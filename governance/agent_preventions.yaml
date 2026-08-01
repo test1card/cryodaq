@@ -2595,8 +2595,39 @@ false_green_pairs:
     ci_partition: core
     red_evidence: targeted_or_manager_stop_could_report_success_while_a_known_production_driver_sibling_remained_energized_2026_07_31_pending_immutable_capture
     green_evidence: pending
+  - id: G4-SOURCE-CONTROL-AUTHORITY-FALSE-GREEN-209
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable
+    ci_partition: remaining
+    red_evidence: missing_head_tree_object_made_unavailable_source_control_evidence_look_like_an_authoritative_absent_prerequisite_2026_08_01_pending_immutable_capture
+    green_evidence: pending
 
 records:
+  - id: G4-SOURCE-CONTROL-AUTHORITY-038
+    status: open
+    scope: repository
+    authority_source: docs/new_lab_acceptance_checklist.md
+    applies_to: Every G4 make-prerequisite assertion derived from committed Git state.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A missing committed object or inherited repository redirect can make unavailable or foreign evidence satisfy an asserted prerequisite state.
+    invariant: G4 prerequisite checks query the intended repository's readable HEAD tree and fail closed when repository identity or tree evidence is unavailable or ambiguous.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+      - docs/new_lab_acceptance_checklist.md
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_inherited_repository_redirect
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable
+        ci_partition: remaining
+    red_evidence: inherited_repository_selection_and_unreadable_head_tree_were_reproduced_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+
   - id: GOVERNANCE-PREVENTION-MAP-001
     status: open
     scope: repository
@@ -4778,6 +4809,7 @@ records:
     classification_corpus:
       repeat_threshold: 2
       covered_classifications:
+        - evidence_misbinding
         - late_side_effect
         - markup_interpretation
         - publication_loss

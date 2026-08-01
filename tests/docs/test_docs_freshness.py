@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shlex
+import stat
 import subprocess
 import tomllib
 import xml.etree.ElementTree as ET
@@ -736,8 +738,8 @@ def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:
 
     Pathspec magic: `ls-files` interprets its argument as a pathspec, so a future
     `requires:Make*|status:present` reference was satisfied by the tracked
-    `Makefile` even though nothing named `Make*` is tracked -- measured. `rev:path`
-    syntax is literal, so `HEAD:Make*` resolves to nothing.
+    `Makefile` even though nothing named `Make*` is tracked -- measured. The
+    replacement uses `ls-tree` with literal pathspec semantics.
 
     Index availability: `ls-files` returns 1 both for a genuinely untracked path
     and for a missing or unreadable `.git/index` (including an inherited
@@ -749,21 +751,56 @@ def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:
     `status:` declaration is about a FRESH CHECKOUT, not about an index state.
     """
 
-    head = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-        cwd=root,
+    root = root.resolve()
+    git_env = os.environ.copy()
+    for key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+    ):
+        git_env.pop(key, None)
+    for key in tuple(git_env):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            git_env.pop(key, None)
+
+    repository = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
         capture_output=True,
         text=True,
+        env=git_env,
+    )
+    if repository.returncode or Path(repository.stdout.strip()).resolve() != root:
+        raise RuntimeError(f"{root} is not the resolved Git repository, so source-control evidence is unavailable")
+
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        capture_output=True,
+        text=True,
+        env=git_env,
     )
     if head.returncode:
         raise RuntimeError(f"HEAD does not resolve in {root}, so source-control evidence is unavailable")
     result = subprocess.run(
-        ["git", "cat-file", "-e", f"HEAD:{relative_path}"],
-        cwd=root,
+        ["git", "-C", str(root), "--literal-pathspecs", "ls-tree", "-z", "--full-tree", "HEAD", "--", relative_path],
         capture_output=True,
-        text=True,
+        env=git_env,
     )
-    return result.returncode == 0
+    if result.returncode:
+        raise RuntimeError(f"committed tree lookup failed in {root}, so source-control evidence is unavailable")
+    if not result.stdout:
+        return False
+    entries = result.stdout.split(b"\0")
+    if entries[-1] == b"":
+        entries.pop()
+    expected = relative_path.encode("utf-8")
+    paths = [entry.split(b"\t", 1)[1] for entry in entries if b"\t" in entry]
+    if len(entries) != 1 or paths != [expected]:
+        raise RuntimeError(f"committed tree lookup returned ambiguous evidence for {relative_path}")
+    return True
 
 
 def _g4_reference_error(root: Path, reference: str) -> str | None:
@@ -920,11 +957,66 @@ def test_g4_make_prerequisites_fail_closed_without_git_metadata(tmp_path: Path) 
 
     # Fail-closed contract: unavailable Git evidence must RAISE, never read as
     # "absent". A bare `tmp_path` has no repository at all, so HEAD cannot resolve.
-    with pytest.raises(RuntimeError, match="HEAD does not resolve"):
+    with pytest.raises(RuntimeError, match="source-control evidence is unavailable"):
         _g4_reference_error(
             tmp_path,
             "make:bootstrap-predictor|requires:predictor_model.json|status:absent",
         )
+
+
+def test_g4_make_prerequisite_ignores_inherited_repository_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    intended = tmp_path / "intended"
+    redirected = tmp_path / "redirected"
+    intended.mkdir()
+    redirected.mkdir()
+    commit = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q"]
+    for repository in (intended, redirected):
+        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+        (repository / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+        subprocess.run(["git", "add", "Makefile"], cwd=repository, check=True)
+        subprocess.run([*commit, "-m", "seed"], cwd=repository, check=True)
+    (redirected / "predictor_model.json").write_text("model", encoding="utf-8")
+    subprocess.run(["git", "add", "predictor_model.json"], cwd=redirected, check=True)
+    subprocess.run([*commit, "-m", "track"], cwd=redirected, check=True)
+
+    monkeypatch.setenv("GIT_DIR", str(redirected / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(redirected))
+    reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
+    assert _g4_reference_error(intended, reference) is None
+    assert _g4_is_source_controlled(redirected, "predictor_model.json") is True
+
+
+def test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Makefile"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q", "-m", "seed"],
+        cwd=tmp_path,
+        check=True,
+    )
+    tree_oid = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    tree_object = tmp_path / ".git" / "objects" / tree_oid[:2] / tree_oid[2:]
+    tree_bytes = tree_object.read_bytes()
+    tree_mode = tree_object.stat().st_mode
+    tree_object.chmod(tree_mode | stat.S_IWUSR)
+    tree_object.unlink()
+    reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
+    try:
+        with pytest.raises(RuntimeError, match="committed tree lookup failed"):
+            _g4_reference_error(tmp_path, reference)
+    finally:
+        tree_object.write_bytes(tree_bytes)
+        tree_object.chmod(tree_mode)
+    assert _g4_is_source_controlled(tmp_path, "Makefile") is True
 
 
 @pytest.mark.parametrize(
