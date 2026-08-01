@@ -10,7 +10,15 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.channels.descriptors import (
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
 from cryodaq.storage.sentinel import SENTINEL, decode
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -162,7 +170,7 @@ async def test_daily_rotation(tmp_path: Path) -> None:
 
 
 class _CountingConnection:
-    """Delegating wrapper that counts the calls a batch write makes."""
+    """Delegating wrapper that counts direct and cursor batch-write calls."""
 
     def __init__(self, real: object) -> None:
         self._real = real
@@ -170,16 +178,32 @@ class _CountingConnection:
         self.executemany_calls = 0
         self.commit_calls = 0
         self.executemany_rows = 0
+        self.begin_immediate_calls = 0
+        self.main_readings_insert_batches = 0
 
-    def execute(self, *args: object, **kwargs: object) -> object:
+    def _record_execute(self, statement: str) -> None:
         self.execute_calls += 1
-        return self._real.execute(*args, **kwargs)
+        if statement.strip().upper() == "BEGIN IMMEDIATE":
+            self.begin_immediate_calls += 1
 
-    def executemany(self, statement: str, parameters: object) -> object:
+    def _record_executemany(self, statement: str, parameters: object) -> list[object]:
         materialised = list(parameters)
         self.executemany_calls += 1
         self.executemany_rows += len(materialised)
+        if "INSERT INTO main.readings" in statement:
+            self.main_readings_insert_batches += 1
+        return materialised
+
+    def execute(self, statement: str, *args: object, **kwargs: object) -> object:
+        self._record_execute(statement)
+        return self._real.execute(statement, *args, **kwargs)
+
+    def executemany(self, statement: str, parameters: object) -> object:
+        materialised = self._record_executemany(statement, parameters)
         return self._real.executemany(statement, materialised)
+
+    def cursor(self, *args: object, **kwargs: object) -> _CountingCursor:
+        return _CountingCursor(self, self._real.cursor(*args, **kwargs))
 
     def commit(self) -> object:
         self.commit_calls += 1
@@ -189,11 +213,53 @@ class _CountingConnection:
         return getattr(self._real, name)
 
 
-def _write_counting(tmp_path: Path, count: int) -> tuple[_CountingConnection, int]:
-    """Write ``count`` readings and return the call counts plus persisted rows."""
+class _CountingCursor:
+    """Delegating cursor wrapper sharing its connection's counters."""
 
-    writer = SQLiteWriter(tmp_path)
-    batch = _batch(count)
+    def __init__(self, connection: _CountingConnection, real: object) -> None:
+        self._connection = connection
+        self._real = real
+
+    def execute(self, statement: str, *args: object, **kwargs: object) -> object:
+        self._connection._record_execute(statement)
+        return self._real.execute(statement, *args, **kwargs)
+
+    def executemany(self, statement: str, parameters: object) -> object:
+        materialised = self._connection._record_executemany(statement, parameters)
+        return self._real.executemany(statement, materialised)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+async def _write_counting(tmp_path: Path, count: int) -> tuple[_CountingConnection, int]:
+    """Commit ``count`` readings through the live production path and count calls."""
+
+    timestamp = datetime(2026, 7, 12, 12, tzinfo=UTC)
+    catalog = LiveChannelDescriptorCatalog(
+        ChannelCatalog(
+            tuple(
+                ChannelDescriptorV1(
+                    schema_version=1,
+                    channel_id=f"CH{i}",
+                    instrument_id="ls218s",
+                    source_key=f"input.{i}.temperature",
+                    quantity=ChannelQuantity.TEMPERATURE,
+                    unit="K",
+                    role=ChannelRole.PRIMARY_MEASUREMENT,
+                    safety_class=ChannelSafetyClass.OBSERVATIONAL,
+                    display_group="probes",
+                    display_name=f"Probe {i}",
+                    visible_by_default=True,
+                    display_order=i,
+                    descriptor_revision=1,
+                )
+                for i in range(1, 9)
+            )
+        )
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=catalog)
+    batch = _batch(count, ts=timestamp)
     counter: _CountingConnection | None = None
     real_ensure = writer._ensure_connection
 
@@ -204,9 +270,13 @@ def _write_counting(tmp_path: Path, count: int) -> tuple[_CountingConnection, in
         return counter
 
     writer._ensure_connection = _wrapped  # type: ignore[method-assign]
-    writer._write_batch(batch)
+    try:
+        receipt = await writer.write_committed(batch)
+        assert receipt is not None
+    finally:
+        await writer.stop()
 
-    db_path = tmp_path / f"data_{batch[0].timestamp.date().isoformat()}.db"
+    db_path = tmp_path / f"data_{timestamp.date().isoformat()}.db"
     assert counter is not None
     return counter, len(_read_db(db_path))
 
@@ -224,30 +294,36 @@ async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_pat
     this catches the N+1 regression the timer stood for, deterministically.
     """
 
-    small, small_rows = _write_counting(tmp_path / "small", 100)
-    large, large_rows = _write_counting(tmp_path / "large", 1000)
+    small, small_rows = await _write_counting(tmp_path / "small", 100)
+    large, large_rows = await _write_counting(tmp_path / "large", 1000)
 
     assert small_rows == 100, f"Expected 100 persisted rows, got {small_rows}"
     assert large_rows == 1000, f"Expected 1000 persisted rows, got {large_rows}"
 
-    assert large.executemany_calls == 1, (
-        f"1000 readings issued {large.executemany_calls} executemany calls; the write is not batched"
+    assert large.main_readings_insert_batches == 1, (
+        "1000 readings issued "
+        f"{large.main_readings_insert_batches} main.readings insert batches; the write is not batched"
     )
     assert large.executemany_rows == 1000, (
         f"executemany carried {large.executemany_rows} rows, expected all 1000 in one statement"
     )
+    assert large.commit_calls == 1, f"1000 readings issued {large.commit_calls} commits, expected one"
+    assert large.begin_immediate_calls == 1, (
+        f"1000 readings issued {large.begin_immediate_calls} transactions, expected one"
+    )
 
     # The decisive assertion: a ten-fold increase in rows must not change the
-    # number of statements or commits. A per-row insert or per-row commit would
-    # move these, and no amount of runner load can.
-    assert large.executemany_calls == small.executemany_calls, (
-        f"executemany calls scaled with row count: {small.executemany_calls} -> {large.executemany_calls}"
+    # number of reading transactions, batches, or commits. A per-row insert or
+    # per-row commit would move these, and no amount of runner load can.
+    assert large.main_readings_insert_batches == small.main_readings_insert_batches, (
+        "main.readings insert batches scaled with row count: "
+        f"{small.main_readings_insert_batches} -> {large.main_readings_insert_batches}"
     )
     assert large.commit_calls == small.commit_calls, (
         f"commits scaled with row count: {small.commit_calls} -> {large.commit_calls}"
     )
-    assert large.execute_calls == small.execute_calls, (
-        f"execute calls scaled with row count: {small.execute_calls} -> {large.execute_calls}"
+    assert large.begin_immediate_calls == small.begin_immediate_calls, (
+        f"BEGIN IMMEDIATE calls scaled with row count: {small.begin_immediate_calls} -> {large.begin_immediate_calls}"
     )
 
 
