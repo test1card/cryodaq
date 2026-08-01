@@ -729,16 +729,40 @@ def _g4_declared_ids(root: Path) -> set[str]:
 
 
 def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:
-    """Return Git-tracked existence; unavailable Git metadata fails closed, never as absent."""
+    """Return whether the path exists in the committed tree at HEAD.
 
-    result = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", "--", relative_path],
+    Resolved against the BOUND TREE rather than the index, which closes two ways
+    the earlier `git ls-files --error-unmatch` form could lie.
+
+    Pathspec magic: `ls-files` interprets its argument as a pathspec, so a future
+    `requires:Make*|status:present` reference was satisfied by the tracked
+    `Makefile` even though nothing named `Make*` is tracked -- measured. `rev:path`
+    syntax is literal, so `HEAD:Make*` resolves to nothing.
+
+    Index availability: `ls-files` returns 1 both for a genuinely untracked path
+    and for a missing or unreadable `.git/index` (including an inherited
+    `GIT_INDEX_FILE` pointing nowhere), so unavailable evidence read as "absent"
+    and let a `status:absent` reference pass. HEAD is verified independently
+    first, so an unresolvable HEAD raises instead of being mistaken for absence.
+
+    A committed tree is also the right authority for the claim being checked: a
+    `status:` declaration is about a FRESH CHECKOUT, not about an index state.
+    """
+
+    head = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
         cwd=root,
         capture_output=True,
         text=True,
     )
-    if result.returncode not in {0, 1}:
-        result.check_returncode()
+    if head.returncode:
+        raise RuntimeError(f"HEAD does not resolve in {root}, so source-control evidence is unavailable")
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"HEAD:{relative_path}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
     return result.returncode == 0
 
 
@@ -869,9 +893,12 @@ def test_g4_rejects_make_prerequisite_status_not_matching_source_control(
     required_path = "predictor_model.json"
     prerequisite = tmp_path / required_path
 
+    _commit = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q"]
+    subprocess.run([*_commit, "-m", "seed", "--allow-empty"], cwd=tmp_path, check=True)
     if in_git_index:
         prerequisite.write_text("model", encoding="utf-8")
         subprocess.run(["git", "add", "-f", required_path], cwd=tmp_path, check=True)
+        subprocess.run([*_commit, "-m", "track"], cwd=tmp_path, check=True)
     if not on_disk:
         prerequisite.unlink()
     elif not in_git_index:
@@ -891,7 +918,9 @@ def test_g4_rejects_make_prerequisite_status_not_matching_source_control(
 def test_g4_make_prerequisites_fail_closed_without_git_metadata(tmp_path: Path) -> None:
     (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
 
-    with pytest.raises(subprocess.CalledProcessError):
+    # Fail-closed contract: unavailable Git evidence must RAISE, never read as
+    # "absent". A bare `tmp_path` has no repository at all, so HEAD cannot resolve.
+    with pytest.raises(RuntimeError, match="HEAD does not resolve"):
         _g4_reference_error(
             tmp_path,
             "make:bootstrap-predictor|requires:predictor_model.json|status:absent",
