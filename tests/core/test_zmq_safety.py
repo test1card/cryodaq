@@ -9,6 +9,29 @@ import time
 
 import pytest
 
+
+def _free_addr() -> str:
+    """Return a loopback endpoint on a port the OS just told us was free.
+
+    OC-039. These tests used fixed high ports, and two of them
+    (`test_zmq_safety.py` and `test_zmq_subprocess.py`) asked for the SAME pair,
+    59994/59995. A port still held by a previous test's bridge — in TIME_WAIT or
+    in a daemon that has not finished exiting — makes the bind fail and the test
+    time out. It fails in the safe direction, but a spurious red on a required
+    partition terminates a one-shot CI cycle, and retrying until green is
+    forbidden. Asking the OS for a free port removes the shared name.
+    """
+
+    import socket
+
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return f"tcp://127.0.0.1:{probe.getsockname()[1]}"
+    finally:
+        probe.close()
+
+
 # ---------------------------------------------------------------------------
 # Heartbeat
 # ---------------------------------------------------------------------------
@@ -27,7 +50,7 @@ def test_subprocess_sends_heartbeat() -> None:
     # but should still send heartbeats
     proc = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:59990", "tcp://127.0.0.1:59991", data_q, cmd_q, reply_q, shutdown),
+        args=(_free_addr(), _free_addr(), data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc.start()
@@ -64,7 +87,7 @@ def test_heartbeat_has_timestamp() -> None:
 
     proc = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:59992", "tcp://127.0.0.1:59993", data_q, cmd_q, reply_q, shutdown),
+        args=(_free_addr(), _free_addr(), data_q, cmd_q, reply_q, shutdown),
         daemon=True,
     )
     proc.start()
@@ -380,7 +403,7 @@ def test_zmq_bridge_is_healthy_initial() -> None:
     """
     from cryodaq.gui.zmq_client import ZmqBridge
 
-    bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59994", cmd_addr="tcp://127.0.0.1:59995")
+    bridge = ZmqBridge(pub_addr=_free_addr(), cmd_addr=_free_addr())
     assert not bridge.is_alive(), "unstarted bridge must not be alive"
     assert not bridge.is_healthy(), "unstarted bridge must not be healthy"
 
@@ -396,7 +419,7 @@ def test_zmq_bridge_poll_handles_heartbeat() -> None:
     """
     from cryodaq.gui.zmq_client import ZmqBridge
 
-    bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59996", cmd_addr="tcp://127.0.0.1:59997")
+    bridge = ZmqBridge(pub_addr=_free_addr(), cmd_addr=_free_addr())
     bridge._data_queue.put({"__type": "heartbeat", "ts": time.monotonic()}, timeout=1.0)
     # Tiny yield so the feeder thread definitely flushes before get_nowait().
     time.sleep(0.05)
@@ -409,7 +432,7 @@ def test_zmq_bridge_poll_handles_warning() -> None:
     """poll_readings recognizes warning messages and doesn't return them as readings."""
     from cryodaq.gui.zmq_client import ZmqBridge
 
-    bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59998", cmd_addr="tcp://127.0.0.1:59999")
+    bridge = ZmqBridge(pub_addr=_free_addr(), cmd_addr=_free_addr())
     bridge._data_queue.put_nowait({"__type": "warning", "message": "test overflow"})
     readings = bridge.poll_readings()
     assert len(readings) == 0

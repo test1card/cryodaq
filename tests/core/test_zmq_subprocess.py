@@ -9,6 +9,28 @@ import pytest
 from cryodaq.core.zmq_subprocess import zmq_bridge_main
 
 
+def _free_addr() -> str:
+    """Return a loopback endpoint on a port the OS just told us was free.
+
+    OC-039. These tests used fixed high ports, and two of them
+    (`test_zmq_safety.py` and `test_zmq_subprocess.py`) asked for the SAME pair,
+    59994/59995. A port still held by a previous test's bridge — in TIME_WAIT or
+    in a daemon that has not finished exiting — makes the bind fail and the test
+    time out. It fails in the safe direction, but a spurious red on a required
+    partition terminates a one-shot CI cycle, and retrying until green is
+    forbidden. Asking the OS for a free port removes the shared name.
+    """
+
+    import socket
+
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return f"tcp://127.0.0.1:{probe.getsockname()[1]}"
+    finally:
+        probe.close()
+
+
 @pytest.fixture()
 def bridge_env():
     """Create queues and event for a bridge subprocess."""
@@ -160,7 +182,7 @@ def test_is_healthy_threshold_generous():
 
     from cryodaq.gui.zmq_client import ZmqBridge
 
-    bridge = ZmqBridge(pub_addr="tcp://127.0.0.1:59994", cmd_addr="tcp://127.0.0.1:59995")
+    bridge = ZmqBridge(pub_addr=_free_addr(), cmd_addr=_free_addr())
 
     # Simulate recent heartbeat → not stale
     bridge._last_heartbeat = _time.monotonic() - 5.0
