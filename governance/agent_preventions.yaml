@@ -2615,7 +2615,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A same-day committed batch can issue one transaction per reading instead of one per batch, multiplying transactions and write amplification on every acquisition batch.
-    invariant: One same-day write_committed() admission issues exactly one main.readings insert batch and one commit, and its reading-transaction totals do not change between 100 and 1000 readings.
+    invariant: One same-day write_committed() admission issues exactly one main.readings insert batch and one commit for a production-shaped eight-reading poll as well as larger 100- and 1000-reading batches, and its reading-transaction totals do not scale with row count.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     guards:

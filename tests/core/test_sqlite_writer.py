@@ -190,7 +190,7 @@ class _CountingConnection:
     def _record_executemany(self, statement: str, parameters: object) -> list[object]:
         materialised = list(parameters)
         self.executemany_calls += 1
-        if "INSERT INTO main.readings" in statement:
+        if "INSERT INTO MAIN.READINGS" in statement.upper():
             self.main_readings_insert_batches += 1
             # Scoped to the readings insert on purpose. Catalog installation runs
             # in the same transaction, so counting every statement's rows would
