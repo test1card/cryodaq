@@ -58,8 +58,24 @@ def _g4_inventory() -> dict:
     }
 
 
-def _g4_guard_source(*, weakened: bool) -> str:
+def _g4_guard_source(
+    *,
+    weakened: bool,
+    source_controlled_parameter: bool = True,
+    callback_type_error: bool = False,
+) -> str:
     physical_check = "if False:" if weakened else 'if result == "SOFTWARE-PROVABLE":'
+    validator_parameters = (
+        "root: Path, overrides=None, *, source_controlled=None"
+        if source_controlled_parameter
+        else "root: Path, overrides=None"
+    )
+    authority = (
+        "source_controlled or (lambda relative_path: _g4_is_source_controlled(root, relative_path))"
+        if source_controlled_parameter
+        else "lambda relative_path: _g4_is_source_controlled(root, relative_path)"
+    )
+    type_error = "    raise TypeError('unrelated callback body failure')\n" if callback_type_error else ""
     return (
         "from pathlib import Path\n"
         "import subprocess\n\n"
@@ -72,10 +88,9 @@ def _g4_guard_source(*, weakened: bool) -> str:
         "    if repository.returncode or Path(repository.stdout.strip()).resolve() != root:\n"
         "        raise RuntimeError('source-control evidence is unavailable')\n"
         "    return False\n\n"
-        "def _validate_g4_docs(root: Path, overrides=None, *, source_controlled=None) -> None:\n"
-        "    is_source_controlled = source_controlled or (\n"
-        "        lambda relative_path: _g4_is_source_controlled(root, relative_path)\n"
-        "    )\n"
+        f"def _validate_g4_docs({validator_parameters}) -> None:\n"
+        f"{type_error}"
+        f"    is_source_controlled = {authority}\n"
         "    if is_source_controlled('cooldown_v5/predictor_model.json'):\n"
         "        raise AssertionError('source-control binding is wrong')\n"
         "    checklist = (overrides or {}).get(\n"
@@ -197,6 +212,64 @@ def test_g4_archived_revision_binds_source_control_to_the_compared_tree(tmp_path
     assert not red.passed
     assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
     assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+
+def test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(repo / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(
+        repo / "tests" / "docs" / "test_docs_freshness.py",
+        _g4_guard_source(weakened=False, source_controlled_parameter=False),
+    )
+    archived_base = _commit(repo, "pre-signature G4 guard")
+
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    current_guard = _commit(repo, "add revision source-control callback")
+
+    compatible = compare(repo, archived_base, current_guard)
+    assert compatible.passed
+    assert compatible.gains == ()
+
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=True))
+    weakened = _commit(repo, "remove G4 procedure rejection")
+
+    red = compare(repo, archived_base, weakened)
+    assert not red.passed
+    assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+
+def test_g4_pre_signature_callback_body_type_error_is_a_base_failure(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(repo / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(
+        repo / "tests" / "docs" / "test_docs_freshness.py",
+        _g4_guard_source(
+            weakened=False,
+            source_controlled_parameter=False,
+            callback_type_error=True,
+        ),
+    )
+    archived_base = _commit(repo, "pre-signature callback with unrelated defect")
+
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    current_guard = _commit(repo, "working current callback")
+
+    with pytest.raises(
+        GuardCoverageError,
+        match=(
+            "base challenge failed: G4-DOCUMENTATION-PROCEDURES:"
+            "G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001: guard error: TypeError: "
+            "unrelated callback body failure"
+        ),
+    ):
+        compare(repo, archived_base, current_guard)
 
 
 def test_gitless_export_fails_hard_instead_of_skipping(tmp_path: Path) -> None:

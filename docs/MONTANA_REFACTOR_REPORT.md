@@ -261,11 +261,11 @@ The following table distinguishes three numbers that are easy to confuse:
 | Net source-inventory growth | 124,536 lines | Insertions minus deletions. |
 | Delivered-tree Git churn | 139,644 insertions / 9,554 deletions / 130,090 net | Source inventory plus the four regenerated architecture SVGs. |
 | Baseline repository text | 188,539 lines | Measured text inventory across the baseline tree. |
-| Candidate source-inventory text | 456,957 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
-| Delivered-tree text | 457,041 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
+| Candidate source-inventory text | 457,108 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
+| Delivered-tree text | 457,192 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
 | Baseline test Python | 80,529 lines | Python under `tests`. |
 | Candidate production Python | 154,227 lines | Candidate `src/cryodaq` inventory, not 134,090. |
-| Candidate test Python | 220,135 lines | Candidate `tests` inventory. |
+| Candidate test Python | 220,208 lines | Candidate `tests` inventory. |
 | Paths changed in candidate comparison | 489 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
 | Paths changed in delivered comparison | 493 | Candidate comparison plus the one surviving generated architecture SVG path. |
 | Baseline repository files | 779 | Inventory at `f5d6434`. |
@@ -617,7 +617,11 @@ Guard-coverage comparisons load G4 procedures from Git archives while binding
 prerequisite membership to each exact raw base or candidate revision tree.
 Archive roots never borrow an enclosing checkout's repository identity, and
 replacement refs are disabled for revision resolution, inventory reads,
-archive materialization, and membership queries.
+archive materialization, and membership queries. An explicit signature adapter
+passes that revision authority to current validators and temporarily binds the
+same authority to the exact historical hook used by pre-signature validators.
+The adapter restores the archived module after each call and never interprets a
+callback-body `TypeError` as interface compatibility.
 
 The current reviewed-source path requires OFF evidence; a disconnect cannot be
 treated as safe if readback did not confirm removal of output. If a future

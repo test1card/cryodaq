@@ -2619,19 +2619,27 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: original_ls_tree_HEAD_queried_a_moved_commit_after_verifying_another_and_allowed_status_absent_to_pass_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: G4-ARCHIVED-CALLBACK-SIGNATURE-FALSE-GREEN-246
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/governance/test_guard_coverage.py::test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss
+    ci_partition: remaining
+    red_evidence: pre_signature_G4_validator_rejected_the_revision_authority_keyword_and_the_base_failure_was_reported_as_a_gain_so_a_later_procedure_coverage_loss_was_skipped_2026_08_01_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
     status: open
     scope: repository
     authority_source: docs/new_lab_acceptance_checklist.md
-    applies_to: Every G4 make-prerequisite assertion derived from committed Git state.
+    applies_to: Every live or archived G4 make-prerequisite assertion derived from committed Git state.
     classification: evidence_misbinding
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A missing committed object, inherited repository redirect, active replacement ref, or HEAD movement between verification and lookup can make unavailable, foreign, substituted, or mismatched evidence satisfy an asserted prerequisite state.
-    invariant: G4 prerequisite checks disable Git object replacement, resolve and verify one exact raw HEAD commit in the intended repository, query that same commit's readable tree, and fail closed when repository identity or tree evidence is unavailable or ambiguous.
+    consequence: A missing committed object, inherited repository redirect, active replacement ref, HEAD movement between verification and lookup, or incompatible archived callback invocation can make unavailable, foreign, substituted, mismatched, or unexecuted evidence satisfy an asserted prerequisite state.
+    invariant: G4 prerequisite checks disable Git object replacement, resolve and verify one exact raw commit in the intended repository, query that same commit's readable tree, and fail closed when repository identity or tree evidence is unavailable or ambiguous. Archived validators receive that authority through an explicitly detected current keyword capability or their exact historical source-control hook; callback-body failures remain failures and are never retried as interface compatibility.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -2647,7 +2655,11 @@ records:
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit
         ci_partition: remaining
-    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_and_verified_HEAD_to_ls_tree_race_were_reproduced_2026_08_01_pending_immutable_capture
+      - node: tests/governance/test_guard_coverage.py::test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_g4_pre_signature_callback_body_type_error_is_a_base_failure
+        ci_partition: remaining
+    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_and_pre_signature_archived_callback_skip_were_reproduced_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
   - id: GOVERNANCE-PREVENTION-MAP-001

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import ast
 import importlib.util
+import inspect
 import io
 import json
 import re
@@ -18,7 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -201,6 +202,63 @@ def _probe_root(revision_root: Path, challenge_id: str) -> Path:
     return root
 
 
+def _invoke_g4_docs_validator(
+    module: ModuleType,
+    revision_root: Path,
+    overrides: Mapping[str, str],
+    source_controlled: Callable[[str], bool],
+) -> None:
+    """Invoke current or archived G4 validators without guessing from exceptions."""
+
+    validator = getattr(module, "_validate_g4_docs", None)
+    if not callable(validator):
+        raise GuardCoverageError("G4 guard module has no callable _validate_g4_docs")
+    try:
+        validator_signature = inspect.signature(validator)
+    except (TypeError, ValueError) as exc:
+        raise GuardCoverageError("G4 validator signature is unavailable") from exc
+
+    try:
+        validator_signature.bind(
+            revision_root,
+            overrides,
+            source_controlled=source_controlled,
+        )
+    except TypeError:
+        try:
+            validator_signature.bind(revision_root, overrides)
+        except TypeError as exc:
+            raise GuardCoverageError(f"unsupported archived G4 validator signature: {validator_signature}") from exc
+
+        historical_authority = getattr(module, "_g4_is_source_controlled", None)
+        if not callable(historical_authority):
+            raise GuardCoverageError("pre-signature G4 validator has no callable _g4_is_source_controlled capability")
+        try:
+            inspect.signature(historical_authority).bind(revision_root, "probe")
+        except (TypeError, ValueError) as exc:
+            raise GuardCoverageError("pre-signature G4 source-control capability has an unsupported signature") from exc
+
+        expected_root = revision_root.resolve()
+
+        def archived_source_controlled(root: Path, relative_path: str) -> bool:
+            if root.resolve() != expected_root:
+                raise GuardCoverageError("archived G4 validator requested source control for a foreign root")
+            return source_controlled(relative_path)
+
+        module._g4_is_source_controlled = archived_source_controlled
+        try:
+            validator(revision_root, overrides)
+        finally:
+            module._g4_is_source_controlled = historical_authority
+        return
+
+    validator(
+        revision_root,
+        overrides,
+        source_controlled=source_controlled,
+    )
+
+
 def _run_challenge(
     repo: Path,
     revision: str,
@@ -241,10 +299,11 @@ def _run_challenge(
             if mutated == checklist:
                 return ChallengeResult(False, "physical procedure fixture is unavailable")
             try:
-                module._validate_g4_docs(
+                _invoke_g4_docs_validator(
+                    module,
                     revision_root,
                     {"docs/new_lab_acceptance_checklist.md": mutated},
-                    source_controlled=lambda relative_path: _revision_source_controlled(repo, revision, relative_path),
+                    lambda relative_path: _revision_source_controlled(repo, revision, relative_path),
                 )
             except AssertionError as exc:
                 passed = expected in str(exc)
@@ -480,6 +539,8 @@ def compare(
             lost: list[str] = []
             for challenge_id, challenge in (base_guard or authoritative)["challenges"].items():
                 base_result = _run_challenge(repo, base, base_root, guard_path, challenge_id, challenge, "base")
+                if not base_result.passed and base_result.detail.startswith("guard error:"):
+                    raise GuardCoverageError(f"base challenge failed: {guard_id}:{challenge_id}: {base_result.detail}")
                 candidate_result = _run_challenge(
                     repo,
                     candidate,
