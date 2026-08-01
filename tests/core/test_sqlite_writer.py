@@ -180,6 +180,7 @@ class _CountingConnection:
         self.executemany_rows = 0
         self.begin_immediate_calls = 0
         self.main_readings_insert_batches = 0
+        self.cursor_calls = 0
 
     def _record_execute(self, statement: str) -> None:
         self.execute_calls += 1
@@ -189,9 +190,13 @@ class _CountingConnection:
     def _record_executemany(self, statement: str, parameters: object) -> list[object]:
         materialised = list(parameters)
         self.executemany_calls += 1
-        self.executemany_rows += len(materialised)
         if "INSERT INTO main.readings" in statement:
             self.main_readings_insert_batches += 1
+            # Scoped to the readings insert on purpose. Catalog installation runs
+            # in the same transaction, so counting every statement's rows would
+            # make a legitimate refactor of the eight descriptor inserts into one
+            # executemany read as 1008 rows and fail a correct write.
+            self.executemany_rows += len(materialised)
         return materialised
 
     def execute(self, statement: str, *args: object, **kwargs: object) -> object:
@@ -203,6 +208,7 @@ class _CountingConnection:
         return self._real.executemany(statement, materialised)
 
     def cursor(self, *args: object, **kwargs: object) -> _CountingCursor:
+        self.cursor_calls += 1
         return _CountingCursor(self, self._real.cursor(*args, **kwargs))
 
     def commit(self) -> object:
@@ -308,6 +314,20 @@ async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_pat
         f"executemany carried {large.executemany_rows} rows, expected all 1000 in one statement"
     )
     assert large.commit_calls == 1, f"1000 readings issued {large.commit_calls} commits, expected one"
+    # The readings write must NOT route through a raw cursor. Production
+    # `_OwnedControlConnection` defines execute/executemany/commit and validates
+    # authority around each one (`_execute` calls `validate_authority()` before,
+    # on failure, and after, then wraps the result in `_OwnedControlCursor`). It
+    # defines NO `cursor()` override, so `conn.cursor()` falls through
+    # `__getattr__` to a raw sqlite3 cursor and skips every one of those checks.
+    # Cursor batching is therefore NOT an equivalent refactor here: it would keep
+    # the batching property while dropping fail-closed persistence authority. This
+    # guard stays red for that route until production grows an authority-preserving
+    # `cursor()` wrapper, which is a production change and a separate PR.
+    assert large.cursor_calls == 0, (
+        f"the readings write used {large.cursor_calls} raw cursor(s); that route bypasses "
+        "_OwnedControlConnection.validate_authority() and must not be blessed as batched"
+    )
     assert large.begin_immediate_calls == 1, (
         f"1000 readings issued {large.begin_immediate_calls} transactions, expected one"
     )

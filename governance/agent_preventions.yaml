@@ -2614,8 +2614,8 @@ records:
     correction_owner: reviewer
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A guard can report green CI evidence about a persistence property it cannot observe on the deployed write_committed path.
-    invariant: The batched-write guard drives public write_committed() on a catalog-backed writer and counts connection and cursor operations, asserting reading-transaction totals are identical for 100 and 1000 same-day readings.
+    consequence: A same-day committed batch can issue one transaction per reading instead of one per batch, multiplying transactions and write amplification on every acquisition batch.
+    invariant: One same-day write_committed() admission issues exactly one main.readings insert batch and one commit, and its reading-transaction totals do not change between 100 and 1000 readings.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     guards:
