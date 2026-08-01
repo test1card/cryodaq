@@ -287,6 +287,27 @@ async def _write_counting(tmp_path: Path, count: int) -> tuple[_CountingConnecti
     return counter, len(_read_db(db_path))
 
 
+def _assert_single_batched_live_write(label: str, rows: int, counted: _CountingConnection, persisted_rows: int) -> None:
+    """Assert the live writer's one-statement transaction contract."""
+
+    assert persisted_rows == rows, f"Expected {rows} persisted rows, got {persisted_rows}"
+    assert counted.cursor_calls == 0, (
+        f"the {label} readings write used {counted.cursor_calls} raw cursor(s); that route "
+        "bypasses _OwnedControlConnection.validate_authority() and must not be blessed as batched"
+    )
+    assert counted.main_readings_insert_batches == 1, (
+        f"the {label} write issued {counted.main_readings_insert_batches} main.readings "
+        "insert batches; the write is not batched"
+    )
+    assert counted.commit_calls == 1, f"the {label} write issued {counted.commit_calls} commits, expected one"
+    assert counted.begin_immediate_calls == 1, (
+        f"the {label} write issued {counted.begin_immediate_calls} transactions, expected one"
+    )
+    assert counted.executemany_rows == rows, (
+        f"the {label} write carried {counted.executemany_rows} rows, expected all {rows} in one statement"
+    )
+
+
 async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_path: Path) -> None:
     """The write must cost the same whether it carries 100 rows or 1000.
 
@@ -300,37 +321,16 @@ async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_pat
     this catches the N+1 regression the timer stood for, deterministically.
     """
 
-    # Eight rows is the PRODUCTION-SHAPED case, not an arbitrary small number: a
-    # shipped LS218 poll has eight configured channels, and `scheduler.py` passes
-    # each driver's combined reading list straight to committed persistence. A
-    # regression that degrades only small batches is invisible to 100 and 1000 --
-    # measured: routing batches of 16 rows or fewer per-row left this test green
-    # while an eight-row write issued eight batches, eight commits and eight
-    # BEGIN IMMEDIATEs.
     poll, poll_rows = await _write_counting(tmp_path / "poll", 8)
     small, small_rows = await _write_counting(tmp_path / "small", 100)
     large, large_rows = await _write_counting(tmp_path / "large", 1000)
 
-    assert poll_rows == 8, f"Expected 8 persisted rows, got {poll_rows}"
-    assert small_rows == 100, f"Expected 100 persisted rows, got {small_rows}"
-    assert large_rows == 1000, f"Expected 1000 persisted rows, got {large_rows}"
-
-    for label, counted, rows in (("8-row poll", poll, 8), ("100-row", small, 100), ("1000-row", large, 1000)):
-        assert counted.cursor_calls == 0, (
-            f"the {label} readings write used {counted.cursor_calls} raw cursor(s); that route "
-            "bypasses _OwnedControlConnection.validate_authority() and must not be blessed as batched"
-        )
-        assert counted.main_readings_insert_batches == 1, (
-            f"the {label} write issued {counted.main_readings_insert_batches} main.readings "
-            "insert batches; the write is not batched"
-        )
-        assert counted.commit_calls == 1, f"the {label} write issued {counted.commit_calls} commits, expected one"
-        assert counted.begin_immediate_calls == 1, (
-            f"the {label} write issued {counted.begin_immediate_calls} transactions, expected one"
-        )
-        assert counted.executemany_rows == rows, (
-            f"the {label} write carried {counted.executemany_rows} rows, expected all {rows} in one statement"
-        )
+    for label, rows, counted, persisted_rows in (
+        ("8-row poll", 8, poll, poll_rows),
+        ("100-row", 100, small, small_rows),
+        ("1000-row", 1000, large, large_rows),
+    ):
+        _assert_single_batched_live_write(label, rows, counted, persisted_rows)
 
     # The decisive assertion: a ten-fold increase in rows must not change the
     # number of reading transactions, batches, or commits. A per-row insert or
@@ -346,12 +346,24 @@ async def test_batch_insert_is_batched_and_does_not_scale_with_row_count(tmp_pat
         f"BEGIN IMMEDIATE calls scaled with row count: {small.begin_immediate_calls} -> {large.begin_immediate_calls}"
     )
     assert poll.main_readings_insert_batches == large.main_readings_insert_batches, (
-        "main.readings insert batches differ between a production-shaped 8-row poll and 1000 rows: "
+        "main.readings insert batches differ between an 8-row poll and 1000 rows: "
         f"{poll.main_readings_insert_batches} -> {large.main_readings_insert_batches}"
     )
     assert poll.commit_calls == large.commit_calls, (
         f"commits differ between an 8-row poll and 1000 rows: {poll.commit_calls} -> {large.commit_calls}"
     )
+
+
+async def test_batch_insert_covers_every_multiline_poll_shape(tmp_path: Path) -> None:
+    """Each valid MultiLine poll shape writes as one SQLite transaction."""
+
+    # MultiLine supports 1..32 active channels and emits temperature, pressure,
+    # and humidity with each poll, so its authoritative batch-size range is
+    # 4..35. The shipped four-channel default produces exactly seven rows.
+    for rows in range(4, 36):
+        counted, persisted_rows = await _write_counting(tmp_path / f"multiline-{rows}", rows)
+        label = "7-row shipped MultiLine default" if rows == 7 else f"{rows}-row MultiLine poll"
+        _assert_single_batched_live_write(label, rows, counted, persisted_rows)
 
 
 # ---------------------------------------------------------------------------

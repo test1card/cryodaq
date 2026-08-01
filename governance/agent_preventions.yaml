@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: SQLITE-LIVE-BATCH-SHAPE-FALSE-GREEN-217
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_batch_insert_covers_every_multiline_poll_shape
+    ci_partition: core
+    red_evidence: exact_seven_row_multiline_batch_split_per_reading_survived_the_8_100_1000_guard_2026_08_01_pending_immutable_capture
+    green_evidence: pending
   - id: SQLITE-LIVE-BATCH-PRODUCTION-PATH-FALSE-GREEN-208
     status: open
     scope: product_contract
@@ -2615,11 +2623,13 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A same-day committed batch can issue one transaction per reading instead of one per batch, multiplying transactions and write amplification on every acquisition batch.
-    invariant: One same-day write_committed() admission issues exactly one main.readings insert batch and one commit for a production-shaped eight-reading poll as well as larger 100- and 1000-reading batches, and its reading-transaction totals do not scale with row count.
+    invariant: One same-day write_committed() admission issues exactly one main.readings insert batch, one commit, and one BEGIN IMMEDIATE for every authoritative MultiLine poll shape (one to 32 active length channels plus three environmental readings, or four to 35 rows, including the shipped seven-row shape) as well as larger 100- and 1000-reading batches, and its reading-transaction totals do not scale with row count.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     guards:
       - node: tests/core/test_sqlite_writer.py::test_batch_insert_is_batched_and_does_not_scale_with_row_count
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_batch_insert_covers_every_multiline_poll_shape
         ci_partition: core
     red_evidence: legacy_write_batch_guard_stayed_green_while_mutated_write_live_batch_issued_one_transaction_per_reading_2026_08_01_pending_immutable_capture
     green_evidence: pending
