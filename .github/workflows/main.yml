@@ -7,8 +7,14 @@ on:
   # Every pull request into master — validates the simulated merge result.
   pull_request:
     branches: [master]
+  merge_group:
   # Manual "Run workflow" button in the Actions tab.
   workflow_dispatch:
+    inputs:
+      trusted_base_sha:
+        description: Exact 40-character commit SHA whose registered evidence is trusted
+        required: true
+        type: string
 
 # If you push again before CI finishes, cancel the superseded run to save
 # runner minutes — EXCEPT on master, where every mainline commit is fully
@@ -55,6 +61,7 @@ jobs:
       # refusing the run otherwise. That preserves tree-content coverage; it does not execute suites
       # against the merge commit.
       EVIDENCE_SHA: ${{ needs.candidate_identity.outputs.evidence_sha }}
+      TRUSTED_BASE_SHA: ${{ needs.candidate_identity.outputs.trusted_base_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -101,6 +108,7 @@ jobs:
           python -m tools.ci_active_checkout_runner \
             --repository "${GITHUB_WORKSPACE:?}" \
             --revision "${EVIDENCE_SHA:?}" \
+            --trusted-base "${TRUSTED_BASE_SHA:?}" \
             --suite remaining \
             --basetemp "${RUNNER_TEMP:?}/cryodaq-active-remaining-pytest"
 
@@ -213,6 +221,7 @@ jobs:
       contents: read
     outputs:
       evidence_sha: ${{ steps.bind.outputs.evidence_sha }}
+      trusted_base_sha: ${{ steps.bind.outputs.trusted_base_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -225,11 +234,28 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_CREATED: ${{ github.event.created }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_TRUSTED_BASE_SHA: ${{ inputs.trusted_base_sha }}
         shell: bash
         run: |
           set -euo pipefail
           event_commit="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
           readonly event_commit
+          require_commit() {
+            local label="$1" sha="$2"
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || [[ "$sha" == "0000000000000000000000000000000000000000" ]]; then
+              echo "invalid $label commit SHA" >&2
+              return 1
+            fi
+            if ! git rev-parse --verify "${sha}^{commit}" >/dev/null; then
+              echo "unresolvable $label commit SHA: $sha" >&2
+              return 1
+            fi
+            printf '%s' "$sha"
+          }
           if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
             readonly merge_commit="$event_commit"
             base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"
@@ -254,7 +280,34 @@ jobs:
               exit 1
             fi
             readonly evidence_sha="$head_commit"
-          else
+            trusted_base_sha="$(require_commit 'pull request base' "${PR_BASE_SHA:?}")"
+            readonly trusted_base_sha
+          elif [[ "$EVENT_NAME" == "merge_group" ]]; then
             readonly evidence_sha="$event_commit"
+            trusted_base_sha="$(require_commit 'merge-group base' "${MERGE_GROUP_BASE_SHA:?}")"
+            readonly trusted_base_sha
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            if [[ "${PUSH_CREATED:-false}" == true ]]; then
+              test "${PUSH_BEFORE:?}" = "0000000000000000000000000000000000000000"
+              test -n "${DEFAULT_BRANCH:?}"
+              git fetch --no-tags origin "${DEFAULT_BRANCH}"
+              default_tip="$(git rev-parse --verify "origin/${DEFAULT_BRANCH}^{commit}")"
+              mapfile -t bases < <(git merge-base --all "$event_commit" "$default_tip")
+              test "${#bases[@]}" = 1
+              trusted_base_sha="$(require_commit 'creation-push merge base' "${bases[0]}")"
+            else
+              test "${PUSH_BEFORE:?}" != "0000000000000000000000000000000000000000"
+              trusted_base_sha="$(require_commit 'push before' "${PUSH_BEFORE}")"
+            fi
+            readonly trusted_base_sha
+            readonly evidence_sha="$event_commit"
+          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            readonly evidence_sha="$event_commit"
+            trusted_base_sha="$(require_commit 'workflow-dispatch trusted base' "${DISPATCH_TRUSTED_BASE_SHA:?}")"
+            readonly trusted_base_sha
+          else
+            echo "unsupported evidence authority event: $EVENT_NAME" >&2
+            exit 1
           fi
           printf 'evidence_sha=%s\n' "$evidence_sha" >>"$GITHUB_OUTPUT"
+          printf 'trusted_base_sha=%s\n' "$trusted_base_sha" >>"$GITHUB_OUTPUT"

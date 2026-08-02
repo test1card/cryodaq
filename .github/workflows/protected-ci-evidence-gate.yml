@@ -37,6 +37,7 @@ jobs:
       TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}
       TARGET_RUN_ID: ${{ github.run_id }}
       TARGET_SHA: ${{ github.sha }}
+      TRUSTED_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
     steps:
       - name: Resolve immutable workflow source
         id: workflow-source
@@ -147,7 +148,8 @@ jobs:
             --output "${RUNNER_TEMP:?}/cryodaq-protected-evidence" \
             --artifact-name "${ARTIFACT_NAME:?}" \
             --producer-root "${GITHUB_WORKSPACE:?}/judge" \
-            --producer-revision "${JUDGE_SHA:?}"
+            --producer-revision "${JUDGE_SHA:?}" \
+            --trusted-base "${TRUSTED_BASE_SHA:?}"
 
       - name: Bind receipt digest to GitHub-signed job identity
         id: job-attestation
@@ -198,6 +200,7 @@ jobs:
       TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}
       TARGET_RUN_ID: ${{ github.run_id }}
       TARGET_SHA: ${{ github.sha }}
+      TRUSTED_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
     steps:
       - name: Resolve immutable workflow source
         id: workflow-source
@@ -323,7 +326,8 @@ jobs:
                 --target-run-id "${TARGET_RUN_ID:?}" \
                 --target-run-attempt "${TARGET_RUN_ATTEMPT:?}" \
                 --target-sha "${TARGET_SHA:?}" \
-                --workflow-sha "${JUDGE_SHA:?}"
+                --workflow-sha "${JUDGE_SHA:?}" \
+                --trusted-base "${TRUSTED_BASE_SHA:?}"
             done
           done
 

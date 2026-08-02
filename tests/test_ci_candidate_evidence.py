@@ -7,16 +7,18 @@ import json
 import os
 import subprocess
 import sys
+import time
 import tomllib
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import psutil
 import pytest
 import yaml
 
-from tools import ci_candidate_evidence, ci_candidate_runner
+from tools import ci_active_checkout_runner, ci_candidate_evidence, ci_candidate_runner
 from tools.candidate_evidence import execute_exported_candidate
 from tools.ci_candidate_evidence import (
     FAILURE_RECEIPT_INDEX_ENV,
@@ -51,6 +53,18 @@ EXPECTED_CANDIDATE_BIND_SCRIPT = """\
 set -euo pipefail
 event_commit="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
 readonly event_commit
+require_commit() {
+  local label="$1" sha="$2"
+  if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || [[ "$sha" == "0000000000000000000000000000000000000000" ]]; then
+    echo "invalid $label commit SHA" >&2
+    return 1
+  fi
+  if ! git rev-parse --verify "${sha}^{commit}" >/dev/null; then
+    echo "unresolvable $label commit SHA: $sha" >&2
+    return 1
+  fi
+  printf '%s' "$sha"
+}
 if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
   readonly merge_commit="$event_commit"
   base_commit="$(git rev-parse --verify "${PR_BASE_SHA:?}^{commit}")"
@@ -75,10 +89,37 @@ if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
     exit 1
   fi
   readonly evidence_sha="$head_commit"
-else
+  trusted_base_sha="$(require_commit 'pull request base' "${PR_BASE_SHA:?}")"
+  readonly trusted_base_sha
+elif [[ "$EVENT_NAME" == "merge_group" ]]; then
   readonly evidence_sha="$event_commit"
+  trusted_base_sha="$(require_commit 'merge-group base' "${MERGE_GROUP_BASE_SHA:?}")"
+  readonly trusted_base_sha
+elif [[ "$EVENT_NAME" == "push" ]]; then
+  if [[ "${PUSH_CREATED:-false}" == true ]]; then
+    test "${PUSH_BEFORE:?}" = "0000000000000000000000000000000000000000"
+    test -n "${DEFAULT_BRANCH:?}"
+    git fetch --no-tags origin "${DEFAULT_BRANCH}"
+    default_tip="$(git rev-parse --verify "origin/${DEFAULT_BRANCH}^{commit}")"
+    mapfile -t bases < <(git merge-base --all "$event_commit" "$default_tip")
+    test "${#bases[@]}" = 1
+    trusted_base_sha="$(require_commit 'creation-push merge base' "${bases[0]}")"
+  else
+    test "${PUSH_BEFORE:?}" != "0000000000000000000000000000000000000000"
+    trusted_base_sha="$(require_commit 'push before' "${PUSH_BEFORE}")"
+  fi
+  readonly trusted_base_sha
+  readonly evidence_sha="$event_commit"
+elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+  readonly evidence_sha="$event_commit"
+  trusted_base_sha="$(require_commit 'workflow-dispatch trusted base' "${DISPATCH_TRUSTED_BASE_SHA:?}")"
+  readonly trusted_base_sha
+else
+  echo "unsupported evidence authority event: $EVENT_NAME" >&2
+  exit 1
 fi
 printf 'evidence_sha=%s\\n' "$evidence_sha" >>"$GITHUB_OUTPUT"
+printf 'trusted_base_sha=%s\\n' "$trusted_base_sha" >>"$GITHUB_OUTPUT"
 """
 
 _TEST_RSA_N = int(
@@ -193,8 +234,13 @@ def _assert_candidate_identity_output(
     event_name: str,
     event_sha: str,
     expected_sha: str,
+    expected_trusted_base_sha: str,
     base_sha: str = "",
     head_sha: str = "",
+    merge_group_base_sha: str = "",
+    push_before: str = "",
+    push_created: str = "false",
+    dispatch_trusted_base_sha: str = "",
 ) -> None:
     bind = next(step for step in workflow["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind")
     _git(repository, "checkout", "--detach", event_sha)
@@ -206,6 +252,11 @@ def _assert_candidate_identity_output(
             "EVENT_SHA": event_sha,
             "PR_BASE_SHA": base_sha,
             "PR_HEAD_SHA": head_sha,
+            "MERGE_GROUP_BASE_SHA": merge_group_base_sha,
+            "PUSH_BEFORE": push_before,
+            "PUSH_CREATED": push_created,
+            "DEFAULT_BRANCH": "master",
+            "DISPATCH_TRUSTED_BASE_SHA": dispatch_trusted_base_sha,
             "GITHUB_OUTPUT": output.resolve().as_posix(),
         }
     )
@@ -223,6 +274,8 @@ def _assert_candidate_identity_output(
     emitted = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
     if emitted["evidence_sha"] != expected_sha:
         raise AssertionError(f"candidate_identity emitted {emitted['evidence_sha']}; expected {expected_sha}")
+    if emitted.get("trusted_base_sha") != expected_trusted_base_sha:
+        raise AssertionError("candidate_identity emitted an unexpected trusted base")
 
 
 def _github(commit: str) -> dict[str, str]:
@@ -454,11 +507,276 @@ def _production_protected_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
                 revision=target_sha,
                 suite="core",
                 timeout=60,
+                trusted_base="a" * 40,
             )
         )
         == 0
     )
     return captured["command"]
+
+
+def test_protected_remaining_keeps_active_checkout_temp_outside_export_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The active preflight cannot make the sealed export destination non-empty."""
+    repository = tmp_path / "candidate"
+    producer_root = tmp_path / "producer"
+    destination = tmp_path / "export"
+    repository.mkdir()
+    producer_root.mkdir()
+    target_sha = "b" * 40
+    producer = {"commit": "a" * 40, "files": [], "tree": "c" * 40}
+    observed: dict[str, Path] = {}
+
+    def fake_run_suite(_suite: str, *, basetemp: Path, **_kwargs) -> int:
+        observed["basetemp"] = basetemp
+        basetemp.mkdir(parents=True)
+        (basetemp / "preflight-state").write_bytes(b"active")
+        return 0
+
+    def fake_execute(*_args, destination: Path, **_kwargs):
+        observed["destination"] = destination
+        assert not destination.exists(), "active preflight poisoned the sealed export destination"
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(ci_candidate_evidence, "_git", lambda *_args: target_sha)
+    monkeypatch.setattr(ci_candidate_evidence, "_protected_producer_manifest", lambda *_args: producer)
+    monkeypatch.setattr(ci_active_checkout_runner, "run_suite", fake_run_suite)
+    monkeypatch.setattr(
+        ci_active_checkout_runner,
+        "compare_red_reproduction_bindings",
+        lambda *_args, **_kwargs: {"outcome": "passed"},
+    )
+    monkeypatch.setattr(ci_candidate_evidence, "execute_exported_candidate", fake_execute)
+    monkeypatch.setattr(ci_candidate_evidence, "_protected_github_environment", lambda **_kwargs: {})
+    monkeypatch.setattr(ci_candidate_evidence, "write_execution_bundle", lambda *_args, **_kwargs: {})
+
+    assert (
+        ci_candidate_evidence._protected_run(
+            SimpleNamespace(
+                artifact_name="protected-remaining",
+                destination=destination,
+                output=tmp_path / "unused-bundle",
+                producer_revision=producer["commit"],
+                producer_root=producer_root,
+                repository=repository,
+                revision=target_sha,
+                suite="remaining",
+                timeout=60,
+                trusted_base="a" * 40,
+            )
+        )
+        == 0
+    )
+    assert observed == {
+        "basetemp": tmp_path / "export-active-checkout",
+        "destination": destination,
+    }
+    assert not destination.exists()
+    assert (tmp_path / "export-active-checkout" / "preflight-state").read_bytes() == b"active"
+
+
+@pytest.mark.parametrize("phase", ("strict", "ordinary"))
+def test_active_checkout_candidate_processes_cannot_retain_protected_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Both real launch paths strip job authority and settle inherited descendants."""
+
+    repository = tmp_path / "candidate"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "Active Checkout Authority Test")
+    _git(repository, "config", "user.email", "active-checkout@example.invalid")
+    escaped = tmp_path / f"{phase}-escaped"
+    keys = (
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        "ACTIONS_ID_TOKEN_REQUEST_URL",
+        "GH_TOKEN",
+        "GITHUB_ENV",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_STATE",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_TOKEN",
+    )
+    probe = repository / "authority_probe.py"
+    pid_path = tmp_path / f"{phase}-escaped.pid"
+    probe.write_text(
+        "import os\n"
+        "import pathlib\n"
+        "import subprocess\n"
+        "import sys\n"
+        f"KEYS = {keys!r}\n"
+        "if any(key in os.environ for key in KEYS):\n"
+        "    raise SystemExit(77)\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', "
+        "'import pathlib,sys,time; time.sleep(0.25); pathlib.Path(sys.argv[1]).write_text(\"escaped\")', "
+        "sys.argv[1]],\n"
+        "    start_new_session=True,\n"
+        ")\n"
+        "pathlib.Path(sys.argv[2]).write_text(str(child.pid), encoding='ascii')\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    tests = repository / "tests"
+    tests.mkdir()
+    (tests / "test_authority.py").write_text(
+        "import subprocess\n"
+        "import sys\n"
+        "def test_authority():\n"
+        f"    escaped = {str(escaped)!r}\n"
+        f"    pid_path = {str(pid_path)!r}\n"
+        "    subprocess.run([sys.executable, '-B', 'authority_probe.py', escaped, pid_path], check=True)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    governance = repository / "governance"
+    governance.mkdir()
+    (governance / "agent_preventions.yaml").write_text(
+        "records: []\nfalse_green_pairs: []\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "candidate authority probe")
+    revision = _git(repository, "rev-parse", "HEAD")
+    for key in keys:
+        monkeypatch.setenv(key, str(tmp_path / key))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setattr(ci_active_checkout_runner, "compile_python_tree", lambda *_args: None)
+    monkeypatch.setattr(ci_active_checkout_runner, "_validate_strict_guard_receipt", lambda *_args, **_kwargs: None)
+    node = "tests/test_authority.py::test_authority"
+    if phase == "strict":
+        monkeypatch.setattr(
+            ci_active_checkout_runner,
+            "active_guard_specs",
+            lambda *_args, **_kwargs: (GuardSpec(node, "remaining", None),),
+        )
+        monkeypatch.setattr(ci_active_checkout_runner, "checkout_execution_selection", lambda *_args: ((), ()))
+        monkeypatch.setattr(
+            ci_active_checkout_runner,
+            "_strict_guard_command",
+            lambda *_args, **_kwargs: (sys.executable, "-B", str(probe), str(escaped), str(pid_path)),
+        )
+    else:
+        monkeypatch.setattr(ci_active_checkout_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
+        monkeypatch.setattr(
+            ci_active_checkout_runner,
+            "checkout_execution_selection",
+            lambda *_args: (("tests/test_authority.py",), ()),
+        )
+
+    assert (
+        ci_active_checkout_runner.run_suite(
+            "remaining",
+            root=repository,
+            revision=revision,
+            basetemp=tmp_path / f"{phase}-state",
+            trusted_base=revision,
+        )
+        == 0
+    )
+    escaped_pid = int(pid_path.read_text(encoding="ascii"))
+    assert not psutil.pid_exists(escaped_pid), "runner returned success before the session-escaped child was reaped"
+    time.sleep(1.0)
+    assert not escaped.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="start_new_session is a POSIX process-boundary contract")
+def test_active_checkout_runner_settles_session_escaped_grandchild_after_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real runner owns a detached descendant after candidate timeout."""
+
+    repository = tmp_path / "candidate"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "POSIX Settlement Test")
+    _git(repository, "config", "user.email", "posix-settlement@example.invalid")
+    pid_path = tmp_path / "session-escaped-grandchild.pid"
+    (repository / "escape_probe.py").write_text(
+        "import pathlib, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    tests = repository / "tests"
+    tests.mkdir()
+    (tests / "test_session_escape.py").write_text(
+        "import subprocess, sys, time\n"
+        "import pytest\n"
+        "@pytest.mark.timeout(0.25)\n"
+        "def test_session_escape():\n"
+        f"    subprocess.run([sys.executable, '-B', 'escape_probe.py', {str(pid_path)!r}], check=True)\n"
+        "    time.sleep(60)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    governance = repository / "governance"
+    governance.mkdir()
+    (governance / "agent_preventions.yaml").write_text("records: []\nfalse_green_pairs: []\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "session escaping candidate descendant")
+    revision = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.setattr(ci_active_checkout_runner, "compile_python_tree", lambda *_args: None)
+    monkeypatch.setattr(ci_active_checkout_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        ci_active_checkout_runner,
+        "checkout_execution_selection",
+        lambda *_args, **_kwargs: (("tests/test_session_escape.py",), ()),
+    )
+
+    assert (
+        ci_active_checkout_runner.run_suite(
+            "remaining",
+            root=repository,
+            revision=revision,
+            basetemp=tmp_path / "session-escape-state",
+            trusted_base=revision,
+        )
+        != 0
+    )
+    escaped_pid = int(pid_path.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 5
+    while psutil.pid_exists(escaped_pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not psutil.pid_exists(escaped_pid), "runner returned success before the escaped descendant was reaped"
+
+
+def test_active_checkout_runner_refuses_unsupported_posix_before_candidate_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A POSIX host without Linux subreaper authority cannot run candidate code."""
+
+    launched = False
+
+    def forbidden_popen(*_args, **_kwargs):
+        nonlocal launched
+        launched = True
+        raise AssertionError("candidate Popen must not be reached")
+
+    monkeypatch.setattr(ci_active_checkout_runner.os, "name", "posix")
+    monkeypatch.setattr(ci_active_checkout_runner.sys, "platform", "darwin")
+    monkeypatch.setattr(ci_active_checkout_runner.subprocess, "Popen", forbidden_popen)
+
+    with pytest.raises(
+        ci_active_checkout_runner.CandidateProcessSettlementError,
+        match="requires Linux subreaper support",
+    ):
+        ci_active_checkout_runner._run_candidate_process(
+            (sys.executable, "-c", "raise SystemExit(99)"),
+            root=tmp_path,
+            environment=os.environ.copy(),
+            capture_output=True,
+        )
+    assert not launched
 
 
 def _write_protected_command_bundle(
@@ -574,6 +892,7 @@ def _validate_production_protected_command(
         expected_target_sha="b" * 40,
         expected_source_head_sha="d" * 40,
         expected_workflow_sha=producer["commit"],
+        expected_trusted_base_sha="a" * 40,
         jobs=[{"id": 98765}],
         jwks={},
     )
@@ -1468,6 +1787,8 @@ def _protected_identity_fixture(
     *,
     event_name: str = "pull_request",
     source_head_sha: str = "d" * 40,
+    schema_version: int = 2,
+    with_red_reproduction_comparison: bool = False,
 ) -> tuple[dict, bytes, dict, dict, dict]:
     issued_at = now - 600
     producer_sha = "a" * 40
@@ -1490,8 +1811,17 @@ def _protected_identity_fixture(
     execution = {
         "github": github,
         "producer": {"commit": producer_sha, "files": [], "tree": "c" * 40},
-        "schema_version": 2,
+        "schema_version": schema_version,
+        "tree": "e" * 40,
     }
+    if with_red_reproduction_comparison:
+        execution["red_reproduction_comparison"] = {
+            "candidate_commit": candidate_sha,
+            "candidate_tree": "e" * 40,
+            "outcome": "passed",
+            "trusted_base_commit": "f" * 40,
+            "trusted_binding_count": 6,
+        }
     execution_raw = (json.dumps(execution, sort_keys=True, separators=(",", ":")) + "\n").encode()
     audience = _execution_receipt_audience(execution_raw)
     claims = {
@@ -1545,6 +1875,8 @@ def test_signed_job_identity_binds_receipt_to_exact_rest_job_run_and_shas() -> N
         expected_target_run_id="54321",
         expected_target_run_attempt="4",
         expected_target_sha="b" * 40,
+        expected_target_tree="e" * 40,
+        expected_trusted_base_sha="f" * 40,
         expected_source_head_sha="d" * 40,
         now=now,
     )
@@ -1564,6 +1896,8 @@ def test_signed_job_identity_binds_receipt_to_exact_rest_job_run_and_shas() -> N
             expected_target_run_id="54321",
             expected_target_run_attempt="4",
             expected_target_sha="b" * 40,
+            expected_target_tree="e" * 40,
+            expected_trusted_base_sha="f" * 40,
             expected_source_head_sha="d" * 40,
             now=now,
         )
@@ -1579,6 +1913,8 @@ def test_signed_job_identity_binds_receipt_to_exact_rest_job_run_and_shas() -> N
             "expected_target_run_id": "54321",
             "expected_target_run_attempt": "4",
             "expected_target_sha": "b" * 40,
+            "expected_target_tree": "e" * 40,
+            "expected_trusted_base_sha": "f" * 40,
             "expected_source_head_sha": "d" * 40,
         }
         arguments[field] = value
@@ -1613,12 +1949,105 @@ def test_merge_group_signed_identity_binds_rest_and_candidate_to_group_sha() -> 
         expected_target_run_id="54321",
         expected_target_run_attempt="4",
         expected_target_sha="b" * 40,
+        expected_target_tree="e" * 40,
+        expected_trusted_base_sha="f" * 40,
         expected_source_head_sha="b" * 40,
         now=now,
     )
 
     assert claims["event_name"] == "merge_group"
     assert claims["sha"] == "b" * 40
+
+
+def test_signed_job_identity_requires_exact_comparison_schema_contract() -> None:
+    now = 2_000_000_000
+    arguments = {
+        "expected_repository": "owner/cryodaq",
+        "expected_event_name": "pull_request",
+        "expected_target_run_id": "54321",
+        "expected_target_run_attempt": "4",
+        "expected_target_sha": "b" * 40,
+        "expected_target_tree": "e" * 40,
+        "expected_trusted_base_sha": "f" * 40,
+        "expected_source_head_sha": "d" * 40,
+        "now": now,
+    }
+    execution, execution_raw, attestation, jwks, job = _protected_identity_fixture(
+        now,
+        schema_version=3,
+        with_red_reproduction_comparison=True,
+    )
+
+    claims = validate_protected_job_identity(
+        execution,
+        attestation,
+        execution_raw=execution_raw,
+        jwks=jwks,
+        job=job,
+        **arguments,
+    )
+
+    assert claims["check_run_id"] == "98765"
+    v2, v2_raw, v2_signed, v2_jwks, v2_job = _protected_identity_fixture(now)
+    assert (
+        validate_protected_job_identity(
+            v2,
+            v2_signed,
+            execution_raw=v2_raw,
+            jwks=v2_jwks,
+            job=v2_job,
+            **arguments,
+        )["check_run_id"]
+        == "98765"
+    )
+
+    def resign(mutated: dict) -> tuple[bytes, dict, dict]:
+        raw = ci_candidate_evidence._canonical(mutated)
+        encoded_claims = attestation["oidc_token"].split(".")[1]
+        claims_payload = json.loads(base64.urlsafe_b64decode(encoded_claims + "=" * (-len(encoded_claims) % 4)))
+        claims_payload["aud"] = _execution_receipt_audience(raw)
+        token, mutation_jwks = _test_oidc_token(claims_payload)
+        signed = {
+            **attestation,
+            "audience": claims_payload["aud"],
+            "execution_receipt_sha256": ci_candidate_evidence._digest(raw),
+            "oidc_token": token,
+        }
+        return raw, signed, mutation_jwks
+
+    for mutate in (
+        lambda comparison: comparison.update({"extra": "forged"}),
+        lambda comparison: comparison.__setitem__("trusted_binding_count", True),
+        lambda comparison: comparison.__setitem__("trusted_base_commit", "a" * 40),
+        lambda comparison: comparison.pop("outcome"),
+    ):
+        invalid = copy.deepcopy(execution)
+        mutate(invalid["red_reproduction_comparison"])
+        raw, signed, mutation_jwks = resign(invalid)
+        with pytest.raises(CiCandidateEvidenceError, match="comparison schema"):
+            validate_protected_job_identity(
+                invalid,
+                signed,
+                execution_raw=raw,
+                jwks=mutation_jwks,
+                job=job,
+                **arguments,
+            )
+    for schema_version, with_comparison in ((2, True), (3, False), (4, False), (4, True)):
+        invalid, raw, signed, invalid_jwks, invalid_job = _protected_identity_fixture(
+            now,
+            schema_version=schema_version,
+            with_red_reproduction_comparison=with_comparison,
+        )
+        with pytest.raises(CiCandidateEvidenceError, match="different target or producer"):
+            validate_protected_job_identity(
+                invalid,
+                signed,
+                execution_raw=raw,
+                jwks=invalid_jwks,
+                job=invalid_job,
+                **arguments,
+            )
 
 
 def test_signed_job_identity_refuses_absent_forged_and_misbound_oidc() -> None:
@@ -1633,6 +2062,8 @@ def test_signed_job_identity_refuses_absent_forged_and_misbound_oidc() -> None:
         "expected_target_run_id": "54321",
         "expected_target_run_attempt": "4",
         "expected_target_sha": "b" * 40,
+        "expected_target_tree": "e" * 40,
+        "expected_trusted_base_sha": "f" * 40,
         "expected_source_head_sha": "d" * 40,
         "now": now,
     }
@@ -2281,6 +2712,7 @@ def test_ci_workflow_mandates_exact_candidate_execution_and_upload_attestation(t
     assert "tools.ci_active_checkout_runner" in active["run"]
     assert '--repository "${GITHUB_WORKSPACE:?}"' in active["run"]
     assert '--revision "${EVIDENCE_SHA:?}"' in active["run"]
+    assert '--trusted-base "${TRUSTED_BASE_SHA:?}"' in active["run"]
     assert all(selection not in active["run"] for root in EXECUTION_ROOTS for selection in (*root.files, *root.nodes))
     # The former guard only searched raw workflow text, so a comment containing
     # every selection passed even while the executable pytest arguments drifted.
@@ -2359,7 +2791,10 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
     assert test_job["needs"] == "candidate_identity"
     assert "continue-on-error" not in identity_job
     assert all("continue-on-error" not in step for step in identity_job["steps"])
-    assert identity_job["outputs"] == {"evidence_sha": "${{ steps.bind.outputs.evidence_sha }}"}
+    assert identity_job["outputs"] == {
+        "evidence_sha": "${{ steps.bind.outputs.evidence_sha }}",
+        "trusted_base_sha": "${{ steps.bind.outputs.trusted_base_sha }}",
+    }
 
     identity_steps = {step.get("id"): step for step in identity_job["steps"] if step.get("id")}
     bind = identity_steps["bind"]
@@ -2378,6 +2813,17 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         "EVENT_SHA": "${{ github.sha }}",
         "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        # Identifies the default ref used to calculate a creation-push merge base.
+        "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+        # Binds merge-queue candidates to the merge group base commit.
+        "MERGE_GROUP_BASE_SHA": "${{ github.event.merge_group.base_sha }}",
+        # Supplies the prior ref for ordinary push trusted-base binding.
+        "PUSH_BEFORE": "${{ github.event.before }}",
+        # Distinguishes a branch-creation push from an ordinary push.
+        "PUSH_CREATED": "${{ github.event.created }}",
+        # A manual run has no event-derived before/base commit, so the operator
+        # must name the exact immutable trusted base explicitly.
+        "DISPATCH_TRUSTED_BASE_SHA": "${{ inputs.trusted_base_sha }}",
     }
     assert bind["run"] == EXPECTED_CANDIDATE_BIND_SCRIPT
     commands = tuple(
@@ -2406,6 +2852,8 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         event_name="push",
         event_sha=head_commit,
         expected_sha=head_commit,
+        expected_trusted_base_sha=base_commit,
+        push_before=base_commit,
     )
     _assert_candidate_identity_output(
         payload,
@@ -2416,6 +2864,7 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         base_sha=base_commit,
         head_sha=head_commit,
         expected_sha=head_commit,
+        expected_trusted_base_sha=base_commit,
     )
 
     assert test_job["env"]["EVIDENCE_SHA"] == evidence_output
@@ -2425,6 +2874,122 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
     for step_id in ("active-remaining", "candidate"):
         assert '--revision "${EVIDENCE_SHA:?}"' in indexed[step_id]["run"]
         assert "${GITHUB_SHA:?}" not in indexed[step_id]["run"]
+
+
+def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_path: Path) -> None:
+    payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    dispatch = payload[True]["workflow_dispatch"]
+    assert dispatch == {
+        "inputs": {
+            "trusted_base_sha": {
+                "description": "Exact 40-character commit SHA whose registered evidence is trusted",
+                "required": True,
+                "type": "string",
+            }
+        }
+    }
+
+    test_job = payload["jobs"]["test"]
+    steps = {step.get("id"): step for step in test_job["steps"] if step.get("id")}
+    active = steps["active-remaining"]
+    assert active["if"] == "matrix.suite == 'remaining'"
+    assert '--trusted-base "${TRUSTED_BASE_SHA:?}"' in active["run"]
+    enforce = next(
+        step
+        for step in test_job["steps"]
+        if step.get("name") == "Enforce exact candidate execution and evidence publication"
+    )
+    assert "workflow_dispatch" not in enforce["run"]
+    assert 'if test "${{ matrix.suite }}" = remaining; then' in enforce["run"]
+    assert 'test "${{ steps.active-remaining.outcome }}" = success' in enforce["run"]
+
+    identity_job = payload["jobs"]["candidate_identity"]
+    bind = next(step for step in identity_job["steps"] if step.get("id") == "bind")
+    assert bind["env"]["DISPATCH_TRUSTED_BASE_SHA"] == "${{ inputs.trusted_base_sha }}"
+    dispatch_binding = (
+        'trusted_base_sha="$(require_commit \'workflow-dispatch trusted base\' "${DISPATCH_TRUSTED_BASE_SHA:?}")"'
+    )
+    assert dispatch_binding in bind["run"]
+
+    repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
+    remote = tmp_path / "default-branch.git"
+    _git(remote.parent, "init", "--bare", "-q", str(remote))
+    _git(repository, "remote", "add", "origin", str(remote))
+    _git(repository, "push", "-q", "origin", f"{base_commit}:refs/heads/master")
+
+    event_cases = (
+        {
+            "event_name": "pull_request",
+            "event_sha": merge_commit,
+            "base_sha": base_commit,
+            "head_sha": head_commit,
+            "expected_sha": head_commit,
+            "expected_trusted_base_sha": base_commit,
+        },
+        {
+            "event_name": "merge_group",
+            "event_sha": head_commit,
+            "merge_group_base_sha": base_commit,
+            "expected_sha": head_commit,
+            "expected_trusted_base_sha": base_commit,
+        },
+        {
+            "event_name": "push",
+            "event_sha": head_commit,
+            "push_before": base_commit,
+            "expected_sha": head_commit,
+            "expected_trusted_base_sha": base_commit,
+        },
+        {
+            "event_name": "push",
+            "event_sha": head_commit,
+            "push_before": "0" * 40,
+            "push_created": "true",
+            "expected_sha": head_commit,
+            "expected_trusted_base_sha": base_commit,
+        },
+        {
+            "event_name": "workflow_dispatch",
+            "event_sha": head_commit,
+            "dispatch_trusted_base_sha": base_commit,
+            "expected_sha": head_commit,
+            "expected_trusted_base_sha": base_commit,
+        },
+    )
+    for index, case in enumerate(event_cases):
+        _assert_candidate_identity_output(payload, repository, tmp_path / f"event-{index}.out", **case)
+
+    for index, invalid_base in enumerate(("", "not-a-sha", "f" * 40)):
+        output = tmp_path / f"invalid-dispatch-{index}.out"
+        with pytest.raises(AssertionError):
+            _assert_candidate_identity_output(
+                payload,
+                repository,
+                output,
+                event_name="workflow_dispatch",
+                event_sha=head_commit,
+                dispatch_trusted_base_sha=invalid_base,
+                expected_sha=head_commit,
+                expected_trusted_base_sha=base_commit,
+            )
+        assert not output.exists()
+
+    restored_defect = copy.deepcopy(payload)
+    restored_bind = next(
+        step for step in restored_defect["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind"
+    )
+    restored_bind["run"] = restored_bind["run"].replace(dispatch_binding, 'trusted_base_sha=""', 1)
+    with pytest.raises(AssertionError, match="unexpected trusted base"):
+        _assert_candidate_identity_output(
+            restored_defect,
+            repository,
+            tmp_path / "restored-empty-base.out",
+            event_name="workflow_dispatch",
+            event_sha=head_commit,
+            dispatch_trusted_base_sha=base_commit,
+            expected_sha=head_commit,
+            expected_trusted_base_sha=base_commit,
+        )
 
 
 def test_ci_workflow_candidate_identity_tripwire_refuses_unresolved_trees(tmp_path: Path) -> None:
@@ -2455,6 +3020,7 @@ git() {
             base_sha=base_commit,
             head_sha=head_commit,
             expected_sha=head_commit,
+            expected_trusted_base_sha=base_commit,
         )
     assert not output.exists()
 
@@ -2492,6 +3058,7 @@ def test_ci_workflow_candidate_identity_tripwire_rejects_evidence_binding_mutati
             base_sha=base_commit,
             head_sha=head_commit,
             expected_sha=head_commit,
+            expected_trusted_base_sha=base_commit,
         )
     assert str(rejected.value) == f"candidate_identity emitted {merge_commit}; expected {head_commit}"
     print(f"{mutation}: RED — {rejected.value}")
