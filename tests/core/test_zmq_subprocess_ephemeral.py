@@ -33,7 +33,12 @@ _TEST_SAFE_CMD_ADDR = "tcp://127.0.0.1:61002"
 # create it.
 _FAKE_REQ_SOCKET_TYPE = "REQ"
 _COLLECTION_HANG_GUARD_S = 60.0
-_DEFAULT_OWNER_SETTLEMENT_TIMEOUT_S = 0.25
+# The real bridge owns a command forwarder that polls its source queue at
+# 100 ms. Leave enough room for that poll to observe shutdown, for the bridge
+# owner to join its children, and for the terminal reply drain to cut the queue
+# after the owner is truly settled. Deliberately tight fake-owner tests pass
+# their own timeout explicitly below.
+_DEFAULT_OWNER_SETTLEMENT_TIMEOUT_S = 1.0
 _MISSING_QUEUE_ATTRIBUTE = object()
 
 
