@@ -86,6 +86,7 @@ jobs:
             tools/candidate_evidence.py \
             tools/check_python_compile.py \
             tools/ci_candidate_evidence.py \
+            tools/ci_active_checkout_runner.py \
             tools/ci_candidate_runner.py \
             tools/ci_execution_roots.py \
             tools/ci_guard_execution.py \
@@ -113,6 +114,23 @@ jobs:
           # intentionally contains the candidate-facing dependency set.
           python -m pip install -r requirements-protected-ci-lock.txt
           python -m pip check
+
+      - name: Bind reviewed interpreter alias in candidate (Linux)
+        if: runner.os == 'Linux'
+        working-directory: candidate
+        run: |
+          # The git-index soak guards spawn the exact worktree .venv/bin/python
+          # and prove it resolves to the interpreter executing them. The main
+          # workflow binds the same alias in its own checkout; the pristine
+          # candidate checkout needs it too. .venv/ is git-ignored, so the
+          # exact-checkout verification stays clean.
+          if [ -e .venv ] || [ -L .venv ]; then
+            echo "refusing to reuse an ambient .venv for soak evidence" >&2
+            exit 1
+          fi
+          mkdir -m 700 -p .venv/bin
+          ln -s -- "$(command -v python)" .venv/bin/python
+          python -c "from pathlib import Path; alias = Path('.venv/bin/python').resolve(strict=True); running = Path('/proc/self/exe').resolve(strict=True); assert alias == running, (alias, running)"
 
       - name: Run exact candidate with immutable producer
         id: protected-run
@@ -229,6 +247,7 @@ jobs:
             tools/candidate_evidence.py \
             tools/check_python_compile.py \
             tools/ci_candidate_evidence.py \
+            tools/ci_active_checkout_runner.py \
             tools/ci_candidate_runner.py \
             tools/ci_execution_roots.py \
             tools/ci_guard_execution.py \

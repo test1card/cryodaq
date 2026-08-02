@@ -128,6 +128,7 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     immutable = next(step for step in steps if step["name"] == "Verify immutable producer object")
     producer_paths = _immutable_paths(immutable)
     assert producer_paths == _expected_immutable_paths()
+    assert "tools/ci_active_checkout_runner.py" in producer_paths
     assert "tools/ci_required_workflow_context.py" in producer_paths
 
     setup = next(step for step in steps if step.get("uses", "").startswith("conda-incubator/setup-miniconda@"))
@@ -142,6 +143,7 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     assert protected_run["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
     assert '--revision "${TARGET_SHA:?}"' in protected_run["run"]
     assert '--producer-revision "${JUDGE_SHA:?}"' in protected_run["run"]
+    assert "tools.ci_active_checkout_runner" not in protected_run["run"]
     identity = next(step for step in steps if step.get("id") == "job-attestation")
     assert identity["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
     upload = next(step for step in steps if step.get("id") == "protected-upload")
@@ -150,6 +152,26 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     assert "steps.protected-run.outcome" in enforce["run"]
     assert "steps.job-attestation.outcome" in enforce["run"]
     assert "steps.protected-upload.outcome" in enforce["run"]
+
+
+def test_protected_workflow_binds_candidate_interpreter_alias_before_execution() -> None:
+    """The git-index soak guards spawn the exact worktree .venv/bin/python.
+
+    The ordinary workflow binds that alias in its own checkout; the protected
+    candidate checkout is pristine, so without this step the two POSIX soak
+    nodes fail closed with "exact worktree .venv interpreter is unavailable".
+    """
+
+    payload = yaml.safe_load(PROTECTED_WORKFLOW.read_text(encoding="utf-8"))
+    steps = payload["jobs"]["protected-execution"]["steps"]
+    alias = next(step for step in steps if step.get("name") == "Bind reviewed interpreter alias in candidate (Linux)")
+    assert alias["if"] == "runner.os == 'Linux'"
+    assert alias["working-directory"] == "candidate"
+    assert "refusing to reuse an ambient .venv" in alias["run"]
+    assert 'ln -s -- "$(command -v python)" .venv/bin/python' in alias["run"]
+    assert "Path('/proc/self/exe')" in alias["run"] or 'Path("/proc/self/exe")' in alias["run"]
+    protected_run = next(step for step in steps if step.get("id") == "protected-run")
+    assert steps.index(alias) < steps.index(protected_run)
 
 
 def test_native_final_job_is_fail_closed_and_uploads_only_accepted_context() -> None:
