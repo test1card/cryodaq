@@ -14,10 +14,13 @@ from tools import ci_active_checkout_runner, ci_candidate_runner
 from tools.ci_guard_execution import (
     RECEIPT_PREFIX,
     GuardExecutionError,
+    GuardSpec,
+    active_guard_specs,
     active_guard_nodes,
     current_guard_platform,
     empty_guard_receipt,
 )
+from tools.ci_execution_roots import ExecutionSelection
 from tools.governance_contract import (
     GovernanceContractError,
     _git_blob_id,
@@ -653,6 +656,21 @@ def test_open_reopened_and_closed_guards_execute_while_expired_does_not(tmp_path
         "violations": [],
         "warnings": [],
     }
+
+
+def test_file_selected_active_guard_routes_to_git_index(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    node = "tests/test_guard_cases.py::test_guard"
+    _write_registry(tmp_path, node)
+    _write_test(tmp_path, node, "def test_guard(): pass\n")
+    monkeypatch.setattr(
+        "tools.ci_guard_execution._checkout_execution_selection",
+        lambda _suite: ExecutionSelection("git-index", "remaining", ("tests/test_guard_cases.py",), ()),
+    )
+
+    assert active_guard_specs(tmp_path, "remaining", execution_root="exported-commit") == ()
+    assert active_guard_specs(tmp_path, "remaining", execution_root="git-index") == (
+        GuardSpec(node, "remaining", None),
+    )
 
 
 def test_false_green_expiry_cannot_outlive_runtime_or_expire_durable_scope() -> None:

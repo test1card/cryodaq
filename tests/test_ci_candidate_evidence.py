@@ -539,7 +539,11 @@ def _validate_production_protected_command(
     command: tuple[str, ...],
     bundle_target_sha: str = "b" * 40,
     candidate_output: str | None = None,
+    checkout_specs: tuple = (),
 ) -> dict:
+    from tools import ci_guard_execution
+
+    monkeypatch.setattr(ci_guard_execution, "active_guard_specs", lambda *_args, **_kwargs: checkout_specs)
     repository = tmp_path / "candidate"
     producer_root = tmp_path / "producer"
     producer = {"commit": "a" * 40, "files": [], "tree": "c" * 40}
@@ -592,6 +596,23 @@ def test_protected_verifier_accepts_the_command_generated_by_protected_run(
     }
 
 
+def test_protected_verifier_rejects_unbound_checkout_guard_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools.ci_guard_execution import GuardSpec
+
+    command = _production_protected_command(tmp_path, monkeypatch)
+
+    with pytest.raises(CiCandidateEvidenceError, match="checkout-only guard receipt"):
+        _validate_production_protected_command(
+            tmp_path,
+            monkeypatch,
+            command=command,
+            checkout_specs=(GuardSpec("tests/test_guard.py::test_guard", "core", None),),
+        )
+
+
 @pytest.mark.parametrize(
     ("producer_root", "destination", "candidate_repository"),
     (
@@ -626,9 +647,10 @@ def test_protected_verifier_accepts_producer_local_paths(
             destination,
             command[9],
             producer_root,
-            command[11],
-            candidate_repository,
-        ),
+                command[11],
+                candidate_repository,
+                *command[13:],
+            ),
     )
 
     assert result == {

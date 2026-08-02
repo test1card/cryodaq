@@ -83,6 +83,7 @@ _PROTECTED_PRODUCER_FILES = (
     "tools/candidate_evidence.py",
     "tools/check_python_compile.py",
     "tools/ci_candidate_evidence.py",
+    "tools/ci_active_checkout_runner.py",
     "tools/ci_candidate_runner.py",
     "tools/ci_execution_roots.py",
     "tools/ci_guard_execution.py",
@@ -588,6 +589,8 @@ def _protected_run(args: argparse.Namespace) -> int:
         # and they execute no candidate hook or program.
         "--candidate-git-repository",
         str(repository),
+        "--candidate-git-revision",
+        commit,
     )
     prior_suite = os.environ.get(FAILURE_RECEIPT_SUITE_ENV)
     os.environ[FAILURE_RECEIPT_SUITE_ENV] = args.suite
@@ -1341,13 +1344,14 @@ def validate_protected_execution_bundle(
     command = execution.get("command")
     if (
         not isinstance(command, list)
-        # 13, not 11: --candidate-git-repository was added to the producer invocation
+        # 15, not 11: the candidate Git checkout and exact revision bind the
+        # judge-owned checkout-only guard execution into this sealed receipt.
         # so the protected run can RESOLVE Git objects instead of skipping them. This
         # verifier was not updated with it, so every otherwise-successful protected
         # bundle was rejected here and the required PROTECTED EXECUTION ACCEPTED
         # results were unreachable. The producer and its verifier describe the same
         # command and must be changed together.
-        or len(command) != 13
+        or len(command) != 15
         or command[1:4] != ["-I", "-c", _PROTECTED_RUNNER_BOOTSTRAP]
         or command[4:]
         != [
@@ -1368,6 +1372,8 @@ def validate_protected_execution_bundle(
             # used to export the candidate, whose commit/tree/manifest are checked
             # against the target checkout.
             command[12],
+            "--candidate-git-revision",
+            expected_target_sha,
         ]
         or not isinstance(command[0], str)
         or not command[0]
@@ -1398,6 +1404,33 @@ def validate_protected_execution_bundle(
         )
     ):
         raise CiCandidateEvidenceError("protected producer did not prove positive pytest execution coverage")
+    # The sealed export has no Git metadata, so checkout-selected guards are
+    # deliberately run by the judge against the exact candidate checkout. Their
+    # canonical receipt is retained in the same stdout.bin bound above; a
+    # workflow-only invocation would have no such evidence binding.
+    from tools.ci_candidate_runner import _validate_strict_guard_receipt
+    from tools.ci_guard_execution import GuardExecutionError, active_guard_specs, current_guard_platform
+
+    platform = current_guard_platform()
+    checkout_specs = active_guard_specs(
+        repository,
+        expected_suite,
+        platform=platform,
+        execution_root="git-index",
+        git_repository=repository,
+        require_git_resolution=True,
+    )
+    if checkout_specs:
+        try:
+            _validate_strict_guard_receipt(
+                output,
+                suite=expected_suite,
+                expected=tuple(spec.node for spec in checkout_specs),
+                expected_platforms={spec.node: spec.platform for spec in checkout_specs},
+                platform=platform,
+            )
+        except (GuardExecutionError, ValueError, TypeError) as exc:
+            raise CiCandidateEvidenceError("protected checkout-only guard receipt is invalid or unbound") from exc
     github = execution.get("github")
     check_run_id = github.get("github_job_check_run_id") if isinstance(github, Mapping) else None
     matching_jobs = [job for job in jobs if str(job.get("id")) == str(check_run_id)]

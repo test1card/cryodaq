@@ -86,6 +86,7 @@ jobs:
             tools/candidate_evidence.py \
             tools/check_python_compile.py \
             tools/ci_candidate_evidence.py \
+            tools/ci_active_checkout_runner.py \
             tools/ci_candidate_runner.py \
             tools/ci_execution_roots.py \
             tools/ci_guard_execution.py \
@@ -229,6 +230,7 @@ jobs:
             tools/candidate_evidence.py \
             tools/check_python_compile.py \
             tools/ci_candidate_evidence.py \
+            tools/ci_active_checkout_runner.py \
             tools/ci_candidate_runner.py \
             tools/ci_execution_roots.py \
             tools/ci_guard_execution.py \

@@ -128,6 +128,7 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     immutable = next(step for step in steps if step["name"] == "Verify immutable producer object")
     producer_paths = _immutable_paths(immutable)
     assert producer_paths == _expected_immutable_paths()
+    assert "tools/ci_active_checkout_runner.py" in producer_paths
     assert "tools/ci_required_workflow_context.py" in producer_paths
 
     setup = next(step for step in steps if step.get("uses", "").startswith("conda-incubator/setup-miniconda@"))
@@ -142,6 +143,7 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     assert protected_run["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
     assert '--revision "${TARGET_SHA:?}"' in protected_run["run"]
     assert '--producer-revision "${JUDGE_SHA:?}"' in protected_run["run"]
+    assert "tools.ci_active_checkout_runner" not in protected_run["run"]
     identity = next(step for step in steps if step.get("id") == "job-attestation")
     assert identity["env"]["GITHUB_JOB_CHECK_RUN_ID"] == "${{ job.check_run_id }}"
     upload = next(step for step in steps if step.get("id") == "protected-upload")

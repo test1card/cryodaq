@@ -498,6 +498,7 @@ def run_suite(
     basetemp: Path | None = None,
     protected_producer_root: Path | None = None,
     candidate_git_repository: Path | None = None,
+    candidate_git_revision: str | None = None,
 ) -> int:
     try:
         manifest = compile_python_tree(root)
@@ -648,6 +649,21 @@ def run_suite(
     if failures:
         print(f"candidate-suite={suite} failures={failures!r}", file=sys.stderr, flush=True)
         return failures[0][1] or 1
+    if protected_producer_root is not None:
+        if candidate_git_repository is None or candidate_git_revision is None:
+            print(f"candidate-suite={suite} checkout-guard-setup-failure=missing Git checkout binding", file=sys.stderr)
+            return 1
+        from tools import ci_active_checkout_runner
+
+        checkout_result = ci_active_checkout_runner.run_suite(
+            suite,
+            root=candidate_git_repository,
+            revision=candidate_git_revision,
+            basetemp=guard_basetemp / "git-index",
+            protected_producer_root=protected_producer_root,
+        )
+        if checkout_result:
+            return checkout_result
     return 0
 
 
@@ -657,12 +673,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--protected-producer-root", type=Path)
     parser.add_argument("--candidate-git-repository", type=Path)
+    parser.add_argument("--candidate-git-revision")
     args = parser.parse_args(argv)
     return run_suite(
         args.suite,
         root=args.root,
         protected_producer_root=args.protected_producer_root,
         candidate_git_repository=args.candidate_git_repository,
+        candidate_git_revision=args.candidate_git_revision,
     )
 
 

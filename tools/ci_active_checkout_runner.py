@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 
 from tools.check_python_compile import compile_python_tree
-from tools.ci_candidate_runner import _TAIL, _strict_guard_command, _validate_strict_guard_receipt
+from tools.ci_candidate_runner import (
+    _PYTEST,
+    _TAIL,
+    _protected_pytest_command,
+    _strict_guard_command,
+    _validate_strict_guard_receipt,
+)
 from tools.ci_guard_execution import active_guard_specs, checkout_execution_selection, current_guard_platform
 
 # The sealed candidate disables autoload; this checkout runner must not reuse its explicit plugin list.
@@ -31,7 +37,14 @@ def _verify_checkout(root: Path, revision: str) -> None:
         raise RuntimeError("exact checkout has tracked or untracked changes")
 
 
-def run_suite(suite: str, *, root: Path, revision: str, basetemp: Path) -> int:
+def run_suite(
+    suite: str,
+    *,
+    root: Path,
+    revision: str,
+    basetemp: Path,
+    protected_producer_root: Path | None = None,
+) -> int:
     """Execute all and only the registry-selected exact-checkout tests once."""
 
     root = root.resolve(strict=True)
@@ -41,7 +54,14 @@ def run_suite(suite: str, *, root: Path, revision: str, basetemp: Path) -> int:
     file_set = set(files)
     selected_nodes = tuple(node for node in nodes if node.split("::", 1)[0] not in file_set)
     platform = current_guard_platform()
-    guard_specs = active_guard_specs(root, suite, platform=platform, execution_root="git-index")
+    guard_specs = active_guard_specs(
+        root,
+        suite,
+        platform=platform,
+        execution_root="git-index",
+        git_repository=root if protected_producer_root is not None else None,
+        require_git_resolution=protected_producer_root is not None,
+    )
     guard_nodes = tuple(spec.node for spec in guard_specs)
     basetemp.mkdir(parents=True, exist_ok=True)
 
@@ -52,6 +72,14 @@ def run_suite(suite: str, *, root: Path, revision: str, basetemp: Path) -> int:
         execution_root="git-index",
         pytest_command=_PYTEST,
     )
+    if protected_producer_root is not None:
+        if strict is not None:
+            strict = _protected_pytest_command(
+                strict,
+                root=root,
+                producer_root=protected_producer_root,
+                strict=True,
+            )
     if strict is not None:
         completed = subprocess.run(strict, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if completed.stdout:
@@ -72,6 +100,13 @@ def run_suite(suite: str, *, root: Path, revision: str, basetemp: Path) -> int:
     if ordinary:
         command = _PYTEST + ("--basetemp", str(basetemp / "ordinary"), *ordinary)
         command += tuple(argument for node in guard_nodes for argument in ("--deselect", node)) + _TAIL
+        if protected_producer_root is not None:
+            command = _protected_pytest_command(
+                command,
+                root=root,
+                producer_root=protected_producer_root,
+                strict=False,
+            )
         completed = subprocess.run(command, cwd=root, check=False)
         if completed.returncode:
             return completed.returncode
@@ -85,8 +120,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--revision", required=True)
     parser.add_argument("--suite", choices=("remaining",), required=True)
     parser.add_argument("--basetemp", type=Path, required=True)
+    parser.add_argument("--protected-producer-root", type=Path)
     args = parser.parse_args(argv)
-    return run_suite(args.suite, root=args.repository, revision=args.revision, basetemp=args.basetemp)
+    return run_suite(
+        args.suite,
+        root=args.repository,
+        revision=args.revision,
+        basetemp=args.basetemp,
+        protected_producer_root=args.protected_producer_root,
+    )
 
 
 if __name__ == "__main__":
