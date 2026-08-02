@@ -15,6 +15,9 @@ import queue as stdlib_queue
 import sys
 import threading
 import time
+from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -29,6 +32,14 @@ _TEST_SAFE_CMD_ADDR = "tcp://127.0.0.1:61002"
 # *is* rather than by the order in which the bridge's independent threads happened to
 # create it.
 _FAKE_REQ_SOCKET_TYPE = "REQ"
+_COLLECTION_HANG_GUARD_S = 60.0
+# The real bridge owns a command forwarder that polls its source queue at
+# 100 ms. Leave enough room for that poll to observe shutdown, for the bridge
+# owner to join its children, and for the terminal reply drain to cut the queue
+# after the owner is truly settled. Deliberately tight fake-owner tests pass
+# their own timeout explicitly below.
+_DEFAULT_OWNER_SETTLEMENT_TIMEOUT_S = 1.0
+_MISSING_QUEUE_ATTRIBUTE = object()
 
 
 def _make_mock_context(
@@ -88,8 +99,10 @@ def _run_cmd_forward(
     sockets: list[MagicMock],
     reply_payloads: list[str] | None = None,
     safe_cmds: list[dict] | None = None,
-    timeout_s: float = 5.0,
+    owner_join_timeout_s: float = _DEFAULT_OWNER_SETTLEMENT_TIMEOUT_S,
     reply_queue: stdlib_queue.Queue | None = None,
+    safe_reply_queue: stdlib_queue.Queue | None = None,
+    producer_complete: threading.Event | None = None,
     diagnostics: dict[str, object] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Drive ``zmq_bridge_main`` in this thread until all ``cmds`` are
@@ -105,20 +118,59 @@ def _run_cmd_forward(
     cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     safe_cmd_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
     reply_q: stdlib_queue.Queue = reply_queue if reply_queue is not None else stdlib_queue.Queue(maxsize=100)
-    safe_reply_q: stdlib_queue.Queue = stdlib_queue.Queue(maxsize=100)
+    safe_reply_q: stdlib_queue.Queue = (
+        safe_reply_queue if safe_reply_queue is not None else stdlib_queue.Queue(maxsize=100)
+    )
     shutdown = threading.Event()
     bridge_owner_exceptions: list[BaseException] = []
+    bridge_owner_complete = threading.Event()
+    collection_condition = threading.Condition()
+    collection_hang_guard_expired = threading.Event()
+    expected_reply_ids = [cmd.get("_rid") for cmd in (*cmds, *(safe_cmds or []))]
+    if any(not isinstance(reply_id, str) or not reply_id for reply_id in expected_reply_ids):
+        raise AssertionError("every expected reply requires a nonempty string request identity")
+    if len(set(expected_reply_ids)) != len(expected_reply_ids):
+        raise AssertionError("expected request identities must be unique")
 
-    # Seed cmd_q with the whole batch up-front, then run the loop in a
-    # thread. A sentinel (shutdown.set()) after all replies arrive
-    # lets the loop exit cleanly.
-    for cmd in cmds:
-        cmd_q.put(cmd)
-    for cmd in safe_cmds or []:
-        safe_cmd_q.put(cmd)
+    def _notify_collector() -> None:
+        with collection_condition:
+            collection_condition.notify_all()
 
-    # Import inside the helper so the zmq import happens under the patch.
-    with patch.dict("sys.modules"):
+    @contextmanager
+    def _notify_after_put(output_queue: stdlib_queue.Queue) -> Iterator[None]:
+        original_instance_put = vars(output_queue).get("put", _MISSING_QUEUE_ATTRIBUTE)
+        original_put = output_queue.put
+
+        def _put_and_notify(*args: object, **kwargs: object) -> object:
+            result = original_put(*args, **kwargs)
+            _notify_collector()
+            return result
+
+        output_queue.put = _put_and_notify  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            if original_instance_put is _MISSING_QUEUE_ATTRIBUTE:
+                del output_queue.put
+            else:
+                output_queue.put = original_instance_put  # type: ignore[method-assign]
+
+    # Import inside the helper so the zmq import happens under the patch. The
+    # notifying wrappers are scoped to this call and restored exactly at the
+    # instance-attribute boundary even when owner settlement raises.
+    with (
+        _notify_after_put(reply_q),
+        _notify_after_put(safe_reply_q),
+        patch.dict("sys.modules"),
+    ):
+        # Seed cmd_q with the whole batch up-front, then run the loop in a
+        # thread. A sentinel (shutdown.set()) after all replies arrive
+        # lets the loop exit cleanly.
+        for cmd in cmds:
+            cmd_q.put(cmd)
+        for cmd in safe_cmds or []:
+            safe_cmd_q.put(cmd)
+
         import sys
 
         fake_zmq = MagicMock(name="zmq_module")
@@ -169,29 +221,57 @@ def _run_cmd_forward(
                 )
             except BaseException as exc:
                 bridge_owner_exceptions.append(exc)
+            finally:
+                bridge_owner_complete.set()
+                _notify_collector()
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
 
-        # Wait for all expected replies to arrive, then signal shutdown.
         replies: list[dict] = []
-        deadline = time.monotonic() + timeout_s
         expected_replies = len(cmds) + len(safe_cmds or [])
-        while len(replies) < expected_replies and time.monotonic() < deadline:
-            progressed = False
-            for output_queue in (
-                reply_q,
-                *((safe_reply_q,) if safe_cmds is not None else ()),
-            ):
-                while len(replies) < expected_replies:
-                    try:
-                        replies.append(output_queue.get_nowait())
-                    except stdlib_queue.Empty:
-                        break
-                    progressed = True
-            if not progressed:
-                time.sleep(0.001)
+        collection_end = ""
 
+        def _expire_collection_hang_guard() -> None:
+            collection_hang_guard_expired.set()
+            _notify_collector()
+
+        collection_hang_guard = threading.Timer(_COLLECTION_HANG_GUARD_S, _expire_collection_hang_guard)
+        collection_hang_guard.start()
+        try:
+            while len(replies) < expected_replies:
+                with collection_condition:
+                    for output_queue in (
+                        reply_q,
+                        *((safe_reply_q,) if safe_cmds is not None else ()),
+                    ):
+                        while len(replies) < expected_replies:
+                            try:
+                                replies.append(output_queue.get_nowait())
+                            except stdlib_queue.Empty:
+                                break
+                    if len(replies) == expected_replies:
+                        collection_end = "expected_replies"
+                        break
+                    if bridge_owner_complete.is_set():
+                        collection_end = "bridge_owner_complete"
+                        break
+                    if producer_complete is not None and producer_complete.is_set():
+                        collection_end = "producer_complete"
+                        break
+                    if collection_hang_guard_expired.is_set():
+                        collection_end = "collection_hang_guard_expired"
+                        break
+                    collection_condition.wait()
+        finally:
+            collection_hang_guard.cancel()
+
+        # Stop after a causal collection outcome, then settle the producer before
+        # taking the terminal queue cut. Otherwise a reply published after the
+        # pre-join drain can escape identity accounting behind a green return.
+        shutdown.set()
+        thread.join(timeout=owner_join_timeout_s)
+        bridge_owner_alive = thread.is_alive()
         pending_replies: list[dict] = []
         for output_queue in (
             reply_q,
@@ -204,21 +284,30 @@ def _run_cmd_forward(
                     break
         collected_reply_ids = [reply.get("_rid") for reply in replies]
         pending_reply_ids = [reply.get("_rid") for reply in pending_replies]
-        unaccounted_reply_ids = [cmd.get("_rid") for cmd in (*cmds, *(safe_cmds or []))]
-        for reply_id in (*collected_reply_ids, *pending_reply_ids):
-            if reply_id in unaccounted_reply_ids:
-                unaccounted_reply_ids.remove(reply_id)
+        observed_reply_ids = [*collected_reply_ids, *pending_reply_ids]
+        malformed_reply_ids = [
+            reply_id for reply_id in observed_reply_ids if not isinstance(reply_id, str) or not reply_id
+        ]
+        valid_observed_reply_ids = [
+            reply_id for reply_id in observed_reply_ids if isinstance(reply_id, str) and reply_id
+        ]
+        expected_identity_counts = Counter(expected_reply_ids)
+        observed_identity_counts = Counter(valid_observed_reply_ids)
+        unaccounted_reply_ids = list((expected_identity_counts - observed_identity_counts).elements())
+        unexpected_reply_ids = [
+            *malformed_reply_ids,
+            *(observed_identity_counts - expected_identity_counts).elements(),
+        ]
         req_sockets = [
             socket for socket in sockets if getattr(socket, "created_socket_type", None) == _FAKE_REQ_SOCKET_TYPE
         ]
-        shutdown.set()
-        thread.join(timeout=timeout_s)
-        bridge_owner_alive = thread.is_alive()
         if diagnostics is not None:
             diagnostics.update(
+                collection_end=collection_end,
                 collected_reply_ids=collected_reply_ids,
                 pending_reply_ids=pending_reply_ids,
                 unaccounted_reply_ids=unaccounted_reply_ids,
+                unexpected_reply_ids=unexpected_reply_ids,
                 req_sockets_created=len(req_sockets),
                 req_sockets_sent=sum(socket.send_string.call_count for socket in req_sockets),
                 req_sockets_closed=sum(socket.close.call_count for socket in req_sockets),
@@ -230,6 +319,26 @@ def _run_cmd_forward(
             raise AssertionError("bridge owner did not settle after bounded shutdown join")
         if bridge_owner_exceptions:
             raise bridge_owner_exceptions[0]
+        if collection_end == "collection_hang_guard_expired":
+            raise AssertionError("reply collection hang guard expired")
+        if unaccounted_reply_ids or unexpected_reply_ids:
+            raise AssertionError(
+                "reply collection ended without an exact reply identity multiset: "
+                f"collection_end={collection_end}; "
+                f"collected_reply_ids={collected_reply_ids}; "
+                f"pending_reply_ids={pending_reply_ids}; "
+                f"unaccounted_reply_ids={unaccounted_reply_ids}; "
+                f"unexpected_reply_ids={unexpected_reply_ids}; "
+                "req_sockets(created/sent/closed)="
+                f"{len(req_sockets)}/"
+                f"{sum(socket.send_string.call_count for socket in req_sockets)}/"
+                f"{sum(socket.close.call_count for socket in req_sockets)}; "
+                f"cmd_q_qsize={cmd_q.qsize()}; "
+                f"bridge_owner_alive={bridge_owner_alive}; "
+                "bridge_owner_exceptions="
+                f"{[f'{type(exc).__name__}: {exc}' for exc in bridge_owner_exceptions]}"
+            )
+        replies.extend(pending_replies)
 
     # Drain any control messages that landed on data_queue.
     control: list[dict] = []
@@ -254,6 +363,7 @@ def _format_reply_collector_diagnostics(diagnostics: dict[str, object]) -> str:
         f"collected_reply_ids={diagnostics['collected_reply_ids']}; "
         f"pending_reply_ids={diagnostics['pending_reply_ids']}; "
         f"unaccounted_reply_ids={diagnostics['unaccounted_reply_ids']}; "
+        f"unexpected_reply_ids={diagnostics['unexpected_reply_ids']}; "
         "req_sockets(created/sent/closed)="
         f"{diagnostics['req_sockets_created']}/"
         f"{diagnostics['req_sockets_sent']}/"
@@ -343,7 +453,13 @@ def test_cmd_forward_creates_fresh_socket_per_command(_sockets):
         diagnostics=diagnostics,
     )
 
-    assert len(replies) == 5, _format_reply_collector_diagnostics(diagnostics)
+    assert [reply["_rid"] for reply in replies] == ["r0", "r1", "r2", "r3", "r4"], _format_reply_collector_diagnostics(
+        diagnostics
+    )
+    req_sockets = _select_req_sockets(_sockets)
+    assert len(req_sockets) == 5, _format_reply_collector_diagnostics(diagnostics)
+    assert all(socket.send_string.call_count == 1 for socket in req_sockets)
+    assert all(socket.close.call_count == 1 for socket in req_sockets)
     # 1 SUB socket (sub_drain_loop) + 5 REQ sockets (one per command).
     assert len(_sockets) == 6, (
         f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)} — ephemeral REQ lifecycle regressed"
@@ -351,6 +467,9 @@ def test_cmd_forward_creates_fresh_socket_per_command(_sockets):
 
 
 def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
+    cmds = [{"cmd": "safety_status", "_rid": f"r{i}"} for i in range(5)]
+    producer_complete = threading.Event()
+
     class _PublishOnlyFirstReplyQueue(stdlib_queue.Queue):
         def __init__(self) -> None:
             super().__init__(maxsize=100)
@@ -366,40 +485,231 @@ def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
             reply_id = item.get("_rid")
             self.attempted_reply_ids.append(reply_id)
             if self.published_reply_ids:
+                if len(self.attempted_reply_ids) == len(cmds):
+                    producer_complete.set()
                 return
             self.published_reply_ids.append(reply_id)
             super().put(item, block=block, timeout=timeout)
 
-    cmds = [{"cmd": "safety_status", "_rid": f"r{i}"} for i in range(5)]
     reply_queue = _PublishOnlyFirstReplyQueue()
     diagnostics: dict[str, object] = {}
 
-    replies, _control = _run_cmd_forward(
-        cmds,
-        sockets=_sockets,
-        timeout_s=1.0,
-        reply_queue=reply_queue,
-        diagnostics=diagnostics,
-    )
+    with pytest.raises(
+        AssertionError,
+        match="reply collection ended without an exact reply identity multiset",
+    ) as failure:
+        _run_cmd_forward(
+            cmds,
+            sockets=_sockets,
+            reply_queue=reply_queue,
+            producer_complete=producer_complete,
+            diagnostics=diagnostics,
+        )
 
     assert reply_queue.attempted_reply_ids == ["r0", "r1", "r2", "r3", "r4"]
     assert reply_queue.published_reply_ids == ["r0"]
     assert diagnostics["req_sockets_created"] == 5
     assert diagnostics["req_sockets_sent"] == 5
     assert diagnostics["req_sockets_closed"] == 5
-    with pytest.raises(AssertionError) as failure:
-        assert len(replies) == 5, _format_reply_collector_diagnostics(diagnostics)
+    assert diagnostics["collection_end"] == "producer_complete"
     assert "collected_reply_ids=['r0']" in str(failure.value)
     assert "pending_reply_ids=[]" in str(failure.value)
     assert "unaccounted_reply_ids=['r1', 'r2', 'r3', 'r4']" in str(failure.value)
+    assert "unexpected_reply_ids=[]" in str(failure.value)
     assert "req_sockets(created/sent/closed)=5/5/5" in str(failure.value)
     assert "cmd_q_qsize=0" in str(failure.value)
     assert "bridge_owner_alive=False" in str(failure.value)
     assert "bridge_owner_exceptions=[]" in str(failure.value)
 
 
+def test_reply_collector_returns_accounted_replies_drained_after_collection_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.core import zmq_subprocess
+
+    producer_complete = threading.Event()
+
+    class _LatePendingReplyQueue(stdlib_queue.Queue):
+        def __init__(self) -> None:
+            super().__init__(maxsize=100)
+            self.get_attempts = 0
+
+        def get_nowait(self) -> dict[str, object]:
+            self.get_attempts += 1
+            if self.get_attempts == 2:
+                stdlib_queue.Queue.put(self, {"ok": True, "_rid": "pending-r1"})
+                producer_complete.set()
+                raise stdlib_queue.Empty
+            return super().get_nowait()
+
+    def _publish_first_reply_only(
+        _pub_addr: str,
+        _cmd_addr: str,
+        _data_queue: stdlib_queue.Queue,
+        cmd_queue: stdlib_queue.Queue,
+        reply_queue: stdlib_queue.Queue,
+        _shutdown: threading.Event,
+        **_kwargs: object,
+    ) -> None:
+        command = cmd_queue.get(timeout=1.0)
+        reply_queue.put({"ok": True, "_rid": command["_rid"]})
+
+    reply_queue = _LatePendingReplyQueue()
+    diagnostics: dict[str, object] = {}
+    monkeypatch.setattr(zmq_subprocess, "zmq_bridge_main", _publish_first_reply_only)
+
+    replies, _control = _run_cmd_forward(
+        [
+            {"cmd": "safety_status", "_rid": "collected-r0"},
+            {"cmd": "safety_status", "_rid": "pending-r1"},
+        ],
+        sockets=[],
+        reply_queue=reply_queue,
+        producer_complete=producer_complete,
+        diagnostics=diagnostics,
+    )
+
+    assert [reply["_rid"] for reply in replies] == ["collected-r0", "pending-r1"]
+    assert diagnostics["collected_reply_ids"] == ["collected-r0"]
+    assert diagnostics["pending_reply_ids"] == ["pending-r1"]
+    assert diagnostics["unaccounted_reply_ids"] == []
+    assert diagnostics["unexpected_reply_ids"] == []
+    assert "put" not in vars(reply_queue)
+
+
+@pytest.mark.parametrize(
+    "observed_reply_ids",
+    (
+        ["r1", "alien"],
+        ["r1", "r1"],
+        ["r1", None],
+    ),
+    ids=("unknown", "duplicate", "missing"),
+)
+def test_reply_collector_rejects_nonexact_terminal_identity_multiset(
+    monkeypatch: pytest.MonkeyPatch,
+    observed_reply_ids: list[object],
+) -> None:
+    from cryodaq.core import zmq_subprocess
+
+    def _publish_supplied_identities(
+        _pub_addr: str,
+        _cmd_addr: str,
+        _data_queue: stdlib_queue.Queue,
+        _cmd_queue: stdlib_queue.Queue,
+        reply_queue: stdlib_queue.Queue,
+        _shutdown: threading.Event,
+        **_kwargs: object,
+    ) -> None:
+        for reply_id in observed_reply_ids:
+            reply_queue.put({"ok": True, "_rid": reply_id})
+
+    monkeypatch.setattr(zmq_subprocess, "zmq_bridge_main", _publish_supplied_identities)
+
+    with pytest.raises(AssertionError, match="exact reply identity multiset"):
+        _run_cmd_forward(
+            [{"cmd": "safety_status", "_rid": "r1"}],
+            sockets=[],
+        )
+
+
+@pytest.mark.parametrize(
+    "commands",
+    (
+        [{"cmd": "safety_status"}],
+        [
+            {"cmd": "safety_status", "_rid": "duplicate"},
+            {"cmd": "protocol_version", "_rid": "duplicate"},
+        ],
+    ),
+    ids=("missing", "duplicate"),
+)
+def test_reply_collector_rejects_missing_or_duplicate_expected_identity(
+    commands: list[dict[str, object]],
+) -> None:
+    with pytest.raises(AssertionError, match="request identit"):
+        _run_cmd_forward(commands, sockets=[])
+
+
+def _reply_queue_with_instance_put_state(
+    custom_instance_put: bool,
+) -> tuple[stdlib_queue.Queue, object]:
+    output_queue: stdlib_queue.Queue = stdlib_queue.Queue()
+    if not custom_instance_put:
+        assert "put" not in vars(output_queue)
+        return output_queue, _MISSING_QUEUE_ATTRIBUTE
+    original_instance_put = MagicMock(wraps=output_queue.put)
+    output_queue.put = original_instance_put  # type: ignore[method-assign]
+    return output_queue, original_instance_put
+
+
+def _assert_reply_queue_put_state(output_queue: stdlib_queue.Queue, original_instance_put: object) -> None:
+    if original_instance_put is _MISSING_QUEUE_ATTRIBUTE:
+        assert "put" not in vars(output_queue)
+    else:
+        assert vars(output_queue)["put"] is original_instance_put
+
+
+def test_terminal_drain_accounts_reply_published_during_owner_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.core import zmq_subprocess
+
+    def _publish_expected_then_late_unknown(
+        _pub_addr: str,
+        _cmd_addr: str,
+        _data_queue: stdlib_queue.Queue,
+        cmd_queue: stdlib_queue.Queue,
+        reply_queue: stdlib_queue.Queue,
+        shutdown: threading.Event,
+        **_kwargs: object,
+    ) -> None:
+        command = cmd_queue.get(timeout=1.0)
+        reply_queue.put({"ok": True, "_rid": command["_rid"]})
+        assert shutdown.wait(timeout=1.0)
+        reply_queue.put({"ok": True, "_rid": "alien-after-drain"})
+
+    diagnostics: dict[str, object] = {}
+    monkeypatch.setattr(zmq_subprocess, "zmq_bridge_main", _publish_expected_then_late_unknown)
+
+    with pytest.raises(AssertionError, match="exact reply identity multiset"):
+        _run_cmd_forward(
+            [{"cmd": "safety_status", "_rid": "expected-r1"}],
+            sockets=[],
+            diagnostics=diagnostics,
+        )
+
+    assert diagnostics["collected_reply_ids"] == ["expected-r1"]
+    assert diagnostics["pending_reply_ids"] == ["alien-after-drain"]
+    assert diagnostics["unexpected_reply_ids"] == ["alien-after-drain"]
+    assert diagnostics["bridge_owner_alive"] is False
+
+
+@pytest.mark.parametrize("custom_instance_put", (False, True), ids=("absent", "custom"))
+def test_run_cmd_forward_restores_both_reply_queue_put_attributes_after_success(
+    _sockets: list[MagicMock],
+    custom_instance_put: bool,
+) -> None:
+    reply_queue, original_reply_put = _reply_queue_with_instance_put_state(custom_instance_put)
+    safe_reply_queue, original_safe_reply_put = _reply_queue_with_instance_put_state(custom_instance_put)
+
+    replies, _control = _run_cmd_forward(
+        [{"cmd": "safety_status", "_rid": "ordinary-success"}],
+        sockets=_sockets,
+        safe_cmds=[{"cmd": "keithley_emergency_off", "_rid": "safe-success"}],
+        reply_queue=reply_queue,
+        safe_reply_queue=safe_reply_queue,
+    )
+
+    assert {reply["_rid"] for reply in replies} == {"ordinary-success", "safe-success"}
+    _assert_reply_queue_put_state(reply_queue, original_reply_put)
+    _assert_reply_queue_put_state(safe_reply_queue, original_safe_reply_put)
+
+
+@pytest.mark.parametrize("custom_instance_put", (False, True), ids=("absent", "custom"))
 def test_run_cmd_forward_propagates_owner_failure_after_expected_reply(
     monkeypatch: pytest.MonkeyPatch,
+    custom_instance_put: bool,
 ) -> None:
     from cryodaq.core import zmq_subprocess
 
@@ -417,23 +727,31 @@ def test_run_cmd_forward_propagates_owner_failure_after_expected_reply(
         raise RuntimeError("bridge exploded after expected reply")
 
     diagnostics: dict[str, object] = {}
+    reply_queue, original_reply_put = _reply_queue_with_instance_put_state(custom_instance_put)
+    safe_reply_queue, original_safe_reply_put = _reply_queue_with_instance_put_state(custom_instance_put)
     monkeypatch.setattr(zmq_subprocess, "zmq_bridge_main", _publish_then_raise)
 
     with pytest.raises(RuntimeError, match="bridge exploded after expected reply"):
         _run_cmd_forward(
             [{"cmd": "safety_status", "_rid": "expected-r0"}],
             sockets=[],
+            reply_queue=reply_queue,
+            safe_reply_queue=safe_reply_queue,
             diagnostics=diagnostics,
-            timeout_s=0.25,
+            owner_join_timeout_s=0.25,
         )
 
     assert diagnostics["collected_reply_ids"] == ["expected-r0"]
     assert diagnostics["bridge_owner_alive"] is False
     assert diagnostics["bridge_owner_exceptions"] == ["RuntimeError: bridge exploded after expected reply"]
+    _assert_reply_queue_put_state(reply_queue, original_reply_put)
+    _assert_reply_queue_put_state(safe_reply_queue, original_safe_reply_put)
 
 
+@pytest.mark.parametrize("custom_instance_put", (False, True), ids=("absent", "custom"))
 def test_run_cmd_forward_refuses_success_while_owner_is_unsettled(
     monkeypatch: pytest.MonkeyPatch,
+    custom_instance_put: bool,
 ) -> None:
     from cryodaq.core import zmq_subprocess
 
@@ -456,6 +774,8 @@ def test_run_cmd_forward_refuses_success_while_owner_is_unsettled(
         raise RuntimeError("bridge exploded after delayed settlement")
 
     diagnostics: dict[str, object] = {}
+    reply_queue, original_reply_put = _reply_queue_with_instance_put_state(custom_instance_put)
+    safe_reply_queue, original_safe_reply_put = _reply_queue_with_instance_put_state(custom_instance_put)
     monkeypatch.setattr(zmq_subprocess, "zmq_bridge_main", _publish_then_raise_after_release)
 
     try:
@@ -463,8 +783,10 @@ def test_run_cmd_forward_refuses_success_while_owner_is_unsettled(
             _run_cmd_forward(
                 [{"cmd": "safety_status", "_rid": "expected-r0"}],
                 sockets=[],
+                reply_queue=reply_queue,
+                safe_reply_queue=safe_reply_queue,
                 diagnostics=diagnostics,
-                timeout_s=0.05,
+                owner_join_timeout_s=0.05,
             )
     finally:
         release_owner.set()
@@ -472,6 +794,8 @@ def test_run_cmd_forward_refuses_success_while_owner_is_unsettled(
     assert owner_released.wait(timeout=1.0)
     assert diagnostics["bridge_owner_alive"] is True
     assert diagnostics["bridge_owner_exceptions"] == []
+    _assert_reply_queue_put_state(reply_queue, original_reply_put)
+    _assert_reply_queue_put_state(safe_reply_queue, original_safe_reply_put)
 
 
 def test_cmd_forward_closes_socket_after_success(_sockets):
