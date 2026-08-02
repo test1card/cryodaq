@@ -720,6 +720,12 @@ def test_protected_checkout_runner_detaches_exported_candidate_environment(
     monkeypatch.setenv(FAILURE_RECEIPT_SUITE_ENV, "remaining")
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.setenv("CRYODAQ_EXPORTED_CANDIDATE", "1")
+    # An inherited PYTHONPATH is poison twice over: it binds the judge's tree
+    # instead of the candidate's, and its absence leaves the candidate's
+    # src-layout package unimportable. The checkout environment must pin the
+    # candidate's own root and src, exactly as the sealed candidate runner's
+    # bootstrap does (tools/ci_candidate_runner.py).
+    monkeypatch.setenv("PYTHONPATH", "/poison/judge/src")
     monkeypatch.delenv(FAILURE_RECEIPT_INDEX_ENV, raising=False)
     captured: list[tuple[tuple[str, ...], dict[str, str]]] = []
 
@@ -752,6 +758,8 @@ def test_protected_checkout_runner_detaches_exported_candidate_environment(
     assert FAILURE_RECEIPT_INDEX_ENV not in environment
     assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in environment
     assert "CRYODAQ_EXPORTED_CANDIDATE" not in environment
+    resolved = repository.resolve()
+    assert environment["PYTHONPATH"] == os.pathsep.join((str(resolved), str(resolved / "src")))
 
 
 def test_false_green_expiry_cannot_outlive_runtime_or_expire_durable_scope() -> None:

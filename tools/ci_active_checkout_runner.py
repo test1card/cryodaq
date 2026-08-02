@@ -450,7 +450,7 @@ def _run_candidate_process(
     )
 
 
-def _checkout_environment() -> dict[str, str]:
+def _checkout_environment(root: Path) -> dict[str, str]:
     """Return the subprocess environment for exact-checkout pytest runs.
 
     A protected run inherits the sealed export's environment, which is poison
@@ -470,6 +470,12 @@ def _checkout_environment() -> dict[str, str]:
         "CRYODAQ_EXPORTED_CANDIDATE",
     ):
         environment.pop(key, None)
+    # An inherited PYTHONPATH is poison twice over: it would bind the judge's
+    # tree instead of the candidate's, and its absence leaves the candidate's
+    # src-layout package unimportable. Pin the candidate's own root and src,
+    # exactly as the sealed candidate runner's bootstrap does
+    # (tools/ci_candidate_runner.py).
+    environment["PYTHONPATH"] = os.pathsep.join((str(root), str(root / "src")))
     return environment
 
 
@@ -649,7 +655,7 @@ def run_suite(
     )
     guard_nodes = tuple(spec.node for spec in guard_specs)
     basetemp.mkdir(parents=True, exist_ok=True)
-    environment = _checkout_environment()
+    environment = _checkout_environment(root)
 
     strict = _strict_guard_command(
         suite,
