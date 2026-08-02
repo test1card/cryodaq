@@ -23,15 +23,22 @@ class _TelegramApiResponse:
     """Minimal aiohttp response protocol used by TelegramSender._send."""
 
     status = 200
+    _body = b'{"ok":false,"description":"Forbidden: bot was blocked by the user"}'
+    content_length = len(_body)
+    content = None
 
     async def __aenter__(self):
+        self.content = self
         return self
 
     async def __aexit__(self, *_args):
         return False
 
     async def json(self):
-        return {"ok": False, "description": "Forbidden: bot was blocked by the user"}
+        raise AssertionError("TelegramSender must stream the bounded response body")
+
+    async def iter_chunked(self, _size: int):
+        yield self._body
 
 
 class _TelegramApiSession:
@@ -42,11 +49,11 @@ class _TelegramApiSession:
 
 
 @pytest.mark.asyncio
-async def test_telegram_http_200_with_api_failure_is_not_delivered() -> None:
+async def test_telegram_http_200_with_api_failure_is_outcome_unknown() -> None:
     sender = TelegramSender("token", [101])
     sender._session = _TelegramApiSession()
 
-    assert await sender._send(101, "alarm") == "failed"
+    assert await sender._send(101, "alarm") == "outcome_unknown"
 
 
 @pytest.mark.asyncio

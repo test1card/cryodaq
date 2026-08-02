@@ -37,7 +37,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import math
 import time
 import types
 from datetime import UTC, datetime
@@ -267,6 +269,183 @@ class _RemoteEngineStateCache:
         return types.SimpleNamespace(**self._sensor_diagnostics)
 
 
+#: Largest integer a JSON parser is required to round-trip exactly, and the upper
+#: bound the live client already enforces (``assistant/periodic_telegram.py``).
+_MAX_JSON_INTEGER = 2**63 - 1
+_MAX_TELEGRAM_ACKNOWLEDGEMENT_BYTES = 65_536
+_MAX_TELEGRAM_ACKNOWLEDGEMENT_JSON_DEPTH = 16
+_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S = 10.0
+
+
+def _check_telegram_acknowledgement_json_depth(text: str) -> None:
+    """Reject acknowledgement JSON deeper than the periodic Telegram contract."""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > _MAX_TELEGRAM_ACKNOWLEDGEMENT_JSON_DEPTH:
+                raise ValueError("JSON is too deep")
+        elif char in "]}":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("JSON nesting is invalid")
+
+
+def _unique_telegram_acknowledgement_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject ambiguous acknowledgement objects instead of accepting last-key wins."""
+
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _bounded_telegram_acknowledgement_int(value: str) -> int:
+    """Match the periodic Telegram acknowledgement integer contract."""
+
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > 20:
+        raise ValueError("JSON integer is oversized")
+    result = int(value)
+    if abs(result) > _MAX_JSON_INTEGER:
+        raise ValueError("JSON integer is outside range")
+    return result
+
+
+def _bounded_telegram_acknowledgement_float(value: str) -> float:
+    """Match the periodic Telegram acknowledgement finite-float contract."""
+
+    if len(value) > 64:
+        raise ValueError("JSON float is oversized")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("JSON float is non-finite")
+    return result
+
+
+def _reject_telegram_acknowledgement_constant(_value: str) -> object:
+    """Reject JSON's non-standard NaN and Infinity constants."""
+
+    raise ValueError("non-finite JSON constant")
+
+
+async def _parse_bounded_json_response(response: Any) -> tuple[bool, object | None]:
+    """Read a bounded Telegram acknowledgement body and parse strict UTF-8 JSON."""
+
+    content_length = getattr(response, "content_length", None)
+    if content_length is not None and (
+        type(content_length) is not int or content_length < 0 or content_length > _MAX_TELEGRAM_ACKNOWLEDGEMENT_BYTES
+    ):
+        return False, None
+
+    chunks: list[bytes] = []
+    body_size = 0
+    try:
+        async with asyncio.timeout(_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S):
+            async for chunk in response.content.iter_chunked(4096):
+                body_size += len(chunk)
+                if body_size > _MAX_TELEGRAM_ACKNOWLEDGEMENT_BYTES:
+                    return False, None
+                chunks.append(chunk)
+    except TimeoutError:
+        return False, None
+
+    try:
+        text = b"".join(chunks).decode("utf-8", errors="strict")
+        _check_telegram_acknowledgement_json_depth(text)
+        return True, json.loads(
+            text,
+            object_pairs_hook=_unique_telegram_acknowledgement_object,
+            parse_int=_bounded_telegram_acknowledgement_int,
+            parse_float=_bounded_telegram_acknowledgement_float,
+            parse_constant=_reject_telegram_acknowledgement_constant,
+        )
+    except (ValueError, OverflowError, RecursionError, UnicodeError, json.JSONDecodeError):
+        return False, None
+
+
+async def _read_bounded_telegram_error_diagnostic(response: Any) -> str:
+    """Return a short, bounded diagnostic preview of a failed Telegram response."""
+
+    content_length = getattr(response, "content_length", None)
+    if content_length is not None and (
+        type(content_length) is not int or content_length < 0 or content_length > _MAX_TELEGRAM_ACKNOWLEDGEMENT_BYTES
+    ):
+        return "response body exceeds the 64 KiB limit"
+
+    chunks: list[bytes] = []
+    body_size = 0
+    try:
+        async for chunk in response.content.iter_chunked(4096):
+            body_size += len(chunk)
+            if body_size > _MAX_TELEGRAM_ACKNOWLEDGEMENT_BYTES:
+                return "response body exceeds the 64 KiB limit"
+            chunks.append(chunk)
+    except (TimeoutError, asyncio.CancelledError):
+        raise
+    except Exception:
+        return "response body could not be read"
+
+    return b"".join(chunks).decode("utf-8", errors="replace")[:200]
+
+
+def _acknowledged_message_id(payload: object, chat_id: int | str) -> int | None:
+    """Return the message id Telegram acknowledged for ``chat_id``, else ``None``.
+
+    A 200 with ``ok: true`` says the API read the request; only ``result.message_id``
+    says a message exists. Treating the former as delivery replaces an unknown
+    outcome with a determined-looking one (OC-026).
+
+    THE ACKNOWLEDGEMENT IS BOUND TO THE REQUESTED CHAT. A message id proves some
+    message was created, not that it reached the intended destination, so a body
+    naming a different ``result.chat`` -- or naming none at all -- is an unknown
+    outcome rather than a delivery. The live periodic adapter already refuses
+    exactly this in ``cryodaq.agents.assistant.periodic_telegram``.
+
+    The accepted range is ``1..2**63-1``, matching the same adapter. Two senders
+    disagreeing about what counts as an acknowledgement is itself a defect, so this
+    defers to the established contract rather than inventing a second one.
+    ``type(...) is not int`` rather than ``isinstance`` because ``bool`` is an
+    ``int`` subclass and ``True`` must not read as message 1.
+    """
+
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    message_id = result.get("message_id")
+    if type(message_id) is not int or not 1 <= message_id <= _MAX_JSON_INTEGER:
+        return None
+    chat = result.get("chat")
+    if not isinstance(chat, dict) or not _chat_matches(chat, chat_id):
+        return None
+    return message_id
+
+
+def _chat_matches(chat: dict[str, Any], configured: int | str) -> bool:
+    """Mirror the live adapter's destination check: numeric id or @username."""
+
+    if type(configured) is int:
+        return type(chat.get("id")) is int and chat.get("id") == configured
+    username = chat.get("username")
+    return type(username) is str and configured.startswith("@") and username.casefold() == configured[1:].casefold()
+
+
 class TelegramSender:
     """Outbound-only Telegram client: ``_send_to_all`` + ``send_photo``.
 
@@ -302,33 +481,47 @@ class TelegramSender:
 
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(ssl=self._verify_ssl)
-            self._session = aiohttp.ClientSession(connector=connector)
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(
+                    total=_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S,
+                    connect=_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S,
+                    sock_connect=_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S,
+                    sock_read=_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S,
+                ),
+            )
         return self._session
 
     async def _send(self, chat_id: int, text: str) -> str:
         session = await self._get_session()
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
         try:
-            async with session.post(f"{self._api}/sendMessage", json=payload, allow_redirects=False) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.error("Telegram sendMessage %d: %s", resp.status, body[:200])
-                    return "failed" if 400 <= resp.status < 500 else "outcome_unknown"
-                try:
-                    result = await resp.json()
-                except Exception:
-                    logger.error("Telegram sendMessage 200 with unparseable response")
-                    return "outcome_unknown"
-                if not isinstance(result, dict):
-                    logger.error("Telegram sendMessage 200 without an object acknowledgement")
-                    return "outcome_unknown"
-                if result.get("ok") is True:
+            async with asyncio.timeout(_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S):
+                async with session.post(f"{self._api}/sendMessage", json=payload, allow_redirects=False) as resp:
+                    if resp.status != 200:
+                        body = await _read_bounded_telegram_error_diagnostic(resp)
+                        logger.error("Telegram sendMessage %d: %s", resp.status, body)
+                        return "failed" if 400 <= resp.status < 500 else "outcome_unknown"
+                    parsed, result = await _parse_bounded_json_response(resp)
+                    if not parsed:
+                        logger.error("Telegram sendMessage 200 with unparseable response")
+                        return "outcome_unknown"
+                    if not isinstance(result, dict):
+                        logger.error("Telegram sendMessage 200 without an object acknowledgement")
+                        return "outcome_unknown"
+                    if result.get("ok") is False:
+                        logger.error(
+                            "Telegram sendMessage 200 contradictory/unknown response: %s",
+                            result.get("description", "unknown error"),
+                        )
+                        return "outcome_unknown"
+                    if _acknowledged_message_id(result, chat_id) is None:
+                        logger.error("Telegram sendMessage 200 without an acknowledged message id")
+                        return "outcome_unknown"
                     return "delivered"
-                if result.get("ok") is False:
-                    logger.error("Telegram sendMessage rejected: %s", result.get("description", "unknown error"))
-                    return "failed"
-                logger.error("Telegram sendMessage 200 without API acknowledgement")
-                return "outcome_unknown"
+        except TimeoutError:
+            logger.error("Telegram sendMessage acknowledgement timed out; outcome unknown")
+            return "outcome_unknown"
         except Exception as exc:
             logger.error("Ошибка отправки Telegram: %s", exc)
             return "outcome_unknown"
@@ -348,10 +541,26 @@ class TelegramSender:
             form.add_field("photo", photo, filename="chart.png", content_type="image/png")
             if caption:
                 form.add_field("caption", caption)
-            async with session.post(f"{self._api}/sendPhoto", data=form, allow_redirects=False) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logger.error("Telegram sendPhoto %d: %s", resp.status, body[:200])
+            async with asyncio.timeout(_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S):
+                async with session.post(f"{self._api}/sendPhoto", data=form, allow_redirects=False) as resp:
+                    if resp.status != 200:
+                        body = await _read_bounded_telegram_error_diagnostic(resp)
+                        logger.error("Telegram sendPhoto %d: %s", resp.status, body)
+                        return
+                    parsed, payload = await _parse_bounded_json_response(resp)
+                    if not parsed:
+                        logger.error("Telegram sendPhoto 200 with unparseable response")
+                        return
+                    if isinstance(payload, dict) and payload.get("ok") is False:
+                        logger.error(
+                            "Telegram sendPhoto 200 contradictory/unknown response: %s",
+                            payload.get("description", "unknown error"),
+                        )
+                        return
+                    if _acknowledged_message_id(payload, chat_id) is None:
+                        logger.error("Telegram sendPhoto 200 without an acknowledged message id")
+        except TimeoutError:
+            logger.error("Telegram sendPhoto acknowledgement timed out; outcome unknown")
         except Exception as exc:
             logger.error("Ошибка отправки Telegram фото: %s", exc)
 

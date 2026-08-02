@@ -2675,6 +2675,38 @@ false_green_pairs:
     ci_partition: core
     red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: ASSISTANT-ACKNOWLEDGEMENT-FALSE-GREEN-210
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_delivery_acknowledgement.py::test_send_refuses_to_claim_delivery_without_an_acknowledged_message_id
+    ci_partition: agents
+    red_evidence: 25_passing_delivery_acknowledgement_tests_missed_removal_of_the_literal_ok_true_requirement_until_each_invalid_ok_fixture_carried_an_otherwise_valid_message_and_matching_chat_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-ACKNOWLEDGEMENT-STRICT-JSON-FALSE-GREEN-216
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_reject_duplicate_and_nan_acknowledgements
+    ci_partition: agents
+    red_evidence: exact_3ccd2afe_duplicate_ok_body_made_send_delivered_and_send_photo_silent_while_nan_in_an_unused_member_was_also_accepted_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-ACKNOWLEDGEMENT-NESTED-DUPLICATE-FALSE-GREEN-224
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_reject_nested_duplicate_authority_keys
+    ci_partition: agents
+    red_evidence: 66_passing_acknowledgement_tests_missed_nested_duplicate_authority_keys_under_a_selective_duplicate_ok_only_mutant_that_made_send_delivered_and_send_photo_silent_while_nan_in_an_unused_member_was_also_accepted_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-ACKNOWLEDGEMENT-TIMEOUT-FALSE-GREEN-241
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_bound_a_dribbling_200_acknowledgement_body
+    ci_partition: agents
+    red_evidence: exact_9eeccabf_acknowledgement_suite_missed_an_early_stalled_200_body_that_held_send_photo_and_chart_shutdown_drain_2026_08_01_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -4133,8 +4165,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: External output can occur without durable audit and HTTP failure can be labeled delivered.
-    invariant: Durable intent precedes egress and exact per-destination settlement follows; audit failure yields zero external output.
+    consequence: External output can occur without durable audit, HTTP failure can be labeled delivered, or an unbounded acknowledgement operation can prevent bounded owner shutdown.
+    invariant: Durable intent precedes egress and exact per-destination settlement follows; audit failure yields zero external output, and every invoked acknowledgement operation has a short connection-through-body deadline whose expiry is outcome unknown and cannot hold owner drain indefinitely.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4149,6 +4181,34 @@ records:
       - node: tests/agents/assistant/test_output_router.py::test_production_sender_retains_per_destination_terminal_outcomes
         ci_partition: agents
       - node: tests/agents/assistant/test_query_agent.py::test_query_audit_failure_prevents_chart_and_response_egress
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_refuses_to_claim_delivery_without_an_acknowledged_message_id
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_photo_refuses_to_report_success_without_an_acknowledged_message_id
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_enforces_the_streamed_acknowledgement_boundary
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_photo_enforces_the_streamed_acknowledgement_boundary
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_treats_a_200_false_acknowledgement_as_an_unknown_outcome
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_treats_a_non_object_acknowledgement_as_exact_unknown
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_treats_an_unparseable_body_as_exact_unknown
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_send_photo_records_a_200_false_acknowledgement_as_unknown
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_reject_duplicate_and_nan_acknowledgements
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_reject_nested_duplicate_authority_keys
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_bound_the_entire_acknowledgement_operation
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_bound_a_dribbling_200_acknowledgement_body
+        ci_partition: agents
+      - node: tests/agents/assistant/test_query_agent.py::test_query_agent_close_bounds_stalled_photo_request_drain
+        ci_partition: agents
+      - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_match_periodic_strict_json_rejections
         ci_partition: agents
     red_evidence: http_500_egress_before_audit_unwired_shutdown_aggregate_sender_and_query_chart_before_audit_reproductions_pending_immutable_capture
     green_evidence: pending
