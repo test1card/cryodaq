@@ -682,6 +682,29 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             recorded,
             live_oc030_locators(candidate_paths, candidate_contents),
         )
+        # The closure gate's prose count must agree with the locator set it
+        # summarizes: a stale "all N sites" lets an implementer close the row
+        # while leaving a live spelling-inference site unfixed.
+        number_words = {
+            1: "one",
+            2: "two",
+            3: "three",
+            4: "four",
+            5: "five",
+            6: "six",
+            7: "seven",
+            8: "eight",
+            9: "nine",
+            10: "ten",
+            11: "eleven",
+            12: "twelve",
+        }
+        total_locators = sum(len(lines) for lines in recorded.values())
+        assert total_locators in number_words
+        assert f"at all {number_words[total_locators]} sites" in oc_030.lower(), (
+            "OC-030 closure gate must name the exact live locator count",
+            total_locators,
+        )
 
     assert_current(text, tracked, contents)
     for old, replacement in (
@@ -701,6 +724,7 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         ),
         ("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`", "`src/cryodaq/gui/dashboard/temp_plot_widget.py:135`"),
         ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
+        ("at all seven sites", "at all six sites"),
         (
             "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:109`",
             "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:108`",
@@ -2391,3 +2415,72 @@ def test_architecture_generation_does_not_replace_outputs_after_render_failure(
     with pytest.raises(RuntimeError, match="render failed"):
         generator.generate()
     assert all((output / name).read_bytes() == b"original" for name in names)
+
+
+def test_architecture_generation_rolls_back_published_outputs_when_a_later_replace_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A failed destination replace must not strand a mixed-snapshot pair.
+
+    Publication is a sequence of single-file replaces; if the metrics
+    destination is locked after the SVGs were already replaced, the shipped
+    SVG/metrics pair would describe two different index snapshots. Every
+    destination published from the failed render must be restored.
+    """
+    import tools.generate_montana_architecture_svgs as generator
+
+    output = tmp_path / "docs" / "refactor"
+    output.mkdir(parents=True)
+    names = (
+        "architecture-before-all-files.svg",
+        "architecture-montana-all-files.svg",
+        "architecture-before-important.svg",
+        "architecture-montana-important.svg",
+    )
+    for name in names:
+        (output / name).write_bytes(b"original")
+    metrics_path = tmp_path / "docs" / "current_candidate_metrics.md"
+
+    base_oid = "a" * 40
+    target_oid = "b" * 40
+    base = generator.GitSnapshot(
+        tree_sha="c" * 40,
+        source="test:base",
+        entries=(generator.GitEntry("base.py", "100644", "blob", base_oid),),
+        blobs={base_oid: b""},
+    )
+    target = generator.GitSnapshot(
+        tree_sha="d" * 40,
+        source="test:index",
+        entries=(generator.GitEntry("target.py", "100644", "blob", target_oid),),
+        blobs={target_oid: b""},
+    )
+    monkeypatch.setattr(generator, "OUT", output)
+    monkeypatch.setattr(generator, "ROOT", tmp_path)
+    monkeypatch.setattr(generator, "MONTANA_IMPORTANT_SVG", output / "architecture-montana-important.svg")
+    monkeypatch.setattr(generator, "CURRENT_METRICS", metrics_path)
+    monkeypatch.setattr(generator, "base_snapshot", lambda *, refresh=False: base)
+    monkeypatch.setattr(generator, "target_snapshot", lambda *, refresh=False: target)
+    monkeypatch.setattr(generator, "verify", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(generator, "current_metrics_bytes", lambda *_args: b"metrics")
+
+    def render(snapshot, _paths, _reader, destination, _snapshot_info):
+        destination.write_bytes(snapshot.encode("ascii"))
+
+    monkeypatch.setattr(generator, "all_files_svg", render)
+    monkeypatch.setattr(generator, "important_svg", render)
+
+    real_replace = Path.replace
+
+    def failing_replace(self, destination):
+        if Path(destination).name == metrics_path.name:
+            raise OSError("simulated locked metrics destination")
+        return real_replace(self, destination)
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="simulated locked metrics destination"):
+        generator.generate()
+    assert all((output / name).read_bytes() == b"original" for name in names)
+    assert not metrics_path.exists()

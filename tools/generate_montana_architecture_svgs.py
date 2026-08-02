@@ -1015,8 +1015,25 @@ def generate() -> None:
         metrics_render = temporary_root / CURRENT_METRICS.name
         metrics_render.write_bytes(current_metrics_bytes(montana_snapshot, important_render.read_bytes()))
         rendered.append((metrics_render, CURRENT_METRICS, CURRENT_METRICS.relative_to(ROOT).as_posix(), "generated"))
-        for temporary_path, path, _label, _count in rendered:
-            temporary_path.replace(path)
+        published: list[tuple[Path, bytes | None]] = []
+        try:
+            for temporary_path, path, _label, _count in rendered:
+                # Back up before replacing so a failure part-way through the
+                # publish sequence cannot strand a mixed-snapshot artifact
+                # pair: every destination already replaced from this render
+                # is restored before the original exception propagates.
+                published.append((path, path.read_bytes() if path.exists() else None))
+                temporary_path.replace(path)
+        except BaseException:
+            for path, backup in reversed(published):
+                try:
+                    if backup is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(backup)
+                except OSError:
+                    pass
+            raise
         for _temporary_path, _path, label, count in rendered:
             print(f"{label}: {count} files")
 
