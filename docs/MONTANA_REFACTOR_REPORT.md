@@ -67,12 +67,12 @@ flows:
 - the design system is now an operator-safety contract as well as a visual system.
 
 Measured from `f5d6434` to the candidate source inventory, the campaign changes
-**489 files**, with **134,090 inserted lines** and **9,554 deleted lines**, or a
-**net increase of 124,536 lines**. These figures are Git line-change statistics,
-not "134,090 new production lines." The baseline repository had **188,539 text
+**825 files**, with **292,034 inserted lines** and **20,887 deleted lines**, or a
+**net increase of 271,147 lines**. These figures are Git line-change statistics,
+not "292,034 new production lines." The baseline repository had **188,539 text
 lines**, including **68,857 lines of production Python** and **80,529 lines of test
-Python**. The candidate source inventory has **313,075 text lines**, including
-**111,810 production-Python lines** and **145,532 test-Python lines**.
+Python**. The candidate source inventory has **459,602 text lines**, including
+**154,436 production-Python lines** and **221,778 test-Python lines**.
 Much of the growth is deliberate executable evidence: tests, fixtures, process
 harnesses, protocol contracts, and documentation. These figures measure the
 current candidate worktree while the repair slice still awaits sealing. Release evidence must record the
@@ -256,26 +256,26 @@ The following table distinguishes three numbers that are easy to confuse:
 | Measure | Value | Meaning |
 |---|---:|---|
 | Baseline production Python | 68,857 lines | Python under `src/cryodaq` at `f5d6434`. |
-| Git insertions in the campaign | 134,090 lines | Lines added across the intended source inventory: tracked source plus the explicitly owned final additions, excluding the four generated architecture SVGs. Not all are net-new production code. |
-| Git deletions in the campaign | 9,554 lines | Lines removed or replaced. |
-| Net source-inventory growth | 124,536 lines | Insertions minus deletions. |
-| Delivered-tree Git churn | 139,644 insertions / 9,554 deletions / 130,090 net | Source inventory plus the four regenerated architecture SVGs. |
+| Git insertions in the campaign | 292,034 lines | Lines added across the intended source inventory: tracked source plus the explicitly owned final additions, excluding the one surviving generated architecture SVG. Not all are net-new production code. |
+| Git deletions in the campaign | 20,887 lines | Lines removed or replaced. |
+| Net source-inventory growth | 271,147 lines | Insertions minus deletions. |
+| Delivered-tree Git churn | 292,034 insertions / 20,887 deletions / 271,147 net | Source inventory plus the one surviving regenerated architecture SVG. |
 | Baseline repository text | 188,539 lines | Measured text inventory across the baseline tree. |
-| Candidate source-inventory text | 458,570 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
-| Delivered-tree text | 458,654 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
+| Candidate source-inventory text | 459,602 lines | Strict UTF-8/no-NUL text in the intended candidate inventory, excluding the one generated architecture SVG. |
+| Delivered-tree text | 459,686 lines | Final source inventory plus the one surviving regenerated architecture SVG. |
 | Baseline test Python | 80,529 lines | Python under `tests`. |
-| Candidate production Python | 154,227 lines | Candidate `src/cryodaq` inventory, not 134,090. |
-| Candidate test Python | 221,019 lines | Candidate `tests` inventory. |
-| Paths changed in candidate comparison | 489 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
-| Paths changed in delivered comparison | 493 | Candidate comparison plus the one surviving generated architecture SVG path. |
+| Candidate production Python | 154,436 lines | Candidate `src/cryodaq` inventory, not 292,034. |
+| Candidate test Python | 221,778 lines | Candidate `tests` inventory. |
+| Paths changed in candidate comparison | 825 | Baseline comparison plus explicitly intended final-candidate additions; generated architecture SVGs are excluded. |
+| Paths changed in delivered comparison | 826 | Candidate comparison plus the one surviving generated architecture SVG path. |
 | Baseline repository files | 779 | Inventory at `f5d6434`. |
-| Architecture source manifest | 1,189 | Every intended source file except the self-referential generated `docs/refactor/architecture-*.svg` and `docs/architecture-montana-important.svg` outputs. |
-| Delivered-tree files | 1,190 | Source manifest plus the one surviving regenerated architecture SVG. |
-| Commits from baseline to recorded checkpoint | 166 | Committed history through `7607bc1`; the measured working slice is not yet included. |
+| Architecture source manifest | 1,190 | Every intended source file except the self-referential generated `docs/refactor/architecture-*.svg` and `docs/architecture-montana-important.svg` outputs. |
+| Delivered-tree files | 1,191 | Source manifest plus the one surviving regenerated architecture SVG. |
+| Commits from baseline to recorded checkpoint | 1,447 | Committed history through `76550e3e` (current master); the PR2 candidate commits are not yet included. |
 
-The repository added **42,953 lines of production Python** and **65,003
+The repository added **85,579 lines of production Python** and **141,249
 lines of test Python** by inventory. This is a healthier explanation of the
-campaign than saying the project "added 130k lines of code": most growth is not
+campaign than saying the project "added 271k lines of code": most growth is not
 application logic alone, and test growth exceeds production growth.
 
 ### 4.2 Reproducible measurement approach
@@ -952,7 +952,7 @@ sequence at report-authoring time.
 
 ### 9.1 Test architecture
 
-The test tree grew from **80,529 to 145,532 lines of Python**. It
+The test tree grew from **80,529 to 221,778 lines of Python**. It
 mirrors production subsystems and adds substantial contract, integration, E2E,
 process, and platform coverage.
 
@@ -1507,10 +1507,10 @@ beautiful, but it must preserve the panoramic truth that experienced cryogenic
 operators depend on. Summary surfaces are useful only when they remain additive,
 provenance-rich, and honest about what they do not know.
 
-The interim integration snapshot is large: it recorded 489 changed paths,
-166 committed changesets through checkpoint `7607bc1` plus the then-owned
-working slice, 134,090 insertions, and source inventory growth from 188,539 to
-313,075 text lines. Those figures must be regenerated from the final quiescent
+The interim integration snapshot is large: it recorded 825 changed paths,
+1,447 committed changesets through checkpoint `76550e3e` (current master) plus
+the then-owned working slice, 292,034 insertions, and source inventory growth from 188,539 to
+459,602 text lines. Those figures must be regenerated from the final quiescent
 index before publication; they are scale evidence, not a final release
 fingerprint. That scale justifies this report, the companion architecture graphs,
 strict review, and a deliberate release boundary. It also creates a future obligation:
