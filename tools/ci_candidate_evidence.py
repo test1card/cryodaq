@@ -59,11 +59,22 @@ _PROTECTED_RELAY_OMITTED = (
 _OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 _OIDC_JWKS_URI = f"{_OIDC_ISSUER}/.well-known/jwks"
 _OIDC_AUDIENCE_PREFIX = "urn:cryodaq:execution-receipt:"
+_GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+_RED_REPRODUCTION_COMPARISON_FIELDS = frozenset(
+    {
+        "candidate_commit",
+        "candidate_tree",
+        "outcome",
+        "trusted_base_commit",
+        "trusted_binding_count",
+    }
+)
 _PROTECTED_RUNNER_BOOTSTRAP = (
     "import runpy,sys;"
     "sys.stdout.reconfigure(encoding='utf-8');"
     "sys.stderr.reconfigure(encoding='utf-8');"
     "sys.path.insert(0,sys.argv.pop(1));"
+    "base=sys.argv.index('--trusted-base');sys.argv.pop(base);sys.argv.pop(base);"
     "runpy.run_module('tools.ci_candidate_runner',run_name='__main__',alter_sys=True)"
 )
 _PROTECTED_PRODUCER_FILES = (
@@ -94,6 +105,34 @@ _PROTECTED_PRODUCER_FILES = (
 
 class CiCandidateEvidenceError(ValueError):
     """Raised when CI evidence does not bind one execution and upload."""
+
+
+def _validate_red_reproduction_comparison(
+    comparison: Any,
+    *,
+    candidate_commit: str,
+    candidate_tree: Any,
+    trusted_base_commit: str,
+) -> None:
+    """Require the complete, typed v3 trusted-base comparison contract."""
+
+    if (
+        not isinstance(comparison, Mapping)
+        or set(comparison) != _RED_REPRODUCTION_COMPARISON_FIELDS
+        or type(comparison.get("candidate_commit")) is not str
+        or _GIT_SHA.fullmatch(comparison["candidate_commit"]) is None
+        or comparison["candidate_commit"] != candidate_commit
+        or type(comparison.get("candidate_tree")) is not str
+        or _GIT_SHA.fullmatch(comparison["candidate_tree"]) is None
+        or comparison["candidate_tree"] != candidate_tree
+        or comparison.get("outcome") != "passed"
+        or type(comparison.get("trusted_base_commit")) is not str
+        or _GIT_SHA.fullmatch(comparison["trusted_base_commit"]) is None
+        or comparison["trusted_base_commit"] != trusted_base_commit
+        or type(comparison.get("trusted_binding_count")) is not int
+        or comparison["trusted_binding_count"] < 0
+    ):
+        raise CiCandidateEvidenceError("protected receipt trusted-base comparison schema is invalid or misbound")
 
 
 def _digest(raw: bytes) -> str:
@@ -330,6 +369,7 @@ def write_execution_bundle(
     github: Mapping[str, str],
     artifact_name: str,
     producer: Mapping[str, Any] | None = None,
+    red_reproduction_comparison: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if tuple(workflow_path.parts[-3:]) != (".github", "workflows", "main.yml"):
         raise CiCandidateEvidenceError("workflow path is not the canonical candidate workflow")
@@ -360,6 +400,9 @@ def write_execution_bundle(
     if producer is not None:
         execution["producer"] = dict(producer)
         execution["schema_version"] = 2
+    if red_reproduction_comparison is not None:
+        execution["red_reproduction_comparison"] = dict(red_reproduction_comparison)
+        execution["schema_version"] = 3
     files = {
         "candidate-manifest.json": candidate_raw,
         "execution-receipt.json": _canonical(execution),
@@ -568,6 +611,21 @@ def _protected_run(args: argparse.Namespace) -> int:
     commit = _git(repository, "rev-parse", "--verify", f"{args.revision}^{{commit}}")
     producer_before = _protected_producer_manifest(producer_root, args.producer_revision)
     destination = args.destination.resolve(strict=False)
+    red_reproduction_comparison: Mapping[str, Any] | None = None
+    if args.suite == "remaining":
+        from tools.ci_active_checkout_runner import compare_red_reproduction_bindings, run_suite
+
+        if run_suite(
+            "remaining",
+            root=repository,
+            revision=commit,
+            basetemp=destination.with_name(f"{destination.name}-active-checkout"),
+            trusted_base=args.trusted_base,
+        ):
+            raise CiCandidateEvidenceError("protected active exact-checkout remaining partition failed")
+        red_reproduction_comparison = compare_red_reproduction_bindings(
+            repository, candidate=commit, trusted_base=args.trusted_base
+        )
     command = (
         sys.executable,
         "-I",
@@ -591,6 +649,10 @@ def _protected_run(args: argparse.Namespace) -> int:
         str(repository),
         "--candidate-git-revision",
         commit,
+        # The exact trusted base travels in the immutable producer command. The
+        # bootstrap removes it before the sealed candidate runner parses argv.
+        "--trusted-base",
+        args.trusted_base,
     )
     prior_suite = os.environ.get(FAILURE_RECEIPT_SUITE_ENV)
     os.environ[FAILURE_RECEIPT_SUITE_ENV] = args.suite
@@ -618,6 +680,7 @@ def _protected_run(args: argparse.Namespace) -> int:
         github=_protected_github_environment(candidate_sha=commit),
         artifact_name=args.artifact_name,
         producer=producer_before,
+        red_reproduction_comparison=red_reproduction_comparison,
     )
     if receipt.returncode != 0:
         _relay_protected_failure(receipt, suite=args.suite, output=args.output)
@@ -900,6 +963,8 @@ def validate_protected_job_identity(
     expected_target_run_id: str,
     expected_target_run_attempt: str,
     expected_target_sha: str,
+    expected_target_tree: str,
+    expected_trusted_base_sha: str,
     expected_source_head_sha: str,
     now: int | None = None,
 ) -> dict[str, Any]:
@@ -929,8 +994,10 @@ def validate_protected_job_identity(
         "target_run_attempt",
         "target_run_id",
     }
+    has_red_reproduction_comparison = "red_reproduction_comparison" in execution
+    expected_schema_version = 3 if has_red_reproduction_comparison else 2
     if (
-        execution.get("schema_version") != 2
+        execution.get("schema_version") != expected_schema_version
         or not isinstance(github, Mapping)
         or set(github) != expected_github_fields
         or not isinstance(producer, Mapping)
@@ -943,6 +1010,14 @@ def validate_protected_job_identity(
         or github.get("target_run_attempt") != expected_target_run_attempt
     ):
         raise CiCandidateEvidenceError("protected receipt is bound to a different target or producer")
+    if has_red_reproduction_comparison:
+        comparison = execution["red_reproduction_comparison"]
+        _validate_red_reproduction_comparison(
+            comparison,
+            candidate_commit=expected_target_sha,
+            candidate_tree=expected_target_tree,
+            trusted_base_commit=expected_trusted_base_sha,
+        )
     claims = _verified_oidc_claims(
         attestation["oidc_token"],
         audience=attestation["audience"],
@@ -1289,6 +1364,7 @@ def validate_protected_execution_bundle(
     expected_target_sha: str,
     expected_source_head_sha: str,
     expected_workflow_sha: str,
+    expected_trusted_base_sha: str,
     jobs: list[Mapping[str, Any]],
     jwks: Mapping[str, Any],
     now: int | None = None,
@@ -1341,17 +1417,30 @@ def validate_protected_execution_bundle(
     expected_producer = _protected_producer_manifest(producer_root, expected_workflow_sha)
     if execution.get("producer") != expected_producer:
         raise CiCandidateEvidenceError("protected execution receipt does not bind the immutable producer")
+    comparison = execution.get("red_reproduction_comparison")
+    if expected_suite == "remaining":
+        _validate_red_reproduction_comparison(
+            comparison,
+            candidate_commit=expected_target_sha,
+            candidate_tree=candidate.get("tree"),
+            trusted_base_commit=expected_trusted_base_sha,
+        )
+    elif comparison is not None:
+        raise CiCandidateEvidenceError("non-remaining protected receipt unexpectedly carries comparison evidence")
     command = execution.get("command")
     if (
         not isinstance(command, list)
-        # 15, not 11: the candidate Git checkout and exact revision bind the
-        # judge-owned checkout-only guard execution into this sealed receipt.
+        # 17, not 11: the candidate Git checkout and exact revision bind the
+        # judge-owned checkout-only guard execution into this sealed receipt,
+        # and the exact trusted base travels in the immutable producer command.
+        # The bootstrap removes the trusted base before the sealed candidate
+        # runner parses argv.
         # so the protected run can RESOLVE Git objects instead of skipping them. This
         # verifier was not updated with it, so every otherwise-successful protected
         # bundle was rejected here and the required PROTECTED EXECUTION ACCEPTED
         # results were unreachable. The producer and its verifier describe the same
         # command and must be changed together.
-        or len(command) != 15
+        or len(command) != 17
         or command[1:4] != ["-I", "-c", _PROTECTED_RUNNER_BOOTSTRAP]
         or command[4:]
         != [
@@ -1374,6 +1463,8 @@ def validate_protected_execution_bundle(
             command[12],
             "--candidate-git-revision",
             expected_target_sha,
+            "--trusted-base",
+            expected_trusted_base_sha,
         ]
         or not isinstance(command[0], str)
         or not command[0]
@@ -1385,6 +1476,8 @@ def validate_protected_execution_bundle(
         or not isinstance(command[12], str)
         or not command[12]
         or not (PurePosixPath(command[12]).is_absolute() or PureWindowsPath(command[12]).is_absolute())
+        or command[14] != expected_target_sha
+        or command[16] != expected_trusted_base_sha
     ):
         raise CiCandidateEvidenceError("protected execution command did not invoke the pinned producer")
     output = (raw["stdout.bin"] + b"\n" + raw["stderr.bin"]).decode("utf-8", errors="replace")
@@ -1460,6 +1553,8 @@ def validate_protected_execution_bundle(
         expected_target_run_id=expected_target_run_id,
         expected_target_run_attempt=expected_target_run_attempt,
         expected_target_sha=expected_target_sha,
+        expected_target_tree=candidate.get("tree"),
+        expected_trusted_base_sha=expected_trusted_base_sha,
         expected_source_head_sha=expected_source_head_sha,
         now=now,
     )
@@ -1500,6 +1595,7 @@ def _verify_protected(args: argparse.Namespace) -> int:
         expected_target_sha=args.target_sha,
         expected_source_head_sha=args.source_head_sha,
         expected_workflow_sha=args.workflow_sha,
+        expected_trusted_base_sha=args.trusted_base,
         jobs=jobs,
         jwks=_fetch_oidc_jwks(),
     )
@@ -1533,6 +1629,7 @@ def main(argv: list[str] | None = None) -> int:
     protected_run.add_argument("--artifact-name", required=True)
     protected_run.add_argument("--producer-root", type=Path, required=True)
     protected_run.add_argument("--producer-revision", required=True)
+    protected_run.add_argument("--trusted-base", required=True)
     protected_run.add_argument("--timeout", type=float, default=2_400)
     protected_run.set_defaults(handler=_protected_run)
     attest = subparsers.add_parser("attest")
@@ -1559,6 +1656,7 @@ def main(argv: list[str] | None = None) -> int:
     verify_protected.add_argument("--target-sha", required=True)
     verify_protected.add_argument("--source-head-sha", required=True)
     verify_protected.add_argument("--workflow-sha", required=True)
+    verify_protected.add_argument("--trusted-base", required=True)
     verify_protected.set_defaults(handler=_verify_protected)
     summarize = subparsers.add_parser("summarize")
     summarize.add_argument("--bundle", type=Path, required=True)

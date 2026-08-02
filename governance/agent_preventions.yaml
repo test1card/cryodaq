@@ -2595,53 +2595,50 @@ false_green_pairs:
     ci_partition: core
     red_evidence: targeted_or_manager_stop_could_report_success_while_a_known_production_driver_sibling_remained_energized_2026_07_31_pending_immutable_capture
     green_evidence: pending
-  - id: G4-SOURCE-CONTROL-AUTHORITY-FALSE-GREEN-209
+
+  - id: RED-REPRODUCTION-REBIND-FALSE-GREEN-211
     status: open
     scope: repository
-    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
-    guard: tests/docs/test_docs_freshness.py::test_g4_rejects_make_prerequisite_status_not_matching_source_control
+    runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
+    guard: tests/governance/test_red_reproduction_immutability.py::test_rejects_reassigned_locator_deleted_id_and_collection_move
     ci_partition: remaining
-    red_evidence: the_original_disk_existence_check_reported_untracked_or_missing_tracked_prerequisites_as_authoritative_source_control_state_2026_08_01_pending_immutable_capture
+    red_evidence: candidate_ancestry_and_repository_wide_locator_membership_guards_passed_after_one_prevention_identity_was_rebound_to_replacement_evidence_2026_08_01_pending_immutable_capture
     green_evidence: pending
-  - id: G4-ARCHIVE-CHALLENGE-FALSE-GREEN-219
+
+  - id: RED-REPRODUCTION-REBIND-FALSE-GREEN-214
     status: open
     scope: repository
-    runtime_prevention_id: GUARD-COVERAGE-REGRESSION-034
-    guard: tests/governance/test_guard_coverage.py::test_g4_archived_revision_binds_source_control_to_the_compared_tree
+    runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
+    guard: tests/test_ci_candidate_evidence.py::test_workflow_dispatch_requires_trusted_base_and_executes_active_runner
     ci_partition: remaining
-    red_evidence: removing_the_exact_revision_tree_callback_made_archived_base_and_weakened_candidate_challenges_both_fail_before_the_procedure_guard_and_reported_no_coverage_reduction_2026_08_01_pending_immutable_capture
+    red_evidence: workflow_dispatch_skipped_the_active_exact_checkout_runner_and_emitted_an_empty_trusted_base_while_the_final_enforcement_step_accepted_the_skip_2026_08_01_pending_immutable_capture
     green_evidence: pending
-  - id: G4-HEAD-LS-TREE-RACE-FALSE-GREEN-227
+
+  - id: ACTIVE-EXPORT-DESTINATION-COLLISION-FALSE-GREEN-228
     status: open
     scope: repository
-    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
-    guard: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit
+    runtime_prevention_id: EXACT-SIX-PROTECTED-EXPORT-DESTINATION-ISOLATION-042
+    guard: tests/test_ci_candidate_evidence.py::test_protected_remaining_keeps_active_checkout_temp_outside_export_destination
     ci_partition: remaining
-    red_evidence: original_ls_tree_HEAD_queried_a_moved_commit_after_verifying_another_and_allowed_status_absent_to_pass_2026_08_01_pending_immutable_capture
+    red_evidence: protected_command_tests_used_the_core_suite_and_mocked_the_exporter_while_the_remaining_preflight_created_state_beneath_the_export_destination_that_the_real_exporter_refuses_when_nonempty_2026_08_01_pending_immutable_capture
     green_evidence: pending
-  - id: G4-ARCHIVED-CALLBACK-SIGNATURE-FALSE-GREEN-246
+
+  - id: ACTIVE-CHECKOUT-COMMAND-CHANNEL-FALSE-GREEN-243
     status: open
     scope: repository
-    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
-    guard: tests/governance/test_guard_coverage.py::test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss
+    runtime_prevention_id: PROTECTED-ACTIVE-CHECKOUT-AUTHORITY-ISOLATION-052
+    guard: tests/test_ci_candidate_evidence.py::test_active_checkout_candidate_processes_cannot_retain_protected_authority
     ci_partition: remaining
-    red_evidence: pre_signature_G4_validator_rejected_the_revision_authority_keyword_and_the_base_failure_was_reported_as_a_gain_so_a_later_procedure_coverage_loss_was_skipped_2026_08_01_pending_immutable_capture
+    red_evidence: protected_active_checkout_pytest_inherited_oidc_credentials_and_github_command_channels_and_the_process_group_only_predecessor_passed_a_same_session_fixture_while_a_fast_parent_could_spawn_a_start_new_session_descendant_and_exit_between_userspace_samples_leaving_the_detached_worker_alive_2026_08_01_pending_immutable_capture
     green_evidence: pending
-  - id: GUARD-COVERAGE-INHERITED-REPOSITORY-REDIRECT-FALSE-GREEN-251
+
+  - id: PROTECTED-REMAINING-SCHEMA-FALSE-GREEN-248
     status: open
     scope: repository
-    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
-    guard: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
+    runtime_prevention_id: PROTECTED-REMAINING-SCHEMA-IDENTITY-053
+    guard: tests/test_ci_candidate_evidence.py::test_signed_job_identity_requires_exact_comparison_schema_contract
     ci_partition: remaining
-    red_evidence: inherited_GIT_GRAFT_FILE_repository_local_info_grafts_shallow_and_replace_authority_and_a_foreign_ordinary_Git_directory_with_core_worktree_requested_and_reciprocal_gitdir_commondir_decoration_selected_foreign_strong_objects_and_production_main_returned_false_clean_exit_0_instead_of_exit_2_2026_08_02_pending_immutable_capture
-    green_evidence: pending
-  - id: GUARD-COVERAGE-ALLOWLIST-SHAPE-FALSE-GREEN-252
-    status: open
-    scope: repository
-    runtime_prevention_id: GUARD-COVERAGE-REGRESSION-034
-    guard: tests/governance/test_guard_coverage.py::test_guard_coverage_runs_current_c2_frozenset_allowlist_shape
-    ci_partition: remaining
-    red_evidence: every_synthetic_comparator_fixture_used_a_mapping_allowlist_while_the_real_current_C2_guard_used_frozenset_so_the_green_suite_missed_an_AttributeError_and_a_registered_mapping_purpose_equal_to_the_literal_undeclared_sentinel_collided_with_a_set_shaped_entry_to_report_zero_reductions_2026_08_01_pending_immutable_capture
+    red_evidence: protected_ubuntu_remaining_run_30705652733_emitted_a_correctly_bound_schema_three_comparison_receipt_that_the_identity_verifier_rejected_by_hard_coding_schema_two_and_the_followup_exactness_gap_accepted_extra_comparison_fields_true_as_an_integer_and_a_well_typed_wrong_trusted_base_by_self_validating_the_receipt_2026_08_01_pending_immutable_capture
     green_evidence: pending
   - id: ZMQ-REPLY-COLLECTION-FALSE-GREEN-212
     status: open
@@ -2676,46 +2673,8 @@ false_green_pairs:
     red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
-records:
-  - id: G4-SOURCE-CONTROL-AUTHORITY-038
-    status: open
-    scope: repository
-    authority_source: docs/new_lab_acceptance_checklist.md
-    applies_to: Every live or archived G4 make-prerequisite assertion derived from committed Git state.
-    classification: evidence_misbinding
-    correction_owner: primary
-    guard_owner: primary
-    disposition_owner: reviewer
-    consequence: A missing committed object, inherited Git environment authority, active repository-local graph rewrite, foreign Git directory claiming the requested worktree, HEAD movement between verification and lookup, or incompatible archived callback invocation can make unavailable, foreign, substituted, mismatched, or unexecuted evidence satisfy an asserted prerequisite state.
-    invariant: 'G4 prerequisite checks and the guard-coverage comparator clear every inherited GIT_* authority variable, replace system and global configuration with comparator-owned empty authority, and reject active repository-local graft, shallow, or replacement history before either revision is resolved. The comparator binds one immutable exact worktree, Git directory, and common directory: a direct .git directory is self-contained, while a file-backed marker is admitted only when common_dir != git_dir, git_dir is exactly common_dir/worktrees/<id>, the marker, Git-directory backpointer, and commondir pointer are regular non-reparse files with reciprocal exact resolved targets, the relevant directories are real/non-reparse, and the registered worktree is the requested root. Every Git subprocess uses those explicit validated paths and the binding is rechecked before a result. It resolves and verifies one exact raw commit in that authority, queries that same commit''s readable tree, and fails closed when local configuration, repository identity, ancestry, or tree evidence is active, unavailable, foreign, or ambiguous. Archived validators receive that authority through an explicitly detected current keyword capability or their exact historical source-control hook; callback-body failures remain failures and are never retried as interface compatibility.'
-    rule_refs:
-      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
-      - docs/new_lab_acceptance_checklist.md
-    guards:
-      - node: tests/docs/test_docs_freshness.py::test_g4_rejects_make_prerequisite_status_not_matching_source_control
-        ci_partition: remaining
-      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_inherited_repository_redirect
-        ci_partition: remaining
-      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable
-        ci_partition: remaining
-      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_commit_replacement_refs
-        ci_partition: remaining
-      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit
-        ci_partition: remaining
-      - node: tests/governance/test_guard_coverage.py::test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss
-        ci_partition: remaining
-      - node: tests/governance/test_guard_coverage.py::test_g4_pre_signature_callback_body_type_error_is_a_base_failure
-        ci_partition: remaining
-      - node: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
-        ci_partition: remaining
-      - node: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root
-        ci_partition: remaining
-      - node: tests/governance/test_guard_coverage.py::test_git_file_reads_the_requested_repository_not_an_inherited_redirect
-        ci_partition: remaining
-    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_pre_signature_archived_callback_skip_inherited_GIT_GRAFT_FILE_repository_local_graft_shallow_and_replace_history_authority_and_foreign_ordinary_Git_directory_with_reciprocal_gitdir_commondir_decoration_claiming_the_requested_root_were_reproduced_2026_08_02_pending_immutable_capture
-    green_evidence: pending
 
+records:
   - id: GOVERNANCE-PREVENTION-MAP-001
     status: open
     scope: repository
@@ -4990,28 +4949,23 @@ records:
     applies_to: >-
       Every class-wide static, structural, AST, source, documentation, or CI guard
       registered in the guard-coverage inventory: its matcher, its tracked
-      challenge corpus, and its registered exemption descriptors. G4 archived
-      challenges additionally bind source-control membership to each exact compared
-      revision tree. Other guard execution dependencies are not covered generally
-      and may still be influenced by a loaded candidate module.
+      challenge corpus, and its registered exemption descriptors. It does NOT
+      cover a guard's execution dependencies, which a live-candidate import can
+      still influence.
     classification: guard_coverage_regression_governance
     correction_owner: reviewer
     guard_owner: reviewer
     disposition_owner: reviewer
     consequence: A guard-strengthening change can silently remove a proven challenge, add an exemption, or weaken its own declared corpus while the commit message still claims broader enforcement.
-    invariant: Given a trusted comparator, a caller-selected correct base, a completed run, already-passing base challenges, explicitly revision-bound G4 source-control membership, otherwise self-contained guard modules, and collision-free registered exemption descriptors, the exact-checkout comparison preserves every base-proven stable challenge and reports changes to the tracked inventory; such a loss requires an exact tracked approved reduction declaration. Set-shaped C2 entries have a structural undeclared state that never enters registered-descriptor matching, while other exemption additions are reported per registered descriptor and can still be missed when descriptors coalesce, so this is detection under stated conditions, not unconditional mechanical prevention.
+    invariant: Given a trusted comparator, a caller-selected correct base, a completed run, already-passing base challenges, self-contained guard modules, and collision-free registered exemption descriptors, the exact-checkout comparison preserves every base-proven stable challenge and reports changes to the tracked inventory; such a loss requires an exact tracked approved reduction declaration. Exemption additions are reported per registered descriptor and can be missed when descriptors coalesce, so this is detection under stated conditions, not unconditional mechanical prevention.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/governance/test_guard_coverage.py::test_guard_coverage_reduction_requires_exact_tracked_declaration
         ci_partition: remaining
-      - node: tests/governance/test_guard_coverage.py::test_guard_coverage_runs_current_c2_frozenset_allowlist_shape
-        ci_partition: remaining
-      - node: tests/governance/test_guard_coverage.py::test_g4_archived_revision_binds_source_control_to_the_compared_tree
-        ci_partition: remaining
-    automation_limit: An independent audit found these remaining gaps - coalescing registered exemption descriptors can hide an addition; execution dependencies other than the explicitly revision-bound G4 source-control query can be influenced by a loaded candidate module; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
-    red_evidence: local_exact_object_comparisons_reject_3d6d1a22_1d2c43ad_and_0f505dd6_with_stable_lost_challenge_and_added_exemption_ids_and_archived_g4_challenges_bind_each_exact_revision_tree_2026_08_01_pending_immutable_capture
+    automation_limit: An independent audit found these gaps — coalescing registered exemption descriptors can hide an addition; a guard's execution dependencies are not covered because a live-candidate import can influence them; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
+    red_evidence: local_exact_object_comparisons_reject_3d6d1a22_1d2c43ad_and_0f505dd6_with_stable_lost_challenge_and_added_exemption_ids_2026_07_28_pending_immutable_capture
     green_evidence: pending
 
   - id: REPLAY-COMPARISON-EVIDENCE-035
@@ -5104,6 +5058,34 @@ records:
     red_evidence: production_driver_sibling_remained_energized_while_targeted_or_manager_stop_could_publish_success_2026_07_31_pending_immutable_capture
     green_evidence: pending
 
+  - id: RED-REPRODUCTION-TRUSTED-BASE-038
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every committed red-reproduction file and locator/digest binding already present in the exact trusted base supplied to pull-request, merge-group, push, or manually dispatched candidate CI.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A candidate can silently modify, delete, replace, reassign, or change the committed type or mode of unique red-reproduction evidence while retaining a green governance suite.
+    invariant: For each records or false_green_pairs prevention identity bound to red-reproduction evidence in the exact CI-supplied trusted base, the candidate retains the same identity, locator, digest, literal path, Git object, type, and mode; additions remain permitted.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_record_bytes_and_registry_digest_changed_together
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_reassigned_locator_deleted_id_and_collection_move
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_deleted_renamed_and_ancestry_accepted_replacement
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_same_blob_mode_or_type_change
+        ci_partition: remaining
+      - node: tests/test_ci_candidate_evidence.py::test_workflow_dispatch_requires_trusted_base_and_executes_active_runner
+        ci_partition: remaining
+    red_evidence: a_candidate_could_rebind_the_registry_and_evidence_together_or_hide_the_prior_binding_from_candidate_controlled_ancestry_while_the_governance_suite_remained_green_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+
   - id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
     status: open
     scope: repository
@@ -5136,4 +5118,69 @@ records:
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_terminal_drain_accounts_reply_published_during_owner_settlement
         ci_partition: core
     red_evidence: original_partial_return_error_path_queue_leak_permissive_identity_accounting_success_only_cleanup_safe_queue_cleanup_omission_prejoin_terminal_drain_and_exceptional_safe_queue_leak_mutants_failed_their_exact_behavioral_guards_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+
+  - id: EXACT-SIX-PROTECTED-EXPORT-DESTINATION-ISOLATION-042
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Protected remaining-lane active-checkout preflight state and the sealed candidate export destination passed to execute_exported_candidate.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: The protected remaining lane can fail before sealed candidate execution because its active-checkout pytest state makes the export destination non-empty and therefore invalid by the exporter contract.
+    invariant: The active exact-checkout preflight writes only to a sibling runner-temporary path disjoint from the sealed export destination; when execute_exported_candidate receives its destination, that destination is absent or empty and retains exclusive ownership of its export tree.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_ci_candidate_evidence.py::test_protected_remaining_keeps_active_checkout_temp_outside_export_destination
+        ci_partition: remaining
+    red_evidence: protected_remaining_called_the_active_runner_with_destination_slash_active_checkout_then_passed_the_now_nonempty_destination_to_an_exporter_that_rejects_nonempty_destinations_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+
+  - id: PROTECTED-ACTIVE-CHECKOUT-AUTHORITY-ISOLATION-052
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every candidate-controlled pytest process and descendant, including a POSIX descendant that creates a new session, launched by the protected active-checkout remaining partition before immutable evidence and job identity are written.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: Candidate tests can inherit the protected job's OIDC credentials or GitHub workflow-command paths, retain a background descendant after pytest exits, and alter later workflow state or evidence while the protected check appears green.
+    invariant: Both strict and ordinary active-checkout pytest launches receive the producer-owned authority-sanitized environment. Windows launches remain in the producer-owned kill-on-close Job Object. Linux launches serialize a process-global PR_SET_CHILD_SUBREAPER boundary before Popen, reconcile known lineage plus newly adopted direct children, terminate and explicitly reap every candidate identity until zero live and zero unreaped children remain, and only then restore the prior subreaper state and return; unsupported non-Linux POSIX hosts fail before candidate launch.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_ci_candidate_evidence.py::test_active_checkout_candidate_processes_cannot_retain_protected_authority
+        ci_partition: remaining
+      - node: tests/test_ci_candidate_evidence.py::test_active_checkout_runner_settles_session_escaped_grandchild_after_timeout
+        ci_partition: remaining
+        platform: posix
+      - node: tests/test_ci_candidate_evidence.py::test_active_checkout_runner_refuses_unsupported_posix_before_candidate_launch
+        ci_partition: remaining
+    red_evidence: protected_active_checkout_pytest_inherited_actions_id_token_request_credentials_and_github_env_output_path_state_and_step_summary_channels_and_did_not_own_background_descendant_settlement_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+
+  - id: PROTECTED-REMAINING-SCHEMA-IDENTITY-053
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every signed protected execution receipt verified by the final required gate, including remaining-lane receipts carrying trusted-base comparison evidence and no mixed v2/v3 form.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A correctly bound protected remaining result can be rejected solely because its required comparison evidence upgrades the receipt schema, or a signed but forged receipt can select its own trusted base and pass self-validation instead of binding to workflow authority.
+    invariant: A signed receipt uses schema two exactly when it has no red-reproduction comparison and schema three exactly when it carries one; a schema-three comparison has exactly the required fields, ordinary integer counts, valid bounded identities, and exact candidate tree and trusted-base bindings supplied independently by the validated candidate manifest and workflow or CLI authority, never by the comparison or execution receipt itself, before the target, producer, OIDC, and REST job bindings are accepted.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_ci_candidate_evidence.py::test_signed_job_identity_requires_exact_comparison_schema_contract
+        ci_partition: remaining
+    red_evidence: protected_ubuntu_remaining_run_30705652733_emitted_schema_three_with_a_valid_trusted_base_comparison_and_exact_merge_target_and_producer_bindings_but_validate_protected_job_identity_rejected_every_schema_except_two_2026_08_01_pending_immutable_capture
     green_evidence: pending

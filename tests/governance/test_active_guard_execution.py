@@ -693,6 +693,11 @@ def test_protected_checkout_runner_detaches_exported_candidate_environment(
     repository.mkdir()
     monkeypatch.setattr(ci_active_checkout_runner, "_verify_checkout", lambda *_args: None)
     monkeypatch.setattr(ci_active_checkout_runner, "compile_python_tree", lambda _root: {})
+    monkeypatch.setattr(
+        ci_active_checkout_runner,
+        "compare_red_reproduction_bindings",
+        lambda *_args, **_kwargs: {"outcome": "passed"},
+    )
     monkeypatch.setattr(ci_active_checkout_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(
         "tools.ci_guard_execution._checkout_execution_selection",
@@ -704,11 +709,13 @@ def test_protected_checkout_runner_detaches_exported_candidate_environment(
     monkeypatch.delenv(FAILURE_RECEIPT_INDEX_ENV, raising=False)
     captured: list[tuple[tuple[str, ...], dict[str, str]]] = []
 
-    def fake_run(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        captured.append((tuple(command), kwargs["env"]))
-        return subprocess.CompletedProcess(command, 0)
+    def fake_run(
+        command: tuple[str, ...], *, root: Path, environment: dict[str, str], capture_output: bool
+    ) -> subprocess.CompletedProcess[str]:
+        captured.append((tuple(command), environment))
+        return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(ci_active_checkout_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(ci_active_checkout_runner, "_run_candidate_process", fake_run)
 
     assert (
         ci_active_checkout_runner.run_suite(
@@ -716,6 +723,7 @@ def test_protected_checkout_runner_detaches_exported_candidate_environment(
             root=repository,
             revision="0" * 40,
             basetemp=tmp_path / "basetemp",
+            trusted_base="a" * 40,
             protected_producer_root=producer,
         )
         == 0
@@ -921,3 +929,48 @@ def test_candidate_runner_rejects_failed_receipt_even_when_later_hook_resets_exi
     )
 
     assert result == 1
+
+
+def test_sealed_checkout_runner_runs_without_trusted_base_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The sealed candidate runner reaches the checkout runner without the trusted base.
+
+    ``tools.ci_candidate_runner`` calls ``ci_active_checkout_runner.run_suite``
+    without ``trusted_base``: the bootstrap strips producer authority before
+    candidate code runs, and the producer has already receipt-bound the same
+    comparison.  The checkout runner must skip the comparison there rather than
+    demand authority the sealed path can never hold.
+    """
+
+    repository = tmp_path / "candidate"
+    repository.mkdir()
+    monkeypatch.setattr(ci_active_checkout_runner, "_verify_checkout", lambda *_args: None)
+    monkeypatch.setattr(ci_active_checkout_runner, "compile_python_tree", lambda _root: {})
+    monkeypatch.setattr(ci_active_checkout_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        "tools.ci_guard_execution._checkout_execution_selection",
+        lambda _suite: ExecutionSelection("git-index", "remaining", ("tests/test_docs.py",), ()),
+    )
+
+    def forbidden_compare(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("sealed checkout run must not demand trusted-base authority")
+
+    monkeypatch.setattr(ci_active_checkout_runner, "compare_red_reproduction_bindings", forbidden_compare)
+
+    def fake_run(
+        command: tuple[str, ...], *, root: Path, environment: dict[str, str], capture_output: bool
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(ci_active_checkout_runner, "_run_candidate_process", fake_run)
+
+    assert (
+        ci_active_checkout_runner.run_suite(
+            "remaining",
+            root=repository,
+            revision="0" * 40,
+            basetemp=tmp_path / "basetemp",
+        )
+        == 0
+    )

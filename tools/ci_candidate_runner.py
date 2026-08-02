@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -466,6 +467,28 @@ def _validate_strict_guard_receipt(
         raise GuardExecutionError("strict guard receipt omits an expected guard")
 
 
+_CANDIDATE_AUTHORITY_ENV_KEYS = (
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "GH_TOKEN",
+    "GITHUB_ENV",
+    "GITHUB_OUTPUT",
+    "GITHUB_PATH",
+    "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY",
+    "GITHUB_TOKEN",
+)
+
+
+def _candidate_authority_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Copy an environment without protected-job credentials or command channels."""
+
+    environment = dict(os.environ if source is None else source)
+    for key in _CANDIDATE_AUTHORITY_ENV_KEYS:
+        environment.pop(key, None)
+    return environment
+
+
 def _command_environment(*, basetemp: Path, suite: str, index: int) -> dict[str, str]:
     root = basetemp.parent / "command-state" / suite / str(index)
     runtime = root / "runtime"
@@ -474,19 +497,7 @@ def _command_environment(*, basetemp: Path, suite: str, index: int) -> dict[str,
     pycache = root / "pycache"
     for path in (runtime, temp, cache, pycache):
         path.mkdir(parents=True, exist_ok=True)
-    environment = dict(os.environ)
-    for key in (
-        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
-        "ACTIONS_ID_TOKEN_REQUEST_URL",
-        "GH_TOKEN",
-        "GITHUB_ENV",
-        "GITHUB_OUTPUT",
-        "GITHUB_PATH",
-        "GITHUB_STATE",
-        "GITHUB_STEP_SUMMARY",
-        "GITHUB_TOKEN",
-    ):
-        environment.pop(key, None)
+    environment = _candidate_authority_environment()
     environment.update(
         {
             "COVERAGE_FILE": str(cache / ".coverage"),

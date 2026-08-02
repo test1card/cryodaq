@@ -38,9 +38,23 @@ EXECUTION_ROOTS = (
         files=(
             "tests/docs/test_docs_freshness.py",
             "tests/governance/test_agent_formatter_gate.py",
+            "tests/governance/test_red_reproduction_immutability.py",
             "tests/test_claudemd_index.py",
         ),
         nodes=(
+            (
+                "tests/governance/test_red_reproduction_immutability.py"
+                "::test_rejects_record_bytes_and_registry_digest_changed_together"
+            ),
+            (
+                "tests/governance/test_red_reproduction_immutability.py"
+                "::test_rejects_reassigned_locator_deleted_id_and_collection_move"
+            ),
+            (
+                "tests/governance/test_red_reproduction_immutability.py"
+                "::test_rejects_deleted_renamed_and_ancestry_accepted_replacement"
+            ),
+            ("tests/governance/test_red_reproduction_immutability.py::test_rejects_same_blob_mode_or_type_change"),
             "tests/governance/test_agent_formatter_gate.py::test_mutating_formatter_wrapper_is_absent",
             "tests/governance/test_agent_formatter_gate.py::test_tracked_recipes_forbid_mutating_ruff_modes",
             (
