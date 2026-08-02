@@ -213,11 +213,15 @@ def active_guard_specs(
         and pair["ci_partition"] == suite
         and pair.get("platform") in {None, selected_platform}
     )
-    _, git_index_nodes = checkout_execution_selection(root, suite)
+    git_index_files, git_index_nodes = checkout_execution_selection(root, suite)
+
+    def requires_git_index(spec: GuardSpec) -> bool:
+        return spec.node in git_index_nodes or spec.node.split("::", 1)[0] in git_index_files
+
     if execution_root == "git-index":
-        active = [spec for spec in active if spec.node in git_index_nodes]
+        active = [spec for spec in active if requires_git_index(spec)]
     else:
-        active = [spec for spec in active if spec.node not in git_index_nodes]
+        active = [spec for spec in active if not requires_git_index(spec)]
     by_node: dict[str, GuardSpec] = {}
     for spec in active:
         previous = by_node.get(spec.node)
