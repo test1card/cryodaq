@@ -1407,20 +1407,29 @@ def validate_protected_execution_bundle(
     # The sealed export has no Git metadata, so checkout-selected guards are
     # deliberately run by the judge against the exact candidate checkout. Their
     # canonical receipt is retained in the same stdout.bin bound above; a
-    # workflow-only invocation would have no such evidence binding.
+    # workflow-only invocation would have no such evidence binding. stdout.bin
+    # legitimately also carries the exported-commit strict receipt, so the
+    # checkout receipt is selected by its exact guard binding. The bundle does
+    # not record the executing OS and this gate verifies every OS matrix
+    # bundle from one Linux job, so the receipt is accepted only when it binds
+    # the exact guard set of exactly one admissible execution platform.
     from tools.ci_candidate_runner import _validate_strict_guard_receipt
-    from tools.ci_guard_execution import GuardExecutionError, active_guard_specs, current_guard_platform
+    from tools.ci_guard_execution import GUARD_PLATFORMS, GuardExecutionError, active_guard_specs
 
-    platform = current_guard_platform()
-    checkout_specs = active_guard_specs(
-        repository,
-        expected_suite,
-        platform=platform,
-        execution_root="git-index",
-        git_repository=repository,
-        require_git_resolution=True,
-    )
-    if checkout_specs:
+    any_checkout_specs = False
+    matched_platforms: list[str] = []
+    for platform in sorted(GUARD_PLATFORMS):
+        checkout_specs = active_guard_specs(
+            repository,
+            expected_suite,
+            platform=platform,
+            execution_root="git-index",
+            git_repository=repository,
+            require_git_resolution=True,
+        )
+        if not checkout_specs:
+            continue
+        any_checkout_specs = True
         try:
             _validate_strict_guard_receipt(
                 output,
@@ -1428,9 +1437,13 @@ def validate_protected_execution_bundle(
                 expected=tuple(spec.node for spec in checkout_specs),
                 expected_platforms={spec.node: spec.platform for spec in checkout_specs},
                 platform=platform,
+                allow_sibling_receipts=True,
             )
-        except (GuardExecutionError, ValueError, TypeError) as exc:
-            raise CiCandidateEvidenceError("protected checkout-only guard receipt is invalid or unbound") from exc
+        except (GuardExecutionError, ValueError, TypeError):
+            continue
+        matched_platforms.append(platform)
+    if any_checkout_specs and len(matched_platforms) != 1:
+        raise CiCandidateEvidenceError("protected checkout-only guard receipt is invalid or unbound")
     github = execution.get("github")
     check_run_id = github.get("github_job_check_run_id") if isinstance(github, Mapping) else None
     matching_jobs = [job for job in jobs if str(job.get("id")) == str(check_run_id)]

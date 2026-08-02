@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from tools.check_python_compile import compile_python_tree
+from tools.ci_candidate_evidence import FAILURE_RECEIPT_INDEX_ENV, FAILURE_RECEIPT_SUITE_ENV
 from tools.ci_candidate_runner import (
-    _PYTEST,
     _TAIL,
     _protected_pytest_command,
     _strict_guard_command,
@@ -19,6 +20,27 @@ from tools.ci_guard_execution import active_guard_specs, checkout_execution_sele
 
 # The sealed candidate disables autoload; this checkout runner must not reuse its explicit plugin list.
 _PYTEST = (sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider")
+
+
+def _checkout_environment() -> dict[str, str]:
+    """Return the subprocess environment for exact-checkout pytest runs.
+
+    A protected run inherits the sealed export's environment, which is poison
+    for a real checkout: the population-receipt plugin fails closed without the
+    per-invocation index only the exported partition accounting owns, disabled
+    plugin autoload withdraws the entry-point plugins (asyncio, timeout) these
+    tests rely on, and the exported-candidate marker misdescribes this tree.
+    """
+
+    environment = dict(os.environ)
+    for key in (
+        FAILURE_RECEIPT_INDEX_ENV,
+        FAILURE_RECEIPT_SUITE_ENV,
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+        "CRYODAQ_EXPORTED_CANDIDATE",
+    ):
+        environment.pop(key, None)
+    return environment
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -64,6 +86,7 @@ def run_suite(
     )
     guard_nodes = tuple(spec.node for spec in guard_specs)
     basetemp.mkdir(parents=True, exist_ok=True)
+    environment = _checkout_environment()
 
     strict = _strict_guard_command(
         suite,
@@ -81,7 +104,15 @@ def run_suite(
                 strict=True,
             )
     if strict is not None:
-        completed = subprocess.run(strict, cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        completed = subprocess.run(
+            strict,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+        )
         if completed.stdout:
             print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n", flush=True)
         if completed.stderr:
@@ -107,7 +138,7 @@ def run_suite(
                 producer_root=protected_producer_root,
                 strict=False,
             )
-        completed = subprocess.run(command, cwd=root, check=False)
+        completed = subprocess.run(command, cwd=root, check=False, env=environment)
         if completed.returncode:
             return completed.returncode
     _verify_checkout(root, revision)

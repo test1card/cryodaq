@@ -334,6 +334,24 @@ def _protected_pytest_command(
     )
 
 
+def _receipt_expected_guards(line: str) -> list[str] | None:
+    """Return the guard set one receipt line claims to bind, or None when unreadable."""
+
+    try:
+        envelope = json.loads(line)
+    except (json.JSONDecodeError, UnicodeError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    expected = payload.get("expected_guards")
+    if not isinstance(expected, list) or any(not isinstance(node, str) for node in expected):
+        return None
+    return expected
+
+
 def _validate_strict_guard_receipt(
     output: str,
     *,
@@ -341,8 +359,15 @@ def _validate_strict_guard_receipt(
     expected: tuple[str, ...],
     expected_platforms: dict[str, str | None],
     platform: str,
+    allow_sibling_receipts: bool = False,
 ) -> None:
     lines = [line[len(RECEIPT_PREFIX) :] for line in output.splitlines() if line.startswith(RECEIPT_PREFIX)]
+    if allow_sibling_receipts:
+        # A sealed protected bundle retains every strict receipt the judge
+        # executed: exported-commit and exact-checkout guards share stdout.bin.
+        # Select the one receipt bound to this exact guard set; absence or a
+        # duplicate binding still fails closed below.
+        lines = [line for line in lines if _receipt_expected_guards(line) == list(expected)]
     if len(lines) != 1:
         raise GuardExecutionError(f"strict guard execution emitted {len(lines)} receipts instead of one")
     raw = lines[0]

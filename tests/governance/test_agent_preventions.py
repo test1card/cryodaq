@@ -879,8 +879,7 @@ def test_every_nonexpired_mapping_is_one_unique_active_guard_in_its_default_suit
             relocated = {
                 node
                 for node in expected_nodes
-                if selection is not None
-                and (node in selection.nodes or node.split("::", 1)[0] in selection.files)
+                if selection is not None and (node in selection.nodes or node.split("::", 1)[0] in selection.files)
             }
             assert active == tuple(sorted(expected_nodes - relocated))
             assert len(active) == len(set(active))

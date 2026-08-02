@@ -11,16 +11,16 @@ import pytest
 import yaml
 
 from tools import ci_active_checkout_runner, ci_candidate_runner
+from tools.ci_execution_roots import ExecutionSelection
 from tools.ci_guard_execution import (
     RECEIPT_PREFIX,
     GuardExecutionError,
     GuardSpec,
-    active_guard_specs,
     active_guard_nodes,
+    active_guard_specs,
     current_guard_platform,
     empty_guard_receipt,
 )
-from tools.ci_execution_roots import ExecutionSelection
 from tools.governance_contract import (
     GovernanceContractError,
     _git_blob_id,
@@ -671,6 +671,65 @@ def test_file_selected_active_guard_routes_to_git_index(monkeypatch: pytest.Monk
     assert active_guard_specs(tmp_path, "remaining", execution_root="git-index") == (
         GuardSpec(node, "remaining", None),
     )
+
+
+def test_protected_checkout_runner_detaches_exported_candidate_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Judge-owned checkout runs must not inherit the sealed export's poisoned environment.
+
+    The population-receipt plugin fails closed without a per-invocation index
+    only the exported partition accounting owns, and disabled plugin autoload
+    withdraws the entry-point plugins the checkout tests rely on.
+    """
+
+    from tools.ci_candidate_evidence import FAILURE_RECEIPT_INDEX_ENV, FAILURE_RECEIPT_SUITE_ENV
+
+    producer = tmp_path / "producer"
+    (producer / "tools").mkdir(parents=True)
+    (producer / "tools" / "ci_candidate_evidence.py").write_text("# pinned\n", encoding="utf-8", newline="\n")
+    (producer / "tools" / "ci_guard_execution.py").write_text("# pinned\n", encoding="utf-8", newline="\n")
+    repository = tmp_path / "candidate"
+    repository.mkdir()
+    monkeypatch.setattr(ci_active_checkout_runner, "_verify_checkout", lambda *_args: None)
+    monkeypatch.setattr(ci_active_checkout_runner, "compile_python_tree", lambda _root: {})
+    monkeypatch.setattr(ci_active_checkout_runner, "active_guard_specs", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        "tools.ci_guard_execution._checkout_execution_selection",
+        lambda _suite: ExecutionSelection("git-index", "remaining", ("tests/test_docs.py",), ()),
+    )
+    monkeypatch.setenv(FAILURE_RECEIPT_SUITE_ENV, "remaining")
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    monkeypatch.setenv("CRYODAQ_EXPORTED_CANDIDATE", "1")
+    monkeypatch.delenv(FAILURE_RECEIPT_INDEX_ENV, raising=False)
+    captured: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append((tuple(command), kwargs["env"]))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(ci_active_checkout_runner.subprocess, "run", fake_run)
+
+    assert (
+        ci_active_checkout_runner.run_suite(
+            "remaining",
+            root=repository,
+            revision="0" * 40,
+            basetemp=tmp_path / "basetemp",
+            protected_producer_root=producer,
+        )
+        == 0
+    )
+    assert len(captured) == 1
+    command, environment = captured[0]
+    # The pinned producer bootstrap drives pytest; candidate plugins are never loaded.
+    assert command[1:6] == ("-B", "-I", "-X", "utf8=1", "-c")
+    assert str(producer.resolve()) in command
+    assert str(repository.resolve()) in command
+    assert FAILURE_RECEIPT_SUITE_ENV not in environment
+    assert FAILURE_RECEIPT_INDEX_ENV not in environment
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in environment
+    assert "CRYODAQ_EXPORTED_CANDIDATE" not in environment
 
 
 def test_false_green_expiry_cannot_outlive_runtime_or_expire_durable_scope() -> None:

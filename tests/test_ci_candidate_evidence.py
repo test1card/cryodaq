@@ -613,6 +613,136 @@ def test_protected_verifier_rejects_unbound_checkout_guard_receipt(
         )
 
 
+def _strict_receipt_line(suite: str, guards: tuple[str, ...], platform: str) -> str:
+    """Render one canonical passing strict-guard receipt line for exact guards."""
+
+    return RECEIPT_PREFIX + canonical_receipt(
+        {
+            "concrete_nodes": [
+                {
+                    "guards": [guard],
+                    "markers": [],
+                    "nodeid": guard,
+                    "phases": {"call": ["passed"], "setup": ["passed"], "teardown": ["passed"]},
+                    "was_xfail": False,
+                }
+                for guard in guards
+            ],
+            "deselected_nodes": [],
+            "expected_guards": list(guards),
+            "expected_guard_platforms": {guard: None for guard in guards},
+            "platform": platform,
+            "result": "passed",
+            "schema_version": 3,
+            "suite": suite,
+            "violations": [],
+            "warnings": [],
+        }
+    )
+
+
+def _protected_population_output(extra_lines: tuple[str, ...] = ()) -> str:
+    return (
+        "candidate-suite=core command=1/1\n"
+        + FAILURE_RECEIPT_PREFIX
+        + canonical_failure_receipt(
+            {
+                "collection_complete": True,
+                "failed_nodeids": [],
+                "invocation_index": 1,
+                "population": {
+                    "call_executed": 1,
+                    "collected": 1,
+                    "deselected": 0,
+                    "executed": 1,
+                    "skipped": 0,
+                },
+                "schema_version": 4,
+                "suite": "core",
+            }
+        )
+        + "\n"
+        + "".join(f"{line}\n" for line in extra_lines)
+    )
+
+
+def test_protected_verifier_accepts_checkout_guard_receipt_alongside_exported_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stdout.bin legitimately carries both strict receipts; the exact binding selects one."""
+
+    checkout_guard = "tests/docs/test_docs_freshness.py::test_guard"
+    exported_guard = "tests/governance/test_exported_guard.py::test_guard"
+    command = _production_protected_command(tmp_path, monkeypatch)
+    candidate_output = _protected_population_output(
+        (
+            _strict_receipt_line("core", (exported_guard,), current_guard_platform()),
+            _strict_receipt_line("core", (checkout_guard,), current_guard_platform()),
+        )
+    )
+
+    result = _validate_production_protected_command(
+        tmp_path,
+        monkeypatch,
+        command=command,
+        candidate_output=candidate_output,
+        checkout_specs=(GuardSpec(checkout_guard, "core", None),),
+    )
+
+    assert result == {
+        "call_executed": 1,
+        "check_run_id": "98765",
+        "collected": 1,
+        "executed": 1,
+        "suite": "core",
+    }
+
+
+def test_protected_verifier_rejects_checkout_guard_receipt_bound_to_other_guards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling receipt binding a different guard set can never stand in for the checkout guards."""
+
+    checkout_guard = "tests/docs/test_docs_freshness.py::test_guard"
+    other_guard = "tests/governance/test_other_guard.py::test_guard"
+    command = _production_protected_command(tmp_path, monkeypatch)
+    candidate_output = _protected_population_output(
+        (_strict_receipt_line("core", (other_guard,), current_guard_platform()),)
+    )
+
+    with pytest.raises(CiCandidateEvidenceError, match="checkout-only guard receipt"):
+        _validate_production_protected_command(
+            tmp_path,
+            monkeypatch,
+            command=command,
+            candidate_output=candidate_output,
+            checkout_specs=(GuardSpec(checkout_guard, "core", None),),
+        )
+
+
+def test_protected_verifier_rejects_ambiguous_checkout_guard_receipts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two receipts claiming the same checkout guard set are a forgery shape, not evidence."""
+
+    checkout_guard = "tests/docs/test_docs_freshness.py::test_guard"
+    command = _production_protected_command(tmp_path, monkeypatch)
+    line = _strict_receipt_line("core", (checkout_guard,), current_guard_platform())
+    candidate_output = _protected_population_output((line, line))
+
+    with pytest.raises(CiCandidateEvidenceError, match="checkout-only guard receipt"):
+        _validate_production_protected_command(
+            tmp_path,
+            monkeypatch,
+            command=command,
+            candidate_output=candidate_output,
+            checkout_specs=(GuardSpec(checkout_guard, "core", None),),
+        )
+
+
 @pytest.mark.parametrize(
     ("producer_root", "destination", "candidate_repository"),
     (
@@ -647,10 +777,10 @@ def test_protected_verifier_accepts_producer_local_paths(
             destination,
             command[9],
             producer_root,
-                command[11],
-                candidate_repository,
-                *command[13:],
-            ),
+            command[11],
+            candidate_repository,
+            *command[13:],
+        ),
     )
 
     assert result == {
