@@ -17,6 +17,7 @@ import hashlib
 import html
 import json
 import math
+import os
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -33,6 +34,7 @@ OUT = ROOT / "docs" / "refactor"
 # the unreadable 1,085-file montana-all-files map are campaign-only and are
 # not checked in; only this one — legible, current-state — ships).
 MONTANA_IMPORTANT_SVG = ROOT / "docs" / "architecture-montana-important.svg"
+CURRENT_METRICS = ROOT / "docs" / "current_candidate_metrics.md"
 
 COLORS = {
     "src": ("#17334d", "#8fd3ff"),
@@ -44,20 +46,38 @@ COLORS = {
 }
 
 
+def _git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Every generator Git read ignores replacement refs.
+
+    ``git replace`` is supported repository state, and it can substitute
+    commits, trees, and blobs alike. Generated evidence must measure the
+    objects it names, so both the command-line switch and the environment
+    variable are pinned for every invocation, including direct blob reads.
+    """
+
+    env = dict(os.environ) if extra is None else dict(extra)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return env
+
+
+def _git_argv(*args: str) -> tuple[str, ...]:
+    return ("git", "--no-replace-objects", *args)
+
+
 def run(*args: str) -> str:
-    return subprocess.run(args, cwd=ROOT, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode(
-        "utf-8", errors="strict"
-    )
+    return subprocess.run(
+        _git_argv(*args), cwd=ROOT, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_git_env()
+    ).stdout.decode("utf-8", errors="strict")
 
 
 def _git_bytes(*args: str, env: dict[str, str] | None = None) -> bytes:
     return subprocess.run(
-        ("git", *args),
+        _git_argv(*args),
         cwd=ROOT,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=env,
+        env=_git_env(env),
     ).stdout
 
 
@@ -70,7 +90,10 @@ def _is_generated_output(path: str) -> bool:
     # but MONTANA_IMPORTANT_SVG is a module-level constant bound to the real
     # ROOT at import time, so deriving the relative path from it here would
     # raise ValueError under that patched ROOT.
-    return path == "docs/architecture-montana-important.svg"
+    return path in {
+        "docs/architecture-montana-important.svg",
+        "docs/current_candidate_metrics.md",
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,11 +180,12 @@ def _cat_blobs(oids: tuple[str, ...]) -> dict[str, bytes]:
     if not requested:
         return {}
     completed = subprocess.run(
-        ("git", "cat-file", "--batch"),
+        _git_argv("cat-file", "--batch"),
         cwd=ROOT,
         input=b"".join(oid.encode("ascii") + b"\n" for oid in requested),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=_git_env(),
         check=True,
     )
     raw = completed.stdout
@@ -439,8 +463,8 @@ def metadata_payload(
         "manifest_sha256": hashlib.sha256("\n".join(paths).encode()).hexdigest(),
         "content_sha256": content_fingerprint(paths, reader),
         "generated_outputs_excluded": (
-            "docs/refactor/architecture-*.svg and docs/architecture-montana-important.svg "
-            "(self-referential generated files)"
+            "docs/refactor/architecture-*.svg, docs/architecture-montana-important.svg, "
+            "and docs/current_candidate_metrics.md (self-referential generated files)"
         ),
         "metric_note": "text load = UTF-8 LOC plus internal import degree; binary files report bytes; Montana heat = text churn versus pinned baseline",
     }
@@ -726,7 +750,7 @@ def important_svg(
         '<defs><marker id="dataArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#61c8f4"/></marker><marker id="controlArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#ff7067"/></marker><marker id="boundaryArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#c59cff"/></marker></defs>',
         '<rect width="100%" height="100%" fill="#0b1118"/>',
         f'<text x="70" y="58" fill="#f4f7fb" font-family="Segoe UI, sans-serif" font-size="31" font-weight="700">{esc(title)}</text>',
-        '<text x="70" y="95" fill="#aebaca" font-family="Segoe UI, sans-serif" font-size="16">Selected load-bearing files; exhaustive companion map contains every repository file.</text>',
+        '<text x="70" y="95" fill="#aebaca" font-family="Segoe UI, sans-serif" font-size="16">Selected load-bearing files in the sole shipped architecture map.</text>',
         '<g aria-label="Legend" font-family="Segoe UI, sans-serif" font-size="14"><line x1="70" y1="135" x2="120" y2="135" stroke="#61c8f4" stroke-width="3"/><text x="130" y="140" fill="#cbd5e1">data/evidence</text><line x1="290" y1="135" x2="340" y2="135" stroke="#ff7067" stroke-width="3"/><text x="350" y="140" fill="#cbd5e1">control/safety authority</text><line x1="570" y1="135" x2="620" y2="135" stroke="#c59cff" stroke-width="3" stroke-dasharray="7 5"/><text x="630" y="140" fill="#cbd5e1">process or trust boundary</text><text x="70" y="174" fill="#cbd5e1">Node metric: LOC and internal import degree. Amber/red border = high Montana churn.</text></g>',
         '<g class="architecture-edges" fill="none">',
     ]
@@ -800,6 +824,162 @@ def verify(path: Path, expected: list[str], exhaustive: bool) -> None:
                 raise RuntimeError(f"{attribute}={coordinate} outside viewBox in {path}")
 
 
+def _numstat_rows(snapshot: GitSnapshot) -> tuple[tuple[str, str, str], ...]:
+    """Return numstat from a private index populated by the frozen entries."""
+
+    index_info = b"".join(
+        entry.mode.encode("ascii")
+        + b" "
+        + entry.oid.encode("ascii")
+        + b" 0\t"
+        + entry.path.encode("utf-8", errors="strict")
+        + b"\x00"
+        for entry in snapshot.entries
+    )
+    with tempfile.TemporaryDirectory(prefix="montana-metrics-index-") as temporary:
+        index_path = str(Path(temporary) / "index")
+        env = _git_env()
+        env["GIT_INDEX_FILE"] = index_path
+        subprocess.run(
+            _git_argv("read-tree", "--empty"),
+            cwd=ROOT,
+            env=env,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        subprocess.run(
+            _git_argv("update-index", "-z", "--index-info"),
+            cwd=ROOT,
+            env=env,
+            input=index_info,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        raw = _git_bytes("diff", "--cached", "--no-renames", "--numstat", BASE_REF, "--", env=env).decode(
+            "utf-8", errors="strict"
+        )
+    rows: list[tuple[str, str, str]] = []
+    for line in raw.splitlines():
+        added, deleted, path = line.split("\t", 2)
+        if not _is_generated_output(path):
+            rows.append((added, deleted, path))
+    return tuple(rows)
+
+
+def _inventory_stats(snapshot: GitSnapshot) -> tuple[int, int, int, int]:
+    text_entries = tuple(entry for entry in snapshot.entries if is_text(snapshot.read(entry.path)))
+    binary_entries = tuple(entry for entry in snapshot.entries if entry not in text_entries)
+    return (
+        sum(loc(snapshot.read(entry.path)) for entry in text_entries),
+        len(text_entries),
+        len(binary_entries),
+        sum(len(snapshot.read(entry.path)) for entry in binary_entries),
+    )
+
+
+def current_metrics_bytes(snapshot: GitSnapshot, important_svg: bytes) -> bytes:
+    """Render the sole current-candidate numeric authority from one frozen index."""
+
+    base = base_snapshot()
+    generated_paths = (
+        "docs/current_candidate_metrics.md",
+        "docs/architecture-montana-important.svg",
+    )
+    if any(path in base.paths for path in generated_paths):
+        raise RuntimeError("generated Montana outputs unexpectedly exist in the pinned baseline")
+
+    diff_rows = _numstat_rows(snapshot)
+    text_diff = tuple(row for row in diff_rows if row[0] != "-" and row[1] != "-")
+    source_paths = len(diff_rows)
+    source_insertions = sum(int(row[0]) for row in text_diff)
+    source_deletions = sum(int(row[1]) for row in text_diff)
+    source_binary = source_paths - len(text_diff)
+    source_text, source_text_files, source_binary_files, source_binary_bytes = _inventory_stats(snapshot)
+    base_text, base_text_files, base_binary_files, base_binary_bytes = _inventory_stats(base)
+    production_python = sum(
+        loc(snapshot.read(path)) for path in snapshot.paths if path.startswith("src/cryodaq/") and path.endswith(".py")
+    )
+    test_python = sum(
+        loc(snapshot.read(path)) for path in snapshot.paths if path.startswith("tests/") and path.endswith(".py")
+    )
+    base_production_python = sum(
+        loc(base.read(path)) for path in base.paths if path.startswith("src/cryodaq/") and path.endswith(".py")
+    )
+    base_test_python = sum(
+        loc(base.read(path)) for path in base.paths if path.startswith("tests/") and path.endswith(".py")
+    )
+
+    engine_path = "src/cryodaq/engine.py"
+
+    def engine_metrics(candidate: GitSnapshot) -> tuple[int, int, int]:
+        tree = ast.parse(candidate.read(engine_path))
+        owner = next(
+            node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "_run_engine"
+        )
+        imports = sum(
+            source == engine_path for source, _target in import_edges(list(candidate.paths), candidate.read, candidate)
+        )
+        return loc(candidate.read(engine_path)), owner.end_lineno - owner.lineno + 1, imports
+
+    base_engine, base_run_engine, base_engine_imports = engine_metrics(base)
+    engine, run_engine, engine_imports = engine_metrics(snapshot)
+    soak_runner = loc(snapshot.read("scripts/soak_mock_stack_runner.py"))
+    soak_stack = loc(snapshot.read("scripts/soak_mock_stack.py"))
+    svg_lines = loc(important_svg)
+
+    def render(metrics_lines: int) -> bytes:
+        delivered_insertions = source_insertions + metrics_lines + svg_lines
+        delivered_deletions = source_deletions
+        delivered_text = source_text + metrics_lines + svg_lines
+        body = f"""<!-- Generated by tools/generate_montana_architecture_svgs.py; do not edit. -->
+# CryoDAQ current-candidate metrics
+
+This is the sole numeric authority for current-candidate aggregate measurements cited by the Montana report. Both this block and the surviving architecture SVG were rendered from the same frozen Git-index source snapshot; generated outputs are excluded from that snapshot to prevent self-reference.
+
+| Measure | Value |
+|---|---:|
+| Baseline commit | `{BASE_SHA}` |
+| Source snapshot tree | `{snapshot.tree_sha}` |
+| Source snapshot object manifest SHA-256 | `{snapshot.object_manifest_sha256()}` |
+| Changed source-inventory paths | {source_paths:,} |
+| Source-inventory Git churn | {source_insertions:,} insertions / {source_deletions:,} deletions / {source_insertions - source_deletions:,} net |
+| Delivered-tree changed paths | {source_paths + len(generated_paths):,} |
+| Delivered-tree Git churn | {delivered_insertions:,} insertions / {delivered_deletions:,} deletions / {delivered_insertions - delivered_deletions:,} net |
+| Changed binary paths, source / delivered | {source_binary:,} / {source_binary:,} |
+| Baseline repository text | {base_text:,} lines |
+| Candidate source-inventory text | {source_text:,} lines |
+| Delivered-tree text | {delivered_text:,} lines |
+| Baseline production Python | {base_production_python:,} lines |
+| Candidate production Python | {production_python:,} lines |
+| Production-Python inventory growth | {production_python - base_production_python:,} lines |
+| Baseline test Python | {base_test_python:,} lines |
+| Candidate test Python | {test_python:,} lines |
+| Test-Python inventory growth | {test_python - base_test_python:,} lines |
+| Baseline files | {len(base.paths):,} |
+| Candidate source-manifest files | {len(snapshot.paths):,} |
+| Delivered-tree files | {len(snapshot.paths) + len(generated_paths):,} |
+| Baseline text / binary files | {base_text_files:,} / {base_binary_files:,} |
+| Baseline binary bytes | {base_binary_bytes:,} |
+| Candidate source text / binary files | {source_text_files:,} / {source_binary_files:,} |
+| Candidate source binary bytes | {source_binary_bytes:,} |
+| `src/cryodaq/engine.py`, baseline / candidate | {base_engine:,} / {engine:,} lines |
+| `_run_engine`, baseline / candidate | {base_run_engine:,} / {run_engine:,} lines |
+| Engine local-module imports, baseline / candidate | {base_engine_imports:,} / {engine_imports:,} |
+| `scripts/soak_mock_stack_runner.py` | {soak_runner:,} lines |
+| `scripts/soak_mock_stack.py` | {soak_stack:,} lines |
+| Generated metrics document / surviving SVG | {metrics_lines:,} / {svg_lines:,} lines |
+"""
+        return body.encode("utf-8")
+
+    draft = render(0)
+    rendered = render(loc(draft))
+    if loc(rendered) != loc(draft):
+        raise RuntimeError("Montana metric rendering changed its own line cardinality")
+    return rendered
+
+
 def generate() -> None:
     """Render atomically from one baseline tree and one frozen Git-index tree."""
 
@@ -831,6 +1011,10 @@ def generate() -> None:
             rendered.append(
                 (temporary_path, path, path.relative_to(ROOT).as_posix(), len(paths) if exhaustive else "selected")
             )
+        important_render = next(item[0] for item in rendered if item[1] == MONTANA_IMPORTANT_SVG)
+        metrics_render = temporary_root / CURRENT_METRICS.name
+        metrics_render.write_bytes(current_metrics_bytes(montana_snapshot, important_render.read_bytes()))
+        rendered.append((metrics_render, CURRENT_METRICS, CURRENT_METRICS.relative_to(ROOT).as_posix(), "generated"))
         for temporary_path, path, _label, _count in rendered:
             temporary_path.replace(path)
         for _temporary_path, _path, label, count in rendered:

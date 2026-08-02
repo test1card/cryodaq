@@ -55,6 +55,7 @@ EXECUTION_ROOTS = (
                 "::test_rejects_deleted_renamed_and_ancestry_accepted_replacement"
             ),
             ("tests/governance/test_red_reproduction_immutability.py::test_rejects_same_blob_mode_or_type_change"),
+            "tests/governance/test_active_guard_execution.py::test_file_selected_guard_runs_only_from_git_index",
             "tests/governance/test_agent_formatter_gate.py::test_mutating_formatter_wrapper_is_absent",
             "tests/governance/test_agent_formatter_gate.py::test_tracked_recipes_forbid_mutating_ruff_modes",
             (

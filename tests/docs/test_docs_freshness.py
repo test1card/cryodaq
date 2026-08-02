@@ -8,6 +8,7 @@ check would produce false positives (see docstrings per test).
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import stat
 import subprocess
 import tomllib
 import xml.etree.ElementTree as ET
+from collections import Counter
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
@@ -48,6 +50,38 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _open_cell_rows(text: str) -> dict[str, tuple[str, ...]]:
+    """Parse the canonical open table and reject duplicate row IDs anywhere."""
+    assert text.count("| ID | Class |") == 1
+    open_text, closed_marker, _closed_text = text.partition("## Closed rows")
+    assert closed_marker
+    table = open_text.split("| ID | Class |", 1)[1].split("\n", 1)[1].rstrip("\n")
+    lines = table.splitlines()
+    assert lines and lines[0].startswith("| --- |")
+
+    document_ids = re.findall(r"(?m)^\s*\|\s*(OC-\d{3})\b", text)
+    duplicates = sorted(cell_id for cell_id, count in Counter(document_ids).items() if count != 1)
+    assert not duplicates, f"open-cell row IDs must be document-wide unique: {duplicates}"
+
+    rows: dict[str, tuple[str, ...]] = {}
+    for line in lines[1:]:
+        assert line.startswith("| OC-"), line
+        fields = tuple(field.strip() for field in line.strip("|").split("|"))
+        assert len(fields) == 11, (fields[0], len(fields))
+        rows[fields[0]] = fields
+    assert set(rows) <= set(document_ids)
+    return rows
+
+
+def _assert_open_cell_gate(rows: dict[str, tuple[str, ...]], cell_id: str) -> None:
+    assert cell_id in rows, f"{cell_id} must remain in the canonical open table"
+    gate = rows[cell_id][9]
+    assert gate.startswith("BLOCKS-DEPLOYMENT — ") and gate.count("BLOCKS-DEPLOYMENT") == 1, (
+        f"{cell_id} Gate column must start with the exact BLOCKS-DEPLOYMENT enum",
+        gate,
+    )
+
+
 def _frontmatter(text: str) -> dict[str, str]:
     """Parse the flat key/value subset used by canonical docs front matter."""
 
@@ -62,6 +96,856 @@ def _frontmatter(text: str) -> dict[str, str]:
         if separator:
             result[key.strip()] = value.strip()
     return {}
+
+
+def test_open_cells_dispositions_match_recorded_evidence() -> None:
+    """Open-cell dispositions must describe the production evidence they cite."""
+    rows = {
+        fields[1]: row
+        for row in _read(REPO_ROOT / "docs" / "OPEN_CELLS.md").splitlines()
+        if row.startswith("| OC-")
+        if len(fields := [field.strip() for field in row.split("|")]) > 2
+    }
+
+    oc_002 = rows["OC-002"]
+    oc_017 = rows["OC-017"]
+    oc_031 = rows["OC-031"]
+    oc_008 = rows["OC-008"]
+    failures = []
+    if (
+        "| OC-002 | C1a/C1b | DEFECT |" not in oc_002
+        or "QueryRouter.fetch" not in oc_002.rsplit("|", 3)[-3]
+        or "adapter failure is distinct from authoritative empty" not in oc_002.rsplit("|", 3)[-3]
+        or "test_router_never_raises_on_adapter_exception" not in oc_002.rsplit("|", 3)[-3]
+        or "assistant-producer availability inventory" not in oc_002.rsplit("|", 3)[-3]
+        or "NONBLOCKING" not in oc_002.rsplit("|", 3)[-3]
+        or "test_router_never_raises_on_adapter_exception" not in oc_002
+    ):
+        failures.append("OC-002 must be DEFECT and NONBLOCKING")
+    if (
+        "| OC-017 | C3 | CONTRACT |" not in oc_017
+        or oc_017.rsplit("|", 3)[-3].strip()
+        != "Terminal-evidence contract for the notification transports. NONBLOCKING."
+        or "test_send_message_distinguishes_transport_and_service_confirmation" not in oc_017
+    ):
+        failures.append("OC-017 must be CONTRACT and NONBLOCKING")
+    if "returns `delivered` on HTTP 200 alone" in oc_017:
+        failures.append("OC-017 must not claim bare HTTP 200 is delivered")
+    if "four tiers" not in oc_017 or "OC-026" not in oc_017:
+        failures.append("OC-017 must cite the four-tier repair and OC-026")
+    # OC-031 records a concrete guard bypass demonstrated against a green
+    # baseline, so by the register's own definition it is a DEFECT; only its
+    # scheduling is NONBLOCKING.
+    if (
+        "| OC-031 | substrate | DEFECT |" not in oc_031
+        or "no change to the detected set" not in oc_031
+        or "NONBLOCKING" not in oc_031.rsplit("|", 3)[-3]
+    ):
+        failures.append("OC-031 must be DEFECT and NONBLOCKING")
+    # OC-008 may not be closed by recreating the path-and-line-keyed
+    # inventory that OC-031 already defeated.
+    oc_008_gate = oc_008.rsplit("|", 3)[-3]
+    if (
+        "normalised semantic site keys" not in oc_008_gate
+        or "OC-031 known-bypass regressions" not in oc_008_gate
+        or "NONBLOCKING" not in oc_008_gate
+    ):
+        failures.append("OC-008 closure must require normalised semantic keys and the OC-031 bypass regressions")
+    assert not failures, "\n".join(failures)
+
+
+def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
+    """Keep the register contiguous and do not let the general rubric reclassify owner gates."""
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    status = _read(REPO_ROOT / "PROJECT_STATUS.md")
+    roadmap = _read(REPO_ROOT / "ROADMAP.md")
+    rows = _open_cell_rows(text)
+    # The protected set is not a hand-grown list of rows that previously
+    # escaped: it is the complete BLOCKS-DEPLOYMENT set, re-derived from the
+    # register on every run and pinned to the exact expected inventory so a
+    # newly blocking row (or a silently retagged one) is itself a red event.
+    expected_blocking = (
+        "OC-013",
+        "OC-020",
+        "OC-023",
+        "OC-024",
+        "OC-026",
+        "OC-028",
+        "OC-030",
+        "OC-034",
+        "OC-036",
+        "OC-037",
+        "OC-039",
+    )
+    derived_blocking = tuple(sorted(cell_id for cell_id, fields in rows.items() if "BLOCKS-DEPLOYMENT" in fields[9]))
+    assert derived_blocking == expected_blocking, (
+        "the register's BLOCKS-DEPLOYMENT inventory drifted from the protected expectation",
+        derived_blocking,
+    )
+    protected = expected_blocking
+    owner_ratified = ("OC-020", "OC-036", "OC-037", "OC-039")
+    summary = "OC-020/036/037/039 remain **owner-ratified BLOCKS-DEPLOYMENT** rows in this PR."
+    assert summary in text
+
+    def assert_derived_owner_gates(candidate_status: str, candidate_roadmap: str) -> None:
+        normalized_status = re.sub(r"\s+", " ", candidate_status)
+        roadmap_rows = {
+            match.group("id"): match.group(0)
+            for match in re.finditer(r"(?m)^\| \*\*(?P<id>OC-\d{3})\*\* \|.*$", candidate_roadmap)
+        }
+        for cell_id in owner_ratified:
+            assert f"**{cell_id} — BLOCKS-DEPLOYMENT" in normalized_status
+            assert f"| **{cell_id}** | **BLOCKS-DEPLOYMENT" in roadmap_rows[cell_id]
+
+    assert_derived_owner_gates(status, roadmap)
+
+    for cell_id in protected:
+        _assert_open_cell_gate(rows, cell_id)
+
+        # Exact mutation that passed the original summary-only guard at 74062e88:
+        # preserve its asserted summary while retagging the actual Gate cell.
+        mutated_fields = list(rows[cell_id])
+        original_row = "| " + " | ".join(mutated_fields) + " |"
+        mutated_fields[9] = mutated_fields[9].replace("BLOCKS-DEPLOYMENT", "NONBLOCKING", 1)
+        mutated_row = "| " + " | ".join(mutated_fields) + " |"
+        mutated = text.replace(original_row, mutated_row, 1)
+        assert mutated != text and summary in mutated
+        with pytest.raises(AssertionError, match=rf"{cell_id} Gate column"):
+            _assert_open_cell_gate(_open_cell_rows(mutated), cell_id)
+
+        for escaped in ("NOT BLOCKS-DEPLOYMENT", "~~BLOCKS-DEPLOYMENT~~"):
+            escaped_fields = list(rows[cell_id])
+            escaped_fields[9] = escaped_fields[9].replace("BLOCKS-DEPLOYMENT", escaped, 1)
+            escaped_row = "| " + " | ".join(escaped_fields) + " |"
+            escaped_text = text.replace(original_row, escaped_row, 1)
+            assert escaped_text != text
+            with pytest.raises(AssertionError, match=rf"{cell_id} Gate column"):
+                _assert_open_cell_gate(_open_cell_rows(escaped_text), cell_id)
+
+    duplicate = "| " + " | ".join(rows["OC-020"]) + " |"
+    before = text.replace("| ID | Class |", duplicate + "\n| ID | Class |", 1)
+    assert before != text
+    with pytest.raises(AssertionError, match="document-wide unique"):
+        _open_cell_rows(before)
+
+    after = text + "\n" + duplicate + "\n"
+    assert after != text
+    with pytest.raises(AssertionError, match="document-wide unique"):
+        _open_cell_rows(after)
+
+    closed_header = "| ID | Disposition | Surface | Closure evidence |\n| --- | --- | --- | --- |"
+    closed = text.replace(closed_header, closed_header + "\n| OC-020 | CLOSED | duplicate | invalid |", 1)
+    assert closed != text
+    with pytest.raises(AssertionError, match="document-wide unique"):
+        _open_cell_rows(closed)
+
+    malformed = text.replace(duplicate, "| OC-020 | malformed |", 1)
+    assert malformed != text
+    with pytest.raises(AssertionError, match=r"OC-020.*, 2"):
+        _open_cell_rows(malformed)
+
+    for cell_id in owner_ratified:
+        mutated_status = status.replace(
+            f"**{cell_id} — BLOCKS-DEPLOYMENT",
+            f"**{cell_id} — NONBLOCKING",
+            1,
+        )
+        assert mutated_status != status
+        with pytest.raises(AssertionError):
+            assert_derived_owner_gates(mutated_status, roadmap)
+
+        mutated_roadmap = roadmap.replace(
+            f"| **{cell_id}** | **BLOCKS-DEPLOYMENT",
+            f"| **{cell_id}** | **NONBLOCKING",
+            1,
+        )
+        assert mutated_roadmap != roadmap
+        with pytest.raises(AssertionError):
+            assert_derived_owner_gates(status, mutated_roadmap)
+
+
+def test_oc013_physical_off_gate_retag_mutant_is_red() -> None:
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    rows = _open_cell_rows(text)
+    _assert_open_cell_gate(rows, "OC-013")
+    fields = list(rows["OC-013"])
+    original = "| " + " | ".join(fields) + " |"
+    fields[9] = fields[9].replace("BLOCKS-DEPLOYMENT", "NONBLOCKING", 1)
+    mutated = text.replace(original, "| " + " | ".join(fields) + " |", 1)
+    assert mutated != text
+    with pytest.raises(AssertionError, match="OC-013 Gate column"):
+        _assert_open_cell_gate(_open_cell_rows(mutated), "OC-013")
+
+
+def test_open_cell_qualification_authority_and_status_remain_current() -> None:
+    open_cells = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    status = _read(REPO_ROOT / "PROJECT_STATUS.md")
+    roadmap = _read(REPO_ROOT / "ROADMAP.md")
+    claim_corrections = _read(REPO_ROOT / "docs" / "CLAIM_CORRECTIONS.md")
+
+    promotion_tree = ast.parse(_read(REPO_ROOT / "build_scripts" / "artifact_promotion.py"))
+    promotion_calls = {
+        node.func.id
+        for node in ast.walk(promotion_tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    qualification_tree = ast.parse(_read(REPO_ROOT / "src" / "cryodaq" / "core" / "qualification.py"))
+    qualification_functions = {
+        node.name for node in ast.walk(qualification_tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    promotion_tests = ast.parse(_read(REPO_ROOT / "tests" / "test_artifact_promotion.py"))
+    test_count = sum(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+        for node in promotion_tests.body
+    )
+    assert "verify_artifact_qualification_receipt" in promotion_calls
+    assert {"verify_artifact_qualification_receipt", "_signature_valid"} <= qualification_functions
+    assert "receipt_binding_digest" not in qualification_functions
+    assert test_count == 10
+
+    promotion_blob = subprocess.run(
+        ["git", "hash-object", "tests/test_artifact_promotion.py"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert promotion_blob == "1c1256e5c8274186f61214fa433d31b6053bc62d"
+
+    def assert_current(candidate_cells: str, candidate_status: str, candidate_corrections: str) -> None:
+        rows = _open_cell_rows(candidate_cells)
+        oc_034 = " | ".join(rows["OC-034"])
+        oc_037 = " | ".join(rows["OC-037"])
+        normalized_status = re.sub(r"\s+", " ", candidate_status)
+        assert "RSA-SHA256" in oc_034 and "RSA-SHA256" in oc_037
+        assert "10 tests" in oc_034
+        assert "10 passed" not in oc_037
+        assert "diagnostic" in oc_037 and "immutable" in oc_037
+        assert "workflow provenance" in oc_034 and "direct release upload" in oc_034
+        assert "same-ledger duplicate-use refusal" in oc_034
+        assert "cross-run replay refusal is not established" in oc_034
+        assert "binding_digest` is tamper detection, not a signature" not in oc_034
+        _assert_open_cell_gate(rows, "OC-037")
+        assert "**OC-037 — BLOCKS-DEPLOYMENT" in normalized_status
+        assert "RSA-SHA256" in normalized_status
+        assert "workflow provenance" in normalized_status
+        assert "direct release upload" in normalized_status
+        assert "receipt-producing qualification workflow" in normalized_status
+        assert "same-ledger duplicate-use refusal" in normalized_status
+        assert "cross-run replay refusal is not established" in normalized_status
+        assert "exact current test source contains ten top-level tests" in candidate_corrections
+        assert (
+            f"Immutable source blob `{promotion_blob}` contains ten top-level `test_*` functions"
+            in candidate_corrections
+        )
+        assert "The current test file contains nine tests" not in candidate_corrections
+        assert "reports 9 passed as an unfrozen current-worktree diagnostic" not in candidate_corrections
+
+    assert_current(open_cells, status, claim_corrections)
+    assert "OC-034/OC-037 release-promotion and direct-upload restrictions" in roadmap
+
+    unsigned_claim = open_cells.replace(
+        "RSA-SHA256 signature verification",
+        "binding_digest` is tamper detection, not a signature",
+        1,
+    )
+    assert unsigned_claim != open_cells
+    with pytest.raises(AssertionError):
+        assert_current(unsigned_claim, status, claim_corrections)
+
+    nine_tests = open_cells.replace("10 tests", "9 tests", 1)
+    assert nine_tests != open_cells
+    with pytest.raises(AssertionError):
+        assert_current(nine_tests, status, claim_corrections)
+
+    omitted_status = status.replace("**OC-037 — BLOCKS-DEPLOYMENT", "**OC-037 omitted", 1)
+    assert omitted_status != status
+    with pytest.raises(AssertionError):
+        assert_current(open_cells, omitted_status, claim_corrections)
+
+    stale_correction = claim_corrections.replace(
+        "exact current test source contains ten top-level tests",
+        "current test file contains nine tests",
+        1,
+    )
+    assert stale_correction != claim_corrections
+    with pytest.raises(AssertionError):
+        assert_current(open_cells, status, stale_correction)
+
+    diagnostic_claim = "focused suite: **10 tests (diagnostic source-tree count)**"
+    unbound_pass_claim = open_cells.replace(diagnostic_claim, "focused suite: **10 passed**", 1)
+    assert unbound_pass_claim != open_cells
+    with pytest.raises(AssertionError):
+        assert_current(unbound_pass_claim, status, claim_corrections)
+
+
+def test_current_metrics_uses_frozen_snapshot_against_poisoned_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A poisoned inherited index cannot alter metrics from the frozen snapshot."""
+
+    import tools.generate_montana_architecture_svgs as generator
+
+    snapshot = generator.target_snapshot(refresh=True)
+    entry = snapshot.entry("docs/OPEN_CELLS.md")
+    replacement = snapshot.entry("docs/MONTANA_REFACTOR_REPORT.md")
+    svg = b"<svg>\n</svg>\n"
+    expected = generator.current_metrics_bytes(snapshot, svg)
+    poisoned = tmp_path / "poisoned-index"
+    entries = [item for item in snapshot.entries if item.path != entry.path]
+    entries.append(replacement.__class__(entry.path, entry.mode, entry.object_type, replacement.oid))
+    entries.sort(key=lambda item: item.path)
+    env = dict(os.environ)
+    env["GIT_INDEX_FILE"] = str(poisoned)
+    subprocess.run(("git", "read-tree", "--empty"), cwd=generator.ROOT, env=env, check=True)
+    index_info = b"".join(
+        item.mode.encode("ascii") + b" " + item.oid.encode("ascii") + b" 0\t" + item.path.encode() + b"\x00"
+        for item in entries
+    )
+    subprocess.run(
+        ("git", "update-index", "-z", "--index-info"),
+        cwd=generator.ROOT,
+        env=env,
+        input=index_info,
+        check=True,
+    )
+    monkeypatch.setenv("GIT_INDEX_FILE", str(poisoned))
+    assert generator.current_metrics_bytes(snapshot, svg) == expected
+
+
+def test_baseline_metrics_ignore_replacement_refs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local `git replace` of the pinned baseline must not move generated metrics.
+
+    Replacement refs can substitute commits, trees, and blobs in supported Git
+    state. Generated baseline evidence names the pinned baseline commit, so
+    every generator read — revision resolution, tree listing, diff, and direct
+    blob reads — must resolve the original objects.
+    """
+
+    import tools.generate_montana_architecture_svgs as generator
+
+    clone = tmp_path / "replace-clone"
+    subprocess.run(
+        ("git", "clone", "--quiet", "--shared", "--no-checkout", ".", str(clone)),
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+    )
+    honest_tree = subprocess.run(
+        ("git", "--no-replace-objects", "rev-parse", f"{generator.BASE_SHA}^{{tree}}"),
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    head = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=REPO_ROOT, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    assert head != generator.BASE_SHA
+    subprocess.run(("git", "replace", generator.BASE_SHA, head), cwd=clone, check=True, capture_output=True)
+    poisoned_tree = subprocess.run(
+        ("git", "rev-parse", f"{generator.BASE_SHA}^{{tree}}"),
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert poisoned_tree != honest_tree
+
+    monkeypatch.setattr(generator, "ROOT", clone)
+    snapshot = generator.base_snapshot(refresh=True)
+    assert snapshot.tree_sha == honest_tree
+
+    # Direct blob reads are replacement-ref paths too: a replaced baseline
+    # blob must still yield its original bytes.
+    entry = next(item for item in snapshot.entries if item.kind == "blob")
+    original = snapshot.read(entry.path)
+    poison_oid = (
+        subprocess.run(
+            ("git", "hash-object", "-w", "--stdin"),
+            cwd=clone,
+            input=b"replacement-ref poison\n",
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode("ascii")
+        .strip()
+    )
+    subprocess.run(("git", "replace", entry.oid, poison_oid), cwd=clone, check=True, capture_output=True)
+    poisoned_read = subprocess.run(
+        ("git", "cat-file", "blob", entry.oid), cwd=clone, check=True, capture_output=True
+    ).stdout
+    assert poisoned_read == b"replacement-ref poison\n"
+    assert generator._cat_blobs((entry.oid,))[entry.oid] == original
+    assert generator.base_snapshot(refresh=True).read(entry.path) == original
+
+
+def test_claim_corrections_changed_python_count_matches_workflow_index() -> None:
+    workflow = _read(REPO_ROOT / ".github" / "workflows" / "main.yml")
+    corrections = _read(REPO_ROOT / "docs" / "CLAIM_CORRECTIONS.md")
+
+    def assert_current(candidate_workflow: str, candidate_corrections: str) -> None:
+        bases = re.findall(r"(?m)^\s*FORMAT_BASE=([0-9a-f]{40})\s*$", candidate_workflow)
+        assert len(bases) == 1
+        format_base = bases[0]
+        ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", format_base, "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert ancestry.returncode == 0, ancestry.stderr
+        changed = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--cached",
+                "--name-only",
+                "--diff-filter=ACMR",
+                format_base,
+                "--",
+                "*.py",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        assert changed == sorted(set(changed))
+        anchor = (
+            f"workflow-exact changed-file set in the frozen PR7 staged index contains **{len(changed):,}** Python paths"
+        )
+        assert anchor in candidate_corrections
+
+    assert_current(workflow, corrections)
+
+    stale_count = corrections.replace("contains **671** Python paths", "contains **669** Python paths", 1)
+    assert stale_count != corrections
+    with pytest.raises(AssertionError):
+        assert_current(workflow, stale_count)
+
+    stale_base = workflow.replace(
+        "FORMAT_BASE=f5d6434d20dffae62c9f03fbc12f68b03f48351b",
+        "FORMAT_BASE=dc2f911b4da7e01325ef4627c21a3f6140d3bc67",
+        1,
+    )
+    assert stale_base != workflow
+    with pytest.raises(AssertionError):
+        assert_current(stale_base, corrections)
+
+    # Regression for the detached/exported-checkout topology defect: a
+    # FORMAT_BASE that is a valid commit but NOT an ancestor of HEAD must fail
+    # closed as an AssertionError from the ancestry guard. With the old
+    # ``check=True`` form this escaped as a CalledProcessError (which
+    # ``pytest.raises(AssertionError)`` cannot catch), so a non-ancestor base in
+    # a GitHub-shaped detached checkout turned the guard into an error instead
+    # of a clean failure. The dangling commit below is a real child of HEAD, so
+    # it is a valid commit that is provably not an ancestor of HEAD, and it
+    # touches no ref or working tree.
+    non_ancestor_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "cryodaq-test",
+        "GIT_AUTHOR_EMAIL": "cryodaq-test@example.com",
+        "GIT_COMMITTER_NAME": "cryodaq-test",
+        "GIT_COMMITTER_EMAIL": "cryodaq-test@example.com",
+    }
+    head_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    non_ancestor = subprocess.run(
+        ["git", "commit-tree", head_tree, "-p", "HEAD", "-m", "non-ancestor ancestry probe"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=non_ancestor_env,
+        check=True,
+    ).stdout.strip()
+    ancestry_check = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", non_ancestor, "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ancestry_check.returncode == 1, (non_ancestor, ancestry_check.stderr)
+    non_ancestor_workflow = workflow.replace(
+        "FORMAT_BASE=f5d6434d20dffae62c9f03fbc12f68b03f48351b",
+        f"FORMAT_BASE={non_ancestor}",
+        1,
+    )
+    assert non_ancestor_workflow != workflow
+    with pytest.raises(AssertionError):
+        assert_current(non_ancestor_workflow, corrections)
+
+
+def test_open_cell_qualification_replay_scope_matches_production_workflow(tmp_path: Path) -> None:
+    from cryodaq.core.qualification import QualificationReceiptError, verify_qualification_receipt
+    from tests.qualification_support import (
+        VALID_AT,
+        qualification_context,
+        qualification_receipt_bytes,
+    )
+
+    open_cells = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    status = _read(REPO_ROOT / "PROJECT_STATUS.md")
+    workflow = _read(REPO_ROOT / ".github" / "workflows" / "qualified-artifact-promotion.yml")
+    oc_034 = " | ".join(_open_cell_rows(open_cells)["OC-034"])
+    assert "same-ledger duplicate-use refusal" in oc_034
+    assert "cross-run replay refusal is not established" in oc_034
+    assert "same-ledger duplicate-use refusal" in status
+    assert "cross-run replay refusal is not established" in status
+    assert '--replay-directory "$RUNNER_TEMP/qualification-replay"' in workflow
+
+    receipt = qualification_receipt_bytes()
+    context = qualification_context()
+    first_ledger = tmp_path / "workflow-run-1"
+    second_ledger = tmp_path / "workflow-run-2"
+    verify_qualification_receipt(receipt, expected=context, replay_directory=first_ledger, now_unix_s=VALID_AT)
+    with pytest.raises(QualificationReceiptError, match="replay refused"):
+        verify_qualification_receipt(receipt, expected=context, replay_directory=first_ledger, now_unix_s=VALID_AT)
+    verify_qualification_receipt(receipt, expected=context, replay_directory=second_ledger, now_unix_s=VALID_AT)
+
+
+def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    _snapshot, indexed_paths, contents = _architecture_inventory()
+    tracked = list(indexed_paths)
+
+    # Every locator recorded in OC-030's Sites cell is validated against the
+    # frozen index, and every live Cyrillic-Te spelling-selection needle under
+    # the GUI tree must be recorded: moving, repairing, deleting, or adding a
+    # site while the row stays stale turns this guard red. Both the literal
+    # "Т" and the escaped "\u0422" spellings are the same detected class.
+    oc030_needle = re.compile(r"""startswith\(\s*["'](?:Т|\\u0422)["']\)""")
+
+    def live_oc030_locators(candidate_paths: list[str], candidate_contents: dict[str, bytes]) -> dict[str, list[int]]:
+        live: dict[str, list[int]] = {}
+        for path in candidate_paths:
+            if not (path.startswith("src/cryodaq/gui/") and path.endswith(".py")):
+                continue
+            blob = candidate_contents.get(path)
+            assert blob is not None, f"tracked GUI path has no frozen-index blob: {path}"
+            lines = blob.decode("utf-8").splitlines()
+            needles = [number for number, line in enumerate(lines, 1) if oc030_needle.search(line)]
+            if needles:
+                live[path] = needles
+        return live
+
+    def recorded_oc030_locators(row_text: str) -> dict[str, list[int]]:
+        recorded: dict[str, list[int]] = {}
+        for match in re.finditer(r"`(src/cryodaq/gui/[^`:]+?):(\d+)`", row_text):
+            recorded.setdefault(match.group(1), []).append(int(match.group(2)))
+        return recorded
+
+    def assert_current(candidate: str, candidate_paths: list[str], candidate_contents: dict[str, bytes]) -> None:
+        rows = _open_cell_rows(candidate)
+        oc_012 = " | ".join(rows["OC-012"])
+        oc_030 = " | ".join(rows["OC-030"])
+        oc_012_lower = oc_012.lower()
+        workflows = sorted(
+            path
+            for path in candidate_paths
+            if path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
+        )
+        governance_modules = sorted(
+            path for path in candidate_paths if path.startswith("tests/governance/") and path.endswith(".py")
+        )
+        reference_blobs = workflows
+        referenced_runner_modules: set[str] = set()
+        for reference_path in reference_blobs:
+            blob = candidate_contents.get(reference_path, b"")
+            referenced_runner_modules.update(
+                path.decode("utf-8") for path in re.findall(rb"tools/[A-Za-z0-9_/-]+\.py", blob)
+            )
+            referenced_runner_modules.update(
+                path.decode("utf-8").replace(".", "/") + ".py"
+                for path in re.findall(rb"tools(?:\.[A-Za-z_][A-Za-z0-9_]*)+", blob)
+            )
+        required_runner_modules = referenced_runner_modules | {"tools/__init__.py"}
+        runner_modules = sorted(required_runner_modules & set(candidate_paths))
+        manifest = "".join(path + "\n" for path in workflows + governance_modules + runner_modules).encode("utf-8")
+        assert f"all {len(workflows)} tracked workflows" in oc_012_lower
+        assert f"all {len(governance_modules)} tracked governance-test modules" in oc_012_lower
+        assert f"all {len(runner_modules)} tracked workflow-referenced ci/governance runner modules" in oc_012_lower
+        assert set(runner_modules) == required_runner_modules
+        assert "registry/config references were swept" not in oc_012_lower
+        assert "sha256:" + hashlib.sha256(manifest).hexdigest() in oc_012
+        recorded = recorded_oc030_locators(oc_030)
+        assert recorded, "OC-030 must record at least one GUI locator"
+        assert recorded == live_oc030_locators(candidate_paths, candidate_contents), (
+            "OC-030 locators must match every live Cyrillic-Te spelling-selection site",
+            recorded,
+            live_oc030_locators(candidate_paths, candidate_contents),
+        )
+
+    assert_current(text, tracked, contents)
+    for old, replacement in (
+        ("All 6 tracked workflows", "All 4 tracked workflows"),
+        ("all 18 tracked governance-test modules", "all 12 tracked governance-test modules"),
+        (
+            "all 10 tracked workflow-referenced CI/governance runner modules",
+            "all 9 tracked workflow-referenced CI/governance runner modules",
+        ),
+        (
+            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1632`",
+            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1626`",
+        ),
+        (
+            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:167`",
+            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:166`",
+        ),
+        ("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`", "`src/cryodaq/gui/dashboard/temp_plot_widget.py:135`"),
+        ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
+        (
+            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:109`",
+            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:108`",
+        ),
+    ):
+        mutated = text.replace(old, replacement, 1)
+        assert mutated != text
+        with pytest.raises(AssertionError):
+            assert_current(mutated, tracked, contents)
+
+    omitted_locator = text.replace("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`; ", "", 1)
+    assert omitted_locator != text
+    with pytest.raises(AssertionError):
+        assert_current(omitted_locator, tracked, contents)
+
+    with pytest.raises(AssertionError):
+        assert_current(text, [*tracked, ".github/workflows/new-drift.yml"], contents)
+    with pytest.raises(AssertionError):
+        assert_current(text, [*tracked, "tests/governance/test_new_drift.py"], contents)
+    added_reference = dict(contents)
+    added_reference[".github/workflows/protected-ci-evidence-gate.yml"] += b"\npython -m tools.ci_new_runner\n"
+    added_paths = [*tracked, "tools/ci_new_runner.py"]
+    added_reference["tools/ci_new_runner.py"] = b"# referenced runner\n"
+    with pytest.raises(AssertionError):
+        assert_current(text, added_paths, added_reference)
+    with pytest.raises(AssertionError):
+        assert_current(text, [path for path in tracked if path != "tools/check_python_compile.py"], contents)
+    registry_claim = text.replace(
+        "all 10 tracked workflow-referenced CI/governance runner modules were swept",
+        (
+            "all 10 tracked workflow-referenced CI/governance runner modules were swept, "
+            "and the registry/config references were swept"
+        ),
+        1,
+    )
+    assert registry_claim != text
+    with pytest.raises(AssertionError):
+        assert_current(registry_claim, tracked, contents)
+
+
+def test_p5_report_manifest_claim_remains_pending_until_immutable_freeze() -> None:
+    report = _read(REPO_ROOT / "docs" / "MONTANA_REFACTOR_REPORT.md")
+    claim_corrections = _read(REPO_ROOT / "docs" / "CLAIM_CORRECTIONS.md")
+    open_cells = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    roadmap = _read(REPO_ROOT / "ROADMAP.md")
+
+    def assert_current(candidate_report: str, candidate_corrections: str) -> None:
+        report_lower = re.sub(r"\s+", " ", candidate_report.lower().replace(">", " "))
+        assert "no immutable p5 frozen-candidate manifest exists" in report_lower
+        assert "p5 immutable" in report_lower and "remain pending" in report_lower
+        pending_bindings = re.findall(
+            r"(?i)no immutable P5 candidate manifest currently binds (?:a|the) final commit/tree",
+            candidate_corrections,
+        )
+        assert len(pending_bindings) == 2
+        assert candidate_corrections.lower().count("remains pending until independently verified") >= 2
+
+        binding_verb = re.compile(
+            r"(?i)\b(?:"
+            r"bind(?:s|ing)?|bound|"
+            r"record(?:s|ed|ing)?|"
+            r"captur(?:e|es|ed|ing)|"
+            r"suppl(?:y|ies|ied|ying)|"
+            r"pin(?:s|ned|ning)?|"
+            r"establish(?:es|ed|ing)?|"
+            r"prov(?:e|es|ed|ing|en)|"
+            r"verif(?:y|ies|ied|ying)|"
+            r"certif(?:y|ies|ied|ying)"
+            r")\b"
+        )
+        candidate_target = re.compile(r"(?i)\b(?:candidate|final|exported|immutable|P5|frozen[- ]candidate)\b")
+        immutable_object = re.compile(r"(?i)\b(?:commit|tree|manifest|sha)\b")
+        binding_authority = re.compile(r"(?i)\b(?:external(?:ly)?|exact[- ]?sha|ci|evidence|receipt|run|manifest)\b")
+        local_qualifier = re.compile(
+            r"(?i)\b(?:"
+            r"no|not|never|without|cannot|can't|"
+            r"must|will|shall|should|required|requires?|requiring|"
+            r"historical|superseded|stale|false|undisclosed|unsupported"
+            r")\b"
+        )
+        leading_historical_or_stale = re.compile(r"(?i)^\s*(?:\*\*)?(?:Historical|Stale)(?:\*\*)?\s*:")
+        clause_boundary = re.compile(r"(?i)(?::|[—–]|--|;|\||,\s*(?:and|but|however|yet)\b)")
+
+        def claim_units(text: str) -> list[str]:
+            structured = re.sub(
+                r"\n(?=(?:\*\*[^*]+:\*\*|#{1,6}\s|[-*]\s))",
+                "\n\n",
+                text,
+            )
+            units = []
+            for block in re.split(r"\n\s*\n", structured):
+                normalized = re.sub(r"\s+", " ", block).strip()
+                if not normalized:
+                    continue
+                normalized = re.sub(r"(?<=[.!?])\s+", "\n", normalized)
+                normalized = re.sub(r"\s*[|;]\s*", "\n", normalized)
+                normalized = re.sub(
+                    r",\s*(?=(?:but|however|yet)\b)|\b(?:however|yet)\s*[:,]",
+                    "\n",
+                    normalized,
+                    flags=re.IGNORECASE,
+                )
+                units.extend(unit.strip() for unit in normalized.splitlines() if unit.strip())
+            return units
+
+        offenders = []
+        for unit in claim_units(candidate_report) + claim_units(candidate_corrections):
+            for verb in binding_verb.finditer(unit):
+                relation = unit[max(0, verb.start() - 160) : verb.end() + 160]
+                if not (
+                    candidate_target.search(relation)
+                    and immutable_object.search(relation)
+                    and binding_authority.search(relation)
+                ):
+                    continue
+                qualifier_prefix = unit[max(0, verb.start() - 140) : verb.start()]
+                boundaries = list(clause_boundary.finditer(qualifier_prefix))
+                if boundaries:
+                    qualifier_prefix = qualifier_prefix[boundaries[-1].end() :]
+                if leading_historical_or_stale.match(unit):
+                    continue
+                if not local_qualifier.search(qualifier_prefix):
+                    offenders.append(unit)
+                    break
+        assert not offenders, offenders[:3]
+        assert "P5-freeze.json" in roadmap
+        assert "They do not supply a P5 frozen candidate" in open_cells
+
+    assert_current(report, claim_corrections)
+    restored_report_claim = report.replace(
+        (
+            "An external candidate manifest is a pending\n"
+            "publication prerequisite; no current manifest binds a commit or tree for this\n"
+            "report."
+        ),
+        "The external candidate manifest binds the exact commit and tree.",
+        1,
+    )
+    assert restored_report_claim != report
+    with pytest.raises(AssertionError):
+        assert_current(restored_report_claim, claim_corrections)
+
+    restored_exact_report_claim = report.replace(
+        (
+            "An exact-SHA candidate manifest and CI\n"
+            "evidence remain pending publication; they are required before generated files\n"
+            "can be treated as externally frozen."
+        ),
+        (
+            "The candidate commit is recorded in external exact-SHA CI evidence so generated files remain "
+            "byte-stable after they are committed."
+        ),
+        1,
+    )
+    assert restored_exact_report_claim != report
+    with pytest.raises(AssertionError):
+        assert_current(restored_exact_report_claim, claim_corrections)
+
+    restored_corrections_claim, replacements = re.subn(
+        r"(?i)no immutable P5 candidate manifest currently binds (?:a|the) final commit/tree[^|\n]*",
+        "The external candidate manifest binds the final commit/tree.",
+        claim_corrections,
+        count=1,
+    )
+    assert replacements == 1
+    assert restored_corrections_claim != claim_corrections
+    with pytest.raises(AssertionError):
+        assert_current(report, restored_corrections_claim)
+
+    positive_probes = (
+        "The external candidate manifest binds the exact commit and tree.",
+        "The external candidate manifest captures the exact commit and tree.",
+        "The external candidate manifest records the exact commit and tree.",
+        "The external candidate manifest supplies the exact commit and tree evidence.",
+        "The external candidate manifest proves the exact final commit and tree.",
+        "The external candidate manifest verifies the exact final commit and tree.",
+        "The external candidate manifest certifies the exact final commit and tree.",
+        (
+            "No current manifest binds a commit or tree, but the external candidate manifest records the exact "
+            "commit and tree."
+        ),
+        "P5 remains pending; however, the external candidate manifest captures the final commit and tree.",
+        "P5 remains open, yet the external candidate manifest supplies the final commit and tree.",
+        "This summary is not provisional: the external candidate manifest records the exact final commit and tree.",
+        "This summary is not provisional — the external candidate manifest records the exact final commit and tree.",
+        "This summary is not provisional, and the external candidate manifest records the exact final commit and tree.",
+        "False: the external candidate manifest records the exact final commit and tree.",
+        "Superseded: the external candidate manifest records the exact final commit and tree.",
+        "Undisclosed: the external candidate manifest records the exact final commit and tree.",
+        "Unsupported: the external candidate manifest records the exact final commit and tree.",
+        (
+            "The candidate commit is not recorded, and the external candidate manifest records the exact final "
+            "commit and tree."
+        ),
+    )
+    for probe in positive_probes:
+        with pytest.raises(AssertionError):
+            assert_current(report + "\n\n" + probe, claim_corrections)
+
+    correction_probe = claim_corrections.replace(
+        "so that binding remains pending until independently verified.",
+        (
+            "so that binding remains pending until independently verified. "
+            "The external candidate manifest records the exact final commit and tree."
+        ),
+        1,
+    )
+    assert correction_probe != claim_corrections
+    with pytest.raises(AssertionError):
+        assert_current(report, correction_probe)
+
+    allowed_probes = (
+        "The exact candidate commit must be recorded in external CI evidence after commit.",
+        "The exact candidate commit will be recorded in external CI evidence after commit.",
+        "The exact candidate commit was not recorded in external CI evidence.",
+        "Historical: the exact candidate commit was recorded in external CI evidence.",
+        "Stale: the exact candidate commit was recorded in external CI evidence.",
+        "The exact candidate commit remains pending until independently verified.",
+    )
+    for probe in allowed_probes:
+        assert_current(report + "\n\n" + probe, claim_corrections)
+
+
+def test_current_metrics_snapshot_binding_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Registered runtime guard for the frozen-snapshot metrics boundary."""
+
+    test_current_metrics_uses_frozen_snapshot_against_poisoned_index(tmp_path, monkeypatch)
+
+
+def test_oc037_unbound_pass_claim_guard() -> None:
+    """Registered runtime guard for OC-037's bound diagnostic evidence."""
+
+    test_open_cell_qualification_authority_and_status_remain_current()
+
+
+def test_oc012_reference_runner_inventory_guard() -> None:
+    """Registered runtime guard for OC-012's derived runner inventory."""
+
+    test_open_cell_inventory_and_oc030_locator_match_live_tree()
+
+
+def test_p5_pending_manifest_guard() -> None:
+    """Registered runtime guard for the pending P5-manifest boundary."""
+
+    test_p5_report_manifest_claim_remains_pending_until_immutable_freeze()
 
 
 def test_design_system_release_markers_are_one_version() -> None:
@@ -1297,7 +2181,7 @@ def _architecture_inventory() -> tuple[object, tuple[str, ...], dict[str, bytes]
     return snapshot, paths, {path: snapshot.read(path) for path in paths}
 
 
-def test_checked_in_montana_architecture_svgs_match_frozen_index_snapshot() -> None:
+def test_checked_in_montana_architecture_svgs_match_frozen_index_snapshot(tmp_path: Path) -> None:
     """Narrowed to the one surviving architecture graph (manifest SVG decision).
 
     Previously checked both the exhaustive 1,085-file "all-files" map and the
@@ -1327,47 +2211,94 @@ def test_checked_in_montana_architecture_svgs_match_frozen_index_snapshot() -> N
     )
     assert _svg_nodes(important_svg) == important
     generator.verify(important_svg, important, exhaustive=False)
+    rendered = tmp_path / important_svg.name
+    generator.important_svg("montana", paths, reader, rendered, snapshot)
+    generator.verify(rendered, important, exhaustive=False)
+    assert rendered.read_bytes() == generator._git_bytes("show", ":docs/architecture-montana-important.svg")
+
+
+def test_shipped_architecture_artifact_does_not_claim_removed_companions() -> None:
+    # Enumerate every tracked architecture-SVG path, not only the ones this
+    # guard already knows about: a companion re-checked-in at any natural
+    # location (for example the historical root path
+    # `docs/architecture-montana-all-files.svg`) must fail this exact
+    # allowlist instead of passing unseen.
+    shipped_family = sorted(
+        path
+        for path in _tracked_files()
+        if path.endswith(".svg")
+        and (path.startswith("docs/architecture-") or path.startswith("docs/refactor/architecture-"))
+    )
+    assert shipped_family == ["docs/architecture-montana-important.svg"]
+
+    expected_subtitle = "Selected load-bearing files in the sole shipped architecture map."
+    generator = _read(REPO_ROOT / "tools/generate_montana_architecture_svgs.py")
+    checked_in = _read(REPO_ROOT / shipped_family[0])
+    report = _read(REPO_ROOT / "docs/MONTANA_REFACTOR_REPORT.md")
+    assert expected_subtitle in generator
+    assert expected_subtitle in checked_in
+    for stale_claim in ("exhaustive companion map", "The all-file SVGs"):
+        assert stale_claim not in checked_in
+        assert stale_claim not in report
 
 
 def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
-    """Narrowed to the one surviving architecture graph (manifest SVG decision).
-
-    Previously globbed ``docs/refactor/architecture-*.svg`` and expected all
-    four. PR-A ships only ``docs/architecture-montana-important.svg`` (moved
-    out of the campaign-named ``docs/refactor/``); the other three never
-    existed in this tree.
-    """
+    """Bind one generated metric block and the surviving SVG to one index snapshot."""
     import tools.generate_montana_architecture_svgs as generator
 
-    _snapshot, frozen_paths, contents = _architecture_inventory()
-    paths = list(frozen_paths)
-    source_text = sum(generator.loc(contents[path]) for path in paths)
-    production_python = sum(
-        generator.loc(contents[path]) for path in paths if path.startswith("src/cryodaq/") and path.endswith(".py")
-    )
-    test_python = sum(
-        generator.loc(contents[path]) for path in paths if path.startswith("tests/") and path.endswith(".py")
-    )
-    generated = [REPO_ROOT / "docs/architecture-montana-important.svg"]
-    assert all(path.is_file() for path in generated)
-    delivered_text = source_text + sum(generator.loc(path.read_bytes()) for path in generated)
-    report = (REPO_ROOT / "docs/MONTANA_REFACTOR_REPORT.md").read_text(encoding="utf-8")
+    snapshot, frozen_paths, contents = _architecture_inventory()
+    assert frozen_paths and contents
+    svg_path = REPO_ROOT / "docs/architecture-montana-important.svg"
 
-    expected_rows = (
-        f"| Candidate source-inventory text | {source_text:,} lines |",
-        f"| Delivered-tree text | {delivered_text:,} lines |",
-        f"| Candidate production Python | {production_python:,} lines |",
-        f"| Candidate test Python | {test_python:,} lines |",
-        f"| Architecture source manifest | {len(paths):,} |",
-        f"| Delivered-tree files | {len(paths) + len(generated):,} |",
+    expected = generator.current_metrics_bytes(
+        snapshot, generator._git_bytes("show", ":docs/architecture-montana-important.svg")
     )
-    for row in expected_rows:
-        assert row in report
+    assert generator._git_bytes("show", ":docs/current_candidate_metrics.md") == expected
 
-    runner_lines = generator.loc(contents["scripts/soak_mock_stack_runner.py"])
-    soak_lines = generator.loc(contents["scripts/soak_mock_stack.py"])
-    assert f"New ~{runner_lines:,}-line runner" in report
-    assert f"New/expanded {soak_lines:,} lines" in report
+    metrics = expected.decode("utf-8")
+    svg_metadata = _svg_metadata(svg_path)
+    assert f"| Source snapshot tree | `{snapshot.tree_sha}` |" in metrics
+    assert f"| Source snapshot object manifest SHA-256 | `{snapshot.object_manifest_sha256()}` |" in metrics
+    assert svg_metadata["source_tree_sha"] == snapshot.tree_sha
+    assert svg_metadata["source_tree_file_count"] == len(snapshot.paths)
+
+    report = _read(REPO_ROOT / "docs/MONTANA_REFACTOR_REPORT.md")
+    metrics_link = "[generated current-candidate metrics](current_candidate_metrics.md)"
+    assert report.count(metrics_link) >= 5
+    assert "current_candidate_metrics.md" in report
+
+    # The owner plan must authorize and require both shipped artifacts: the
+    # generator writes them from one frozen snapshot, so a plan that
+    # regenerates only the SVG leaves the metrics tree hash stale.
+    roadmap = _read(REPO_ROOT / "ROADMAP.md")
+    p3_amendment = roadmap[roadmap.index("* **P3**") : roadmap.index("* **P4**")]
+    assert "docs/architecture-montana-important.svg" in p3_amendment
+    assert "docs/current_candidate_metrics.md" in p3_amendment
+
+    # The narrative is no longer a second numeric database. This structural
+    # check rejects a newly worded contradictory aggregate instead of listing
+    # every prose anchor that happened to exist when the guard was written.
+    comma_number = re.compile(r"\b\d{1,3}(?:,\d{3})+\b")
+    aggregate_claim = re.compile(
+        r"(?i)(?<![\w.])\d(?:[\d,]*\d)?(?:\s+[a-z+/_-]+){0,4}\s+"
+        r"(?:files?|paths?|nodes?|lines?|insertions?|deletions?|imports?|additions?|tests?|bytes?)\b"
+    )
+    # Compact suffix forms (the historical `130k lines` escape named in
+    # MONTANA-REPORT-METRIC-FALSE-GREEN-234): the unit suffix is attached to
+    # the digits, so the two patterns above cannot see them.
+    compact_aggregate_claim = re.compile(
+        r"(?i)(?<![\w.])\d+(?:\.\d+)?[kM](?:\s+[a-z+/_-]+){0,4}\s+"
+        r"(?:files?|paths?|nodes?|lines?|insertions?|deletions?|imports?|additions?|tests?|bytes?)\b"
+    )
+    assert not comma_number.search(report)
+    assert not aggregate_claim.search(report)
+    assert not compact_aggregate_claim.search(report)
+
+    mutant = report + "\nThe current candidate now claims 999999 newly measured source paths.\n"
+    assert aggregate_claim.search(mutant)
+    for compact_form in ("130k lines", "1M lines"):
+        compact_mutant = report + f"\nThe campaign interim count was {compact_form} of source text.\n"
+        assert compact_aggregate_claim.search(compact_mutant)
 
 
 def test_architecture_svg_types_symlinks_and_gitlinks(tmp_path: Path, monkeypatch) -> None:

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tools import ci_active_checkout_runner, ci_candidate_runner
+from tools import ci_active_checkout_runner, ci_candidate_runner, ci_guard_execution
 from tools.ci_execution_roots import ExecutionSelection
 from tools.ci_guard_execution import (
     RECEIPT_PREFIX,
@@ -267,6 +267,20 @@ def test_active_checkout_strict_guard_uses_entry_point_plugins_once(tmp_path: Pa
     payload = _receipt(completed)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert payload["result"] == "passed"
+
+
+def test_file_selected_guard_runs_only_from_git_index() -> None:
+    """Use the live default-CI selection; no synthetic registry or root is valid evidence."""
+    node = "tests/docs/test_docs_freshness.py::test_oc013_physical_off_gate_retag_mutant_is_red"
+    selected_files, selected_nodes = ci_guard_execution.checkout_execution_selection(ROOT, "remaining")
+    assert "tests/docs/test_docs_freshness.py" in selected_files
+    assert node not in selected_nodes
+
+    platform = current_guard_platform()
+    git_index = active_guard_specs(ROOT, "remaining", platform=platform, execution_root="git-index")
+    exported = active_guard_specs(ROOT, "remaining", platform=platform, execution_root="exported-commit")
+    assert any(spec.node == node for spec in git_index)
+    assert all(spec.node != node for spec in exported)
 
 
 def _run_strict(
