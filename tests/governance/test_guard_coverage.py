@@ -10,9 +10,12 @@ import pytest
 from tools.guard_coverage import (
     INVENTORY_PATH,
     GuardCoverageError,
+    _git_file,
     _inventory_changes,
     _load_inventory,
+    _repository_authority,
     compare,
+    main,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +50,60 @@ def _c2_inventory() -> dict:
         "guards": {"C2-DESCRIPTOR-SELECTION": payload["guards"]["C2-DESCRIPTOR-SELECTION"]},
         "reduction_declarations": [],
     }
+
+
+def _g4_inventory() -> dict:
+    payload = json.loads((ROOT / INVENTORY_PATH).read_text(encoding="utf-8"))
+    return {
+        "schema_version": 1,
+        "guards": {"G4-DOCUMENTATION-PROCEDURES": payload["guards"]["G4-DOCUMENTATION-PROCEDURES"]},
+        "reduction_declarations": [],
+    }
+
+
+def _g4_guard_source(
+    *,
+    weakened: bool,
+    source_controlled_parameter: bool = True,
+    callback_type_error: bool = False,
+) -> str:
+    physical_check = "if False:" if weakened else 'if result == "SOFTWARE-PROVABLE":'
+    validator_parameters = (
+        "root: Path, overrides=None, *, source_controlled=None"
+        if source_controlled_parameter
+        else "root: Path, overrides=None"
+    )
+    authority = (
+        "source_controlled or (lambda relative_path: _g4_is_source_controlled(root, relative_path))"
+        if source_controlled_parameter
+        else "lambda relative_path: _g4_is_source_controlled(root, relative_path)"
+    )
+    type_error = "    raise TypeError('unrelated callback body failure')\n" if callback_type_error else ""
+    return (
+        "from pathlib import Path\n"
+        "import subprocess\n\n"
+        "def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:\n"
+        "    root = root.resolve()\n"
+        "    repository = subprocess.run(\n"
+        "        ['git', '--no-replace-objects', '-C', str(root), 'rev-parse', '--show-toplevel'],\n"
+        "        capture_output=True, text=True,\n"
+        "    )\n"
+        "    if repository.returncode or Path(repository.stdout.strip()).resolve() != root:\n"
+        "        raise RuntimeError('source-control evidence is unavailable')\n"
+        "    return False\n\n"
+        f"def _validate_g4_docs({validator_parameters}) -> None:\n"
+        f"{type_error}"
+        f"    is_source_controlled = {authority}\n"
+        "    if is_source_controlled('cooldown_v5/predictor_model.json'):\n"
+        "        raise AssertionError('source-control binding is wrong')\n"
+        "    checklist = (overrides or {}).get(\n"
+        "        'docs/new_lab_acceptance_checklist.md',\n"
+        "        (root / 'docs/new_lab_acceptance_checklist.md').read_text(encoding='utf-8'),\n"
+        "    )\n"
+        "    result = checklist.split('result: ', 1)[1].splitlines()[0]\n"
+        f"    {physical_check}\n"
+        "        raise AssertionError('acceptance evidence is external or physical, not SOFTWARE-PROVABLE')\n"
+    )
 
 
 def test_inventory_uses_stable_ids_and_never_line_number_identity() -> None:
@@ -136,8 +193,332 @@ def test_guard_coverage_reduction_requires_exact_tracked_declaration(tmp_path: P
     assert green.approved == ("TEST-REDUCTION-001",)
 
 
+def test_guard_coverage_runs_current_c2_frozenset_allowlist_shape(tmp_path: Path) -> None:
+    """The real current C2 guard uses an empty ``frozenset`` allowlist.
+
+    Synthetic comparator fixtures historically used only mappings, so they
+    stayed green while a production exact-object comparison crashed before it
+    could produce a verdict. Exercise the current tracked guard source through
+    the real comparator instead of restating its allowlist shape in a fixture.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_c2_inventory(), indent=2) + "\n")
+    guard_path = Path("tests/analytics/test_c2_descriptor_selection_guard.py")
+    current_guard = (ROOT / guard_path).read_text(encoding="utf-8")
+    _write(repo / guard_path, current_guard)
+    _write(
+        repo / "src" / "cryodaq" / "reporting" / "periodic_renderer.py",
+        "def _channel_key(value):\n    return value\n",
+    )
+    base = _commit(repo, "current C2 guard")
+    _write(repo / "candidate-marker.txt", "same guard, second exact object\n")
+    candidate = _commit(repo, "candidate with unchanged C2 guard")
+
+    result = compare(repo, base, candidate)
+
+    assert result.passed
+    assert result.reductions == ()
+
+    with_set_exemption = current_guard.replace(
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()",
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({('src/cryodaq/reporting/periodic_renderer.py', 2)})",
+        1,
+    )
+    assert with_set_exemption != current_guard
+    _write(repo / guard_path, with_set_exemption)
+    added_exemption = _commit(repo, "add set-shaped exemption without a purpose")
+
+    red = compare(repo, candidate, added_exemption)
+
+    assert not red.passed
+    assert len(red.reductions) == 1
+    assert red.reductions[0]["added_exemption_ids"][0].startswith("UNDECLARED[")
+
+    collision_inventory = _c2_inventory()
+    collision_inventory["guards"]["C2-DESCRIPTOR-SELECTION"]["exemptions"]["C2-EXEMPT-OC-010"]["purpose"] = (
+        "UNDECLARED-SET-SHAPED-EXEMPTION"
+    )
+    _write(repo / INVENTORY_PATH, json.dumps(collision_inventory, indent=2) + "\n")
+    mapping_collision = current_guard.replace(
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()",
+        "_ALLOWLIST = {('src/cryodaq/reporting/periodic_renderer.py', 2): 'UNDECLARED-SET-SHAPED-EXEMPTION'}",
+        1,
+    )
+    assert mapping_collision != current_guard
+    _write(repo / guard_path, mapping_collision)
+    collision_base = _commit(repo, "registered mapping purpose equals the old sentinel")
+
+    set_collision = current_guard.replace(
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset()",
+        "_ALLOWLIST: frozenset[tuple[str, int]] = frozenset({('src/cryodaq/reporting/periodic_renderer.py', 2)})",
+        1,
+    )
+    assert set_collision != current_guard
+    _write(repo / guard_path, set_collision)
+    collision_candidate = _commit(repo, "set entry collides with the old sentinel text")
+
+    collision_red = compare(repo, collision_base, collision_candidate)
+
+    assert not collision_red.passed
+    assert len(collision_red.reductions) == 1
+    assert collision_red.reductions[0]["added_exemption_ids"][0].startswith("UNDECLARED[")
+    assert collision_red.reductions[0]["removed_exemption_inventory_ids"] == []
+    assert collision_red.removed_exemptions == ("C2-DESCRIPTOR-SELECTION:C2-EXEMPT-OC-010",)
+
+
+def test_g4_archived_revision_binds_source_control_to_the_compared_tree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(repo / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    base = _commit(repo, "base G4 guard")
+
+    # The candidate deliberately loses the procedure rejection. Coverage must
+    # distinguish that weakening after loading both revisions from Git-less
+    # archives; a shared archive-root Git failure must not make both challenges
+    # fail before the changed behavior is reached.
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=True))
+    weakened = _commit(repo, "weaken G4 procedure guard")
+    _git(repo, "replace", base, weakened)
+
+    with pytest.raises(GuardCoverageError, match="repository-local Git replacement authority is active"):
+        compare(repo, base, weakened)
+
+    _git(repo, "replace", "-d", base)
+    red = compare(repo, base, weakened)
+
+    assert not red.passed
+    assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+
+def test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(repo / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(
+        repo / "tests" / "docs" / "test_docs_freshness.py",
+        _g4_guard_source(weakened=False, source_controlled_parameter=False),
+    )
+    archived_base = _commit(repo, "pre-signature G4 guard")
+
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    current_guard = _commit(repo, "add revision source-control callback")
+
+    compatible = compare(repo, archived_base, current_guard)
+    assert compatible.passed
+    assert compatible.gains == ()
+
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=True))
+    weakened = _commit(repo, "remove G4 procedure rejection")
+
+    red = compare(repo, archived_base, weakened)
+    assert not red.passed
+    assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+
+def test_g4_pre_signature_callback_body_type_error_is_a_base_failure(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _write(repo / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(repo / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(
+        repo / "tests" / "docs" / "test_docs_freshness.py",
+        _g4_guard_source(
+            weakened=False,
+            source_controlled_parameter=False,
+            callback_type_error=True,
+        ),
+    )
+    archived_base = _commit(repo, "pre-signature callback with unrelated defect")
+
+    _write(repo / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    current_guard = _commit(repo, "working current callback")
+
+    with pytest.raises(
+        GuardCoverageError,
+        match=(
+            "base challenge failed: G4-DOCUMENTATION-PROCEDURES:"
+            "G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001: guard error: TypeError: "
+            "unrelated callback body failure"
+        ),
+    ):
+        compare(repo, archived_base, current_guard)
+
+
 def test_gitless_export_fails_hard_instead_of_skipping(tmp_path: Path) -> None:
     _write(tmp_path / INVENTORY_PATH, json.dumps(_c2_inventory(), indent=2) + "\n")
 
-    with pytest.raises(GuardCoverageError, match="requires an exact Git checkout"):
+    with pytest.raises(GuardCoverageError, match="requires one self-consistent repository authority"):
         compare(tmp_path, "HEAD^", "HEAD")
+
+
+def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """Every Git read shares one self-consistent repository authority.
+
+    Inherited grafts are ignored; repository-local graph rewrites fail closed.
+    More importantly, a foreign Git directory whose ``core.worktree`` names the
+    requested root can make ``--show-toplevel`` echo that exact root while all
+    revisions and trees come from the foreign object database. Production
+    ``main()`` must reject that non-reciprocal worktree/Git-directory binding,
+    while ordinary and legitimate linked worktrees retain the real reduction.
+    """
+
+    requested = tmp_path / "requested"
+    requested.mkdir()
+    _git(requested, "init")
+    _write(requested / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(requested / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(requested / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    _commit(requested, "requested base guard")
+    _write(requested / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=True))
+    weakened = _commit(requested, "weaken the requested G4 procedure guard")
+
+    graft_file = tmp_path / "inherited-grafts"
+    _write(graft_file, f"{weakened} {weakened}\n")
+    monkeypatch.setenv("GIT_GRAFT_FILE", str(graft_file))
+
+    red = compare(requested, "HEAD^", "HEAD")
+
+    assert not red.passed
+    assert red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+    monkeypatch.delenv("GIT_GRAFT_FILE")
+    local_grafts = requested / ".git" / "info" / "grafts"
+    _write(local_grafts, f"{weakened} {weakened}\n")
+
+    with pytest.raises(GuardCoverageError, match="repository-local Git graft authority is active"):
+        compare(requested, "HEAD^", "HEAD")
+
+    local_grafts.unlink()
+    local_shallow = requested / ".git" / "shallow"
+    _write(local_shallow, f"{weakened}\n")
+
+    with pytest.raises(GuardCoverageError, match="repository-local Git shallow authority is active"):
+        compare(requested, "HEAD^", "HEAD")
+
+    local_shallow.unlink()
+    base = _git(requested, "rev-parse", "HEAD^")
+    _git(requested, "replace", base, weakened)
+
+    with pytest.raises(GuardCoverageError, match="repository-local Git replacement authority is active"):
+        compare(requested, "HEAD^", "HEAD")
+
+    _git(requested, "replace", "-d", base)
+    final_red = compare(requested, "HEAD^", "HEAD")
+    assert not final_red.passed
+    assert final_red.reductions[0]["guard_id"] == "G4-DOCUMENTATION-PROCEDURES"
+    assert final_red.reductions[0]["lost_challenge_ids"] == ["G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001"]
+
+    assert main(["--repo", str(requested), "--base", "HEAD^", "--candidate", "HEAD"]) == 1
+    ordinary_error = capsys.readouterr().err
+    assert "guard coverage regression" in ordinary_error
+    assert "G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001" in ordinary_error
+
+    linked = tmp_path / "legitimate-linked-worktree"
+    _git(requested, "worktree", "add", "--detach", str(linked), "HEAD")
+    assert main(["--repo", str(linked), "--base", "HEAD^", "--candidate", "HEAD"]) == 1
+    linked_error = capsys.readouterr().err
+    assert "guard coverage regression" in linked_error
+    assert "G4-CHALLENGE-EXTERNAL-AS-SOFTWARE-001" in linked_error
+
+    foreign = tmp_path / "foreign-authority"
+    foreign.mkdir()
+    _git(foreign, "init")
+    _write(foreign / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(foreign / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(foreign / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    _commit(foreign, "foreign strong base guard")
+    _write(foreign / "foreign-marker.txt", "second strong object\n")
+    foreign_head = _commit(foreign, "foreign strong candidate guard")
+    _git(foreign, "config", "core.worktree", str(requested))
+
+    requested_git = requested / ".git"
+    requested_git.rename(tmp_path / "requested-owned-git")
+    _write(requested_git, f"gitdir: {(foreign / '.git').as_posix()}\n")
+
+    assert Path(_git(requested, "rev-parse", "--show-toplevel")).resolve() == requested.resolve()
+    assert Path(_git(requested, "rev-parse", "--absolute-git-dir")).resolve() == (foreign / ".git").resolve()
+    assert _git(requested, "rev-parse", "HEAD") == foreign_head
+
+    assert main(["--repo", str(requested), "--base", "HEAD^", "--candidate", "HEAD"]) == 2
+    assert "repository linked-worktree authority is incomplete" in capsys.readouterr().err
+
+    _write(foreign / ".git" / "gitdir", f"{requested_git.resolve().as_posix()}\n")
+    _write(foreign / ".git" / "commondir", ".\n")
+
+    assert Path(_git(requested, "rev-parse", "--git-common-dir")).resolve() == (foreign / ".git").resolve()
+    assert _git(requested, "rev-parse", "HEAD") == foreign_head
+    assert main(["--repo", str(requested), "--base", "HEAD^", "--candidate", "HEAD"]) == 2
+    assert "repository linked-worktree authority requires a distinct common directory" in capsys.readouterr().err
+
+
+def test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root(
+    tmp_path: Path,
+) -> None:
+    """The requested-repository verification is fail-closed: a path whose
+    ``rev-parse --show-toplevel`` resolves anywhere but the requested
+    repository is unavailable evidence, never an implicit pass.
+
+    A directory nested inside a foreign repository borrows that repository's
+    objects for both revisions, so without the top-level check the comparison
+    reported no reduction; the authority boundary rejects it before any
+    revision is resolved.
+    """
+
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    _git(foreign, "init")
+    _write(foreign / INVENTORY_PATH, json.dumps(_g4_inventory(), indent=2) + "\n")
+    _write(foreign / "docs" / "new_lab_acceptance_checklist.md", "result: PHYSICAL\n")
+    _write(foreign / "tests" / "docs" / "test_docs_freshness.py", _g4_guard_source(weakened=False))
+    _commit(foreign, "foreign base guard")
+    _write(foreign / "foreign-repository-marker.txt", "unrelated second commit\n")
+    _commit(foreign, "foreign second commit keeps the strong guard at HEAD")
+
+    nested = foreign / "nested"
+    nested.mkdir()
+
+    with pytest.raises(GuardCoverageError, match="repository discovery does not bind the exact requested worktree"):
+        compare(nested, "HEAD^", "HEAD")
+
+
+def test_git_file_reads_the_requested_repository_not_an_inherited_redirect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """``_git_file`` shares the sanitized boundary: an inherited redirect into a
+    second repository must not satisfy a path read against the requested one."""
+
+    requested = tmp_path / "requested"
+    requested.mkdir()
+    _git(requested, "init")
+    _write(requested / "identity.txt", "requested\n")
+    requested_revision = _commit(requested, "requested marker")
+
+    strong = tmp_path / "strong"
+    strong.mkdir()
+    _git(strong, "init")
+    _write(strong / "identity.txt", "strong\n")
+    _commit(strong, "strong marker")
+
+    monkeypatch.setenv("GIT_DIR", str(strong / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(strong))
+
+    content = _git_file(_repository_authority(requested), requested_revision, Path("identity.txt"))
+
+    assert content == b"requested\n"

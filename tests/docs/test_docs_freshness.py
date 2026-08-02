@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shlex
+import stat
 import subprocess
 import tomllib
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 
@@ -728,7 +731,111 @@ def _g4_declared_ids(root: Path) -> set[str]:
     }
 
 
-def _g4_reference_error(root: Path, reference: str) -> str | None:
+def _g4_is_source_controlled(root: Path, relative_path: str) -> bool:
+    """Return whether the path exists in the committed tree at HEAD.
+
+    Resolved against the BOUND TREE rather than the index, which closes two ways
+    the earlier `git ls-files --error-unmatch` form could lie.
+
+    Pathspec magic: `ls-files` interprets its argument as a pathspec, so a future
+    `requires:Make*|status:present` reference was satisfied by the tracked
+    `Makefile` even though nothing named `Make*` is tracked -- measured. The
+    replacement uses `ls-tree` with literal pathspec semantics.
+
+    Index availability: `ls-files` returns 1 both for a genuinely untracked path
+    and for a missing or unreadable `.git/index` (including an inherited
+    `GIT_INDEX_FILE` pointing nowhere), so unavailable evidence read as "absent"
+    and let a `status:absent` reference pass. HEAD is verified independently
+    first, so an unresolvable HEAD raises instead of being mistaken for absence.
+
+    Replacement refs: Git commands ordinarily honor `refs/replace/*`, so a local
+    `git replace HEAD HEAD^` can substitute an ancestor tree and turn a tracked
+    prerequisite into apparent absence. Every evidence lookup disables object
+    replacement so the claim remains bound to the raw commit named by HEAD.
+
+    A committed tree is also the right authority for the claim being checked: a
+    `status:` declaration is about a FRESH CHECKOUT, not about an index state.
+    """
+
+    root = root.resolve()
+    git_env = os.environ.copy()
+    for key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+    ):
+        git_env.pop(key, None)
+    for key in tuple(git_env):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            git_env.pop(key, None)
+
+    repository = subprocess.run(
+        ["git", "--no-replace-objects", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        env=git_env,
+    )
+    if repository.returncode or Path(repository.stdout.strip()).resolve() != root:
+        raise RuntimeError(f"{root} is not the resolved Git repository, so source-control evidence is unavailable")
+
+    head = subprocess.run(
+        [
+            "git",
+            "--no-replace-objects",
+            "-C",
+            str(root),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "HEAD^{commit}",
+        ],
+        capture_output=True,
+        text=True,
+        env=git_env,
+    )
+    if head.returncode:
+        raise RuntimeError(f"HEAD does not resolve in {root}, so source-control evidence is unavailable")
+    result = subprocess.run(
+        [
+            "git",
+            "--no-replace-objects",
+            "-C",
+            str(root),
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            head.stdout.strip(),
+            "--",
+            relative_path,
+        ],
+        capture_output=True,
+        env=git_env,
+    )
+    if result.returncode:
+        raise RuntimeError(f"committed tree lookup failed in {root}, so source-control evidence is unavailable")
+    if not result.stdout:
+        return False
+    entries = result.stdout.split(b"\0")
+    if entries[-1] == b"":
+        entries.pop()
+    expected = relative_path.encode("utf-8")
+    paths = [entry.split(b"\t", 1)[1] for entry in entries if b"\t" in entry]
+    if len(entries) != 1 or paths != [expected]:
+        raise RuntimeError(f"committed tree lookup returned ambiguous evidence for {relative_path}")
+    return True
+
+
+def _g4_reference_error(
+    root: Path,
+    reference: str,
+    *,
+    source_controlled: Callable[[str], bool] | None = None,
+) -> str | None:
     if reference.startswith("make:"):
         target, separator, requirement = reference[5:].partition("|requires:")
         required_path, status_separator, status = requirement.partition("|status:")
@@ -737,7 +844,11 @@ def _g4_reference_error(root: Path, reference: str) -> str | None:
             return f"make reference lacks a checkable prerequisite: {reference}"
         if not re.search(rf"(?m)^{re.escape(target)}:\s*$", _read(makefile)):
             return f"make target does not exist: {target}"
-        exists = (root / required_path).exists()
+        exists = (
+            source_controlled(required_path)
+            if source_controlled is not None
+            else _g4_is_source_controlled(root, required_path)
+        )
         if exists != (status == "present"):
             return f"make prerequisite status differs: {required_path} is {'present' if exists else 'absent'}"
         return None
@@ -791,8 +902,13 @@ def _g4_procedures(text: str) -> dict[str, dict[str, str]]:
     return procedures
 
 
-def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> None:
-    """Validate G4 documents without Git or process state."""
+def _validate_g4_docs(
+    root: Path,
+    overrides: dict[str, str] | None = None,
+    *,
+    source_controlled: Callable[[str], bool] | None = None,
+) -> None:
+    """Validate G4 documents; make prerequisites require Git source-control evidence."""
 
     overrides = overrides or {}
     documents = {name: overrides.get(name, _read(root / name)) for name in _G4_DOCS}
@@ -801,7 +917,7 @@ def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> No
         for legacy in _G4_LEGACY_LINE_RE.findall(text):
             errors.append(f"{name}: line-number citation is forbidden: {legacy}")
         for reference in _G4_REFERENCE_RE.findall(text):
-            if error := _g4_reference_error(root, reference):
+            if error := _g4_reference_error(root, reference, source_controlled=source_controlled):
                 errors.append(f"{name}: {error}")
         unmarked = _G4_REFERENCE_RE.sub("", text)
         for reference in _G4_UNMARKED_REFERENCE_RE.findall(unmarked):
@@ -834,6 +950,208 @@ def _validate_g4_docs(root: Path, overrides: dict[str, str] | None = None) -> No
 
 def test_g4_executable_references_and_procedure_declarations() -> None:
     _validate_g4_docs(REPO_ROOT)
+
+
+@pytest.mark.parametrize(
+    ("in_git_index", "on_disk", "declared_status", "opposite_status"),
+    (
+        (False, True, "absent", "present"),
+        (True, False, "present", "absent"),
+    ),
+)
+def test_g4_rejects_make_prerequisite_status_not_matching_source_control(
+    tmp_path: Path,
+    in_git_index: bool,
+    on_disk: bool,
+    declared_status: str,
+    opposite_status: str,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+    required_path = "predictor_model.json"
+    prerequisite = tmp_path / required_path
+
+    _commit = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q"]
+    subprocess.run([*_commit, "-m", "seed", "--allow-empty"], cwd=tmp_path, check=True)
+    if in_git_index:
+        prerequisite.write_text("model", encoding="utf-8")
+        subprocess.run(["git", "add", "-f", required_path], cwd=tmp_path, check=True)
+        subprocess.run([*_commit, "-m", "track"], cwd=tmp_path, check=True)
+    if not on_disk:
+        prerequisite.unlink()
+    elif not in_git_index:
+        prerequisite.write_text("model", encoding="utf-8")
+
+    assert prerequisite.exists() is on_disk
+    assert _g4_is_source_controlled(tmp_path, required_path) is in_git_index
+
+    reference = f"make:bootstrap-predictor|requires:{required_path}|status:{declared_status}"
+    assert _g4_reference_error(tmp_path, reference) is None
+
+    opposite_reference = f"make:bootstrap-predictor|requires:{required_path}|status:{opposite_status}"
+    expected = f"make prerequisite status differs: {required_path} is {declared_status}"
+    assert _g4_reference_error(tmp_path, opposite_reference) == expected
+
+
+def test_g4_make_prerequisites_fail_closed_without_git_metadata(tmp_path: Path) -> None:
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+
+    # Fail-closed contract: unavailable Git evidence must RAISE, never read as
+    # "absent". A bare `tmp_path` has no repository at all, so HEAD cannot resolve.
+    with pytest.raises(RuntimeError, match="source-control evidence is unavailable"):
+        _g4_reference_error(
+            tmp_path,
+            "make:bootstrap-predictor|requires:predictor_model.json|status:absent",
+        )
+
+
+def test_g4_make_prerequisite_ignores_inherited_repository_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    intended = tmp_path / "intended"
+    redirected = tmp_path / "redirected"
+    intended.mkdir()
+    redirected.mkdir()
+    commit = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q"]
+    for repository in (intended, redirected):
+        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+        (repository / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+        subprocess.run(["git", "add", "Makefile"], cwd=repository, check=True)
+        subprocess.run([*commit, "-m", "seed"], cwd=repository, check=True)
+    (redirected / "predictor_model.json").write_text("model", encoding="utf-8")
+    subprocess.run(["git", "add", "predictor_model.json"], cwd=redirected, check=True)
+    subprocess.run([*commit, "-m", "track"], cwd=redirected, check=True)
+
+    monkeypatch.setenv("GIT_DIR", str(redirected / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(redirected))
+    reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
+    assert _g4_reference_error(intended, reference) is None
+    assert _g4_is_source_controlled(redirected, "predictor_model.json") is True
+
+
+def test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Makefile"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q", "-m", "seed"],
+        cwd=tmp_path,
+        check=True,
+    )
+    tree_oid = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    tree_object = tmp_path / ".git" / "objects" / tree_oid[:2] / tree_oid[2:]
+    tree_bytes = tree_object.read_bytes()
+    tree_mode = tree_object.stat().st_mode
+    tree_object.chmod(tree_mode | stat.S_IWUSR)
+    tree_object.unlink()
+    reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
+    try:
+        with pytest.raises(RuntimeError, match="committed tree lookup failed"):
+            _g4_reference_error(tmp_path, reference)
+    finally:
+        tree_object.write_bytes(tree_bytes)
+        tree_object.chmod(tree_mode)
+    assert _g4_is_source_controlled(tmp_path, "Makefile") is True
+
+
+def test_g4_make_prerequisite_ignores_commit_replacement_refs(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    commit = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q"]
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Makefile"], cwd=tmp_path, check=True)
+    subprocess.run([*commit, "-m", "seed"], cwd=tmp_path, check=True)
+    (tmp_path / "predictor_model.json").write_text("model", encoding="utf-8")
+    subprocess.run(["git", "add", "predictor_model.json"], cwd=tmp_path, check=True)
+    subprocess.run([*commit, "-m", "track predictor"], cwd=tmp_path, check=True)
+
+    subprocess.run(["git", "replace", "HEAD", "HEAD^"], cwd=tmp_path, check=True)
+    vulnerable = subprocess.run(
+        [
+            "git",
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            "HEAD",
+            "--",
+            "predictor_model.json",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
+    )
+    authoritative = subprocess.run(
+        [
+            "git",
+            "--no-replace-objects",
+            "--literal-pathspecs",
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            "HEAD",
+            "--",
+            "predictor_model.json",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        check=True,
+    )
+    assert vulnerable.stdout == b""
+    assert authoritative.stdout
+
+    reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
+    assert _g4_reference_error(tmp_path, reference) == (
+        "make prerequisite status differs: predictor_model.json is present"
+    )
+
+
+def test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    commit = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q"]
+    (tmp_path / "Makefile").write_text("bootstrap-predictor:\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Makefile"], cwd=tmp_path, check=True)
+    subprocess.run([*commit, "-m", "absent"], cwd=tmp_path, check=True)
+    (tmp_path / "predictor_model.json").write_text("model", encoding="utf-8")
+    subprocess.run(["git", "add", "predictor_model.json"], cwd=tmp_path, check=True)
+    subprocess.run([*commit, "-m", "present"], cwd=tmp_path, check=True)
+
+    original_run = subprocess.run
+    verified_commit = original_run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    calls: list[list[str]] = []
+
+    def move_head_after_verification(args, *run_args, **run_kwargs):
+        completed = original_run(args, *run_args, **run_kwargs)
+        command = list(args)
+        calls.append(command)
+        if command[-3:] == ["--verify", "--quiet", "HEAD^{commit}"]:
+            assert completed.stdout.strip() == verified_commit
+            original_run(["git", "reset", "--hard", "HEAD^"], cwd=tmp_path, check=True)
+        return completed
+
+    monkeypatch.setattr(subprocess, "run", move_head_after_verification)
+    reference = "make:bootstrap-predictor|requires:predictor_model.json|status:absent"
+    assert _g4_reference_error(tmp_path, reference) == (
+        "make prerequisite status differs: predictor_model.json is present"
+    )
+
+    query = next(command for command in calls if "ls-tree" in command)
+    assert query[query.index("--full-tree") + 1] == verified_commit
+    assert (
+        original_run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        != verified_commit
+    )
 
 
 @pytest.mark.parametrize(
