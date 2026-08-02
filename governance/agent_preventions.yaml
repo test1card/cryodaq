@@ -2545,7 +2545,6 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: reviewer_confirmed_blanket_same_sha_join_and_missing_exact_context_supersession_2026_07_31_pending_immutable_capture
     green_evidence: pending
-
   - id: ARCHIVE-RECEIPT-QUARANTINE-FALSE-GREEN-202
     status: open
     scope: product_contract
@@ -2554,7 +2553,6 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: local_rejected_dirty_proposal_returned_one_row_from_the_source_that_failed_postread_receipt_verification_2026_07_31_pending_immutable_integration_capture
     green_evidence: pending
-
   - id: CI-SAME-SHA-CONTEXT-REUSE-FALSE-GREEN-203
     status: reopened
     scope: repository
@@ -2595,7 +2593,126 @@ false_green_pairs:
     ci_partition: core
     red_evidence: targeted_or_manager_stop_could_report_success_while_a_known_production_driver_sibling_remained_energized_2026_07_31_pending_immutable_capture
     green_evidence: pending
-
+  - id: OPEN-CELL-GATE-FALSE-GREEN-215
+    status: reopened
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_open_cells_table_and_owner_gates_remain_canonical
+    ci_partition: remaining
+    red_evidence: exact_74062e885997a3e1de37ffd9bd837d3232f4a22d_summary_only_guard_passed_after_OC_020_Gate_column_was_retagged_from_BLOCKS_DEPLOYMENT_to_NONBLOCKING_then_exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_guard_passed_duplicate_protected_rows_after_and_inside_the_closed_table_then_exact_6d91e1c71f41655e84b392f2c81a166d8a05cd7d_guard_passed_NOT_and_struck_out_BLOCKS_DEPLOYMENT_Gate_cells_2026_08_01
+    green_evidence: pending
+  - id: OPEN-CELL-GATE-OC013-FALSE-GREEN-226
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_oc013_physical_off_gate_retag_mutant_is_red
+    ci_partition: remaining
+    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_guard_passed_after_the_OC_013_physical_OFF_Gate_cell_was_retagged_from_BLOCKS_DEPLOYMENT_to_NONBLOCKING_and_exact_6d91e1c71f41655e84b392f2c81a166d8a05cd7d_guard_passed_explicit_negation_and_strikeout_2026_08_01
+    green_evidence: pending
+  - id: OPEN-CELL-QUALIFICATION-AUTHORITY-FALSE-GREEN-232
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_open_cell_qualification_authority_and_status_remain_current
+    ci_partition: remaining
+    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_docs_guard_passed_while_OC_034_claimed_unsigned_self_hash_authority_and_nine_tests_and_PROJECT_STATUS_omitted_owner_ratified_OC_037_then_exact_7af2dbb971ec909f027ab4a7cf318f1d084664ee_guard_passed_while_CLAIM_CORRECTIONS_still_called_nine_tests_current_2026_08_01
+    green_evidence: pending
+  - id: OPEN-CELL-INVENTORY-LOCATOR-FALSE-GREEN-233
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_open_cell_inventory_and_oc030_locator_match_live_tree
+    ci_partition: remaining
+    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_docs_guard_passed_with_four_of_six_workflows_twelve_of_seventeen_governance_modules_and_OC_030_locator_1626_instead_of_live_1632_2026_08_01
+    green_evidence: pending
+  - id: MONTANA-REPORT-METRIC-FALSE-GREEN-234
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot
+    ci_partition: remaining
+    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_table_only_guard_passed_while_header_executive_deltas_and_closing_reported_stale_candidate_metrics_and_489_plus_one_was_reported_as_493_paths_then_exact_6d91e1c71f41655e84b392f2c81a166d8a05cd7d_retained_uncovered_134090_and_130k_interim_metric_literals_2026_08_01
+    green_evidence: pending
+  - id: ACTIVE-GUARD-EXECUTION-ROOT-FALSE-GREEN-235
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/governance/test_active_guard_execution.py::test_file_selected_guard_runs_only_from_git_index
+    ci_partition: remaining
+    red_evidence: exact_6d91e1c71f41655e84b392f2c81a166d8a05cd7d_file_selected_active_docs_guards_were_assigned_to_exported_commit_strict_execution_and_git_dependent_nodes_failed_without_dot_git_2026_08_01
+    green_evidence: pending
+  - id: OPEN-CELL-REPLAY-SCOPE-FALSE-GREEN-236
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_open_cell_qualification_replay_scope_matches_production_workflow
+    ci_partition: remaining
+    red_evidence: exact_6d91e1c71f41655e84b392f2c81a166d8a05cd7d_docs_claimed_general_replay_rejection_while_the_production_workflow_supplied_a_fresh_temporary_ledger_per_run_2026_08_01
+    green_evidence: pending
+  - id: MONTANA-SHIPPED-SVG-CLAIM-FALSE-GREEN-237
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_shipped_architecture_artifact_does_not_claim_removed_companions
+    ci_partition: remaining
+    red_evidence: exact_8a42ac62c5c5220fc360de141738106784746fdc_shipped_only_the_important_file_SVG_while_its_subtitle_and_report_claimed_an_exhaustive_all_file_companion_map_2026_08_01
+    green_evidence: pending
+  - id: CHANGED-PYTHON-FORMAT-COUNT-FALSE-GREEN-238
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_claim_corrections_changed_python_count_matches_workflow_index
+    ci_partition: remaining
+    red_evidence: exact_7af2dbb971ec909f027ab4a7cf318f1d084664ee_docs_guard_passed_while_CLAIM_CORRECTIONS_called_659_the_current_workflow_exact_changed_Python_path_count_but_the_live_FORMAT_BASE_selected_670_and_a_non_ancestor_FORMAT_BASE_in_a_detached_checkout_escaped_the_guard_as_CalledProcessError_instead_of_a_fail_closed_AssertionError_2026_08_02
+    green_evidence: pending
+  - id: G4-SOURCE-CONTROL-AUTHORITY-FALSE-GREEN-209
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/docs/test_docs_freshness.py::test_g4_rejects_make_prerequisite_status_not_matching_source_control
+    ci_partition: remaining
+    red_evidence: the_original_disk_existence_check_reported_untracked_or_missing_tracked_prerequisites_as_authoritative_source_control_state_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: G4-ARCHIVE-CHALLENGE-FALSE-GREEN-219
+    status: open
+    scope: repository
+    runtime_prevention_id: GUARD-COVERAGE-REGRESSION-034
+    guard: tests/governance/test_guard_coverage.py::test_g4_archived_revision_binds_source_control_to_the_compared_tree
+    ci_partition: remaining
+    red_evidence: removing_the_exact_revision_tree_callback_made_archived_base_and_weakened_candidate_challenges_both_fail_before_the_procedure_guard_and_reported_no_coverage_reduction_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: G4-HEAD-LS-TREE-RACE-FALSE-GREEN-227
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit
+    ci_partition: remaining
+    red_evidence: original_ls_tree_HEAD_queried_a_moved_commit_after_verifying_another_and_allowed_status_absent_to_pass_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: G4-ARCHIVED-CALLBACK-SIGNATURE-FALSE-GREEN-246
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/governance/test_guard_coverage.py::test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss
+    ci_partition: remaining
+    red_evidence: pre_signature_G4_validator_rejected_the_revision_authority_keyword_and_the_base_failure_was_reported_as_a_gain_so_a_later_procedure_coverage_loss_was_skipped_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: GUARD-COVERAGE-INHERITED-REPOSITORY-REDIRECT-FALSE-GREEN-251
+    status: open
+    scope: repository
+    runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
+    guard: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
+    ci_partition: remaining
+    red_evidence: inherited_GIT_GRAFT_FILE_repository_local_info_grafts_shallow_and_replace_authority_and_a_foreign_ordinary_Git_directory_with_core_worktree_requested_and_reciprocal_gitdir_commondir_decoration_selected_foreign_strong_objects_and_production_main_returned_false_clean_exit_0_instead_of_exit_2_2026_08_02_pending_immutable_capture
+    green_evidence: pending
+  - id: GUARD-COVERAGE-ALLOWLIST-SHAPE-FALSE-GREEN-252
+    status: open
+    scope: repository
+    runtime_prevention_id: GUARD-COVERAGE-REGRESSION-034
+    guard: tests/governance/test_guard_coverage.py::test_guard_coverage_runs_current_c2_frozenset_allowlist_shape
+    ci_partition: remaining
+    red_evidence: every_synthetic_comparator_fixture_used_a_mapping_allowlist_while_the_real_current_C2_guard_used_frozenset_so_the_green_suite_missed_an_AttributeError_and_a_registered_mapping_purpose_equal_to_the_literal_undeclared_sentinel_collided_with_a_set_shaped_entry_to_report_zero_reductions_2026_08_01_pending_immutable_capture
+    green_evidence: pending
   - id: RED-REPRODUCTION-REBIND-FALSE-GREEN-211
     status: open
     scope: repository
@@ -2604,7 +2721,6 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: candidate_ancestry_and_repository_wide_locator_membership_guards_passed_after_one_prevention_identity_was_rebound_to_replacement_evidence_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: RED-REPRODUCTION-REBIND-FALSE-GREEN-214
     status: open
     scope: repository
@@ -2613,7 +2729,6 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: workflow_dispatch_skipped_the_active_exact_checkout_runner_and_emitted_an_empty_trusted_base_while_the_final_enforcement_step_accepted_the_skip_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: ACTIVE-EXPORT-DESTINATION-COLLISION-FALSE-GREEN-228
     status: open
     scope: repository
@@ -2622,7 +2737,6 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: protected_command_tests_used_the_core_suite_and_mocked_the_exporter_while_the_remaining_preflight_created_state_beneath_the_export_destination_that_the_real_exporter_refuses_when_nonempty_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: ACTIVE-CHECKOUT-COMMAND-CHANNEL-FALSE-GREEN-243
     status: open
     scope: repository
@@ -2631,7 +2745,6 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: protected_active_checkout_pytest_inherited_oidc_credentials_and_github_command_channels_and_the_process_group_only_predecessor_passed_a_same_session_fixture_while_a_fast_parent_could_spawn_a_start_new_session_descendant_and_exit_between_userspace_samples_leaving_the_detached_worker_alive_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: PROTECTED-REMAINING-SCHEMA-FALSE-GREEN-248
     status: open
     scope: repository
@@ -2672,9 +2785,86 @@ false_green_pairs:
     ci_partition: core
     red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
+  - id: MONTANA-METRICS-SNAPSHOT-FALSE-GREEN-239
+    status: open
+    scope: repository
+    runtime_prevention_id: MONTANA-METRICS-SNAPSHOT-043
+    guard: tests/docs/test_docs_freshness.py::test_current_metrics_snapshot_binding_guard
+    ci_partition: remaining
+    red_evidence: local_poisoned_alternate_index_restored_live_cached_numstat_and_guard_failed_2026_08_02_pending_candidate_binding
+    green_evidence: pending
+  - id: OPEN-CELL-OC037-EVIDENCE-FALSE-GREEN-240
+    status: open
+    scope: repository
+    runtime_prevention_id: OPEN-CELL-OC037-EVIDENCE-044
+    guard: tests/docs/test_docs_freshness.py::test_oc037_unbound_pass_claim_guard
+    ci_partition: remaining
+    red_evidence: local_OC037_unbound_10_passed_mutation_failed_the_authority_guard_2026_08_02_pending_candidate_binding
+    green_evidence: pending
+  - id: OPEN-CELL-OC012-INVENTORY-FALSE-GREEN-241
+    status: open
+    scope: repository
+    runtime_prevention_id: OPEN-CELL-OC012-INVENTORY-045
+    guard: tests/docs/test_docs_freshness.py::test_oc012_reference_runner_inventory_guard
+    ci_partition: remaining
+    red_evidence: local_dotted_python_module_runner_reference_omission_failed_the_inventory_guard_2026_08_02_pending_candidate_binding
+    green_evidence: pending
+  - id: MONTANA-REPORT-P5-MANIFEST-FALSE-GREEN-242
+    status: open
+    scope: repository
+    runtime_prevention_id: MONTANA-REPORT-P5-MANIFEST-046
+    guard: tests/docs/test_docs_freshness.py::test_p5_pending_manifest_guard
+    ci_partition: remaining
+    red_evidence: local_exact_old_external_exact_SHA_claim_and_masked_clause_paraphrases_in_report_and_claim_corrections_failed_the_registered_pending_authority_guard_2026_08_02_pending_candidate_binding
+    green_evidence: pending
+  - id: MONTANA-BASELINE-REPLACE-REF-FALSE-GREEN-253
+    status: open
+    scope: repository
+    runtime_prevention_id: MONTANA-METRICS-SNAPSHOT-043
+    guard: tests/docs/test_docs_freshness.py::test_baseline_metrics_ignore_replacement_refs
+    ci_partition: remaining
+    red_evidence: exact_02bfc1d66a3615950f99ee661b977c09b4e92999_final_head_review_replaced_the_pinned_baseline_commit_and_moved_BASE_SHA_tree_resolution_to_the_replacement_while_no_replace_objects_retained_the_original_then_local_replacement_of_a_baseline_commit_and_blob_left_generated_reads_unmoved_2026_08_02_pending_immutable_capture
+    green_evidence: pending
 
 records:
+  - id: G4-SOURCE-CONTROL-AUTHORITY-038
+    status: open
+    scope: repository
+    authority_source: docs/new_lab_acceptance_checklist.md
+    applies_to: Every live or archived G4 make-prerequisite assertion derived from committed Git state.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A missing committed object, inherited Git environment authority, active repository-local graph rewrite, foreign Git directory claiming the requested worktree, HEAD movement between verification and lookup, or incompatible archived callback invocation can make unavailable, foreign, substituted, mismatched, or unexecuted evidence satisfy an asserted prerequisite state.
+    invariant: 'G4 prerequisite checks and the guard-coverage comparator clear every inherited GIT_* authority variable, replace system and global configuration with comparator-owned empty authority, and reject active repository-local graft, shallow, or replacement history before either revision is resolved. The comparator binds one immutable exact worktree, Git directory, and common directory: a direct .git directory is self-contained, while a file-backed marker is admitted only when common_dir != git_dir, git_dir is exactly common_dir/worktrees/<id>, the marker, Git-directory backpointer, and commondir pointer are regular non-reparse files with reciprocal exact resolved targets, the relevant directories are real/non-reparse, and the registered worktree is the requested root. Every Git subprocess uses those explicit validated paths and the binding is rechecked before a result. It resolves and verifies one exact raw commit in that authority, queries that same commit''s readable tree, and fails closed when local configuration, repository identity, ancestry, or tree evidence is active, unavailable, foreign, or ambiguous. Archived validators receive that authority through an explicitly detected current keyword capability or their exact historical source-control hook; callback-body failures remain failures and are never retried as interface compatibility.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+      - docs/new_lab_acceptance_checklist.md
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_g4_rejects_make_prerequisite_status_not_matching_source_control
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_inherited_repository_redirect
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_fails_closed_when_head_tree_is_unreadable
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_ignores_commit_replacement_refs
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_g4_make_prerequisite_binds_ls_tree_to_verified_head_commit
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_g4_pre_signature_archive_runs_and_detects_later_coverage_loss
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_g4_pre_signature_callback_body_type_error_is_a_base_failure
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_git_file_reads_the_requested_repository_not_an_inherited_redirect
+        ci_partition: remaining
+    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_pre_signature_archived_callback_skip_inherited_GIT_GRAFT_FILE_repository_local_graft_shallow_and_replace_history_authority_and_foreign_ordinary_Git_directory_with_reciprocal_gitdir_commondir_decoration_claiming_the_requested_root_were_reproduced_2026_08_02_pending_immutable_capture
+    green_evidence: pending
   - id: GOVERNANCE-PREVENTION-MAP-001
     status: open
     scope: repository
@@ -2706,7 +2896,6 @@ records:
         ci_partition: remaining
     red_evidence: pending_immutable_capture
     green_evidence: pending
-
   - id: GOVERNANCE-SCOPE-001
     status: open
     scope: repository
@@ -2728,7 +2917,6 @@ records:
         ci_partition: remaining
     red_evidence: montana_integration_sequence_was_summarized_without_local_scope_pending_immutable_capture
     green_evidence: pending
-
   - id: GOVERNANCE-ARTIFACT-TRACKING-001
     status: open
     scope: repository
@@ -2748,7 +2936,6 @@ records:
         ci_partition: remaining
     red_evidence: adr_003_ignored_and_spec_registry_schema_untracked_2026_07_22_pending_immutable_capture
     green_evidence: pending
-
   - id: MONTANA-INTEGRATION-SEQUENCE-001
     status: open
     scope: campaign_local
@@ -2814,7 +3001,6 @@ records:
     automation_limit: Code can verify ancestry, manifests, object identity, and state transitions; only semantic approval of reviewed behavior remains human.
     red_evidence: prior_unapproved_squash_staging_merge_pressure_and_premature_cli_97cff82c_proposal_documented_pending_immutable_capture
     green_evidence: pending
-
   - id: AUTH-HANDSHAKE-006
     status: open
     scope: repository
@@ -2838,7 +3024,6 @@ records:
     automation_limit: Root, branch, role, path, and forbidden-surface checks are automated; semantic objective fit remains human.
     red_evidence: reviewer_transcript_available_not_yet_immutable
     green_evidence: pending
-
   - id: PARALLEL-PATH-OWNERSHIP-001
     status: open
     scope: repository
@@ -2862,7 +3047,6 @@ records:
         ci_partition: remaining
     red_evidence: reviewer_issued_overlapping_primary_and_cli_lifecycle_experiment_off_steering_2026_07_22_and_later_assigned_two_active_authors_to_test_zmq_command_server_supervision_before_serial_reconciliation_2026_07_24_pending_immutable_capture
     green_evidence: pending
-
   - id: AGENT-CONTEXT-COMPACTION-001
     status: open
     scope: repository
@@ -2897,7 +3081,6 @@ records:
         ci_partition: remaining
     red_evidence: missing_capsules_status_only_digest_and_invalid_reviewer_canonicalization_reproduced_2026_07_22_pending_immutable_capture
     green_evidence: pending
-
   - id: REVIEW-EXACT-TREE-001
     status: open
     scope: repository
@@ -2921,9 +3104,8 @@ records:
         ci_partition: remaining
     red_evidence: exact_tree_8ff15811_failed_while_dirty_tree_passed_then_exact_tree_c16cabc_omitted_required_context_reader_and_failed_three_assistant_collection_modules_2026_07_22_pending_artifact_binding
     green_evidence: pending
-
   - id: FALSE-GREEN-001
-    status: open
+    status: reopened
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     applies_to: Every deterministic reviewer reproduction contradicted by passing automated tests.
@@ -2977,9 +3159,26 @@ records:
         ci_partition: remaining
       - node: tests/core/test_p1_fixes.py::test_get_data_dir_uses_env_var
         ci_partition: core
+      - node: tests/docs/test_docs_freshness.py::test_open_cells_table_and_owner_gates_remain_canonical
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_oc013_physical_off_gate_retag_mutant_is_red
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_open_cell_qualification_authority_and_status_remain_current
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_open_cell_inventory_and_oc030_locator_match_live_tree
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot
+        ci_partition: remaining
+      - node: tests/governance/test_active_guard_execution.py::test_file_selected_guard_runs_only_from_git_index
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_open_cell_qualification_replay_scope_matches_production_workflow
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_shipped_architecture_artifact_does_not_claim_removed_companions
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_claim_corrections_changed_python_count_matches_workflow_index
+        ci_partition: remaining
     red_evidence: multiple_reviewer_reproductions_contradict_green_counts_pending_artifact_binding
     green_evidence: pending
-
   - id: ZMQ-MUTATION-QUARANTINE-001
     status: open
     scope: product_contract
@@ -3002,7 +3201,6 @@ records:
         ci_partition: core
     red_evidence: deterministic_late_commit_reproduction_pending_artifact_binding
     green_evidence: pending
-
   - id: MACHINE-RECEIPT-AUTHORITY-001
     status: open
     scope: product_contract
@@ -3023,7 +3221,6 @@ records:
         ci_partition: core
     red_evidence: localized_substring_assertion_omitted_delivery_commit_and_retry_authority_2026_07_23_pending_artifact_binding
     green_evidence: pending
-
   - id: ENGINE-STARTUP-SETTLEMENT-001
     status: open
     scope: product_contract
@@ -3064,7 +3261,6 @@ records:
         ci_partition: core
     red_evidence: missing_partial_acquire_and_cancellation_settlement_guards_2026_07_23_pending_artifact_binding
     green_evidence: pending
-
   - id: ENGINE-SHUTDOWN-SETTLEMENT-013
     status: open
     scope: product_contract
@@ -3100,7 +3296,6 @@ records:
         ci_partition: core
     red_evidence: fail_fast_post_off_teardown_premature_completion_banner_arbitrary_post_return_sleep_and_unproven_repeated_cancellation_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: SHUTDOWN-OWNER-SETTLEMENT-014
     status: open
     scope: product_contract
@@ -3154,7 +3349,6 @@ records:
         ci_partition: core
     red_evidence: unobserved_done_failures_false_success_infinite_retry_and_dependency_cleanup_skip_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: SAFETY-GLOBAL-OFF-COALESCE-001
     status: open
     scope: product_contract
@@ -3175,7 +3369,6 @@ records:
         ci_partition: core
     red_evidence: max_inflight_two_reproduction_pending_artifact_binding
     green_evidence: pending
-
   - id: LAUNCHER-SHUTDOWN-RECEIPT-001
     status: open
     scope: product_contract
@@ -3203,7 +3396,6 @@ records:
         ci_partition: gui
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending
-
   - id: LAUNCHER-STARTUP-AUTHORITY-002
     status: open
     scope: product_contract
@@ -3297,7 +3489,6 @@ records:
         ci_partition: remaining
     red_evidence: inherited_stdout_external_self_attestation_loose_replay_status_missing_real_proto_phantom_identity_and_abandoned_postspawn_handle_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: SINGLE-INSTANCE-LOCK-STABILITY-001
     status: open
     scope: product_contract
@@ -3320,7 +3511,6 @@ records:
         ci_partition: remaining
     red_evidence: gui_app_imported_generic_unlinking_release_for_both_exit_paths_2026_07_23_pending_artifact_binding
     green_evidence: pending
-
   - id: ENGINE-FORCE-PROCESS-IDENTITY-001
     status: open
     scope: product_contract
@@ -3346,7 +3536,6 @@ records:
         ci_partition: core
     red_evidence: pid_and_argv_based_force_kill_could_not_prove_that_the_target_owned_this_exact_kernel_lock_and_data_root_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: REPLAY-RUNTIME-SETTLEMENT-010
     status: open
     scope: product_contract
@@ -3372,7 +3561,6 @@ records:
         ci_partition: remaining
     red_evidence: self_cancelled_source_returned_clean_success_and_partial_start_cancellation_settlement_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: REPLAY-WIRE-AUTHORITY-011
     status: open
     scope: repository
@@ -3392,7 +3580,6 @@ records:
         ci_partition: remaining
     red_evidence: reviewer_agent_direct_handler_proto_false_positive_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: GUI-WIRE-REPLY-AUTHORITY-012
     status: open
     scope: repository
@@ -3422,7 +3609,6 @@ records:
         ci_partition: gui
     red_evidence: proto_less_gui_callback_fixtures_and_direct_handler_wire_review_confusion_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: OPLOG-COLD-IDEMP-001
     status: open
     scope: product_contract
@@ -3449,7 +3635,6 @@ records:
         ci_partition: remaining
     red_evidence: exact_c16cabc_rotation_restart_duplicate_capacity_over_admission_and_legacy_stranded_sweep_deletion_reproductions_pending_immutable_capture
     green_evidence: pending
-
   - id: OPLOG-OUTBOX-002
     status: open
     scope: product_contract
@@ -3508,7 +3693,6 @@ records:
         ci_partition: remaining
     red_evidence: exact_c16cabc_definitions_only_outbox_without_production_caller_or_startup_recovery_reproduction_pending_immutable_capture
     green_evidence: pending
-
   - id: ALARM-ACK-OUTBOX-003
     status: open
     scope: product_contract
@@ -3589,7 +3773,6 @@ records:
         ci_partition: gui
     red_evidence: state_committed_event_lost_reproduction_pending_artifact_binding
     green_evidence: pending
-
   - id: PERSISTENCE-STOP-004
     status: open
     scope: product_contract
@@ -3612,7 +3795,6 @@ records:
         ci_partition: remaining
     red_evidence: post_stopped_commit_and_callback_reproductions_pending_artifact_binding
     green_evidence: pending
-
   - id: PERSISTENCE-RECEIPT-RECONCILIATION-005
     status: open
     scope: product_contract
@@ -3637,7 +3819,6 @@ records:
         ci_partition: remaining
     red_evidence: exact_c16cabc_scheduler_drained_before_shielded_owner_settlement_cross_attributed_late_receipts_cardinality_only_accepted_different_content_and_maxlen_deque_silently_evicted_proof_pending_immutable_capture
     green_evidence: pending
-
   - id: SQLITE-FILESYSTEM-AUTHORITY-006
     status: open
     scope: product_contract
@@ -3673,7 +3854,6 @@ records:
         ci_partition: remaining
     red_evidence: main_database_aba_unbound_wal_shm_and_unkeyed_trigger_false_success_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: EXP-RECEIPT-PROVENANCE-009
     status: open
     scope: product_contract
@@ -3714,7 +3894,6 @@ records:
         ci_partition: core
     red_evidence: missing_id_stale_journal_unbound_archive_invalid_phase_wrong_timestamp_nested_alias_and_moving_cli_thread_rlock_across_await_reproductions_pending_immutable_capture
     green_evidence: pending
-
   - id: CLI-LIFECYCLE-INGRESS-001
     status: open
     scope: product_contract
@@ -3765,7 +3944,6 @@ records:
         ci_partition: gui
     red_evidence: lifecycle_defaults_stale_ready_active_state_nonrevocation_mixed_batch_opposite_mode_subprocess_high_water_dashboard_producer_anchor_and_legacy_string_mutation_reproductions_pending_artifact_binding
     green_evidence: pending
-
   - id: CLI-COMMAND-SETTLEMENT-002
     status: open
     scope: product_contract
@@ -3812,7 +3990,6 @@ records:
         ci_partition: gui
     red_evidence: old_child_restamp_cancelled_pending_and_old_reply_consumer_reactivation_reproductions_pending_artifact_binding
     green_evidence: pending
-
   - id: CLI-DASHBOARD-AUTHORITY-003A
     status: open
     scope: product_contract
@@ -3833,7 +4010,6 @@ records:
         ci_partition: gui
     red_evidence: arbitrary_telemetry_enabled_dashboard_mutations_pending_artifact_binding
     green_evidence: pending
-
   - id: CLI-ANNUNCIATION-SILENCE-003B
     status: open
     scope: product_contract
@@ -3874,7 +4050,6 @@ records:
         ci_partition: gui
     red_evidence: event_emitted_false_silenced_activation_pending_artifact_binding
     green_evidence: pending
-
   - id: CLI-QTHREAD-SETTLEMENT-003C
     status: open
     scope: product_contract
@@ -3897,7 +4072,6 @@ records:
         ci_partition: gui
     red_evidence: real_qthread_survived_close_pending_artifact_binding
     green_evidence: pending
-
   - id: CLI-PLAINTEXT-RENDERING-003D
     status: open
     scope: product_contract
@@ -3920,7 +4094,6 @@ records:
         ci_partition: gui
     red_evidence: raw_identity_interpreted_as_autotext_pending_artifact_binding
     green_evidence: pending
-
   - id: CLI-DISK-EVIDENCE-FRESHNESS-003E
     status: open
     scope: product_contract
@@ -3943,7 +4116,6 @@ records:
         ci_partition: gui
     red_evidence: stale_disk_evidence_survived_own_deadline_and_bridge_replacement_while_other_measurements_flowed_pending_artifact_binding
     green_evidence: pending
-
   - id: KEITHLEY-IDENTITY-OFF-001A
     status: open
     scope: product_contract
@@ -3984,7 +4156,6 @@ records:
         ci_partition: core
     red_evidence: incomplete_identity_and_off_proof_pending_artifact_binding
     green_evidence: pending
-
   - id: USBTMC-CLOSE-SETTLEMENT-001B
     status: open
     scope: product_contract
@@ -4005,7 +4176,6 @@ records:
         ci_partition: remaining
     red_evidence: usbtmc_cancelled_close_lost_owner_pending_artifact_binding
     green_evidence: pending
-
   - id: GPIB-HANDLE-SETTLEMENT-001C
     status: open
     scope: product_contract
@@ -4040,7 +4210,6 @@ records:
         ci_partition: remaining
     red_evidence: exact_cli_870607ff_false_close_double_open_desync_and_cancelled_connect_live_handle_reproductions_pending_immutable_capture
     green_evidence: pending
-
   - id: PHYSICAL-CONFIG-WIRING-001
     status: open
     scope: product_contract
@@ -4063,7 +4232,6 @@ records:
         ci_partition: core
     red_evidence: production_permissive_loader_trace_pending_artifact_binding
     green_evidence: pending
-
   - id: OPERATOR-SNAPSHOT-CODEC-VERSION-004
     status: open
     scope: product_contract
@@ -4082,7 +4250,6 @@ records:
         ci_partition: remaining
     red_evidence: schema_constant_2_with_v1_module_error_and_codec_text_in_exact_97cff82c_pending_immutable_capture
     green_evidence: pending
-
   - id: ASSISTANT-EGRESS-AUTHORITY-001
     status: open
     scope: product_contract
@@ -4111,7 +4278,6 @@ records:
         ci_partition: agents
     red_evidence: http_500_egress_before_audit_unwired_shutdown_aggregate_sender_and_query_chart_before_audit_reproductions_pending_immutable_capture
     green_evidence: pending
-
   - id: ASSISTANT-RAG-CAPABILITY-002A
     status: open
     scope: product_contract
@@ -4130,7 +4296,6 @@ records:
         ci_partition: agents
     red_evidence: directly_importable_live_rag_sink_and_gui_command_pending_artifact_binding
     green_evidence: pending
-
   - id: ASSISTANT-LOOPBACK-002B
     status: open
     scope: product_contract
@@ -4155,7 +4320,6 @@ records:
         ci_partition: core
     red_evidence: localhost_redirect_report_intro_live_telegram_escape_wrong_endpoint_compatibility_and_strict_HTTPError_response_owner_leak_pending_artifact_binding
     green_evidence: pending
-
   - id: ASSISTANT-CONTEXT-FRESHNESS-002C
     status: open
     scope: product_contract
@@ -4178,7 +4342,6 @@ records:
         ci_partition: agents
     red_evidence: cached_remote_state_never_expired_and_validated_cache_remained_unwired_pending_immutable_capture
     green_evidence: pending
-
   - id: ASSISTANT-PLAINTEXT-002D
     status: open
     scope: product_contract
@@ -4199,7 +4362,6 @@ records:
         ci_partition: gui
     red_evidence: raw_html_and_qt_autotext_reproduction_pending_artifact_binding
     green_evidence: pending
-
   - id: ASSISTANT-REPARSE-BOUNDARY-003
     status: open
     scope: product_contract
@@ -4220,7 +4382,6 @@ records:
         ci_partition: agents
     red_evidence: static_toc_reparse_boundary_confirmed_pending_runtime_artifact
     green_evidence: pending
-
   - id: EVIDENCE-BINDING-001
     status: reopened
     scope: repository
@@ -4310,7 +4471,6 @@ records:
         ci_partition: remaining
     red_evidence: ci_line_review_confirmed_misbinding_pending_hosted_artifact
     green_evidence: pending
-
   - id: CANDIDATE-FAILURE-VISIBILITY-028
     status: reopened
     scope: repository
@@ -4337,7 +4497,6 @@ records:
       sha256: sha256:131ef93fab51b4f6a8d44a1b9b00273a2eb4b0c18c8b7b814582bdc65a32876f
       tree: 4fb4e484a7a0d3716b6d39e8bfd4abeaf4082f32
       suite: remaining
-
   - id: BROKER-DELIVERY-ISOLATION-015
     status: open
     scope: product_contract
@@ -4359,7 +4518,6 @@ records:
         ci_partition: core
     red_evidence: filter_mutation_and_stale_shared_object_expectation_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: ALARM-PHASE-ELAPSED-SUBCONDITION-026
     status: reopened
     scope: product_contract
@@ -4391,7 +4549,6 @@ records:
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
       tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
       suite: core
-
   - id: ALARM-MIXED-SELECTOR-027
     status: reopened
     scope: product_contract
@@ -4423,7 +4580,6 @@ records:
       sha256: sha256:5142760c289b3948979ec697a82f446d87ef4b9de2f07624ffc3b5136a0ba66f
       tree: 9f00d2560ef8e6cff3a292c8e6e26d963b6f861e
       suite: core
-
   - id: COMMAND-REPLY-BOUNDS-016
     status: open
     scope: product_contract
@@ -4449,7 +4605,6 @@ records:
         ci_partition: core
     red_evidence: server_valid_history_item_cap_and_per_channel_aggregate_budget_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: REPLAY-STATUS-PROVENANCE-017
     status: open
     scope: product_contract
@@ -4477,7 +4632,6 @@ records:
         ci_partition: gui
     red_evidence: fractional_speed_misrender_and_live_cut_under_replay_pin_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: ZMQ-SAFE-DIRECTION-CAPACITY-018
     status: open
     scope: product_contract
@@ -4577,7 +4731,6 @@ records:
         ci_partition: core
     red_evidence: abandoned_read_late_reply_unbounded_ledger_and_safe_direction_starvation_reproductions_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: GUI-PARTIAL-CONSTRUCTION-OWNERSHIP-019
     status: open
     scope: product_contract
@@ -4603,7 +4756,6 @@ records:
         ci_partition: remaining
     red_evidence: anchored_partial_mainwindow_dereference_ignored_settlement_result_trayless_hidden_hold_and_replay_title_overwrite_reproductions_2026_07_24_pending_immutable_capture
     green_evidence: pending
-
   - id: FORMATTER-MUTATION-PROHIBITION-020
     status: open
     scope: repository
@@ -4629,7 +4781,6 @@ records:
         ci_partition: remaining
     red_evidence: independent_line_review_and_real_git_execution_rejected_the_uncommitted_2136_line_wrapper_for_bloat_crash_recovery_toc_metadata_and_portability_failures_2026_07_24_pending_immutable_capture
     green_evidence: pending
-
   - id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
     status: open
     scope: product_contract
@@ -4657,7 +4808,6 @@ records:
         ci_partition: remaining
     red_evidence: real_pipe_descriptor_reuse_partial_publication_disk_full_and_residual_owner_reproductions_confirmed_2026_07_24_pending_immutable_capture
     green_evidence: pending
-
   - id: ANALYTICS-GENERATION-TRANSACTION-022
     status: open
     scope: product_contract
@@ -4721,7 +4871,6 @@ records:
         ci_partition: remaining
     red_evidence: real_plugin_partial_start_teardown_failure_lying_summary_evicted_success_temp_swap_foreign_cleanup_and_fd_leak_reproductions_confirmed_2026_07_24_pending_immutable_capture
     green_evidence: pending
-
   - id: TEST-RUNTIME-FIXTURE-OWNERSHIP-023
     status: open
     scope: repository
@@ -4765,7 +4914,6 @@ records:
         ci_partition: gui
     red_evidence: synthetic_bridge_liveness_incarnation_queue_replacement_put_only_compatibility_request_owner_leaks_and_shared_fixture_preemption_of_the_production_application_root_escaped_green_test_bodies_until_complete_partition_execution_2026_07_24_pending_immutable_capture
     green_evidence: pending
-
   - id: GENERATED-EVIDENCE-STAGING-024
     status: open
     scope: repository
@@ -4785,7 +4933,6 @@ records:
         ci_partition: remaining
     red_evidence: more_than_38000_generated_candidate_and_pytest_paths_remained_visible_to_blanket_staging_while_only_21_untracked_source_paths_were_intended_2026_07_24_pending_immutable_capture
     green_evidence: pending
-
   - id: RESOURCE-OWNER-API-025
     status: open
     scope: repository
@@ -4814,7 +4961,6 @@ records:
         ci_partition: remaining
     red_evidence: sqlite_connection_finalizer_sequence_fastapi_deprecation_and_mutated_thread_constructor_reproductions_confirmed_2026_07_23_pending_immutable_capture
     green_evidence: pending
-
   - id: GUARD-FALSIFICATION-AUTHORITY-029
     status: open
     scope: repository
@@ -4835,7 +4981,6 @@ records:
     automation_limit: No canonical typed guard-to-production-invocation graph or independently authored reviewer-disposition receipt exists today; creating and validating both would make the path-naming and separation portions machine-testable.
     red_evidence: prose_only_guard_falsification_authority_rule_added_in_396c8fb8_without_registry_record_or_enforceable_production_path_binding_2026_07_26
     green_evidence: pending
-
   - id: PREVENTION-CORPUS-DISPOSITION-030
     status: open
     scope: repository
@@ -4856,6 +5001,7 @@ records:
     classification_corpus:
       repeat_threshold: 2
       covered_classifications:
+        - coverage_escape
         - evidence_misbinding
         - late_side_effect
         - markup_interpretation
@@ -4864,7 +5010,6 @@ records:
         - stale_authority
     red_evidence: registry_corpus_on_2026_07_26_contains_five_classifications_with_exactly_two_records_and_no_prior_class_level_disposition_or_enforcement
     green_evidence: pending
-
   - id: GUARD-DEPENDENCY-NEUTRALIZATION-031
     status: open
     scope: repository
@@ -4885,7 +5030,6 @@ records:
     automation_limit: The registry has no faithful, sealed pytest execution-dependency manifest for indirect imports, fixtures, conftest discovery, markers, and configuration; an invocation-produced manifest bound into candidate evidence is required before the invariant can be mechanically enforced.
     red_evidence: guard_source_blobs_in_current_registry_bind_only_direct_guard_test_files_while_conftest_fixture_imported_helper_marker_and_pytest_configuration_changes_remain_outside_that_binding_2026_07_26
     green_evidence: pending
-
   - id: PUBLICATION-DUAL-REVIEW-INDEPENDENCE-032
     status: open
     scope: repository
@@ -4906,7 +5050,6 @@ records:
     automation_limit: A typed receipt is now contract-validated, but no immutable sealed review transcripts or candidate-bound review evidence exist for this receipt. The recorded receipt correctly says not_approved because both reviewers returned do_not_approve, so it cannot supply approval or green closure evidence; immutable evidence for a reviewed, approved candidate remains required before this prevention can close.
     red_evidence: prose_only_two_independent_review_publication_rule_in_AGENTS_md_mistake_to_enforcement_section_without_registry_record_or_named_distinct_reviewer_disposition_receipt_2026_07_26
     green_evidence: pending
-
   - id: ALARM-UNKNOWN-AS-CLEAR-033
     status: open
     scope: product_contract
@@ -4941,7 +5084,6 @@ records:
       locator: red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_033.json
       sha256: sha256:423bf8c0878c732f22f98f5bf23b6883f1bfc2d648c390c21d87a9e4434cc9ef
     green_evidence: pending
-
   - id: GUARD-COVERAGE-REGRESSION-034
     status: open
     scope: repository
@@ -4964,10 +5106,13 @@ records:
     guards:
       - node: tests/governance/test_guard_coverage.py::test_guard_coverage_reduction_requires_exact_tracked_declaration
         ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_guard_coverage_runs_current_c2_frozenset_allowlist_shape
+        ci_partition: remaining
+      - node: tests/governance/test_guard_coverage.py::test_g4_archived_revision_binds_source_control_to_the_compared_tree
+        ci_partition: remaining
     automation_limit: An independent audit found these gaps — coalescing registered exemption descriptors can hide an addition; a guard's execution dependencies are not covered because a live-candidate import can influence them; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
     red_evidence: local_exact_object_comparisons_reject_3d6d1a22_1d2c43ad_and_0f505dd6_with_stable_lost_challenge_and_added_exemption_ids_2026_07_28_pending_immutable_capture
     green_evidence: pending
-
   - id: REPLAY-COMPARISON-EVIDENCE-035
     status: open
     scope: product_contract
@@ -4989,7 +5134,6 @@ records:
         ci_partition: remaining
     red_evidence: missing_project_root_legacy_alarm_authority_and_identical_finite_sensor_error_rows_each_produced_no_differences_2026_07_29_pending_immutable_capture
     green_evidence: pending
-
   - id: ARCHIVE-RECEIPT-AUTHORITY-036
     status: open
     scope: product_contract
@@ -5037,7 +5181,6 @@ records:
         ci_partition: remaining
     red_evidence: local_junit_sha256_f714efbb47c490bd6882584fa45e623f1ac2dc183b978a3fe1775604a840654c_reproduced_runtime_and_false_green_failures_pending_immutable_integration_capture
     green_evidence: pending
-
   - id: SAFETY-HAZARDOUS-SUCCESS-037
     status: open
     scope: product_contract
@@ -5057,7 +5200,6 @@ records:
         ci_partition: core
     red_evidence: production_driver_sibling_remained_energized_while_targeted_or_manager_stop_could_publish_success_2026_07_31_pending_immutable_capture
     green_evidence: pending
-
   - id: RED-REPRODUCTION-TRUSTED-BASE-038
     status: open
     scope: repository
@@ -5085,7 +5227,6 @@ records:
         ci_partition: remaining
     red_evidence: a_candidate_could_rebind_the_registry_and_evidence_together_or_hide_the_prior_binding_from_candidate_controlled_ancestry_while_the_governance_suite_remained_green_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
     status: open
     scope: repository
@@ -5119,7 +5260,6 @@ records:
         ci_partition: core
     red_evidence: original_partial_return_error_path_queue_leak_permissive_identity_accounting_success_only_cleanup_safe_queue_cleanup_omission_prejoin_terminal_drain_and_exceptional_safe_queue_leak_mutants_failed_their_exact_behavioral_guards_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: EXACT-SIX-PROTECTED-EXPORT-DESTINATION-ISOLATION-042
     status: open
     scope: repository
@@ -5139,7 +5279,6 @@ records:
         ci_partition: remaining
     red_evidence: protected_remaining_called_the_active_runner_with_destination_slash_active_checkout_then_passed_the_now_nonempty_destination_to_an_exporter_that_rejects_nonempty_destinations_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: PROTECTED-ACTIVE-CHECKOUT-AUTHORITY-ISOLATION-052
     status: open
     scope: repository
@@ -5164,7 +5303,6 @@ records:
         ci_partition: remaining
     red_evidence: protected_active_checkout_pytest_inherited_actions_id_token_request_credentials_and_github_env_output_path_state_and_step_summary_channels_and_did_not_own_background_descendant_settlement_2026_08_01_pending_immutable_capture
     green_evidence: pending
-
   - id: PROTECTED-REMAINING-SCHEMA-IDENTITY-053
     status: open
     scope: repository
@@ -5184,3 +5322,81 @@ records:
         ci_partition: remaining
     red_evidence: protected_ubuntu_remaining_run_30705652733_emitted_schema_three_with_a_valid_trusted_base_comparison_and_exact_merge_target_and_producer_bindings_but_validate_protected_job_identity_rejected_every_schema_except_two_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: MONTANA-METRICS-SNAPSHOT-043
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every generated current-candidate metrics publication derived from a staged Git index.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Metrics can combine a frozen source inventory with numstat from a different live index and publish a mixed candidate.
+    invariant: Every metrics input, including baseline numstat, is derived from one frozen index snapshot; inherited or concurrently changed indexes cannot alter publication, and the pinned baseline commit, tree, and blobs resolve without replacement-ref substitution.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_current_metrics_snapshot_binding_guard
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_baseline_metrics_ignore_replacement_refs
+        ci_partition: remaining
+    red_evidence: local_poisoned_alternate_index_restored_live_cached_numstat_and_guard_failed_2026_08_02_pending_candidate_binding
+    green_evidence: focused_frozen_snapshot_guard_passed_2026_08_02_pending_candidate_binding
+  - id: OPEN-CELL-OC037-EVIDENCE-044
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Current numeric qualification claims in the OC-037 register and related report authority.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: An unbound present-tense pass count can be mistaken for immutable candidate qualification evidence.
+    invariant: A current numeric pass claim requires an immutable command, commit/tree, and hosted-run binding; otherwise it is explicitly diagnostic or pending.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_oc037_unbound_pass_claim_guard
+        ci_partition: remaining
+    red_evidence: local_OC037_unbound_10_passed_mutation_failed_the_authority_guard_2026_08_02_pending_candidate_binding
+    green_evidence: focused_OC037_authority_guard_passed_2026_08_02_pending_candidate_binding
+  - id: OPEN-CELL-OC012-INVENTORY-045
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The OC-012 claimed workflow, governance-test, and reference-derived runner inventory.
+    classification: coverage_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A stale inventory can omit a tracked runner module while its prose and manifest still look complete.
+    invariant: The OC-012 manifest is derived from frozen workflow references and tracked candidate paths, with any added, removed, or missing referenced runner failing closed.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_oc012_reference_runner_inventory_guard
+        ci_partition: remaining
+    red_evidence: local_dotted_python_module_runner_reference_omission_failed_the_inventory_guard_2026_08_02_pending_candidate_binding
+    green_evidence: focused_OC012_inventory_guard_passed_2026_08_02_pending_candidate_binding
+  - id: MONTANA-REPORT-P5-MANIFEST-046
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: All live P5 candidate-manifest binding claims in the Montana report and claim-corrections register while P5 remains absent or pending.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Live report or claim-corrections prose can present an external exact commit/tree binding that does not exist and contradict the P5 authority register.
+    invariant: Every live P5 semantic claim unit remains explicitly pending until a real independently verified immutable P5 manifest exists; any present-tense external binding claim in either authority surface fails closed unless a qualifying word (negation, modal, or historical/stale status) qualifies the binding verb within its own local clause, and a qualifier in a different sentence, table cell, colon, em-dash/double-dash, semicolon, or comma-and/contrast clause cannot authorize it; a narrow leading Historical or Stale label is the only cross-clause allowance.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_p5_pending_manifest_guard
+        ci_partition: remaining
+    red_evidence: local_exact_old_external_exact_SHA_claim_plus_bind_capture_record_supply_and_cross_clause_mask_probes_in_report_and_claim_corrections_failed_the_registered_pending_authority_guard_2026_08_02_pending_candidate_binding
+    green_evidence: focused_P5_pending_manifest_guard_passed_2026_08_02_pending_candidate_binding

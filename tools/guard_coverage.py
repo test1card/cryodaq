@@ -256,7 +256,10 @@ def _repository_authority(repo: Path) -> RepositoryAuthority:
     except OSError as exc:
         raise GuardCoverageError("repository discovery returned an unavailable authority path") from exc
     if top_level != repo or not git_dir.is_dir() or not common_dir.is_dir():
-        raise GuardCoverageError("repository discovery does not bind the exact requested worktree")
+        raise GuardCoverageError(
+            "guard coverage requires one self-consistent repository authority; "
+            "repository discovery does not bind the exact requested worktree"
+        )
 
     marker = repo / ".git"
     marker_bytes: bytes | None = None

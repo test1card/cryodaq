@@ -59,14 +59,28 @@ Open checkpoint and deployment invariants:
    default-branch commit, compromised runner or GitHub identity, and same-process
    Byzantine behavior. A required-check setting enabled after the requested
    fast-forward protects later changes, not that fast-forward.
-3. **OC-036 — checkpoint prerequisite for accidental/agent-induced producer
-   substitution.** The protected producer and pytest plugin come from the
+3. **OC-036 — BLOCKS-DEPLOYMENT residual and checkpoint prerequisite for
+   accidental/agent-induced producer substitution.** The protected producer and pytest plugin come from the
    default-branch judge, so candidate copies cannot accidentally weaken them.
    Candidate tests still share the pytest process and OS account; deliberate
    plugin mutation, protocol forgery, background tampering, and equivalent
    hostile behavior remain BLOCKS-DEPLOYMENT disclosure debt.
-4. **OC-039 — BLOCKS-DEPLOYMENT disclosure debt, not an independent checkpoint
-   blocker.** The measured fixed-port/startup race fails only in the safe
+4. **OC-037 — BLOCKS-DEPLOYMENT release-promotion authority debt.** The current
+   validator performs RSA-SHA256 verification against the embedded public root,
+   binds the receipt to the exact artifact and candidate, and provides
+   same-ledger duplicate-use refusal. The workflow supplies a per-run temporary
+   ledger, so cross-run replay refusal is not established. The verifier has no
+   legacy self-hash API. The in-tree promotion workflow separately checks
+   workflow provenance: a successful configured qualification run for the same
+   candidate SHA must supply the externally signed receipt. The private signing
+   authority and receipt-producing qualification workflow are not in this tree;
+   bringing either under candidate authorship crosses the authority boundary and
+   requires separate protected owner review. Neither layer restricts direct
+   release upload outside the workflow or protects repository settings, so the
+   owner-ratified deployment gate remains open.
+5. **OC-039 — BLOCKS-DEPLOYMENT disclosure debt, not an independent checkpoint
+   blocker.** The flake's cause remains unknown; measured listener probes
+   falsified the fixed-port/startup explanation. It fails only in the safe
    direction, and its diagnostic retry is not a fix. If it makes P7 red, the
    one-shot cycle terminates because required hosted evidence is red.
 
