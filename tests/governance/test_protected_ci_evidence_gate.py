@@ -154,6 +154,26 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     assert "steps.protected-upload.outcome" in enforce["run"]
 
 
+def test_protected_workflow_binds_candidate_interpreter_alias_before_execution() -> None:
+    """The git-index soak guards spawn the exact worktree .venv/bin/python.
+
+    The ordinary workflow binds that alias in its own checkout; the protected
+    candidate checkout is pristine, so without this step the two POSIX soak
+    nodes fail closed with "exact worktree .venv interpreter is unavailable".
+    """
+
+    payload = yaml.safe_load(PROTECTED_WORKFLOW.read_text(encoding="utf-8"))
+    steps = payload["jobs"]["protected-execution"]["steps"]
+    alias = next(step for step in steps if step.get("name") == "Bind reviewed interpreter alias in candidate (Linux)")
+    assert alias["if"] == "runner.os == 'Linux'"
+    assert alias["working-directory"] == "candidate"
+    assert "refusing to reuse an ambient .venv" in alias["run"]
+    assert 'ln -s -- "$(command -v python)" .venv/bin/python' in alias["run"]
+    assert "Path('/proc/self/exe')" in alias["run"] or 'Path("/proc/self/exe")' in alias["run"]
+    protected_run = next(step for step in steps if step.get("id") == "protected-run")
+    assert steps.index(alias) < steps.index(protected_run)
+
+
 def test_native_final_job_is_fail_closed_and_uploads_only_accepted_context() -> None:
     payload = yaml.safe_load(PROTECTED_WORKFLOW.read_text(encoding="utf-8"))
     job = payload["jobs"]["protected-ci-evidence-gate"]
