@@ -618,15 +618,22 @@ def run_suite(
     root: Path,
     revision: str,
     basetemp: Path,
-    trusted_base: str,
+    trusted_base: str | None = None,
     protected_producer_root: Path | None = None,
 ) -> int:
     """Execute all and only the registry-selected exact-checkout tests once."""
 
     root = root.resolve(strict=True)
     _verify_checkout(root, revision)
-    comparison = compare_red_reproduction_bindings(root, candidate=revision, trusted_base=trusted_base)
-    print(f"CRYODAQ_RED_REPRODUCTION_COMPARISON {json.dumps(comparison, sort_keys=True)}", flush=True)
+    # The trusted-base comparison runs only where that authority legitimately
+    # exists: the workflow CLI (--trusted-base is required there) and the
+    # protected producer.  The sealed candidate runner reaches this function
+    # through tools.ci_candidate_runner without the base -- the bootstrap
+    # strips it before candidate code can read it -- and the producer has
+    # already proven the same comparison and bound it into the signed bundle.
+    if trusted_base is not None:
+        comparison = compare_red_reproduction_bindings(root, candidate=revision, trusted_base=trusted_base)
+        print(f"CRYODAQ_RED_REPRODUCTION_COMPARISON {json.dumps(comparison, sort_keys=True)}", flush=True)
     compile_python_tree(root)
     files, nodes = checkout_execution_selection(root, suite)
     file_set = set(files)

@@ -59,6 +59,13 @@ require_commit() {
     echo "invalid $label commit SHA" >&2
     return 1
   fi
+  if ! git rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1; then
+    # A force-pushed predecessor head is GitHub event authority but is
+    # not an ancestor of the new head, so the checkout lacks the
+    # object; fetch that exact commit once, then re-verify.  A SHA
+    # the remote cannot serve still fails closed below.
+    git fetch --no-tags origin "${sha}" >&2 || true
+  fi
   if ! git rev-parse --verify "${sha}^{commit}" >/dev/null; then
     echo "unresolvable $label commit SHA: $sha" >&2
     return 1
@@ -2990,6 +2997,66 @@ def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_
             expected_sha=head_commit,
             expected_trusted_base_sha=base_commit,
         )
+
+
+def test_candidate_identity_fetches_force_pushed_before_commit(tmp_path: Path) -> None:
+    """A force-pushed predecessor is event authority absent from the checkout."""
+
+    payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
+    remote = tmp_path / "default-branch.git"
+    _git(remote.parent, "init", "--bare", "-q", str(remote))
+    _git(repository, "remote", "add", "origin", str(remote))
+    _git(repository, "push", "-q", "origin", f"{base_commit}:refs/heads/master")
+
+    # Build the superseded predecessor head in a sibling clone so the bind
+    # checkout never holds the object; a production force-push leaves the old
+    # head non-ancestral to the new head exactly like this.
+    _git(tmp_path, "clone", "-q", str(remote), str(tmp_path / "sibling"))
+    sibling = tmp_path / "sibling"
+    _git(sibling, "config", "user.name", "Superseded Head Test")
+    _git(sibling, "config", "user.email", "superseded@example.invalid")
+    (sibling / "superseded.txt").write_text("old head\n", encoding="utf-8", newline="\n")
+    _git(sibling, "add", "superseded.txt")
+    _git(sibling, "commit", "-q", "-m", "superseded predecessor head")
+    superseded = _git(sibling, "rev-parse", "HEAD")
+    _git(sibling, "push", "-q", "origin", f"{superseded}:refs/heads/superseded-head")
+
+    assert (
+        subprocess.run(
+            ["git", "rev-parse", "--verify", f"{superseded}^{{commit}}"],
+            cwd=repository,
+            capture_output=True,
+            check=False,
+        ).returncode
+        != 0
+    )
+
+    _assert_candidate_identity_output(
+        payload,
+        repository,
+        tmp_path / "force-push.out",
+        event_name="push",
+        event_sha=head_commit,
+        push_before=superseded,
+        expected_sha=head_commit,
+        expected_trusted_base_sha=superseded,
+    )
+
+    # A before-SHA the remote cannot serve must still fail closed.
+    unservable = tmp_path / "unservable-before.out"
+    with pytest.raises(AssertionError):
+        _assert_candidate_identity_output(
+            payload,
+            repository,
+            unservable,
+            event_name="push",
+            event_sha=head_commit,
+            push_before="f" * 40,
+            expected_sha=head_commit,
+            expected_trusted_base_sha="f" * 40,
+        )
+    assert not unservable.exists()
 
 
 def test_ci_workflow_candidate_identity_tripwire_refuses_unresolved_trees(tmp_path: Path) -> None:

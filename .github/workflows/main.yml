@@ -250,6 +250,13 @@ jobs:
               echo "invalid $label commit SHA" >&2
               return 1
             fi
+            if ! git rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1; then
+              # A force-pushed predecessor head is GitHub event authority but is
+              # not an ancestor of the new head, so the checkout lacks the
+              # object; fetch that exact commit once, then re-verify.  A SHA
+              # the remote cannot serve still fails closed below.
+              git fetch --no-tags origin "${sha}" >&2 || true
+            fi
             if ! git rev-parse --verify "${sha}^{commit}" >/dev/null; then
               echo "unresolvable $label commit SHA: $sha" >&2
               return 1
