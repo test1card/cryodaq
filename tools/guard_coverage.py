@@ -144,17 +144,38 @@ def _declared_path(base: Path, value: str, label: str) -> Path:
         raise GuardCoverageError(f"repository {label} authority path is unavailable") from exc
 
 
+def _assert_real_directory_components(path: Path, label: str) -> None:
+    if not path.is_absolute():
+        raise GuardCoverageError(f"repository {label} authority path is not absolute")
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        if _is_link_or_reparse(current) or not current.is_dir():
+            raise GuardCoverageError(f"repository {label} authority is not a real directory")
+
+
 def _assert_repository_authority(authority: RepositoryAuthority) -> None:
     """Prove the filesystem registration still matches the bound Git authority."""
 
     marker = authority.marker
+    _assert_real_directory_components(authority.worktree, "requested worktree")
     if authority.marker_bytes is None:
-        if _is_link_or_reparse(marker) or not marker.is_dir():
+        _assert_real_directory_components(marker, "direct Git")
+        if not marker.is_dir():
             raise GuardCoverageError("repository direct Git authority is not a real directory")
         if marker.resolve(strict=True) != authority.git_dir or authority.common_dir != authority.git_dir:
             raise GuardCoverageError("repository direct Git authority is inconsistent")
         return
 
+    _assert_real_directory_components(authority.common_dir, "common-directory")
+    _assert_real_directory_components(authority.git_dir, "linked Git")
+    worktrees_dir = authority.common_dir / "worktrees"
+    if authority.common_dir == authority.git_dir:
+        raise GuardCoverageError("repository linked-worktree authority requires a distinct common directory")
+    if authority.git_dir.parent != worktrees_dir or not authority.git_dir.name:
+        raise GuardCoverageError("repository linked-worktree authority is not registered under its common directory")
+    _assert_real_directory_components(worktrees_dir, "linked-worktree registration")
+    _assert_real_directory_components(marker.parent, "worktree marker")
     if _read_authority_file(marker, "worktree marker") != authority.marker_bytes:
         raise GuardCoverageError("repository worktree marker authority changed")
     marker_target = _declared_path(
@@ -183,7 +204,11 @@ def _assert_repository_authority(authority: RepositoryAuthority) -> None:
         _authority_line(authority.commondir_bytes, "common-directory pointer"),
         "common-directory pointer",
     )
-    if backpointer_target != marker.resolve(strict=True) or common_target != authority.common_dir:
+    try:
+        marker_target_root = marker.resolve(strict=True)
+    except OSError as exc:
+        raise GuardCoverageError("repository worktree marker authority is unavailable") from exc
+    if backpointer_target != marker_target_root or common_target != authority.common_dir:
         raise GuardCoverageError("repository linked-worktree authority is inconsistent")
 
 
@@ -219,9 +244,15 @@ def _repository_authority(repo: Path) -> RepositoryAuthority:
     if len(values) != 4 or values[0] != "true":
         raise GuardCoverageError("guard coverage requires one worktree-bound repository authority")
     try:
-        top_level = Path(values[1]).resolve(strict=True)
-        git_dir = Path(values[2]).resolve(strict=True)
-        common_dir = Path(values[3]).resolve(strict=True)
+        discovered_top_level = Path(values[1])
+        discovered_git_dir = Path(values[2])
+        discovered_common_dir = Path(values[3])
+        _assert_real_directory_components(discovered_top_level, "requested worktree")
+        _assert_real_directory_components(discovered_git_dir, "Git")
+        _assert_real_directory_components(discovered_common_dir, "common-directory")
+        top_level = discovered_top_level.resolve(strict=True)
+        git_dir = discovered_git_dir.resolve(strict=True)
+        common_dir = discovered_common_dir.resolve(strict=True)
     except OSError as exc:
         raise GuardCoverageError("repository discovery returned an unavailable authority path") from exc
     if top_level != repo or not git_dir.is_dir() or not common_dir.is_dir():
@@ -231,13 +262,16 @@ def _repository_authority(repo: Path) -> RepositoryAuthority:
     marker_bytes: bytes | None = None
     backpointer_bytes: bytes | None = None
     commondir_bytes: bytes | None = None
-    if marker.is_file() and not _is_link_or_reparse(marker):
+    marker_is_reparse = _is_link_or_reparse(marker)
+    if marker.is_file() and not marker_is_reparse:
         marker_bytes = _read_authority_file(marker, "worktree marker")
         try:
             backpointer_bytes = _read_authority_file(git_dir / "gitdir", "Git-directory backpointer")
             commondir_bytes = _read_authority_file(git_dir / "commondir", "common-directory pointer")
         except GuardCoverageError as exc:
             raise GuardCoverageError("repository linked-worktree authority is incomplete") from exc
+    elif not marker.is_dir() or marker_is_reparse:
+        raise GuardCoverageError("repository .git authority is not a regular directory or file")
     authority = RepositoryAuthority(
         worktree=repo,
         git_dir=git_dir,

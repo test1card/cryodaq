@@ -458,6 +458,14 @@ def test_g4_guard_coverage_rejects_inherited_git_repository_redirect(
     assert main(["--repo", str(requested), "--base", "HEAD^", "--candidate", "HEAD"]) == 2
     assert "repository linked-worktree authority is incomplete" in capsys.readouterr().err
 
+    _write(foreign / ".git" / "gitdir", f"{requested_git.resolve().as_posix()}\n")
+    _write(foreign / ".git" / "commondir", ".\n")
+
+    assert Path(_git(requested, "rev-parse", "--git-common-dir")).resolve() == (foreign / ".git").resolve()
+    assert _git(requested, "rev-parse", "HEAD") == foreign_head
+    assert main(["--repo", str(requested), "--base", "HEAD^", "--candidate", "HEAD"]) == 2
+    assert "repository linked-worktree authority requires a distinct common directory" in capsys.readouterr().err
+
 
 def test_g4_guard_coverage_fails_closed_when_requested_repo_resolves_to_a_foreign_root(
     tmp_path: Path,

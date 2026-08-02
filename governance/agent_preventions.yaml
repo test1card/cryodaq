@@ -2633,7 +2633,7 @@ false_green_pairs:
     runtime_prevention_id: G4-SOURCE-CONTROL-AUTHORITY-038
     guard: tests/governance/test_guard_coverage.py::test_g4_guard_coverage_rejects_inherited_git_repository_redirect
     ci_partition: remaining
-    red_evidence: inherited_GIT_GRAFT_FILE_repository_local_info_grafts_shallow_and_replace_authority_and_a_foreign_Git_directory_whose_core_worktree_named_the_exact_requested_root_could_reinterpret_or_replace_both_requested_trees_with_the_self_parent_graft_and_foreign_strong_object_database_each_reporting_false_clean_zero_reductions_2026_08_01_pending_immutable_capture
+    red_evidence: inherited_GIT_GRAFT_FILE_repository_local_info_grafts_shallow_and_replace_authority_and_a_foreign_ordinary_Git_directory_with_core_worktree_requested_and_reciprocal_gitdir_commondir_decoration_selected_foreign_strong_objects_and_production_main_returned_false_clean_exit_0_instead_of_exit_2_2026_08_02_pending_immutable_capture
     green_evidence: pending
   - id: GUARD-COVERAGE-ALLOWLIST-SHAPE-FALSE-GREEN-252
     status: open
@@ -2655,7 +2655,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A missing committed object, inherited Git environment authority, active repository-local graph rewrite, foreign Git directory claiming the requested worktree, HEAD movement between verification and lookup, or incompatible archived callback invocation can make unavailable, foreign, substituted, mismatched, or unexecuted evidence satisfy an asserted prerequisite state.
-    invariant: G4 prerequisite checks and the guard-coverage comparator clear every inherited GIT_* authority variable, replace system and global configuration with comparator-owned empty authority, and reject active repository-local graft, shallow, or replacement history before either revision is resolved. The comparator binds one immutable exact worktree, Git directory, and common directory whose direct marker or linked-worktree marker, backpointer, and commondir declaration are reciprocal; every Git subprocess uses those explicit paths and the binding is rechecked before a result. It resolves and verifies one exact raw commit in that authority, queries that same commit's readable tree, and fails closed when local configuration, repository identity, ancestry, or tree evidence is active, unavailable, foreign, or ambiguous. Archived validators receive that authority through an explicitly detected current keyword capability or their exact historical source-control hook; callback-body failures remain failures and are never retried as interface compatibility.
+    invariant: 'G4 prerequisite checks and the guard-coverage comparator clear every inherited GIT_* authority variable, replace system and global configuration with comparator-owned empty authority, and reject active repository-local graft, shallow, or replacement history before either revision is resolved. The comparator binds one immutable exact worktree, Git directory, and common directory: a direct .git directory is self-contained, while a file-backed marker is admitted only when common_dir != git_dir, git_dir is exactly common_dir/worktrees/<id>, the marker, Git-directory backpointer, and commondir pointer are regular non-reparse files with reciprocal exact resolved targets, the relevant directories are real/non-reparse, and the registered worktree is the requested root. Every Git subprocess uses those explicit validated paths and the binding is rechecked before a result. It resolves and verifies one exact raw commit in that authority, queries that same commit''s readable tree, and fails closed when local configuration, repository identity, ancestry, or tree evidence is active, unavailable, foreign, or ambiguous. Archived validators receive that authority through an explicitly detected current keyword capability or their exact historical source-control hook; callback-body failures remain failures and are never retried as interface compatibility.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -2681,7 +2681,7 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_guard_coverage.py::test_git_file_reads_the_requested_repository_not_an_inherited_redirect
         ci_partition: remaining
-    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_pre_signature_archived_callback_skip_inherited_GIT_GRAFT_FILE_repository_local_graft_shallow_and_replace_history_authority_and_foreign_Git_directory_exact_worktree_claim_were_reproduced_2026_08_01_pending_immutable_capture
+    red_evidence: inherited_repository_selection_unreadable_head_tree_commit_replacement_ref_substitution_verified_HEAD_to_ls_tree_race_pre_signature_archived_callback_skip_inherited_GIT_GRAFT_FILE_repository_local_graft_shallow_and_replace_history_authority_and_foreign_ordinary_Git_directory_with_reciprocal_gitdir_commondir_decoration_claiming_the_requested_root_were_reproduced_2026_08_02_pending_immutable_capture
     green_evidence: pending
 
   - id: GOVERNANCE-PREVENTION-MAP-001
