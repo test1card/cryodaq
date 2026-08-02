@@ -2643,6 +2643,38 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: every_synthetic_comparator_fixture_used_a_mapping_allowlist_while_the_real_current_C2_guard_used_frozenset_so_the_green_suite_missed_an_AttributeError_and_a_registered_mapping_purpose_equal_to_the_literal_undeclared_sentinel_collided_with_a_set_shaped_entry_to_report_zero_reductions_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-FALSE-GREEN-212
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_collector_does_not_hide_real_reply_publication_loss
+    ci_partition: core
+    red_evidence: helper_returned_one_of_five_expected_replies_after_producer_completion_and_left_the_completeness_assertion_to_the_caller_2_failed_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-RESTORE-FALSE-GREEN-218
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_restores_both_reply_queue_put_attributes_after_success
+    ci_partition: core
+    red_evidence: success_only_restoration_omission_and_safe_queue_restoration_omission_each_failed_both_absent_and_custom_instance_attribute_guards_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-LATE-FALSE-GREEN-221
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_terminal_drain_accounts_reply_published_during_owner_settlement
+    ci_partition: core
+    red_evidence: prejoin_terminal_drain_returned_success_while_owner_published_an_unknown_reply_during_shutdown_settlement_1_failed_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-EXCEPTIONAL-SAFE-FALSE-GREEN-222
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_propagates_owner_failure_after_expected_reply
+    ci_partition: core
+    red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -5070,4 +5102,38 @@ records:
       - node: tests/core/test_safety_operator_snapshot_owner.py::test_hazardous_success_reconciles_production_driver_sibling_on
         ci_partition: core
     red_evidence: production_driver_sibling_remained_energized_while_targeted_or_manager_stop_could_publish_success_2026_07_31_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Test helpers that collect ZMQ subprocess replies and temporarily instrument externally supplied queues.
+    classification: publication_loss
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A helper can return a partial command batch as success or leak its queue monkeypatch into later tests, turning missing replies and unrelated failures into false evidence.
+    invariant: Every expected request identity is a unique nonempty string; the reply collector fails closed unless collected plus pending reply identities are an exact multiset match with no missing, duplicate, unknown, or absent identity, returns that exact accounted terminal cut, and restores both ordinary and safe reply queues to their exact pre-call instance-attribute state on success, owner failure, timeout, and every other exit.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_collector_does_not_hide_real_reply_publication_loss
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_collector_returns_accounted_replies_drained_after_collection_end
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_propagates_owner_failure_after_expected_reply
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_refuses_success_while_owner_is_unsettled
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_collector_rejects_nonexact_terminal_identity_multiset
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_collector_rejects_missing_or_duplicate_expected_identity
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_restores_both_reply_queue_put_attributes_after_success
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_terminal_drain_accounts_reply_published_during_owner_settlement
+        ci_partition: core
+    red_evidence: original_partial_return_error_path_queue_leak_permissive_identity_accounting_success_only_cleanup_safe_queue_cleanup_omission_prejoin_terminal_drain_and_exceptional_safe_queue_leak_mutants_failed_their_exact_behavioral_guards_2026_08_01_pending_immutable_capture
     green_evidence: pending

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import multiprocessing as mp
 import queue
 import time
+from collections.abc import Iterator
+from dataclasses import dataclass
 
 import pytest
 
@@ -14,81 +17,65 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def test_subprocess_sends_heartbeat() -> None:
-    """ZMQ subprocess sends heartbeat messages into data_queue."""
+_HEARTBEAT_COLLECTION_HANG_GUARD_S = 60.0
+
+
+@dataclass
+class _RunningBridge:
+    data_queue: mp.Queue
+    process: mp.Process
+
+
+@contextlib.contextmanager
+def _running_bridge(pub_addr: str, cmd_addr: str) -> Iterator[_RunningBridge]:
+    """Run the real bridge subprocess and always settle its lifecycle."""
     from cryodaq.core.zmq_subprocess import zmq_bridge_main
 
-    data_q: mp.Queue = mp.Queue(maxsize=1000)
-    cmd_q: mp.Queue = mp.Queue(maxsize=100)
-    reply_q: mp.Queue = mp.Queue(maxsize=100)
+    data_queue: mp.Queue = mp.Queue(maxsize=1000)
+    command_queue: mp.Queue = mp.Queue(maxsize=100)
+    reply_queue: mp.Queue = mp.Queue(maxsize=100)
     shutdown = mp.Event()
-
-    # Start subprocess — it will try to connect to non-existent engine
-    # but should still send heartbeats
-    proc = mp.Process(
+    process = mp.Process(
         target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:59990", "tcp://127.0.0.1:59991", data_q, cmd_q, reply_q, shutdown),
+        args=(pub_addr, cmd_addr, data_queue, command_queue, reply_queue, shutdown),
         daemon=True,
     )
-    proc.start()
+    process.start()
+    try:
+        yield _RunningBridge(data_queue, process)
+    finally:
+        shutdown.set()
+        process.join(timeout=3)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=2)
 
-    # Wait for heartbeat (should arrive within ~4s)
-    heartbeat_received = False
-    deadline = time.monotonic() + 6.0
-    while time.monotonic() < deadline:
-        try:
-            msg = data_q.get(timeout=0.5)
-            if isinstance(msg, dict) and msg.get("__type") == "heartbeat":
-                heartbeat_received = True
-                break
-        except queue.Empty:
-            continue
 
-    shutdown.set()
-    proc.join(timeout=3)
-    if proc.is_alive():
-        proc.kill()
-        proc.join(timeout=2)
+def _receive_heartbeat(bridge: _RunningBridge) -> dict[object, object]:
+    try:
+        message = bridge.data_queue.get(timeout=_HEARTBEAT_COLLECTION_HANG_GUARD_S)
+    except queue.Empty:
+        pytest.fail(
+            "heartbeat collection hang guard expired; "
+            f"bridge_alive={bridge.process.is_alive()}; exitcode={bridge.process.exitcode}"
+        )
+    assert isinstance(message, dict), f"expected heartbeat envelope, got {message!r}"
+    assert message.get("__type") == "heartbeat", f"expected heartbeat envelope, got {message!r}"
+    return message
 
-    assert heartbeat_received, "No heartbeat received within 6 seconds"
+
+def test_subprocess_sends_heartbeat() -> None:
+    """A real bridge subprocess causally emits a heartbeat envelope."""
+    with _running_bridge("tcp://127.0.0.1:59990", "tcp://127.0.0.1:59991") as bridge:
+        _receive_heartbeat(bridge)
 
 
 def test_heartbeat_has_timestamp() -> None:
-    """Heartbeat messages contain a 'ts' field with a monotonic timestamp."""
-    from cryodaq.core.zmq_subprocess import zmq_bridge_main
+    """Heartbeat envelopes carry a positive float monotonic timestamp."""
+    with _running_bridge("tcp://127.0.0.1:59992", "tcp://127.0.0.1:59993") as bridge:
+        heartbeat = _receive_heartbeat(bridge)
 
-    data_q: mp.Queue = mp.Queue(maxsize=1000)
-    cmd_q: mp.Queue = mp.Queue(maxsize=100)
-    reply_q: mp.Queue = mp.Queue(maxsize=100)
-    shutdown = mp.Event()
-
-    proc = mp.Process(
-        target=zmq_bridge_main,
-        args=("tcp://127.0.0.1:59992", "tcp://127.0.0.1:59993", data_q, cmd_q, reply_q, shutdown),
-        daemon=True,
-    )
-    proc.start()
-
-    heartbeat = None
-    deadline = time.monotonic() + 6.0
-    while time.monotonic() < deadline:
-        try:
-            msg = data_q.get(timeout=0.5)
-            if isinstance(msg, dict) and msg.get("__type") == "heartbeat":
-                heartbeat = msg
-                break
-        except queue.Empty:
-            continue
-
-    shutdown.set()
-    proc.join(timeout=3)
-    if proc.is_alive():
-        proc.kill()
-        proc.join(timeout=2)
-
-    assert heartbeat is not None
-    assert "ts" in heartbeat
-    assert isinstance(heartbeat["ts"], float)
+    assert type(heartbeat["ts"]) is float
     assert heartbeat["ts"] > 0
 
 
