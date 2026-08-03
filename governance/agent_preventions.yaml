@@ -5413,17 +5413,21 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Operator-log trigger-authority guards and every test that asserts one specific fail-closed refusal while an independent wall-clock fail-closed deadline is also live.
+    applies_to: Operator-log trigger-authority guards and every test that touches control-DB admission incidentally while the wall-clock fail-closed initialization deadline is live.
     classification: production_test_divergence
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A specific-refusal guard that does not classify the environmental control-DB initialization deadline trip fails red on a loaded runner without any product regression, and a retry classified after pytest.raises can never fire because the regex mismatch converts the RuntimeError into an AssertionError.
-    invariant: The trigger-authority scenario classifies the control-DB initialization deadline error before the refusal assertion and re-raises it raw; a bounded retry reruns the whole scenario on exactly that error with a fresh data directory per attempt, while an undetected trigger, a forged row, a lost row, or a missing refusal fails immediately without retry. The 2.0s production initialization deadline budget is unchanged and no fail-closed behavior is weakened.
+    consequence: A test that gates incidental control-DB admission on the production 2.0s wall-clock budget fails red on a loaded shared runner without any product regression — post-merge master failed three times across two different tests in this family at 2.080s, 2.087s, and 5.224s of the 2.000s budget — and a refusal guard that classifies the deadline error after pytest.raises can never retry, because the regex mismatch converts the RuntimeError into an AssertionError.
+    invariant: The tests/storage/test_operator_log_idempotency.py module never gates incidental admission on the production wall-clock budget — an autouse fixture gives incidental uses a generous 60s budget while the deadline mechanism is verified deterministically by a clock-monkeypatched test that pins 2.0s explicitly. The trigger-authority scenario additionally classifies the deadline error before the refusal assertion and re-raises it raw; a bounded retry reruns the whole scenario on exactly that error with a fresh data directory per attempt, while an undetected trigger, a forged row, a lost row, or a missing refusal fails immediately without retry. The 2.0s production initialization deadline budget is unchanged and no fail-closed behavior is weakened.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
+      - node: tests/storage/test_operator_log_idempotency.py::test_incidental_control_init_deadline_budget_is_generous_in_this_module
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_control_initialization_deadline_rolls_back_before_ddl_commit
+        ci_partition: remaining
       - node: tests/storage/test_operator_log_idempotency.py::test_keyed_append_rejects_triggered_loss_or_mutation_before_commit
         ci_partition: remaining
       - node: tests/storage/test_operator_log_idempotency.py::test_trigger_authority_deadline_retry_recovers_from_one_environmental_trip
@@ -5434,5 +5438,5 @@ records:
         ci_partition: remaining
       - node: tests/storage/test_operator_log_idempotency.py::test_trigger_authority_scenario_exposes_raw_deadline_error_for_retry
         ci_partition: remaining
-    red_evidence: post_merge_master_dbfd960d_windows_remaining_failed_both_trigger_parameterizations_with_control_database_initialization_deadline_expired_at_2.087s_and_5.224s_of_the_2.000s_budget_while_the_identical_tree_passed_pr_ci_twice_and_pytest_raises_converted_the_deadline_runtime_error_into_an_unretryable_assertion_error_2026_08_03_pending_immutable_capture
+    red_evidence: post_merge_master_dbfd960d_windows_remaining_failed_both_trigger_parameterizations_at_2.087s_and_5.224s_of_the_2.000s_budget_and_pr10_protected_windows_remaining_failed_test_promotion_and_missing_insert_bytes_reject_before_any_outbox_mutation_at_2.080s_while_identical_trees_passed_pr_gates_and_pytest_raises_converted_the_deadline_runtime_error_into_an_unretryable_assertion_error_2026_08_03_pending_immutable_capture
     green_evidence: pending

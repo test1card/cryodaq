@@ -708,10 +708,47 @@ async def test_failed_stop_owner_is_cleared_for_exact_retry(
     assert writer._stop_owner is not None and writer._stop_owner.done()
 
 
+# The 2.0s production initialization deadline is an intentional fail-closed
+# admission bound; it is verified deterministically by clock-monkeypatched
+# deadline tests (see test_control_initialization_deadline_rolls_back_before_ddl_commit,
+# which pins the budget back to 2.0s explicitly). Every other test in this
+# module touches control-DB admission only incidentally: on a loaded shared CI
+# runner, first-time SQLite initialization legitimately exceeds 2.0s of wall
+# clock (post-merge master failed three times at 2.080s, 2.087s, and 5.224s of
+# the 2.000s budget on trees PR CI had passed), and that legal fail-closed
+# refusal is not the property those tests assert. Give incidental uses a
+# generous budget so environmental slowness cannot masquerade as a product
+# failure; production behavior is unchanged.
+_TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S = 60.0
+
+
+@pytest.fixture(autouse=True)
+def _incidental_control_init_deadline_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S",
+        _TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S,
+    )
+
+
+def test_incidental_control_init_deadline_budget_is_generous_in_this_module() -> None:
+    assert (
+        sqlite_writer_module._OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S
+        == _TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S
+    )
+
+
 async def test_control_initialization_deadline_rolls_back_before_ddl_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # This test is the deadline's subject: pin the production budget back so
+    # the patched clock (0 -> 10) provably crosses it.
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S",
+        2.0,
+    )
     clock = {"expired": False}
     original_verify = SQLiteWriter._verify_operator_log_publication_storage
 
