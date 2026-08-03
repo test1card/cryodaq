@@ -520,7 +520,7 @@ def test_claim_corrections_changed_python_count_matches_workflow_index() -> None
 
     assert_current(workflow, corrections)
 
-    stale_count = corrections.replace("contains **671** Python paths", "contains **669** Python paths", 1)
+    stale_count = corrections.replace("contains **680** Python paths", "contains **678** Python paths", 1)
     assert stale_count != corrections
     with pytest.raises(AssertionError):
         assert_current(workflow, stale_count)

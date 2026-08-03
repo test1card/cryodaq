@@ -1,0 +1,60 @@
+# Lab Profile v1 — worked example for an IMAGINARY adapting laboratory.
+#
+# This file is a teaching artifact. It is NOT the incumbent stand's
+# configuration, and nothing in the engine consumes it in v1. It shows what a
+# fork of CryoDAQ running on different hardware declares about itself BEFORE
+# any incumbent config surface is touched.
+#
+# A lab profile is data-only and downstream:
+#   * Instrument types must come from the closed driver registry allowlist
+#     (BUILTIN_DRIVER_SPECS in src/cryodaq/drivers/registry.py). Capabilities
+#     are DERIVED from the registry, never declared here.
+#   * Actuation is not representable: a source-authority driver (today only
+#     keithley_2604b) is rejected, because docs/new_lab_adaptation.md §8 says
+#     adopting a hazardous actuator is not possible today.
+#   * Incumbent config surfaces (safety, thresholds, interlocks, alarms,
+#     overrides, channels, actuation) are deliberately not representable.
+#     Adding such a key fails validation with an exact-key error.
+#
+# Validate this file with:
+#   python -m cryodaq.lab_profile docs/examples/lab_profile.imaginary_lab.yaml
+
+schema_version: 1
+
+lab:
+  # Stable, whitespace-free identity of the adapting laboratory. This one is
+  # imaginary; a real fork picks its own.
+  lab_id: imaginary-asc-lab
+  # Human-facing name; ordinary spacing is allowed here.
+  display_name: Imaginary ASC Lab
+
+instruments:
+  # Every entry is {type, name} plus an optional note. `type` must be a key of
+  # the closed driver registry; `name` is the lab's stable instance identity
+  # (no whitespace, no path syntax).
+  - type: lakeshore_218s
+    name: LS218_1
+    note: Eight-channel thermometer on the imaginary cold head.
+  - type: thyracont_vsp63d
+    name: VSP63_1
+    note: Pirani vacuum gauge on the imaginary cryostat.
+  - type: etalon_multiline
+    name: ML_1
+    note: Displacement interferometer, burst-capable passive sensor.
+
+questions:
+  # Hazardous questions the lab has NOT answered yet. The kind enum is closed
+  # and maps to the ESCALATE points of docs/new_lab_adaptation.md
+  # (§3.4, §4.4, §6, §8). An open question here means: stop, ask the engineer.
+  - kind: safety_critical_roster
+    subject: Which sensors are permanently bolted to the cryostat?
+    summary: >-
+      The safety_critical_input roster is a physical claim about the wiring of
+      this stand (docs/new_lab_adaptation.md §3.4). The lab has no signed
+      wiring record yet, so no sensor may be marked safety-critical.
+  - kind: class_a_thresholds
+    subject: What are the interlock trip points before the first energized run?
+    summary: >-
+      Class A thresholds need an engineer-signed derivation from the physics
+      of this stand (docs/new_lab_adaptation.md §6) before anything is
+      energized. No derivation document exists yet.
