@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -119,6 +120,14 @@ def _denied_dunder(name: str) -> bool:
     return bool(_DUNDER.match(name)) and name not in ALLOWED_DUNDERS
 
 
+def _root_name(node: ast.expr) -> str | None:
+    """The base identifier of an assignment target, through attributes and subscripts."""
+
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
 INCUMBENT_CONFIG_FILES = (
     "config/safety.yaml",
     "config/interlocks.yaml",
@@ -200,7 +209,10 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
     # in-boundary: the same scan is applied to their own source, so they need no
     # capability allowlist entry.  Only names crossing the boundary do.
     local_names: set[str] = set()
+    imported_modules: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update((alias.asname or alias.name).split(".", 1)[0] for alias in node.names)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             local_names.add(node.name)
         elif isinstance(node, ast.ImportFrom):
@@ -266,6 +278,27 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             # Catches the subscript and getattr spellings -- ``x["__builtins__"]``
             # and ``getattr(x, "__globals__")`` name their dunder as a string.
             violations.append(f"{label}: the name {node.value!r} reaches interpreter internals past the boundary")
+        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and any(
+            isinstance(t, ast.Name) and t.id in ALLOWED_CALL_NAMES | ALLOWED_METHOD_NAMES
+            for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        ):
+            # ``print = open`` rebinds an allowlisted spelling to a denied
+            # capability, so the name in the allowlist stops meaning what it says.
+            violations.append(f"{label}: rebinding an allowlisted capability name hides what the call does")
+        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)) and any(
+            _root_name(target) in imported_modules
+            for target in (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else node.targets
+                if isinstance(node, ast.Delete)
+                else [node.target]
+            )
+        ):
+            # Mutation WITHOUT a call: os.environ[...] = ..., sys.path[:] = ...,
+            # del os.environ[...].  A call-only capability filter never sees these,
+            # and os.environ writes can flip documented runtime bypasses.
+            violations.append(f"{label}: assigning into an imported module mutates state outside the boundary")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _denied_dunder(node.name):
             # Defining a dunder is a reflection hook too: a module-level
             # __getattr__ resolves arbitrary attribute names at import time.
@@ -282,6 +315,23 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
                 violations.append(f"{label}: {func.id}() is not an allowlisted capability for a read-only artifact")
             elif isinstance(func, ast.Attribute) and func.attr not in ALLOWED_METHOD_NAMES:
                 violations.append(f"{label}: .{func.attr}() is not an allowlisted capability for a read-only artifact")
+            elif isinstance(func, ast.Attribute) and func.attr == "open":
+                # ``.open`` is allowlisted for the loader's bounded READ, so the
+                # MODE has to be checked -- Path(...).open("w") truncates.
+                modes = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+                modes += [
+                    k.value.value
+                    for k in node.keywords
+                    if k.arg == "mode" and isinstance(k.value, ast.Constant) and isinstance(k.value.value, str)
+                ]
+                if any(set(m) & set("wax+") for m in modes) or not modes:
+                    violations.append(f"{label}: .open() must name an explicit read-only mode, got {modes}")
+            elif isinstance(func, ast.Attribute) and func.attr == "load":
+                # yaml.load is safe only with the bounded in-package Loader;
+                # Loader=yaml.UnsafeLoader reintroduces arbitrary construction.
+                loaders = [k.value for k in node.keywords if k.arg == "Loader"]
+                if not loaders or not all(isinstance(v, ast.Name) and v.id in local_names for v in loaders):
+                    violations.append(f"{label}: .load() must pass an in-package Loader, not an external one")
     return violations
 
 
@@ -411,6 +461,18 @@ def test_every_allowlist_entry_is_load_bearing(monkeypatch: pytest.MonkeyPatch, 
         "import os\nos.remove('config/safety.yaml')",
         # Round 9: defining a module-level __getattr__ is an interpreter hook.
         "def __getattr__(name):\n    return None",
+        # Round 10: the allowlisted SPELLING is not the capability.  Rebinding,
+        # receiver and argument values each let an allowed name do a denied thing.
+        "print = open\nprint('config/safety.yaml', 'w')",
+        "from pathlib import Path\nPath('config/safety.yaml').open('w')",
+        "from pathlib import Path\nPath('config/safety.yaml').open(mode='a')",
+        "import yaml\nyaml.load(text, Loader=yaml.UnsafeLoader)",
+        "import yaml\nyaml.load(text)",
+        # Round 10: mutation performed without any call at all.
+        "import os\nos.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
+        "import os\nos.environ['CRYODAQ_ROOT'] = '/tmp/attacker'",
+        "import sys\nsys.path[:] = ['/tmp/attacker']",
+        "import os\ndel os.environ['PATH']",
     ),
 )
 def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
@@ -499,6 +561,87 @@ def _incumbent_snapshot() -> tuple[object, dict[str, str]]:
         name: hashlib.sha256((REPO_ROOT / name).read_bytes()).hexdigest() for name in INCUMBENT_CONFIG_FILES
     }
     return registry_state, config_hashes
+
+
+_RUNTIME_PROBE = r"""
+import hashlib, json, os, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+payload = json.loads(sys.stdin.read())
+
+
+def snapshot():
+    return {
+        "configs": {n: hashlib.sha256((root / n).read_bytes()).hexdigest() for n in payload["files"]},
+        "environ": sorted(os.environ.items()),
+        "sys_path": list(sys.path),
+    }
+
+
+# Taken BEFORE the import: an import-time write is exactly what the in-process
+# guard cannot see, because there the package is already imported.
+before = snapshot()
+
+import cryodaq.lab_profile as lab_profile
+
+for text in payload["texts"]:
+    try:
+        lab_profile.parse_lab_profile(text)
+    except Exception:
+        pass
+
+after = snapshot()
+differences = [key for key in before if before[key] != after[key]]
+# Report the tree actually imported. Measuring the wrong checkout is this
+# repository's single most expensive recurring mistake, and a guard that cannot
+# say which source it exercised is not evidence.
+print(json.dumps({"differences": differences, "tree": lab_profile.__file__}))
+"""
+
+
+def test_import_and_parse_leave_incumbent_process_state_untouched() -> None:
+    """Measure the read-only claim by EFFECT, in a fresh process, not by spelling.
+
+    The static scan constrains what the package's source may say; this
+    constrains what running it may do.  It is indifferent to aliasing
+    (``print = open``), to receiver (``Path(...).open("w")``), to argument
+    values (``Loader=yaml.UnsafeLoader``) and to whether the mutation is a call
+    at all (``os.environ[...] = ...``, ``sys.path[:] = [...]``) -- all of which
+    defeated, or would defeat, a purely syntactic capability check.
+
+    Crucially the baseline is taken BEFORE ``cryodaq.lab_profile`` is imported.
+    ``test_hostile_corpus_leaves_incumbent_state_untouched`` cannot do that: by
+    the time it runs, this module's own import has already executed the
+    package, so an import-time write would be inside its baseline.
+    """
+
+    payload = json.dumps({"files": list(INCUMBENT_CONFIG_FILES), "texts": [_VALID_TEXT, *HOSTILE_TEXTS]})
+    # *** The child gets a CLEAN environment, never dict(os.environ). ***
+    # This module imports cryodaq.lab_profile at its top, so by the time this
+    # test runs the package has ALREADY executed inside the pytest process. An
+    # inherited environment therefore carries any import-time mutation the
+    # package performed, the child's baseline starts out already-mutated, and
+    # setting the same variable again changes nothing -- the guard reports green
+    # against the very defect it exists to catch. Measured: with an inherited
+    # environment an injected os.environ write was reported as no difference,
+    # while the identical child run from an uncontaminated parent reported it.
+    # Only what CPython needs to start is passed through.
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    completed = subprocess.run(
+        [sys.executable, "-c", _RUNTIME_PROBE, str(REPO_ROOT)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert Path(report["tree"]).is_relative_to(REPO_ROOT), f"measured the wrong checkout: {report['tree']}"
+    assert report["differences"] == [], completed.stdout
 
 
 def test_hostile_corpus_leaves_incumbent_state_untouched() -> None:
