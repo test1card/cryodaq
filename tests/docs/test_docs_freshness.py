@@ -520,7 +520,18 @@ def test_claim_corrections_changed_python_count_matches_workflow_index() -> None
 
     assert_current(workflow, corrections)
 
-    stale_count = corrections.replace("contains **681** Python paths", "contains **679** Python paths", 1)
+    # The negative control has to mutate the LIVE candidate anchor that
+    # ``assert_current`` actually validates.  Matching the first
+    # ``contains **N** Python paths`` in the file is not equivalent: this branch
+    # also carries the frozen PR7 correction, whose count appears earlier and is
+    # deliberately pinned, so mutating it leaves the guard green and the control
+    # proves nothing.  The count itself stays un-hardcoded so the control keeps
+    # working as the candidate set moves.
+    current_anchor = re.search(r"current candidate index contains \*\*[\d,]+\*\* Python paths", corrections)
+    assert current_anchor is not None
+    stale_count = corrections.replace(
+        current_anchor.group(0), "current candidate index contains **669** Python paths", 1
+    )
     assert stale_count != corrections
     with pytest.raises(AssertionError):
         assert_current(workflow, stale_count)
