@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from cryodaq.drivers.registry import DriverAuthority, DriverCapability
 from cryodaq.lab_profile import (
     ActuationBoundaryError,
+    LabCapabilities,
     LabProfileError,
     load_lab_profile,
     parse_lab_profile,
@@ -198,3 +200,61 @@ def test_non_utf8_file_is_rejected(tmp_path) -> None:
     broken.write_bytes(b"\xff\xfe\x00 not utf-8")
     with pytest.raises(LabProfileError, match="strict UTF-8"):
         load_lab_profile(broken)
+
+
+def test_whitespace_only_display_name_is_rejected() -> None:
+    with pytest.raises(LabProfileError, match="whitespace-only"):
+        parse_lab_profile(_base().replace("display_name: Hostile Lab", 'display_name: "   "'))
+
+
+def test_whitespace_only_question_fields_are_rejected() -> None:
+    blank_subject = _with_questions('questions:\n  - kind: class_a_thresholds\n    subject: "  "\n    summary: s\n')
+    with pytest.raises(LabProfileError, match="whitespace-only"):
+        parse_lab_profile(blank_subject)
+    blank_summary = _with_questions('questions:\n  - kind: class_a_thresholds\n    subject: s\n    summary: "   "\n')
+    with pytest.raises(LabProfileError, match="whitespace-only"):
+        parse_lab_profile(blank_summary)
+
+
+def test_identity_limit_counts_characters_not_bytes() -> None:
+    accepted = _base().replace("lab_id: hostile-lab", f"lab_id: {'я' * 64}")
+    assert parse_lab_profile(accepted).lab_id == "я" * 64
+    rejected = _base().replace("lab_id: hostile-lab", f"lab_id: {'я' * 65}")
+    with pytest.raises(LabProfileError, match="64 characters"):
+        parse_lab_profile(rejected)
+
+
+def test_lab_capabilities_must_equal_the_registry_derivation() -> None:
+    invented = dict(
+        instrument_types=("lakeshore_218s",),
+        capabilities=frozenset({DriverCapability.CALIBRATABLE_SENSOR}),
+        trust_classes=frozenset({DriverAuthority.PASSIVE_MEASUREMENT}),
+    )
+    with pytest.raises(LabProfileError, match="derived from BUILTIN_DRIVER_SPECS"):
+        LabCapabilities(**invented)
+    unknown_type = dict(
+        instrument_types=("not_a_driver",),
+        capabilities=frozenset({DriverCapability.CALIBRATABLE_SENSOR}),
+        trust_classes=frozenset({DriverAuthority.PASSIVE_MEASUREMENT}),
+    )
+    with pytest.raises(LabProfileError, match="closed allowlist"):
+        LabCapabilities(**unknown_type)
+    source_type = dict(
+        instrument_types=("keithley_2604b",),
+        capabilities=frozenset(
+            {
+                DriverCapability.PASSIVE_SENSOR,
+                DriverCapability.CONTROLLED_SOURCE,
+                DriverCapability.VERIFIED_OFF_SOURCE,
+            }
+        ),
+        trust_classes=frozenset({DriverAuthority.REVIEWED_SOURCE}),
+    )
+    with pytest.raises(ActuationBoundaryError, match="hazardous actuator"):
+        LabCapabilities(**source_type)
+    honest = LabCapabilities(
+        instrument_types=("lakeshore_218s",),
+        capabilities=frozenset({DriverCapability.PASSIVE_SENSOR}),
+        trust_classes=frozenset({DriverAuthority.PASSIVE_MEASUREMENT}),
+    )
+    assert honest.actuation_supported is False

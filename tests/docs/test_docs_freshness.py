@@ -514,7 +514,7 @@ def test_claim_corrections_changed_python_count_matches_workflow_index() -> None
         ).stdout.splitlines()
         assert changed == sorted(set(changed))
         anchor = (
-            f"workflow-exact changed-file set in the frozen PR7 staged index contains **{len(changed):,}** Python paths"
+            f"workflow-exact changed-file set in the current candidate index contains **{len(changed):,}** Python paths"
         )
         assert anchor in candidate_corrections
 

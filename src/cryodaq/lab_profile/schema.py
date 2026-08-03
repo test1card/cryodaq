@@ -51,7 +51,7 @@ class QuestionKind(StrEnum):
 
 
 def _bounded_text(value: object, field_name: str, *, maximum: int, allow_empty: bool = False) -> str:
-    """Validate one NFC, control-free, byte-bounded text field."""
+    """Validate one NFC, control-free, character-bounded text field."""
 
     if type(value) is not str:
         raise LabProfileError(f"{field_name} must be an exact string")
@@ -59,14 +59,10 @@ def _bounded_text(value: object, field_name: str, *, maximum: int, allow_empty: 
         raise LabProfileError(f"{field_name} must be NFC-normalized")
     if any(unicodedata.category(character).startswith("C") for character in value):
         raise LabProfileError(f"{field_name} contains a Unicode control character")
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        raise LabProfileError(f"{field_name} is not valid Unicode text") from None
-    if not encoded and not allow_empty:
-        raise LabProfileError(f"{field_name} must not be empty")
-    if len(encoded) > maximum:
-        raise LabProfileError(f"{field_name} exceeds its bounded text grammar ({maximum} bytes)")
+    if not allow_empty and not value.strip():
+        raise LabProfileError(f"{field_name} must not be empty or whitespace-only")
+    if len(value) > maximum:
+        raise LabProfileError(f"{field_name} exceeds its bounded text grammar ({maximum} characters)")
     return value
 
 
@@ -150,11 +146,30 @@ class LabCapabilities:
             raise LabProfileError("derived capabilities must be DriverCapability values")
         if any(not isinstance(item, DriverAuthority) for item in self.trust_classes):
             raise LabProfileError("derived trust classes must be DriverAuthority values")
+        # Recompute the only legal values from the registry: a LabCapabilities
+        # that disagrees with the derivation was invented, not derived.
+        expected_capabilities: set[DriverCapability] = set()
+        expected_trust: set[DriverAuthority] = set()
+        for type_name in self.instrument_types:
+            spec = BUILTIN_DRIVER_SPECS.get(type_name)
+            if spec is None:
+                known = ", ".join(sorted(BUILTIN_DRIVER_SPECS))
+                raise LabProfileError(
+                    f"unknown instrument type {type_name!r}: the driver registry is a closed allowlist "
+                    f"(known types: {known}); a lab profile cannot declare an unregistered driver"
+                )
+            expected_capabilities |= spec.capabilities
+            expected_trust.add(spec.authority)
         source_capabilities = {DriverCapability.CONTROLLED_SOURCE, DriverCapability.VERIFIED_OFF_SOURCE}
-        if self.capabilities & source_capabilities or DriverAuthority.REVIEWED_SOURCE in self.trust_classes:
+        if expected_capabilities & source_capabilities or DriverAuthority.REVIEWED_SOURCE in expected_trust:
             raise ActuationBoundaryError(
                 "derived lab capabilities include source authority: docs/new_lab_adaptation.md §8 states that "
                 "adopting a hazardous actuator is not possible today — a hazardous actuator path does not exist"
+            )
+        if set(self.capabilities) != expected_capabilities or set(self.trust_classes) != expected_trust:
+            raise LabProfileError(
+                "LabCapabilities values must equal the union derived from BUILTIN_DRIVER_SPECS "
+                "for the declared instrument types; construct one via derive_capabilities"
             )
 
     @property

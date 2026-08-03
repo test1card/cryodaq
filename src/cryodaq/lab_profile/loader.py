@@ -181,7 +181,8 @@ def load_lab_profile(path: Path) -> LabProfileV1:
     if not os.path.isfile(selected):
         raise LabProfileError(f"lab profile path must be a regular file: {selected}")
     try:
-        raw = selected.read_bytes()
+        with selected.open("rb") as handle:
+            raw = handle.read(MAX_LAB_PROFILE_BYTES + 1)
     except OSError:
         raise LabProfileError(f"lab profile cannot be read: {selected}") from None
     if not raw or len(raw) > MAX_LAB_PROFILE_BYTES:

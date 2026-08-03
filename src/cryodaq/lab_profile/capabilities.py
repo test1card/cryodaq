@@ -8,13 +8,9 @@ what those instruments can do and which trust class they carry.
 
 from __future__ import annotations
 
-from typing import Final
-
 from cryodaq.drivers.registry import BUILTIN_DRIVER_SPECS, DriverAuthority, DriverCapability
 
-from .schema import ActuationBoundaryError, LabCapabilities, ProfileInstrument
-
-_SOURCE_CAPABILITIES: Final = frozenset({DriverCapability.CONTROLLED_SOURCE, DriverCapability.VERIFIED_OFF_SOURCE})
+from .schema import LabCapabilities, ProfileInstrument
 
 
 def derive_capabilities(instruments: tuple[ProfileInstrument, ...]) -> LabCapabilities:
@@ -22,8 +18,9 @@ def derive_capabilities(instruments: tuple[ProfileInstrument, ...]) -> LabCapabi
 
     Reads only ``BUILTIN_DRIVER_SPECS``.  The union of each declared
     instrument's ``spec.capabilities`` and ``spec.authority`` is the whole
-    answer; a defensive check rejects any source capability or reviewed-source
-    trust class, which a validated profile can never produce.
+    answer.  ``LabCapabilities.__post_init__`` independently recomputes that
+    union and rejects any instance — derived or hand-built — whose values
+    disagree with the registry or reach source authority.
     """
 
     instrument_types = tuple(item.type_name for item in instruments)
@@ -33,11 +30,6 @@ def derive_capabilities(instruments: tuple[ProfileInstrument, ...]) -> LabCapabi
         spec = BUILTIN_DRIVER_SPECS[type_name]
         capabilities |= spec.capabilities
         trust_classes.add(spec.authority)
-    if capabilities & _SOURCE_CAPABILITIES or DriverAuthority.REVIEWED_SOURCE in trust_classes:
-        raise ActuationBoundaryError(
-            "derived lab capabilities include source authority: docs/new_lab_adaptation.md §8 states that "
-            "adopting a hazardous actuator is not possible today — a hazardous actuator path does not exist"
-        )
     return LabCapabilities(
         instrument_types=instrument_types,
         capabilities=frozenset(capabilities),

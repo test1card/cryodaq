@@ -111,9 +111,12 @@ and the third adds `burst_sensor`. The derived `LabCapabilities` is therefore:
 - `actuation_supported`: `False` — a constant; v1 cannot represent actuation
 - `grants_control_authority`: `False` — a profile is data, not authority
 
-A defensive check in the derivation rejects any source capability
-(`controlled_source`, `verified_off_source`) or the `reviewed_source` trust
-class, so even a hand-built in-memory profile cannot smuggle actuation in.
+`LabCapabilities.__post_init__` independently recomputes that union from the
+registry and rejects any instance — derived or hand-built — whose values
+disagree with it, whose instrument types leave the closed allowlist, or that
+reach any source capability (`controlled_source`, `verified_off_source`) or
+the `reviewed_source` trust class. An in-memory profile cannot smuggle
+actuation in either.
 
 ## The four typed question kinds
 
