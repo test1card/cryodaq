@@ -2873,6 +2873,30 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: identical_tree_passed_the_pr_gate_twice_while_pytest_raises_converted_the_environmental_deadline_runtime_error_into_an_assertion_error_making_the_retry_dead_code_and_post_merge_master_failed_twice_2026_08_03_pending_immutable_capture
     green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-STEADY-STATE-FALSE-GREEN-249
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_steady_state_second_admission_uses_one_live_transaction
+    ci_partition: core
+    red_evidence: split_only_when_descriptor_catalog_installed_mutant_issued_eight_insert_batches_commits_and_begin_immediates_on_the_second_same_day_admission_while_every_fresh_writer_guard_passed_2026_08_03_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-SCHEDULER-PATH-FALSE-GREEN-255
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_scheduler_process_readings_uses_one_live_transaction
+    ci_partition: core
+    red_evidence: scheduler_side_per_reading_begin_committed_mutant_issued_one_settlement_per_reading_while_guards_replicating_the_writer_calls_themselves_passed_2026_08_03_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-WARM-ERROR-FALSE-GREEN-256
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_multiline_unavailable_poll_uses_one_live_transaction
+    ci_partition: core
+    red_evidence: split_only_non_ok_batches_when_catalog_installed_mutant_issued_seven_insert_batches_commits_and_transactions_on_the_second_unavailable_multiline_poll_while_fresh_writer_error_guards_passed_2026_08_03_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -5492,7 +5516,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A same-day committed batch can issue one transaction per reading instead of one per batch, multiplying transactions and write amplification on acquisition polls.
-    invariant: One same-day descriptor-authoritative admission issues exactly one main.readings insert batch carrying every admitted row, one commit, and one BEGIN IMMEDIATE, counted both at the owned connection wrapper and at the native SQLite boundary beneath _OwnedControlConnection so a split or commit routed through the raw connection is still rejected. The guard drives the scheduler's exact direct-settlement sequence (begin_committed(), settlement wait, release_committed()) on a warm writer, repeats a second same-day steady-state admission on one writer, uses the public eight-channel LakeShore response path for mixed and all error statuses, persists the public seven-reading MultiLine unavailable SENSOR_ERROR poll, and carries tracked LS218_2, LS218_3, and MultiLine_1 polls through the configured catalog and writer boundary. Synthetic cardinality cases are explicitly supplemental rather than claimed shipped polls.
+    invariant: One same-day descriptor-authoritative admission issues exactly one main.readings insert batch carrying every admitted row, one commit, and one BEGIN IMMEDIATE, counted both at the owned connection wrapper and at the native SQLite boundary beneath _OwnedControlConnection so a split or commit routed through the raw connection is still rejected. The guard invokes Scheduler._process_readings() itself with the startup-resolved throttle and a shipped LS218_2 poll, drives the scheduler's exact direct-settlement sequence (begin_committed(), settlement wait, release_committed()) on a warm writer, repeats a second same-day steady-state admission on one writer, repeats shipped LakeShore mixed/all-error and MultiLine unavailable SENSOR_ERROR polls as second admissions on one warm writer, and carries tracked LS218_2, LS218_3, and MultiLine_1 polls through the configured catalog and writer boundary. Synthetic cardinality cases are explicitly supplemental rather than claimed shipped polls.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     guards:
@@ -5509,6 +5533,8 @@ records:
       - node: tests/core/test_sqlite_writer.py::test_steady_state_second_admission_uses_one_live_transaction
         ci_partition: core
       - node: tests/core/test_sqlite_writer.py::test_scheduler_direct_settlement_uses_one_live_transaction
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_scheduler_process_readings_uses_one_live_transaction
         ci_partition: core
       - node: tests/core/test_sqlite_writer.py::test_multiline_unavailable_poll_uses_one_live_transaction
         ci_partition: core

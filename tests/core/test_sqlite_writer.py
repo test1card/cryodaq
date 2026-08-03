@@ -20,6 +20,7 @@ from cryodaq.channels.descriptors import (
     ChannelRole,
     ChannelSafetyClass,
 )
+from cryodaq.core.broker import DataBroker
 from cryodaq.core.housekeeping import (
     AdaptiveThrottle,
     load_critical_channels_from_alarms_v3,
@@ -29,6 +30,7 @@ from cryodaq.core.housekeeping import (
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
+from cryodaq.core.scheduler import InstrumentConfig, Scheduler, _InstrumentState
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.drivers.instruments.etalon_multiline import MultiLineDriver
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
@@ -782,17 +784,31 @@ async def test_error_status_batches_use_one_live_transaction(
         assert math.isinf(values[0]) and math.isnan(values[1]) and math.isinf(values[2])
 
     catalog, _patterns = _shipped_protected_patterns()
-    counted, persisted_rows = await _write_counting(
-        tmp_path,
-        len(batch),
-        batch=batch,
-        channel_catalog=catalog,
-    )
-    rows = _read_db(tmp_path / f"data_{timestamp.date().isoformat()}.db")
+    writer = SQLiteWriter(tmp_path, channel_catalog=catalog)
+    get_counter = _install_counting(writer)
+    try:
+        # Warm the writer past catalog installation with a shipped OK poll so
+        # the error batch lands on the steady-state path, where a regression
+        # that splits only non-OK batches must still fail this guard.
+        warm, warm_commands = await _read_shipped_lakeshore_response("4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0")
+        assert warm_commands == ("KRDG?",)
+        warm_receipt = await writer.write_committed([replace(reading, timestamp=timestamp) for reading in warm])
+        assert warm_receipt is not None
+        counted = get_counter()
+        assert counted is not None
+        before = _counter_snapshot(counted)
+        receipt = await writer.write_committed(batch)
+        assert receipt is not None
+        after = _counter_snapshot(counted)
+    finally:
+        await writer.stop()
 
-    _assert_single_batched_live_write(label, len(batch), counted, persisted_rows)
-    assert [row["status"] for row in rows] == [status.value for status in statuses]
-    for row, status in zip(rows, statuses, strict=True):
+    rows = _read_db(tmp_path / f"data_{timestamp.date().isoformat()}.db")
+    assert len(rows) == 16, f"Expected 16 persisted rows across both admissions, got {len(rows)}"
+    _assert_single_batched_delta(f"warm-writer {label}", len(batch), before, after)
+    error_rows = rows[8:]
+    assert [row["status"] for row in error_rows] == [status.value for status in statuses]
+    for row, status in zip(error_rows, statuses, strict=True):
         if status is ChannelStatus.OK:
             assert row["value"] != SENTINEL
         else:
@@ -871,22 +887,62 @@ async def test_scheduler_direct_settlement_uses_one_live_transaction(tmp_path: P
     _assert_single_batched_delta("scheduler direct-settlement admission", len(combined), before, after)
 
 
+async def test_scheduler_process_readings_uses_one_live_transaction(tmp_path: Path) -> None:
+    """Drive the deployed ``Scheduler._process_readings()`` persistence path itself.
+
+    Guards that reproduce the writer calls cannot see a scheduler-side
+    regression: if ``_process_readings()`` admitted each reading through its
+    own ``begin_committed()`` instead of one settlement for the filtered
+    combined poll, only invoking the scheduler observes it. This guard passes
+    one shipped eight-channel LS218_2 poll through the production scheduler
+    with the startup-resolved adaptive throttle and the counted descriptor-
+    authoritative writer.
+    """
+
+    timestamp = datetime(2026, 7, 12, 12, tzinfo=UTC)
+    catalog, protected_patterns = _shipped_protected_patterns()
+    housekeeping, _receipt = load_housekeeping_config(_CONFIG_DIR / "housekeeping.yaml")
+    throttle = AdaptiveThrottle(housekeeping["adaptive_throttle"], protected_patterns=protected_patterns)
+    writer = SQLiteWriter(tmp_path, channel_catalog=catalog)
+    get_counter = _install_counting(writer)
+    scheduler = Scheduler(DataBroker(), sqlite_writer=writer, adaptive_throttle=throttle)
+    state = _InstrumentState(InstrumentConfig(driver=_shipped_driver("LS218_2")))
+    acquired, commands = await _read_shipped_lakeshore_response("4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0")
+    assert commands == ("KRDG?",)
+    poll = [replace(reading, timestamp=timestamp) for reading in acquired]
+    try:
+        await scheduler._process_readings(state, poll)
+    finally:
+        await writer.stop()
+
+    counted = get_counter()
+    assert counted is not None
+    rows = _read_db(tmp_path / f"data_{timestamp.date().isoformat()}.db")
+    _assert_single_batched_live_write("scheduler _process_readings admission", len(poll), counted, len(rows))
+
+
 async def test_multiline_unavailable_poll_uses_one_live_transaction(tmp_path: Path) -> None:
     """A disconnected MultiLine poll is seven SENSOR_ERROR readings in one transaction.
 
     The shipped ``MultiLineDriver.read_channels()`` failure path returns the
     full seven-channel roster (four length + three environmental) as
-    SENSOR_ERROR; persist that public result through the counted writer so a
-    split of seven-row error batches fails here.
+    SENSOR_ERROR. Persist it through the counted writer *after* a warm OK
+    admission on the same writer: production error polls arrive on the
+    steady-state path, so a regression splitting only non-OK batches once the
+    catalog is installed must fail here.
     """
 
     driver = _shipped_driver("MultiLine_1")
     assert isinstance(driver, MultiLineDriver)
+    timestamp = datetime(2026, 7, 12, 12, tzinfo=UTC)
+    ok_poll = [replace(reading, timestamp=timestamp) for reading in await driver.read_channels()]
+    assert len(ok_poll) == 7
+    assert all(reading.status is ChannelStatus.OK for reading in ok_poll)
+
     driver.mock = False
     # No transport is ever installed: the shipped failure path answers publicly.
-    timestamp = datetime(2026, 7, 12, 12, tzinfo=UTC)
     acquired = await driver.read_channels()
-    batch = [replace(reading, timestamp=timestamp) for reading in acquired]
+    batch = [replace(reading, timestamp=timestamp + timedelta(seconds=1)) for reading in acquired]
     assert len(batch) == 7, f"Expected the seven-reading unavailable roster, got {len(batch)}"
     assert [reading.channel for reading in batch] == [
         "MultiLine_1/length_ch1",
@@ -900,17 +956,26 @@ async def test_multiline_unavailable_poll_uses_one_live_transaction(tmp_path: Pa
     assert all(reading.status is ChannelStatus.SENSOR_ERROR for reading in batch)
 
     catalog, _patterns = _shipped_protected_patterns()
-    counted, persisted_rows = await _write_counting(
-        tmp_path,
-        len(batch),
-        batch=batch,
-        channel_catalog=catalog,
-    )
-    rows = _read_db(tmp_path / f"data_{timestamp.date().isoformat()}.db")
+    writer = SQLiteWriter(tmp_path, channel_catalog=catalog)
+    get_counter = _install_counting(writer)
+    try:
+        warm_receipt = await writer.write_committed(ok_poll)
+        assert warm_receipt is not None
+        counted = get_counter()
+        assert counted is not None
+        before = _counter_snapshot(counted)
+        receipt = await writer.write_committed(batch)
+        assert receipt is not None
+        after = _counter_snapshot(counted)
+    finally:
+        await writer.stop()
 
-    _assert_single_batched_live_write("MultiLine unavailable poll", len(batch), counted, persisted_rows)
-    assert [row["status"] for row in rows] == [ChannelStatus.SENSOR_ERROR.value] * 7
-    assert all(row["value"] == SENTINEL for row in rows)
+    rows = _read_db(tmp_path / f"data_{timestamp.date().isoformat()}.db")
+    assert len(rows) == 14, f"Expected 14 persisted rows across both admissions, got {len(rows)}"
+    _assert_single_batched_delta("steady-state MultiLine unavailable poll", len(batch), before, after)
+    error_rows = rows[7:]
+    assert [row["status"] for row in error_rows] == [ChannelStatus.SENSOR_ERROR.value] * 7
+    assert all(row["value"] == SENTINEL for row in error_rows)
 
 
 # ---------------------------------------------------------------------------
