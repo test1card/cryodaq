@@ -5424,6 +5424,8 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
+      - node: tests/storage/test_operator_log_idempotency.py::test_production_control_init_deadline_budget_is_unchanged
+        ci_partition: remaining
       - node: tests/storage/test_operator_log_idempotency.py::test_incidental_control_init_deadline_budget_is_generous_in_this_module
         ci_partition: remaining
       - node: tests/storage/test_operator_log_idempotency.py::test_control_initialization_deadline_rolls_back_before_ddl_commit

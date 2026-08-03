@@ -719,6 +719,14 @@ async def test_failed_stop_owner_is_cleared_for_exact_retry(
 # refusal is not the property those tests assert. Give incidental uses a
 # generous budget so environmental slowness cannot masquerade as a product
 # failure; production behavior is unchanged.
+#
+# The production value is captured at import time, before the autouse fixture
+# can overwrite the module global: without this, weakening the production
+# budget (for example 2.0 -> 60.0) would pass every guard in this module,
+# because the fixture masks the change and the rollback test pins 2.0s for
+# itself. test_production_control_init_deadline_budget_is_unchanged is the
+# guard that detects exactly that weakening.
+_PRODUCTION_CONTROL_INIT_DEADLINE_S = sqlite_writer_module._OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S
 _TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S = 60.0
 
 
@@ -729,6 +737,11 @@ def _incidental_control_init_deadline_budget(monkeypatch: pytest.MonkeyPatch) ->
         "_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S",
         _TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S,
     )
+
+
+def test_production_control_init_deadline_budget_is_unchanged() -> None:
+    """The module-wide test override must never mask a weakened production budget."""
+    assert _PRODUCTION_CONTROL_INIT_DEADLINE_S == 2.0
 
 
 def test_incidental_control_init_deadline_budget_is_generous_in_this_module() -> None:
@@ -747,7 +760,7 @@ async def test_control_initialization_deadline_rolls_back_before_ddl_commit(
     monkeypatch.setattr(
         sqlite_writer_module,
         "_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S",
-        2.0,
+        _PRODUCTION_CONTROL_INIT_DEADLINE_S,
     )
     clock = {"expired": False}
     original_verify = SQLiteWriter._verify_operator_log_publication_storage
