@@ -907,18 +907,27 @@ async def test_scheduler_process_readings_uses_one_live_transaction(tmp_path: Pa
     get_counter = _install_counting(writer)
     scheduler = Scheduler(DataBroker(), sqlite_writer=writer, adaptive_throttle=throttle)
     state = _InstrumentState(InstrumentConfig(driver=_shipped_driver("LS218_2")))
-    acquired, commands = await _read_shipped_lakeshore_response("4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0")
-    assert commands == ("KRDG?",)
-    poll = [replace(reading, timestamp=timestamp) for reading in acquired]
     try:
+        warm, commands = await _read_shipped_lakeshore_response("4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0")
+        assert commands == ("KRDG?",)
+        await scheduler._process_readings(state, [replace(reading, timestamp=timestamp) for reading in warm])
+        counted = get_counter()
+        assert counted is not None
+        before = _counter_snapshot(counted)
+        # The second scheduler admission runs on the steady-state path: a
+        # scheduler-side per-reading split that starts only once the catalog
+        # is installed must fail here.
+        acquired, commands = await _read_shipped_lakeshore_response("4.1,5.1,6.1,7.1,8.1,9.1,10.1,11.1")
+        assert commands == ("KRDG?",)
+        poll = [replace(reading, timestamp=timestamp + timedelta(seconds=1)) for reading in acquired]
         await scheduler._process_readings(state, poll)
+        after = _counter_snapshot(counted)
     finally:
         await writer.stop()
 
-    counted = get_counter()
-    assert counted is not None
     rows = _read_db(tmp_path / f"data_{timestamp.date().isoformat()}.db")
-    _assert_single_batched_live_write("scheduler _process_readings admission", len(poll), counted, len(rows))
+    assert len(rows) == 16, f"Expected 16 persisted rows across both scheduler admissions, got {len(rows)}"
+    _assert_single_batched_delta("second scheduler _process_readings admission", len(poll), before, after)
 
 
 async def test_multiline_unavailable_poll_uses_one_live_transaction(tmp_path: Path) -> None:
