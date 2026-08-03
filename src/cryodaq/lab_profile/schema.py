@@ -15,8 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
-from cryodaq.drivers.capability_metadata import DriverAuthority, DriverCapability
-from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA
+from cryodaq.drivers.capability_metadata import BUILTIN_DRIVER_METADATA, DriverAuthority, DriverCapability
 
 MAX_IDENTITY_CHARS: Final = 64
 MAX_DISPLAY_NAME_CHARS: Final = 128

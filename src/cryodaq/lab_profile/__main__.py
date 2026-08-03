@@ -8,10 +8,11 @@ any failure.  This is an offline validation tool with no console-script entry.
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 
-from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA
+from cryodaq.drivers.capability_metadata import BUILTIN_DRIVER_METADATA
 
 from .loader import load_lab_profile
 from .schema import LabProfileError
@@ -22,9 +23,8 @@ def main(argv: list[str] | None = None) -> int:
     # the CLI must print what it accepts even on a legacy-encoded stream
     # (e.g. PYTHONIOENCODING=cp1252), never die with UnicodeEncodeError.
     for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if callable(reconfigure):
-            reconfigure(encoding="utf-8", errors="replace")
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = sys.argv[1:] if argv is None else list(argv)
     if len(args) != 1:
         print("usage: python -m cryodaq.lab_profile <path>", file=sys.stderr)

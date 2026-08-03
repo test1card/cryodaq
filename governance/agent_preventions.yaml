@@ -2897,6 +2897,14 @@ false_green_pairs:
     ci_partition: core
     red_evidence: split_only_non_ok_batches_when_catalog_installed_mutant_issued_seven_insert_batches_commits_and_transactions_on_the_second_unavailable_multiline_poll_while_fresh_writer_error_guards_passed_2026_08_03_pending_immutable_capture
     green_evidence: pending
+  - id: LAB-PROFILE-BOUNDARY-GUARD-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAB-PROFILE-AUTHORITY-ESCAPE-001
+    guard: tests/lab_profile/test_downstream_readonly.py::test_import_guard_rejects_authority_bearing_symbols
+    ci_partition: remaining
+    red_evidence: fourteen_static_relative_dynamic_and_reflective_escape_spellings_including_inspect_getmodule_on_the_enums_passed_the_prior_boundary_guard_while_it_stayed_green_2026_08_03_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -5075,6 +5083,7 @@ records:
       covered_classifications:
         - coverage_escape
         - evidence_misbinding
+        - instrument_authority_escape
         - late_side_effect
         - markup_interpretation
         - production_test_divergence
@@ -5541,3 +5550,28 @@ records:
     red_evidence: legacy_write_batch_guard_stayed_green_while_mutated_write_live_batch_issued_one_transaction_per_reading_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
+  - id: LAB-PROFILE-AUTHORITY-ESCAPE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Downstream declaration artifacts that derive capability truth from the driver registry (today cryodaq.lab_profile).
+    classification: instrument_authority_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A data-only downstream artifact acquires driver-construction or source authority by importing, dynamically loading, or reflecting into the authority-bearing registry while presenting itself as inert.
+    invariant: Downstream capability truth comes only from the deliberately authority-free cryodaq.drivers.capability_metadata module; the lab_profile package never loads the registry module, never names BUILTIN_DRIVER_SPECS, and cannot reach construction authority through static, relative, nested, dynamic, or reflective import paths.
+    rule_refs:
+      - docs/lab_profile.md
+      - docs/new_lab_adaptation.md#8-what-is-out-of-scope-here
+    guards:
+      - node: tests/lab_profile/test_downstream_readonly.py::test_import_closure_stays_downstream
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_import_guard_rejects_authority_bearing_symbols
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_importing_the_package_never_loads_the_authority_bearing_registry
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_package_never_names_the_authority_bearing_registry_mapping
+        ci_partition: remaining
+    red_evidence: inspect_getmodule_on_the_imported_enums_returned_the_authority_bearing_registry_and_construct_driver_while_the_symbol_allowlist_guard_stayed_green_2026_08_03_pending_immutable_capture
+    green_evidence: pending

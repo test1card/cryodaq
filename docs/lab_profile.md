@@ -96,15 +96,16 @@ declaration fails.
 
 A lab profile never declares capabilities. It declares instruments, and
 `src/cryodaq/lab_profile/capabilities.py` derives everything else by reading
-**only** `BUILTIN_DRIVER_METADATA` — an inert, factory-free projection whose
-definitions live in the deliberately authority-free
-`src/cryodaq/drivers/capability_metadata.py` and which the registry builds
-from its closed allowlist (the engine's own source of truth). The full
-`BUILTIN_DRIVER_SPECS` mapping is deliberately not imported: its values carry
-public driver factories, and a data-only artifact must not hold construction
-authority — not even via reflection, which is why the enums and the metadata
-type live in the inert module rather than in the registry. Derivation is
-the ONLY source of capability truth for a profile.
+**only** `BUILTIN_DRIVER_METADATA` from
+`src/cryodaq/drivers/capability_metadata.py` — a deliberately authority-free
+module that owns the trust taxonomy and the inert capability table. The
+registry *consumes* that table and re-derives it from its live specs at
+import time, failing closed on any drift, so the table and the registry
+cannot silently disagree. The package never imports the registry at all: the
+full `BUILTIN_DRIVER_SPECS` mapping carries public driver factories, and a
+data-only artifact must not hold construction authority — not even via
+reflection, which lands in the inert module where no constructor exists.
+Derivation is the ONLY source of capability truth for a profile.
 
 Worked example: the imaginary lab above declares `lakeshore_218s`,
 `thyracont_vsp63d`, and `etalon_multiline`. The registry says the first two

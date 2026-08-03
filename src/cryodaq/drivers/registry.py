@@ -21,9 +21,9 @@ from typing import Final, TypeGuard
 
 from cryodaq.drivers.base import InstrumentDriver
 from cryodaq.drivers.capability_metadata import (
+    BUILTIN_DRIVER_METADATA,
     DriverAuthority,
     DriverCapability,
-    DriverTypeMetadata,
     build_driver_metadata_projection,
 )
 from cryodaq.drivers.contracts import (
@@ -524,13 +524,23 @@ ALLOWLISTED_DRIVER_MODULES: Final[tuple[str, ...]] = tuple(
     sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values())
 )
 
-# The inert projection lives in cryodaq.drivers.capability_metadata so that a
-# downstream consumer can derive capabilities without importing (or reaching
-# via reflection) this authority-bearing module.  DriverTypeMetadata is
-# re-exported here only for compatibility.
-BUILTIN_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = build_driver_metadata_projection(
-    BUILTIN_DRIVER_SPECS.values()
-)
+# The authoritative inert capability table lives in
+# cryodaq.drivers.capability_metadata so downstream consumers can import
+# capability truth without loading this authority-bearing module.  The registry
+# consumes that table and re-derives it from its own live specs at import
+# time: any drift between the two fails closed here, so the table and the
+# registry cannot silently disagree.  BUILTIN_DRIVER_METADATA is re-exported
+# for compatibility; new downstream code should import it from
+# cryodaq.drivers.capability_metadata.
+_derived_metadata = build_driver_metadata_projection(BUILTIN_DRIVER_SPECS.values())
+if _derived_metadata != BUILTIN_DRIVER_METADATA:
+    _drift = sorted(set(_derived_metadata) ^ set(BUILTIN_DRIVER_METADATA)) or sorted(
+        key for key in _derived_metadata if _derived_metadata[key] != BUILTIN_DRIVER_METADATA.get(key)
+    )
+    raise DriverRegistryError(
+        "driver capability metadata drift between the registry specs and the inert table: " + ", ".join(_drift)
+    )
+del _derived_metadata
 
 
 def _normalize_keithley_watchdog(value: object, *, path: str) -> dict[str, object]:

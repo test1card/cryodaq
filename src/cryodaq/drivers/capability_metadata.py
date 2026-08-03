@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Final
 
 
 class DriverMetadataError(ValueError):
@@ -80,3 +81,48 @@ def build_driver_metadata_projection(specs: Iterable[object]) -> Mapping[str, Dr
             raise DriverMetadataError(f"duplicate driver metadata projection for {metadata.type_name!r}")
         projection[metadata.type_name] = metadata
     return MappingProxyType(projection)
+
+
+# The authoritative inert capability table.  This module — not the registry —
+# owns the mapping so that downstream consumers can import capability truth
+# without loading the authority-bearing registry into their process at all.
+# ``cryodaq.drivers.registry`` re-derives the projection from its live specs at
+# import time and refuses to start on any drift between the two, so the table
+# and the registry cannot silently disagree.
+_BUILTIN_DRIVER_METADATA_ROWS: Final = (
+    DriverTypeMetadata(
+        type_name="lakeshore_218s",
+        authority=DriverAuthority.PASSIVE_MEASUREMENT,
+        capabilities=frozenset({DriverCapability.PASSIVE_SENSOR}),
+    ),
+    DriverTypeMetadata(
+        type_name="thyracont_vsp63d",
+        authority=DriverAuthority.PASSIVE_MEASUREMENT,
+        capabilities=frozenset({DriverCapability.PASSIVE_SENSOR}),
+    ),
+    DriverTypeMetadata(
+        type_name="etalon_multiline",
+        authority=DriverAuthority.PASSIVE_MEASUREMENT,
+        capabilities=frozenset({DriverCapability.PASSIVE_SENSOR, DriverCapability.BURST_SENSOR}),
+    ),
+    DriverTypeMetadata(
+        type_name="asc_reference_tcp",
+        authority=DriverAuthority.PASSIVE_EXTENSION,
+        capabilities=frozenset({DriverCapability.PASSIVE_SENSOR}),
+    ),
+    DriverTypeMetadata(
+        type_name="keithley_2604b",
+        authority=DriverAuthority.REVIEWED_SOURCE,
+        capabilities=frozenset(
+            {
+                DriverCapability.PASSIVE_SENSOR,
+                DriverCapability.CONTROLLED_SOURCE,
+                DriverCapability.VERIFIED_OFF_SOURCE,
+            }
+        ),
+    ),
+)
+
+BUILTIN_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = MappingProxyType(
+    {metadata.type_name: metadata for metadata in _BUILTIN_DRIVER_METADATA_ROWS}
+)

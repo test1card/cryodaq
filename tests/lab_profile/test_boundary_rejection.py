@@ -286,3 +286,11 @@ def test_line_and_paragraph_separators_are_rejected_in_text() -> None:
     )
     with pytest.raises(LabProfileError, match="line/paragraph separator"):
         parse_lab_profile(forged)
+
+
+def test_parse_lab_profile_enforces_the_byte_ceiling_on_text() -> None:
+    oversized = f"# {'x' * (70 * 1024)}\n{_base()}"
+    with pytest.raises(LabProfileError, match="bounded text grammar"):
+        parse_lab_profile(oversized)
+    within = f"# {'y' * (8 * 1024)}\n{_base()}"
+    assert parse_lab_profile(within).lab_id == "hostile-lab"

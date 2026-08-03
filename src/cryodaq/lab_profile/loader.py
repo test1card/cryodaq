@@ -48,9 +48,9 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
             event = self.peek_event()
             raise yaml.constructor.ConstructorError(
                 "while composing a lab profile",
-                getattr(event, "start_mark", None),
+                event.start_mark,
                 "YAML aliases are not allowed",
-                getattr(event, "start_mark", None),
+                event.start_mark,
             )
         self._lab_profile_depth += 1
         if self._lab_profile_depth > MAX_LAB_PROFILE_DEPTH:
@@ -58,9 +58,9 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
             event = self.peek_event()
             raise yaml.constructor.ConstructorError(
                 "while composing a lab profile",
-                getattr(event, "start_mark", None),
+                event.start_mark,
                 "lab profile nesting exceeds its limit",
-                getattr(event, "start_mark", None),
+                event.start_mark,
             )
         try:
             return super().compose_node(parent, index)
@@ -161,10 +161,16 @@ def _build_profile(payload: object) -> LabProfileV1:
 
 
 def parse_lab_profile(text: str) -> LabProfileV1:
-    """Parse and validate one Lab Profile v1 document from text."""
+    """Parse and validate one Lab Profile v1 document from text.
+
+    The same hard byte ceiling as ``load_lab_profile`` applies to the text
+    form: an arbitrarily large string must not reach the YAML parser.
+    """
 
     if type(text) is not str:
         raise LabProfileError("lab profile text must be an exact string")
+    if len(text.encode("utf-8")) > MAX_LAB_PROFILE_BYTES:
+        raise LabProfileError("lab profile exceeds its bounded text grammar")
     try:
         payload = yaml.load(text, Loader=_StrictLabProfileLoader)
     except LabProfileError:
