@@ -28,7 +28,7 @@ ALLOWED_CRYODAQ_IMPORTS: dict[str, frozenset[str]] = {
         {"BUILTIN_DRIVER_METADATA", "DriverAuthority", "DriverCapability", "DriverTypeMetadata"}
     ),
 }
-REFLECTION_MODULES = ("inspect", "gc")
+REFLECTION_MODULES = ("inspect", "gc", "builtins")
 REFLECTION_CALLS = frozenset({"getattr", "eval", "exec", "vars", "dir", "globals", "locals", "compile"})
 INCUMBENT_CONFIG_FILES = (
     "config/safety.yaml",
@@ -129,6 +129,8 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
                     )
         elif isinstance(node, ast.Attribute) and node.attr == "modules":
             violations.append(f"{label}: .modules access bypasses the static import boundary")
+        elif isinstance(node, ast.Name) and node.id == "__builtins__":
+            violations.append(f"{label}: __builtins__ access bypasses the static import boundary")
         elif isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "__import__":
@@ -195,6 +197,12 @@ def test_import_closure_stays_downstream() -> None:
         "globals()",
         "locals()",
         "compile('1', 'x', 'eval')",
+        "import builtins\nbuiltins.__import__('cryodaq.drivers.registry')",
+        "import builtins\nbuiltins.getattr(sys, 'modules')",
+        "from builtins import __import__ as load",
+        "from builtins import getattr",
+        "__builtins__['getattr']",
+        "__builtins__.getattr",
     ),
 )
 def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:

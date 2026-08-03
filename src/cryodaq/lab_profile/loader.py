@@ -169,7 +169,11 @@ def parse_lab_profile(text: str) -> LabProfileV1:
 
     if type(text) is not str:
         raise LabProfileError("lab profile text must be an exact string")
-    if len(text.encode("utf-8")) > MAX_LAB_PROFILE_BYTES:
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise LabProfileError("lab profile text is not valid Unicode (unpaired surrogate)") from None
+    if len(encoded) > MAX_LAB_PROFILE_BYTES:
         raise LabProfileError("lab profile exceeds its bounded text grammar")
     try:
         payload = yaml.load(text, Loader=_StrictLabProfileLoader)

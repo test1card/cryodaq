@@ -294,3 +294,9 @@ def test_parse_lab_profile_enforces_the_byte_ceiling_on_text() -> None:
         parse_lab_profile(oversized)
     within = f"# {'y' * (8 * 1024)}\n{_base()}"
     assert parse_lab_profile(within).lab_id == "hostile-lab"
+
+
+def test_parse_lab_profile_rejects_unpaired_surrogates_with_lab_profile_error() -> None:
+    broken = _base().replace("display_name: Hostile Lab", "display_name: " + "\ud800")
+    with pytest.raises(LabProfileError):
+        parse_lab_profile(broken)
