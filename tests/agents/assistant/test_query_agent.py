@@ -8,19 +8,22 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import cryodaq.agents.assistant_main as assistant_main
 from cryodaq.agents.assistant.query.adapters.alarm_adapter import AlarmAdapter
 from cryodaq.agents.assistant.query.adapters.composite_adapter import CompositeAdapter
 from cryodaq.agents.assistant.query.agent import _FALLBACK, AssistantQueryAgent
+from cryodaq.agents.assistant.query.chart_dispatcher import ChartDispatcher
 from cryodaq.agents.assistant.query.schemas import (
     ActiveAlarmInfo,
     AlarmStatusResult,
     CompositeStatus,
     CooldownETA,
     QueryAdapters,
+    QueryCategory,
     VacuumETA,
 )
 from cryodaq.agents.assistant.shared.audit import AuditLogger
-from cryodaq.agents.assistant_main import _handle_assistant_query_command
+from cryodaq.agents.assistant_main import TelegramSender, _handle_assistant_query_command
 
 # ---------------------------------------------------------------------------
 # Test fixtures / helpers
@@ -108,6 +111,7 @@ def _make_agent(
     *,
     max_per_hour: int = 60,
     format_timeout_s: float = 20.0,
+    chart_dispatcher: ChartDispatcher | None = None,
 ) -> AssistantQueryAgent:
     return AssistantQueryAgent(
         ollama_client=ollama,
@@ -116,6 +120,7 @@ def _make_agent(
         adapters=adapters or _make_adapters(),
         max_queries_per_chat_per_hour=max_per_hour,
         format_timeout_s=format_timeout_s,
+        chart_dispatcher=chart_dispatcher,
     )
 
 
@@ -129,6 +134,77 @@ def _intent_json(category: str) -> str:
             "time_window_minutes": None,
             "quantity": "",
         }
+    )
+
+
+async def test_query_agent_close_bounds_stalled_photo_request_drain(monkeypatch, caplog) -> None:
+    class DribblingContent:
+        def __init__(self) -> None:
+            self.stalled = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def iter_chunked(self, _size):
+            yield b'{"ok":true,"result":'
+            self.stalled.set()
+            await self.release.wait()
+            raise AssertionError("timed-out response body resumed")
+
+    class DribblingResponse:
+        status = 200
+        content_length = None
+
+        class headers:
+            @staticmethod
+            def getall(_key, default=None):
+                return list(default or [])
+
+        def __init__(self) -> None:
+            self.content = DribblingContent()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+    class Session:
+        closed = False
+
+        def __init__(self, response: DribblingResponse) -> None:
+            self.response = response
+
+        def post(self, *_args, **_kwargs):
+            return self.response
+
+    response = DribblingResponse()
+    sender = TelegramSender("token", [4242])
+    sender._session = Session(response)
+    monkeypatch.setattr(assistant_main, "_TELEGRAM_ACKNOWLEDGEMENT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(
+        "cryodaq.agents.assistant.query.chart_dispatcher.render_temperature_chart",
+        lambda *_args, **_kwargs: b"png",
+    )
+    charts = ChartDispatcher(sender.send_photo)
+    agent = _make_agent(MagicMock(), chart_dispatcher=charts)
+
+    charts.dispatch(
+        QueryCategory.COMPOSITE_STATUS,
+        {"composite_status": SimpleNamespace(snapshot_empty=False, key_temperatures={"T1": 1.0})},
+        4242,
+    )
+    await asyncio.wait_for(response.content.stalled.wait(), 0.5)
+    close_task = asyncio.create_task(agent.close())
+    try:
+        done, _pending = await asyncio.wait({close_task}, timeout=0.2)
+        assert close_task in done, "query-agent chart drain exceeded the acknowledgement deadline"
+        await close_task
+    finally:
+        response.content.release.set()
+        await asyncio.gather(close_task, return_exceptions=True)
+
+    assert not charts._tasks
+    assert any(
+        "sendPhoto acknowledgement timed out; outcome unknown" in record.getMessage() for record in caplog.records
     )
 
 
