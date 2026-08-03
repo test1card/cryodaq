@@ -60,7 +60,9 @@ def _import_violations(source: str, *, label: str) -> list[str]:
     public ``factory`` constructors, so importing it would hand the package
     driver-construction authority.  Relative imports are resolved before the
     check so ``from ..drivers.registry import construct_driver`` cannot slip
-    past as an unexamined relative import.
+    past as an unexamined relative import, and dynamic access
+    (``importlib``/``import_module``, ``__import__``, ``.modules[...]``) is a
+    violation because it bypasses static examination entirely.
     """
 
     stdlib = set(sys.stdlib_module_names)
@@ -69,6 +71,9 @@ def _import_violations(source: str, *, label: str) -> list[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".", 1)[0]
+                if alias.name == "importlib" or alias.name.startswith("importlib."):
+                    violations.append(f"{label}: importing {alias.name!r} enables dynamic module loading")
+                    continue
                 if root in stdlib or alias.name == "yaml":
                     continue
                 if alias.name == PACKAGE_MODULE or alias.name.startswith(f"{PACKAGE_MODULE}."):
@@ -77,6 +82,9 @@ def _import_violations(source: str, *, label: str) -> list[str]:
         elif isinstance(node, ast.ImportFrom):
             module = _resolve_import(node.module or "", node.level)
             root = module.split(".", 1)[0] if module else ""
+            if module == "importlib" or module.startswith("importlib."):
+                violations.append(f"{label}: importing from {module!r} enables dynamic module loading")
+                continue
             if root in stdlib or root == "yaml":
                 continue
             if module == PACKAGE_MODULE or module.startswith(f"{PACKAGE_MODULE}."):
@@ -93,6 +101,16 @@ def _import_violations(source: str, *, label: str) -> list[str]:
                         f"{label}: registry symbol {alias.name!r} is not one of "
                         f"{sorted(ALLOWED_REGISTRY_SYMBOLS)}; the package may not hold driver-construction authority"
                     )
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "__import__":
+                violations.append(f"{label}: __import__ bypasses the static import boundary")
+            elif isinstance(func, ast.Attribute) and func.attr == "import_module":
+                violations.append(f"{label}: import_module bypasses the static import boundary")
+        elif isinstance(node, ast.Subscript):
+            value = node.value
+            if isinstance(value, ast.Attribute) and value.attr == "modules":
+                violations.append(f"{label}: .modules[...] lookup bypasses the static import boundary")
     return violations
 
 
@@ -118,6 +136,11 @@ def test_import_closure_stays_downstream() -> None:
         "from ..drivers import registry",
         "from ...drivers.registry import construct_driver",
         "from .. import drivers",
+        "import importlib\nimportlib.import_module('cryodaq.drivers.registry')",
+        "from importlib import import_module",
+        "__import__('cryodaq.drivers.registry')",
+        "import sys\nsys.modules['cryodaq.drivers.registry']",
+        "import sys as system\nsystem.modules['cryodaq.drivers.registry']",
     ),
 )
 def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
@@ -130,6 +153,7 @@ def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
         "from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA",
         "from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA, DriverAuthority, DriverCapability",
         "import os\nimport sys",
+        "import sys\nsys.exit(0)",
         "import yaml",
         "from .schema import LabProfileError",
         "from . import schema",
