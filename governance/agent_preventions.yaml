@@ -5560,7 +5560,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A data-only downstream artifact acquires driver-construction or source authority by importing, dynamically loading, or reflecting into the authority-bearing registry while presenting itself as inert.
-    invariant: Downstream capability truth comes only from the deliberately authority-free cryodaq.drivers.capability_metadata module; the lab_profile package never loads the registry module, never names BUILTIN_DRIVER_SPECS, and cannot reach construction authority through static, relative, nested, dynamic, or reflective import paths.
+    invariant: Downstream capability truth comes only from the deliberately authority-free cryodaq.drivers.capability_metadata module; the lab_profile package never loads the registry module, never names BUILTIN_DRIVER_SPECS, and cannot reach construction authority through static, relative, nested, dynamic, or reflective import paths. The reflective clause is held by denying the dunder VOCABULARY outside a measured allowlist rather than by enumerating spellings, because four consecutive review rounds each defeated the previous round's spelling list, so a spelling list is not a floor. Do not weaken this back into an enumeration.
     rule_refs:
       - docs/lab_profile.md
       - docs/new_lab_adaptation.md#8-what-is-out-of-scope-here
@@ -5573,5 +5573,5 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_package_never_names_the_authority_bearing_registry_mapping
         ci_partition: remaining
-    red_evidence: inspect_getmodule_on_the_imported_enums_returned_the_authority_bearing_registry_and_construct_driver_while_the_symbol_allowlist_guard_stayed_green_2026_08_03_pending_immutable_capture
+    red_evidence: inspect_getmodule_on_the_imported_enums_returned_the_authority_bearing_registry_and_construct_driver_while_the_symbol_allowlist_guard_stayed_green_2026_08_03_pending_immutable_capture_then_dunder_indirection_through_an_allowed_symbol_init_globals_builtins_import_reached_the_same_constructor_while_the_spelling_based_scan_stayed_green_seven_distinct_spellings_reproduced_2026_08_04_pending_immutable_capture
     green_evidence: pending

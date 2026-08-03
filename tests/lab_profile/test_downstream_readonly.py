@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,26 @@ ALLOWED_CRYODAQ_IMPORTS: dict[str, frozenset[str]] = {
 }
 REFLECTION_MODULES = ("inspect", "gc", "builtins")
 REFLECTION_CALLS = frozenset({"getattr", "eval", "exec", "vars", "dir", "globals", "locals", "compile"})
+# Every route out of Python to a module object -- interpreter builtins, function
+# globals, the class hierarchy, import loaders -- must NAME a dunder.  Denying
+# the whole vocabulary closes that class in one rule.  Enumerating spellings
+# does not terminate: four consecutive review rounds each produced a fresh
+# bypass of the previous round's spelling list, and seven more were found by
+# hand once the pattern was recognised.  The allowlist below is measured, not
+# assumed -- it is exactly the dunder vocabulary the package's own source uses
+# (``super().__init__`` in the strict YAML loader, the ``object.__setattr__``
+# frozen-dataclass freeze idiom, and module scaffolding).  None of them reaches
+# a module or a globals mapping without a second, denied, dunder hop.
+ALLOWED_DUNDERS = frozenset(
+    {"__all__", "__future__", "__init__", "__main__", "__name__", "__post_init__", "__setattr__"}
+)
+_DUNDER = re.compile(r"^__[A-Za-z0-9_]+__$")
+
+
+def _denied_dunder(name: str) -> bool:
+    return bool(_DUNDER.match(name)) and name not in ALLOWED_DUNDERS
+
+
 INCUMBENT_CONFIG_FILES = (
     "config/safety.yaml",
     "config/interlocks.yaml",
@@ -78,6 +99,18 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
     ``getattr``/``eval``/``exec``/``vars``/``dir``/``globals``/``locals``/
     ``compile``) is a violation because it bypasses static examination
     entirely.
+
+    Reflection is denied as a CLASS rather than as a list of spellings: any
+    dunder outside ``ALLOWED_DUNDERS`` is a violation wherever it is named --
+    as an attribute, as a bare name, or as a string constant, the last of which
+    covers the ``x["__builtins__"]`` and ``getattr(x, "__globals__")`` forms.
+
+    What this is NOT: a sandbox.  It is a scan of source text the package
+    actually ships, so it constrains what this package can be written to do,
+    not what arbitrary code loaded at runtime could do.  That is the honest
+    claim, and it is the one the lab needs -- it keeps driver-construction
+    authority from being wired into a downstream config reader by accident or
+    by a later edit.
     """
 
     stdlib = set(sys.stdlib_module_names)
@@ -131,6 +164,14 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             violations.append(f"{label}: .modules access bypasses the static import boundary")
         elif isinstance(node, ast.Name) and node.id == "__builtins__":
             violations.append(f"{label}: __builtins__ access bypasses the static import boundary")
+        elif isinstance(node, ast.Attribute) and _denied_dunder(node.attr):
+            violations.append(f"{label}: {node.attr} attribute access exposes interpreter internals past the boundary")
+        elif isinstance(node, ast.Name) and _denied_dunder(node.id):
+            violations.append(f"{label}: {node.id} exposes interpreter internals past the boundary")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and _denied_dunder(node.value):
+            # Catches the subscript and getattr spellings -- ``x["__builtins__"]``
+            # and ``getattr(x, "__globals__")`` name their dunder as a string.
+            violations.append(f"{label}: the name {node.value!r} reaches interpreter internals past the boundary")
         elif isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "__import__":
@@ -203,6 +244,21 @@ def test_import_closure_stays_downstream() -> None:
         "from builtins import getattr",
         "__builtins__['getattr']",
         "__builtins__.getattr",
+        # Indirect reflection through an ALLOWED symbol's dunders.  The first is
+        # the round-8 review finding; the rest are siblings found by hand once
+        # the class was recognised, and every one of them defeated the previous
+        # spelling-based scan.
+        'DriverTypeMetadata.__init__.__globals__["__builtins__"]["__import__"]'
+        '("cryodaq.drivers.registry", fromlist=("construct_driver",)).construct_driver',
+        'DriverTypeMetadata.__init__.__globals__["construct_driver"]',
+        "DriverTypeMetadata.__class__.__mro__[0].__subclasses__()",
+        "DriverTypeMetadata.__module__",
+        "__spec__.loader.load_module('cryodaq.drivers.registry')",
+        "__loader__.load_module('cryodaq.drivers.registry')",
+        "type(DriverTypeMetadata).__bases__",
+        "getattr(DriverTypeMetadata, '__globals__')",
+        "DriverTypeMetadata.__init__.__func__",
+        "DriverTypeMetadata.__dict__",
     ),
 )
 def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
