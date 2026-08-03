@@ -7,8 +7,8 @@
 #
 # A lab profile is data-only and downstream:
 #   * Instrument types must come from the closed driver registry allowlist
-#     (projected inertly as BUILTIN_DRIVER_METADATA in
-#     src/cryodaq/drivers/registry.py). Capabilities
+#     (projected inertly as BUILTIN_DRIVER_METADATA, defined in
+#     src/cryodaq/drivers/capability_metadata.py). Capabilities
 #     are DERIVED from the registry, never declared here.
 #   * Actuation is not representable: a source-authority driver (today only
 #     keithley_2604b) is rejected, because docs/new_lab_adaptation.md §8 says

@@ -275,3 +275,14 @@ def test_lab_capabilities_freezes_mutable_inputs() -> None:
     assert tuple(honest.instrument_types) == ("lakeshore_218s",)
     assert honest.capabilities == frozenset({DriverCapability.PASSIVE_SENSOR})
     assert honest.trust_classes == frozenset({DriverAuthority.PASSIVE_MEASUREMENT})
+
+
+def test_line_and_paragraph_separators_are_rejected_in_text() -> None:
+    separated = _base().replace("display_name: Hostile Lab", 'display_name: "Hostile\\u2028Lab"')
+    with pytest.raises(LabProfileError, match="line/paragraph separator"):
+        parse_lab_profile(separated)
+    forged = _with_questions(
+        'questions:\n  - kind: class_a_thresholds\n    subject: s\n    summary: "x\\u2029actuation_supported: true"\n'
+    )
+    with pytest.raises(LabProfileError, match="line/paragraph separator"):
+        parse_lab_profile(forged)

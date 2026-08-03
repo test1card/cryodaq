@@ -8,7 +8,8 @@ what those instruments can do and which trust class they carry.
 
 from __future__ import annotations
 
-from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA, DriverAuthority, DriverCapability
+from cryodaq.drivers.capability_metadata import DriverAuthority, DriverCapability
+from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA
 
 from .schema import LabCapabilities, ProfileInstrument
 

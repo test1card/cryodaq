@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
-from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA, DriverAuthority, DriverCapability
+from cryodaq.drivers.capability_metadata import DriverAuthority, DriverCapability
+from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA
 
 MAX_IDENTITY_CHARS: Final = 64
 MAX_DISPLAY_NAME_CHARS: Final = 128
@@ -59,6 +60,8 @@ def _bounded_text(value: object, field_name: str, *, maximum: int, allow_empty: 
         raise LabProfileError(f"{field_name} must be NFC-normalized")
     if any(unicodedata.category(character).startswith("C") for character in value):
         raise LabProfileError(f"{field_name} contains a Unicode control character")
+    if any(unicodedata.category(character) in {"Zl", "Zp"} for character in value):
+        raise LabProfileError(f"{field_name} contains a Unicode line/paragraph separator")
     if not allow_empty and not value.strip():
         raise LabProfileError(f"{field_name} must not be empty or whitespace-only")
     if len(value) > maximum:

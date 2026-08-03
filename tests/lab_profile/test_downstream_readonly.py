@@ -17,8 +17,16 @@ from tests.lab_profile.test_boundary_rejection import HOSTILE_TEXTS
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO_ROOT / "src" / "cryodaq" / "lab_profile"
 PACKAGE_MODULE = "cryodaq.lab_profile"
-ALLOWED_CRYODAQ_MODULE = "cryodaq.drivers.registry"
-ALLOWED_REGISTRY_SYMBOLS = frozenset({"BUILTIN_DRIVER_METADATA", "DriverAuthority", "DriverCapability"})
+ALLOWED_CRYODAQ_IMPORTS: dict[str, frozenset[str]] = {
+    # The inert module: reflection against these symbols lands in
+    # capability_metadata, where no constructor or loader exists.
+    "cryodaq.drivers.capability_metadata": frozenset({"DriverAuthority", "DriverCapability", "DriverTypeMetadata"}),
+    # The registry is authority-bearing; only the inert projection may be
+    # imported from it, never the enums (whose inert home is above) and never
+    # BUILTIN_DRIVER_SPECS (whose values carry public factories).
+    "cryodaq.drivers.registry": frozenset({"BUILTIN_DRIVER_METADATA"}),
+}
+REFLECTION_MODULES = ("inspect", "gc")
 INCUMBENT_CONFIG_FILES = (
     "config/safety.yaml",
     "config/interlocks.yaml",
@@ -55,14 +63,17 @@ def _import_violations(source: str, *, label: str) -> list[str]:
     """List every import in one source text that crosses the downstream boundary.
 
     The package may import only stdlib modules, ``yaml``, its own modules, and
-    — by name — the three inert public symbols of ``cryodaq.drivers.registry``.
-    ``BUILTIN_DRIVER_SPECS`` is deliberately NOT allowlisted: its values carry
-    public ``factory`` constructors, so importing it would hand the package
-    driver-construction authority.  Relative imports are resolved before the
-    check so ``from ..drivers.registry import construct_driver`` cannot slip
-    past as an unexamined relative import, and dynamic access
-    (``importlib``/``import_module``, ``__import__``, ``.modules[...]``) is a
-    violation because it bypasses static examination entirely.
+    a per-module allowlist of inert cryodaq symbols: the enums and metadata
+    from ``cryodaq.drivers.capability_metadata`` (a deliberately authority-free
+    module, so reflection against them lands where no constructor exists) and
+    the factory-free ``BUILTIN_DRIVER_METADATA`` projection from
+    ``cryodaq.drivers.registry``.  ``BUILTIN_DRIVER_SPECS`` is deliberately NOT
+    allowlisted: its values carry public ``factory`` constructors.  Relative
+    imports are resolved before the check so ``from ..drivers.registry import
+    construct_driver`` cannot slip past as an unexamined relative import, and
+    dynamic or reflective access (``importlib``/``import_module``,
+    ``__import__``, ``.modules`` access, ``inspect``/``gc``) is a violation
+    because it bypasses static examination entirely.
     """
 
     stdlib = set(sys.stdlib_module_names)
@@ -73,6 +84,9 @@ def _import_violations(source: str, *, label: str) -> list[str]:
                 root = alias.name.split(".", 1)[0]
                 if alias.name == "importlib" or alias.name.startswith("importlib."):
                     violations.append(f"{label}: importing {alias.name!r} enables dynamic module loading")
+                    continue
+                if root in REFLECTION_MODULES:
+                    violations.append(f"{label}: importing {alias.name!r} enables reflection past the boundary")
                     continue
                 if root in stdlib or alias.name == "yaml":
                     continue
@@ -85,6 +99,9 @@ def _import_violations(source: str, *, label: str) -> list[str]:
             if module == "importlib" or module.startswith("importlib."):
                 violations.append(f"{label}: importing from {module!r} enables dynamic module loading")
                 continue
+            if root in REFLECTION_MODULES:
+                violations.append(f"{label}: importing from {module!r} enables reflection past the boundary")
+                continue
             if module == "sys" and any(alias.name == "modules" for alias in node.names):
                 violations.append(f"{label}: importing sys.modules by name bypasses the static import boundary")
                 continue
@@ -92,17 +109,19 @@ def _import_violations(source: str, *, label: str) -> list[str]:
                 continue
             if module == PACKAGE_MODULE or module.startswith(f"{PACKAGE_MODULE}."):
                 continue  # in-package imports are inside the boundary
-            if module != ALLOWED_CRYODAQ_MODULE:
+            allowed_symbols = ALLOWED_CRYODAQ_IMPORTS.get(module)
+            if allowed_symbols is None:
                 violations.append(
                     f"{label}: import from {(node.module or '.')!r} (resolves to {module!r}) "
                     "crosses the downstream boundary"
                 )
                 continue
             for alias in node.names:
-                if alias.name not in ALLOWED_REGISTRY_SYMBOLS:
+                if alias.name not in allowed_symbols:
                     violations.append(
-                        f"{label}: registry symbol {alias.name!r} is not one of "
-                        f"{sorted(ALLOWED_REGISTRY_SYMBOLS)}; the package may not hold driver-construction authority"
+                        f"{label}: symbol {alias.name!r} from {module!r} is not allowlisted "
+                        f"(allowed: {sorted(allowed_symbols)}); the package may not hold "
+                        "driver-construction authority"
                     )
         elif isinstance(node, ast.Attribute) and node.attr == "modules":
             violations.append(f"{label}: .modules access bypasses the static import boundary")
@@ -144,6 +163,11 @@ def test_import_closure_stays_downstream() -> None:
         "import sys as system\nsystem.modules['cryodaq.drivers.registry']",
         "from sys import modules\nmodules['cryodaq.drivers.registry']",
         "import sys\nmods = sys.modules\nmods['cryodaq.drivers.registry']",
+        "import inspect\ninspect.getmodule(DriverAuthority)",
+        "from inspect import getmodule",
+        "import gc\ngc.get_objects()",
+        "from cryodaq.drivers.registry import DriverAuthority",
+        "from cryodaq.drivers.registry import DriverCapability",
     ),
 )
 def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
@@ -154,7 +178,8 @@ def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
     "allowed",
     (
         "from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA",
-        "from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA, DriverAuthority, DriverCapability",
+        "from cryodaq.drivers.capability_metadata import DriverAuthority, DriverCapability",
+        "from cryodaq.drivers.capability_metadata import DriverTypeMetadata",
         "import os\nimport sys",
         "import sys\nsys.exit(0)",
         "import yaml",

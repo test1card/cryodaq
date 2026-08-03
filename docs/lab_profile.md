@@ -96,11 +96,14 @@ declaration fails.
 
 A lab profile never declares capabilities. It declares instruments, and
 `src/cryodaq/lab_profile/capabilities.py` derives everything else by reading
-**only** `BUILTIN_DRIVER_METADATA` from `src/cryodaq/drivers/registry.py` — an
-inert, factory-free projection of the closed allowlist that is also the
-engine's own source of truth (the full `BUILTIN_DRIVER_SPECS` mapping is
-deliberately not imported: its values carry public driver factories, and a
-data-only artifact must not hold construction authority). Derivation is
+**only** `BUILTIN_DRIVER_METADATA` — an inert, factory-free projection whose
+definitions live in the deliberately authority-free
+`src/cryodaq/drivers/capability_metadata.py` and which the registry builds
+from its closed allowlist (the engine's own source of truth). The full
+`BUILTIN_DRIVER_SPECS` mapping is deliberately not imported: its values carry
+public driver factories, and a data-only artifact must not hold construction
+authority — not even via reflection, which is why the enums and the metadata
+type live in the inert module rather than in the registry. Derivation is
 the ONLY source of capability truth for a profile.
 
 Worked example: the imaginary lab above declares `lakeshore_218s`,
@@ -164,10 +167,13 @@ The boundary above is enforced by tests, not by prose:
   whitespace identities, empty/duplicate instruments) is rejected with the
   right error type and message.
 - `tests/lab_profile/test_downstream_readonly.py` — an AST scan proves the
-  package imports only stdlib, `yaml`, and the three public registry names;
-  running the whole hostile corpus leaves the registry and the tracked
-  incumbent config files byte-identical; the package exposes no authority
-  objects.
+  package imports only stdlib, `yaml`, the inert
+  `cryodaq.drivers.capability_metadata` symbols, and the
+  `BUILTIN_DRIVER_METADATA` projection — with dynamic/reflective access
+  (`importlib`, `__import__`, `.modules`, `inspect`, `gc`) treated as a
+  violation; running the whole hostile corpus leaves the registry and the
+  tracked incumbent config files byte-identical; the package exposes no
+  authority objects.
 
 ## Non-goals
 

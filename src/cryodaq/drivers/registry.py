@@ -20,6 +20,12 @@ from types import MappingProxyType
 from typing import Final, TypeGuard
 
 from cryodaq.drivers.base import InstrumentDriver
+from cryodaq.drivers.capability_metadata import (
+    DriverAuthority,
+    DriverCapability,
+    DriverTypeMetadata,
+    build_driver_metadata_projection,
+)
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     BusDescriptor,
@@ -43,21 +49,6 @@ class UnknownDriverTypeError(DriverRegistryError):
 
 class DuplicateInstrumentNameError(DriverRegistryError):
     """Two configured instruments use the same stable instance name."""
-
-
-class DriverAuthority(StrEnum):
-    PASSIVE_MEASUREMENT = "passive_measurement"
-    PASSIVE_EXTENSION = "passive_extension"
-    REVIEWED_SOURCE = "reviewed_source"
-
-
-class DriverCapability(StrEnum):
-    PASSIVE_SENSOR = "passive_sensor"
-    CALIBRATABLE_SENSOR = "calibratable_sensor"
-    BURST_SENSOR = "burst_sensor"
-    SHARED_BUS_DEVICE = "shared_bus_device"
-    CONTROLLED_SOURCE = "controlled_source"
-    VERIFIED_OFF_SOURCE = "verified_off_source"
 
 
 class ValueKind(StrEnum):
@@ -533,41 +524,12 @@ ALLOWLISTED_DRIVER_MODULES: Final[tuple[str, ...]] = tuple(
     sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values())
 )
 
-
-@dataclass(frozen=True, slots=True)
-class DriverTypeMetadata:
-    """Inert, factory-free projection of one registered driver type.
-
-    Unlike ``DriverSpec`` — whose public ``factory``/``normalizer`` fields are
-    exact constructors — this projection carries only declarative facts, so a
-    downstream consumer (for example a lab-profile validator) can derive
-    capabilities without holding any driver-construction authority.
-    """
-
-    type_name: str
-    authority: DriverAuthority
-    capabilities: frozenset[DriverCapability]
-
-    def __post_init__(self) -> None:
-        if type(self.type_name) is not str or not self.type_name:
-            raise DriverRegistryError("driver metadata type_name must be a non-empty string")
-        if not isinstance(self.authority, DriverAuthority):
-            raise DriverRegistryError("driver metadata authority must be a DriverAuthority")
-        capabilities = frozenset(self.capabilities)
-        if any(not isinstance(item, DriverCapability) for item in capabilities):
-            raise DriverRegistryError("driver metadata capabilities must be DriverCapability values")
-        object.__setattr__(self, "capabilities", capabilities)
-
-
-BUILTIN_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = MappingProxyType(
-    {
-        spec.type_name: DriverTypeMetadata(
-            type_name=spec.type_name,
-            authority=spec.authority,
-            capabilities=spec.capabilities,
-        )
-        for spec in BUILTIN_DRIVER_SPECS.values()
-    }
+# The inert projection lives in cryodaq.drivers.capability_metadata so that a
+# downstream consumer can derive capabilities without importing (or reaching
+# via reflection) this authority-bearing module.  DriverTypeMetadata is
+# re-exported here only for compatibility.
+BUILTIN_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = build_driver_metadata_projection(
+    BUILTIN_DRIVER_SPECS.values()
 )
 
 
