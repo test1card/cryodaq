@@ -10,6 +10,7 @@ import os
 import sqlite3
 import textwrap
 import threading
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -2123,6 +2124,76 @@ async def test_keyed_append_replays_original_and_conflict_is_fail_closed(tmp_pat
     }
 
 
+_CONTROL_INIT_DEADLINE_MESSAGE = "control database initialization deadline expired"
+
+
+async def _run_trigger_authority_scenario(root: Path, trigger_sql: str) -> None:
+    writer = SQLiteWriter(root)
+    await writer.start_immediate()
+    try:
+        await writer.initialize_operator_log_idempotency()
+        first = await writer.append_operator_log_idempotent(
+            message="first retained row",
+            author="operator",
+            source="gui",
+            request_id="1" * 32,
+            request_fingerprint="a" * 64,
+        )
+        daily_path = root / f"data_{first.entry.timestamp.date().isoformat()}.db"
+        external = sqlite3.connect(daily_path)
+        try:
+            external.execute(trigger_sql)
+            external.commit()
+        finally:
+            external.close()
+
+        with pytest.raises(RuntimeError, match="operator_log trigger authority is invalid"):
+            await writer.append_operator_log_idempotent(
+                message="must not be lost or rewritten",
+                author="operator",
+                source="gui",
+                request_id="2" * 32,
+                request_fingerprint="b" * 64,
+            )
+
+        external = sqlite3.connect(daily_path)
+        try:
+            rows = external.execute("SELECT request_id, author, message FROM operator_log ORDER BY id").fetchall()
+        finally:
+            external.close()
+        assert rows == [("1" * 32, "operator", "first retained row")]
+    finally:
+        await writer.stop()
+
+
+async def _await_trigger_authority_scenario_with_deadline_retry(
+    tmp_path: Path,
+    trigger_sql: str,
+    *,
+    attempts: int = 3,
+    scenario: Callable[[Path, str], Awaitable[None]] = _run_trigger_authority_scenario,
+) -> None:
+    """Retry only an environmental control-DB initialization deadline trip.
+
+    The 2.0s initialization deadline is intentional fail-closed behavior; on a
+    loaded Windows CI runner it can fire during admission before the
+    trigger-authority path this guard exists to prove (observed on the
+    post-merge master run at 2.087s and 5.224s of the 2.000s budget). Retrying
+    the whole scenario on exactly that error keeps the guard strict: any other
+    failure — including an undetected trigger, a rewritten row, or a lost row —
+    propagates immediately and fails the test.
+    """
+
+    for attempt in range(attempts):
+        try:
+            await scenario(tmp_path / f"attempt-{attempt}", trigger_sql)
+        except RuntimeError as exc:
+            if _CONTROL_INIT_DEADLINE_MESSAGE in str(exc) and attempt + 1 < attempts:
+                continue
+            raise
+        return
+
+
 @pytest.mark.parametrize(
     "trigger_sql",
     [
@@ -2135,40 +2206,47 @@ async def test_keyed_append_rejects_triggered_loss_or_mutation_before_commit(
     tmp_path: Path,
     trigger_sql: str,
 ) -> None:
-    writer = SQLiteWriter(tmp_path)
-    await writer.start_immediate()
-    await writer.initialize_operator_log_idempotency()
-    first = await writer.append_operator_log_idempotent(
-        message="first retained row",
-        author="operator",
-        source="gui",
-        request_id="1" * 32,
-        request_fingerprint="a" * 64,
-    )
-    daily_path = tmp_path / f"data_{first.entry.timestamp.date().isoformat()}.db"
-    external = sqlite3.connect(daily_path)
-    try:
-        external.execute(trigger_sql)
-        external.commit()
-    finally:
-        external.close()
+    await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, trigger_sql)
+
+
+async def test_trigger_authority_deadline_retry_recovers_from_one_environmental_trip(tmp_path: Path) -> None:
+    calls: list[Path] = []
+
+    async def scenario(root: Path, _trigger_sql: str) -> None:
+        calls.append(root)
+        if len(calls) == 1:
+            raise RuntimeError(
+                "control database initialization deadline expired during admission after 2.087s of a 2.000s budget"
+            )
+
+    await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, "trigger", scenario=scenario)
+    assert calls == [tmp_path / "attempt-0", tmp_path / "attempt-1"]
+
+
+async def test_trigger_authority_deadline_retry_never_retries_the_guard_subject(tmp_path: Path) -> None:
+    calls = 0
+
+    async def scenario(_root: Path, _trigger_sql: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("operator_log trigger authority is invalid")
 
     with pytest.raises(RuntimeError, match="operator_log trigger authority is invalid"):
-        await writer.append_operator_log_idempotent(
-            message="must not be lost or rewritten",
-            author="operator",
-            source="gui",
-            request_id="2" * 32,
-            request_fingerprint="b" * 64,
-        )
+        await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, "trigger", scenario=scenario)
+    assert calls == 1
 
-    external = sqlite3.connect(daily_path)
-    try:
-        rows = external.execute("SELECT request_id, author, message FROM operator_log ORDER BY id").fetchall()
-    finally:
-        external.close()
-    assert rows == [("1" * 32, "operator", "first retained row")]
-    await writer.stop()
+
+async def test_trigger_authority_deadline_retry_is_bounded(tmp_path: Path) -> None:
+    calls = 0
+
+    async def scenario(_root: Path, _trigger_sql: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("control database initialization deadline expired during admission")
+
+    with pytest.raises(RuntimeError, match="control database initialization deadline expired"):
+        await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, "trigger", attempts=2, scenario=scenario)
+    assert calls == 2
 
 
 @pytest.mark.parametrize(
