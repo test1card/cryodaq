@@ -534,6 +534,43 @@ ALLOWLISTED_DRIVER_MODULES: Final[tuple[str, ...]] = tuple(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class DriverTypeMetadata:
+    """Inert, factory-free projection of one registered driver type.
+
+    Unlike ``DriverSpec`` — whose public ``factory``/``normalizer`` fields are
+    exact constructors — this projection carries only declarative facts, so a
+    downstream consumer (for example a lab-profile validator) can derive
+    capabilities without holding any driver-construction authority.
+    """
+
+    type_name: str
+    authority: DriverAuthority
+    capabilities: frozenset[DriverCapability]
+
+    def __post_init__(self) -> None:
+        if type(self.type_name) is not str or not self.type_name:
+            raise DriverRegistryError("driver metadata type_name must be a non-empty string")
+        if not isinstance(self.authority, DriverAuthority):
+            raise DriverRegistryError("driver metadata authority must be a DriverAuthority")
+        capabilities = frozenset(self.capabilities)
+        if any(not isinstance(item, DriverCapability) for item in capabilities):
+            raise DriverRegistryError("driver metadata capabilities must be DriverCapability values")
+        object.__setattr__(self, "capabilities", capabilities)
+
+
+BUILTIN_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = MappingProxyType(
+    {
+        spec.type_name: DriverTypeMetadata(
+            type_name=spec.type_name,
+            authority=spec.authority,
+            capabilities=spec.capabilities,
+        )
+        for spec in BUILTIN_DRIVER_SPECS.values()
+    }
+)
+
+
 def _normalize_keithley_watchdog(value: object, *, path: str) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise DriverRegistryError(f"{path} must be a mapping")

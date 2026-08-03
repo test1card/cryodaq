@@ -230,7 +230,7 @@ def test_lab_capabilities_must_equal_the_registry_derivation() -> None:
         capabilities=frozenset({DriverCapability.CALIBRATABLE_SENSOR}),
         trust_classes=frozenset({DriverAuthority.PASSIVE_MEASUREMENT}),
     )
-    with pytest.raises(LabProfileError, match="derived from BUILTIN_DRIVER_SPECS"):
+    with pytest.raises(LabProfileError, match="derived from BUILTIN_DRIVER_METADATA"):
         LabCapabilities(**invented)
     unknown_type = dict(
         instrument_types=("not_a_driver",),
@@ -258,3 +258,20 @@ def test_lab_capabilities_must_equal_the_registry_derivation() -> None:
         trust_classes=frozenset({DriverAuthority.PASSIVE_MEASUREMENT}),
     )
     assert honest.actuation_supported is False
+
+
+def test_lab_capabilities_freezes_mutable_inputs() -> None:
+    mutable_types = ["lakeshore_218s"]
+    mutable_caps = {DriverCapability.PASSIVE_SENSOR}
+    mutable_trust = {DriverAuthority.PASSIVE_MEASUREMENT}
+    honest = LabCapabilities(
+        instrument_types=mutable_types,
+        capabilities=mutable_caps,
+        trust_classes=mutable_trust,
+    )
+    mutable_types.append("keithley_2604b")
+    mutable_caps.add(DriverCapability.CONTROLLED_SOURCE)
+    mutable_trust.add(DriverAuthority.REVIEWED_SOURCE)
+    assert tuple(honest.instrument_types) == ("lakeshore_218s",)
+    assert honest.capabilities == frozenset({DriverCapability.PASSIVE_SENSOR})
+    assert honest.trust_classes == frozenset({DriverAuthority.PASSIVE_MEASUREMENT})

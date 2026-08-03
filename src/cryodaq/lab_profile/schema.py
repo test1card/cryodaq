@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Final
 
-from cryodaq.drivers.registry import BUILTIN_DRIVER_SPECS, DriverAuthority, DriverCapability
+from cryodaq.drivers.registry import BUILTIN_DRIVER_METADATA, DriverAuthority, DriverCapability
 
 MAX_IDENTITY_CHARS: Final = 64
 MAX_DISPLAY_NAME_CHARS: Final = 128
@@ -93,9 +93,9 @@ class ProfileInstrument:
     def __post_init__(self) -> None:
         if type(self.type_name) is not str:
             raise LabProfileError("instrument type must be an exact string")
-        spec = BUILTIN_DRIVER_SPECS.get(self.type_name)
+        spec = BUILTIN_DRIVER_METADATA.get(self.type_name)
         if spec is None:
-            known = ", ".join(sorted(BUILTIN_DRIVER_SPECS))
+            known = ", ".join(sorted(BUILTIN_DRIVER_METADATA))
             raise LabProfileError(
                 f"unknown instrument type {self.type_name!r}: the driver registry is a closed allowlist "
                 f"(known types: {known}); a lab profile cannot declare an unregistered driver"
@@ -140,6 +140,12 @@ class LabCapabilities:
     trust_classes: frozenset[DriverAuthority]
 
     def __post_init__(self) -> None:
+        # Freeze inputs before validating: a frozen dataclass holding mutable
+        # containers is not actually immutable (post-validation mutation could
+        # smuggle in a source type after the checks below ran).
+        object.__setattr__(self, "instrument_types", tuple(self.instrument_types))
+        object.__setattr__(self, "capabilities", frozenset(self.capabilities))
+        object.__setattr__(self, "trust_classes", frozenset(self.trust_classes))
         if any(type(item) is not str for item in self.instrument_types):
             raise LabProfileError("derived instrument types must be exact strings")
         if any(not isinstance(item, DriverCapability) for item in self.capabilities):
@@ -151,9 +157,9 @@ class LabCapabilities:
         expected_capabilities: set[DriverCapability] = set()
         expected_trust: set[DriverAuthority] = set()
         for type_name in self.instrument_types:
-            spec = BUILTIN_DRIVER_SPECS.get(type_name)
+            spec = BUILTIN_DRIVER_METADATA.get(type_name)
             if spec is None:
-                known = ", ".join(sorted(BUILTIN_DRIVER_SPECS))
+                known = ", ".join(sorted(BUILTIN_DRIVER_METADATA))
                 raise LabProfileError(
                     f"unknown instrument type {type_name!r}: the driver registry is a closed allowlist "
                     f"(known types: {known}); a lab profile cannot declare an unregistered driver"
@@ -168,7 +174,7 @@ class LabCapabilities:
             )
         if set(self.capabilities) != expected_capabilities or set(self.trust_classes) != expected_trust:
             raise LabProfileError(
-                "LabCapabilities values must equal the union derived from BUILTIN_DRIVER_SPECS "
+                "LabCapabilities values must equal the union derived from BUILTIN_DRIVER_METADATA "
                 "for the declared instrument types; construct one via derive_capabilities"
             )
 

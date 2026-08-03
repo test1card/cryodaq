@@ -96,8 +96,11 @@ declaration fails.
 
 A lab profile never declares capabilities. It declares instruments, and
 `src/cryodaq/lab_profile/capabilities.py` derives everything else by reading
-**only** `BUILTIN_DRIVER_SPECS` from `src/cryodaq/drivers/registry.py` — the
-closed allowlist that is also the engine's own source of truth. Derivation is
+**only** `BUILTIN_DRIVER_METADATA` from `src/cryodaq/drivers/registry.py` — an
+inert, factory-free projection of the closed allowlist that is also the
+engine's own source of truth (the full `BUILTIN_DRIVER_SPECS` mapping is
+deliberately not imported: its values carry public driver factories, and a
+data-only artifact must not hold construction authority). Derivation is
 the ONLY source of capability truth for a profile.
 
 Worked example: the imaginary lab above declares `lakeshore_218s`,
