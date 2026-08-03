@@ -10,6 +10,7 @@ import os
 import sqlite3
 import textwrap
 import threading
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -707,10 +708,60 @@ async def test_failed_stop_owner_is_cleared_for_exact_retry(
     assert writer._stop_owner is not None and writer._stop_owner.done()
 
 
+# The 2.0s production initialization deadline is an intentional fail-closed
+# admission bound; it is verified deterministically by clock-monkeypatched
+# deadline tests (see test_control_initialization_deadline_rolls_back_before_ddl_commit,
+# which pins the budget back to 2.0s explicitly). Every other test in this
+# module touches control-DB admission only incidentally: on a loaded shared CI
+# runner, first-time SQLite initialization legitimately exceeds 2.0s of wall
+# clock (post-merge master failed three times at 2.080s, 2.087s, and 5.224s of
+# the 2.000s budget on trees PR CI had passed), and that legal fail-closed
+# refusal is not the property those tests assert. Give incidental uses a
+# generous budget so environmental slowness cannot masquerade as a product
+# failure; production behavior is unchanged.
+#
+# The production value is captured at import time, before the autouse fixture
+# can overwrite the module global: without this, weakening the production
+# budget (for example 2.0 -> 60.0) would pass every guard in this module,
+# because the fixture masks the change and the rollback test pins 2.0s for
+# itself. test_production_control_init_deadline_budget_is_unchanged is the
+# guard that detects exactly that weakening.
+_PRODUCTION_CONTROL_INIT_DEADLINE_S = sqlite_writer_module._OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S
+_TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S = 60.0
+
+
+@pytest.fixture(autouse=True)
+def _incidental_control_init_deadline_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S",
+        _TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S,
+    )
+
+
+def test_production_control_init_deadline_budget_is_unchanged() -> None:
+    """The module-wide test override must never mask a weakened production budget."""
+    assert _PRODUCTION_CONTROL_INIT_DEADLINE_S == 2.0
+
+
+def test_incidental_control_init_deadline_budget_is_generous_in_this_module() -> None:
+    assert (
+        sqlite_writer_module._OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S
+        == _TEST_INCIDENTAL_CONTROL_INIT_DEADLINE_S
+    )
+
+
 async def test_control_initialization_deadline_rolls_back_before_ddl_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # This test is the deadline's subject: pin the production budget back so
+    # the patched clock (0 -> 10) provably crosses it.
+    monkeypatch.setattr(
+        sqlite_writer_module,
+        "_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S",
+        _PRODUCTION_CONTROL_INIT_DEADLINE_S,
+    )
     clock = {"expired": False}
     original_verify = SQLiteWriter._verify_operator_log_publication_storage
 
@@ -2123,6 +2174,86 @@ async def test_keyed_append_replays_original_and_conflict_is_fail_closed(tmp_pat
     }
 
 
+_CONTROL_INIT_DEADLINE_MESSAGE = "control database initialization deadline expired"
+
+
+async def _run_trigger_authority_scenario(root: Path, trigger_sql: str) -> None:
+    writer = SQLiteWriter(root)
+    await writer.start_immediate()
+    try:
+        await writer.initialize_operator_log_idempotency()
+        first = await writer.append_operator_log_idempotent(
+            message="first retained row",
+            author="operator",
+            source="gui",
+            request_id="1" * 32,
+            request_fingerprint="a" * 64,
+        )
+        daily_path = root / f"data_{first.entry.timestamp.date().isoformat()}.db"
+        external = sqlite3.connect(daily_path)
+        try:
+            external.execute(trigger_sql)
+            external.commit()
+        finally:
+            external.close()
+
+        try:
+            await writer.append_operator_log_idempotent(
+                message="must not be lost or rewritten",
+                author="operator",
+                source="gui",
+                request_id="2" * 32,
+                request_fingerprint="b" * 64,
+            )
+        except RuntimeError as exc:
+            if _CONTROL_INIT_DEADLINE_MESSAGE in str(exc):
+                # Environmental fail-closed deadline trip: expose the raw
+                # error so the retry wrapper can classify it. Inside
+                # pytest.raises the regex mismatch would convert it into an
+                # AssertionError the retry can never see.
+                raise
+            assert "operator_log trigger authority is invalid" in str(exc), str(exc)
+        else:
+            raise AssertionError("triggered append must refuse the poisoned operator log")
+
+        external = sqlite3.connect(daily_path)
+        try:
+            rows = external.execute("SELECT request_id, author, message FROM operator_log ORDER BY id").fetchall()
+        finally:
+            external.close()
+        assert rows == [("1" * 32, "operator", "first retained row")]
+    finally:
+        await writer.stop()
+
+
+async def _await_trigger_authority_scenario_with_deadline_retry(
+    tmp_path: Path,
+    trigger_sql: str,
+    *,
+    attempts: int = 3,
+    scenario: Callable[[Path, str], Awaitable[None]] = _run_trigger_authority_scenario,
+) -> None:
+    """Retry only an environmental control-DB initialization deadline trip.
+
+    The 2.0s initialization deadline is intentional fail-closed behavior; on a
+    loaded Windows CI runner it can fire during admission before the
+    trigger-authority path this guard exists to prove (observed on the
+    post-merge master run at 2.087s and 5.224s of the 2.000s budget). Retrying
+    the whole scenario on exactly that error keeps the guard strict: any other
+    failure — including an undetected trigger, a rewritten row, or a lost row —
+    propagates immediately and fails the test.
+    """
+
+    for attempt in range(attempts):
+        try:
+            await scenario(tmp_path / f"attempt-{attempt}", trigger_sql)
+        except RuntimeError as exc:
+            if _CONTROL_INIT_DEADLINE_MESSAGE in str(exc) and attempt + 1 < attempts:
+                continue
+            raise
+        return
+
+
 @pytest.mark.parametrize(
     "trigger_sql",
     [
@@ -2135,40 +2266,109 @@ async def test_keyed_append_rejects_triggered_loss_or_mutation_before_commit(
     tmp_path: Path,
     trigger_sql: str,
 ) -> None:
-    writer = SQLiteWriter(tmp_path)
-    await writer.start_immediate()
-    await writer.initialize_operator_log_idempotency()
-    first = await writer.append_operator_log_idempotent(
-        message="first retained row",
-        author="operator",
-        source="gui",
-        request_id="1" * 32,
-        request_fingerprint="a" * 64,
-    )
-    daily_path = tmp_path / f"data_{first.entry.timestamp.date().isoformat()}.db"
-    external = sqlite3.connect(daily_path)
-    try:
-        external.execute(trigger_sql)
-        external.commit()
-    finally:
-        external.close()
+    await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, trigger_sql)
+
+
+async def test_trigger_authority_deadline_retry_recovers_from_one_environmental_trip(tmp_path: Path) -> None:
+    calls: list[Path] = []
+
+    async def scenario(root: Path, _trigger_sql: str) -> None:
+        calls.append(root)
+        if len(calls) == 1:
+            raise RuntimeError(
+                "control database initialization deadline expired during admission after 2.087s of a 2.000s budget"
+            )
+
+    await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, "trigger", scenario=scenario)
+    assert calls == [tmp_path / "attempt-0", tmp_path / "attempt-1"]
+
+
+async def test_trigger_authority_deadline_retry_never_retries_the_guard_subject(tmp_path: Path) -> None:
+    calls = 0
+
+    async def scenario(_root: Path, _trigger_sql: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("operator_log trigger authority is invalid")
 
     with pytest.raises(RuntimeError, match="operator_log trigger authority is invalid"):
-        await writer.append_operator_log_idempotent(
-            message="must not be lost or rewritten",
-            author="operator",
-            source="gui",
-            request_id="2" * 32,
-            request_fingerprint="b" * 64,
-        )
+        await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, "trigger", scenario=scenario)
+    assert calls == 1
 
-    external = sqlite3.connect(daily_path)
-    try:
-        rows = external.execute("SELECT request_id, author, message FROM operator_log ORDER BY id").fetchall()
-    finally:
-        external.close()
-    assert rows == [("1" * 32, "operator", "first retained row")]
-    await writer.stop()
+
+async def test_trigger_authority_deadline_retry_is_bounded(tmp_path: Path) -> None:
+    calls = 0
+
+    async def scenario(_root: Path, _trigger_sql: str) -> None:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("control database initialization deadline expired during admission")
+
+    with pytest.raises(RuntimeError, match="control database initialization deadline expired"):
+        await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, "trigger", attempts=2, scenario=scenario)
+    assert calls == 2
+
+
+async def test_trigger_authority_scenario_exposes_raw_deadline_error_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenario must surface the deadline trip as a raw RuntimeError.
+
+    Regression for the exact post-merge master failure shape: the deadline
+    fired inside the second append, pytest.raises accepted the RuntimeError
+    type and converted the regex mismatch into an AssertionError, and the
+    retry wrapper — which classifies only RuntimeError — never ran.
+    """
+
+    class _FakeEntry:
+        timestamp = datetime(2026, 8, 3, tzinfo=UTC)
+
+    class _FakeFirst:
+        entry = _FakeEntry()
+
+    class _FakeWriter:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+            self.appends = 0
+
+        async def start_immediate(self) -> None:
+            pass
+
+        async def initialize_operator_log_idempotency(self) -> None:
+            pass
+
+        async def append_operator_log_idempotent(self, **_kwargs: object) -> _FakeFirst:
+            self.appends += 1
+            if self.appends > 1:
+                raise RuntimeError(
+                    "control database initialization deadline expired during admission after 2.087s of a 2.000s budget"
+                )
+            daily = self.root / "data_2026-08-03.db"
+            conn = sqlite3.connect(daily)
+            try:
+                conn.execute(
+                    "CREATE TABLE operator_log ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT, author TEXT, message TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO operator_log (request_id, author, message) VALUES (?, ?, ?)",
+                    ("1" * 32, "operator", "first retained row"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            return _FakeFirst()
+
+        async def stop(self) -> None:
+            pass
+
+    monkeypatch.setitem(globals(), "SQLiteWriter", _FakeWriter)
+    with pytest.raises(RuntimeError, match="control database initialization deadline expired"):
+        await _run_trigger_authority_scenario(
+            tmp_path,
+            "CREATE TRIGGER operator_log_ignore BEFORE INSERT ON operator_log BEGIN SELECT RAISE(IGNORE); END",
+        )
 
 
 @pytest.mark.parametrize(

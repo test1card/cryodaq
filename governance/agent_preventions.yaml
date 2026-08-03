@@ -2825,6 +2825,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_02bfc1d66a3615950f99ee661b977c09b4e92999_final_head_review_replaced_the_pinned_baseline_commit_and_moved_BASE_SHA_tree_resolution_to_the_replacement_while_no_replace_objects_retained_the_original_then_local_replacement_of_a_baseline_commit_and_blob_left_generated_reads_unmoved_2026_08_02_pending_immutable_capture
     green_evidence: pending
+  - id: TRIGGER-AUTHORITY-DEADLINE-RETRY-FALSE-GREEN-254
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-LOG-TRIGGER-AUTHORITY-001
+    guard: tests/storage/test_operator_log_idempotency.py::test_trigger_authority_scenario_exposes_raw_deadline_error_for_retry
+    ci_partition: remaining
+    red_evidence: identical_tree_passed_the_pr_gate_twice_while_pytest_raises_converted_the_environmental_deadline_runtime_error_into_an_assertion_error_making_the_retry_dead_code_and_post_merge_master_failed_twice_2026_08_03_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -5005,6 +5013,7 @@ records:
         - evidence_misbinding
         - late_side_effect
         - markup_interpretation
+        - production_test_divergence
         - publication_loss
         - retained_handle_loss
         - stale_authority
@@ -5400,3 +5409,36 @@ records:
         ci_partition: remaining
     red_evidence: local_exact_old_external_exact_SHA_claim_plus_bind_capture_record_supply_and_cross_clause_mask_probes_in_report_and_claim_corrections_failed_the_registered_pending_authority_guard_2026_08_02_pending_candidate_binding
     green_evidence: focused_P5_pending_manifest_guard_passed_2026_08_02_pending_candidate_binding
+  - id: OPERATOR-LOG-TRIGGER-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Operator-log trigger-authority guards and every test that touches control-DB admission incidentally while the wall-clock fail-closed initialization deadline is live.
+    classification: production_test_divergence
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A test that gates incidental control-DB admission on the production 2.0s wall-clock budget fails red on a loaded shared runner without any product regression — post-merge master failed three times across two different tests in this family at 2.080s, 2.087s, and 5.224s of the 2.000s budget — and a refusal guard that classifies the deadline error after pytest.raises can never retry, because the regex mismatch converts the RuntimeError into an AssertionError.
+    invariant: The tests/storage/test_operator_log_idempotency.py module never gates incidental admission on the production wall-clock budget — an autouse fixture gives incidental uses a generous 60s budget while the deadline mechanism is verified deterministically by a clock-monkeypatched test that pins 2.0s explicitly. The trigger-authority scenario additionally classifies the deadline error before the refusal assertion and re-raises it raw; a bounded retry reruns the whole scenario on exactly that error with a fresh data directory per attempt, while an undetected trigger, a forged row, a lost row, or a missing refusal fails immediately without retry. The 2.0s production initialization deadline budget is unchanged and no fail-closed behavior is weakened.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/storage/test_operator_log_idempotency.py::test_production_control_init_deadline_budget_is_unchanged
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_incidental_control_init_deadline_budget_is_generous_in_this_module
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_control_initialization_deadline_rolls_back_before_ddl_commit
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_keyed_append_rejects_triggered_loss_or_mutation_before_commit
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_trigger_authority_deadline_retry_recovers_from_one_environmental_trip
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_trigger_authority_deadline_retry_never_retries_the_guard_subject
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_trigger_authority_deadline_retry_is_bounded
+        ci_partition: remaining
+      - node: tests/storage/test_operator_log_idempotency.py::test_trigger_authority_scenario_exposes_raw_deadline_error_for_retry
+        ci_partition: remaining
+    red_evidence: post_merge_master_dbfd960d_windows_remaining_failed_both_trigger_parameterizations_at_2.087s_and_5.224s_of_the_2.000s_budget_and_pr10_protected_windows_remaining_failed_test_promotion_and_missing_insert_bytes_reject_before_any_outbox_mutation_at_2.080s_while_identical_trees_passed_pr_gates_and_pytest_raises_converted_the_deadline_runtime_error_into_an_unretryable_assertion_error_2026_08_03_pending_immutable_capture
+    green_evidence: pending
