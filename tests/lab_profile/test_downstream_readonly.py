@@ -31,18 +31,86 @@ ALLOWED_CRYODAQ_IMPORTS: dict[str, frozenset[str]] = {
 }
 REFLECTION_MODULES = ("inspect", "gc", "builtins")
 REFLECTION_CALLS = frozenset({"getattr", "eval", "exec", "vars", "dir", "globals", "locals", "compile"})
-# Every route out of Python to a module object -- interpreter builtins, function
-# globals, the class hierarchy, import loaders -- must NAME a dunder.  Denying
-# the whole vocabulary closes that class in one rule.  Enumerating spellings
-# does not terminate: four consecutive review rounds each produced a fresh
-# bypass of the previous round's spelling list, and seven more were found by
-# hand once the pattern was recognised.  The allowlist below is measured, not
-# assumed -- it is exactly the dunder vocabulary the package's own source uses
-# (``super().__init__`` in the strict YAML loader, the ``object.__setattr__``
-# frozen-dataclass freeze idiom, and module scaffolding).  None of them reaches
-# a module or a globals mapping without a second, denied, dunder hop.
-ALLOWED_DUNDERS = frozenset(
-    {"__all__", "__future__", "__init__", "__main__", "__name__", "__post_init__", "__setattr__"}
+# *** DENY BY DEFAULT. ***  Allowing "any stdlib module" was not a boundary:
+# pkgutil.resolve_name("cryodaq.drivers.registry:construct_driver"),
+# pydoc.locate and runpy.run_module each return the exact registry constructor
+# while naming no dunder and no reflection module.  Enumerating those three
+# would have been the fifth spelling list in five rounds, so instead only the
+# modules the package actually imports are allowed, and every other module in
+# the stdlib -- including every future module-loading helper -- is denied
+# without needing to be named.  Measured from the package source; see
+# test_every_allowlist_entry_is_load_bearing, which fails if an entry here is
+# not required by the package as it actually stands.
+ALLOWED_STDLIB_MODULES = frozenset(
+    {"__future__", "dataclasses", "enum", "io", "os", "pathlib", "sys", "typing", "unicodedata"}
+)
+# Every route out of Python to a module object THROUGH THE INTERPRETER -- its
+# builtins, function globals, the class hierarchy, import loaders -- must NAME a
+# dunder, so denying the vocabulary closes that class in one rule where
+# enumerating spellings did not terminate: four consecutive review rounds each
+# produced a fresh bypass of the previous round's list.  This does NOT cover
+# module-loading helpers reached by ordinary import -- ALLOWED_STDLIB_MODULES
+# covers those, and claiming otherwise is precisely the overreach that round 9
+# refuted.  ``__future__`` is deliberately absent here: it is an import, so it
+# is load-bearing in ALLOWED_STDLIB_MODULES instead.  Every entry belongs to
+# exactly one allowlist -- the one where deleting it turns the package scan red.
+ALLOWED_DUNDERS = frozenset({"__all__", "__init__", "__main__", "__name__", "__post_init__", "__setattr__"})
+# Deny-by-default capability policy.  A read-only artifact must not be able to
+# write: open(..., "w"), Path.unlink, os.replace and shutil.rmtree are all
+# invisible to a reflection-only filter, and an import-time write is invisible
+# to the incumbent-snapshot test as well, because the package is imported
+# before that snapshot is taken.  So calls are allowlisted rather than
+# denylisted -- the loader's bounded READ is permitted and nothing else is.
+# Only names that CROSS the boundary need an entry.  The package's own classes
+# and helpers are in-boundary (see ``local_names``) and deliberately absent.
+ALLOWED_CALL_NAMES = frozenset(
+    {
+        "Path",
+        "SystemExit",
+        "any",
+        "dataclass",
+        "enumerate",
+        "field",
+        "frozenset",
+        "isinstance",
+        "len",
+        "list",
+        "print",
+        "set",
+        "sorted",
+        "str",
+        "super",
+        "tuple",
+        "type",
+    }
+)
+ALLOWED_METHOD_NAMES = frozenset(
+    {
+        "ConstructorError",
+        "__init__",
+        "__setattr__",
+        "add",
+        "append",
+        "category",
+        "check_event",
+        "compose_node",
+        "construct_object",
+        "decode",
+        "encode",
+        "get",
+        "isfile",
+        "isspace",
+        "join",
+        "load",
+        "lower",
+        "normalize",
+        "open",
+        "peek_event",
+        "read",
+        "reconfigure",
+        "startswith",
+        "strip",
+    }
 )
 _DUNDER = re.compile(r"^__[A-Za-z0-9_]+__$")
 
@@ -86,24 +154,38 @@ def _resolve_import(module: str, level: int, *, base: str) -> str:
 def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -> list[str]:
     """List every import in one source text that crosses the downstream boundary.
 
-    The package may import only stdlib modules, ``yaml``, its own modules, and
-    the inert symbols of ``cryodaq.drivers.capability_metadata`` — a
-    deliberately authority-free module, so reflection against them lands where
-    no constructor exists.  The authority-bearing registry is not allowlisted
-    at all: ``BUILTIN_DRIVER_SPECS`` values carry public ``factory``
-    constructors, and even the inert projection is imported from its
-    authoritative inert home.  Relative imports are resolved against the
-    importing file's actual package (nested modules included), and dynamic or
-    reflective access (``importlib``/``import_module``, ``__import__``,
-    ``.modules`` access, ``inspect``/``gc``, and the reflection builtins
-    ``getattr``/``eval``/``exec``/``vars``/``dir``/``globals``/``locals``/
-    ``compile``) is a violation because it bypasses static examination
-    entirely.
+    Everything is DENIED BY DEFAULT and the allowlists are measured from the
+    package's own source.  The package may import only the modules in
+    ``ALLOWED_STDLIB_MODULES``, ``yaml``, its own modules, and the inert symbols
+    of ``cryodaq.drivers.capability_metadata`` — a deliberately authority-free
+    module, so reflection against them lands where no constructor exists.  The
+    authority-bearing registry is not allowlisted at all: ``BUILTIN_DRIVER_SPECS``
+    values carry public ``factory`` constructors, and even the inert projection
+    is imported from its authoritative inert home.  Relative imports are
+    resolved against the importing file's actual package (nested modules
+    included).
 
-    Reflection is denied as a CLASS rather than as a list of spellings: any
-    dunder outside ``ALLOWED_DUNDERS`` is a violation wherever it is named --
-    as an attribute, as a bare name, or as a string constant, the last of which
-    covers the ``x["__builtins__"]`` and ``getattr(x, "__globals__")`` forms.
+    Three independent rules, because three independent classes defeated the
+    earlier versions of this scan:
+
+    1. **Modules.**  ``ALLOWED_STDLIB_MODULES``, not "any stdlib module".  The
+       blanket allowance let ``pkgutil.resolve_name``, ``pydoc.locate`` and
+       ``runpy.run_module`` return the registry constructor while naming no
+       dunder and no reflection module.
+    2. **Reflection.**  Any dunder outside ``ALLOWED_DUNDERS`` is a violation
+       wherever it is named — attribute, bare name, string constant (covering
+       ``x["__builtins__"]`` and ``getattr(x, "__globals__")``), or ``def``,
+       since a module-level ``__getattr__`` is itself an interpreter hook.
+    3. **Capability.**  Calls are allowlisted, not denylisted, so a read-only
+       artifact cannot write.  ``open(..., "w")``, ``Path.unlink`` and
+       ``os.replace`` are invisible to a reflection-only filter, and an
+       import-time write is invisible to the incumbent-snapshot test too,
+       because the package is imported before that snapshot is taken.
+
+    Each rule is enumeration-free in the direction that matters: new module
+    loaders, new dunder spellings and new write APIs are all denied without
+    being named.  ``test_every_allowlist_entry_is_load_bearing`` proves no entry
+    is padding, so the allowlists cannot quietly widen either.
 
     What this is NOT: a sandbox.  It is a scan of source text the package
     actually ships, so it constrains what this package can be written to do,
@@ -113,9 +195,21 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
     by a later edit.
     """
 
-    stdlib = set(sys.stdlib_module_names)
+    tree = ast.parse(source, filename=label)
+    # Names the file itself defines, or imports from inside the boundary, are
+    # in-boundary: the same scan is applied to their own source, so they need no
+    # capability allowlist entry.  Only names crossing the boundary do.
+    local_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            local_names.add(node.name)
+        elif isinstance(node, ast.ImportFrom):
+            origin = _resolve_import(node.module or "", node.level, base=base)
+            if origin == PACKAGE_MODULE or origin.startswith(f"{PACKAGE_MODULE}.") or origin in ALLOWED_CRYODAQ_IMPORTS:
+                local_names.update(alias.asname or alias.name for alias in node.names)
+
     violations: list[str] = []
-    for node in ast.walk(ast.parse(source, filename=label)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".", 1)[0]
@@ -125,7 +219,7 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
                 if root in REFLECTION_MODULES:
                     violations.append(f"{label}: importing {alias.name!r} enables reflection past the boundary")
                     continue
-                if root in stdlib or alias.name == "yaml":
+                if root in ALLOWED_STDLIB_MODULES or alias.name == "yaml":
                     continue
                 if alias.name == PACKAGE_MODULE or alias.name.startswith(f"{PACKAGE_MODULE}."):
                     continue
@@ -142,7 +236,7 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             if module == "sys" and any(alias.name == "modules" for alias in node.names):
                 violations.append(f"{label}: importing sys.modules by name bypasses the static import boundary")
                 continue
-            if root in stdlib or root == "yaml":
+            if root in ALLOWED_STDLIB_MODULES or root == "yaml":
                 continue
             if module == PACKAGE_MODULE or module.startswith(f"{PACKAGE_MODULE}."):
                 continue  # in-package imports are inside the boundary
@@ -172,6 +266,10 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             # Catches the subscript and getattr spellings -- ``x["__builtins__"]``
             # and ``getattr(x, "__globals__")`` name their dunder as a string.
             violations.append(f"{label}: the name {node.value!r} reaches interpreter internals past the boundary")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _denied_dunder(node.name):
+            # Defining a dunder is a reflection hook too: a module-level
+            # __getattr__ resolves arbitrary attribute names at import time.
+            violations.append(f"{label}: defining {node.name} installs an interpreter hook past the boundary")
         elif isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "__import__":
@@ -180,6 +278,10 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
                 violations.append(f"{label}: import_module bypasses the static import boundary")
             elif isinstance(func, ast.Name) and func.id in REFLECTION_CALLS:
                 violations.append(f"{label}: {func.id}() bypasses the static import boundary")
+            elif isinstance(func, ast.Name) and func.id not in ALLOWED_CALL_NAMES | local_names:
+                violations.append(f"{label}: {func.id}() is not an allowlisted capability for a read-only artifact")
+            elif isinstance(func, ast.Attribute) and func.attr not in ALLOWED_METHOD_NAMES:
+                violations.append(f"{label}: .{func.attr}() is not an allowlisted capability for a read-only artifact")
     return violations
 
 
@@ -198,6 +300,37 @@ def _scan_package(base_dir: Path, *, package_module: str) -> list[str]:
 
 def test_import_closure_stays_downstream() -> None:
     assert _scan_package(PACKAGE_DIR, package_module=PACKAGE_MODULE) == []
+
+
+@pytest.mark.parametrize(
+    ("allowlist", "entry"),
+    [
+        (name, entry)
+        for name, values in (
+            ("ALLOWED_STDLIB_MODULES", ALLOWED_STDLIB_MODULES),
+            ("ALLOWED_DUNDERS", ALLOWED_DUNDERS),
+            ("ALLOWED_CALL_NAMES", ALLOWED_CALL_NAMES),
+            ("ALLOWED_METHOD_NAMES", ALLOWED_METHOD_NAMES),
+        )
+        for entry in sorted(values)
+    ],
+)
+def test_every_allowlist_entry_is_load_bearing(monkeypatch: pytest.MonkeyPatch, allowlist: str, entry: str) -> None:
+    """Deleting any single allowlisted item must turn the real package scan red.
+
+    An entry whose removal changes nothing is padding: it silently widens the
+    boundary without being required by the package as it stands, so the
+    deny-by-default claim would be weaker than it reads.  This is asserted
+    mechanically rather than argued, because the previous round's "no entry is
+    padding" claim was generalised from a hand-picked subset and two entries
+    were in fact unused.
+    """
+
+    module = __import__(__name__.rsplit(".", 1)[0] + ".test_downstream_readonly", fromlist=["x"])
+    monkeypatch.setattr(module, allowlist, getattr(module, allowlist) - {entry})
+    assert _scan_package(PACKAGE_DIR, package_module=PACKAGE_MODULE) != [], (
+        f"{allowlist} entry {entry!r} is not required by the package source"
+    )
 
 
 @pytest.mark.parametrize(
@@ -259,6 +392,25 @@ def test_import_closure_stays_downstream() -> None:
         "getattr(DriverTypeMetadata, '__globals__')",
         "DriverTypeMetadata.__init__.__func__",
         "DriverTypeMetadata.__dict__",
+        # Round 9: stdlib module-loading helpers.  None of these names a dunder
+        # or a reflection module, and each returns the exact registry
+        # constructor -- the blanket "any stdlib module" allowance was the hole.
+        "import pkgutil\nactivate = pkgutil.resolve_name('cryodaq.drivers.registry:construct_driver')",
+        "import pydoc\npydoc.locate('cryodaq.drivers.registry.construct_driver')",
+        "import runpy\nrunpy.run_module('cryodaq.drivers.registry')",
+        "from pkgutil import resolve_name",
+        "import shutil",
+        "import subprocess",
+        # Round 9: write capability. A read-only artifact that can write can
+        # corrupt the incumbent config, and an import-time write is invisible to
+        # the incumbent-snapshot test because the package is imported first.
+        "open('config/safety.yaml', 'w').write('disabled: true')",
+        "from pathlib import Path\nPath('config/safety.yaml').unlink()",
+        "import os\nos.replace('config/safety.yaml', 'config/safety.bak')",
+        "from pathlib import Path\nPath('config/safety.yaml').write_text('disabled: true')",
+        "import os\nos.remove('config/safety.yaml')",
+        # Round 9: defining a module-level __getattr__ is an interpreter hook.
+        "def __getattr__(name):\n    return None",
     ),
 )
 def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
@@ -272,7 +424,10 @@ def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
         "from cryodaq.drivers.capability_metadata import DriverAuthority, DriverCapability",
         "from cryodaq.drivers.capability_metadata import DriverTypeMetadata",
         "import os\nimport sys",
-        "import sys\nsys.exit(0)",
+        # ``raise SystemExit(0)`` is what __main__.py actually does.  Under a
+        # deny-by-default capability policy a call the package never makes is
+        # denied by design, so the accepted corpus tracks its real idioms.
+        "import sys\nraise SystemExit(0)",
         "import yaml",
         "from .schema import LabProfileError",
         "from . import schema",
