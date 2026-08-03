@@ -2147,7 +2147,7 @@ async def _run_trigger_authority_scenario(root: Path, trigger_sql: str) -> None:
         finally:
             external.close()
 
-        with pytest.raises(RuntimeError, match="operator_log trigger authority is invalid"):
+        try:
             await writer.append_operator_log_idempotent(
                 message="must not be lost or rewritten",
                 author="operator",
@@ -2155,6 +2155,16 @@ async def _run_trigger_authority_scenario(root: Path, trigger_sql: str) -> None:
                 request_id="2" * 32,
                 request_fingerprint="b" * 64,
             )
+        except RuntimeError as exc:
+            if _CONTROL_INIT_DEADLINE_MESSAGE in str(exc):
+                # Environmental fail-closed deadline trip: expose the raw
+                # error so the retry wrapper can classify it. Inside
+                # pytest.raises the regex mismatch would convert it into an
+                # AssertionError the retry can never see.
+                raise
+            assert "operator_log trigger authority is invalid" in str(exc), str(exc)
+        else:
+            raise AssertionError("triggered append must refuse the poisoned operator log")
 
         external = sqlite3.connect(daily_path)
         try:
@@ -2247,6 +2257,68 @@ async def test_trigger_authority_deadline_retry_is_bounded(tmp_path: Path) -> No
     with pytest.raises(RuntimeError, match="control database initialization deadline expired"):
         await _await_trigger_authority_scenario_with_deadline_retry(tmp_path, "trigger", attempts=2, scenario=scenario)
     assert calls == 2
+
+
+async def test_trigger_authority_scenario_exposes_raw_deadline_error_for_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scenario must surface the deadline trip as a raw RuntimeError.
+
+    Regression for the exact post-merge master failure shape: the deadline
+    fired inside the second append, pytest.raises accepted the RuntimeError
+    type and converted the regex mismatch into an AssertionError, and the
+    retry wrapper — which classifies only RuntimeError — never ran.
+    """
+
+    class _FakeEntry:
+        timestamp = datetime(2026, 8, 3, tzinfo=UTC)
+
+    class _FakeFirst:
+        entry = _FakeEntry()
+
+    class _FakeWriter:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+            self.appends = 0
+
+        async def start_immediate(self) -> None:
+            pass
+
+        async def initialize_operator_log_idempotency(self) -> None:
+            pass
+
+        async def append_operator_log_idempotent(self, **_kwargs: object) -> _FakeFirst:
+            self.appends += 1
+            if self.appends > 1:
+                raise RuntimeError(
+                    "control database initialization deadline expired during admission after 2.087s of a 2.000s budget"
+                )
+            daily = self.root / "data_2026-08-03.db"
+            conn = sqlite3.connect(daily)
+            try:
+                conn.execute(
+                    "CREATE TABLE operator_log ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT, author TEXT, message TEXT)"
+                )
+                conn.execute(
+                    "INSERT INTO operator_log (request_id, author, message) VALUES (?, ?, ?)",
+                    ("1" * 32, "operator", "first retained row"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            return _FakeFirst()
+
+        async def stop(self) -> None:
+            pass
+
+    monkeypatch.setitem(globals(), "SQLiteWriter", _FakeWriter)
+    with pytest.raises(RuntimeError, match="control database initialization deadline expired"):
+        await _run_trigger_authority_scenario(
+            tmp_path,
+            "CREATE TRIGGER operator_log_ignore BEFORE INSERT ON operator_log BEGIN SELECT RAISE(IGNORE); END",
+        )
 
 
 @pytest.mark.parametrize(
