@@ -56,6 +56,46 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: SQLITE-LIVE-BATCH-PRODUCTION-PATH-FALSE-GREEN-208
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_batch_insert_is_batched_and_does_not_scale_with_row_count
+    ci_partition: core
+    red_evidence: catalog_free_write_batch_guard_could_not_observe_per_reading_transactions_on_the_deployed_path_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-SHAPE-FALSE-GREEN-217
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_batch_insert_covers_every_multiline_poll_shape
+    ci_partition: core
+    red_evidence: seven_row_multiline_batch_split_per_reading_survived_the_prior_8_100_1000_guard_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-ADAPTIVE-FALSE-GREEN-225
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_batch_insert_covers_every_detectable_live_cardinality
+    ci_partition: core
+    red_evidence: two_or_three_row_admitted_batch_split_per_reading_survived_the_prior_guard_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-ERROR-STATUS-FALSE-GREEN-247
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_error_status_batches_use_one_live_transaction
+    ci_partition: core
+    red_evidence: three_token_error_fixture_never_reached_the_shipped_eight_channel_parser_path_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-POLL-PERSISTENCE-FALSE-GREEN-250
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_shipped_throttle_derives_detectable_live_cardinalities
+    ci_partition: core
+    red_evidence: tracked_poll_provenance_stopped_before_the_counted_writer_so_synthetic_inputs_missed_shipped_persistence_shapes_2026_08_01_pending_immutable_capture
+    green_evidence: pending
   - id: AGENT-CONTEXT-DIRTY-BLOB-FALSE-GREEN-001
     status: open
     scope: repository
@@ -2833,6 +2873,30 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: identical_tree_passed_the_pr_gate_twice_while_pytest_raises_converted_the_environmental_deadline_runtime_error_into_an_assertion_error_making_the_retry_dead_code_and_post_merge_master_failed_twice_2026_08_03_pending_immutable_capture
     green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-STEADY-STATE-FALSE-GREEN-249
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_steady_state_second_admission_uses_one_live_transaction
+    ci_partition: core
+    red_evidence: split_only_when_descriptor_catalog_installed_mutant_issued_eight_insert_batches_commits_and_begin_immediates_on_the_second_same_day_admission_while_every_fresh_writer_guard_passed_2026_08_03_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-SCHEDULER-PATH-FALSE-GREEN-255
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_scheduler_process_readings_uses_one_live_transaction
+    ci_partition: core
+    red_evidence: scheduler_side_per_reading_begin_committed_mutant_gated_on_descriptor_catalog_installed_issued_one_settlement_per_reading_on_the_second_scheduler_admission_while_single_call_and_writer_replicating_guards_passed_2026_08_03_pending_immutable_capture
+    green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-WARM-ERROR-FALSE-GREEN-256
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    guard: tests/core/test_sqlite_writer.py::test_multiline_unavailable_poll_uses_one_live_transaction
+    ci_partition: core
+    red_evidence: split_only_non_ok_batches_when_catalog_installed_mutant_issued_seven_insert_batches_commits_and_transactions_on_the_second_unavailable_multiline_poll_while_fresh_writer_error_guards_passed_2026_08_03_pending_immutable_capture
+    green_evidence: pending
 
 records:
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
@@ -5442,3 +5506,38 @@ records:
         ci_partition: remaining
     red_evidence: post_merge_master_dbfd960d_windows_remaining_failed_both_trigger_parameterizations_at_2.087s_and_5.224s_of_the_2.000s_budget_and_pr10_protected_windows_remaining_failed_test_promotion_and_missing_insert_bytes_reject_before_any_outbox_mutation_at_2.080s_while_identical_trees_passed_pr_gates_and_pytest_raises_converted_the_deadline_runtime_error_into_an_unretryable_assertion_error_2026_08_03_pending_immutable_capture
     green_evidence: pending
+  - id: SQLITE-LIVE-BATCH-TRANSACTION-038
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md
+    applies_to: Scheduler._process_readings() -> AdaptiveThrottle.filter_for_archive() -> begin_committed() -> _write_live_batch() -> _write_day_batch().
+    classification: production_test_divergence
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A same-day committed batch can issue one transaction per reading instead of one per batch, multiplying transactions and write amplification on acquisition polls.
+    invariant: One same-day descriptor-authoritative admission issues exactly one main.readings insert batch carrying every admitted row, one commit, and one BEGIN IMMEDIATE, counted both at the owned connection wrapper and at the native SQLite boundary beneath _OwnedControlConnection so a split or commit routed through the raw connection is still rejected. The guard invokes Scheduler._process_readings() itself twice on one writer with the startup-resolved throttle and shipped LS218_2 polls, asserting the second steady-state scheduler admission's counter delta, drives the scheduler's exact direct-settlement sequence (begin_committed(), settlement wait, release_committed()) on a warm writer, repeats a second same-day steady-state admission on one writer, repeats shipped LakeShore mixed/all-error and MultiLine unavailable SENSOR_ERROR polls as second admissions on one warm writer, and carries tracked LS218_2, LS218_3, and MultiLine_1 polls through the configured catalog and writer boundary. Synthetic cardinality cases are explicitly supplemental rather than claimed shipped polls.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    guards:
+      - node: tests/core/test_sqlite_writer.py::test_batch_insert_is_batched_and_does_not_scale_with_row_count
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_batch_insert_covers_every_multiline_poll_shape
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_batch_insert_covers_every_detectable_live_cardinality
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_shipped_throttle_derives_detectable_live_cardinalities
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_error_status_batches_use_one_live_transaction
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_steady_state_second_admission_uses_one_live_transaction
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_scheduler_direct_settlement_uses_one_live_transaction
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_scheduler_process_readings_uses_one_live_transaction
+        ci_partition: core
+      - node: tests/core/test_sqlite_writer.py::test_multiline_unavailable_poll_uses_one_live_transaction
+        ci_partition: core
+    red_evidence: legacy_write_batch_guard_stayed_green_while_mutated_write_live_batch_issued_one_transaction_per_reading_2026_08_01_pending_immutable_capture
+    green_evidence: pending
+
