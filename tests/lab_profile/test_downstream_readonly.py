@@ -85,6 +85,9 @@ def _import_violations(source: str, *, label: str) -> list[str]:
             if module == "importlib" or module.startswith("importlib."):
                 violations.append(f"{label}: importing from {module!r} enables dynamic module loading")
                 continue
+            if module == "sys" and any(alias.name == "modules" for alias in node.names):
+                violations.append(f"{label}: importing sys.modules by name bypasses the static import boundary")
+                continue
             if root in stdlib or root == "yaml":
                 continue
             if module == PACKAGE_MODULE or module.startswith(f"{PACKAGE_MODULE}."):
@@ -101,16 +104,14 @@ def _import_violations(source: str, *, label: str) -> list[str]:
                         f"{label}: registry symbol {alias.name!r} is not one of "
                         f"{sorted(ALLOWED_REGISTRY_SYMBOLS)}; the package may not hold driver-construction authority"
                     )
+        elif isinstance(node, ast.Attribute) and node.attr == "modules":
+            violations.append(f"{label}: .modules access bypasses the static import boundary")
         elif isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id == "__import__":
                 violations.append(f"{label}: __import__ bypasses the static import boundary")
             elif isinstance(func, ast.Attribute) and func.attr == "import_module":
                 violations.append(f"{label}: import_module bypasses the static import boundary")
-        elif isinstance(node, ast.Subscript):
-            value = node.value
-            if isinstance(value, ast.Attribute) and value.attr == "modules":
-                violations.append(f"{label}: .modules[...] lookup bypasses the static import boundary")
     return violations
 
 
@@ -141,6 +142,8 @@ def test_import_closure_stays_downstream() -> None:
         "__import__('cryodaq.drivers.registry')",
         "import sys\nsys.modules['cryodaq.drivers.registry']",
         "import sys as system\nsystem.modules['cryodaq.drivers.registry']",
+        "from sys import modules\nmodules['cryodaq.drivers.registry']",
+        "import sys\nmods = sys.modules\nmods['cryodaq.drivers.registry']",
     ),
 )
 def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:

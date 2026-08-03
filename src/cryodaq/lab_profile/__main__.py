@@ -18,6 +18,13 @@ from .schema import LabProfileError
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The schema's character-based grammar accepts any NFC Unicode identity;
+    # the CLI must print what it accepts even on a legacy-encoded stream
+    # (e.g. PYTHONIOENCODING=cp1252), never die with UnicodeEncodeError.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
     args = sys.argv[1:] if argv is None else list(argv)
     if len(args) != 1:
         print("usage: python -m cryodaq.lab_profile <path>", file=sys.stderr)

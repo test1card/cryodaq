@@ -76,3 +76,31 @@ def test_cli_validates_the_shipped_example() -> None:
     assert "lab_id: imaginary-asc-lab" in completed.stdout
     assert "actuation_supported: false" in completed.stdout
     assert "safety_critical_roster" in completed.stdout
+
+
+def test_cli_prints_unicode_identities_under_a_legacy_stdout_encoding(tmp_path) -> None:
+    profile_path = tmp_path / "cyrillic.yaml"
+    profile_path.write_text(
+        "schema_version: 1\n"
+        "lab:\n"
+        "  lab_id: лаборатория\n"
+        "  display_name: Криогенная лаборатория\n"
+        "instruments:\n"
+        "  - type: lakeshore_218s\n"
+        "    name: LS1\n"
+        "questions: []\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONIOENCODING"] = "cp1252"
+    completed = subprocess.run(
+        [sys.executable, "-m", "cryodaq.lab_profile", str(profile_path)],
+        capture_output=True,
+        text=False,
+        env=env,
+        cwd=REPO_ROOT,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
