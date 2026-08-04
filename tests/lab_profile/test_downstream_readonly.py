@@ -153,6 +153,16 @@ def _bindings(node: ast.AST):
     elif isinstance(node, ast.withitem):
         if node.optional_vars is not None:
             yield _bound_names(node.optional_vars), node.context_expr
+    elif isinstance(node, ast.Match):
+        # `match SafeLoader: case Loader:` binds Loader to the SAME object.
+        for case in node.cases:
+            for captured in ast.walk(case.pattern):
+                name = getattr(captured, "name", None)
+                if isinstance(name, str):
+                    yield [name], node.subject
+                rest = getattr(captured, "rest", None)
+                if isinstance(rest, str):
+                    yield [rest], node.subject
     elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         # A default binds the SAME object to the parameter name on every call.
         signature = node.args
@@ -184,9 +194,43 @@ def _aliases_foreign(value: ast.expr, foreign: set[str]) -> bool:
     # every non-call expression can hand back the foreign object itself.
     # Over-approximating is safe here -- it can only mark more names foreign,
     # and a violation still requires an actual assignment INTO one of them.
-    if isinstance(value, ast.Call):
-        return False
+    # Calls are NOT exempt either.  ``{'x': yaml.SafeLoader}.get('x')`` is a
+    # call that returns the foreign object itself, so "a call produces a fresh
+    # object" was simply false.  There is no expression form that can be trusted
+    # to launder provenance, so none is exempt: mentioning a foreign name
+    # anywhere in a bound value makes the bound name foreign.  This
+    # over-approximates -- ``Path(path)`` marks ``selected`` foreign too -- which
+    # is harmless, because a violation additionally requires a mutation THROUGH
+    # the name, and the package never does that to its own locals.
     return any(isinstance(node, ast.Name) and node.id in foreign for node in ast.walk(value))
+
+
+def _mutates_foreign(node: ast.AST, target: ast.expr, foreign: set[str]) -> bool:
+    """True when this binding reaches a foreign object rather than a local label.
+
+    Provenance is read from the COMPLETE target expression, not from a bare-name
+    root: ``(SafeLoader,)[0].yaml_constructors['t'] = None`` needs no
+    intermediate binding at all, and peeling attributes and subscripts until a
+    ``Name`` appears never reaches the tuple.
+    """
+
+    # Follow the RECEIVER spine -- the ``.value`` chain of attributes and
+    # subscripts -- to the object actually being mutated.  Walking the whole
+    # target instead would count a subscript INDEX: ``result[key] = ...`` mutates
+    # ``result``, and ``key`` merely selects a slot, so a foreign ``key`` would
+    # be a false positive.  Peeling to a bare Name is not enough either, because
+    # ``(SafeLoader,)[0].yaml_constructors['t'] = None`` never reaches one.
+    receiver = target
+    while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+        receiver = receiver.value
+    if not any(isinstance(sub, ast.Name) and sub.id in foreign for sub in ast.walk(receiver)):
+        return False
+    if isinstance(target, ast.Name):
+        # A bare rebinding only moves a local label -- EXCEPT augmented
+        # assignment, which mutates in place through __ior__/__iadd__ before
+        # rebinding, so ``constructors |= {...}`` changes the foreign dict.
+        return isinstance(node, ast.AugAssign)
+    return True
 
 
 def _root_name(node: ast.expr) -> str | None:
@@ -229,7 +273,7 @@ def _resolve_import(module: str, level: int, *, base: str) -> str:
     return f"{prefix}.{module}" if module else prefix
 
 
-def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -> list[str]:
+def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, root: str = PACKAGE_MODULE) -> list[str]:
     """List every import in one source text that crosses the downstream boundary.
 
     Everything is DENIED BY DEFAULT and the allowlists are measured from the
@@ -286,7 +330,7 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             local_names.add(node.name)
         elif isinstance(node, ast.ImportFrom):
             origin = _resolve_import(node.module or "", node.level, base=base)
-            if origin == PACKAGE_MODULE or origin.startswith(f"{PACKAGE_MODULE}.") or origin in ALLOWED_CRYODAQ_IMPORTS:
+            if origin == root or origin.startswith(f"{root}.") or origin in ALLOWED_CRYODAQ_IMPORTS:
                 local_names.update(alias.asname or alias.name for alias in node.names)
             else:
                 # A ``from``-imported symbol is a FOREIGN object that lives in
@@ -317,6 +361,20 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
                         changed = True
 
     violations: list[str] = []
+    # A MODULE-LEVEL alias of a foreign object is exportable: another file in the
+    # package can `from .source import Loader`, which this scan classifies as an
+    # in-package import, and mutate it there with no foreign name in sight.
+    # Rejecting the export is simpler and tighter than propagating provenance
+    # across files, and the package has no legitimate need for one.
+    for statement in tree.body:
+        for names, value in _bindings(statement):
+            if not _aliases_foreign(value, imported_modules):
+                continue
+            for name in names:
+                violations.append(
+                    f"{label}: module-level name {name!r} aliases a foreign object and can be re-imported "
+                    "elsewhere in the package, laundering its provenance"
+                )
     for node in ast.walk(tree):
         # A denied dunder carried by an IMPORT ALIAS never appears as a Name,
         # an Attribute or a string constant in the body, so every dunder rule
@@ -332,33 +390,39 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
                         )
         if isinstance(node, ast.Import):
             for alias in node.names:
-                root = alias.name.split(".", 1)[0]
+                top_level = alias.name.split(".", 1)[0]
                 if alias.name == "importlib" or alias.name.startswith("importlib."):
                     violations.append(f"{label}: importing {alias.name!r} enables dynamic module loading")
                     continue
-                if root in REFLECTION_MODULES:
+                if top_level in REFLECTION_MODULES:
                     violations.append(f"{label}: importing {alias.name!r} enables reflection past the boundary")
                     continue
-                if root in ALLOWED_STDLIB_MODULES or alias.name == "yaml":
+                if top_level in ALLOWED_STDLIB_MODULES or alias.name == "yaml":
                     continue
-                if alias.name == PACKAGE_MODULE or alias.name.startswith(f"{PACKAGE_MODULE}."):
+                if alias.name == root or alias.name.startswith(f"{root}."):
                     continue
                 violations.append(f"{label}: bare import of {alias.name!r} crosses the downstream boundary")
         elif isinstance(node, ast.ImportFrom):
             module = _resolve_import(node.module or "", node.level, base=base)
-            root = module.split(".", 1)[0] if module else ""
+            top_level = module.split(".", 1)[0] if module else ""
             if module == "importlib" or module.startswith("importlib."):
                 violations.append(f"{label}: importing from {module!r} enables dynamic module loading")
                 continue
-            if root in REFLECTION_MODULES:
+            if top_level in REFLECTION_MODULES:
                 violations.append(f"{label}: importing from {module!r} enables reflection past the boundary")
+                continue
+            if any(alias.name == "*" for alias in node.names) and not (module == root or module.startswith(f"{root}.")):
+                # `from yaml import *` binds names this AST cannot enumerate, so
+                # provenance recorded only the literal '*' and every later
+                # mutation of a wildcard-bound name looked local.
+                violations.append(f"{label}: wildcard import from {module!r} hides which names it binds")
                 continue
             if module == "sys" and any(alias.name == "modules" for alias in node.names):
                 violations.append(f"{label}: importing sys.modules by name bypasses the static import boundary")
                 continue
-            if root in ALLOWED_STDLIB_MODULES or root == "yaml":
+            if top_level in ALLOWED_STDLIB_MODULES or top_level == "yaml":
                 continue
-            if module == PACKAGE_MODULE or module.startswith(f"{PACKAGE_MODULE}."):
+            if module == root or module.startswith(f"{root}."):
                 continue  # in-package imports are inside the boundary
             allowed_symbols = ALLOWED_CRYODAQ_IMPORTS.get(module)
             if allowed_symbols is None:
@@ -401,7 +465,7 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             # so ``args = sys.argv[1:]`` marks ``args`` foreign even though the
             # slice is a fresh list -- without this, that ordinary line in
             # __main__.py would be reported as a boundary violation.
-            isinstance(target, (ast.Attribute, ast.Subscript)) and _root_name(target) in imported_modules
+            _mutates_foreign(node, target, imported_modules)
             for target in (
                 node.targets
                 if isinstance(node, ast.Assign)
@@ -459,7 +523,11 @@ def _scan_package(base_dir: Path, *, package_module: str) -> list[str]:
         file_package = package_module
         if str(relative_parent) != ".":
             file_package = f"{package_module}.{'.'.join(relative_parent.parts)}"
-        violations.extend(_import_violations(path.read_text(encoding="utf-8"), label=path.name, base=file_package))
+        violations.extend(
+            _import_violations(
+                path.read_text(encoding="utf-8"), label=path.name, base=file_package, root=package_module
+            )
+        )
     return violations
 
 
@@ -587,6 +655,19 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         "from yaml import SafeLoader\nL = [SafeLoader for _ in (1,)][0]\nL.yaml_constructors['t'] = None",
         "from yaml import SafeLoader\nL = SafeLoader or None\nL.yaml_constructors['t'] = None",
         "from yaml import SafeLoader\nL = {'k': SafeLoader}['k']\nL.yaml_constructors['t'] = None",
+        # A CALL can preserve identity too, so no expression form is exempt.
+        "import yaml\nLoader = {'x': yaml.SafeLoader}.get('x')\nLoader.yaml_constructors['t'] = None",
+        # In-place mutation through the augmented-assignment protocol, on a bare
+        # name -- ``dict.__ior__`` changes the foreign dict before rebinding.
+        "from yaml import SafeLoader\nconstructors = SafeLoader.yaml_constructors\nconstructors |= {'t': None}",
+        # Pattern-matching capture: ``Loader is SafeLoader``.
+        "from yaml import SafeLoader\nmatch SafeLoader:\n    case Loader:\n        Loader.yaml_constructors['t'] = 1",
+        # Wildcard: the bound names cannot be enumerated from this AST at all.
+        "from yaml import *\nSafeLoader.yaml_constructors['t'] = None",
+        "from os import *\nenviron['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
+        # No intermediate binding: the receiver is reached through a tuple, so
+        # peeling the target to a bare Name never finds it.
+        "from yaml import SafeLoader\n(SafeLoader,)[0].yaml_constructors['t'] = None",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
@@ -706,14 +787,51 @@ def test_importing_the_package_never_loads_the_authority_bearing_registry() -> N
 
 
 def test_nested_modules_are_scanned_with_their_own_package(tmp_path: Path) -> None:
-    """A hostile file in a nested subpackage must produce violations."""
+    """Relative imports resolve against the nested file's OWN package.
+
+    The previous version of this test asserted that
+    ``from ..drivers.registry import construct_driver`` in ``pkg/sub`` is a
+    violation.  It was, but only because the scan compared against the hard-coded
+    ``cryodaq.lab_profile`` root instead of the ``pkg`` root it was asked for, so
+    the case would have stayed red however the relative-resolution logic broke.
+    With the root threaded through, that import resolves to ``pkg.drivers.registry``
+    and is correctly in-package -- so the control has to use an import that
+    really does leave the package.
+    """
 
     nested = tmp_path / "pkg" / "sub"
     nested.mkdir(parents=True)
     (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
     (nested / "__init__.py").write_text("", encoding="utf-8")
-    (nested / "evil.py").write_text("from ..drivers.registry import construct_driver\n", encoding="utf-8")
-    assert _scan_package(tmp_path / "pkg", package_module="pkg") != []
+    # level=3 from pkg.sub climbs past the package root, so it cannot resolve.
+    (nested / "evil.py").write_text("from ...drivers.registry import construct_driver\n", encoding="utf-8")
+    violations = _scan_package(tmp_path / "pkg", package_module="pkg")
+    assert violations != [] and any("evil.py" in entry for entry in violations), violations
+
+    # Positive control on the other side: a relative import that stays inside the
+    # requested package must NOT be reported, which is what proves the root is
+    # honoured rather than everything simply being called foreign.
+    (nested / "evil.py").write_text("from ..sub import helper\n", encoding="utf-8")
+    assert _scan_package(tmp_path / "pkg", package_module="pkg") == []
+
+
+def test_module_level_alias_cannot_launder_provenance_across_files(tmp_path: Path) -> None:
+    """One module exports a foreign alias; another imports and mutates it.
+
+    The importer's ``from .source import Loader`` is an in-package import, so
+    nothing foreign is named there at all, and the exporter merely rebinds a
+    name.  Neither file looks hostile on its own, which is why the export itself
+    has to be the violation.
+    """
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "source.py").write_text("from yaml import SafeLoader\nLoader = SafeLoader\n", encoding="utf-8")
+    (package / "__init__.py").write_text(
+        "from .source import Loader\nLoader.yaml_constructors['t'] = None\n", encoding="utf-8"
+    )
+    violations = _scan_package(package, package_module="pkg")
+    assert any("laundering" in entry for entry in violations), violations
 
 
 def test_driver_metadata_projection_is_inert_and_exact() -> None:
