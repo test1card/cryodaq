@@ -221,6 +221,16 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             origin = _resolve_import(node.module or "", node.level, base=base)
             if origin == PACKAGE_MODULE or origin.startswith(f"{PACKAGE_MODULE}.") or origin in ALLOWED_CRYODAQ_IMPORTS:
                 local_names.update(alias.asname or alias.name for alias in node.names)
+            else:
+                # A ``from``-imported symbol is a FOREIGN object that lives in
+                # another module, so assigning into it mutates process-wide
+                # state outside the boundary exactly as ``os.environ[...] = ...``
+                # does.  Tracking only ``import x`` missed it, and
+                # ``from yaml import SafeLoader;
+                # SafeLoader.yaml_constructors['tag:yaml.org,2002:str'] = None``
+                # poisons the safe-YAML constructor table for the whole host
+                # while leaving no file, variable, path or process trace.
+                imported_modules.update(alias.asname or alias.name for alias in node.names)
 
     violations: list[str] = []
     for node in ast.walk(tree):
@@ -419,6 +429,14 @@ def test_every_allowlist_entry_is_load_bearing(monkeypatch: pytest.MonkeyPatch, 
         "eval('1 + 1')",
         "exec('pass')",
         "vars(sys)",
+        # A ``from``-imported symbol is a foreign object; assigning into it
+        # poisons process-wide state with no file, variable, path or process
+        # trace.  Tracking only ``import x`` bindings missed every one of these.
+        "from yaml import SafeLoader\nSafeLoader.yaml_constructors['tag:yaml.org,2002:str'] = None",
+        "from yaml import SafeLoader as L\nL.yaml_constructors['tag:yaml.org,2002:str'] = None",
+        "from os import environ\nenviron['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
+        "from sys import path\npath[:] = ['/tmp/attacker']",
+        "from yaml import SafeLoader\ndel SafeLoader.yaml_constructors",
         "dir(sys)",
         "globals()",
         "locals()",
@@ -583,21 +601,70 @@ payload = json.loads(sys.stdin.read())
 # directory, so a state diff alone reports green while a shell has run.  The
 # audit hook observes the capability itself, is installed BEFORE the package is
 # imported, and cannot be evaded by aliasing or by how the call is spelled.
+# These are CPython's own audit-event names for the capability classes, taken as
+# classes rather than as spellings: every documented way to create a process,
+# every mutating filesystem primitive, every socket.  A write under $HOME and an
+# os.fork both leave the copied checkout untouched, so neither is visible to a
+# tree hash however complete that tree is.
 _AUDITED = frozenset(
     {
+        # create a process
         "os.system",
         "os.exec",
+        "os.fork",
+        "os.forkpty",
         "os.posix_spawn",
         "os.spawn",
         "os.startfile",
         "subprocess.Popen",
+        "pty.spawn",
+        # mutate the filesystem anywhere, not only under the checkout
+        "os.remove",
+        "os.rename",
+        "os.link",
+        "os.symlink",
+        "os.mkdir",
+        "os.rmdir",
+        "os.truncate",
+        "os.chmod",
+        "os.chown",
+        "shutil.copyfile",
+        "shutil.copymode",
+        "shutil.copystat",
+        "shutil.copytree",
+        "shutil.move",
+        "shutil.rmtree",
+        "shutil.unpack_archive",
+        # reach the network
         "socket.connect",
         "socket.bind",
         "socket.getaddrinfo",
+        "socket.sendto",
+        "urllib.Request",
     }
 )
+# os.open flags that request write access; the `open` audit event reports mode
+# as a string for io.open and as flags for os.open.
+_WRITE_FLAGS = getattr(os, "O_WRONLY", 0) | getattr(os, "O_RDWR", 0) | getattr(os, "O_APPEND", 0)
+_WRITE_FLAGS |= getattr(os, "O_CREAT", 0) | getattr(os, "O_TRUNC", 0)
 _observed = set()
-sys.addaudithook(lambda event, args: _observed.add(event) if event in _AUDITED else None)
+
+
+def _audit(event, args):
+    if event in _AUDITED:
+        _observed.add(event)
+        return
+    if event != "open":
+        return
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 else None
+    if isinstance(mode, str) and set(mode) & set("wax+"):
+        _observed.add("file.write")
+    elif mode is None and isinstance(flags, int) and flags & _WRITE_FLAGS:
+        _observed.add("file.write")
+
+
+sys.addaudithook(_audit)
 
 
 def snapshot():
@@ -812,28 +879,42 @@ def _probe(checkout: Path, mode: str) -> dict:
 # scored differently.
 _REGRESSIONS = {
     "incumbent_config_write": (
-        "tree",
+        {"tree", "capabilities"},
         "open(os.path.join(os.getcwd(), 'config', 'safety.yaml'), 'w').write('disabled: true')",
     ),
-    "new_file_anywhere": ("tree", "open(os.path.join(os.getcwd(), 'planted.txt'), 'w').write('x')"),
+    "new_file_anywhere": ({"tree", "capabilities"}, "open(os.path.join(os.getcwd(), 'planted.txt'), 'w').write('x')"),
     "package_self_edit": (
-        "tree",
+        {"tree", "capabilities"},
         "open(os.path.join(os.getcwd(), 'src', 'cryodaq', 'lab_profile', 'capabilities.py'), 'a').write('\\n')",
     ),
-    "environment_write": ("environ", "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
+    "environment_write": ({"environ"}, "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
     # Leaves NO trace in a state diff -- no file, variable, path or cwd changes.
     # Only the audit hook sees it.  (Deliberately NOT spelled as an alias over
     # `print`: that shadows a builtin __main__.py itself calls, so the control
     # would fail for its own reason instead of measuring the guard.)
-    "process_launch": ("capabilities", "os.system('exit 0')"),
+    "process_launch": ({"capabilities"}, "os.system('exit 0')"),
+    # Outside the copied checkout entirely, so no tree hash can ever see it --
+    # in a real invocation this is the operator's own home directory.
+    "write_outside_checkout": (
+        {"capabilities"},
+        "import io\n"
+        "class Sink(io.FileIO):\n"
+        "    pass\n"
+        "Sink(os.path.join(os.environ['HOME'], 'planted.txt'), 'w').close()",
+    ),
     # Conditioned on an ordinary variable, which a near-empty environment hid.
     "conditional_on_home": (
-        "environ",
+        {"environ"},
         "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1' if 'HOME' in os.environ else None",
     ),
-    "import_path_insert": ("sys_path", "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))"),
-    "working_directory_move": ("cwd", "os.chdir(os.path.dirname(os.getcwd()))"),
+    "import_path_insert": ({"sys_path"}, "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))"),
+    "working_directory_move": ({"cwd"}, "os.chdir(os.path.dirname(os.getcwd()))"),
 }
+if hasattr(os, "fork"):
+    # POSIX only -- Windows has no fork, so this control cannot run there and is
+    # registered conditionally rather than being asserted on every platform.
+    # The child exits immediately so it cannot go on running the probe.
+    _REGRESSIONS["fork_process"] = ({"capabilities"}, "if os.fork() == 0:\n    os._exit(0)")
 
 
 @pytest.mark.parametrize("mode", ("import", "cli"))
@@ -883,7 +964,7 @@ def test_effect_guard_reports_a_real_regression(tmp_path: Path, mode: str, entry
     anchor = "from __future__ import annotations\n"
     assert anchor in source, entry_point
     module.write_text(source.replace(anchor, f"{anchor}import os, sys\n{code}\n", 1), encoding="utf-8")
-    assert _probe(checkout, mode)["differences"] == [dimension]
+    assert set(_probe(checkout, mode)["differences"]) == dimension
 
 
 def test_documented_cli_spelling_validates_the_shipped_example(tmp_path: Path) -> None:
