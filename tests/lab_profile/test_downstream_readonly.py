@@ -153,6 +153,11 @@ def _aliases_foreign(value: ast.expr, foreign: set[str]) -> bool:
 
     if isinstance(value, ast.Name):
         return value.id in foreign
+    if isinstance(value, ast.Attribute):
+        # ``yaml.SafeLoader`` is IDENTITY-preserving: attribute access hands back
+        # the very object living in the foreign module, so the binding is an
+        # alias just as much as a bare name is.
+        return _root_name(value) in foreign
     if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
         return any(_aliases_foreign(element, foreign) for element in value.elts)
     if isinstance(value, ast.Starred):
@@ -290,6 +295,18 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
 
     violations: list[str] = []
     for node in ast.walk(tree):
+        # A denied dunder carried by an IMPORT ALIAS never appears as a Name,
+        # an Attribute or a string constant in the body, so every dunder rule
+        # below missed it: ``from yaml import __builtins__ as b`` hands over the
+        # interpreter builtins through an otherwise allowlisted module.  The
+        # imported symbol name is checked here, before the module allowance.
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                for part in (*alias.name.split("."), alias.asname or ""):
+                    if part and _denied_dunder(part):
+                        violations.append(
+                            f"{label}: importing the name {part!r} carries interpreter internals past the boundary"
+                        )
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".", 1)[0]
@@ -501,7 +518,16 @@ def test_every_allowlist_entry_is_load_bearing(monkeypatch: pytest.MonkeyPatch, 
         "from yaml import SafeLoader\nLoader: type = SafeLoader\nLoader.yaml_constructors['t'] = None",
         "from yaml import SafeLoader\n(Loader,) = (SafeLoader,)\nLoader.yaml_constructors['t'] = None",
         "from yaml import SafeLoader\nfor Loader in (SafeLoader,):\n    Loader.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\n(Loader := SafeLoader)\nLoader.yaml_constructors['t'] = None",
         "from os import environ\nE = environ\nE['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
+        # The alias is an ATTRIBUTE of a foreign module, which is still the same
+        # object rather than a fresh one.
+        "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
+        "import yaml\nL: type = yaml.SafeLoader\nL.yaml_constructors['t'] = None",
+        # The dunder is carried by an import alias, so no dunder ever appears as
+        # a Name, Attribute or string constant in the body.
+        "from yaml import __builtins__ as b\nb.get('x')",
+        "from os import __dict__ as d\nd.get('x')",
         "dir(sys)",
         "globals()",
         "locals()",
@@ -752,6 +778,13 @@ def _read_umask():
         return None
 
 
+def _read_priority():
+    try:
+        return os.getpriority(os.PRIO_PROCESS, 0)
+    except (AttributeError, OSError):
+        return None
+
+
 def snapshot():
     # EVERY file under the checkout, not an enumerated list of interesting ones.
     # Naming five config paths would have left a write to any sixth path -- a
@@ -775,6 +808,10 @@ def snapshot():
         # permissions applied to every later file this process creates while
         # leaving no other trace.
         "umask": _read_umask(),
+        # Scheduling priority is likewise process state with no audit event:
+        # os.nice(1) slows the long-lived host permanently and touches nothing
+        # else.  POSIX-only; None elsewhere.
+        "priority": _read_priority(),
     }
 
 
@@ -1011,6 +1048,9 @@ _REGRESSIONS = {
     "working_directory_move": ({"cwd"}, "os.chdir(os.path.dirname(os.getcwd()))"),
 }
 if os.name == "posix":
+    # Lowers the scheduling priority of the long-lived host permanently, with
+    # no audit event and no other trace.  POSIX-only, like umask.
+    _REGRESSIONS["scheduling_change"] = ({"priority"}, "os.nice(1)")
     # Changes the permissions applied to every later file this process creates.
     # os.umask raises no audit event, hence the umask snapshot.  Measured:
     # on Windows os.umask always returns 0o0 and tracks nothing, so the
@@ -1071,6 +1111,42 @@ def test_effect_guard_reports_a_real_regression(tmp_path: Path, mode: str, entry
     assert anchor in source, entry_point
     module.write_text(source.replace(anchor, f"{anchor}import os, sys\n{code}\n", 1), encoding="utf-8")
     assert set(_probe(checkout, mode)["differences"]) == dimension
+
+
+def test_effect_guard_reports_a_function_local_unsafe_loader(tmp_path: Path) -> None:
+    """A loader defined INSIDE a function, used only on the documented CLI path.
+
+    ``vars(module)`` cannot see a class defined inside ``main()``, and the static
+    scan trusts every locally defined class name, so neither of those guards
+    covers this.  The effect probe does, because it drives Python object tags
+    through ``python -m cryodaq.lab_profile`` against a victim file that lives
+    inside the hashed tree -- a constructor that actually ran deletes it.
+
+    This is registered as its own control so that coverage is asserted rather
+    than argued: without it, the object-tag-through-the-CLI path was exercised
+    but nothing proved it could go red.
+    """
+
+    checkout = _isolated_checkout(tmp_path)
+    main_py = checkout / "src" / "cryodaq" / "lab_profile" / "__main__.py"
+    source = main_py.read_text(encoding="utf-8")
+    anchor = "    try:\n        profile = load_lab_profile(Path(args[0]))\n"
+    assert anchor in source
+    main_py.write_text(
+        source.replace(
+            anchor,
+            "    import yaml as _y\n"
+            "    class Loader(_y.UnsafeLoader):\n"
+            "        pass\n"
+            "    _y.load(Path(args[0]).read_text(encoding='utf-8'), Loader=Loader)\n" + anchor,
+            1,
+        ),
+        encoding="utf-8",
+    )
+    victim = checkout / "victim.txt"
+    assert victim.read_text(encoding="utf-8") == "intact"
+    assert "tree" in _probe(checkout, "cli")["differences"]
+    assert not victim.exists(), "the object tag did not execute, so this control proves nothing"
 
 
 def test_documented_cli_spelling_validates_the_shipped_example(tmp_path: Path) -> None:
