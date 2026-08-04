@@ -5727,6 +5727,8 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_pre_import_bool_poisoning_cannot_reach_the_profile_loader
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_float_scalars_cannot_reach_the_schema
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
         ci_partition: remaining
     red_evidence: >-
@@ -5757,5 +5759,9 @@ records:
       a host that poisoned bool_values BEFORE the first cryodaq.lab_profile import had its value copied in, so
       schema_version: true still validated as 1. Identity separation only blocks mutation that happens after
       import; the boolean table is now written out literally and the ordering is exercised in a fresh process,
-      because an in-process test can only ever reach the easy ordering. 2026-08-04, pending immutable capture.
+      because an in-process test can only ever reach the easy ordering. The same pre-import ordering then
+      surfaced a FIFTH dependency: construct_yaml_float reads the inherited inf_value and nan_value class
+      attributes, so a host setting yaml.SafeLoader.inf_value = 1 made schema_version: .inf validate as the
+      integer 1. No field in the schema accepts a float, so the float constructor is removed outright rather
+      than owned, which eliminates the dependency instead of relocating it. 2026-08-04, pending immutable capture.
     green_evidence: pending

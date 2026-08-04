@@ -36,7 +36,13 @@ _QUESTION_KEYS: Final = frozenset({"kind", "subject", "summary"})
 
 _INCUMBENT_SURFACES: Final = "safety, thresholds, interlocks, alarms, overrides, channels, actuation"
 
-# The exact tag vocabulary a lab profile may contain.  Module level so both
+# The exact tag vocabulary a lab profile may contain.  FLOAT IS ABSENT: no field
+# in the schema accepts one -- schema_version is an exact int and every other
+# field an exact str -- and construct_yaml_float reads the inherited, mutable
+# ``inf_value``/``nan_value`` class attributes.  Measured: a host setting
+# ``yaml.SafeLoader.inf_value = 1`` made ``schema_version: .inf`` validate as
+# the integer 1.  Dropping the constructor removes that dependency outright,
+# which is better than owning yet more host state.  Module level so both
 # the constructor table and the resolver table below can reference it: a
 # class-body comprehension cannot see class scope.
 _OWNED_TAGS: Final = frozenset(
@@ -44,7 +50,6 @@ _OWNED_TAGS: Final = frozenset(
         "tag:yaml.org,2002:null",
         "tag:yaml.org,2002:bool",
         "tag:yaml.org,2002:int",
-        "tag:yaml.org,2002:float",
         "tag:yaml.org,2002:str",
         "tag:yaml.org,2002:seq",
         "tag:yaml.org,2002:map",
@@ -75,7 +80,6 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
         "tag:yaml.org,2002:null": yaml.constructor.SafeConstructor.construct_yaml_null,
         "tag:yaml.org,2002:bool": yaml.constructor.SafeConstructor.construct_yaml_bool,
         "tag:yaml.org,2002:int": yaml.constructor.SafeConstructor.construct_yaml_int,
-        "tag:yaml.org,2002:float": yaml.constructor.SafeConstructor.construct_yaml_float,
         "tag:yaml.org,2002:str": yaml.constructor.SafeConstructor.construct_yaml_str,
         "tag:yaml.org,2002:seq": yaml.constructor.SafeConstructor.construct_yaml_seq,
         "tag:yaml.org,2002:map": yaml.constructor.SafeConstructor.construct_yaml_map,

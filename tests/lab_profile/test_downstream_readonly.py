@@ -1680,6 +1680,61 @@ def test_host_bool_values_cannot_reach_the_profile_loader() -> None:
         yaml.SafeLoader.bool_values.update(original)
 
 
+_PRE_IMPORT_FLOAT_POISON = r"""
+import yaml
+
+# Poison the float constructor's support values BEFORE the first import.
+yaml.SafeLoader.inf_value = 1
+yaml.SafeLoader.nan_value = 1
+
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+body = (
+    "lab:\n  lab_id: x\n  display_name: y\n"
+    "instruments:\n  - type: lakeshore_218s\n    name: LS1\n"
+    "questions: []\n"
+)
+outcomes = []
+for scalar in (".inf", ".nan", "1.5"):
+    try:
+        parse_lab_profile("schema_version: " + scalar + "\n" + body)
+    except LabProfileError:
+        outcomes.append("rejected")
+    else:
+        outcomes.append("accepted")
+print(",".join(outcomes))
+"""
+
+
+def test_float_scalars_cannot_reach_the_schema(tmp_path: Path) -> None:
+    """No field accepts a float, so the float constructor is not owned at all.
+
+    ``construct_yaml_float`` reads the inherited, mutable ``inf_value`` and
+    ``nan_value`` class attributes.  Measured before the fix, in a fresh process:
+    ``yaml.SafeLoader.inf_value = 1`` made ``schema_version: .inf`` validate as
+    the integer 1.  Removing the constructor removes the dependency outright,
+    rather than owning yet more host state -- schema_version is an exact int and
+    every other field an exact str, so nothing legitimate is lost.
+
+    Runs in a subprocess: the ordering that matters is host-first, import-second.
+    """
+
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _PRE_IMPORT_FLOAT_POISON],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "rejected,rejected,rejected", completed.stdout + completed.stderr
+
+
 _PRE_IMPORT_POISON = r"""
 import sys
 import yaml
