@@ -925,6 +925,9 @@ def test_import_closure_stays_downstream() -> None:
             ("ALLOWED_DUNDERS", ALLOWED_DUNDERS),
             ("ALLOWED_CALL_NAMES", ALLOWED_CALL_NAMES),
             ("ALLOWED_METHOD_NAMES", ALLOWED_METHOD_NAMES),
+            # A base-class allowance widens the boundary as much as any other,
+            # so it is measured the same way rather than trusted to a comment.
+            ("ALLOWED_BASE_CLASSES", ALLOWED_BASE_CLASSES),
         )
         for entry in sorted(values)
     ],
@@ -1909,6 +1912,44 @@ def test_no_loader_in_the_package_can_construct_python_objects() -> None:
             executable = sorted(tag for tag in tags if tag and "python/" in tag)
             assert executable == [], f"{attribute!r} can construct {executable}"
     assert inspected, "no YAML loader found in the package; this guard would be vacuous"
+
+
+def test_host_yaml_registrations_cannot_reach_the_profile_loader(tmp_path: Path) -> None:
+    """A third party must not be able to decide what the profile parser runs.
+
+    Subclassing ``yaml.SafeLoader`` shares its mutable ``yaml_constructors``
+    mapping BY REFERENCE, so any host or library that has called
+    ``yaml.SafeLoader.add_constructor(...)`` -- ordinary PyYAML use, not an
+    attack -- changed what ``parse_lab_profile`` executed.  Measured before the
+    fix: a constructor registered for the standard string tag deleted a file
+    while an operator profile was being validated.
+
+    The victim file is the measurement: a constructor that ran would remove it.
+    """
+
+    import yaml
+
+    from cryodaq.lab_profile.loader import _StrictLabProfileLoader
+
+    assert _StrictLabProfileLoader.yaml_constructors is not yaml.SafeLoader.yaml_constructors
+    assert _StrictLabProfileLoader.yaml_multi_constructors is not yaml.SafeLoader.yaml_multi_constructors
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("intact", encoding="utf-8")
+
+    def side_effecting(loader: object, node: object) -> str:
+        victim.unlink(missing_ok=True)
+        return "pwned"
+
+    original = dict(yaml.SafeLoader.yaml_constructors)
+    yaml.SafeLoader.add_constructor("tag:yaml.org,2002:str", side_effecting)
+    try:
+        profile = parse_lab_profile(_VALID_TEXT)
+        assert profile.lab_id == "readonly-lab"
+        assert victim.read_text(encoding="utf-8") == "intact", "a host registration reached the profile loader"
+    finally:
+        yaml.SafeLoader.yaml_constructors.clear()
+        yaml.SafeLoader.yaml_constructors.update(original)
 
 
 def test_python_object_tags_never_execute(tmp_path: Path) -> None:

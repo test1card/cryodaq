@@ -37,7 +37,34 @@ _INCUMBENT_SURFACES: Final = "safety, thresholds, interlocks, alarms, overrides,
 
 
 class _StrictLabProfileLoader(yaml.SafeLoader):
-    """Bounded YAML grammar with neither aliases nor duplicate mapping keys."""
+    """Bounded YAML grammar with neither aliases nor duplicate mapping keys.
+
+    The constructor tables are OWNED, not inherited.  Subclassing
+    ``yaml.SafeLoader`` shares its mutable ``yaml_constructors`` mapping by
+    reference, so any host or library that has ever called
+    ``yaml.SafeLoader.add_constructor(...)`` -- ordinary PyYAML use -- changes
+    what a lab profile executes.  Measured: registering a side-effecting
+    constructor for the standard string tag deleted a file while an operator
+    profile was being validated, and
+    ``_StrictLabProfileLoader.yaml_constructors is yaml.SafeLoader.yaml_constructors``
+    was true.  A downstream artifact cannot be a read-only boundary if a third
+    party can decide what its parser runs.
+    """
+
+    # The exact tag vocabulary a lab profile can contain, bound to
+    # SafeConstructor's own METHODS rather than copied from its (mutable,
+    # shared) constructor mapping.  ``None`` keeps unknown tags failing closed.
+    yaml_constructors = {
+        None: yaml.constructor.SafeConstructor.construct_undefined,
+        "tag:yaml.org,2002:null": yaml.constructor.SafeConstructor.construct_yaml_null,
+        "tag:yaml.org,2002:bool": yaml.constructor.SafeConstructor.construct_yaml_bool,
+        "tag:yaml.org,2002:int": yaml.constructor.SafeConstructor.construct_yaml_int,
+        "tag:yaml.org,2002:float": yaml.constructor.SafeConstructor.construct_yaml_float,
+        "tag:yaml.org,2002:str": yaml.constructor.SafeConstructor.construct_yaml_str,
+        "tag:yaml.org,2002:seq": yaml.constructor.SafeConstructor.construct_yaml_seq,
+        "tag:yaml.org,2002:map": yaml.constructor.SafeConstructor.construct_yaml_map,
+    }
+    yaml_multi_constructors: dict[str, object] = {}
 
     def __init__(self, stream: object) -> None:
         super().__init__(stream)
