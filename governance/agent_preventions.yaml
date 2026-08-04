@@ -2905,6 +2905,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: fourteen_static_relative_dynamic_and_reflective_escape_spellings_including_inspect_getmodule_on_the_enums_passed_the_prior_boundary_guard_while_it_stayed_green_2026_08_03_pending_immutable_capture
     green_evidence: pending
+  - id: LAB-PROFILE-EFFECT-GUARD-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAB-PROFILE-AUTHORITY-ESCAPE-001
+    guard: tests/lab_profile/test_downstream_readonly.py::test_effect_guard_reports_a_real_regression
+    ci_partition: remaining
+    red_evidence: the_effect_guard_is_the_load_bearing_proof_and_its_own_coverage_escapes_were_only_recorded_on_the_runtime_record_so_the_control_could_be_deleted_or_deselected_while_the_static_false_green_pair_still_appeared_guarded_measured_escapes_that_the_guard_reported_green_were_a_write_under_home_outside_the_copied_checkout_an_os_fork_process_creation_an_os_utime_metadata_rewrite_that_changes_no_bytes_and_an_aliased_foreign_binding_mutation_2026_08_04_pending_immutable_capture
+    green_evidence: pending
   - id: ASSISTANT-ACKNOWLEDGEMENT-FALSE-GREEN-210
     status: open
     scope: product_contract

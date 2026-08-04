@@ -232,6 +232,25 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
                 # while leaving no file, variable, path or process trace.
                 imported_modules.update(alias.asname or alias.name for alias in node.names)
 
+    # An alias of a foreign binding is still foreign.  ``from yaml import
+    # SafeLoader; Loader = SafeLoader`` loses provenance unless the rebind is
+    # followed, and the mutation then lands on a name the scan does not
+    # recognise.  Iterated to a fixpoint so chains (``a = SafeLoader; b = a``)
+    # are covered too, not merely one hop.
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+                continue
+            if node.value.id not in imported_modules:
+                continue
+            for target in node.targets:
+                name = _root_name(target)
+                if name and name not in imported_modules:
+                    imported_modules.add(name)
+                    changed = True
+
     violations: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -628,6 +647,11 @@ _AUDITED = frozenset(
         "os.truncate",
         "os.chmod",
         "os.chown",
+        # Metadata, not content: a tree hash over file BYTES stays identical
+        # while the mtime an incumbent freshness check relies on is rewritten.
+        "os.utime",
+        "os.setxattr",
+        "os.removexattr",
         "shutil.copyfile",
         "shutil.copymode",
         "shutil.copystat",
@@ -893,6 +917,11 @@ _REGRESSIONS = {
     # `print`: that shadows a builtin __main__.py itself calls, so the control
     # would fail for its own reason instead of measuring the guard.)
     "process_launch": ({"capabilities"}, "os.system('exit 0')"),
+    # Content unchanged, so the tree hash cannot see it; only the audit hook can.
+    "metadata_mutation": (
+        {"capabilities"},
+        "os.utime(os.path.join(os.getcwd(), 'config', 'safety.yaml'), (0, 0))",
+    ),
     # Outside the copied checkout entirely, so no tree hash can ever see it --
     # in a real invocation this is the operator's own home directory.
     "write_outside_checkout": (
