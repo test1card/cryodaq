@@ -5869,13 +5869,27 @@ records:
       rebinds it before the first import is captured by the binding exactly as yaml.load was. Measured -- a
       replacement returned a forged profile and deleted a file while the strict grammar never ran. Fixing the
       instance without measuring the chain it called was the same mistake the data-table guard exists to
-      prevent, repeated on the method chain. The loader now DEFINES get_single_data, and, more importantly,
-      a derived guard asserts PROVENANCE for every callable on the loader's MRO: each must have been compiled
-      inside the installed PyYAML package or inside this repository, and must resolve its globals through a
-      yaml or cryodaq namespace. That covers rungs nobody has enumerated, including ones added by a future
-      PyYAML release. Provenance rather than bytecode pinning, deliberately: hashing upstream's compiled code
-      would break on every release and teach the next author to re-baseline instead of read. Stated limit --
-      it checks where a callable was compiled, not what it does, so a patched PyYAML INSTALLATION passes.
+      prevent, repeated on the method chain. The loader now DEFINES get_single_data.
+      RETRACTION, and this record previously published the false version: a derived guard asserts PROVENANCE
+      for every callable on the loader's MRO -- each must have been compiled inside the installed PyYAML
+      package or inside this repository and resolve its globals through a yaml or cryodaq namespace -- and an
+      earlier version of this text claimed that "covers rungs nobody has enumerated, including ones added by a
+      future PyYAML release". THAT CLAIM WAS FALSE and is withdrawn. The guard detects a foreign replacement
+      present when the TEST SUITE runs; it cannot constrain the operator's process. Measured against the fixed
+      tree: rebinding yaml.constructor.BaseConstructor.construct_document AFTER a completed import made
+      parse_lab_profile("hello: world") return a forged profile and delete a file, with NO import ordering
+      required -- easier than either case above. The guard is a DRIFT FENCE and is recorded as one; it is not
+      a runtime defence and must not be cited as coverage against a hostile host.
+      What this record now covers instead is the property that actually holds. The residual is accepted
+      deliberately: every remaining attack of this shape requires the attacker to already execute arbitrary
+      Python inside the operator's process, and such an attacker does not need YAML at all. The realistic
+      threat -- an ordinary library calling yaml.SafeLoader.add_constructor or add_implicit_resolver -- is
+      closed by the owned tables and is unaffected. Descending the chain is not a strategy: yaml.load ->
+      get_single_data -> construct_document -> compose_document -> scanner is ONE defect class, not five.
+      The guarded property is that the ACTUATION BOUNDARY DOES NOT DEPEND ON THE PARSER: schema.py re-derives
+      instrument authority from BUILTIN_DRIVER_METADATA rather than trusting the parsed document, so under
+      TOTAL parser compromise a forged keithley_2604b still raises ActuationBoundaryError. Measured, and
+      guarded by test_actuation_boundary_survives_a_fully_compromised_parser.
       Three further defects in the same round: an explicit `!!int 0_1` validated as 1 because int() accepts
       underscores while _INT_PATTERN gates only IMPLICIT resolution -- the comment claiming such forms failed
       closed was written without being executed and was false, and the pattern is now applied in the
