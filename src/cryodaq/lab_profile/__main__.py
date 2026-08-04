@@ -18,6 +18,24 @@ from .loader import load_lab_profile
 from .schema import LabProfileError
 
 
+def _one_line(text: str) -> str:
+    """Collapse untrusted text so it cannot forge a standalone output line.
+
+    A validation error carries attacker-influenced material: the path the
+    operator was given, and PyYAML's own source snippets.  Emitted raw, a
+    filename containing a newline followed by ``actuation_supported: false``
+    prints that as its own line, which reads exactly like this tool's real
+    boundary status.  That is the misreporting failure this whole artifact
+    exists to avoid, so every line break and control character is escaped
+    rather than printed.
+    """
+
+    return "".join(
+        character if character.isprintable() and character not in "\r\n" else repr(character)[1:-1]
+        for character in text
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     # The schema's character-based grammar accepts any NFC Unicode identity;
     # the CLI must print what it accepts even on a legacy-encoded stream
@@ -51,7 +69,7 @@ def _validate(argv: list[str] | None) -> int:
     try:
         profile = load_lab_profile(Path(args[0]))
     except LabProfileError as exc:
-        print(f"LAB PROFILE ERROR: {exc}", file=sys.stderr)
+        print(f"LAB PROFILE ERROR: {_one_line(str(exc))}", file=sys.stderr)
         return 2
     print(f"lab_id: {profile.lab_id}")
     print(f"display_name: {profile.display_name}")

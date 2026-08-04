@@ -118,6 +118,7 @@ ALLOWED_CALL_NAMES = frozenset(
         "SystemExit",
         "any",
         "dataclass",
+        "dict",
         "enumerate",
         "field",
         "frozenset",
@@ -125,6 +126,7 @@ ALLOWED_CALL_NAMES = frozenset(
         "len",
         "list",
         "print",
+        "repr",
         "set",
         "sorted",
         "str",
@@ -148,6 +150,7 @@ ALLOWED_METHOD_NAMES = frozenset(
         "encode",
         "get",
         "isfile",
+        "isprintable",
         "isspace",
         "items",
         "join",
@@ -1652,6 +1655,57 @@ def test_cli_restores_an_aliased_stream_exactly_once() -> None:
     finally:
         sys.stdout, sys.stderr = original_out, original_err
     assert (encoding, errors) == ("cp1252", "strict"), (encoding, errors)
+
+
+def test_host_bool_values_cannot_reach_the_profile_loader() -> None:
+    """`bool_values` is a fourth shared mutable table feeding construct_yaml_bool.
+
+    Measured: with ``yaml.SafeLoader.bool_values["true"] = 1`` a profile
+    containing ``schema_version: true`` validated successfully, because the
+    boolean constructor calls through to ``self.bool_values``.
+    """
+
+    import yaml
+
+    from cryodaq.lab_profile.loader import _StrictLabProfileLoader
+
+    assert _StrictLabProfileLoader.bool_values is not yaml.SafeLoader.bool_values
+
+    original = dict(yaml.SafeLoader.bool_values)
+    yaml.SafeLoader.bool_values["true"] = 1
+    try:
+        with pytest.raises(LabProfileError):
+            parse_lab_profile(_VALID_TEXT.replace("schema_version: 1", "schema_version: true"))
+    finally:
+        yaml.SafeLoader.bool_values.clear()
+        yaml.SafeLoader.bool_values.update(original)
+
+
+def test_cli_diagnostics_cannot_forge_a_status_line() -> None:
+    """An error message must not be able to print this tool's own status lines.
+
+    A validation error carries attacker-influenced text -- the supplied path and
+    PyYAML's source snippets.  Measured: a filename containing a newline
+    followed by ``actuation_supported: false`` emitted that as a standalone
+    line, indistinguishable from the real boundary status.  That is the
+    misreporting failure this artifact exists to avoid.
+    """
+
+    import io as _io
+
+    from cryodaq.lab_profile.__main__ import main
+
+    captured = _io.StringIO()
+    original_err = sys.stderr
+    sys.stderr = captured
+    try:
+        assert main(["missing\nactuation_supported: false\nunanswered questions: none"]) == 2
+    finally:
+        sys.stderr = original_err
+    emitted = captured.getvalue()
+    assert emitted.strip().count("\n") == 0, emitted
+    for forged in ("actuation_supported: false", "unanswered questions: none"):
+        assert not any(line.strip() == forged for line in emitted.splitlines()), emitted
 
 
 def test_cli_restores_host_stream_configuration() -> None:

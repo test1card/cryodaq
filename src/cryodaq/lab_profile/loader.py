@@ -105,6 +105,12 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     # to a different type -- so it is owned empty.  This loader resolves by
     # implicit pattern only; it has no path-directed resolution to preserve.
     yaml_path_resolvers: dict[object, object] = {}
+    # ``bool_values`` is a FOURTH shared mutable table.  construct_yaml_bool
+    # calls through to ``self.bool_values``, so a host that wrote
+    # ``yaml.SafeLoader.bool_values["true"] = 1`` would make ``schema_version:
+    # true`` validate as the integer 1.  Owned as a copy of the standard
+    # mapping, which is plain data rather than callables.
+    bool_values = dict(yaml.constructor.SafeConstructor.bool_values)
 
     def __init__(self, stream: object) -> None:
         super().__init__(stream)
