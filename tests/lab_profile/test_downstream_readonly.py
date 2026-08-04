@@ -1681,30 +1681,96 @@ def test_no_inherited_pyyaml_state_is_left_unowned() -> None:
     values, the DEFAULT_*_TAG defaults, the parser's tag handles, and the
     scanner's escape tables.  Finding a ninth the same way is not a plan.
 
-    So the rule is enforced instead of the instances: every non-callable
+    So the rule is enforced instead of the instances.  Every non-callable
     attribute reachable through the MRO must be either OWNED by the loader or
-    listed above with a reason.  A new PyYAML release that adds one, or a future
-    edit that drops an override, fails here rather than in a lab.
+    listed above with a reason, AND an owned mutable value must not be the same
+    object as the inherited one -- a name-only check passes for
+    ``ESCAPE_CODES = yaml.SafeLoader.ESCAPE_CODES``, which owns nothing.
     """
 
     from cryodaq.lab_profile.loader import _StrictLabProfileLoader
 
-    owned = set(vars(_StrictLabProfileLoader))
+    owned = vars(_StrictLabProfileLoader)
     unowned: dict[str, str] = {}
+    aliased: dict[str, str] = {}
     for klass in _StrictLabProfileLoader.__mro__[1:]:
         if klass is object:
             continue
         for name, value in vars(klass).items():
-            if name.startswith("__") or name in owned or name in _IRRELEVANT_INHERITED_STATE:
+            if name.startswith("__") or name in _IRRELEVANT_INHERITED_STATE:
                 continue
             if callable(value) or isinstance(value, (staticmethod, classmethod, property)):
                 continue
-            unowned.setdefault(name, f"{klass.__name__}.{name} = {type(value).__name__}")
+            if name not in owned:
+                unowned.setdefault(name, f"{klass.__name__}.{name} = {type(value).__name__}")
+                continue
+            # Shadowed by NAME.  For anything mutable that is not enough: the
+            # override must not simply alias the inherited object.
+            if isinstance(value, (dict, list, set, bytearray)) and owned[name] is value:
+                aliased.setdefault(name, f"{klass.__name__}.{name}")
+
     assert unowned == {}, (
         "inherited PyYAML state is neither owned nor justified: "
         f"{sorted(unowned.values())}. Own it in _StrictLabProfileLoader, or add it to "
         "_IRRELEVANT_INHERITED_STATE with the reason it cannot affect parsing."
     )
+    assert aliased == {}, (
+        f"these overrides ALIAS the inherited object rather than owning it: {sorted(aliased.values())}. "
+        "Define the value in the package; assigning the inherited one owns nothing."
+    )
+
+
+# The exact values the loader must hold, restated HERE so the assertion does not
+# read them back out of the thing it is checking.  A table copied from a
+# pre-poisoned host would be a distinct object -- passing the identity check
+# above -- but would not equal these.
+_EXPECTED_ESCAPE_CODES = {"x": 2, "u": 4, "U": 8}
+_EXPECTED_DEFAULT_TAGS = {"!": "!", "!!": "tag:yaml.org,2002:"}
+_EXPECTED_BOOL_VALUES = {
+    "yes": True,
+    "no": False,
+    "true": True,
+    "false": False,
+    "on": True,
+    "off": False,
+}
+_EXPECTED_OWNED_TAGS = {
+    "tag:yaml.org,2002:null",
+    "tag:yaml.org,2002:bool",
+    "tag:yaml.org,2002:int",
+    "tag:yaml.org,2002:str",
+    "tag:yaml.org,2002:seq",
+    "tag:yaml.org,2002:map",
+}
+
+
+def test_owned_pyyaml_values_are_the_expected_ones() -> None:
+    """Identity is not enough either: a COPY of poisoned state is a distinct object.
+
+    Pre-import poisoning was already shown to survive copying, so the values
+    themselves are pinned against literals held in this test rather than read
+    back from the loader.
+    """
+
+    from cryodaq.lab_profile.loader import _StrictLabProfileLoader as loader
+
+    assert loader.ESCAPE_CODES == _EXPECTED_ESCAPE_CODES
+    assert loader.DEFAULT_TAGS == _EXPECTED_DEFAULT_TAGS
+    assert loader.bool_values == _EXPECTED_BOOL_VALUES
+    assert loader.yaml_multi_constructors == {}
+    assert loader.yaml_path_resolvers == {}
+    assert loader.DEFAULT_SCALAR_TAG == "tag:yaml.org,2002:str"
+    assert loader.DEFAULT_SEQUENCE_TAG == "tag:yaml.org,2002:seq"
+    assert loader.DEFAULT_MAPPING_TAG == "tag:yaml.org,2002:map"
+    # The constructor table decides what may be built at all.
+    assert set(loader.yaml_constructors) - {None} == _EXPECTED_OWNED_TAGS
+    # Every implicit resolver must point at an owned tag and be a real pattern.
+    for entries in loader.yaml_implicit_resolvers.values():
+        for tag, matcher in entries:
+            assert tag in _EXPECTED_OWNED_TAGS, tag
+            assert type(matcher) is re.Pattern, (tag, type(matcher))
+    # The escape replacements must not have grown new keys.
+    assert set(loader.ESCAPE_REPLACEMENTS) == set('0abt\tnvfre "\\/N_LP')
 
 
 def test_host_bool_values_cannot_reach_the_profile_loader() -> None:

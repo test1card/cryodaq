@@ -5739,6 +5739,8 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_no_inherited_pyyaml_state_is_left_unowned
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_owned_pyyaml_values_are_the_expected_ones
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
         ci_partition: remaining
     red_evidence: >-
@@ -5797,6 +5799,12 @@ records:
       test_no_inherited_pyyaml_state_is_left_unowned walks the loader's MRO and fails unless every
       non-callable inherited attribute is either owned or listed with a written reason it cannot affect
       parsing. Verified by mutation: deleting a single override fails it by name. A new PyYAML release that
-      adds state, or an edit that drops an override, now fails in CI rather than in a lab.
+      adds state, or an edit that drops an override, now fails in CI rather than in a lab. That guard was then
+      itself found insufficient: it compared NAMES, so an override written as ESCAPE_CODES =
+      yaml.SafeLoader.ESCAPE_CODES aliased the host object and passed while owning nothing. It now also
+      requires that an owned mutable value is not the same object as the inherited one, and a companion guard
+      pins the owned values against literals held in the test rather than read back from the loader, because a
+      COPY of pre-poisoned state is a distinct object and would pass an identity check. Both verified by
+      mutation.
       2026-08-04, pending immutable capture.
     green_evidence: pending
