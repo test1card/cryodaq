@@ -2923,7 +2923,12 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: >-
       The effect probe is the load-bearing guard, so its own coverage escapes are tracked here. Measured
-      escapes that it reported green before being closed: a write under $HOME outside the copied checkout;
+      escapes that it reported green before being closed: mutation of ANOTHER module's in-process state,
+      which leaves no file, variable, path or audit trace and is the class the shipped yaml_constructors
+      defect belonged to -- now covered by a depth-capped module fingerprint whose volatility mask is
+      measured by repeated calibration rather than authored, with controls for constructor registration,
+      import-hook insertion, trace-hook installation and foreign attribute rebinding; a write under $HOME
+      outside the copied checkout;
       an os.fork process creation; an os.utime metadata rewrite that changes no bytes; an os.putenv that
       changes what children inherit without touching os.environ; and on POSIX an os.umask change and an
       os.nice scheduling change. Each now has a positive control verified to report exactly its own

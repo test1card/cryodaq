@@ -805,6 +805,85 @@ def _audit(event, args):
 sys.addaudithook(_audit)
 
 
+def _encode(value, depth, home, seen):
+    # Structural encoding of one object, depth-capped and cycle-safe.
+    if depth <= 0:
+        return "..."
+    if value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
+        return repr(value)[:200]
+    marker = id(value)
+    if marker in seen:
+        return "<cycle>"
+    seen.add(marker)
+    try:
+        if isinstance(value, dict):
+            return "{" + ",".join(
+                f"{_encode(k, depth - 1, home, seen)}:{_encode(v, depth - 1, home, seen)}"
+                for k, v in sorted(value.items(), key=lambda kv: repr(kv[0]))
+            ) + "}"
+        if isinstance(value, (list, tuple)):
+            return "[" + ",".join(_encode(x, depth - 1, home, seen) for x in value) + "]"
+        if isinstance(value, (set, frozenset)):
+            return "[" + ",".join(_encode(x, depth - 1, home, seen) for x in sorted(value, key=repr)) + "]"
+        if isinstance(value, type):
+            # Recurse into classes DEFINED HERE -- that is where a mutable
+            # class-level registry such as SafeLoader.yaml_constructors lives.
+            # Foreign classes are named, not walked, so the encoding stays local.
+            if getattr(value, "__module__", None) == home:
+                body = {k: v for k, v in vars(value).items() if not k.startswith("__")}
+                return f"<class {value.__qualname__} {_encode(body, depth - 1, home, seen)}>"
+            return f"<class {getattr(value, '__module__', '?')}.{getattr(value, '__qualname__', '?')}>"
+        module_name = getattr(value, "__module__", None)
+        qualname = getattr(value, "__qualname__", None)
+        if qualname is not None:
+            # Functions and bound methods: identity by where they were defined,
+            # so swapping a constructor for another callable changes the hash.
+            return f"<fn {module_name}.{qualname}>"
+        return f"<{type(value).__module__}.{type(value).__name__}>"
+    except Exception:
+        return "<unencodable>"
+    finally:
+        seen.discard(marker)
+
+
+def _fingerprint():
+    # Hash the reachable state of every module already imported.
+    #
+    # This is what a before/after file+env comparison cannot see: a package
+    # that mutates ANOTHER module's state leaves no file, variable, path or
+    # audit trace.  Not hypothetical -- it is the class the shipped
+    # yaml_constructors defect belonged to, where a shared mutable table let
+    # a third party decide what a lab profile executes.
+    #
+    # Depth-capped at 5, which reaches module -> class -> registry -> entry.
+    # A floor, not totality, and stated as such rather than claimed to be
+    # exhaustive.
+    prints = {}
+    for name, module in sorted(sys.modules.items()):
+        if module is None:
+            continue
+        try:
+            members = {k: v for k, v in vars(module).items() if not k.startswith("__")}
+            if name == "sys":
+                # Two members are pure IMPORT BOOKKEEPING and are excluded, both
+                # for the same reason: each is a function of what has been
+                # imported, so hashing it makes `sys` move on every import and
+                # drowns the signal.  Measured -- path_importer_cache was the
+                # last mover after the closure was warmed.
+                #   modules             -- set growth is reported separately
+                #   path_importer_cache -- which finder handles which path
+                # Everything a package could actually abuse stays hashed:
+                # meta_path, path_hooks, argv, and the trace/profile hooks.
+                # sys.path itself is snapshotted as its own dimension, so path
+                # injection is caught regardless.
+                members.pop("modules", None)
+                members.pop("path_importer_cache", None)
+        except Exception:
+            continue
+        prints[name] = hashlib.sha256(_encode(members, 5, name, set()).encode("utf-8", "replace")).hexdigest()
+    return prints
+
+
 def _read_umask():
     try:
         current = os.umask(0o022)
@@ -846,6 +925,11 @@ def snapshot():
         # host, while touching no file, no variable and no sys.path entry.
         "cwd": os.getcwd(),
         "capabilities": sorted(_observed),
+        # Trace/profile hooks are INTERPRETER state, not module attributes:
+        # sys.settrace(...) leaves nothing in vars(sys), so neither the module
+        # fingerprint nor the audit hook sees it.  Measured -- the tracing
+        # control reported nothing at all until this dimension existed.
+        "hooks": [repr(sys.gettrace()), repr(sys.getprofile())],
         # os.umask raises NO audit event (measured), so it is read directly.
         # Reading requires setting, hence set-then-restore.  It changes the
         # permissions applied to every later file this process creates while
@@ -861,6 +945,43 @@ def snapshot():
         "affinity": _read_affinity(),
     }
 
+
+# The volatility mask is MEASURED, not authored.
+#
+# First WARM the exact import closure the package is allowed to use, taken from
+# ALLOWED_STDLIB_MODULES rather than hand-listed here.  After warming, the
+# package's own imports add nothing new, so anything that moves afterwards is a
+# MUTATION rather than an import side effect.  Without this, copyreg dispatch
+# tables, collections.abc registries and sys internals move on any import and
+# drown the signal.
+#
+# Then fingerprint repeatedly with only benign work in between: whatever moves
+# on its own is inherently volatile and is masked.  Only self-moving state is
+# excused, so the mask cannot quietly cover a real mutation -- the same
+# second-pass-fixed-point idea this repository already uses for derived
+# artifacts.
+import importlib as _calibration_importlib
+
+for _warm in payload["warm"]:
+    try:
+        _calibration_importlib.import_module(_warm)
+    except ImportError:
+        pass
+
+_first = _fingerprint()
+_second = _fingerprint()
+sys.modules["yaml"].safe_load("calibration: 1")
+_third = _fingerprint()
+# One more FRESH import, after warming: the first import following a baseline
+# perturbs import bookkeeping (path_importer_cache and friends) nested inside
+# sys.  Measuring that here masks it; hand-excluding sys members would not be
+# measurement.
+_calibration_importlib.import_module("fractions")
+_fourth = _fingerprint()
+_volatile = {name for name in _first if _first.get(name) != _second.get(name)}
+_volatile |= {name for name in _second if _second.get(name) != _third.get(name)}
+_volatile |= {name for name in _third if _third.get(name) != _fourth.get(name)}
+_baseline = _fingerprint()
 
 # Taken BEFORE the package is imported or executed: an effect that happens at
 # import time is exactly what an in-process guard cannot see, because by then
@@ -884,6 +1005,11 @@ else:
     # vanishing when a grandchild process exits.
     # Every profile, not just the valid one: an operator points this CLI at an
     # UNTRUSTED file, so the rejection path is the one that matters most.
+    # The HARNESS sets argv, so the harness restores it.  Otherwise the
+    # fingerprint reports the probe's own mutation of sys as a finding.  A
+    # package that rewrote argv would still be caught: its change persists past
+    # this restore.
+    _harness_argv = list(sys.argv)
     for profile in payload["profiles"]:
         sys.argv = ["cryodaq.lab_profile", profile]
         try:
@@ -896,14 +1022,27 @@ else:
             # changed" names the damage; dying here would only report that
             # something threw.
             pass
+    sys.argv = _harness_argv
     measured = sys.modules["cryodaq.lab_profile"].__file__
 
 after = snapshot()
 differences = [key for key in before if before[key] != after[key]]
+_final = _fingerprint()
+_expected_new = set(_final) - set(_baseline)
+_moved = sorted(
+    name
+    for name in _baseline
+    if name not in _volatile and _baseline[name] != _final.get(name)
+)
+if _moved:
+    differences.append("module_state")
 # Report the tree actually executed. Measuring the wrong checkout is this
 # repository's single most expensive recurring mistake, and a guard that cannot
 # say which source it exercised is not evidence.
-report_path.write_text(json.dumps({"differences": differences, "tree": measured}), encoding="utf-8")
+report_path.write_text(
+    json.dumps({"differences": differences, "tree": measured, "moved_modules": _moved[:12]}),
+    encoding="utf-8",
+)
 """
 
 
@@ -971,7 +1110,16 @@ def _profile_paths(checkout: Path) -> list[str]:
 def _probe(checkout: Path, mode: str) -> dict:
     profiles = _profile_paths(checkout)
     object_tags = [Path(path).read_text(encoding="utf-8") for path in profiles if "objecttag-" in path]
-    payload = json.dumps({"texts": [_VALID_TEXT, *HOSTILE_TEXTS, *object_tags], "profiles": profiles})
+    payload = json.dumps(
+        {
+            "texts": [_VALID_TEXT, *HOSTILE_TEXTS, *object_tags],
+            "profiles": profiles,
+            # The package's own declared import closure, warmed before the
+            # baseline so its imports add nothing new.  Taken from the
+            # allowlist, so it cannot drift from what the scan permits.
+            "warm": [*sorted(ALLOWED_STDLIB_MODULES - {"__future__"}), "yaml"],
+        }
+    )
     # *** SYNTHETIC, never dict(os.environ), and never near-empty either. ***
     #
     # Not inherited: this module imports cryodaq.lab_profile at its top, so by
@@ -1072,6 +1220,17 @@ _REGRESSIONS = {
     # Changes what future CHILDREN inherit without touching os.environ, so the
     # environ snapshot is blind to it.
     "putenv_write": ({"capabilities"}, "os.putenv('CRYODAQ_ALLOW_BROKEN_SQLITE', '1')"),
+    # ---- in-process Python state.  None of these touches a file, a
+    # variable, a path, the working directory, or any audit event, so only
+    # the module-state fingerprint can see them.  The first is the class the
+    # shipped yaml_constructors defect belonged to.
+    "yaml_constructor_registration": (
+        {"module_state"},
+        "import yaml\nyaml.SafeLoader.add_constructor('tag:yaml.org,2002:str', lambda l, n: 'x')",
+    ),
+    "import_hook_installed": ({"module_state"}, "import sys\nsys.meta_path.insert(0, object())"),
+    "tracing_installed": ({"hooks"}, "import sys\nsys.settrace(lambda f, e, a: None)"),
+    "foreign_attribute_rebound": ({"module_state"}, "import yaml\nyaml.safe_load = yaml.unsafe_load"),
     # Without this, removing or misspelling the socket audit entries left
     # every registered control green while the record claimed network
     # coverage.  Loopback with an ephemeral port: deterministic, reaches no
@@ -1099,7 +1258,12 @@ _REGRESSIONS = {
         {"environ", "capabilities"},
         "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1' if 'HOME' in os.environ else None",
     ),
-    "import_path_insert": ({"sys_path"}, "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))"),
+    # sys.path is also reachable inside the `sys` fingerprint, so a path
+    # insert legitimately reports both dimensions.  Measured, not assumed.
+    "import_path_insert": (
+        {"sys_path", "module_state"},
+        "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))",
+    ),
     "working_directory_move": ({"cwd"}, "os.chdir(os.path.dirname(os.getcwd()))"),
 }
 if os.name == "posix":
