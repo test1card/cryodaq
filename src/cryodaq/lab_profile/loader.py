@@ -146,6 +146,38 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     # rejected as an unknown tag -- constructed as the integer 1 and validated.
     # Written out with PyYAML's own defaults so no host value is inherited.
     DEFAULT_TAGS = {"!": "!", "!!": "tag:yaml.org,2002:"}
+    # The SCANNER's escape tables decide what a backslash escape means inside
+    # a quoted scalar.  Measured: with
+    # ``yaml.SafeLoader.ESCAPE_REPLACEMENTS["q"] = "imaginary"`` set before the
+    # first import, the normally invalid ``lab_id: "\\q"`` validated with
+    # ``lab_id == "imaginary"`` -- the accepted grammar itself was rewritten by
+    # the host.  Written out with PyYAML's own defaults.
+    ESCAPE_REPLACEMENTS = {
+        "0": "\0",
+        "a": "\x07",
+        "b": "\x08",
+        "t": "\t",
+        "\t": "\t",
+        "n": "\n",
+        "v": "\x0b",
+        "f": "\x0c",
+        "r": "\r",
+        "e": "\x1b",
+        " ": " ",
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "N": "\x85",
+        "_": "\xa0",
+        "L": "\u2028",
+        "P": "\u2029",
+    }
+    ESCAPE_CODES = {"x": 2, "u": 4, "U": 8}
+    # The reader's non-printable guard is a Pattern, so it cannot be mutated in
+    # place -- but it can be REBOUND on the shared class, which would weaken the
+    # check that rejects control characters in the raw stream.  Owned for the
+    # same reason as the tables above.
+    NON_PRINTABLE = re.compile("[^\x09\x0a\x0d\x20-\x7e\x85\xa0-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
     # ``yaml_path_resolvers`` is a third shared mutable table.  An ordinary
     # ``yaml.SafeLoader.add_path_resolver(...)`` call would otherwise retag

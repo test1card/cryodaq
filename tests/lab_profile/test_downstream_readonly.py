@@ -1657,6 +1657,56 @@ def test_cli_restores_an_aliased_stream_exactly_once() -> None:
     assert (encoding, errors) == ("cp1252", "strict"), (encoding, errors)
 
 
+# Inherited attributes proved NOT to affect what a lab profile parses to.  Each
+# needs a reason, because the whole point of the guard below is that "we looked
+# at it and it is fine" must be written down rather than assumed.
+_IRRELEVANT_INHERITED_STATE = {
+    # The float constructor is not in the owned tag vocabulary at all, so these
+    # two are unreachable.  See loader.py -- dropping the constructor was the
+    # fix for a host poisoning them.
+    "inf_value",
+    "nan_value",
+    # Likewise the timestamp tag: not owned, so its pattern is never consulted.
+    "timestamp_regexp",
+}
+
+
+def test_no_inherited_pyyaml_state_is_left_unowned() -> None:
+    """The systematic form of eight separate defects found one at a time.
+
+    Subclassing ``yaml.SafeLoader`` inherits its mutable class state wholesale,
+    and a host that uses ordinary public PyYAML APIs can then decide what a lab
+    profile does.  Eight pieces were found individually in review --
+    constructors, implicit resolvers, path resolvers, bool values, float support
+    values, the DEFAULT_*_TAG defaults, the parser's tag handles, and the
+    scanner's escape tables.  Finding a ninth the same way is not a plan.
+
+    So the rule is enforced instead of the instances: every non-callable
+    attribute reachable through the MRO must be either OWNED by the loader or
+    listed above with a reason.  A new PyYAML release that adds one, or a future
+    edit that drops an override, fails here rather than in a lab.
+    """
+
+    from cryodaq.lab_profile.loader import _StrictLabProfileLoader
+
+    owned = set(vars(_StrictLabProfileLoader))
+    unowned: dict[str, str] = {}
+    for klass in _StrictLabProfileLoader.__mro__[1:]:
+        if klass is object:
+            continue
+        for name, value in vars(klass).items():
+            if name.startswith("__") or name in owned or name in _IRRELEVANT_INHERITED_STATE:
+                continue
+            if callable(value) or isinstance(value, (staticmethod, classmethod, property)):
+                continue
+            unowned.setdefault(name, f"{klass.__name__}.{name} = {type(value).__name__}")
+    assert unowned == {}, (
+        "inherited PyYAML state is neither owned nor justified: "
+        f"{sorted(unowned.values())}. Own it in _StrictLabProfileLoader, or add it to "
+        "_IRRELEVANT_INHERITED_STATE with the reason it cannot affect parsing."
+    )
+
+
 def test_host_bool_values_cannot_reach_the_profile_loader() -> None:
     """`bool_values` is a fourth shared mutable table feeding construct_yaml_bool.
 
@@ -1841,6 +1891,53 @@ else:
 
 print(",".join(outcomes))
 """
+
+
+_PRE_IMPORT_ESCAPE_POISON = r"""
+import yaml
+
+# The SCANNER's escape tables decide what a backslash escape means inside a
+# quoted scalar -- i.e. the accepted grammar itself.
+yaml.SafeLoader.ESCAPE_REPLACEMENTS["q"] = "imaginary"
+
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+body = (
+    "lab:\n  lab_id: \"\\q\"\n  display_name: y\n"
+    "instruments:\n  - type: lakeshore_218s\n    name: LS1\n"
+    "questions: []\n"
+)
+try:
+    profile = parse_lab_profile("schema_version: 1\n" + body)
+except LabProfileError:
+    print("rejected")
+else:
+    print("accepted:" + profile.lab_id)
+"""
+
+
+def test_pre_import_escape_poisoning_cannot_reach_the_profile_loader(tmp_path: Path) -> None:
+    """A host must not be able to rewrite the accepted escape grammar.
+
+    Measured before the scanner tables were owned: with
+    ``ESCAPE_REPLACEMENTS["q"] = "imaginary"`` set before the first import, the
+    normally invalid ``lab_id: "\\q"`` validated with ``lab_id == "imaginary"``.
+    """
+
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _PRE_IMPORT_ESCAPE_POISON],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "rejected", completed.stdout + completed.stderr
 
 
 def test_pre_import_tag_poisoning_cannot_reach_the_profile_loader(tmp_path: Path) -> None:

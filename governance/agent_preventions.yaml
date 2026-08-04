@@ -5735,6 +5735,10 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_pre_import_tag_poisoning_cannot_reach_the_profile_loader
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_pre_import_escape_poisoning_cannot_reach_the_profile_loader
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_no_inherited_pyyaml_state_is_left_unowned
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
         ci_partition: remaining
     red_evidence: >-
@@ -5786,6 +5790,13 @@ records:
       import, schema_version: !int "1" -- normally rejected as an unknown tag -- constructed as the integer 1
       and validated. It is now written out with PyYAML's own defaults. Seven inherited-state dependencies have
       now been found in this loader; the settled rule is that subclassing yaml.SafeLoader inherits its mutable
-      class state and every piece must be OWNED rather than filtered, copied, or trusted.
+      class state and every piece must be OWNED rather than filtered, copied, or trusted. An EIGHTH then
+      followed -- the scanner's ESCAPE_REPLACEMENTS and ESCAPE_CODES, where a host entry made the normally
+      invalid lab_id: backslash-q validate as 'imaginary', rewriting the accepted grammar itself. Finding a
+      ninth the same way is not a plan, so the rule is now enforced instead of the instances:
+      test_no_inherited_pyyaml_state_is_left_unowned walks the loader's MRO and fails unless every
+      non-callable inherited attribute is either owned or listed with a written reason it cannot affect
+      parsing. Verified by mutation: deleting a single override fails it by name. A new PyYAML release that
+      adds state, or an edit that drops an override, now fails in CI rather than in a lab.
       2026-08-04, pending immutable capture.
     green_evidence: pending
