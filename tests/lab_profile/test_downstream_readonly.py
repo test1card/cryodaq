@@ -28,8 +28,12 @@ ALLOWED_CRYODAQ_IMPORTS: dict[str, frozenset[str]] = {
     # reflection against these symbols lands in capability_metadata, where no
     # constructor or loader exists.  The authority-bearing registry is not
     # allowlisted at all — importing the package must never load it.
+    # Measured, not assumed: DriverTypeMetadata was in this set and no
+    # package source imports it, so its removal changed nothing -- padding
+    # that silently widened the boundary.  test_every_symbol_allowance_is_load_bearing
+    # now fails if any entry here stops being required.
     "cryodaq.drivers.capability_metadata": frozenset(
-        {"BUILTIN_DRIVER_METADATA", "DriverAuthority", "DriverCapability", "DriverTypeMetadata"}
+        {"BUILTIN_DRIVER_METADATA", "DriverAuthority", "DriverCapability"}
     ),
 }
 REFLECTION_MODULES = ("inspect", "gc", "builtins")
@@ -122,24 +126,43 @@ def _denied_dunder(name: str) -> bool:
     return bool(_DUNDER.match(name)) and name not in ALLOWED_DUNDERS
 
 
-def _binding(node: ast.AST) -> tuple[list[ast.expr], ast.expr | None]:
-    """The (targets, bound value) of one node, over Python's binding grammar.
+def _bound_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.arg):
+        return [target.arg]
+    return [sub.id for sub in ast.walk(target) if isinstance(sub, ast.Name)]
+
+
+def _bindings(node: ast.AST):
+    """Every (bound names, bound value) pair, over Python's binding grammar.
 
     This enumerates the LANGUAGE's binding forms, which are a closed and
     documented set, rather than the spellings an attacker might choose --
     handling only ``ast.Assign`` lost provenance the moment an alias was written
-    as ``Loader: type = SafeLoader`` or ``(Loader,) = (SafeLoader,)``.
+    as ``Loader: type = SafeLoader`` or ``(Loader,) = (SafeLoader,)``, and
+    omitting parameter defaults lost it again for
+    ``def poison(Loader=SafeLoader)``.
     """
 
     if isinstance(node, ast.Assign):
-        return list(node.targets), node.value
-    if isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-        return [node.target], node.value
-    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
-        return [node.target], node.iter
-    if isinstance(node, ast.withitem):
-        return ([node.optional_vars], node.context_expr) if node.optional_vars else ([], None)
-    return [], None
+        yield [name for target in node.targets for name in _bound_names(target)], node.value
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+        if node.value is not None:
+            yield _bound_names(node.target), node.value
+    elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        yield _bound_names(node.target), node.iter
+    elif isinstance(node, ast.withitem):
+        if node.optional_vars is not None:
+            yield _bound_names(node.optional_vars), node.context_expr
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        # A default binds the SAME object to the parameter name on every call.
+        signature = node.args
+        positional = [*signature.posonlyargs, *signature.args]
+        offset = len(positional) - len(signature.defaults)
+        for parameter, default in zip(positional[offset:], signature.defaults):
+            yield [parameter.arg], default
+        for parameter, default in zip(signature.kwonlyargs, signature.kw_defaults):
+            if default is not None:
+                yield [parameter.arg], default
 
 
 def _aliases_foreign(value: ast.expr, foreign: set[str]) -> bool:
@@ -284,13 +307,12 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
     while changed:
         changed = False
         for node in ast.walk(tree):
-            targets, value = _binding(node)
-            if value is None or not _aliases_foreign(value, imported_modules):
-                continue
-            for target in targets:
-                for sub in ast.walk(target):
-                    if isinstance(sub, ast.Name) and sub.id not in imported_modules:
-                        imported_modules.add(sub.id)
+            for names, value in _bindings(node):
+                if not _aliases_foreign(value, imported_modules):
+                    continue
+                for name in names:
+                    if name not in imported_modules:
+                        imported_modules.add(name)
                         changed = True
 
     violations: list[str] = []
@@ -469,6 +491,29 @@ def test_every_allowlist_entry_is_load_bearing(monkeypatch: pytest.MonkeyPatch, 
 
 
 @pytest.mark.parametrize(
+    ("module", "symbol"),
+    [(module, symbol) for module, symbols in ALLOWED_CRYODAQ_IMPORTS.items() for symbol in sorted(symbols)],
+)
+def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch, module: str, symbol: str) -> None:
+    """The SYMBOL allowlist must be measured too, not only the four name sets.
+
+    ``test_every_allowlist_entry_is_load_bearing`` covers the module, dunder,
+    call and method sets, which made the no-padding claim read as universal
+    while ``ALLOWED_CRYODAQ_IMPORTS`` went unmeasured.  It was in fact padded:
+    ``DriverTypeMetadata`` sat in this set and no package source imported it,
+    so removing it changed nothing.
+    """
+
+    scan_module = __import__(__name__.rsplit(".", 1)[0] + ".test_downstream_readonly", fromlist=["x"])
+    reduced = dict(scan_module.ALLOWED_CRYODAQ_IMPORTS)
+    reduced[module] = reduced[module] - {symbol}
+    monkeypatch.setattr(scan_module, "ALLOWED_CRYODAQ_IMPORTS", reduced)
+    assert _scan_package(PACKAGE_DIR, package_module=PACKAGE_MODULE) != [], (
+        f"symbol {symbol!r} allowed from {module!r} is not required by the package source"
+    )
+
+
+@pytest.mark.parametrize(
     "hostile",
     (
         "from cryodaq.drivers.registry import construct_driver as activate",
@@ -520,6 +565,10 @@ def test_every_allowlist_entry_is_load_bearing(monkeypatch: pytest.MonkeyPatch, 
         "from yaml import SafeLoader\nfor Loader in (SafeLoader,):\n    Loader.yaml_constructors['t'] = None",
         "from yaml import SafeLoader\n(Loader := SafeLoader)\nLoader.yaml_constructors['t'] = None",
         "from os import environ\nE = environ\nE['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
+        # A parameter DEFAULT binds the same object on every call.
+        "from yaml import SafeLoader\ndef poison(Loader=SafeLoader):\n    Loader.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\ndef poison(*, Loader=SafeLoader):\n    Loader.yaml_constructors['t'] = None",
+        "from os import environ\nf = lambda E=environ: E.__setitem__('CRYODAQ_ALLOW_BROKEN_SQLITE', '1')",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
@@ -595,7 +644,6 @@ def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
     (
         "from cryodaq.drivers.capability_metadata import BUILTIN_DRIVER_METADATA",
         "from cryodaq.drivers.capability_metadata import DriverAuthority, DriverCapability",
-        "from cryodaq.drivers.capability_metadata import DriverTypeMetadata",
         "import os\nimport sys",
         # ``raise SystemExit(0)`` is what __main__.py actually does.  Under a
         # deny-by-default capability policy a call the package never makes is
@@ -785,6 +833,13 @@ def _read_priority():
         return None
 
 
+def _read_affinity():
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        return None
+
+
 def snapshot():
     # EVERY file under the checkout, not an enumerated list of interesting ones.
     # Naming five config paths would have left a write to any sixth path -- a
@@ -812,6 +867,10 @@ def snapshot():
         # os.nice(1) slows the long-lived host permanently and touches nothing
         # else.  POSIX-only; None elsewhere.
         "priority": _read_priority(),
+        # Affinity is the same capability class as priority and equally
+        # traceless: restricting the long-lived host to one CPU changes no
+        # file, variable, path or audit event.
+        "affinity": _read_affinity(),
     }
 
 
@@ -1025,6 +1084,14 @@ _REGRESSIONS = {
     # Changes what future CHILDREN inherit without touching os.environ, so the
     # environ snapshot is blind to it.
     "putenv_write": ({"capabilities"}, "os.putenv('CRYODAQ_ALLOW_BROKEN_SQLITE', '1')"),
+    # Without this, removing or misspelling the socket audit entries left
+    # every registered control green while the record claimed network
+    # coverage.  Loopback with an ephemeral port: deterministic, reaches no
+    # network.
+    "network_socket": (
+        {"capabilities"},
+        "import socket\n_s = socket.socket()\n_s.bind(('127.0.0.1', 0))\n_s.close()",
+    ),
     # Content unchanged, so the tree hash cannot see it; only the audit hook can.
     "metadata_mutation": (
         {"capabilities"},
@@ -1051,6 +1118,12 @@ if os.name == "posix":
     # Lowers the scheduling priority of the long-lived host permanently, with
     # no audit event and no other trace.  POSIX-only, like umask.
     _REGRESSIONS["scheduling_change"] = ({"priority"}, "os.nice(1)")
+    if hasattr(os, "sched_setaffinity"):
+        # The next primitive in the same class as os.nice.
+        _REGRESSIONS["affinity_change"] = (
+            {"affinity"},
+            "os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})",
+        )
     # Changes the permissions applied to every later file this process creates.
     # os.umask raises no audit event, hence the umask snapshot.  Measured:
     # on Windows os.umask always returns 0o0 and tracks nothing, so the
