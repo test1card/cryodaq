@@ -132,6 +132,14 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     # checks, which is the fail-closed direction.  Only these three tags have
     # implicit resolvers; str, seq and map are decided structurally.
     yaml_implicit_resolvers = _build_implicit_resolvers()
+    # The DEFAULT_* tags are inherited class attributes too, and they decide
+    # what an untagged node becomes.  Measured: a host setting
+    # DEFAULT_SCALAR_TAG to the int tag before the first import made every
+    # scalar in a lab profile parse as an integer, breaking validation of
+    # ordinary documents.  Owned so the loader's behaviour is decided here.
+    DEFAULT_SCALAR_TAG = "tag:yaml.org,2002:str"
+    DEFAULT_SEQUENCE_TAG = "tag:yaml.org,2002:seq"
+    DEFAULT_MAPPING_TAG = "tag:yaml.org,2002:map"
 
     # ``yaml_path_resolvers`` is a third shared mutable table.  An ordinary
     # ``yaml.SafeLoader.add_path_resolver(...)`` call would otherwise retag

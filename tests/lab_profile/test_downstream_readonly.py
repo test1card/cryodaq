@@ -1709,6 +1709,46 @@ print("%.2f" % (time.monotonic() - started))
 """
 
 
+@pytest.mark.parametrize(
+    ("label", "scalar"),
+    (
+        # Each begins with a character one of the OWNED resolvers keys on, and
+        # then fails to match at the very end -- the shape that makes a
+        # backtracking pattern explode.  Without these the timing guard only
+        # ever exercised a foreign resolver the loader no longer even installs,
+        # so replacing _INT_PATTERN with a catastrophic one would have left it
+        # green.
+        ("int resolver", "1" * 40 + "x"),
+        ("int resolver, signed", "-" + "1" * 40 + "x"),
+        ("bool resolver, t", "t" * 40 + "x"),
+        ("bool resolver, y", "y" * 40 + "x"),
+        ("bool resolver, o", "o" * 40 + "x"),
+        ("null resolver, n", "n" * 40 + "x"),
+        ("null resolver, tilde", "~" * 40 + "x"),
+    ),
+)
+def test_owned_resolver_patterns_are_linear_time(label: str, scalar: str) -> None:
+    """The package's OWN resolvers must not backtrack, and must be proved so here.
+
+    Every pattern this loader installs is fully anchored with no nested
+    quantifier, which makes it linear.  This asserts that mechanically against
+    adversarial NON-matches rather than trusting the reading, so a future edit
+    that introduces a catastrophic pattern is caught by its own guard.
+    """
+
+    import time
+
+    # PLAIN, not quoted.  A quoted scalar is never implicitly resolved, so the
+    # first version of this test never reached the patterns at all and passed
+    # against a deliberately catastrophic _INT_PATTERN.
+    document = _VALID_TEXT.replace("  lab_id: readonly-lab", f"  lab_id: {scalar}")
+    started = time.monotonic()
+    profile = parse_lab_profile(document)
+    elapsed = time.monotonic() - started
+    assert profile.lab_id == scalar
+    assert elapsed < 1.0, f"{label} took {elapsed:.2f}s"
+
+
 def test_host_regexes_cannot_stall_validation(tmp_path: Path) -> None:
     """A hostile-but-genuine regex must not reach the loader at all.
 
