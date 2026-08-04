@@ -1724,6 +1724,56 @@ def test_no_inherited_pyyaml_state_is_left_unowned() -> None:
 # read them back out of the thing it is checking.  A table copied from a
 # pre-poisoned host would be a distinct object -- passing the identity check
 # above -- but would not equal these.
+#
+# The first version pinned KEY SETS, and review found five ways through it in a
+# single round: a replaced constructor under the same tag, an added resolver
+# under a new first character, ESCAPE_REPLACEMENTS["n"] rebound to a forged
+# string, bool_values["true"] set to the integer 1 (Python mapping equality
+# treats 1 == True), and NON_PRINTABLE omitted entirely.  Every one kept the
+# guard green while changing what a profile parses to.  So the whole surface is
+# pinned now, by exact value AND exact type.
+#
+# Non-ASCII codepoints are spelled chr(0x....) on purpose.  Transcribing U+2028
+# or U+D7FF as literal characters through an editor, a shell and a file encoding
+# is exactly the "measured through a layer that normalises it" mistake this
+# guard exists to catch; a numeric codepoint cannot be silently rewritten.
+_EXPECTED_CONSTRUCTORS = {
+    None: "yaml.constructor.SafeConstructor.construct_undefined",
+    "tag:yaml.org,2002:null": "yaml.constructor.SafeConstructor.construct_yaml_null",
+    "tag:yaml.org,2002:bool": "yaml.constructor.SafeConstructor.construct_yaml_bool",
+    "tag:yaml.org,2002:int": "yaml.constructor.SafeConstructor.construct_yaml_int",
+    "tag:yaml.org,2002:str": "yaml.constructor.SafeConstructor.construct_yaml_str",
+    "tag:yaml.org,2002:seq": "yaml.constructor.SafeConstructor.construct_yaml_seq",
+    "tag:yaml.org,2002:map": "yaml.constructor.SafeConstructor.construct_yaml_map",
+}
+_EXPECTED_OWNED_TAGS = set(_EXPECTED_CONSTRUCTORS) - {None}
+
+_EXPECTED_NULL_SOURCE = "^(?:~|null|Null|NULL|)$"
+_EXPECTED_BOOL_SOURCE = "^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF)$"
+_EXPECTED_INT_SOURCE = "^[-+]?[0-9]+$"
+_EXPECTED_PATTERN_FLAGS = re.UNICODE
+
+
+def _expected_resolver_table() -> dict[str, list[tuple[str, str]]]:
+    """The COMPLETE table: which first characters exist, and in what order.
+
+    Pinning only the entries reachable from a first character this test already
+    knew about let an added ``a``-prefixed catastrophic resolver through.  The
+    key set is part of the property, not a detail of it.
+    """
+
+    table: dict[str, list[tuple[str, str]]] = {}
+    for tag, source, first_characters in (
+        ("tag:yaml.org,2002:null", _EXPECTED_NULL_SOURCE, "~nN"),
+        ("tag:yaml.org,2002:bool", _EXPECTED_BOOL_SOURCE, "yYnNtTfFoO"),
+        ("tag:yaml.org,2002:int", _EXPECTED_INT_SOURCE, "-+0123456789"),
+    ):
+        for character in first_characters:
+            table.setdefault(character, []).append((tag, source))
+    table.setdefault("", []).append(("tag:yaml.org,2002:null", _EXPECTED_NULL_SOURCE))
+    return table
+
+
 _EXPECTED_ESCAPE_CODES = {"x": 2, "u": 4, "U": 8}
 _EXPECTED_DEFAULT_TAGS = {"!": "!", "!!": "tag:yaml.org,2002:"}
 _EXPECTED_BOOL_VALUES = {
@@ -1734,14 +1784,68 @@ _EXPECTED_BOOL_VALUES = {
     "on": True,
     "off": False,
 }
-_EXPECTED_OWNED_TAGS = {
-    "tag:yaml.org,2002:null",
-    "tag:yaml.org,2002:bool",
-    "tag:yaml.org,2002:int",
-    "tag:yaml.org,2002:str",
-    "tag:yaml.org,2002:seq",
-    "tag:yaml.org,2002:map",
+# The full mapping, not just its keys.  Rebinding "n" from newline to "FORGED"
+# made a quoted backslash-n escape parse as "readFORGEDonly" while a key-set
+# check stayed green.
+_EXPECTED_ESCAPE_REPLACEMENTS = {
+    "0": chr(0x00),
+    "a": chr(0x07),
+    "b": chr(0x08),
+    "t": chr(0x09),
+    chr(0x09): chr(0x09),
+    "n": chr(0x0A),
+    "v": chr(0x0B),
+    "f": chr(0x0C),
+    "r": chr(0x0D),
+    "e": chr(0x1B),
+    " ": chr(0x20),
+    '"': chr(0x22),
+    "\\": chr(0x5C),
+    "/": chr(0x2F),
+    "N": chr(0x85),
+    "_": chr(0xA0),
+    "L": chr(0x2028),
+    "P": chr(0x2029),
 }
+# The YAML 1.1 printable set, assembled from codepoints for the reason above.
+_EXPECTED_NON_PRINTABLE_SOURCE = (
+    "[^"
+    + chr(0x09)
+    + chr(0x0A)
+    + chr(0x0D)
+    + chr(0x20)
+    + "-"
+    + chr(0x7E)
+    + chr(0x85)
+    + chr(0xA0)
+    + "-"
+    + chr(0xD7FF)
+    + chr(0xE000)
+    + "-"
+    + chr(0xFFFD)
+    + chr(0x10000)
+    + "-"
+    + chr(0x10FFFF)
+    + "]"
+)
+
+
+def _typed(value: object) -> object:
+    """Canonical representation that distinguishes ``1`` from ``True``.
+
+    Ordinary ``==`` does not.  ``{"true": 1} == {"true": True}`` is True, so the
+    original boolean escape -- setting ``bool_values["true"]`` to the integer 1,
+    which made ``schema_version: true`` validate as version 1 -- survived a plain
+    dictionary comparison.
+    """
+
+    if isinstance(value, dict):
+        return ("dict", sorted(((_typed(key), _typed(item)) for key, item in value.items()), key=repr))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, [_typed(item) for item in value])
+    if isinstance(value, (set, frozenset)):
+        return (type(value).__name__, sorted((_typed(item) for item in value), key=repr))
+    return (type(value).__name__, value)
 
 
 def test_owned_pyyaml_values_are_the_expected_ones() -> None:
@@ -1749,28 +1853,72 @@ def test_owned_pyyaml_values_are_the_expected_ones() -> None:
 
     Pre-import poisoning was already shown to survive copying, so the values
     themselves are pinned against literals held in this test rather than read
-    back from the loader.
+    back from the loader -- by exact value and exact TYPE, across the whole
+    surface rather than its key sets.
     """
 
     from cryodaq.lab_profile.loader import _StrictLabProfileLoader as loader
 
-    assert loader.ESCAPE_CODES == _EXPECTED_ESCAPE_CODES
-    assert loader.DEFAULT_TAGS == _EXPECTED_DEFAULT_TAGS
-    assert loader.bool_values == _EXPECTED_BOOL_VALUES
-    assert loader.yaml_multi_constructors == {}
-    assert loader.yaml_path_resolvers == {}
-    assert loader.DEFAULT_SCALAR_TAG == "tag:yaml.org,2002:str"
-    assert loader.DEFAULT_SEQUENCE_TAG == "tag:yaml.org,2002:seq"
-    assert loader.DEFAULT_MAPPING_TAG == "tag:yaml.org,2002:map"
-    # The constructor table decides what may be built at all.
-    assert set(loader.yaml_constructors) - {None} == _EXPECTED_OWNED_TAGS
-    # Every implicit resolver must point at an owned tag and be a real pattern.
+    assert _typed(loader.ESCAPE_CODES) == _typed(_EXPECTED_ESCAPE_CODES)
+    assert _typed(loader.DEFAULT_TAGS) == _typed(_EXPECTED_DEFAULT_TAGS)
+    assert _typed(loader.bool_values) == _typed(_EXPECTED_BOOL_VALUES)
+    assert _typed(loader.ESCAPE_REPLACEMENTS) == _typed(_EXPECTED_ESCAPE_REPLACEMENTS)
+    assert _typed(loader.yaml_multi_constructors) == _typed({})
+    assert _typed(loader.yaml_path_resolvers) == _typed({})
+    assert _typed(loader.DEFAULT_SCALAR_TAG) == _typed("tag:yaml.org,2002:str")
+    assert _typed(loader.DEFAULT_SEQUENCE_TAG) == _typed("tag:yaml.org,2002:seq")
+    assert _typed(loader.DEFAULT_MAPPING_TAG) == _typed("tag:yaml.org,2002:map")
+
+    # WHICH CALLABLE runs for a tag, not merely which tags exist.  A host that
+    # replaces the string constructor leaves the key set identical.
+    actual_constructors = {
+        tag: f"{function.__module__}.{function.__qualname__}" for tag, function in loader.yaml_constructors.items()
+    }
+    assert _typed(actual_constructors) == _typed(_EXPECTED_CONSTRUCTORS)
+
+    # The COMPLETE resolver table: keys, order, tags, pattern sources, flags.
+    actual_resolvers = {
+        key: [(tag, matcher.pattern) for tag, matcher in entries]
+        for key, entries in loader.yaml_implicit_resolvers.items()
+    }
+    assert _typed(actual_resolvers) == _typed(_expected_resolver_table())
     for entries in loader.yaml_implicit_resolvers.values():
         for tag, matcher in entries:
-            assert tag in _EXPECTED_OWNED_TAGS, tag
             assert type(matcher) is re.Pattern, (tag, type(matcher))
-    # The escape replacements must not have grown new keys.
-    assert set(loader.ESCAPE_REPLACEMENTS) == set('0abt\tnvfre "\\/N_LP')
+            assert matcher.flags == _EXPECTED_PATTERN_FLAGS, (tag, matcher.flags)
+
+    # NON_PRINTABLE gates the RAW stream.  With a never-matching pattern, a NUL
+    # truncated the document, so a valid profile followed by forbidden trailing
+    # content was accepted.  It is a compiled pattern: it cannot be mutated in
+    # place, and the aliasing check above deliberately ignores it -- identity
+    # would be a FALSE POSITIVE here anyway, because ``re.compile`` caches by
+    # source and hands back upstream's own object for an identical local
+    # literal.  Only the value carries information.
+    assert loader.NON_PRINTABLE.pattern == _EXPECTED_NON_PRINTABLE_SOURCE
+    assert loader.NON_PRINTABLE.flags == _EXPECTED_PATTERN_FLAGS
+
+
+def test_owned_tables_produce_the_intended_parse() -> None:
+    """A structural pin is worth nothing if it describes a parse nobody checks.
+
+    Two behaviours the pinned tables exist to produce, asserted through the real
+    public entry point rather than against the loader's attributes.
+    """
+
+    from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+    # A backslash-n escape must be a NEWLINE, not whatever a host says it is.
+    # The observable consequence is rejection: the schema forbids Unicode
+    # control characters in `lab_id`, so the correct escape FAILS validation.
+    # That is the discriminator -- with ESCAPE_REPLACEMENTS["n"] rebound to a
+    # printable string such as "FORGED", this same document is ACCEPTED and the
+    # lab_id silently becomes "readFORGEDonly".
+    with pytest.raises(LabProfileError, match="control character"):
+        parse_lab_profile(_VALID_TEXT.replace("lab_id: readonly-lab", 'lab_id: "read\\nonly"'))
+
+    # A boolean is not an integer version.
+    with pytest.raises(LabProfileError):
+        parse_lab_profile(_VALID_TEXT.replace("schema_version: 1", "schema_version: true"))
 
 
 def test_host_bool_values_cannot_reach_the_profile_loader() -> None:
@@ -1825,6 +1973,26 @@ print("%.2f" % (time.monotonic() - started))
 """
 
 
+# Generous enough that ordinary interpreter start-up on a loaded CI runner never
+# trips it, small enough that a catastrophic pattern fails the job in seconds
+# rather than at the outer job timeout.
+_LINEAR_TIME_BUDGET_S = 60.0
+
+_LINEAR_TIME_PROBE = r"""
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+document = (
+    "schema_version: 1\n"
+    "lab:\n  lab_id: @@SCALAR@@\n  display_name: Readonly Lab\n"
+    "instruments:\n  - type: lakeshore_218s\n    name: LS1\n"
+    "questions: []\n"
+)
+profile = parse_lab_profile(document)
+assert profile.lab_id == "@@SCALAR@@", repr(profile.lab_id)
+print("ok")
+"""
+
+
 @pytest.mark.parametrize(
     ("label", "scalar"),
     (
@@ -1850,19 +2018,38 @@ def test_owned_resolver_patterns_are_linear_time(label: str, scalar: str) -> Non
     quantifier, which makes it linear.  This asserts that mechanically against
     adversarial NON-matches rather than trusting the reading, so a future edit
     that introduces a catastrophic pattern is caught by its own guard.
-    """
 
-    import time
+    Run in a SUBPROCESS with an enforced timeout, not in-process.  Measured
+    against a deliberately catastrophic ``_INT_PATTERN`` of ``^([0-9]+)+$``, the
+    in-process version never returned: the elapsed-time assertion below it was
+    unreachable and the ``remaining`` CI partition would have hung until the
+    outer job timeout instead of failing.  A guard whose failure mode is "the
+    job hangs" reports nothing.
+    """
 
     # PLAIN, not quoted.  A quoted scalar is never implicitly resolved, so the
     # first version of this test never reached the patterns at all and passed
     # against a deliberately catastrophic _INT_PATTERN.
-    document = _VALID_TEXT.replace("  lab_id: readonly-lab", f"  lab_id: {scalar}")
-    started = time.monotonic()
-    profile = parse_lab_profile(document)
-    elapsed = time.monotonic() - started
-    assert profile.lab_id == scalar
-    assert elapsed < 1.0, f"{label} took {elapsed:.2f}s"
+    script = _LINEAR_TIME_PROBE.replace("@@SCALAR@@", scalar)
+    environment = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-B", "-c", script],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=_LINEAR_TIME_BUDGET_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:  # pragma: no cover - the regression path
+        raise AssertionError(
+            f"{label}: parsing {scalar[:12]}... did not finish within "
+            f"{_LINEAR_TIME_BUDGET_S}s. An owned resolver backtracks."
+        ) from None
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert completed.stdout.strip() == "ok", completed.stdout + completed.stderr
 
 
 def test_host_regexes_cannot_stall_validation(tmp_path: Path) -> None:
