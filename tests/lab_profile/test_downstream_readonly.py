@@ -343,11 +343,28 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
                 # while leaving no file, variable, path or process trace.
                 imported_modules.update(alias.asname or alias.name for alias in node.names)
 
+    # An imported name is NEVER local, even if some nested scope also defines
+    # it.  ``local_names`` is collected file-wide, so ``from yaml import
+    # add_constructor as mutate`` plus a nested ``def mutate`` made a
+    # module-level ``mutate(...)`` call look like an in-boundary helper while it
+    # actually rewrote PyYAML's global constructor table.
+    local_names -= imported_modules
+
     # An alias of a foreign binding is still foreign.  ``from yaml import
     # SafeLoader; Loader = SafeLoader`` loses provenance unless the rebind is
     # followed, and the mutation then lands on a name the scan does not
     # recognise.  Iterated to a fixpoint so chains (``a = SafeLoader; b = a``)
     # are covered too, not merely one hop.
+    # A call to an in-package helper binds its arguments to that helper's
+    # parameters, so passing a foreign object into an ordinary function
+    # laundered it: ``def poison(loader): ...; poison(SafeLoader)`` named nothing
+    # foreign inside the body.  Rejecting such calls is not an option -- the
+    # loader legitimately passes parsed foreign values into its own helpers --
+    # so provenance is propagated into the parameter instead.
+    definitions = {
+        node.name: node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
     changed = True
     while changed:
         changed = False
@@ -359,6 +376,23 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
                     if name not in imported_modules:
                         imported_modules.add(name)
                         changed = True
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            target = definitions.get(node.func.id)
+            if target is None:
+                continue
+            parameters = [*target.args.posonlyargs, *target.args.args]
+            pairs = list(zip(parameters, node.args))
+            pairs += [
+                (parameter, keyword.value)
+                for keyword in node.keywords
+                for parameter in [*parameters, *target.args.kwonlyargs]
+                if keyword.arg == parameter.arg
+            ]
+            for parameter, argument in pairs:
+                if _aliases_foreign(argument, imported_modules) and parameter.arg not in imported_modules:
+                    imported_modules.add(parameter.arg)
+                    changed = True
 
     violations: list[str] = []
     # A MODULE-LEVEL alias of a foreign object is exportable: another file in the
@@ -668,6 +702,12 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         # No intermediate binding: the receiver is reached through a tuple, so
         # peeling the target to a bare Name never finds it.
         "from yaml import SafeLoader\n(SafeLoader,)[0].yaml_constructors['t'] = None",
+        # Laundered through an ordinary argument: nothing foreign is named in
+        # the body at all.
+        "from yaml import SafeLoader\ndef poison(loader):\n    loader.yaml_constructors['t'] = 1\npoison(SafeLoader)",
+        "from yaml import SafeLoader\ndef p(*, ldr):\n    ldr.yaml_constructors['t'] = 1\np(ldr=SafeLoader)",
+        # A nested definition must not legitimize a module-level foreign call.
+        "from yaml import add_constructor as m\ndef helper():\n    def m(x):\n        return x\nm('t', None)",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
@@ -1253,7 +1293,11 @@ _REGRESSIONS = {
 if os.name == "posix":
     # Lowers the scheduling priority of the long-lived host permanently, with
     # no audit event and no other trace.  POSIX-only, like umask.
-    _REGRESSIONS["scheduling_change"] = ({"priority"}, "os.nice(1)")
+    if os.getpriority(os.PRIO_PROCESS, 0) < 19:
+        # Gated on the priority actually being increasable: launched under
+        # `nice -n 19`, os.nice(1) returns 19 and changes nothing, so the control
+        # would fail for its own reason instead of proving the guard can go red.
+        _REGRESSIONS["scheduling_change"] = ({"priority"}, "os.nice(1)")
     if hasattr(os, "sched_setaffinity") and len(os.sched_getaffinity(0)) > 1:
         # The next primitive in the same class as os.nice.  Gated on there being
         # at least TWO CPUs available: under `taskset -c 0` the process is
@@ -1268,7 +1312,12 @@ if os.name == "posix":
     # os.umask raises no audit event, hence the umask snapshot.  Measured:
     # on Windows os.umask always returns 0o0 and tracks nothing, so the
     # control would be vacuous there and is gated rather than asserted.
-    _REGRESSIONS["umask_change"] = ({"umask"}, "os.umask(0o077)")
+    # The target mask is DERIVED from the inherited one: hard-coding 0o077 makes
+    # no transition when the suite is launched under `umask 077`, and the
+    # control then fails for its own reason.
+    _inherited = os.umask(0o022)
+    os.umask(_inherited)
+    _REGRESSIONS["umask_change"] = ({"umask"}, f"os.umask({_inherited ^ 0o077:#o})")
 if hasattr(os, "fork"):
     # POSIX only -- Windows has no fork, so this control cannot run there and is
     # registered conditionally rather than being asserted on every platform.
