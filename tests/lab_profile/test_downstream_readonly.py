@@ -133,6 +133,11 @@ ALLOWED_METHOD_NAMES = frozenset(
 _MUTATING_METHODS = frozenset(
     {"add", "append", "clear", "extend", "insert", "pop", "popitem", "remove", "setdefault", "update"}
 )
+# Builtins that INVOKE a callable argument.  `isinstance` and `print` merely
+# receive theirs, so passing a module attribute to them is an ordinary
+# argument rather than a capability handover.
+_INVOKES_KEY = frozenset({"sorted", "min", "max"})
+_INVOKES_FIRST = frozenset({"map", "filter"})
 _BUILTIN_NAMES = frozenset(dir(builtins))
 _DUNDER = re.compile(r"^__[A-Za-z0-9_]+__$")
 
@@ -286,6 +291,18 @@ def _provably_local(tree: ast.AST, foreign: set[str], shadowed: set[str]) -> set
             # the caller.
             for parameter in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
                 bound.setdefault(parameter.arg, []).append(node)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                bound.setdefault(node.name, []).append(node)
+        elif isinstance(node, ast.ClassDef):
+            bound.setdefault(node.name, []).append(node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            # ``x = []`` then ``import sys as x`` must NOT leave x fresh.
+            for alias in node.names:
+                bound.setdefault((alias.asname or alias.name).split(".", 1)[0], []).append(node)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension, ast.withitem, ast.Match)):
+            for names, _value in _bindings(node):
+                for name in names:
+                    bound.setdefault(name, []).append(node)
     return {name for name, values in bound.items() if values and all(fresh(v) for v in values)}
 
 
@@ -517,6 +534,13 @@ def _import_violations(
             shadowing.update(
                 parameter.arg for parameter in [*signature.posonlyargs, *signature.args, *signature.kwonlyargs]
             )
+    module_names = {
+        (alias.asname or alias.name).split(".", 1)[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    class_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
     local_receivers = _provably_local(tree, imported_modules, shadowing)
     violations: list[str] = []
 
@@ -546,6 +570,10 @@ def _import_violations(
             # ast.Call, so `class X(metaclass=add_implicit_resolver)` ran a
             # foreign callable past a call-only filter.
             invocations += [keyword.value for keyword in node.keywords if keyword.arg == "metaclass"]
+            if any(keyword.arg is None for keyword in node.keywords):
+                # `class X(**{'metaclass': add_implicit_resolver})` hides the
+                # capability behind a mapping the AST cannot resolve.
+                violations.append(f"{label}: class keyword expansion can supply an unresolvable metaclass")
         for decorator in invocations:
             if isinstance(decorator, ast.Call):
                 continue  # handled as an ordinary call below
@@ -568,6 +596,32 @@ def _import_violations(
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and not isinstance(node.func, (ast.Name, ast.Attribute)):
             violations.append(f"{label}: call target is not a resolvable capability")
+        # A foreign callable handed to an allowlisted BUILTIN higher-order call,
+        # which may invoke it: `sorted([...], key=sys.settrace)` installs
+        # process-wide tracing while only the name `sorted` is checked.  Limited
+        # to builtin targets on purpose -- passing a module attribute to one of
+        # the package's own methods (``self.check_event(yaml.AliasEvent)``) is
+        # an ordinary argument, not a capability handover.
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            handed_over = []
+            if node.func.id in _INVOKES_KEY:
+                handed_over += [k.value for k in node.keywords if k.arg == "key"]
+            if node.func.id in _INVOKES_FIRST:
+                handed_over += node.args[:1]
+            for argument in handed_over:
+                if isinstance(argument, ast.Attribute) and _root_name(argument) in module_names:
+                    violations.append(
+                        f"{label}: passing {_root_name(argument)}.{argument.attr} into {node.func.id}() hands "
+                        "over a capability the call site does not constrain"
+                    )
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        # `X.get(sys)` calls a method UNBOUND and supplies `self` itself, so
+        # being inside a class body never proved `self` is the instance.
+        if isinstance(node.func.value, ast.Name) and node.func.value.id in class_names:
+            violations.append(
+                f"{label}: calling {node.func.value.id}.{node.func.attr} unbound supplies its own instance"
+            )
 
     # `self` is trusted by the receiver rules, so it must really BE the instance:
     # any free function can name a parameter `self` and receive a foreign object.
@@ -651,11 +705,9 @@ def _import_violations(
                 # In-package -- UNLESS the exporting module got the name from
                 # outside, in which case this import launders a foreign object
                 # through an in-package spelling.
-                laundered = sorted(
-                    (re_exported or {})
-                    .get(module, set())
-                    .intersection(alias.asname or alias.name for alias in node.names)
-                )
+                exported_foreign = (re_exported or {}).get(module, set())
+                # Match the EXPORTED name; ``as call`` only renames it here.
+                laundered = sorted(alias.name for alias in node.names if alias.name in exported_foreign)
                 if laundered:
                     violations.append(
                         f"{label}: {laundered} re-imported from {module!r} was brought into the package "
@@ -752,15 +804,20 @@ def _import_violations(
                 # `sys.meta_path.append(None)` rewrites the host's import
                 # machinery.  A mutating method is an assignment in disguise, so
                 # its receiver is held to the same provably-local standard.
+                # Exactly ONE level, as for assignment: peeling the whole chain
+                # let `x[0].yaml_constructors.update(...)` ride on `x`'s literal.
                 receiver = func.value
-                while isinstance(receiver, (ast.Attribute, ast.Subscript)):
-                    receiver = receiver.value
                 if not (isinstance(receiver, ast.Name) and (receiver.id == "self" or receiver.id in local_receivers)):
                     violations.append(
                         f"{label}: .{func.attr}() mutates a receiver that is not a provably local literal"
                     )
             elif isinstance(func, ast.Attribute) and func.attr not in ALLOWED_METHOD_NAMES:
                 violations.append(f"{label}: .{func.attr}() is not an allowlisted capability for a read-only artifact")
+            elif isinstance(func, ast.Attribute) and func.attr == "open" and _root_name(func.value) in module_names:
+                # `os.open('/tmp/q', os.O_CREAT, 0o600)` is not the bounded
+                # Path.open the allowance exists for, and its second argument is
+                # flags rather than a mode string, so the mode check never fires.
+                violations.append(f"{label}: .open() is permitted only on a path object, not on a module")
             elif isinstance(func, ast.Attribute) and func.attr == "open":
                 # ``.open`` is allowlisted for the loader's bounded READ, so the
                 # MODE has to be checked -- Path(...).open("w") truncates.
@@ -997,6 +1054,18 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         "import sys\ndef poison(self):\n    object.__setattr__(self, 'argv', [])",
         # Class creation invokes its metaclass without an ast.Call.
         "from yaml import add_implicit_resolver\nclass X(metaclass=add_implicit_resolver):\n    pass",
+        # ...including when the metaclass arrives through keyword expansion.
+        "from yaml import add_implicit_resolver\nclass X(**{'metaclass': add_implicit_resolver}):\n    pass",
+        # A mutating METHOD on a descendant, riding on the container's literal.
+        "from yaml import SafeLoader\ndef h():\n    x = []\n    x.append(SafeLoader)\n    x[0].d.update({'t': 1})",
+        # An unbound method call supplies its own `self`.
+        "import sys\nclass X:\n    def get(self):\n        self.argv = []\nX.get(sys)",
+        # `.open` on a module is not the bounded Path.open the allowance is for.
+        "import os\nos.open('/tmp/q', os.O_CREAT, 0o600)",
+        # A literal binding is not permanent: a later import rebinds the name.
+        "def h():\n    x = []\n    import sys as x\n    x.argv = []",
+        # A capability handed to a builtin that will invoke it.
+        "import sys\nsorted([lambda f, e, a: None], key=sys.settrace)",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
