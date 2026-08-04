@@ -11,6 +11,7 @@ chaining noise.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Final
 
@@ -34,6 +35,21 @@ _INSTRUMENT_REQUIRED_KEYS: Final = frozenset({"type", "name"})
 _QUESTION_KEYS: Final = frozenset({"kind", "subject", "summary"})
 
 _INCUMBENT_SURFACES: Final = "safety, thresholds, interlocks, alarms, overrides, channels, actuation"
+
+# The exact tag vocabulary a lab profile may contain.  Module level so both
+# the constructor table and the resolver table below can reference it: a
+# class-body comprehension cannot see class scope.
+_OWNED_TAGS: Final = frozenset(
+    {
+        "tag:yaml.org,2002:null",
+        "tag:yaml.org,2002:bool",
+        "tag:yaml.org,2002:int",
+        "tag:yaml.org,2002:float",
+        "tag:yaml.org,2002:str",
+        "tag:yaml.org,2002:seq",
+        "tag:yaml.org,2002:map",
+    }
+)
 
 
 class _StrictLabProfileLoader(yaml.SafeLoader):
@@ -65,6 +81,21 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
         "tag:yaml.org,2002:map": yaml.constructor.SafeConstructor.construct_yaml_map,
     }
     yaml_multi_constructors: dict[str, object] = {}
+    # ``yaml_implicit_resolvers`` is shared by reference too, and it is WORSE
+    # than the constructor table: PyYAML calls each registered matcher's
+    # ``match()`` while scanning every scalar, so a host that has called
+    # ``yaml.SafeLoader.add_implicit_resolver(...)`` executes its code during
+    # validation.  Measured before this fix: a resolver with a side-effecting
+    # matcher deleted a file while an otherwise valid profile parsed
+    # SUCCESSFULLY -- no error, no signal, arbitrary execution.
+    #
+    # Rebuilt here rather than copied: only tags in the owned vocabulary above
+    # survive, and only when the matcher is a genuine compiled pattern, so an
+    # object with a hand-written ``match`` cannot be inherited.
+    yaml_implicit_resolvers = {
+        prefix: [(tag, matcher) for tag, matcher in entries if tag in _OWNED_TAGS and isinstance(matcher, re.Pattern)]
+        for prefix, entries in yaml.resolver.Resolver.yaml_implicit_resolvers.items()
+    }
 
     def __init__(self, stream: object) -> None:
         super().__init__(stream)

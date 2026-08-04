@@ -22,9 +22,25 @@ def main(argv: list[str] | None = None) -> int:
     # The schema's character-based grammar accepts any NFC Unicode identity;
     # the CLI must print what it accepts even on a legacy-encoded stream
     # (e.g. PYTHONIOENCODING=cp1252), never die with UnicodeEncodeError.
+    #
+    # The reconfiguration is RESTORED afterwards.  Run in-process -- by an
+    # embedding host, or by the boundary probe's runpy path -- leaving it in
+    # place permanently retunes the host's own stdout and stderr to UTF-8 with
+    # replacement, which is an incumbent change this artifact has no business
+    # making.  Measured: two CP1252 wrappers stayed UTF-8 after main([]).
+    restore: list[tuple[io.TextIOWrapper, str, str | None]] = []
     for stream in (sys.stdout, sys.stderr):
         if isinstance(stream, io.TextIOWrapper):
+            restore.append((stream, stream.encoding, stream.errors))
             stream.reconfigure(encoding="utf-8", errors="replace")
+    try:
+        return _validate(argv)
+    finally:
+        for stream, encoding, errors in restore:
+            stream.reconfigure(encoding=encoding, errors=errors)
+
+
+def _validate(argv: list[str] | None) -> int:
     args = sys.argv[1:] if argv is None else list(argv)
     if len(args) != 1:
         print("usage: python -m cryodaq.lab_profile <path>", file=sys.stderr)

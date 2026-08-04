@@ -91,7 +91,7 @@ REFLECTION_CALLS = frozenset({"getattr", "eval", "exec", "vars", "dir", "globals
 # test_every_allowlist_entry_is_load_bearing, which fails if an entry here is
 # not required by the package as it actually stands.
 ALLOWED_STDLIB_MODULES = frozenset(
-    {"__future__", "dataclasses", "enum", "io", "os", "pathlib", "sys", "typing", "unicodedata"}
+    {"__future__", "dataclasses", "enum", "io", "os", "pathlib", "re", "sys", "typing", "unicodedata"}
 )
 # Every route out of Python to a module object THROUGH THE INTERPRETER -- its
 # builtins, function globals, the class hierarchy, import loaders -- must NAME a
@@ -149,6 +149,7 @@ ALLOWED_METHOD_NAMES = frozenset(
         "get",
         "isfile",
         "isspace",
+        "items",
         "join",
         "load",
         "lower",
@@ -1199,6 +1200,12 @@ def _probe(checkout: Path, mode: str) -> dict:
 # corrupting an incumbent config, planting a new file and editing the package's
 # own source are different regressions that a five-path enumeration would have
 # scored differently.
+# On POSIX, assigning to os.environ also mutates posix.environ, so the module
+# fingerprint legitimately reports it alongside the environ dimension.  That is
+# platform state, not a defect, and it is measured here rather than hard-coded:
+# Windows has no posix module and reports only the two.
+_ENVIRON_DIMENSIONS = {"environ", "capabilities"} | ({"module_state"} if os.name == "posix" else set())
+
 _REGRESSIONS = {
     "incumbent_config_write": (
         {"tree", "capabilities"},
@@ -1211,7 +1218,7 @@ _REGRESSIONS = {
     ),
     # os.environ.__setitem__ calls putenv internally, so both the environ
     # snapshot and the audit hook fire.  Measured, not assumed.
-    "environment_write": ({"environ", "capabilities"}, "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
+    "environment_write": (_ENVIRON_DIMENSIONS, "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
     # Leaves NO trace in a state diff -- no file, variable, path or cwd changes.
     # Only the audit hook sees it.  (Deliberately NOT spelled as an alias over
     # `print`: that shadows a builtin __main__.py itself calls, so the control
@@ -1255,7 +1262,7 @@ _REGRESSIONS = {
     ),
     # Conditioned on an ordinary variable, which a near-empty environment hid.
     "conditional_on_home": (
-        {"environ", "capabilities"},
+        _ENVIRON_DIMENSIONS,
         "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1' if 'HOME' in os.environ else None",
     ),
     # sys.path is also reachable inside the `sys` fingerprint, so a path
@@ -1504,23 +1511,97 @@ def test_host_yaml_registrations_cannot_reach_the_profile_loader(tmp_path: Path)
 @pytest.mark.parametrize(
     ("label", "document"),
     (
-        # Owning the constructor table narrowed the accepted tag vocabulary.
-        # An unquoted date USED to construct a datetime.date and be rejected
-        # later by the schema's exact type checks; it now dies at parse.  The
-        # direction is unchanged -- fail closed -- but the boundary moved, so it
-        # is pinned here rather than left as an undocumented side effect.
-        ("implicit timestamp", "lab_id: 2026-01-01"),
         ("binary", "lab_id: !!binary aGk="),
         ("python object", "lab_id: !!python/object/apply:os.getcwd []"),
         ("arbitrary tag", "lab_id: !!foo bar"),
+        ("timestamp tag", "lab_id: !!timestamp 2026-01-01"),
     ),
 )
 def test_owned_tag_vocabulary_rejects_everything_outside_it(label: str, document: str) -> None:
-    """Only null/bool/int/float/str/seq/map construct; everything else fails closed."""
+    """Only null/bool/int/float/str/seq/map construct; every other tag fails closed."""
 
     text = _VALID_TEXT.replace("  lab_id: readonly-lab", f"  {document}")
     with pytest.raises(LabProfileError):
         parse_lab_profile(text)
+
+
+def test_owned_resolvers_read_date_like_scalars_as_plain_strings() -> None:
+    """A consequence of owning the resolver table, pinned rather than left implicit.
+
+    Only resolvers for the owned tag vocabulary survive, so an unquoted
+    ``2026-01-01`` no longer resolves to the timestamp tag.  It is read as the
+    string it looks like, which is what an operator writing a lab identity
+    means.  Previously it constructed a ``datetime.date`` and was rejected
+    downstream by the schema's exact type checks.
+    """
+
+    profile = parse_lab_profile(_VALID_TEXT.replace("  lab_id: readonly-lab", "  lab_id: 2026-01-01"))
+    assert profile.lab_id == "2026-01-01"
+    assert type(profile.lab_id) is str
+
+
+def test_host_implicit_resolvers_cannot_reach_the_profile_loader(tmp_path: Path) -> None:
+    """A host resolver must not run while a lab profile is validated.
+
+    ``yaml_implicit_resolvers`` is shared by reference from SafeLoader, and
+    PyYAML calls each registered matcher's ``match()`` while scanning EVERY
+    scalar.  Measured before the fix: a resolver registered through the ordinary
+    ``yaml.SafeLoader.add_implicit_resolver(...)`` API deleted a file while an
+    otherwise valid profile parsed SUCCESSFULLY -- no error, no signal.
+
+    That is worse than the constructor-table defect, which at least failed the
+    parse.  The victim file is the measurement.
+    """
+
+    import yaml
+
+    from cryodaq.lab_profile.loader import _StrictLabProfileLoader
+
+    assert _StrictLabProfileLoader.yaml_implicit_resolvers is not yaml.SafeLoader.yaml_implicit_resolvers
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("intact", encoding="utf-8")
+
+    class SideEffectingMatcher:
+        def match(self, value: str) -> None:
+            victim.unlink(missing_ok=True)
+            return None
+
+    original = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+    yaml.SafeLoader.add_implicit_resolver("tag:yaml.org,2002:str", SideEffectingMatcher(), None)
+    try:
+        assert parse_lab_profile(_VALID_TEXT).lab_id == "readonly-lab"
+        assert victim.read_text(encoding="utf-8") == "intact", "a host resolver ran during validation"
+    finally:
+        yaml.SafeLoader.yaml_implicit_resolvers.clear()
+        yaml.SafeLoader.yaml_implicit_resolvers.update(original)
+
+
+def test_cli_restores_host_stream_configuration() -> None:
+    """The CLI retunes stdout/stderr to UTF-8, and must put them back.
+
+    Run in-process -- by an embedding host, or by the boundary probe's runpy
+    path -- leaving the reconfiguration in place permanently changes the host's
+    own streams.  Measured before the fix: two CP1252 wrappers were still UTF-8
+    after ``main([])`` returned.
+    """
+
+    import io as _io
+
+    from cryodaq.lab_profile.__main__ import main
+
+    replacement_out = _io.TextIOWrapper(_io.BytesIO(), encoding="cp1252", errors="strict")
+    replacement_err = _io.TextIOWrapper(_io.BytesIO(), encoding="cp1252", errors="strict")
+    original_out, original_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = replacement_out, replacement_err
+    try:
+        main([])  # usage error path: still reconfigures the streams
+        encodings = (replacement_out.encoding, replacement_err.encoding)
+        errors = (replacement_out.errors, replacement_err.errors)
+    finally:
+        sys.stdout, sys.stderr = original_out, original_err
+    assert encodings == ("cp1252", "cp1252"), encodings
+    assert errors == ("strict", "strict"), errors
 
 
 def test_python_object_tags_never_execute(tmp_path: Path) -> None:

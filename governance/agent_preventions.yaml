@@ -5711,5 +5711,25 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_tag_vocabulary_rejects_everything_outside_it
         ci_partition: remaining
-    red_evidence: inspect_getmodule_on_the_imported_enums_returned_the_authority_bearing_registry_and_construct_driver_while_the_symbol_allowlist_guard_stayed_green_2026_08_03_pending_immutable_capture_then_dunder_indirection_through_an_allowed_symbol_init_globals_builtins_import_reached_the_same_constructor_while_the_spelling_based_scan_stayed_green_seven_distinct_spellings_reproduced_2026_08_04_pending_immutable_capture_then_pkgutil_resolve_name_and_pydoc_locate_and_runpy_run_module_returned_the_same_constructor_naming_no_dunder_while_the_blanket_stdlib_allowance_stayed_green_and_separately_open_config_safety_yaml_w_and_path_unlink_and_os_replace_produced_no_violations_so_the_read_only_artifact_could_corrupt_an_incumbent_config_at_import_time_beneath_its_own_snapshot_guard_2026_08_04_pending_immutable_capture_then_the_allowlisted_spelling_proved_not_to_be_the_capability_because_print_rebound_to_open_and_path_open_w_and_yaml_load_with_an_external_loader_and_os_environ_subscript_assignment_all_passed_the_static_capability_scan_and_separately_the_first_version_of_the_runtime_effect_guard_reported_green_against_an_injected_environment_write_because_it_inherited_the_parent_environment_which_this_module_had_already_contaminated_by_importing_the_package_at_module_scope_2026_08_04_pending_immutable_capture_then_a_config_write_injected_into_lab_profile_main_py_was_reported_as_no_difference_by_the_import_only_effect_guard_and_as_configs_by_the_entry_point_probe_proving_the_documented_cli_was_never_executed_and_all_four_dimensions_configs_environ_sys_path_and_cwd_were_each_reproduced_red_on_a_fresh_isolated_checkout_2026_08_04_pending_immutable_capture_then_four_further_escapes_were_reproduced_green_against_that_effect_guard_a_write_to_config_channels_yaml_outside_the_five_file_tuple_an_os_environ_write_conditioned_on_HOME_which_the_near_empty_probe_environment_hid_a_process_launch_through_os_system_which_changes_no_state_at_all_and_an_unsafe_yaml_loader_defined_in_main_py_which_deleted_a_victim_file_through_the_documented_cli_while_the_capability_check_skipped_main_all_four_now_red_2026_08_04_pending_immutable_capture_then_three_further_escapes_were_reproduced_green_a_write_under_the_synthetic_home_outside_the_copied_checkout_which_no_tree_hash_can_see_an_os_fork_which_is_a_process_creation_primitive_absent_from_the_first_audited_set_and_from_yaml_import_safeloader_followed_by_assignment_into_its_constructor_table_which_poisons_process_wide_safe_yaml_parsing_while_imported_modules_tracked_only_ast_import_bindings_the_home_write_and_the_importfrom_mutation_are_now_red_and_the_fork_control_is_gated_on_hasattr_os_fork_so_it_runs_on_linux_ci_not_on_the_windows_coordinator_2026_08_04_pending_immutable_capture
+      - node: tests/lab_profile/test_downstream_readonly.py::test_host_implicit_resolvers_cannot_reach_the_profile_loader
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_cli_restores_host_stream_configuration
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
+        ci_partition: remaining
+    red_evidence: >-
+      TWO PRODUCT DEFECTS of one shape, both found by review, both needing NO hostile code -- a mutable PyYAML
+      table inherited by reference meant a third party decided what a lab profile executes.
+      (1) yaml_constructors: a host that had called yaml.SafeLoader.add_constructor registered a side-effecting
+      constructor for the standard string tag; it deleted a victim file while an operator profile was validated,
+      and the identity check that the two tables were the same object was true. The parse then failed.
+      (2) yaml_implicit_resolvers, WORSE: PyYAML calls each registered matcher while scanning every scalar, so a
+      resolver added through the ordinary add_implicit_resolver API deleted a victim file while the profile parsed
+      SUCCESSFULLY -- no error, no signal. Both tables are now owned and rebuilt rather than inherited, with
+      unknown tags failing closed and matchers required to be genuine compiled patterns.
+      A third, smaller incumbent mutation: the CLI permanently retuned the host stdout/stderr encoding when run
+      in-process; it now restores what it changed.
+      Guard-side escapes are recorded on the false-green pairs, and the hostile-committer class that the static
+      lint no longer claims is listed verbatim in _OUT_OF_SCOPE_FOR_STATIC_LINT with its rubric justification.
+      2026-08-04, pending immutable capture.
     green_evidence: pending
