@@ -138,6 +138,10 @@ _MUTATING_METHODS = frozenset(
 # argument rather than a capability handover.
 _INVOKES_KEY = frozenset({"sorted", "min", "max"})
 _INVOKES_FIRST = frozenset({"map", "filter"})
+# The only foreign base classes the package needs.  A base can select an
+# INHERITED metaclass that runs at class creation, so the set is measured
+# rather than left open.
+ALLOWED_BASE_CLASSES = frozenset({"StrEnum", "yaml.SafeLoader"})
 _BUILTIN_NAMES = frozenset(dir(builtins))
 _DUNDER = re.compile(r"^__[A-Za-z0-9_]+__$")
 
@@ -570,6 +574,16 @@ def _import_violations(
             # ast.Call, so `class X(metaclass=add_implicit_resolver)` ran a
             # foreign callable past a call-only filter.
             invocations += [keyword.value for keyword in node.keywords if keyword.arg == "metaclass"]
+            for base_expression in node.bases:
+                spelling = ast.unparse(base_expression)
+                if spelling in ALLOWED_BASE_CLASSES or spelling in local_names:
+                    continue
+                if isinstance(base_expression, ast.Name) and base_expression.id not in imported_modules:
+                    continue  # a builtin such as ValueError
+                # `class X(yaml.YAMLObject)` invokes the base's INHERITED
+                # metaclass at class creation, registering a tag in the
+                # process-wide constructor table without a metaclass= keyword.
+                violations.append(f"{label}: base class {spelling} may select a metaclass that runs at class creation")
             if any(keyword.arg is None for keyword in node.keywords):
                 # `class X(**{'metaclass': add_implicit_resolver})` hides the
                 # capability behind a mapping the AST cannot resolve.
@@ -609,10 +623,14 @@ def _import_violations(
             if node.func.id in _INVOKES_FIRST:
                 handed_over += node.args[:1]
             for argument in handed_over:
-                if isinstance(argument, ast.Attribute) and _root_name(argument) in module_names:
+                foreign_attribute = isinstance(argument, ast.Attribute) and _root_name(argument) in module_names
+                # `from sys import settrace; sorted(..., key=settrace)` is a bare
+                # NAME, not an attribute, and reaches the same capability.
+                foreign_name = isinstance(argument, ast.Name) and argument.id in imported_modules
+                if foreign_attribute or foreign_name:
                     violations.append(
-                        f"{label}: passing {_root_name(argument)}.{argument.attr} into {node.func.id}() hands "
-                        "over a capability the call site does not constrain"
+                        f"{label}: passing a foreign callable into {node.func.id}() hands over a capability "
+                        "the call site does not constrain"
                     )
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
@@ -622,6 +640,17 @@ def _import_violations(
             violations.append(
                 f"{label}: calling {node.func.value.id}.{node.func.attr} unbound supplies its own instance"
             )
+
+    # Rebinding `self` replaces the instance the receiver rules trust:
+    # `def get(self): self = sys; self.argv = []` keeps the spelling while the
+    # object behind it is foreign.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            # A BARE `self = ...` only.  `self._depth = 0` is an ordinary
+            # attribute write on the instance, not a replacement of it.
+            if any(isinstance(target, ast.Name) and target.id == "self" for target in targets):
+                violations.append(f"{label}: rebinding 'self' replaces the instance the receiver rules trust")
 
     # `self` is trusted by the receiver rules, so it must really BE the instance:
     # any free function can name a parameter `self` and receive a foreign object.
@@ -783,6 +812,16 @@ def _import_violations(
                 violations.append(f"{label}: import_module bypasses the static import boundary")
             elif isinstance(func, ast.Name) and func.id in REFLECTION_CALLS:
                 violations.append(f"{label}: {func.id}() bypasses the static import boundary")
+            elif (
+                isinstance(func, ast.Name)
+                and func.id in ALLOWED_CALL_NAMES
+                and func.id in _BUILTIN_NAMES
+                and (func.id in shadowing or func.id in imported_modules)
+            ):
+                # `def invoke(print): print(...)` -- a parameter binding puts a
+                # foreign callable behind an allowlisted builtin spelling, and
+                # parameters are not covered by the builtin-shadowing pass.
+                violations.append(f"{label}: {func.id}() resolves to a shadowed or foreign binding, not the builtin")
             elif isinstance(func, ast.Name) and func.id not in ALLOWED_CALL_NAMES | local_names:
                 violations.append(f"{label}: {func.id}() is not an allowlisted capability for a read-only artifact")
             elif isinstance(func, ast.Attribute) and func.attr == "__setattr__":
@@ -1064,8 +1103,16 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         "import os\nos.open('/tmp/q', os.O_CREAT, 0o600)",
         # A literal binding is not permanent: a later import rebinds the name.
         "def h():\n    x = []\n    import sys as x\n    x.argv = []",
-        # A capability handed to a builtin that will invoke it.
+        # A capability handed to a builtin that will invoke it, as an attribute
+        # and as an imported bare name.
         "import sys\nsorted([lambda f, e, a: None], key=sys.settrace)",
+        "from sys import settrace\nsorted([lambda f, e, a: None], key=settrace)",
+        # Rebinding `self` inside a method replaces the trusted instance.
+        "import sys\nclass X:\n    def get(self):\n        self = sys\n        self.argv = []",
+        # A parameter puts a foreign callable behind an allowlisted builtin.
+        "from sys import settrace\ndef invoke(print):\n    print(lambda f, e, a: None)",
+        # A base class can select an INHERITED metaclass that runs at creation.
+        "import yaml\nclass X(yaml.YAMLObject):\n    yaml_tag = '!x'",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
