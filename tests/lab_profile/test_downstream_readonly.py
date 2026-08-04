@@ -2193,6 +2193,55 @@ else:
 """
 
 
+_TOTAL_PARSER_COMPROMISE = r"""
+from cryodaq.lab_profile import parse_lab_profile
+import yaml.constructor
+
+
+def _evil(self, node):
+    # A parse result invented wholesale: the document is never read.
+    return {
+        "schema_version": 1,
+        "lab": {"lab_id": "forged", "display_name": "Forged"},
+        "instruments": [{"type": "keithley_2604b", "name": "SRC1"}],
+        "questions": [],
+    }
+
+
+yaml.constructor.BaseConstructor.construct_document = _evil
+
+try:
+    profile = parse_lab_profile("hello: world\n")
+except Exception as exc:
+    print(type(exc).__name__)
+else:
+    print("ACCEPTED:" + ",".join(instrument.type for instrument in profile.instruments))
+"""
+
+
+def test_actuation_boundary_survives_a_fully_compromised_parser(tmp_path: Path) -> None:
+    """The property this package actually protects, isolated from the parser.
+
+    Rounds of work went into owning the loader's tables and entry point, and a
+    residual remains that cannot be closed by descending further: rebinding an
+    inherited composer/constructor method AFTER import replaces the parse
+    entirely.  Measured -- a forged profile was returned and a file deleted, with
+    no import ordering required.
+
+    That residual is accepted, because an attacker who can execute arbitrary
+    Python in the operator's process does not need YAML to do harm.  What must
+    NOT depend on the parser is the actuation boundary, and it does not:
+    ``schema.py`` re-derives instrument authority from BUILTIN_DRIVER_METADATA
+    rather than trusting the parsed document.
+
+    So this asserts the boundary under TOTAL parser compromise -- the strongest
+    attacker the module admits -- rather than asserting the parser is
+    uncompromisable, which it is not.
+    """
+
+    assert _run_probe(_TOTAL_PARSER_COMPROMISE, tmp_path) == "ActuationBoundaryError"
+
+
 def test_host_cannot_replace_the_parse_entry_point(tmp_path: Path) -> None:
     """``yaml.load`` is a module attribute, looked up at CALL time.
 

@@ -374,10 +374,30 @@ def _parse_strict_yaml(text: str) -> object:
     mistake, one rung lower.
 
     ``_StrictLabProfileLoader`` now defines ``get_single_data`` itself, so the
-    entry point belongs to this package.  Everything BELOW it -- the composer,
-    parser and scanner methods -- remains inherited and is NOT owned; see the
-    provenance guard in the tests, which is what actually detects a foreign
-    replacement anywhere on that chain.
+    entry point belongs to this package.
+
+    WHAT THIS DOES NOT DO, stated plainly because an earlier version of this
+    docstring claimed otherwise and the claim was false.  Everything below
+    ``get_single_data`` -- the composer, parser and scanner methods -- is
+    inherited and NOT owned, and nothing here constrains it at runtime.
+    Measured against this very tree: rebinding
+    ``yaml.constructor.BaseConstructor.construct_document`` AFTER a completed
+    import made ``parse_lab_profile("hello: world")`` return a forged profile
+    and delete a file.  No import ordering was required, which makes it easier
+    than the cases this module already fixed.
+
+    The provenance guard in the tests does NOT prevent that.  It detects a
+    foreign replacement present when the SUITE runs; it cannot police the
+    operator's process.  It is a drift fence, not a runtime defence.
+
+    That residual is accepted deliberately.  Every remaining attack of this
+    shape requires the attacker to already be executing arbitrary Python inside
+    the operator's process -- and such an attacker does not need YAML at all.
+    What the boundary actually rests on is ``schema.py``, which re-derives
+    instrument authority from ``BUILTIN_DRIVER_METADATA`` rather than trusting
+    the parsed document: with the parser fully replaced as above, forging a
+    ``keithley_2604b`` still raises ``ActuationBoundaryError``.  That property
+    has its own guard and is the one worth defending.
     """
 
     loader = _StrictLabProfileLoader(text)

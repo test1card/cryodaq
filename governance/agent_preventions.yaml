@@ -5745,6 +5745,8 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_host_cannot_replace_the_parse_entry_point
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_actuation_boundary_survives_a_fully_compromised_parser
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_no_inherited_pyyaml_callable_comes_from_outside_pyyaml
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_effect_probe_reports_a_newly_imported_module
