@@ -57,6 +57,32 @@ _OWNED_TAGS: Final = frozenset(
 )
 
 
+_NULL_PATTERN: Final = re.compile(r"^(?:~|null|Null|NULL|)$")
+_BOOL_PATTERN: Final = re.compile(r"^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF)$")
+_INT_PATTERN: Final = re.compile(r"^[-+]?[0-9]+$")
+
+
+def _build_implicit_resolvers() -> dict[str | None, list[tuple[str, re.Pattern[str]]]]:
+    """The implicit-resolution table, owned outright and keyed as PyYAML expects.
+
+    PyYAML looks up candidate resolvers by the scalar's FIRST CHARACTER, with
+    ``""`` for the empty scalar, so the first characters each pattern can match
+    are listed alongside it.
+    """
+
+    table: dict[str | None, list[tuple[str, re.Pattern[str]]]] = {}
+    for tag, pattern, first_characters in (
+        ("tag:yaml.org,2002:null", _NULL_PATTERN, "~nN"),
+        ("tag:yaml.org,2002:bool", _BOOL_PATTERN, "yYnNtTfFoO"),
+        ("tag:yaml.org,2002:int", _INT_PATTERN, "-+0123456789"),
+    ):
+        for character in first_characters:
+            table.setdefault(character, []).append((tag, pattern))
+    # The empty scalar resolves to null, exactly as upstream does.
+    table.setdefault("", []).append(("tag:yaml.org,2002:null", _NULL_PATTERN))
+    return table
+
+
 class _StrictLabProfileLoader(yaml.SafeLoader):
     """Bounded YAML grammar with neither aliases nor duplicate mapping keys.
 
@@ -89,19 +115,23 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     # than the constructor table: PyYAML calls each registered matcher's
     # ``match()`` while scanning every scalar, so a host that has called
     # ``yaml.SafeLoader.add_implicit_resolver(...)`` executes its code during
-    # validation.  Measured before this fix: a resolver with a side-effecting
-    # matcher deleted a file while an otherwise valid profile parsed
-    # SUCCESSFULLY -- no error, no signal, arbitrary execution.
+    # validation.  Measured before this was owned: a resolver with a
+    # side-effecting matcher deleted a file while an otherwise valid profile
+    # parsed SUCCESSFULLY -- no error, no signal, arbitrary execution.
     #
-    # Rebuilt here rather than copied: only tags in the owned vocabulary above
-    # survive, and only when the matcher is a genuine compiled pattern, so an
-    # object with a hand-written ``match`` cannot be inherited.  The type check
-    # is EXACT: ``isinstance`` consults ``__class__`` and is spoofable, so a
-    # matcher merely reporting ``re.Pattern`` would have passed.
-    yaml_implicit_resolvers = {
-        prefix: [(tag, matcher) for tag, matcher in entries if tag in _OWNED_TAGS and type(matcher) is re.Pattern]
-        for prefix, entries in yaml.resolver.Resolver.yaml_implicit_resolvers.items()
-    }
+    # The table is now BUILT FROM PATTERNS DEFINED HERE, not filtered from the
+    # inherited one.  Filtering was not enough: a host that registered a genuine
+    # but catastrophically backtracking regex BEFORE this module was imported
+    # had it copied in, and a 31-character scalar could then stall validation
+    # for seconds.  That breaks the bounded-parse contract this loader exists to
+    # provide, so nothing from the host is carried across at all.
+    #
+    # The patterns are deliberately narrower than PyYAML's and are linear-time:
+    # no nested quantifiers, each fully anchored.  Anything they do not match
+    # stays a plain string and is then rejected by the schema's exact type
+    # checks, which is the fail-closed direction.  Only these three tags have
+    # implicit resolvers; str, seq and map are decided structurally.
+    yaml_implicit_resolvers = _build_implicit_resolvers()
 
     # ``yaml_path_resolvers`` is a third shared mutable table.  An ordinary
     # ``yaml.SafeLoader.add_path_resolver(...)`` call would otherwise retag

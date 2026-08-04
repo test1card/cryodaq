@@ -142,6 +142,7 @@ ALLOWED_METHOD_NAMES = frozenset(
         "add",
         "append",
         "category",
+        "compile",
         "check_event",
         "compose_node",
         "construct_object",
@@ -151,7 +152,6 @@ ALLOWED_METHOD_NAMES = frozenset(
         "isfile",
         "isprintable",
         "isspace",
-        "items",
         "join",
         "load",
         "lower",
@@ -160,6 +160,7 @@ ALLOWED_METHOD_NAMES = frozenset(
         "peek_event",
         "read",
         "reconfigure",
+        "setdefault",
         "startswith",
         "strip",
     }
@@ -1678,6 +1679,64 @@ def test_host_bool_values_cannot_reach_the_profile_loader() -> None:
     finally:
         yaml.SafeLoader.bool_values.clear()
         yaml.SafeLoader.bool_values.update(original)
+
+
+_PRE_IMPORT_REDOS = r"""
+import re
+import time
+
+import yaml
+
+# A GENUINE compiled pattern -- so a type check cannot reject it -- but one that
+# backtracks catastrophically.  Registered BEFORE the first import, which is the
+# ordering a filter-based defence could not survive.
+yaml.resolver.Resolver.add_implicit_resolver("tag:yaml.org,2002:str", re.compile(r"^(a+)+$"), list("a"))
+
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+document = (
+    "schema_version: 1\n"
+    "lab:\n  lab_id: " + "a" * 30 + "b\n  display_name: y\n"
+    "instruments:\n  - type: lakeshore_218s\n    name: LS1\n"
+    "questions: []\n"
+)
+started = time.monotonic()
+try:
+    parse_lab_profile(document)
+except LabProfileError:
+    pass
+print("%.2f" % (time.monotonic() - started))
+"""
+
+
+def test_host_regexes_cannot_stall_validation(tmp_path: Path) -> None:
+    """A hostile-but-genuine regex must not reach the loader at all.
+
+    An exact ``type(matcher) is re.Pattern`` filter accepts a real compiled
+    pattern, so a catastrophically backtracking one registered BEFORE the first
+    import was copied in.  Measured then: a 31-character scalar pushed
+    validation past four seconds, breaking the bounded-parse contract this
+    loader exists to provide.
+
+    The resolver table is now built from patterns defined in the package, so
+    nothing from the host is carried across.  Budget is generous on purpose --
+    the failure it guards against was seconds, not milliseconds.
+    """
+
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _PRE_IMPORT_REDOS],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert float(completed.stdout.strip()) < 1.0, completed.stdout
 
 
 _PRE_IMPORT_FLOAT_POISON = r"""
