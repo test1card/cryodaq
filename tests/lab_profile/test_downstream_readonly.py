@@ -298,12 +298,14 @@ def _forbidden_mutation(node: ast.AST, target: ast.expr, local_receivers: set[st
         if not isinstance(node, ast.AugAssign) or not isinstance(target, ast.Name):
             return False
         return target.id != "self" and target.id not in local_receivers
-    receiver = target
-    while isinstance(receiver, (ast.Attribute, ast.Subscript)):
-        receiver = receiver.value
-    if isinstance(receiver, ast.Name) and (receiver.id == "self" or receiver.id in local_receivers):
-        return False
-    return True
+    # Exactly ONE level of indirection from a provably local name.  A deeper
+    # chain mutates a DESCENDANT, whose freshness the container's own literal
+    # cannot vouch for: `x = []; x.append(SafeLoader); x[0].yaml_constructors[...]`
+    # keeps `x` fresh while reaching the foreign loader through it.
+    if not isinstance(target.value, ast.Name):
+        return True
+    receiver = target.value
+    return not (receiver.id == "self" or receiver.id in local_receivers)
 
 
 def _mutates_foreign(node: ast.AST, target: ast.expr, foreign: set[str]) -> bool:
@@ -374,7 +376,14 @@ def _resolve_import(module: str, level: int, *, base: str) -> str:
     return f"{prefix}.{module}" if module else prefix
 
 
-def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, root: str = PACKAGE_MODULE) -> list[str]:
+def _import_violations(
+    source: str,
+    *,
+    label: str,
+    base: str = PACKAGE_MODULE,
+    root: str = PACKAGE_MODULE,
+    re_exported: dict[str, set[str]] | None = None,
+) -> list[str]:
     """List every import in one source text that crosses the downstream boundary.
 
     Everything is DENIED BY DEFAULT and the allowlists are measured from the
@@ -500,6 +509,14 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
     shadowing = {
         node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
+    # A PARAMETER shadows the builtin too: ``def h(list): x = list()`` calls
+    # whatever the caller passed, not the container constructor.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            signature = node.args
+            shadowing.update(
+                parameter.arg for parameter in [*signature.posonlyargs, *signature.args, *signature.kwonlyargs]
+            )
     local_receivers = _provably_local(tree, imported_modules, shadowing)
     violations: list[str] = []
 
@@ -523,13 +540,51 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        for decorator in node.decorator_list:
+        invocations = list(node.decorator_list)
+        if isinstance(node, ast.ClassDef):
+            # Class creation INVOKES its metaclass without producing an
+            # ast.Call, so `class X(metaclass=add_implicit_resolver)` ran a
+            # foreign callable past a call-only filter.
+            invocations += [keyword.value for keyword in node.keywords if keyword.arg == "metaclass"]
+        for decorator in invocations:
             if isinstance(decorator, ast.Call):
-                continue  # already handled as a call below
-            if isinstance(decorator, ast.Name) and decorator.id not in ALLOWED_CALL_NAMES | local_names:
-                violations.append(f"{label}: decorator {decorator.id} invokes a capability that is not allowlisted")
-            elif isinstance(decorator, ast.Attribute) and decorator.attr not in ALLOWED_METHOD_NAMES:
-                violations.append(f"{label}: decorator .{decorator.attr} invokes a capability that is not allowlisted")
+                continue  # handled as an ordinary call below
+            if isinstance(decorator, ast.Name):
+                if decorator.id not in ALLOWED_CALL_NAMES | local_names:
+                    violations.append(f"{label}: decorator {decorator.id} invokes a capability that is not allowlisted")
+            elif isinstance(decorator, ast.Attribute):
+                if decorator.attr not in ALLOWED_METHOD_NAMES:
+                    violations.append(
+                        f"{label}: decorator .{decorator.attr} invokes a capability that is not allowlisted"
+                    )
+            else:
+                # FAIL CLOSED: `@(settrace,)[0]` is a subscript, and conditional
+                # or comprehension decorators are equally opaque.
+                violations.append(f"{label}: decorator expression is not a resolvable capability")
+
+    # FAIL CLOSED on a call target the scan cannot classify:
+    # `(add_constructor,)[0]('tag', None)` is an ast.Subscript, so every
+    # capability branch below silently skipped it.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and not isinstance(node.func, (ast.Name, ast.Attribute)):
+            violations.append(f"{label}: call target is not a resolvable capability")
+
+    # `self` is trusted by the receiver rules, so it must really BE the instance:
+    # any free function can name a parameter `self` and receive a foreign object.
+    methods = {
+        child
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        for child in node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        signature = node.args
+        parameters = [*signature.posonlyargs, *signature.args, *signature.kwonlyargs]
+        if any(parameter.arg == "self" for parameter in parameters) and node not in methods:
+            violations.append(f"{label}: a non-method parameter named 'self' forges the instance exemption")
 
     # A MODULE-LEVEL alias of a foreign object is exportable: another file in the
     # package can `from .source import Loader`, which this scan classifies as an
@@ -593,7 +648,20 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
             if top_level in ALLOWED_STDLIB_MODULES or top_level == "yaml":
                 continue
             if module == root or module.startswith(f"{root}."):
-                continue  # in-package imports are inside the boundary
+                # In-package -- UNLESS the exporting module got the name from
+                # outside, in which case this import launders a foreign object
+                # through an in-package spelling.
+                laundered = sorted(
+                    (re_exported or {})
+                    .get(module, set())
+                    .intersection(alias.asname or alias.name for alias in node.names)
+                )
+                if laundered:
+                    violations.append(
+                        f"{label}: {laundered} re-imported from {module!r} was brought into the package "
+                        "from outside, so this in-package import launders its provenance"
+                    )
+                continue
             allowed_symbols = ALLOWED_CRYODAQ_IMPORTS.get(module)
             if allowed_symbols is None:
                 violations.append(
@@ -716,16 +784,34 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
 def _scan_package(base_dir: Path, *, package_module: str) -> list[str]:
     """Scan every Python module under a package directory, recursively."""
 
-    violations: list[str] = []
+    # FIRST PASS: which names does each module bring in from OUTSIDE the
+    # package?  Without this, one file can `from yaml import add_constructor`
+    # and another can `from .source import add_constructor` and call it -- the
+    # second import is in-package, so nothing foreign is named there at all.
+    outside: dict[str, set[str]] = {}
+    files: list[tuple[Path, str, str]] = []
     for path in sorted(base_dir.rglob("*.py")):
         relative_parent = path.parent.relative_to(base_dir)
         file_package = package_module
         if str(relative_parent) != ".":
             file_package = f"{package_module}.{'.'.join(relative_parent.parts)}"
+        module_name = file_package if path.stem == "__init__" else f"{file_package}.{path.stem}"
+        source = path.read_text(encoding="utf-8")
+        files.append((path, file_package, source))
+        brought_in: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                brought_in.update((alias.asname or alias.name).split(".", 1)[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                origin = _resolve_import(node.module or "", node.level, base=file_package)
+                if not (origin == package_module or origin.startswith(f"{package_module}.")):
+                    brought_in.update(alias.asname or alias.name for alias in node.names)
+        outside[module_name] = brought_in
+
+    violations: list[str] = []
+    for path, file_package, source in files:
         violations.extend(
-            _import_violations(
-                path.read_text(encoding="utf-8"), label=path.name, base=file_package, root=package_module
-            )
+            _import_violations(source, label=path.name, base=file_package, root=package_module, re_exported=outside)
         )
     return violations
 
@@ -900,6 +986,17 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         "from os import get_inheritable as len, set_inheritable as print\nprint(1, not len(1))",
         # A bare decorator invokes without producing an ast.Call.
         "from sys import settrace\n@settrace\ndef f(frame, event, arg):\n    return None",
+        # A container that becomes foreign AFTER its literal binding.
+        "from yaml import SafeLoader\ndef h():\n    x = []\n    x.append(SafeLoader)\n    x[0].f = 1",
+        # A PARAMETER shadowing the builtin container constructor.
+        "from yaml import SafeLoader\ndef h(list):\n    x = list()\n    x.yaml_constructors['t'] = 1",
+        # Decorator and call targets the scan cannot resolve at all.
+        "from sys import settrace\n@(settrace,)[0]\ndef f(a, b, c):\n    return None",
+        "from yaml import add_constructor\n(add_constructor,)[0]('tag:test', None)",
+        # A free function can name a parameter `self` and forge the exemption.
+        "import sys\ndef poison(self):\n    object.__setattr__(self, 'argv', [])",
+        # Class creation invokes its metaclass without an ast.Call.
+        "from yaml import add_implicit_resolver\nclass X(metaclass=add_implicit_resolver):\n    pass",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
@@ -1064,6 +1161,25 @@ def test_module_level_alias_cannot_launder_provenance_across_files(tmp_path: Pat
     )
     violations = _scan_package(package, package_module="pkg")
     assert any("laundering" in entry for entry in violations), violations
+
+
+def test_foreign_callable_cannot_be_re_exported_between_modules(tmp_path: Path) -> None:
+    """One module imports a foreign callable; another re-imports and calls it.
+
+    The second import is in-package, so nothing foreign is named there at all
+    and the call looks like an ordinary in-boundary helper.  Only a scan that
+    knows what each module brought in from OUTSIDE can see it, which is why
+    ``_scan_package`` computes that in a first pass.
+    """
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "source.py").write_text("from yaml import add_constructor\n", encoding="utf-8")
+    (package / "__init__.py").write_text(
+        "from .source import add_constructor\nadd_constructor('tag:t', None)\n", encoding="utf-8"
+    )
+    violations = _scan_package(package, package_module="pkg")
+    assert any("launders its provenance" in entry for entry in violations), violations
 
 
 def test_driver_metadata_projection_is_inert_and_exact() -> None:
