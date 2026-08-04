@@ -5725,6 +5725,8 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_cli_diagnostics_cannot_forge_a_status_line
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_pre_import_bool_poisoning_cannot_reach_the_profile_loader
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
         ci_partition: remaining
     red_evidence: >-
@@ -5751,5 +5753,9 @@ records:
       validate as an integer; it is now owned. Separately, CLI diagnostics echoed attacker-influenced path and
       YAML-snippet text unescaped, so a filename containing a newline printed a standalone
       'actuation_supported: false' line indistinguishable from this tool's real boundary status -- a forged
-      authoritative claim, now collapsed to one line. 2026-08-04, pending immutable capture.
+      authoritative claim, now collapsed to one line. Finally, COPYING a table proved insufficient on its own:
+      a host that poisoned bool_values BEFORE the first cryodaq.lab_profile import had its value copied in, so
+      schema_version: true still validated as 1. Identity separation only blocks mutation that happens after
+      import; the boolean table is now written out literally and the ordering is exercised in a fresh process,
+      because an in-process test can only ever reach the easy ordering. 2026-08-04, pending immutable capture.
     green_evidence: pending

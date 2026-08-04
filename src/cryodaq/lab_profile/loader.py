@@ -110,7 +110,20 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     # ``yaml.SafeLoader.bool_values["true"] = 1`` would make ``schema_version:
     # true`` validate as the integer 1.  Owned as a copy of the standard
     # mapping, which is plain data rather than callables.
-    bool_values = dict(yaml.constructor.SafeConstructor.bool_values)
+    # Written OUT, not copied.  Copying reads the process-global mapping at
+    # import time, so a host that poisoned it BEFORE the first
+    # ``cryodaq.lab_profile`` import would have its value copied in --
+    # identity separation only blocks mutation that happens afterwards.
+    # These are the YAML 1.1 booleans; plain data, so owning them literally
+    # costs nothing and depends on no import ordering.
+    bool_values = {
+        "yes": True,
+        "no": False,
+        "true": True,
+        "false": False,
+        "on": True,
+        "off": False,
+    }
 
     def __init__(self, stream: object) -> None:
         super().__init__(stream)

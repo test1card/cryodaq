@@ -118,7 +118,6 @@ ALLOWED_CALL_NAMES = frozenset(
         "SystemExit",
         "any",
         "dataclass",
-        "dict",
         "enumerate",
         "field",
         "frozenset",
@@ -1679,6 +1678,57 @@ def test_host_bool_values_cannot_reach_the_profile_loader() -> None:
     finally:
         yaml.SafeLoader.bool_values.clear()
         yaml.SafeLoader.bool_values.update(original)
+
+
+_PRE_IMPORT_POISON = r"""
+import sys
+import yaml
+
+# Poison BEFORE the first cryodaq.lab_profile import.  Identity separation alone
+# does not help here: a table COPIED at import time copies whatever is already
+# there, so this ordering is the one that matters.
+yaml.SafeLoader.bool_values["true"] = 1
+
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+document = (
+    "schema_version: true\n"
+    "lab:\n  lab_id: x\n  display_name: y\n"
+    "instruments:\n  - type: lakeshore_218s\n    name: LS1\n"
+    "questions: []\n"
+)
+try:
+    parse_lab_profile(document)
+except LabProfileError:
+    print("REJECTED")
+else:
+    print("ACCEPTED")
+"""
+
+
+def test_pre_import_bool_poisoning_cannot_reach_the_profile_loader(tmp_path: Path) -> None:
+    """The host customises PyYAML, THEN the package is imported for the first time.
+
+    This must run in a fresh process: by the time this module is collected,
+    ``cryodaq.lab_profile`` is long since imported, so an in-process test can
+    only ever exercise the easy ordering.  Measured with a copied table: the
+    poisoned value was copied in and ``schema_version: true`` validated as 1.
+    """
+
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _PRE_IMPORT_POISON],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "REJECTED", completed.stdout + completed.stderr
 
 
 def test_cli_diagnostics_cannot_forge_a_status_line() -> None:
