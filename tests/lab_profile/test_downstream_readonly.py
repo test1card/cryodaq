@@ -923,6 +923,12 @@ def _fingerprint():
             continue
         try:
             members = {k: v for k, v in vars(module).items() if not k.startswith("__")}
+            # NOTE: encoded PER ATTRIBUTE below, not as one string per module.
+            # A single string forced volatility to be all-or-nothing, and
+            # calibration marks `re` volatile because of its compile cache --
+            # which then masked EVERY later change under `re`.  Measured:
+            # injecting `re.compile = lambda *a, **k: None` produced no
+            # differences at all.
             if name == "sys":
                 # Two members are pure IMPORT BOOKKEEPING and are excluded, both
                 # for the same reason: each is a function of what has been
@@ -939,7 +945,10 @@ def _fingerprint():
                 members.pop("path_importer_cache", None)
         except Exception:
             continue
-        prints[name] = hashlib.sha256(_encode(members, 5, name, set()).encode("utf-8", "replace")).hexdigest()
+        prints[name] = {
+            attribute: hashlib.sha256(_encode(value, 5, name, set()).encode("utf-8", "replace")).hexdigest()
+            for attribute, value in members.items()
+        }
     return prints
 
 
@@ -989,6 +998,25 @@ def snapshot():
         # fingerprint nor the audit hook sees it.  Measured -- the tracing
         # control reported nothing at all until this dimension existed.
         "hooks": [repr(sys.gettrace()), repr(sys.getprofile())],
+        # Standard-stream CONFIGURATION is incumbent host state, and this
+        # package already treats it as such -- the CLI reconfigures stdout and
+        # stderr to utf-8/replace and restores them afterwards, and there is a
+        # guard asserting that restore is exact.  But there was no dimension
+        # for it, so a regression that retunes a stream OUTSIDE the CLI restore
+        # path was invisible: injecting
+        # `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` at import
+        # time produced `differences: []`.  A property the package restores is a
+        # property the probe must be able to see change.
+        "streams": [
+            [
+                getattr(stream, "name", "?"),
+                getattr(stream, "encoding", None),
+                getattr(stream, "errors", None),
+                getattr(stream, "line_buffering", None),
+                getattr(stream, "newlines", None),
+            ]
+            for stream in (sys.stdout, sys.stderr, sys.stdin)
+        ],
         # os.umask raises NO audit event (measured), so it is read directly.
         # Reading requires setting, hence set-then-restore.  It changes the
         # permissions applied to every later file this process creates while
@@ -1037,10 +1065,40 @@ _third = _fingerprint()
 # measurement.
 _calibration_importlib.import_module("fractions")
 _fourth = _fingerprint()
-_volatile = {name for name in _first if _first.get(name) != _second.get(name)}
-_volatile |= {name for name in _second if _second.get(name) != _third.get(name)}
-_volatile |= {name for name in _third if _third.get(name) != _fourth.get(name)}
+def _volatile_pairs(earlier, later):
+    # (module, attribute) pairs, so a module with ONE unstable attribute does
+    # not become a blind spot for all its others.
+    pairs = set()
+    for module_name, attributes in earlier.items():
+        other = later.get(module_name)
+        if other is None:
+            continue
+        for attribute, value in attributes.items():
+            if other.get(attribute) != value:
+                pairs.add((module_name, attribute))
+        for attribute in other:
+            if attribute not in attributes:
+                pairs.add((module_name, attribute))
+    return pairs
+
+
+_volatile = _volatile_pairs(_first, _second) | _volatile_pairs(_second, _third) | _volatile_pairs(_third, _fourth)
 _baseline = _fingerprint()
+# THE PROBE'S OWN VARIABLES, recorded before the package runs.
+#
+# This script executes as `__main__`, so its instrument state -- the audit-hook
+# sink `_observed`, the argv ledger, the baselines themselves -- lives in a
+# module the fingerprint walks.  Per-attribute comparison made the instrument
+# visible to itself: a regression that merely WRITES A FILE reported
+# `module_state` moved, naming `__main__._observed`, which is the probe
+# recording that it had observed something.  `capabilities` already reports that
+# set as its own dimension, so this was double-counting the measurement as a
+# finding.
+#
+# Only names PRESENT NOW are excluded, and only in `__main__`.  A package that
+# writes a NEW name into `__main__` is still caught, because that name is not in
+# this set -- the exclusion is the instrument, not the module.
+_INSTRUMENT_NAMES = frozenset(vars(sys.modules["__main__"]))
 
 # Taken BEFORE the package is imported or executed: an effect that happens at
 # import time is exactly what an in-process guard cannot see, because by then
@@ -1104,21 +1162,31 @@ _final = _fingerprint()
 # finding: the whole claim is that validating a profile does not load the
 # driver registry or any authority-bearing module.
 _ALLOWED_NEW_MODULE_ROOTS = ("cryodaq.lab_profile", "cryodaq.drivers.capability_metadata")
+
+
+def _allowed_new_module(name):
+    # PACKAGE BOUNDARY, not str.startswith.  A bare prefix test let
+    # `cryodaq.drivers.capability_metadata_canary` pass as
+    # `cryodaq.drivers.capability_metadata`, so a new module could hide behind
+    # an allowed one by sharing its opening characters -- measured, the probe
+    # reported no new modules at all.
+    if name in _ALLOWED_NEW_MODULES:
+        return True
+    return any(name == root or name.startswith(root + ".") for root in _ALLOWED_NEW_MODULE_ROOTS)
 # Measured, not guessed: a clean import adds exactly `__future__` and `cryodaq`
 # beyond the roots above.  Both are inert -- `src/cryodaq/__init__.py` and
 # `src/cryodaq/drivers/__init__.py` are EMPTY files, and `__future__` carries
 # compiler flags and no authority.  Each name is listed individually so that
 # adding one is a visible decision rather than a widened prefix.
 _ALLOWED_NEW_MODULES = frozenset({"__future__", "cryodaq", "cryodaq.drivers"})
-_expected_new = sorted(
-    name
-    for name in set(_final) - set(_baseline)
-    if not name.startswith(_ALLOWED_NEW_MODULE_ROOTS) and name not in _ALLOWED_NEW_MODULES
-)
+_expected_new = sorted(name for name in set(_final) - set(_baseline) if not _allowed_new_module(name))
 _moved = sorted(
-    name
-    for name in _baseline
-    if name not in _volatile and _baseline[name] != _final.get(name)
+    f"{module_name}.{attribute}"
+    for module_name, attributes in _baseline.items()
+    for attribute, value in attributes.items()
+    if (module_name, attribute) not in _volatile
+    and not (module_name == "__main__" and attribute in _INSTRUMENT_NAMES)
+    and _final.get(module_name, {}).get(attribute) != value
 )
 if _moved:
     differences.append("module_state")
