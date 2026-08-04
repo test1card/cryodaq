@@ -95,7 +95,11 @@ ALLOWED_METHOD_NAMES = frozenset(
     {
         "ConstructorError",
         "__init__",
-        "__setattr__",
+        # __setattr__ is deliberately ABSENT: allowing it by name let
+        # ``yaml.__setattr__('safe_load', yaml.unsafe_load)`` rebind a module
+        # attribute process-wide.  It has its own branch that pins the receiver
+        # to ``object``, so an entry here would now be padding -- which
+        # test_every_allowlist_entry_is_load_bearing proves.
         "add",
         "append",
         "category",
@@ -203,6 +207,86 @@ def _aliases_foreign(value: ast.expr, foreign: set[str]) -> bool:
     # is harmless, because a violation additionally requires a mutation THROUGH
     # the name, and the package never does that to its own locals.
     return any(isinstance(node, ast.Name) and node.id in foreign for node in ast.walk(value))
+
+
+_FRESH = (
+    ast.Dict,
+    ast.List,
+    ast.Set,
+    ast.Tuple,
+    ast.DictComp,
+    ast.ListComp,
+    ast.SetComp,
+    ast.GeneratorExp,
+    ast.Constant,
+)
+
+
+_FRESH_CALLS = frozenset({"bytearray", "dict", "frozenset", "list", "set", "sorted", "tuple"})
+
+
+def _provably_local(tree: ast.AST, foreign: set[str]) -> set[str]:
+    """Names EVERY binding of which is a fresh literal in this file.
+
+    This is the inverse of chasing provenance.  Tracking where a foreign object
+    came from did not terminate -- aliases, attributes, containers, calls,
+    parameters, returns, pattern captures and cross-module exports were each a
+    separate route, and resolving call targets properly would mean writing a
+    scope-aware interprocedural analyser inside a test.
+
+    So the burden is flipped.  A mutation is allowed only when its receiver is
+    provably fresh: a container literal bound here, or ``self``.  Nothing needs
+    to be known about foreign objects at all, and a laundering route cannot
+    help, because whatever it produces is still not a literal bound in this
+    file.
+    """
+
+    def fresh(value: ast.expr) -> bool:
+        if isinstance(value, _FRESH):
+            return True
+        # ``set()``, ``dict()``, ``{}``-equivalents: builtin container
+        # constructors always return a NEW object.  Guarded against shadowing --
+        # ``from yaml import SafeLoader as set`` would make ``set()`` foreign.
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in _FRESH_CALLS
+            and value.func.id not in foreign
+        )
+
+    bound: dict[str, list[ast.expr]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                # BARE names only.  ``result[key] = ...`` is a mutation OF
+                # ``result``, not a binding of it, and counting it as one made
+                # ``result`` look re-bound to a call and therefore not local.
+                if isinstance(target, ast.Name) and node.value is not None:
+                    bound.setdefault(target.id, []).append(node.value)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            # A parameter is never a provably fresh local: its value comes from
+            # the caller.
+            for parameter in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
+                bound.setdefault(parameter.arg, []).append(node)
+    return {name for name, values in bound.items() if values and all(fresh(v) for v in values)}
+
+
+def _forbidden_mutation(node: ast.AST, target: ast.expr, local_receivers: set[str]) -> bool:
+    """True unless this mutation's receiver is provably a fresh local object."""
+
+    if not isinstance(target, (ast.Attribute, ast.Subscript)):
+        # A bare rebinding only moves a label; augmented assignment mutates in
+        # place first (``constructors |= {...}`` changes the foreign dict).
+        if not isinstance(node, ast.AugAssign) or not isinstance(target, ast.Name):
+            return False
+        return target.id != "self" and target.id not in local_receivers
+    receiver = target
+    while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+        receiver = receiver.value
+    if isinstance(receiver, ast.Name) and (receiver.id == "self" or receiver.id in local_receivers):
+        return False
+    return True
 
 
 def _mutates_foreign(node: ast.AST, target: ast.expr, foreign: set[str]) -> bool:
@@ -394,6 +478,8 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
                     imported_modules.add(parameter.arg)
                     changed = True
 
+    local_receivers = _provably_local(tree, imported_modules)
+
     violations: list[str] = []
     # A MODULE-LEVEL alias of a foreign object is exportable: another file in the
     # package can `from .source import Loader`, which this scan classifies as an
@@ -499,7 +585,7 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
             # so ``args = sys.argv[1:]`` marks ``args`` foreign even though the
             # slice is a fresh list -- without this, that ordinary line in
             # __main__.py would be reported as a boundary violation.
-            _mutates_foreign(node, target, imported_modules)
+            _forbidden_mutation(node, target, local_receivers)
             for target in (
                 node.targets
                 if isinstance(node, ast.Assign)
@@ -511,7 +597,10 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
             # Mutation WITHOUT a call: os.environ[...] = ..., sys.path[:] = ...,
             # del os.environ[...].  A call-only capability filter never sees these,
             # and os.environ writes can flip documented runtime bypasses.
-            violations.append(f"{label}: assigning into an imported module mutates state outside the boundary")
+            violations.append(
+                f"{label}: mutating through a receiver that is not a provably local literal reaches "
+                "state outside the boundary"
+            )
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _denied_dunder(node.name):
             # Defining a dunder is a reflection hook too: a module-level
             # __getattr__ resolves arbitrary attribute names at import time.
@@ -526,6 +615,15 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
                 violations.append(f"{label}: {func.id}() bypasses the static import boundary")
             elif isinstance(func, ast.Name) and func.id not in ALLOWED_CALL_NAMES | local_names:
                 violations.append(f"{label}: {func.id}() is not an allowlisted capability for a read-only artifact")
+            elif isinstance(func, ast.Attribute) and func.attr == "__setattr__":
+                # Allowing this by NAME let `yaml.__setattr__('safe_load',
+                # yaml.unsafe_load)` rebind a module attribute process-wide.  The
+                # package's only legitimate use is the frozen-dataclass idiom, so
+                # the receiver is pinned rather than the method name allowlisted.
+                if not (isinstance(func.value, ast.Name) and func.value.id == "object"):
+                    violations.append(
+                        f"{label}: __setattr__ is permitted only as object.__setattr__ on the instance being built"
+                    )
             elif isinstance(func, ast.Attribute) and func.attr not in ALLOWED_METHOD_NAMES:
                 violations.append(f"{label}: .{func.attr}() is not an allowlisted capability for a read-only artifact")
             elif isinstance(func, ast.Attribute) and func.attr == "open":
@@ -708,6 +806,21 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         "from yaml import SafeLoader\ndef p(*, ldr):\n    ldr.yaml_constructors['t'] = 1\np(ldr=SafeLoader)",
         # A nested definition must not legitimize a module-level foreign call.
         "from yaml import add_constructor as m\ndef helper():\n    def m(x):\n        return x\nm('t', None)",
+        # Laundering routes that a name-only call map cannot resolve: a
+        # duplicate helper name, a method rather than a function, and a return
+        # value.  None of these is chased -- the receiver simply is not a
+        # provably local literal.
+        (
+            "from yaml import SafeLoader\ndef q(l):\n    l.yaml_constructors['t'] = 1\n"
+            "def h():\n    def q(x, y):\n        return x\nq(SafeLoader)"
+        ),
+        (
+            "from yaml import SafeLoader\nclass H:\n    def get(self, l):\n"
+            "        l.yaml_constructors['t'] = 1\nH().get(SafeLoader)"
+        ),
+        "from yaml import SafeLoader\ndef g():\n    return SafeLoader\nL = g()\nL.yaml_constructors['t'] = 1",
+        # Rebinding a module attribute process-wide through __setattr__.
+        "import yaml\nyaml.__setattr__('safe_load', yaml.unsafe_load)",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
