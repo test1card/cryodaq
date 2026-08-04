@@ -1577,6 +1577,83 @@ def test_host_implicit_resolvers_cannot_reach_the_profile_loader(tmp_path: Path)
         yaml.SafeLoader.yaml_implicit_resolvers.update(original)
 
 
+def test_spoofed_pattern_matchers_cannot_be_inherited(tmp_path: Path) -> None:
+    """`isinstance` consults `__class__` and is spoofable; the check must be exact.
+
+    Measured: a matcher declaring ``__class__ = re.Pattern`` passed an
+    ``isinstance`` filter and its ``match()`` ran during a successful parse.
+    """
+
+    import re as _re
+
+    import yaml
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("intact", encoding="utf-8")
+
+    class SpoofedPattern:
+        __class__ = _re.Pattern  # type: ignore[assignment]
+
+        def match(self, value: str) -> None:
+            victim.unlink(missing_ok=True)
+            return None
+
+    original = {key: list(value) for key, value in yaml.resolver.Resolver.yaml_implicit_resolvers.items()}
+    yaml.resolver.Resolver.add_implicit_resolver("tag:yaml.org,2002:str", SpoofedPattern(), None)
+    try:
+        assert parse_lab_profile(_VALID_TEXT).lab_id == "readonly-lab"
+        assert victim.read_text(encoding="utf-8") == "intact", "a spoofed matcher ran during validation"
+    finally:
+        yaml.resolver.Resolver.yaml_implicit_resolvers.clear()
+        yaml.resolver.Resolver.yaml_implicit_resolvers.update(original)
+
+
+def test_host_path_resolvers_cannot_reach_the_profile_loader() -> None:
+    """`yaml_path_resolvers` is a third shared mutable table; it must be owned too.
+
+    ``yaml.SafeLoader.add_path_resolver(...)`` retags nodes BY POSITION, so a
+    host could force ``schema_version`` to a different type inside a lab profile.
+    """
+
+    import yaml
+
+    from cryodaq.lab_profile.loader import _StrictLabProfileLoader
+
+    assert _StrictLabProfileLoader.yaml_path_resolvers is not yaml.SafeLoader.yaml_path_resolvers
+
+    original = dict(yaml.SafeLoader.yaml_path_resolvers)
+    yaml.SafeLoader.add_path_resolver("tag:yaml.org,2002:int", ["schema_version"], str)
+    try:
+        assert _StrictLabProfileLoader.yaml_path_resolvers == {}
+        assert parse_lab_profile(_VALID_TEXT).lab_id == "readonly-lab"
+    finally:
+        yaml.SafeLoader.yaml_path_resolvers.clear()
+        yaml.SafeLoader.yaml_path_resolvers.update(original)
+
+
+def test_cli_restores_an_aliased_stream_exactly_once() -> None:
+    """A host may assign ONE wrapper to both stdout and stderr.
+
+    Measured: a naive loop recorded that wrapper twice -- the second time in its
+    already-retuned UTF-8 state -- then restored CP1252 and immediately
+    overwrote it with UTF-8.
+    """
+
+    import io as _io
+
+    from cryodaq.lab_profile.__main__ import main
+
+    shared = _io.TextIOWrapper(_io.BytesIO(), encoding="cp1252", errors="strict")
+    original_out, original_err = sys.stdout, sys.stderr
+    sys.stdout = sys.stderr = shared
+    try:
+        main([])
+        encoding, errors = shared.encoding, shared.errors
+    finally:
+        sys.stdout, sys.stderr = original_out, original_err
+    assert (encoding, errors) == ("cp1252", "strict"), (encoding, errors)
+
+
 def test_cli_restores_host_stream_configuration() -> None:
     """The CLI retunes stdout/stderr to UTF-8, and must put them back.
 

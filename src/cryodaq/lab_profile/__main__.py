@@ -28,9 +28,12 @@ def main(argv: list[str] | None = None) -> int:
     # place permanently retunes the host's own stdout and stderr to UTF-8 with
     # replacement, which is an incumbent change this artifact has no business
     # making.  Measured: two CP1252 wrappers stayed UTF-8 after main([]).
+    # Deduplicated BY IDENTITY: a host may assign the same wrapper to both
+    # streams, in which case a naive loop records the already-retuned UTF-8
+    # state the second time and restores that instead of the original.
     restore: list[tuple[io.TextIOWrapper, str, str | None]] = []
     for stream in (sys.stdout, sys.stderr):
-        if isinstance(stream, io.TextIOWrapper):
+        if isinstance(stream, io.TextIOWrapper) and not any(seen is stream for seen, _, _ in restore):
             restore.append((stream, stream.encoding, stream.errors))
             stream.reconfigure(encoding="utf-8", errors="replace")
     try:

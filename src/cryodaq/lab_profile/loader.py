@@ -91,11 +91,20 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     #
     # Rebuilt here rather than copied: only tags in the owned vocabulary above
     # survive, and only when the matcher is a genuine compiled pattern, so an
-    # object with a hand-written ``match`` cannot be inherited.
+    # object with a hand-written ``match`` cannot be inherited.  The type check
+    # is EXACT: ``isinstance`` consults ``__class__`` and is spoofable, so a
+    # matcher merely reporting ``re.Pattern`` would have passed.
     yaml_implicit_resolvers = {
-        prefix: [(tag, matcher) for tag, matcher in entries if tag in _OWNED_TAGS and isinstance(matcher, re.Pattern)]
+        prefix: [(tag, matcher) for tag, matcher in entries if tag in _OWNED_TAGS and type(matcher) is re.Pattern]
         for prefix, entries in yaml.resolver.Resolver.yaml_implicit_resolvers.items()
     }
+
+    # ``yaml_path_resolvers`` is a third shared mutable table.  An ordinary
+    # ``yaml.SafeLoader.add_path_resolver(...)`` call would otherwise retag
+    # nodes by position inside a lab profile -- e.g. forcing ``schema_version``
+    # to a different type -- so it is owned empty.  This loader resolves by
+    # implicit pattern only; it has no path-directed resolution to preserve.
+    yaml_path_resolvers: dict[object, object] = {}
 
     def __init__(self, stream: object) -> None:
         super().__init__(stream)

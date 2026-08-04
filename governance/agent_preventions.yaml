@@ -5715,6 +5715,12 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_cli_restores_host_stream_configuration
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_spoofed_pattern_matchers_cannot_be_inherited
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_host_path_resolvers_cannot_reach_the_profile_loader
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_cli_restores_an_aliased_stream_exactly_once
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
         ci_partition: remaining
     red_evidence: >-
@@ -5731,5 +5737,10 @@ records:
       in-process; it now restores what it changed.
       Guard-side escapes are recorded on the false-green pairs, and the hostile-committer class that the static
       lint no longer claims is listed verbatim in _OUT_OF_SCOPE_FOR_STATIC_LINT with its rubric justification.
-      2026-08-04, pending immutable capture.
+      Three follow-on variants were then reproduced against the first round of those fixes and are also closed:
+      a matcher spoofing re.Pattern through __class__ passed an isinstance filter and ran during a successful
+      parse, so the type check is now exact; yaml_path_resolvers was a THIRD shared mutable table, so an
+      ordinary add_path_resolver call retagged nodes by position inside a profile, and it is now owned empty;
+      and a host assigning ONE wrapper to both stdout and stderr defeated the stream restore, which now
+      deduplicates by identity. 2026-08-04, pending immutable capture.
     green_evidence: pending
