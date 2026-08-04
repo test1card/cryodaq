@@ -111,10 +111,17 @@ def _construct_bool(loader: yaml.Loader, node: yaml.Node) -> bool:
 
 
 def _construct_int(loader: yaml.Loader, node: yaml.Node) -> int:
-    # _INT_PATTERN admits only ^[-+]?[0-9]+$, so plain int() is both correct and
-    # STRICTER than PyYAML's, which also accepts 0x/0b/underscored/sexagesimal
-    # forms.  An explicit !!int tag carrying one of those now fails closed.
-    return int(_scalar_text(node))
+    # The pattern is applied HERE, not assumed.  _INT_PATTERN gates only
+    # IMPLICIT resolution: an explicitly tagged `!!int 0_1` never passes through
+    # a resolver, and plain int() accepts underscores -- measured, it validated
+    # as 1.  The previous comment here asserted that such forms "fail closed",
+    # which was written without being executed and was false.
+    text = _scalar_text(node)
+    if _INT_PATTERN.match(text) is None:
+        raise yaml.constructor.ConstructorError(
+            None, None, f"integer {text!r} is outside the lab profile decimal grammar", node.start_mark
+        )
+    return int(text)
 
 
 def _construct_seq(loader: yaml.Loader, node: yaml.Node) -> object:
@@ -300,6 +307,20 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
         finally:
             self._lab_profile_depth -= 1
 
+    def get_single_data(self) -> object:
+        """The parse entry point, DEFINED HERE rather than inherited.
+
+        ``BaseConstructor.get_single_data`` is an ordinary class attribute on a
+        shared PyYAML base.  Rebound before this package's first import, it
+        replaced the whole parse: measured, a wrapper returned a forged profile
+        and deleted a file while the strict grammar never ran.
+        """
+
+        node = self.get_single_node()
+        if node is None:
+            return None
+        return self.construct_document(node)
+
     def construct_mapping(self, node: yaml.Node, deep: bool = False) -> dict[object, object]:
         if not isinstance(node, yaml.MappingNode):
             raise yaml.constructor.ConstructorError(None, None, "expected a mapping", node.start_mark)
@@ -338,16 +359,30 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
 # parse below calls it directly.  ``get_single_data`` and ``dispose`` are
 # resolved through _StrictLabProfileLoader's MRO at import time rather than
 # through ``yaml`` at call time.
-_LOADER_GET_SINGLE_DATA: Final = _StrictLabProfileLoader.get_single_data
 _LOADER_DISPOSE: Final = _StrictLabProfileLoader.dispose
 
 
 def _parse_strict_yaml(text: str) -> object:
-    """Run the owned loader directly, with no module-attribute indirection."""
+    """Run the owned loader directly, with no module-attribute indirection.
+
+    Binding ``get_single_data`` at import time was NOT enough and the reason is
+    worth stating: it is inherited from ``yaml.constructor.BaseConstructor``, so
+    a host that rebinds it before the first import is captured by the binding
+    exactly as ``yaml.load`` was.  Measured: a replacement returned a forged
+    profile and deleted a file, and the strict grammar never ran.  Fixing the
+    ``yaml.load`` instance without looking at what it called was the same
+    mistake, one rung lower.
+
+    ``_StrictLabProfileLoader`` now defines ``get_single_data`` itself, so the
+    entry point belongs to this package.  Everything BELOW it -- the composer,
+    parser and scanner methods -- remains inherited and is NOT owned; see the
+    provenance guard in the tests, which is what actually detects a foreign
+    replacement anywhere on that chain.
+    """
 
     loader = _StrictLabProfileLoader(text)
     try:
-        return _LOADER_GET_SINGLE_DATA(loader)
+        return loader.get_single_data()
     finally:
         _LOADER_DISPOSE(loader)
 

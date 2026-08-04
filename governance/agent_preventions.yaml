@@ -5745,6 +5745,10 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_host_cannot_replace_the_parse_entry_point
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_no_inherited_pyyaml_callable_comes_from_outside_pyyaml
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_effect_probe_reports_a_newly_imported_module
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_pre_import_constructor_rebinding_cannot_reach_the_profile_loader
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
@@ -5857,5 +5861,28 @@ records:
       constructors were rewritten to build their containers with append() and subscript assignment instead.
       The lint was right and the code changed; widening an allowlist to silence a scan is how it stops
       meaning anything.
+      The NEXT round found the same entry-point defect one rung lower, which is the finding that matters
+      most in this record. Moving the parse off yaml.load and binding get_single_data at import time did not
+      close the class: get_single_data is inherited from yaml.constructor.BaseConstructor, so a host that
+      rebinds it before the first import is captured by the binding exactly as yaml.load was. Measured -- a
+      replacement returned a forged profile and deleted a file while the strict grammar never ran. Fixing the
+      instance without measuring the chain it called was the same mistake the data-table guard exists to
+      prevent, repeated on the method chain. The loader now DEFINES get_single_data, and, more importantly,
+      a derived guard asserts PROVENANCE for every callable on the loader's MRO: each must have been compiled
+      inside the installed PyYAML package or inside this repository, and must resolve its globals through a
+      yaml or cryodaq namespace. That covers rungs nobody has enumerated, including ones added by a future
+      PyYAML release. Provenance rather than bytecode pinning, deliberately: hashing upstream's compiled code
+      would break on every release and teach the next author to re-baseline instead of read. Stated limit --
+      it checks where a callable was compiled, not what it does, so a patched PyYAML INSTALLATION passes.
+      Three further defects in the same round: an explicit `!!int 0_1` validated as 1 because int() accepts
+      underscores while _INT_PATTERN gates only IMPLICIT resolution -- the comment claiming such forms failed
+      closed was written without being executed and was false, and the pattern is now applied in the
+      constructor; the callable fingerprint still matched a replacement built as
+      types.FunctionType(original.__code__, {...}), which reuses the bytecode while resolving globals
+      elsewhere, so globals, defaults and closure are now encoded; and _expected_new was COMPUTED AND NEVER
+      USED, so module-set growth was never reported at all -- a plain `import decimal` injected into the
+      checkout left the probe reporting no differences. It is now a reported dimension with a positive
+      control, its allowlist measured from a clean run rather than guessed. A dimension the report does not
+      carry is not measured, however carefully it is computed.
       2026-08-04, pending immutable capture.
     green_evidence: pending

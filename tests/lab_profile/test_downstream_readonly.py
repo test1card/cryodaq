@@ -126,11 +126,10 @@ ALLOWED_CALL_NAMES = frozenset(
         # narrower than PyYAML's own, which also accepts 0x/0b/sexagesimal.
         "int",
         "isinstance",
-        # This package's own import-time-bound entry point.  They exist
+        # This package's own import-time-bound disposer.  It exists
         # precisely so validation does not look up `yaml.load` at call time,
         # which a host can rebind -- measured: a wrapper that deleted a file and
         # returned a forged dict was accepted as a valid profile.
-        "_LOADER_GET_SINGLE_DATA",
         "_LOADER_DISPOSE",
         "len",
         "list",
@@ -168,7 +167,16 @@ ALLOWED_METHOD_NAMES = frozenset(
         # items() is a pure read.  Neither is a mutation spelling, so neither
         # weakens what this vocabulary is for.
         "construct_mapping",
+        # The owned parse entry point calls these two on ITSELF.  They are the
+        # rungs below get_single_data that remain inherited -- named here rather
+        # than hidden, and covered by the MRO provenance guard.
+        "get_single_node",
+        "construct_document",
+        "get_single_data",
         "items",
+        # _INT_PATTERN.match(): explicit !!int text is now checked against the
+        # loader's decimal grammar instead of trusting int().
+        "match",
         "normalize",
         "open",
         "peek_event",
@@ -868,10 +876,23 @@ def _encode(value, depth, home, seen):
                 getattr(value, "__func__", None), "__code__", None
             )
             if code is not None:
+                # The code object alone is NOT identity either.  A replacement
+                # built as types.FunctionType(original.__code__, {...}) reuses
+                # the bytecode verbatim while resolving its global lookups
+                # through a different namespace -- measured, the probe reported
+                # `differences: []` while the swapped function called a
+                # different `load`.  So the namespace, defaults and closure are
+                # part of the encoding.
+                function_globals = getattr(value, "__globals__", None)
+                globals_identity = id(function_globals) if function_globals is not None else 0
                 return (
                     f"<fn {module_name}.{qualname}"
                     f" @{getattr(code, 'co_filename', '?')}:{getattr(code, 'co_firstlineno', '?')}"
-                    f" #{hash(getattr(code, 'co_code', b''))}>"
+                    f" #{hash(getattr(code, 'co_code', b''))}"
+                    f" g={function_globals.get('__name__', '?') if function_globals is not None else '?'}"
+                    f"/{globals_identity}"
+                    f" d={_encode(getattr(value, '__defaults__', None), depth - 1, home, seen)}"
+                    f" c={len(getattr(value, '__closure__', ()) or ())}>"
                 )
             # C functions and builtins have no code object.  Fall back to the
             # exact type plus the object's own repr, which for builtins encodes
@@ -1079,7 +1100,21 @@ else:
 after = snapshot()
 differences = [key for key in before if before[key] != after[key]]
 _final = _fingerprint()
-_expected_new = set(_final) - set(_baseline)
+# Modules the boundary is ALLOWED to pull in.  Anything else appearing is a
+# finding: the whole claim is that validating a profile does not load the
+# driver registry or any authority-bearing module.
+_ALLOWED_NEW_MODULE_ROOTS = ("cryodaq.lab_profile", "cryodaq.drivers.capability_metadata")
+# Measured, not guessed: a clean import adds exactly `__future__` and `cryodaq`
+# beyond the roots above.  Both are inert -- `src/cryodaq/__init__.py` and
+# `src/cryodaq/drivers/__init__.py` are EMPTY files, and `__future__` carries
+# compiler flags and no authority.  Each name is listed individually so that
+# adding one is a visible decision rather than a widened prefix.
+_ALLOWED_NEW_MODULES = frozenset({"__future__", "cryodaq", "cryodaq.drivers"})
+_expected_new = sorted(
+    name
+    for name in set(_final) - set(_baseline)
+    if not name.startswith(_ALLOWED_NEW_MODULE_ROOTS) and name not in _ALLOWED_NEW_MODULES
+)
 _moved = sorted(
     name
     for name in _baseline
@@ -1087,6 +1122,12 @@ _moved = sorted(
 )
 if _moved:
     differences.append("module_state")
+if _expected_new:
+    # This was computed and then NEVER USED, so module-set growth was never
+    # reported at all: injecting a plain `import decimal` into the checkout left
+    # the probe reporting `differences: []`.  A dimension the report does not
+    # carry is not measured, however carefully it is computed.
+    differences.append("new_modules")
 if _argv_rewrites:
     differences.append("argv")
 # Report the tree actually executed. Measuring the wrong checkout is this
@@ -1098,6 +1139,7 @@ report_path.write_text(
             "differences": differences,
             "tree": measured,
             "moved_modules": _moved[:12],
+            "new_modules": _expected_new[:12],
             "argv_rewrites": _argv_rewrites[:4],
         }
     ),
@@ -1302,7 +1344,9 @@ _REGRESSIONS = {
     # coverage.  Loopback with an ephemeral port: deterministic, reaches no
     # network.
     "network_socket": (
-        {"capabilities"},
+        # Two dimensions, because `import socket` really does both: it acquires
+        # a capability AND grows the module set.  Recorded as measured.
+        {"capabilities", "new_modules"},
         "import socket\n_s = socket.socket()\n_s.bind(('127.0.0.1', 0))\n_s.close()",
     ),
     # Content unchanged, so the tree hash cannot see it; only the audit hook can.
@@ -1391,6 +1435,27 @@ def test_import_and_parse_leave_incumbent_process_state_untouched(tmp_path: Path
     """
 
     assert _probe(_isolated_checkout(tmp_path), mode)["differences"] == []
+
+
+def test_effect_probe_reports_a_newly_imported_module(tmp_path: Path) -> None:
+    """`_expected_new` was computed and never reported, so this never fired.
+
+    Measured before the fix: injecting a plain ``import decimal`` into the
+    throwaway checkout left the probe reporting ``differences: []``, even though
+    the boundary's central claim is that validating a profile does not pull in
+    authority-bearing modules. A dimension the report does not carry is not
+    measured, however carefully it is computed -- so it now has a control.
+    """
+
+    checkout = _isolated_checkout(tmp_path)
+    entry_point = checkout / "src" / "cryodaq" / "lab_profile" / "__init__.py"
+    entry_point.write_text(
+        entry_point.read_text(encoding="utf-8") + "\nimport decimal  # REGRESSION\n",
+        encoding="utf-8",
+    )
+    report = _probe(checkout, "import")
+    assert "new_modules" in report["differences"], report
+    assert "decimal" in report["new_modules"], report
 
 
 @pytest.mark.parametrize(("mode", "entry_point"), (("import", "__init__.py"), ("cli", "__main__.py")))
@@ -1773,6 +1838,66 @@ def test_no_inherited_pyyaml_state_is_left_unowned() -> None:
     assert aliased == {}, (
         f"these overrides ALIAS the inherited object rather than owning it: {sorted(aliased.values())}. "
         "Define the value in the package; assigning the inherited one owns nothing."
+    )
+
+
+def test_no_inherited_pyyaml_callable_comes_from_outside_pyyaml() -> None:
+    """The METHOD chain, not just the data tables.
+
+    ``yaml.load`` was replaceable; the fix bound ``get_single_data`` at import
+    time; that was inherited from ``BaseConstructor`` and equally replaceable --
+    the SAME defect one rung lower, found the round after. Fixing instances of a
+    class one at a time is exactly what the data-table guard exists to stop, and
+    the method chain had no equivalent.
+
+    So this asserts provenance rather than enumerating rungs: every callable
+    reachable through the loader's MRO must have been COMPILED INSIDE the
+    installed PyYAML package or inside this repository. A host that rebinds any
+    method -- at any depth, before or after import -- installs a function whose
+    code object was compiled somewhere else, and that fails here.
+
+    Provenance, deliberately, not bytecode pinning: hashing PyYAML's compiled
+    code would break on every upstream release and teach the next author to
+    re-baseline the guard instead of reading it.
+
+    KNOWN LIMIT, stated because the alternative is overclaiming: this checks
+    where a callable was compiled, not what it does. A replacement that reuses
+    PyYAML's own code object is covered by ``__globals__`` below, but a patched
+    PyYAML *installation* would pass. That is a supply-chain question this guard
+    does not answer and does not pretend to.
+    """
+
+    import yaml
+
+    from cryodaq.lab_profile.loader import _StrictLabProfileLoader
+
+    yaml_root = str(Path(yaml.__file__).resolve().parent).lower()
+    repo_root = str(REPO_ROOT.resolve()).lower()
+    foreign: dict[str, str] = {}
+
+    for klass in _StrictLabProfileLoader.__mro__:
+        if klass is object:
+            continue
+        for name, value in vars(klass).items():
+            function = getattr(value, "__func__", value)
+            code = getattr(function, "__code__", None)
+            if code is None:
+                continue
+            origin = str(Path(code.co_filename).resolve()).lower()
+            if not (origin.startswith(yaml_root) or origin.startswith(repo_root)):
+                foreign.setdefault(f"{klass.__name__}.{name}", origin)
+                continue
+            # Same code object, different globals is the other half: a
+            # replacement built with types.FunctionType(original.__code__, {...})
+            # is compiled in PyYAML's file yet resolves its global lookups
+            # through the attacker's namespace.
+            globals_name = getattr(function, "__globals__", {}).get("__name__", "?")
+            if globals_name.split(".")[0] not in {"yaml", "cryodaq"}:
+                foreign.setdefault(f"{klass.__name__}.{name}", f"globals={globals_name}")
+
+    assert foreign == {}, (
+        f"these callables on the loader's MRO did not come from PyYAML or this repository: {sorted(foreign.items())}. "
+        "A host that rebinds a parse method at any depth lands here."
     )
 
 
