@@ -765,3 +765,21 @@ Report these rather than working around them silently.
 - **The descriptor draft generator is template-bound.** §3.5 — it cannot
   produce a manifest for an instrument type absent from the shipped template.
 - **No completeness check ties `config/channels.yaml` to the manifest.** §5.3.
+- **A new driver type has TWO declarations, and missing the second one is a
+  startup failure, not a warning.** Adding a driver implementation plus its
+  entry in `BUILTIN_DRIVER_SPECS` (`src/cryodaq/drivers/registry.py`) is not
+  sufficient. The same type must also be declared in
+  `_BUILTIN_DRIVER_METADATA_ROWS` in
+  `src/cryodaq/drivers/capability_metadata.py`, with a matching trust class and
+  capability set. Importing the registry re-derives the inert table from the
+  live specs and raises `DriverRegistryError: driver capability metadata drift
+  between the registry specs and the inert table: <type>` on any disagreement,
+  so the engine will not start until both agree.
+
+  The duplication is deliberate and must not be "fixed" by having
+  `capability_metadata` import the registry. That module exists so a downstream
+  consumer — `cryodaq.lab_profile`, and anything like it — can read capability
+  truth *without* loading the authority-bearing registry, which owns the driver
+  constructors. Importing the registry from it would hand every such consumer
+  the construction authority the split exists to withhold. Fail-closed drift
+  detection is the price of that boundary; keep both rows in step instead.

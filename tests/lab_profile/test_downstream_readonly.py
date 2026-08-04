@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -564,10 +566,15 @@ def _incumbent_snapshot() -> tuple[object, dict[str, str]]:
 
 
 _RUNTIME_PROBE = r"""
-import hashlib, json, os, sys
+import hashlib, json, os, runpy, sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+mode = sys.argv[2]
+# The report goes to a FILE, never stdout: in cli mode the module entry point
+# prints its own validation output there, and a report parsed out of a stream
+# the measured code also writes to is not a measurement.
+report_path = Path(sys.argv[3])
 payload = json.loads(sys.stdin.read())
 
 
@@ -576,31 +583,140 @@ def snapshot():
         "configs": {n: hashlib.sha256((root / n).read_bytes()).hexdigest() for n in payload["files"]},
         "environ": sorted(os.environ.items()),
         "sys_path": list(sys.path),
+        # The working directory is process state the package can move: a single
+        # os.chdir redirects every later relative path used by its long-lived
+        # host, while touching no file, no variable and no sys.path entry.
+        "cwd": os.getcwd(),
     }
 
 
-# Taken BEFORE the import: an import-time write is exactly what the in-process
-# guard cannot see, because there the package is already imported.
+# Taken BEFORE the package is imported or executed: an effect that happens at
+# import time is exactly what an in-process guard cannot see, because by then
+# the package has already run.
 before = snapshot()
 
-import cryodaq.lab_profile as lab_profile
+if mode == "import":
+    import cryodaq.lab_profile as lab_profile
 
-for text in payload["texts"]:
+    for text in payload["texts"]:
+        try:
+            lab_profile.parse_lab_profile(text)
+        except Exception:
+            pass
+    measured = lab_profile.__file__
+else:
+    # The DOCUMENTED production path.  runpy executes __main__.py under the same
+    # module machinery as `python -m cryodaq.lab_profile`, but inside THIS
+    # process, so any effect it has on the incumbent config, the environment,
+    # sys.path or the working directory lands in the after-snapshot instead of
+    # vanishing when a grandchild process exits.
+    sys.argv = ["cryodaq.lab_profile", payload["profile"]]
     try:
-        lab_profile.parse_lab_profile(text)
-    except Exception:
+        runpy.run_module("cryodaq.lab_profile", run_name="__main__", alter_sys=True)
+    except SystemExit:
         pass
+    measured = sys.modules["cryodaq.lab_profile"].__file__
 
 after = snapshot()
 differences = [key for key in before if before[key] != after[key]]
-# Report the tree actually imported. Measuring the wrong checkout is this
+# Report the tree actually executed. Measuring the wrong checkout is this
 # repository's single most expensive recurring mistake, and a guard that cannot
 # say which source it exercised is not evidence.
-print(json.dumps({"differences": differences, "tree": lab_profile.__file__}))
+report_path.write_text(json.dumps({"differences": differences, "tree": measured}), encoding="utf-8")
 """
 
 
-def test_import_and_parse_leave_incumbent_process_state_untouched() -> None:
+def _isolated_checkout(tmp_path: Path) -> Path:
+    """Build the throwaway checkout the probe is allowed to damage.
+
+    The live repository is never the mutation target.  If the boundary ever
+    regresses to an import-time write, the guard has to turn red *without*
+    having first truncated the developer's real ``config/safety.yaml`` --
+    a guard whose failure mode is destroying uncommitted work is not a guard
+    anyone can afford to run.
+    """
+
+    checkout = tmp_path / "checkout"
+    shutil.copytree(
+        REPO_ROOT / "src" / "cryodaq",
+        checkout / "src" / "cryodaq",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    for name in INCUMBENT_CONFIG_FILES:
+        destination = checkout / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / name, destination)
+        # Byte-for-byte, so a hash difference means the package moved, not that
+        # the fixture was already unlike the thing it stands in for.
+        assert destination.read_bytes() == (REPO_ROOT / name).read_bytes(), name
+    shutil.copyfile(REPO_ROOT / "docs" / "examples" / "lab_profile.imaginary_lab.yaml", checkout / "profile.yaml")
+    return checkout
+
+
+def _probe(checkout: Path, mode: str) -> dict:
+    payload = json.dumps(
+        {
+            "files": list(INCUMBENT_CONFIG_FILES),
+            "texts": [_VALID_TEXT, *HOSTILE_TEXTS],
+            "profile": str(checkout / "profile.yaml"),
+        }
+    )
+    # *** The child gets a CLEAN environment, never dict(os.environ). ***
+    # This module imports cryodaq.lab_profile at its top, so by the time these
+    # tests run the package has ALREADY executed inside the pytest process. An
+    # inherited environment therefore carries any import-time mutation the
+    # package performed, the child's baseline starts out already-mutated, and
+    # setting the same variable again changes nothing -- the guard reports green
+    # against the very defect it exists to catch. Measured: with an inherited
+    # environment an injected os.environ write was reported as no difference,
+    # while the identical child run from an uncontaminated parent reported it.
+    # Only what CPython needs to start is passed through.
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    env["PYTHONPATH"] = str(checkout / "src")
+    # A hand-built environment DROPS PYTHONDONTWRITEBYTECODE, and the child then
+    # compiles __pycache__/*.pyc beside whatever it imports.  Against the
+    # exported candidate tree that changed the evidence leaf set and failed the
+    # run with `exported candidate leaf set changed (unexpected=[... .pyc])`,
+    # listing exactly the import closure of cryodaq.lab_profile.  The copied
+    # checkout already keeps that out of the candidate tree; -B and the variable
+    # make it true of the child itself rather than a property of where it points.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    report_path = checkout.parent / f"report-{mode}.json"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _RUNTIME_PROBE, str(checkout), mode, str(report_path)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=checkout,
+        timeout=180,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    # The measuring apparatus must not modify the tree it measures.  In CI that
+    # tree is the exported candidate, whose leaf set is the evidence, so a
+    # stray .pyc is a hard contract violation and not a tidiness point.
+    stray = sorted(path.relative_to(checkout).as_posix() for path in checkout.rglob("*.pyc"))
+    assert stray == [], f"the probe wrote bytecode into the tree it measures: {stray}"
+    assert report_path.is_file(), f"probe wrote no report\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert Path(report["tree"]).is_relative_to(checkout), f"measured the wrong checkout: {report['tree']}"
+    return report
+
+
+# Each entry is a capability the read-only claim excludes, written the way a
+# regression would actually arrive.  They are controls, not a denylist: nothing
+# matches on these strings, and the guard measures the resulting state.
+_REGRESSIONS = {
+    "configs": "open(os.path.join(os.getcwd(), 'config', 'safety.yaml'), 'w').write('disabled: true')",
+    "environ": "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
+    "sys_path": "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))",
+    "cwd": "os.chdir(os.path.dirname(os.getcwd()))",
+}
+
+
+@pytest.mark.parametrize("mode", ("import", "cli"))
+def test_import_and_parse_leave_incumbent_process_state_untouched(tmp_path: Path, mode: str) -> None:
     """Measure the read-only claim by EFFECT, in a fresh process, not by spelling.
 
     The static scan constrains what the package's source may say; this
@@ -610,38 +726,70 @@ def test_import_and_parse_leave_incumbent_process_state_untouched() -> None:
     at all (``os.environ[...] = ...``, ``sys.path[:] = [...]``) -- all of which
     defeated, or would defeat, a purely syntactic capability check.
 
-    Crucially the baseline is taken BEFORE ``cryodaq.lab_profile`` is imported.
+    Both entry points are exercised.  ``import`` covers the library path;
+    ``cli`` runs ``__main__`` the way the documented
+    ``python -m cryodaq.lab_profile`` invocation does, which the earlier
+    version of this guard never executed -- so a side effect added to
+    ``__main__.py`` was unobserved by every test in this file.
+
+    Crucially the baseline is taken BEFORE the package is imported or run.
     ``test_hostile_corpus_leaves_incumbent_state_untouched`` cannot do that: by
     the time it runs, this module's own import has already executed the
     package, so an import-time write would be inside its baseline.
     """
 
-    payload = json.dumps({"files": list(INCUMBENT_CONFIG_FILES), "texts": [_VALID_TEXT, *HOSTILE_TEXTS]})
-    # *** The child gets a CLEAN environment, never dict(os.environ). ***
-    # This module imports cryodaq.lab_profile at its top, so by the time this
-    # test runs the package has ALREADY executed inside the pytest process. An
-    # inherited environment therefore carries any import-time mutation the
-    # package performed, the child's baseline starts out already-mutated, and
-    # setting the same variable again changes nothing -- the guard reports green
-    # against the very defect it exists to catch. Measured: with an inherited
-    # environment an injected os.environ write was reported as no difference,
-    # while the identical child run from an uncontaminated parent reported it.
-    # Only what CPython needs to start is passed through.
+    assert _probe(_isolated_checkout(tmp_path), mode)["differences"] == []
+
+
+@pytest.mark.parametrize(("mode", "entry_point"), (("import", "__init__.py"), ("cli", "__main__.py")))
+@pytest.mark.parametrize("dimension", sorted(_REGRESSIONS))
+def test_effect_guard_reports_a_real_regression(tmp_path: Path, mode: str, entry_point: str, dimension: str) -> None:
+    """Positive control: a green guard is only evidence if it can go red.
+
+    Each regression is injected into the throwaway checkout and must be
+    reported, on the entry point that actually executes it.  The ``cli`` case
+    is what binds the claim that the documented CLI is exercised: nothing in
+    ``import`` mode runs ``__main__.py``, so if the probe were not really
+    running the module entry point this control would observe no difference and
+    fail.
+    """
+
+    checkout = _isolated_checkout(tmp_path)
+    module = checkout / "src" / "cryodaq" / "lab_profile" / entry_point
+    source = module.read_text(encoding="utf-8")
+    # Inserted AFTER the __future__ import, which must stay first in the file.
+    anchor = "from __future__ import annotations\n"
+    assert anchor in source, entry_point
+    module.write_text(
+        source.replace(anchor, f"{anchor}import os, sys\n{_REGRESSIONS[dimension]}\n", 1),
+        encoding="utf-8",
+    )
+    assert _probe(checkout, mode)["differences"] == [dimension]
+
+
+def test_documented_cli_spelling_validates_the_shipped_example(tmp_path: Path) -> None:
+    """The documented invocation itself must work, not only an in-process stand-in.
+
+    ``_probe`` runs ``__main__`` through ``runpy`` so that effects stay
+    observable; this pins that stand-in to the real
+    ``python -m cryodaq.lab_profile`` spelling the documentation promises.
+    """
+
+    checkout = _isolated_checkout(tmp_path)
     env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
-    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONPATH"] = str(checkout / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"  # see _probe: a clean env drops this and the child writes .pyc
     completed = subprocess.run(
-        [sys.executable, "-c", _RUNTIME_PROBE, str(REPO_ROOT)],
-        input=payload,
+        [sys.executable, "-B", "-m", "cryodaq.lab_profile", str(checkout / "profile.yaml")],
         capture_output=True,
         text=True,
         env=env,
-        timeout=120,
+        cwd=checkout,
+        timeout=180,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    report = json.loads(completed.stdout)
-    assert Path(report["tree"]).is_relative_to(REPO_ROOT), f"measured the wrong checkout: {report['tree']}"
-    assert report["differences"] == [], completed.stdout
+    assert "actuation_supported: false" in completed.stdout, completed.stdout
 
 
 def test_hostile_corpus_leaves_incumbent_state_untouched() -> None:
@@ -650,6 +798,70 @@ def test_hostile_corpus_leaves_incumbent_state_untouched() -> None:
         with pytest.raises(LabProfileError):
             parse_lab_profile(text)
     assert _incumbent_snapshot() == before
+
+
+def test_no_loader_in_the_package_can_construct_python_objects() -> None:
+    """Ask the loader what it can DO, not what it is called.
+
+    The static scan accepts ``Loader=<any name defined in the package>``, so
+    ``class Loader(yaml.UnsafeLoader): pass`` passes it while still executing
+    tags such as ``!!python/object/apply:os.remove``.  Adding that spelling to
+    a list would have been the next enumeration; the property that actually
+    matters is whether the loader that runs is able to construct Python
+    objects, which is asked here of every loader class the package defines --
+    including ones that do not exist yet.
+    """
+
+    import yaml
+    import yaml.constructor
+
+    # PyYAML's loaders are SIBLINGS, not a hierarchy: issubclass(SafeLoader,
+    # BaseLoader) is False, so testing against BaseLoader silently inspects
+    # nothing.  Every loader does inherit a constructor, and FullConstructor is
+    # exactly where the python/ tags are introduced -- FullLoader carries 13 and
+    # UnsafeLoader 17, while SafeLoader carries none.
+    inspected: list[type] = []
+    for path in sorted(PACKAGE_DIR.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_DIR).with_suffix("")
+        parts = [part for part in relative.parts if part != "__init__"]
+        if "__main__" in parts:
+            continue
+        module = importlib.import_module(".".join([PACKAGE_MODULE, *parts]) if parts else PACKAGE_MODULE)
+        for attribute in vars(module).values():
+            if not isinstance(attribute, type) or not issubclass(attribute, yaml.constructor.BaseConstructor):
+                continue
+            inspected.append(attribute)
+            assert not issubclass(attribute, yaml.constructor.FullConstructor), (
+                f"{attribute!r} inherits object construction"
+            )
+            tags = set(attribute.yaml_constructors) | set(attribute.yaml_multi_constructors)
+            executable = sorted(tag for tag in tags if tag and "python/" in tag)
+            assert executable == [], f"{attribute!r} can construct {executable}"
+    assert inspected, "no YAML loader found in the package; this guard would be vacuous"
+
+
+def test_python_object_tags_never_execute(tmp_path: Path) -> None:
+    """The same property proved by effect: an object tag must not run.
+
+    This holds whatever the loader is named or wherever it is defined, so it
+    survives an edit that the class-level check above would have to be taught
+    about.  The file is the measurement: a constructor that ran would delete it.
+    """
+
+    victim = tmp_path / "victim.txt"
+    victim.write_text("intact", encoding="utf-8")
+    target = json.dumps(str(victim))
+    for text in (
+        f"!!python/object/apply:os.remove [{target}]",
+        f"!!python/object/apply:os.unlink [{target}]",
+        f"!!python/object/apply:pathlib.Path [{target}]",
+        "!!python/name:os.system",
+        "!!python/object/apply:subprocess.getoutput ['echo compromised']",
+        f"schema_version: !!python/object/apply:os.remove [{target}]",
+    ):
+        with pytest.raises(LabProfileError):
+            parse_lab_profile(text)
+        assert victim.read_text(encoding="utf-8") == "intact", text
 
 
 def test_package_grants_no_authority_objects() -> None:
