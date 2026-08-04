@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import importlib
 import json
@@ -83,6 +84,9 @@ ALLOWED_CALL_NAMES = frozenset(
         "len",
         "list",
         "print",
+        # A bare decorator is an invocation, so @property needs an entry here
+        # now that decorators are checked.  Its removal turns the scan red.
+        "property",
         "set",
         "sorted",
         "str",
@@ -100,8 +104,9 @@ ALLOWED_METHOD_NAMES = frozenset(
         # attribute process-wide.  It has its own branch that pins the receiver
         # to ``object``, so an entry here would now be padding -- which
         # test_every_allowlist_entry_is_load_bearing proves.
-        "add",
-        "append",
+        # "add" and "append" are deliberately ABSENT: they mutate their
+        # receiver, so they are checked by _MUTATING_METHODS against the same
+        # provably-local rule as assignment, and an entry here would be padding.
         "category",
         "check_event",
         "compose_node",
@@ -123,6 +128,12 @@ ALLOWED_METHOD_NAMES = frozenset(
         "strip",
     }
 )
+# Methods that MUTATE their receiver.  These are assignments in disguise, so
+# they are held to the same provably-local-receiver rule.
+_MUTATING_METHODS = frozenset(
+    {"add", "append", "clear", "extend", "insert", "pop", "popitem", "remove", "setdefault", "update"}
+)
+_BUILTIN_NAMES = frozenset(dir(builtins))
 _DUNDER = re.compile(r"^__[A-Za-z0-9_]+__$")
 
 
@@ -225,7 +236,7 @@ _FRESH = (
 _FRESH_CALLS = frozenset({"bytearray", "dict", "frozenset", "list", "set", "sorted", "tuple"})
 
 
-def _provably_local(tree: ast.AST, foreign: set[str]) -> set[str]:
+def _provably_local(tree: ast.AST, foreign: set[str], shadowed: set[str]) -> set[str]:
     """Names EVERY binding of which is a fresh literal in this file.
 
     This is the inverse of chasing provenance.  Tracking where a foreign object
@@ -242,6 +253,11 @@ def _provably_local(tree: ast.AST, foreign: set[str]) -> set[str]:
     """
 
     def fresh(value: ast.expr) -> bool:
+        # A literal that CONTAINS a foreign object does not make its elements
+        # fresh: ``x = [SafeLoader]`` then ``x[0].yaml_constructors[...] = ...``
+        # mutates the foreign loader, not the list.
+        if any(isinstance(sub, ast.Name) and sub.id in foreign for sub in ast.walk(value)):
+            return False
         if isinstance(value, _FRESH):
             return True
         # ``set()``, ``dict()``, ``{}``-equivalents: builtin container
@@ -252,6 +268,7 @@ def _provably_local(tree: ast.AST, foreign: set[str]) -> set[str]:
             and isinstance(value.func, ast.Name)
             and value.func.id in _FRESH_CALLS
             and value.func.id not in foreign
+            and value.func.id not in shadowed
         )
 
     bound: dict[str, list[ast.expr]] = {}
@@ -478,9 +495,42 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
                     imported_modules.add(parameter.arg)
                     changed = True
 
-    local_receivers = _provably_local(tree, imported_modules)
-
+    # Names the file itself defines, so a helper called ``list`` cannot pass for
+    # the builtin container constructor.
+    shadowing = {
+        node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    local_receivers = _provably_local(tree, imported_modules, shadowing)
     violations: list[str] = []
+
+    # Shadowing a BUILTIN hides what a call does: `from os import
+    # get_inheritable as len` and `def list(): ...` both put a foreign or local
+    # callable behind a name the capability allowlist trusts.  The package
+    # shadows none, so this costs nothing and closes the class.
+    for node in ast.walk(tree):
+        bound: list[str] = []
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound = [(alias.asname or alias.name).split(".", 1)[0] for alias in node.names]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound = [node.name]
+        for name in bound:
+            if name in _BUILTIN_NAMES:
+                violations.append(f"{label}: binding {name!r} shadows a builtin and hides what a call does")
+
+    # A bare decorator INVOKES its object without producing an ast.Call, so
+    # `@settrace` installed process-wide tracing past a call-only capability
+    # filter.  Decorators are classified as invocations under the same rules.
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Call):
+                continue  # already handled as a call below
+            if isinstance(decorator, ast.Name) and decorator.id not in ALLOWED_CALL_NAMES | local_names:
+                violations.append(f"{label}: decorator {decorator.id} invokes a capability that is not allowlisted")
+            elif isinstance(decorator, ast.Attribute) and decorator.attr not in ALLOWED_METHOD_NAMES:
+                violations.append(f"{label}: decorator .{decorator.attr} invokes a capability that is not allowlisted")
+
     # A MODULE-LEVEL alias of a foreign object is exportable: another file in the
     # package can `from .source import Loader`, which this scan classifies as an
     # in-package import, and mutate it there with no foreign name in sight.
@@ -620,9 +670,26 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE, r
                 # yaml.unsafe_load)` rebind a module attribute process-wide.  The
                 # package's only legitimate use is the frozen-dataclass idiom, so
                 # the receiver is pinned rather than the method name allowlisted.
-                if not (isinstance(func.value, ast.Name) and func.value.id == "object"):
+                receiver_ok = isinstance(func.value, ast.Name) and func.value.id == "object"
+                # The mutated object is the FIRST ARGUMENT, not the receiver:
+                # `object.__setattr__(sys, 'argv', [])` satisfies an
+                # object-receiver check while rewriting sys.argv.
+                target_ok = bool(node.args) and isinstance(node.args[0], ast.Name) and node.args[0].id == "self"
+                if not (receiver_ok and target_ok):
                     violations.append(
-                        f"{label}: __setattr__ is permitted only as object.__setattr__ on the instance being built"
+                        f"{label}: __setattr__ is permitted only as object.__setattr__(self, ...) "
+                        "on the instance being built"
+                    )
+            elif isinstance(func, ast.Attribute) and func.attr in _MUTATING_METHODS:
+                # `sys.meta_path.append(None)` rewrites the host's import
+                # machinery.  A mutating method is an assignment in disguise, so
+                # its receiver is held to the same provably-local standard.
+                receiver = func.value
+                while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+                    receiver = receiver.value
+                if not (isinstance(receiver, ast.Name) and (receiver.id == "self" or receiver.id in local_receivers)):
+                    violations.append(
+                        f"{label}: .{func.attr}() mutates a receiver that is not a provably local literal"
                     )
             elif isinstance(func, ast.Attribute) and func.attr not in ALLOWED_METHOD_NAMES:
                 violations.append(f"{label}: .{func.attr}() is not an allowlisted capability for a read-only artifact")
@@ -821,6 +888,18 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         "from yaml import SafeLoader\ndef g():\n    return SafeLoader\nL = g()\nL.yaml_constructors['t'] = 1",
         # Rebinding a module attribute process-wide through __setattr__.
         "import yaml\nyaml.__setattr__('safe_load', yaml.unsafe_load)",
+        # The mutated object is __setattr__'s FIRST ARGUMENT, not its receiver.
+        "import sys\nobject.__setattr__(sys, 'argv', [])",
+        # A shadowed container constructor is not the builtin.
+        ("from yaml import SafeLoader\ndef list():\n    return SafeLoader\ndef h():\n    x = list()\n    x.f = 1"),
+        # A fresh container holding a foreign object does not make it fresh.
+        "from yaml import SafeLoader\ndef h():\n    x = [SafeLoader]\n    x[0].yaml_constructors['t'] = 1",
+        # A mutating method is an assignment in disguise.
+        "import sys\nsys.meta_path.append(None)",
+        # Foreign callables hidden behind allowlisted builtin spellings.
+        "from os import get_inheritable as len, set_inheritable as print\nprint(1, not len(1))",
+        # A bare decorator invokes without producing an ast.Call.
+        "from sys import settrace\n@settrace\ndef f(frame, event, arg):\n    return None",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
