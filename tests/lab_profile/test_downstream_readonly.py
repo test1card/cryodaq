@@ -579,8 +579,16 @@ payload = json.loads(sys.stdin.read())
 
 
 def snapshot():
+    # EVERY file under the checkout, not an enumerated list of interesting ones.
+    # Naming five config paths would have left a write to any sixth path -- a
+    # new file, the package's own source, a lock, a cache -- unobserved, which
+    # is the same enumeration mistake that the static scan kept making.
+    tree = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            tree[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     return {
-        "configs": {n: hashlib.sha256((root / n).read_bytes()).hexdigest() for n in payload["files"]},
+        "tree": tree,
         "environ": sorted(os.environ.items()),
         "sys_path": list(sys.path),
         # The working directory is process state the package can move: a single
@@ -610,11 +618,14 @@ else:
     # process, so any effect it has on the incumbent config, the environment,
     # sys.path or the working directory lands in the after-snapshot instead of
     # vanishing when a grandchild process exits.
-    sys.argv = ["cryodaq.lab_profile", payload["profile"]]
-    try:
-        runpy.run_module("cryodaq.lab_profile", run_name="__main__", alter_sys=True)
-    except SystemExit:
-        pass
+    # Every profile, not just the valid one: an operator points this CLI at an
+    # UNTRUSTED file, so the rejection path is the one that matters most.
+    for profile in payload["profiles"]:
+        sys.argv = ["cryodaq.lab_profile", profile]
+        try:
+            runpy.run_module("cryodaq.lab_profile", run_name="__main__", alter_sys=True)
+        except SystemExit:
+            pass
     measured = sys.modules["cryodaq.lab_profile"].__file__
 
 after = snapshot()
@@ -649,18 +660,24 @@ def _isolated_checkout(tmp_path: Path) -> Path:
         # Byte-for-byte, so a hash difference means the package moved, not that
         # the fixture was already unlike the thing it stands in for.
         assert destination.read_bytes() == (REPO_ROOT / name).read_bytes(), name
-    shutil.copyfile(REPO_ROOT / "docs" / "examples" / "lab_profile.imaginary_lab.yaml", checkout / "profile.yaml")
+    # Profiles live OUTSIDE the checkout on purpose: the checkout is the thing
+    # being hashed, so writing fixtures into it would show up as a difference
+    # the package did not cause.
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    shutil.copyfile(REPO_ROOT / "docs" / "examples" / "lab_profile.imaginary_lab.yaml", profiles / "valid.yaml")
+    for index, text in enumerate(HOSTILE_TEXTS):
+        (profiles / f"hostile-{index:03d}.yaml").write_text(text, encoding="utf-8")
     return checkout
 
 
+def _profile_paths(checkout: Path) -> list[str]:
+    profiles = checkout.parent / "profiles"
+    return [str(profiles / "valid.yaml"), *sorted(str(path) for path in profiles.glob("hostile-*.yaml"))]
+
+
 def _probe(checkout: Path, mode: str) -> dict:
-    payload = json.dumps(
-        {
-            "files": list(INCUMBENT_CONFIG_FILES),
-            "texts": [_VALID_TEXT, *HOSTILE_TEXTS],
-            "profile": str(checkout / "profile.yaml"),
-        }
-    )
+    payload = json.dumps({"texts": [_VALID_TEXT, *HOSTILE_TEXTS], "profiles": _profile_paths(checkout)})
     # *** The child gets a CLEAN environment, never dict(os.environ). ***
     # This module imports cryodaq.lab_profile at its top, so by the time these
     # tests run the package has ALREADY executed inside the pytest process. An
@@ -705,13 +722,26 @@ def _probe(checkout: Path, mode: str) -> dict:
 
 
 # Each entry is a capability the read-only claim excludes, written the way a
-# regression would actually arrive.  They are controls, not a denylist: nothing
-# matches on these strings, and the guard measures the resulting state.
+# regression would actually arrive, mapped to the snapshot dimension that must
+# report it.  These are CONTROLS, not a denylist: nothing in the guard matches
+# on these strings -- it measures the resulting state -- and their only job is
+# to prove the guard can go red.  Three separate ones land in ``tree`` because
+# corrupting an incumbent config, planting a new file and editing the package's
+# own source are different regressions that a five-path enumeration would have
+# scored differently.
 _REGRESSIONS = {
-    "configs": "open(os.path.join(os.getcwd(), 'config', 'safety.yaml'), 'w').write('disabled: true')",
-    "environ": "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
-    "sys_path": "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))",
-    "cwd": "os.chdir(os.path.dirname(os.getcwd()))",
+    "incumbent_config_write": (
+        "tree",
+        "open(os.path.join(os.getcwd(), 'config', 'safety.yaml'), 'w').write('disabled: true')",
+    ),
+    "new_file_anywhere": ("tree", "open(os.path.join(os.getcwd(), 'planted.txt'), 'w').write('x')"),
+    "package_self_edit": (
+        "tree",
+        "open(os.path.join(os.getcwd(), 'src', 'cryodaq', 'lab_profile', 'capabilities.py'), 'a').write('\\n')",
+    ),
+    "environment_write": ("environ", "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
+    "import_path_insert": ("sys_path", "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))"),
+    "working_directory_move": ("cwd", "os.chdir(os.path.dirname(os.getcwd()))"),
 }
 
 
@@ -742,8 +772,8 @@ def test_import_and_parse_leave_incumbent_process_state_untouched(tmp_path: Path
 
 
 @pytest.mark.parametrize(("mode", "entry_point"), (("import", "__init__.py"), ("cli", "__main__.py")))
-@pytest.mark.parametrize("dimension", sorted(_REGRESSIONS))
-def test_effect_guard_reports_a_real_regression(tmp_path: Path, mode: str, entry_point: str, dimension: str) -> None:
+@pytest.mark.parametrize("regression", sorted(_REGRESSIONS))
+def test_effect_guard_reports_a_real_regression(tmp_path: Path, mode: str, entry_point: str, regression: str) -> None:
     """Positive control: a green guard is only evidence if it can go red.
 
     Each regression is injected into the throwaway checkout and must be
@@ -754,16 +784,14 @@ def test_effect_guard_reports_a_real_regression(tmp_path: Path, mode: str, entry
     fail.
     """
 
+    dimension, code = _REGRESSIONS[regression]
     checkout = _isolated_checkout(tmp_path)
     module = checkout / "src" / "cryodaq" / "lab_profile" / entry_point
     source = module.read_text(encoding="utf-8")
     # Inserted AFTER the __future__ import, which must stay first in the file.
     anchor = "from __future__ import annotations\n"
     assert anchor in source, entry_point
-    module.write_text(
-        source.replace(anchor, f"{anchor}import os, sys\n{_REGRESSIONS[dimension]}\n", 1),
-        encoding="utf-8",
-    )
+    module.write_text(source.replace(anchor, f"{anchor}import os, sys\n{code}\n", 1), encoding="utf-8")
     assert _probe(checkout, mode)["differences"] == [dimension]
 
 
@@ -780,7 +808,7 @@ def test_documented_cli_spelling_validates_the_shipped_example(tmp_path: Path) -
     env["PYTHONPATH"] = str(checkout / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"  # see _probe: a clean env drops this and the child writes .pyc
     completed = subprocess.run(
-        [sys.executable, "-B", "-m", "cryodaq.lab_profile", str(checkout / "profile.yaml")],
+        [sys.executable, "-B", "-m", "cryodaq.lab_profile", str(checkout.parent / "profiles" / "valid.yaml")],
         capture_output=True,
         text=True,
         env=env,
