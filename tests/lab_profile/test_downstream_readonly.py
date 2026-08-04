@@ -174,18 +174,19 @@ def _aliases_foreign(value: ast.expr, foreign: set[str]) -> bool:
     otherwise every ordinary local in the package would be marked foreign.
     """
 
-    if isinstance(value, ast.Name):
-        return value.id in foreign
-    if isinstance(value, ast.Attribute):
-        # ``yaml.SafeLoader`` is IDENTITY-preserving: attribute access hands back
-        # the very object living in the foreign module, so the binding is an
-        # alias just as much as a bare name is.
-        return _root_name(value) in foreign
-    if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
-        return any(_aliases_foreign(element, foreign) for element in value.elts)
-    if isinstance(value, ast.Starred):
-        return _aliases_foreign(value.value, foreign)
-    return False
+    # FAIL CLOSED.  Enumerating identity-preserving expression forms did not
+    # terminate: bare names, then attributes, then containers, then
+    # ``(SafeLoader,)[0]`` -- and subscripts, conditionals, comprehensions,
+    # walrus and boolean operators were all still waiting.  So the rule is
+    # inverted.  A binding value that MENTIONS a foreign name is treated as an
+    # alias unless it is a call, because a call is the one construct that
+    # reliably produces a NEW object: ``Path(path)`` yields a fresh Path, while
+    # every non-call expression can hand back the foreign object itself.
+    # Over-approximating is safe here -- it can only mark more names foreign,
+    # and a violation still requires an actual assignment INTO one of them.
+    if isinstance(value, ast.Call):
+        return False
+    return any(isinstance(node, ast.Name) and node.id in foreign for node in ast.walk(value))
 
 
 def _root_name(node: ast.expr) -> str | None:
@@ -393,7 +394,14 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
             # capability, so the name in the allowlist stops meaning what it says.
             violations.append(f"{label}: rebinding an allowlisted capability name hides what the call does")
         elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)) and any(
-            _root_name(target) in imported_modules
+            # THROUGH the name, not the name itself.  ``X.y = ...``, ``X[...] = ...``
+            # and ``del X.y`` reach the foreign object; a bare ``X = ...`` only
+            # rebinds a local label and changes nothing outside this module.  The
+            # distinction matters because provenance now propagates fail-closed,
+            # so ``args = sys.argv[1:]`` marks ``args`` foreign even though the
+            # slice is a fresh list -- without this, that ordinary line in
+            # __main__.py would be reported as a boundary violation.
+            isinstance(target, (ast.Attribute, ast.Subscript)) and _root_name(target) in imported_modules
             for target in (
                 node.targets
                 if isinstance(node, ast.Assign)
@@ -569,6 +577,16 @@ def test_every_symbol_allowance_is_load_bearing(monkeypatch: pytest.MonkeyPatch,
         "from yaml import SafeLoader\ndef poison(Loader=SafeLoader):\n    Loader.yaml_constructors['t'] = None",
         "from yaml import SafeLoader\ndef poison(*, Loader=SafeLoader):\n    Loader.yaml_constructors['t'] = None",
         "from os import environ\nf = lambda E=environ: E.__setitem__('CRYODAQ_ALLOW_BROKEN_SQLITE', '1')",
+        # Indirect, identity-preserving expressions.  Enumerating these forms is
+        # exactly what stopped terminating, so provenance now fails closed on
+        # any non-call expression mentioning a foreign name; these are the
+        # registered evidence that it does.
+        "from yaml import SafeLoader\ndef p(Loader=(SafeLoader,)[0]):\n    Loader.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\nL = (SafeLoader,)[0]\nL.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\nL = SafeLoader if True else None\nL.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\nL = [SafeLoader for _ in (1,)][0]\nL.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\nL = SafeLoader or None\nL.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\nL = {'k': SafeLoader}['k']\nL.yaml_constructors['t'] = None",
         # The alias is an ATTRIBUTE of a foreign module, which is still the same
         # object rather than a fresh one.
         "import yaml\nLoader = yaml.SafeLoader\nLoader.yaml_constructors['t'] = None",
@@ -1118,8 +1136,12 @@ if os.name == "posix":
     # Lowers the scheduling priority of the long-lived host permanently, with
     # no audit event and no other trace.  POSIX-only, like umask.
     _REGRESSIONS["scheduling_change"] = ({"priority"}, "os.nice(1)")
-    if hasattr(os, "sched_setaffinity"):
-        # The next primitive in the same class as os.nice.
+    if hasattr(os, "sched_setaffinity") and len(os.sched_getaffinity(0)) > 1:
+        # The next primitive in the same class as os.nice.  Gated on there being
+        # at least TWO CPUs available: under `taskset -c 0` the process is
+        # already pinned to a singleton, setting it again changes nothing, and
+        # the control would fail for its own reason instead of proving the guard
+        # can go red.
         _REGRESSIONS["affinity_change"] = (
             {"affinity"},
             "os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})",
