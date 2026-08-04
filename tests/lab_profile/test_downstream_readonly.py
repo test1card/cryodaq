@@ -577,6 +577,28 @@ mode = sys.argv[2]
 report_path = Path(sys.argv[3])
 payload = json.loads(sys.stdin.read())
 
+# Capabilities that leave NO trace in a before/after state comparison: a
+# launched process, an outbound socket.  `from os import system as print;
+# print('true')` mutates no file, no variable, no sys.path entry and no working
+# directory, so a state diff alone reports green while a shell has run.  The
+# audit hook observes the capability itself, is installed BEFORE the package is
+# imported, and cannot be evaded by aliasing or by how the call is spelled.
+_AUDITED = frozenset(
+    {
+        "os.system",
+        "os.exec",
+        "os.posix_spawn",
+        "os.spawn",
+        "os.startfile",
+        "subprocess.Popen",
+        "socket.connect",
+        "socket.bind",
+        "socket.getaddrinfo",
+    }
+)
+_observed = set()
+sys.addaudithook(lambda event, args: _observed.add(event) if event in _AUDITED else None)
+
 
 def snapshot():
     # EVERY file under the checkout, not an enumerated list of interesting ones.
@@ -595,6 +617,7 @@ def snapshot():
         # os.chdir redirects every later relative path used by its long-lived
         # host, while touching no file, no variable and no sys.path entry.
         "cwd": os.getcwd(),
+        "capabilities": sorted(_observed),
     }
 
 
@@ -625,6 +648,12 @@ else:
         try:
             runpy.run_module("cryodaq.lab_profile", run_name="__main__", alter_sys=True)
         except SystemExit:
+            pass
+        except BaseException:
+            # A crashing entry point must not stop the after-snapshot.  The
+            # effect it already had IS the measurement, and reporting "tree
+            # changed" names the damage; dying here would only report that
+            # something threw.
             pass
     measured = sys.modules["cryodaq.lab_profile"].__file__
 
@@ -668,27 +697,79 @@ def _isolated_checkout(tmp_path: Path) -> Path:
     shutil.copyfile(REPO_ROOT / "docs" / "examples" / "lab_profile.imaginary_lab.yaml", profiles / "valid.yaml")
     for index, text in enumerate(HOSTILE_TEXTS):
         (profiles / f"hostile-{index:03d}.yaml").write_text(text, encoding="utf-8")
+    # The victim lives INSIDE the checkout on purpose: it is covered by the tree
+    # hash, so a YAML constructor that actually executed would delete it and the
+    # effect guard would report a ``tree`` difference.  This is what carries the
+    # object-tag claim through the DOCUMENTED CLI rather than only through
+    # parse_lab_profile.
+    victim = checkout / "victim.txt"
+    victim.write_text("intact", encoding="utf-8")
+    target = json.dumps(str(victim))
+    for index, text in enumerate(
+        (
+            f"!!python/object/apply:os.remove [{target}]",
+            f"!!python/object/apply:os.unlink [{target}]",
+            f"!!python/name:os.remove\nschema_version: !!python/object/apply:os.remove [{target}]",
+            f"schema_version: !!python/object/apply:os.remove [{target}]",
+            f"!!python/object/apply:pathlib.Path [{target}]",
+        )
+    ):
+        (profiles / f"objecttag-{index:03d}.yaml").write_text(text, encoding="utf-8")
     return checkout
 
 
 def _profile_paths(checkout: Path) -> list[str]:
     profiles = checkout.parent / "profiles"
-    return [str(profiles / "valid.yaml"), *sorted(str(path) for path in profiles.glob("hostile-*.yaml"))]
+    return [
+        str(profiles / "valid.yaml"),
+        *sorted(str(path) for path in profiles.glob("hostile-*.yaml")),
+        *sorted(str(path) for path in profiles.glob("objecttag-*.yaml")),
+    ]
 
 
 def _probe(checkout: Path, mode: str) -> dict:
-    payload = json.dumps({"texts": [_VALID_TEXT, *HOSTILE_TEXTS], "profiles": _profile_paths(checkout)})
-    # *** The child gets a CLEAN environment, never dict(os.environ). ***
-    # This module imports cryodaq.lab_profile at its top, so by the time these
-    # tests run the package has ALREADY executed inside the pytest process. An
-    # inherited environment therefore carries any import-time mutation the
-    # package performed, the child's baseline starts out already-mutated, and
-    # setting the same variable again changes nothing -- the guard reports green
-    # against the very defect it exists to catch. Measured: with an inherited
-    # environment an injected os.environ write was reported as no difference,
-    # while the identical child run from an uncontaminated parent reported it.
-    # Only what CPython needs to start is passed through.
-    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    profiles = _profile_paths(checkout)
+    object_tags = [Path(path).read_text(encoding="utf-8") for path in profiles if "objecttag-" in path]
+    payload = json.dumps({"texts": [_VALID_TEXT, *HOSTILE_TEXTS, *object_tags], "profiles": profiles})
+    # *** SYNTHETIC, never dict(os.environ), and never near-empty either. ***
+    #
+    # Not inherited: this module imports cryodaq.lab_profile at its top, so by
+    # the time these tests run the package has ALREADY executed inside the
+    # pytest process. An inherited environment would carry any import-time
+    # mutation it performed, the child's baseline would start out
+    # already-mutated, and setting the same variable again changes nothing --
+    # the guard reports green against the very defect it exists to catch.
+    # Measured: with an inherited environment an injected os.environ write was
+    # reported as no difference, while the identical run from an uncontaminated
+    # parent reported it.
+    #
+    # But not near-empty either. A child holding only PATH is not a production
+    # process, and an effect CONDITIONED on an ordinary variable is then
+    # invisible: `if "HOME" in environ: environ[...] = ...` ran in a real POSIX
+    # process while the probe reported no difference, because the probe had no
+    # HOME. So the representative variables below are supplied with fixed
+    # synthetic values -- present enough to satisfy such a condition, and
+    # deterministic, so nothing from this process can mask a child mutation.
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot", "COMSPEC") if name in os.environ}
+    scratch = checkout.parent / "home"
+    scratch.mkdir(exist_ok=True)
+    env.update(
+        {
+            "HOME": str(scratch),
+            "USERPROFILE": str(scratch),
+            "TEMP": str(scratch),
+            "TMP": str(scratch),
+            "TMPDIR": str(scratch),
+            "USER": "cryodaq-probe",
+            "USERNAME": "cryodaq-probe",
+            "LOGNAME": "cryodaq-probe",
+            "HOSTNAME": "cryodaq-probe",
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
+            "SHELL": "/bin/sh",
+            "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        }
+    )
     env["PYTHONPATH"] = str(checkout / "src")
     # A hand-built environment DROPS PYTHONDONTWRITEBYTECODE, and the child then
     # compiles __pycache__/*.pyc beside whatever it imports.  Against the
@@ -740,6 +821,16 @@ _REGRESSIONS = {
         "open(os.path.join(os.getcwd(), 'src', 'cryodaq', 'lab_profile', 'capabilities.py'), 'a').write('\\n')",
     ),
     "environment_write": ("environ", "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
+    # Leaves NO trace in a state diff -- no file, variable, path or cwd changes.
+    # Only the audit hook sees it.  (Deliberately NOT spelled as an alias over
+    # `print`: that shadows a builtin __main__.py itself calls, so the control
+    # would fail for its own reason instead of measuring the guard.)
+    "process_launch": ("capabilities", "os.system('exit 0')"),
+    # Conditioned on an ordinary variable, which a near-empty environment hid.
+    "conditional_on_home": (
+        "environ",
+        "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1' if 'HOME' in os.environ else None",
+    ),
     "import_path_insert": ("sys_path", "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))"),
     "working_directory_move": ("cwd", "os.chdir(os.path.dirname(os.getcwd()))"),
 }
@@ -852,8 +943,11 @@ def test_no_loader_in_the_package_can_construct_python_objects() -> None:
     for path in sorted(PACKAGE_DIR.rglob("*.py")):
         relative = path.relative_to(PACKAGE_DIR).with_suffix("")
         parts = [part for part in relative.parts if part != "__init__"]
-        if "__main__" in parts:
-            continue
+        # __main__ is INCLUDED.  Importing it as an ordinary submodule sets
+        # __name__ to "cryodaq.lab_profile.__main__", so its
+        # ``if __name__ == "__main__"`` guard is false and the entry point does
+        # not run -- there is no reason to skip it, and skipping it left a
+        # CLI-only loader outside every capability check.
         module = importlib.import_module(".".join([PACKAGE_MODULE, *parts]) if parts else PACKAGE_MODULE)
         for attribute in vars(module).values():
             if not isinstance(attribute, type) or not issubclass(attribute, yaml.constructor.BaseConstructor):
