@@ -992,6 +992,7 @@ _baseline = _fingerprint()
 # the package has already run.
 before = snapshot()
 
+_argv_rewrites = []
 if mode == "import":
     import cryodaq.lab_profile as lab_profile
 
@@ -1010,12 +1011,19 @@ else:
     # Every profile, not just the valid one: an operator points this CLI at an
     # UNTRUSTED file, so the rejection path is the one that matters most.
     # The HARNESS sets argv, so the harness restores it.  Otherwise the
-    # fingerprint reports the probe's own mutation of sys as a finding.  A
-    # package that rewrote argv would still be caught: its change persists past
-    # this restore.
+    # fingerprint reports the probe's own mutation of sys as a finding.
+    #
+    # CORRECTED: this used to claim "a package that rewrote argv would still be
+    # caught: its change persists past this restore".  That was FALSE and was
+    # disproved by injecting `sys.argv = []` into __main__.py, which produced
+    # `differences: []`.  The restore below overwrites exactly the evidence the
+    # after-snapshot was supposed to find.  So argv is now compared BEFORE it is
+    # restored, once per profile, and any divergence is its own finding.
     _harness_argv = list(sys.argv)
+    _argv_rewrites = []
     for profile in payload["profiles"]:
-        sys.argv = ["cryodaq.lab_profile", profile]
+        _expected_argv = ["cryodaq.lab_profile", profile]
+        sys.argv = list(_expected_argv)
         try:
             runpy.run_module("cryodaq.lab_profile", run_name="__main__", alter_sys=True)
         except SystemExit:
@@ -1026,6 +1034,11 @@ else:
             # changed" names the damage; dying here would only report that
             # something threw.
             pass
+        # Measured HERE, before any restore: runpy with alter_sys=True sets and
+        # then restores argv[0] itself, so anything still different at this
+        # point was written by the package under test.
+        if list(sys.argv) != _expected_argv:
+            _argv_rewrites.append({"expected": _expected_argv, "observed": list(sys.argv)[:8]})
     sys.argv = _harness_argv
     measured = sys.modules["cryodaq.lab_profile"].__file__
 
@@ -1040,11 +1053,20 @@ _moved = sorted(
 )
 if _moved:
     differences.append("module_state")
+if _argv_rewrites:
+    differences.append("argv")
 # Report the tree actually executed. Measuring the wrong checkout is this
 # repository's single most expensive recurring mistake, and a guard that cannot
 # say which source it exercised is not evidence.
 report_path.write_text(
-    json.dumps({"differences": differences, "tree": measured, "moved_modules": _moved[:12]}),
+    json.dumps(
+        {
+            "differences": differences,
+            "tree": measured,
+            "moved_modules": _moved[:12],
+            "argv_rewrites": _argv_rewrites[:4],
+        }
+    ),
     encoding="utf-8",
 )
 """
@@ -1737,16 +1759,16 @@ def test_no_inherited_pyyaml_state_is_left_unowned() -> None:
 # or U+D7FF as literal characters through an editor, a shell and a file encoding
 # is exactly the "measured through a layer that normalises it" mistake this
 # guard exists to catch; a numeric codepoint cannot be silently rewritten.
-_EXPECTED_CONSTRUCTORS = {
-    None: "yaml.constructor.SafeConstructor.construct_undefined",
-    "tag:yaml.org,2002:null": "yaml.constructor.SafeConstructor.construct_yaml_null",
-    "tag:yaml.org,2002:bool": "yaml.constructor.SafeConstructor.construct_yaml_bool",
-    "tag:yaml.org,2002:int": "yaml.constructor.SafeConstructor.construct_yaml_int",
-    "tag:yaml.org,2002:str": "yaml.constructor.SafeConstructor.construct_yaml_str",
-    "tag:yaml.org,2002:seq": "yaml.constructor.SafeConstructor.construct_yaml_seq",
-    "tag:yaml.org,2002:map": "yaml.constructor.SafeConstructor.construct_yaml_map",
+_EXPECTED_CONSTRUCTOR_NAMES = {
+    None: "construct_undefined",
+    "tag:yaml.org,2002:null": "construct_yaml_null",
+    "tag:yaml.org,2002:bool": "construct_yaml_bool",
+    "tag:yaml.org,2002:int": "construct_yaml_int",
+    "tag:yaml.org,2002:str": "construct_yaml_str",
+    "tag:yaml.org,2002:seq": "construct_yaml_seq",
+    "tag:yaml.org,2002:map": "construct_yaml_map",
 }
-_EXPECTED_OWNED_TAGS = set(_EXPECTED_CONSTRUCTORS) - {None}
+_EXPECTED_OWNED_TAGS = set(_EXPECTED_CONSTRUCTOR_NAMES) - {None}
 
 _EXPECTED_NULL_SOURCE = "^(?:~|null|Null|NULL|)$"
 _EXPECTED_BOOL_SOURCE = "^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF)$"
@@ -1839,12 +1861,23 @@ def _typed(value: object) -> object:
     dictionary comparison.
     """
 
-    if isinstance(value, dict):
+    # EXACT types, never isinstance.  A dict SUBCLASS whose __getitem__ and
+    # items() delegate to yaml.SafeLoader.ESCAPE_CODES canonicalises as an
+    # ordinary dict under isinstance, so the pin stayed green while the loader
+    # was still backed by host state -- and setting ESCAPE_CODES["q"] on the
+    # host then made a quoted backslash-q escape parse as "A".  The container's
+    # type is part of the property: a view over inherited tables is not
+    # ownership.
+    if type(value) is dict:
         return ("dict", sorted(((_typed(key), _typed(item)) for key, item in value.items()), key=repr))
-    if isinstance(value, (list, tuple)):
-        return (type(value).__name__, [_typed(item) for item in value])
-    if isinstance(value, (set, frozenset)):
-        return (type(value).__name__, sorted((_typed(item) for item in value), key=repr))
+    if type(value) is list:
+        return ("list", [_typed(item) for item in value])
+    if type(value) is tuple:
+        return ("tuple", [_typed(item) for item in value])
+    if type(value) is set:
+        return ("set", sorted((_typed(item) for item in value), key=repr))
+    if type(value) is frozenset:
+        return ("frozenset", sorted((_typed(item) for item in value), key=repr))
     return (type(value).__name__, value)
 
 
@@ -1856,6 +1889,8 @@ def test_owned_pyyaml_values_are_the_expected_ones() -> None:
     back from the loader -- by exact value and exact TYPE, across the whole
     surface rather than its key sets.
     """
+
+    import yaml
 
     from cryodaq.lab_profile.loader import _StrictLabProfileLoader as loader
 
@@ -1871,10 +1906,30 @@ def test_owned_pyyaml_values_are_the_expected_ones() -> None:
 
     # WHICH CALLABLE runs for a tag, not merely which tags exist.  A host that
     # replaces the string constructor leaves the key set identical.
-    actual_constructors = {
-        tag: f"{function.__module__}.{function.__qualname__}" for tag, function in loader.yaml_constructors.items()
+    #
+    # Compared by IDENTITY against SafeConstructor's own functions, because
+    # __module__ and __qualname__ are WRITABLE: a replacement that sets them to
+    # "yaml.constructor.SafeConstructor.construct_yaml_str" satisfied the
+    # previous introspection-text comparison while executing during a valid
+    # parse.
+    #
+    # Identity alone is NOT sufficient either, and saying so is the point.  A
+    # host that rebinds SafeConstructor.construct_yaml_str BEFORE the first
+    # import poisons both sides of this comparison at once, so it would pass
+    # vacuously.  That is why test_owned_tables_produce_the_intended_parse
+    # exercises the owned tags through the public entry point: structure and
+    # behaviour each cover the other's blind spot, and neither suffices alone.
+    expected_functions = {
+        tag: getattr(yaml.constructor.SafeConstructor, name) for tag, name in _EXPECTED_CONSTRUCTOR_NAMES.items()
     }
-    assert _typed(actual_constructors) == _typed(_EXPECTED_CONSTRUCTORS)
+    assert set(loader.yaml_constructors) == set(expected_functions)
+    mismatched = sorted(
+        str(tag) for tag, function in loader.yaml_constructors.items() if function is not expected_functions[tag]
+    )
+    assert mismatched == [], (
+        f"these tags are served by a callable that is not PyYAML's own: {mismatched}. "
+        "__module__/__qualname__ are writable, so only identity distinguishes them."
+    )
 
     # The COMPLETE resolver table: keys, order, tags, pattern sources, flags.
     actual_resolvers = {
@@ -1993,24 +2048,28 @@ print("ok")
 """
 
 
-@pytest.mark.parametrize(
-    ("label", "scalar"),
-    (
-        # Each begins with a character one of the OWNED resolvers keys on, and
-        # then fails to match at the very end -- the shape that makes a
-        # backtracking pattern explode.  Without these the timing guard only
-        # ever exercised a foreign resolver the loader no longer even installs,
-        # so replacing _INT_PATTERN with a catastrophic one would have left it
-        # green.
-        ("int resolver", "1" * 40 + "x"),
-        ("int resolver, signed", "-" + "1" * 40 + "x"),
-        ("bool resolver, t", "t" * 40 + "x"),
-        ("bool resolver, y", "y" * 40 + "x"),
-        ("bool resolver, o", "o" * 40 + "x"),
-        ("null resolver, n", "n" * 40 + "x"),
-        ("null resolver, tilde", "~" * 40 + "x"),
-    ),
-)
+def _adversarial_scalars() -> list[tuple[str, str]]:
+    """One probe per production resolver key, DERIVED from the table.
+
+    A hand-written list covered only ``1``, ``-``, and lower-case ``t/y/o/n/~``
+    while the loader also installs resolvers for ``+`` and upper-case
+    ``Y/N/T/F/O``.  A catastrophic pattern reachable only from an omitted key
+    would have stayed green here until an operator profile happened to contain
+    that scalar.  Deriving the probes means adding a resolver key
+    automatically adds its probe.
+    """
+
+    probes = []
+    for key in sorted(_expected_resolver_table()):
+        if not key:  # the empty-scalar key cannot start a 40-character run
+            continue
+        # Repeat the key, then break the match at the very end: the shape that
+        # makes a backtracking pattern explode.
+        probes.append((f"resolver key {key!r}", key * 40 + "x"))
+    return probes
+
+
+@pytest.mark.parametrize(("label", "scalar"), _adversarial_scalars())
 def test_owned_resolver_patterns_are_linear_time(label: str, scalar: str) -> None:
     """The package's OWN resolvers must not backtrack, and must be proved so here.
 

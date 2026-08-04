@@ -5817,6 +5817,20 @@ records:
       each tag and the complete resolver table with its pattern sources and flags. A companion guard asserts
       the resulting PARSE through the public entry point, because a structural pin describing a parse nobody
       checks proves nothing. Every one of the five holes was reproduced as a loader mutation and each is
-      confirmed to turn the guards red.
+      confirmed to turn the guards red. Review then found FOUR more, three of them in the replacement pin
+      itself: (a) __module__ and __qualname__ are WRITABLE, so comparing constructors by introspection text
+      passed for a replacement that spoofed both -- constructors are now compared by IDENTITY against
+      SafeConstructor's own function objects, with the limitation stated in the test that identity alone is
+      also insufficient because a pre-import rebinding poisons both sides at once, which is why the
+      behavioural guard exists alongside it; (b) the canonicaliser used isinstance(), so a dict SUBCLASS
+      delegating to yaml.SafeLoader.ESCAPE_CODES was canonicalised as an ordinary dict and the pin stayed
+      green while the loader was still backed by host state -- exact types only now; (c) the bounded-parse
+      probes were a hand-written list covering 7 of the 23 production resolver keys, omitting '+' and every
+      upper-case key, so a catastrophic pattern reachable only from an omitted key would not have been
+      exercised -- the probes are now DERIVED from the resolver table, and coverage of all 23 keys is
+      measured; (d) the effect probe restored sys.argv BEFORE taking the after-snapshot, so a CLI that
+      rewrote argv reported no differences at all -- argv is now compared per profile before any restore,
+      and reported as its own dimension. All four were reproduced against real production and each is
+      confirmed to turn its guard red.
       2026-08-04, pending immutable capture.
     green_evidence: pending
