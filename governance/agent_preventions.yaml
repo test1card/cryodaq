@@ -5743,6 +5743,10 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_tables_produce_the_intended_parse
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_host_cannot_replace_the_parse_entry_point
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_pre_import_constructor_rebinding_cannot_reach_the_profile_loader
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
         ci_partition: remaining
     red_evidence: >-
@@ -5832,5 +5836,26 @@ records:
       rewrote argv reported no differences at all -- argv is now compared per profile before any restore,
       and reported as its own dimension. All four were reproduced against real production and each is
       confirmed to turn its guard red.
+      A further round then found the first PRODUCT defects in several rounds, and they were more serious
+      than anything the guards had been arguing about. (1) parse_lab_profile called yaml.load -- an ordinary
+      MODULE ATTRIBUTE looked up at call time. With yaml.load rebound to a wrapper that deleted a file and
+      returned a dict, parse_lab_profile('not yaml at all') returned a valid-looking profile and the file was
+      gone; every owned table was irrelevant because the strict loader was never constructed. The parse now
+      runs the owned loader directly through callables bound at import time. (2) The constructor table bound
+      SafeConstructor's METHODS, so a host that rebound construct_yaml_str before the first import was
+      captured verbatim: a valid operator profile validated normally while the replacement deleted a file,
+      and both table guards stayed green because the poisoned function was what 'the expected constructor'
+      resolved to on BOTH sides. The six constructors are now DEFINED IN THIS PACKAGE, which is the only
+      defence in this module that has survived every attack. (3) The effect probe fingerprinted callables by
+      __module__/__qualname__, which are writable: a replacement copying both from dynamically built strings
+      hashed identically and the probe reported no differences while the host yaml module had been modified.
+      Callables are now encoded by code-object identity -- defining file, line, and compiled bytecode.
+      All three were reproduced against real production with a clean-host control and each is confirmed to
+      turn its guard red.
+      One allowlist note kept deliberately: adding 'update' to the call vocabulary to accommodate the new
+      constructors turned a hostile case the scan exists to REJECT green. The entry was withdrawn and the
+      constructors were rewritten to build their containers with append() and subscript assignment instead.
+      The lint was right and the code changed; widening an allowlist to silence a scan is how it stops
+      meaning anything.
       2026-08-04, pending immutable capture.
     green_evidence: pending

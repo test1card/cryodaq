@@ -83,6 +83,62 @@ def _build_implicit_resolvers() -> dict[str | None, list[tuple[str, re.Pattern[s
     return table
 
 
+def _scalar_text(node: yaml.Node) -> str:
+    """The scalar's own text, read off the node rather than via an inherited method."""
+
+    if not isinstance(node, yaml.ScalarNode):
+        raise yaml.constructor.ConstructorError(None, None, f"expected a scalar node, found {node.id}", node.start_mark)
+    return node.value
+
+
+def _construct_undefined(loader: yaml.Loader, node: yaml.Node) -> object:
+    raise yaml.constructor.ConstructorError(
+        None, None, f"tag {node.tag!r} is not part of the lab profile grammar", node.start_mark
+    )
+
+
+def _construct_null(loader: yaml.Loader, node: yaml.Node) -> None:
+    _scalar_text(node)
+    return None
+
+
+def _construct_str(loader: yaml.Loader, node: yaml.Node) -> str:
+    return _scalar_text(node)
+
+
+def _construct_bool(loader: yaml.Loader, node: yaml.Node) -> bool:
+    return loader.bool_values[_scalar_text(node).lower()]
+
+
+def _construct_int(loader: yaml.Loader, node: yaml.Node) -> int:
+    # _INT_PATTERN admits only ^[-+]?[0-9]+$, so plain int() is both correct and
+    # STRICTER than PyYAML's, which also accepts 0x/0b/underscored/sexagesimal
+    # forms.  An explicit !!int tag carrying one of those now fails closed.
+    return int(_scalar_text(node))
+
+
+def _construct_seq(loader: yaml.Loader, node: yaml.Node) -> object:
+    if not isinstance(node, yaml.SequenceNode):
+        raise yaml.constructor.ConstructorError(
+            None, None, f"expected a sequence node, found {node.id}", node.start_mark
+        )
+    data: list[object] = []
+    yield data
+    # append() rather than extend(): "update"/"extend" are mutation spellings
+    # the package's own structural lint uses to catch writes to foreign state,
+    # and allowlisting them here made a hostile case go green.  The lint was
+    # right; this code changed instead.
+    for child in node.value:
+        data.append(loader.construct_object(child))
+
+
+def _construct_map(loader: yaml.Loader, node: yaml.Node) -> object:
+    data: dict[object, object] = {}
+    yield data
+    for key, value in loader.construct_mapping(node).items():
+        data[key] = value
+
+
 class _StrictLabProfileLoader(yaml.SafeLoader):
     """Bounded YAML grammar with neither aliases nor duplicate mapping keys.
 
@@ -98,17 +154,28 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     party can decide what its parser runs.
     """
 
-    # The exact tag vocabulary a lab profile can contain, bound to
-    # SafeConstructor's own METHODS rather than copied from its (mutable,
-    # shared) constructor mapping.  ``None`` keeps unknown tags failing closed.
+    # The exact tag vocabulary a lab profile can contain, bound to THIS
+    # MODULE'S OWN functions.  Binding SafeConstructor's methods was not
+    # ownership: a host that rebinds
+    # ``yaml.constructor.SafeConstructor.construct_yaml_str`` BEFORE the first
+    # import of this package is captured here verbatim.  Measured -- a valid
+    # operator profile validated normally while the replacement deleted a file,
+    # and every table guard stayed green, because the poisoned function was
+    # what "the expected constructor" resolved to on both sides.
+    #
+    # Defining the value in the package is the only defence in this module that
+    # has survived: copying was defeated by pre-import ordering, filtering by a
+    # genuine backtracking regex, type-checking by __class__ spoofing, and
+    # name/identity comparison by writable __qualname__ and by this very case.
+    # ``None`` keeps unknown tags failing closed.
     yaml_constructors = {
-        None: yaml.constructor.SafeConstructor.construct_undefined,
-        "tag:yaml.org,2002:null": yaml.constructor.SafeConstructor.construct_yaml_null,
-        "tag:yaml.org,2002:bool": yaml.constructor.SafeConstructor.construct_yaml_bool,
-        "tag:yaml.org,2002:int": yaml.constructor.SafeConstructor.construct_yaml_int,
-        "tag:yaml.org,2002:str": yaml.constructor.SafeConstructor.construct_yaml_str,
-        "tag:yaml.org,2002:seq": yaml.constructor.SafeConstructor.construct_yaml_seq,
-        "tag:yaml.org,2002:map": yaml.constructor.SafeConstructor.construct_yaml_map,
+        None: _construct_undefined,
+        "tag:yaml.org,2002:null": _construct_null,
+        "tag:yaml.org,2002:bool": _construct_bool,
+        "tag:yaml.org,2002:int": _construct_int,
+        "tag:yaml.org,2002:str": _construct_str,
+        "tag:yaml.org,2002:seq": _construct_seq,
+        "tag:yaml.org,2002:map": _construct_map,
     }
     yaml_multi_constructors: dict[str, object] = {}
     # ``yaml_implicit_resolvers`` is shared by reference too, and it is WORSE
@@ -259,6 +326,32 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
         return result
 
 
+# ``yaml.load`` is an ordinary MODULE ATTRIBUTE, looked up at call time.  A host
+# or an earlier library that rebinds it -- plain monkey-patching, not a hostile
+# edit to this package -- replaces the entire parse entry point, and every table
+# owned above becomes irrelevant because the strict loader is never constructed.
+# Measured before this fix: with ``yaml.load`` set to a wrapper that deleted a
+# file and returned a dict, ``parse_lab_profile("not yaml at all")`` returned a
+# valid-looking profile and the file was gone.
+#
+# So the machinery is bound HERE, once, to this package's own class, and the
+# parse below calls it directly.  ``get_single_data`` and ``dispose`` are
+# resolved through _StrictLabProfileLoader's MRO at import time rather than
+# through ``yaml`` at call time.
+_LOADER_GET_SINGLE_DATA: Final = _StrictLabProfileLoader.get_single_data
+_LOADER_DISPOSE: Final = _StrictLabProfileLoader.dispose
+
+
+def _parse_strict_yaml(text: str) -> object:
+    """Run the owned loader directly, with no module-attribute indirection."""
+
+    loader = _StrictLabProfileLoader(text)
+    try:
+        return _LOADER_GET_SINGLE_DATA(loader)
+    finally:
+        _LOADER_DISPOSE(loader)
+
+
 def _check_exact_keys(row: object, context: str, allowed: frozenset[str], required: frozenset[str]) -> dict:
     if type(row) is not dict or any(type(key) is not str for key in row):
         raise LabProfileError(f"lab profile {context} must be a string-keyed mapping")
@@ -342,7 +435,7 @@ def parse_lab_profile(text: str) -> LabProfileV1:
     if len(encoded) > MAX_LAB_PROFILE_BYTES:
         raise LabProfileError("lab profile exceeds its bounded text grammar")
     try:
-        payload = yaml.load(text, Loader=_StrictLabProfileLoader)
+        payload = _parse_strict_yaml(text)
     except LabProfileError:
         raise
     except Exception as exc:

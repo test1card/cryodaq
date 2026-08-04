@@ -121,7 +121,17 @@ ALLOWED_CALL_NAMES = frozenset(
         "enumerate",
         "field",
         "frozenset",
+        # int(): the owned integer constructor converts a scalar whose text
+        # _INT_PATTERN has already restricted to ^[-+]?[0-9]+$.  Strictly
+        # narrower than PyYAML's own, which also accepts 0x/0b/sexagesimal.
+        "int",
         "isinstance",
+        # This package's own import-time-bound entry point.  They exist
+        # precisely so validation does not look up `yaml.load` at call time,
+        # which a host can rebind -- measured: a wrapper that deleted a file and
+        # returned a forged dict was accepted as a valid profile.
+        "_LOADER_GET_SINGLE_DATA",
+        "_LOADER_DISPOSE",
         "len",
         "list",
         "print",
@@ -153,8 +163,12 @@ ALLOWED_METHOD_NAMES = frozenset(
         "isprintable",
         "isspace",
         "join",
-        "load",
         "lower",
+        # construct_mapping is the loader's OWN duplicate-key-rejecting method;
+        # items() is a pure read.  Neither is a mutation spelling, so neither
+        # weakens what this vocabulary is for.
+        "construct_mapping",
+        "items",
         "normalize",
         "open",
         "peek_event",
@@ -840,9 +854,29 @@ def _encode(value, depth, home, seen):
         module_name = getattr(value, "__module__", None)
         qualname = getattr(value, "__qualname__", None)
         if qualname is not None:
-            # Functions and bound methods: identity by where they were defined,
-            # so swapping a constructor for another callable changes the hash.
-            return f"<fn {module_name}.{qualname}>"
+            # Functions and bound methods.  __module__ and __qualname__ are
+            # WRITABLE, so naming alone is not identity: a replacement callable
+            # that copies both -- built from dynamically assembled strings, so
+            # the static scan sees nothing -- produced an IDENTICAL fingerprint
+            # and `_probe(..., "import")` reported `differences: []` while the
+            # host `yaml` module had in fact been modified.
+            #
+            # The code object is the part a replacement cannot fake while still
+            # being a different function: it names the file and line where the
+            # body was compiled and carries the compiled bytecode itself.
+            code = getattr(value, "__code__", None) or getattr(
+                getattr(value, "__func__", None), "__code__", None
+            )
+            if code is not None:
+                return (
+                    f"<fn {module_name}.{qualname}"
+                    f" @{getattr(code, 'co_filename', '?')}:{getattr(code, 'co_firstlineno', '?')}"
+                    f" #{hash(getattr(code, 'co_code', b''))}>"
+                )
+            # C functions and builtins have no code object.  Fall back to the
+            # exact type plus the object's own repr, which for builtins encodes
+            # the underlying implementation rather than a writable label.
+            return f"<builtin {type(value).__module__}.{type(value).__name__} {value!r}>"
         return f"<{type(value).__module__}.{type(value).__name__}>"
     except Exception:
         return "<unencodable>"
@@ -1759,14 +1793,18 @@ def test_no_inherited_pyyaml_state_is_left_unowned() -> None:
 # or U+D7FF as literal characters through an editor, a shell and a file encoding
 # is exactly the "measured through a layer that normalises it" mistake this
 # guard exists to catch; a numeric codepoint cannot be silently rewritten.
+# Every constructor must be one of THIS PACKAGE'S functions.  Binding
+# SafeConstructor's methods was not ownership: a host that rebound
+# construct_yaml_str before the first import was captured verbatim, and the
+# guard compared the poisoned function against itself.
 _EXPECTED_CONSTRUCTOR_NAMES = {
-    None: "construct_undefined",
-    "tag:yaml.org,2002:null": "construct_yaml_null",
-    "tag:yaml.org,2002:bool": "construct_yaml_bool",
-    "tag:yaml.org,2002:int": "construct_yaml_int",
-    "tag:yaml.org,2002:str": "construct_yaml_str",
-    "tag:yaml.org,2002:seq": "construct_yaml_seq",
-    "tag:yaml.org,2002:map": "construct_yaml_map",
+    None: "_construct_undefined",
+    "tag:yaml.org,2002:null": "_construct_null",
+    "tag:yaml.org,2002:bool": "_construct_bool",
+    "tag:yaml.org,2002:int": "_construct_int",
+    "tag:yaml.org,2002:str": "_construct_str",
+    "tag:yaml.org,2002:seq": "_construct_seq",
+    "tag:yaml.org,2002:map": "_construct_map",
 }
 _EXPECTED_OWNED_TAGS = set(_EXPECTED_CONSTRUCTOR_NAMES) - {None}
 
@@ -1890,8 +1928,6 @@ def test_owned_pyyaml_values_are_the_expected_ones() -> None:
     surface rather than its key sets.
     """
 
-    import yaml
-
     from cryodaq.lab_profile.loader import _StrictLabProfileLoader as loader
 
     assert _typed(loader.ESCAPE_CODES) == _typed(_EXPECTED_ESCAPE_CODES)
@@ -1913,15 +1949,16 @@ def test_owned_pyyaml_values_are_the_expected_ones() -> None:
     # previous introspection-text comparison while executing during a valid
     # parse.
     #
-    # Identity alone is NOT sufficient either, and saying so is the point.  A
-    # host that rebinds SafeConstructor.construct_yaml_str BEFORE the first
-    # import poisons both sides of this comparison at once, so it would pass
-    # vacuously.  That is why test_owned_tables_produce_the_intended_parse
-    # exercises the owned tags through the public entry point: structure and
-    # behaviour each cover the other's blind spot, and neither suffices alone.
-    expected_functions = {
-        tag: getattr(yaml.constructor.SafeConstructor, name) for tag, name in _EXPECTED_CONSTRUCTOR_NAMES.items()
-    }
+    # This used to resolve the expected callables from SafeConstructor -- the
+    # same object the loader borrowed them from -- so a pre-import rebinding
+    # poisoned BOTH SIDES and the comparison passed vacuously while the
+    # replacement ran during a valid parse.  The constructors are now defined in
+    # the package, so this compares against functions a host cannot reach
+    # without editing this repository.  The behavioural and subprocess guards
+    # below still exist because structure alone has been defeated four times.
+    from cryodaq.lab_profile import loader as loader_module
+
+    expected_functions = {tag: getattr(loader_module, name) for tag, name in _EXPECTED_CONSTRUCTOR_NAMES.items()}
     assert set(loader.yaml_constructors) == set(expected_functions)
     mismatched = sorted(
         str(tag) for tag, function in loader.yaml_constructors.items() if function is not expected_functions[tag]
@@ -1974,6 +2011,131 @@ def test_owned_tables_produce_the_intended_parse() -> None:
     # A boolean is not an integer version.
     with pytest.raises(LabProfileError):
         parse_lab_profile(_VALID_TEXT.replace("schema_version: 1", "schema_version: true"))
+
+
+def _run_probe(script: str, tmp_path: Path) -> str:
+    """Run one host-poisoning probe in a clean child and return its verdict line.
+
+    A child process is not a stylistic choice: by pytest collection time this
+    package is already imported, so no in-process test can exercise poisoning
+    that happens BEFORE the first import.
+    """
+
+    environment = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        capture_output=True,
+        text=True,
+        env=environment,
+        cwd=tmp_path,
+        timeout=180,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    return completed.stdout.strip()
+
+
+_ENTRY_POINT_BYPASS = r"""
+import pathlib
+import tempfile
+
+import yaml
+
+victim = pathlib.Path(tempfile.mkdtemp()) / "victim.txt"
+victim.write_text("operator data", encoding="utf-8")
+
+def _wrapper(stream, *args, **kwargs):
+    victim.unlink()
+    return {
+        "schema_version": 1,
+        "lab": {"lab_id": "forged", "display_name": "Forged"},
+        "instruments": [{"type": "lakeshore_218s", "name": "LS1"}],
+        "questions": [],
+    }
+
+yaml.load = _wrapper
+
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+try:
+    parse_lab_profile("not yaml at all")
+except LabProfileError:
+    print("rejected" if victim.exists() else "rejected-but-side-effect-ran")
+else:
+    print("ACCEPTED")
+"""
+
+
+def test_host_cannot_replace_the_parse_entry_point(tmp_path: Path) -> None:
+    """``yaml.load`` is a module attribute, looked up at CALL time.
+
+    Measured before the fix: with ``yaml.load`` rebound to a wrapper that
+    deleted a file and returned a valid-looking dict, ``parse_lab_profile("not
+    yaml at all")`` returned a profile with ``lab_id == "forged"`` and the file
+    was gone.  Every owned table was irrelevant because the strict loader was
+    never constructed.  Ordinary monkey-patching, not a hostile edit here.
+    """
+
+    assert _run_probe(_ENTRY_POINT_BYPASS, tmp_path) == "rejected"
+
+
+_PRE_IMPORT_CONSTRUCTOR_POISON = r"""
+import builtins
+import pathlib
+import tempfile
+
+import yaml.constructor
+
+victim = pathlib.Path(tempfile.mkdtemp()) / "victim.txt"
+victim.write_text("operator data", encoding="utf-8")
+builtins._VICTIM = victim
+
+_real = yaml.constructor.SafeConstructor.construct_yaml_str
+
+
+def _evil(self, node):
+    import builtins
+
+    try:
+        builtins._VICTIM.unlink()
+    except OSError:
+        pass
+    return _real(self, node)
+
+
+yaml.constructor.SafeConstructor.construct_yaml_str = _evil
+
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+text = (
+    "schema_version: 1\n"
+    "lab:\n  lab_id: readonly-lab\n  display_name: Readonly Lab\n"
+    "instruments:\n  - type: lakeshore_218s\n    name: LS1\n"
+    "questions: []\n"
+)
+try:
+    profile = parse_lab_profile(text)
+except LabProfileError as exc:
+    print("rejected:" + str(exc)[:40])
+else:
+    print("clean" if victim.exists() and profile.lab_id == "readonly-lab" else "POISON REACHED THE PARSE")
+"""
+
+
+def test_pre_import_constructor_rebinding_cannot_reach_the_profile_loader(tmp_path: Path) -> None:
+    """Borrowing SafeConstructor's METHODS was never ownership.
+
+    Measured before the fix: rebinding
+    ``yaml.constructor.SafeConstructor.construct_yaml_str`` before the first
+    import made the loader capture the replacement, a valid operator profile
+    validated normally, and the replacement deleted a file while it did.  Both
+    table guards stayed green, because the poisoned function was what "the
+    expected constructor" resolved to on BOTH sides of the comparison.
+    """
+
+    assert _run_probe(_PRE_IMPORT_CONSTRUCTOR_POISON, tmp_path) == "clean"
 
 
 def test_host_bool_values_cannot_reach_the_profile_loader() -> None:
