@@ -1440,22 +1440,42 @@ def test_import_and_parse_leave_incumbent_process_state_untouched(tmp_path: Path
 def test_effect_probe_reports_a_newly_imported_module(tmp_path: Path) -> None:
     """`_expected_new` was computed and never reported, so this never fired.
 
-    Measured before the fix: injecting a plain ``import decimal`` into the
-    throwaway checkout left the probe reporting ``differences: []``, even though
-    the boundary's central claim is that validating a profile does not pull in
-    authority-bearing modules. A dimension the report does not carry is not
-    measured, however carefully it is computed -- so it now has a control.
+    Measured before the fix: injecting an import into the throwaway checkout left
+    the probe reporting ``differences: []``, even though the boundary's central
+    claim is that validating a profile does not pull in authority-bearing
+    modules. A dimension the report does not carry is not measured, however
+    carefully it is computed -- so it has a control.
+
+    The control injects a module that CANNOT have been warmed: a file written
+    into the checkout under a name nothing else imports. The first version used
+    ``decimal`` and was interpreter-dependent -- the probe's own calibration
+    imports ``fractions``, which pulls in ``decimal`` on some versions, so the
+    injection added nothing to the module set and the control reported a false
+    red. Guessing an unwarmed stdlib module is not a property; a name that
+    cannot exist anywhere else is.
+
+    The absence assertion below is the part that makes this self-validating: if
+    the canary ever appears without being injected, the control says so instead
+    of quietly proving nothing.
     """
 
+    canary = "oc_lab_profile_probe_canary"
     checkout = _isolated_checkout(tmp_path)
+
+    baseline_report = _probe(checkout, "import")
+    assert canary not in baseline_report.get("new_modules", []), baseline_report
+    assert "new_modules" not in baseline_report["differences"], baseline_report
+
+    (checkout / "src" / f"{canary}.py").write_text("VALUE = 1\n", encoding="utf-8")
     entry_point = checkout / "src" / "cryodaq" / "lab_profile" / "__init__.py"
     entry_point.write_text(
-        entry_point.read_text(encoding="utf-8") + "\nimport decimal  # REGRESSION\n",
+        entry_point.read_text(encoding="utf-8") + f"\nimport {canary}  # REGRESSION\n",
         encoding="utf-8",
     )
+
     report = _probe(checkout, "import")
     assert "new_modules" in report["differences"], report
-    assert "decimal" in report["new_modules"], report
+    assert canary in report["new_modules"], report
 
 
 @pytest.mark.parametrize(("mode", "entry_point"), (("import", "__init__.py"), ("cli", "__main__.py")))
