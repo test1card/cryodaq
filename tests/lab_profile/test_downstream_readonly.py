@@ -122,6 +122,44 @@ def _denied_dunder(name: str) -> bool:
     return bool(_DUNDER.match(name)) and name not in ALLOWED_DUNDERS
 
 
+def _binding(node: ast.AST) -> tuple[list[ast.expr], ast.expr | None]:
+    """The (targets, bound value) of one node, over Python's binding grammar.
+
+    This enumerates the LANGUAGE's binding forms, which are a closed and
+    documented set, rather than the spellings an attacker might choose --
+    handling only ``ast.Assign`` lost provenance the moment an alias was written
+    as ``Loader: type = SafeLoader`` or ``(Loader,) = (SafeLoader,)``.
+    """
+
+    if isinstance(node, ast.Assign):
+        return list(node.targets), node.value
+    if isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+        return [node.target], node.value
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        return [node.target], node.iter
+    if isinstance(node, ast.withitem):
+        return ([node.optional_vars], node.context_expr) if node.optional_vars else ([], None)
+    return [], None
+
+
+def _aliases_foreign(value: ast.expr, foreign: set[str]) -> bool:
+    """True when ``value`` hands over a foreign object itself, not a new one.
+
+    A bare name, or a tuple/list of them, is an ALIAS: the same object gets a
+    second name.  A call such as ``Path(path)`` merely mentions a foreign name
+    and produces a fresh object, so it is deliberately not treated as one --
+    otherwise every ordinary local in the package would be marked foreign.
+    """
+
+    if isinstance(value, ast.Name):
+        return value.id in foreign
+    if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+        return any(_aliases_foreign(element, foreign) for element in value.elts)
+    if isinstance(value, ast.Starred):
+        return _aliases_foreign(value.value, foreign)
+    return False
+
+
 def _root_name(node: ast.expr) -> str | None:
     """The base identifier of an assignment target, through attributes and subscripts."""
 
@@ -241,15 +279,14 @@ def _import_violations(source: str, *, label: str, base: str = PACKAGE_MODULE) -
     while changed:
         changed = False
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+            targets, value = _binding(node)
+            if value is None or not _aliases_foreign(value, imported_modules):
                 continue
-            if node.value.id not in imported_modules:
-                continue
-            for target in node.targets:
-                name = _root_name(target)
-                if name and name not in imported_modules:
-                    imported_modules.add(name)
-                    changed = True
+            for target in targets:
+                for sub in ast.walk(target):
+                    if isinstance(sub, ast.Name) and sub.id not in imported_modules:
+                        imported_modules.add(sub.id)
+                        changed = True
 
     violations: list[str] = []
     for node in ast.walk(tree):
@@ -456,6 +493,15 @@ def test_every_allowlist_entry_is_load_bearing(monkeypatch: pytest.MonkeyPatch, 
         "from os import environ\nenviron['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
         "from sys import path\npath[:] = ['/tmp/attacker']",
         "from yaml import SafeLoader\ndel SafeLoader.yaml_constructors",
+        # Aliases of a foreign binding, across the binding grammar.  Without
+        # fixpoint propagation each of these loses provenance and the mutation
+        # lands on a name the scan does not recognise as foreign.
+        "from yaml import SafeLoader\nLoader = SafeLoader\nLoader.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\na = SafeLoader\nb = a\nb.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\nLoader: type = SafeLoader\nLoader.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\n(Loader,) = (SafeLoader,)\nLoader.yaml_constructors['t'] = None",
+        "from yaml import SafeLoader\nfor Loader in (SafeLoader,):\n    Loader.yaml_constructors['t'] = None",
+        "from os import environ\nE = environ\nE['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'",
         "dir(sys)",
         "globals()",
         "locals()",
@@ -665,6 +711,12 @@ _AUDITED = frozenset(
         "socket.getaddrinfo",
         "socket.sendto",
         "urllib.Request",
+        # putenv/unsetenv change what future CHILDREN inherit without touching
+        # os.environ, so the environ snapshot cannot see them.  Measured: the
+        # interpreter does raise os.putenv, which is why this is an audit entry
+        # while umask below is a snapshot -- os.umask raises no audit event.
+        "os.putenv",
+        "os.unsetenv",
     }
 )
 # os.open flags that request write access; the `open` audit event reports mode
@@ -691,6 +743,15 @@ def _audit(event, args):
 sys.addaudithook(_audit)
 
 
+def _read_umask():
+    try:
+        current = os.umask(0o022)
+        os.umask(current)
+        return current
+    except (AttributeError, OSError):
+        return None
+
+
 def snapshot():
     # EVERY file under the checkout, not an enumerated list of interesting ones.
     # Naming five config paths would have left a write to any sixth path -- a
@@ -709,6 +770,11 @@ def snapshot():
         # host, while touching no file, no variable and no sys.path entry.
         "cwd": os.getcwd(),
         "capabilities": sorted(_observed),
+        # os.umask raises NO audit event (measured), so it is read directly.
+        # Reading requires setting, hence set-then-restore.  It changes the
+        # permissions applied to every later file this process creates while
+        # leaving no other trace.
+        "umask": _read_umask(),
     }
 
 
@@ -911,12 +977,17 @@ _REGRESSIONS = {
         {"tree", "capabilities"},
         "open(os.path.join(os.getcwd(), 'src', 'cryodaq', 'lab_profile', 'capabilities.py'), 'a').write('\\n')",
     ),
-    "environment_write": ({"environ"}, "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
+    # os.environ.__setitem__ calls putenv internally, so both the environ
+    # snapshot and the audit hook fire.  Measured, not assumed.
+    "environment_write": ({"environ", "capabilities"}, "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1'"),
     # Leaves NO trace in a state diff -- no file, variable, path or cwd changes.
     # Only the audit hook sees it.  (Deliberately NOT spelled as an alias over
     # `print`: that shadows a builtin __main__.py itself calls, so the control
     # would fail for its own reason instead of measuring the guard.)
     "process_launch": ({"capabilities"}, "os.system('exit 0')"),
+    # Changes what future CHILDREN inherit without touching os.environ, so the
+    # environ snapshot is blind to it.
+    "putenv_write": ({"capabilities"}, "os.putenv('CRYODAQ_ALLOW_BROKEN_SQLITE', '1')"),
     # Content unchanged, so the tree hash cannot see it; only the audit hook can.
     "metadata_mutation": (
         {"capabilities"},
@@ -933,12 +1004,18 @@ _REGRESSIONS = {
     ),
     # Conditioned on an ordinary variable, which a near-empty environment hid.
     "conditional_on_home": (
-        {"environ"},
+        {"environ", "capabilities"},
         "os.environ['CRYODAQ_ALLOW_BROKEN_SQLITE'] = '1' if 'HOME' in os.environ else None",
     ),
     "import_path_insert": ({"sys_path"}, "sys.path.insert(0, os.path.join(os.getcwd(), 'attacker'))"),
     "working_directory_move": ({"cwd"}, "os.chdir(os.path.dirname(os.getcwd()))"),
 }
+if os.name == "posix":
+    # Changes the permissions applied to every later file this process creates.
+    # os.umask raises no audit event, hence the umask snapshot.  Measured:
+    # on Windows os.umask always returns 0o0 and tracks nothing, so the
+    # control would be vacuous there and is gated rather than asserted.
+    _REGRESSIONS["umask_change"] = ({"umask"}, "os.umask(0o077)")
 if hasattr(os, "fork"):
     # POSIX only -- Windows has no fork, so this control cannot run there and is
     # registered conditionally rather than being asserted on every platform.
