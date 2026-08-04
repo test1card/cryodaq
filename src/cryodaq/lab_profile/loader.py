@@ -140,6 +140,12 @@ class _StrictLabProfileLoader(yaml.SafeLoader):
     DEFAULT_SCALAR_TAG = "tag:yaml.org,2002:str"
     DEFAULT_SEQUENCE_TAG = "tag:yaml.org,2002:seq"
     DEFAULT_MAPPING_TAG = "tag:yaml.org,2002:map"
+    # And the PARSER's tag-handle map, which expands `!foo` and `!!foo` shorthands.
+    # Measured: with yaml.parser.Parser.DEFAULT_TAGS['!'] set to the yaml.org
+    # prefix before the first import, `schema_version: !int "1"` -- normally
+    # rejected as an unknown tag -- constructed as the integer 1 and validated.
+    # Written out with PyYAML's own defaults so no host value is inherited.
+    DEFAULT_TAGS = {"!": "!", "!!": "tag:yaml.org,2002:"}
 
     # ``yaml_path_resolvers`` is a third shared mutable table.  An ordinary
     # ``yaml.SafeLoader.add_path_resolver(...)`` call would otherwise retag

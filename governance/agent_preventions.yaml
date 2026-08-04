@@ -5733,6 +5733,8 @@ records:
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolver_patterns_are_linear_time
         ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_pre_import_tag_poisoning_cannot_reach_the_profile_loader
+        ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_owned_resolvers_read_date_like_scalars_as_plain_strings
         ci_partition: remaining
     red_evidence: >-
@@ -5779,5 +5781,11 @@ records:
       only a foreign resolver the loader no longer installs, and its adversarial scalars were QUOTED, which is
       never implicitly resolved, so it passed against a deliberately catastrophic package-owned _INT_PATTERN.
       It now uses plain scalars keyed to each owned resolver and was verified to hang on that mutant.
+      A seventh inherited mutable then surfaced: yaml.parser.Parser.DEFAULT_TAGS, the tag-handle map that
+      expands the ! and !! shorthands. With DEFAULT_TAGS['!'] pointed at the yaml.org prefix before the first
+      import, schema_version: !int "1" -- normally rejected as an unknown tag -- constructed as the integer 1
+      and validated. It is now written out with PyYAML's own defaults. Seven inherited-state dependencies have
+      now been found in this loader; the settled rule is that subclassing yaml.SafeLoader inherits its mutable
+      class state and every piece must be OWNED rather than filtered, copied, or trusted.
       2026-08-04, pending immutable capture.
     green_evidence: pending

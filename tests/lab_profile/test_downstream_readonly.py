@@ -1805,6 +1805,71 @@ print(",".join(outcomes))
 """
 
 
+_PRE_IMPORT_TAG_POISON = r"""
+import yaml
+
+# The parser's tag-handle map and the resolver defaults are BOTH ordinary
+# mutable class attributes.  Poison them before the first import -- the ordering
+# a copy-based defence cannot survive.
+yaml.parser.Parser.DEFAULT_TAGS["!"] = "tag:yaml.org,2002:"
+yaml.SafeLoader.DEFAULT_SCALAR_TAG = "tag:yaml.org,2002:int"
+
+from cryodaq.lab_profile import LabProfileError, parse_lab_profile
+
+body = (
+    "lab:\n  lab_id: x\n  display_name: y\n"
+    "instruments:\n  - type: lakeshore_218s\n    name: LS1\n"
+    "questions: []\n"
+)
+
+outcomes = []
+try:
+    parse_lab_profile('schema_version: !int "1"\n' + body)
+except LabProfileError:
+    outcomes.append("rejected")
+else:
+    outcomes.append("accepted")
+
+# The ordinary document must still validate: owning this state must not break
+# the normal path.
+try:
+    parse_lab_profile("schema_version: 1\n" + body)
+except LabProfileError:
+    outcomes.append("broken")
+else:
+    outcomes.append("valid")
+
+print(",".join(outcomes))
+"""
+
+
+def test_pre_import_tag_poisoning_cannot_reach_the_profile_loader(tmp_path: Path) -> None:
+    """The parser's tag handles and the resolver defaults are inherited too.
+
+    Measured before they were owned: with
+    ``yaml.parser.Parser.DEFAULT_TAGS["!"]`` pointed at the yaml.org prefix,
+    ``schema_version: !int "1"`` -- normally rejected as an unknown tag --
+    constructed as the integer 1 and validated.
+
+    Subprocess, because the ordering that matters is host-first, import-second.
+    """
+
+    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "SystemRoot") if name in os.environ}
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _PRE_IMPORT_TAG_POISON],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "rejected,valid", completed.stdout + completed.stderr
+
+
 def test_float_scalars_cannot_reach_the_schema(tmp_path: Path) -> None:
     """No field accepts a float, so the float constructor is not owned at all.
 
