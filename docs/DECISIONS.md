@@ -276,6 +276,22 @@ The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
 - **B — a CRITICAL that stays active is re-narrated on a bounded interval**,
   currently 300 s, rather than being silenced for as long as it keeps firing.
 
+  **The bound is stated as the operator experiences it, and 300 s alone was not
+  it.** The clock is anchored at CONFIRMED DELIVERY, not at the moment the gate
+  admitted an attempt — otherwise the silence an operator experiences depends on
+  how long the *previous* narration took to generate, a term the claim never
+  accounted for. Between narrations the operator actually received, the bound is
+  `300 s + one refire interval + generation latency`, where the last is bounded
+  by `timeout_s` (120 s as shipped). The generation term is named rather than
+  omitted; a bound that ignores it is false whenever inference takes time.
+
+  **An outcome belongs to the attempt that produced it.** Two inferences can run
+  concurrently and each may take up to `timeout_s`, so the same alarm can have
+  two narrations in flight. A late failure from a superseded attempt must not
+  re-arm an alarm a newer attempt already delivered, and an attempt settles
+  once — so a cancellation arriving after a successful send cannot overwrite a
+  delivery the operator has read.
+
 **Why the interval is elapsed time and not a count of suppressed events.** The
 decision was first phrased as "after 10 suppressed windows (5 minutes)". Those
 are not the same thing: an alarm re-firing every second reaches ten suppressed

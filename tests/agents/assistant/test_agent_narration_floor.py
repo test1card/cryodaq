@@ -374,3 +374,254 @@ async def test_a_cancelled_alarm_attempt_is_recorded_as_undelivered() -> None:
     assert "alarm:cancelled" in agent._dedup._undelivered, (
         "a cancelled attempt reached nobody, so it must not be treated as a delivered narration"
     )
+
+
+# --------------------------------------------------------------------------
+# Outcomes belong to the ATTEMPT that produced them.
+#
+# `timeout_s: 120` with two concurrent inferences and a 30 s window means the
+# same alarm can have two narrations in flight.  An outcome carrying only the
+# alarm id then lands on whichever state happens to be current, and the four
+# findings on `988413e8` were all this one seam seen from different sides.
+# --------------------------------------------------------------------------
+
+
+def test_a_late_failure_from_a_superseded_attempt_does_not_re_arm_the_alarm(clock) -> None:
+    """Attempt A fails AFTER attempt B has already reached the operator.
+
+    Without scoping, A's failure re-adds the alarm to `_undelivered` and the
+    next eligible refire narrates a third time -- to an operator who has read
+    the second one.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+
+    assert ledger.should_dispatch("alarm:slow") is True
+    attempt_a = ledger.current_attempt("alarm:slow")
+
+    # A is still generating a full window later, and the alarm goes quiet long
+    # enough for B to be admitted on the ordinary path.
+    clock.return_value = start + WINDOW + 1.0
+    assert ledger.should_dispatch("alarm:slow") is True
+    attempt_b = ledger.current_attempt("alarm:slow")
+    assert attempt_b != attempt_a, "premise: the two admissions must be distinguishable"
+
+    ledger.note_outcome("alarm:slow", delivered=True, attempt=attempt_b)
+
+    # A finally times out and reports, long after B was read.
+    clock.return_value = start + 120.0
+    ledger.note_outcome("alarm:slow", delivered=False, attempt=attempt_a)
+
+    assert "alarm:slow" not in ledger._undelivered, (
+        "a superseded attempt's failure re-armed an alarm a newer attempt had delivered"
+    )
+
+
+def test_an_attempt_settles_once_so_cancellation_cannot_undo_a_delivery(clock) -> None:
+    """Slice B is optional follow-up work that runs AFTER the summary landed.
+
+    ``stop()`` during it cancels the handler, and the blanket cancellation
+    report would otherwise overwrite the summary's confirmed delivery.
+    """
+
+    ledger = _ledger()
+    assert ledger.should_dispatch("alarm:sliceb") is True
+    attempt = ledger.current_attempt("alarm:sliceb")
+
+    ledger.note_outcome("alarm:sliceb", delivered=True, attempt=attempt)
+    ledger.note_outcome("alarm:sliceb", delivered=False, attempt=attempt)
+
+    assert "alarm:sliceb" not in ledger._undelivered, (
+        "a cancellation after a successful send overwrote the delivery the operator received"
+    )
+
+
+def test_an_unscoped_report_is_still_accepted(clock) -> None:
+    """The pre-existing call shape must keep working.
+
+    Scoping is opt-in precisely so that adding it did not silently turn every
+    older caller into a no-op -- which would disable the ledger rather than
+    tighten it.
+    """
+
+    ledger = _ledger()
+    assert ledger.should_dispatch("alarm:legacy") is True
+    ledger.note_outcome("alarm:legacy", delivered=False)
+    assert "alarm:legacy" in ledger._undelivered
+
+
+def test_the_escalation_clock_starts_when_the_operator_was_told(clock) -> None:
+    """Admission is not delivery, and generation can take up to ``timeout_s``.
+
+    Stamped at admission, the silence an operator experiences depends on how
+    long the PREVIOUS narration took to generate -- a term the bound never
+    accounted for.  Anchoring at delivery removes that dependence: the clock
+    starts when they were told, which is what "300 seconds of silence" means.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    latency = 120.0
+    assert ledger.should_dispatch("alarm:latency") is True
+
+    # The alarm keeps firing every 5 s throughout.  Without that the ordinary
+    # "quiet for a full window" branch admits the next dispatch and this node
+    # would never reach the escalation branch it claims to measure -- the trap
+    # that made an earlier version of this file green for the wrong reason.
+    def refire(at: float) -> bool:
+        clock.return_value = at
+        return ledger.should_dispatch("alarm:latency")
+
+    for offset in range(5, int(latency) + 1, 5):
+        assert refire(start + offset) is False, f"unexpected dispatch at t+{offset}s, before delivery"
+
+    # Generation takes 120 s -- the shipped `timeout_s` -- and only then lands.
+    clock.return_value = start + latency
+    ledger.note_outcome("alarm:latency", delivered=True, attempt=ledger.current_attempt("alarm:latency"))
+    delivered = start + latency
+
+    # Anchored at ADMISSION, escalation would fire at start+300, i.e. 180 s
+    # after delivery.  Anchored at DELIVERY it must stay quiet until +300 s.
+    for offset in range(5, int(ESCALATE), 5):
+        assert refire(delivered + offset) is False, (
+            f"escalation fired {offset}s after delivery -- the clock is still anchored at admission"
+        )
+
+    assert refire(delivered + ESCALATE) is True
+
+
+def test_the_operator_visible_silence_bound_includes_generation_latency(clock) -> None:
+    """State the bound the system actually holds, and hold it.
+
+    The row used to claim 330 s. Between DELIVERIES the true bound is
+    ``escalate_after_s + refire interval + generation latency``, because the
+    later narration has to be generated before anyone reads it. Asserting the
+    smaller number would be asserting something false about an alarm path.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    latency = 120.0
+    interval = WINDOW - 0.1
+
+    delivered_at: list[float] = []
+    now = start
+    pending: float | None = None
+    for step in range(0, 400):
+        now = start + step * interval
+        clock.return_value = now
+        if pending is not None and now >= pending:
+            clock.return_value = pending
+            ledger.note_outcome("alarm:live", delivered=True, attempt=ledger.current_attempt("alarm:live"))
+            delivered_at.append(pending)
+            pending = None
+            clock.return_value = now
+        if pending is None and ledger.should_dispatch("alarm:live"):
+            pending = now + latency
+
+    gaps = [later - earlier for earlier, later in zip(delivered_at, delivered_at[1:], strict=False)]
+    bound = ESCALATE + interval + latency
+    assert delivered_at, "no narration was ever delivered"
+    assert max(gaps) <= bound, f"operator silence reached {max(gaps):.1f}s, above the stated bound {bound:.1f}s"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_while_queued_for_an_inference_slot_is_reported() -> None:
+    """Every slot occupied, ``stop()`` arrives, nothing was ever generated.
+
+    A handler that catches cancellation only after acquiring the semaphore
+    never reports this one, and the gate has already advanced.
+    """
+
+    import asyncio
+    from collections import deque
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._config = MagicMock(max_calls_per_hour=100)
+    agent._call_timestamps = deque()
+    agent._semaphore = asyncio.Semaphore(1)
+    agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+    agent._handle_alarm_fired = AsyncMock()
+
+    await agent._semaphore.acquire()  # every slot taken by an in-flight inference
+
+    assert agent._dedup.should_dispatch("alarm:queued") is True
+    attempt = agent._dedup.current_attempt("alarm:queued")
+
+    task = asyncio.create_task(
+        agent._safe_handle(MagicMock(event_type="alarm_fired"), dedup_id="alarm:queued", attempt=attempt)
+    )
+    await asyncio.sleep(0)  # let it reach the semaphore and block there
+    assert not task.done(), "premise: the handler must be waiting for a slot"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    agent._handle_alarm_fired.assert_not_awaited()
+    assert "alarm:queued" in agent._dedup._undelivered, (
+        "cancellation while queued for a slot was not reported, yet the gate had advanced"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancellation_before_the_handler_first_runs_is_reported() -> None:
+    """The one cancellation no ``except`` inside the handler can see.
+
+    A task cancelled before its coroutine is first scheduled never enters the
+    body at all.  The event loop attaches a done-callback for exactly this, and
+    this node drives the REAL ``_event_loop`` so the wiring is what is tested
+    rather than a re-implementation of it.
+    """
+
+    import asyncio
+    from collections import deque
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._config = MagicMock(
+        slice_a_notification=True,
+        alarm_fired_enabled=True,
+        max_calls_per_hour=100,
+    )
+    agent._call_timestamps = deque()
+    agent._semaphore = asyncio.Semaphore(1)
+    agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+    agent._handler_tasks = set()
+    agent._queue = asyncio.Queue()
+    agent._handle_alarm_fired = AsyncMock()
+
+    # `_should_handle` reads `level`, not `severity`; a payload spelling it the
+    # other way is silently filtered out and this node would pass vacuously.
+    event = MagicMock(event_type="alarm_fired", payload={"alarm_id": "vacuum_loss", "level": "CRITICAL"})
+
+    loop_task = asyncio.create_task(agent._event_loop())
+    await agent._queue.put(event)
+    # EXACTLY ONE yield: the loop wakes, gates the event and CREATES the handler
+    # task, then suspends on an empty queue.  A second yield would let the
+    # handler start running, which is a different scenario -- and one this file
+    # already covers.
+    await asyncio.sleep(0)
+
+    handlers = [task for task in agent._handler_tasks if task is not loop_task]
+    assert handlers, "premise: the event loop must have created a handler task"
+    handler = handlers[0]
+    assert agent._handle_alarm_fired.await_count == 0, "premise: the handler must not have started yet"
+
+    handler.cancel()
+    await asyncio.gather(handler, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    loop_task.cancel()
+    await asyncio.gather(loop_task, return_exceptions=True)
+
+    agent._handle_alarm_fired.assert_not_awaited()
+    assert "alarm:vacuum_loss" in agent._dedup._undelivered, (
+        "a handler cancelled before it ever ran left the gate advanced with no outcome recorded"
+    )

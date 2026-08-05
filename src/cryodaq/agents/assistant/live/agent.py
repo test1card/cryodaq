@@ -243,6 +243,16 @@ class _EventDedup:
         self._seen: dict[str, float] = {}
         self._last_allowed: dict[str, float] = {}
         self._undelivered: set[str] = set()
+        # An outcome belongs to the ATTEMPT that produced it, not to the alarm.
+        # With `timeout_s: 120` and two concurrent inferences, attempt B can be
+        # admitted and delivered while attempt A is still pending; A's late
+        # failure must not re-arm an alarm B has already narrated.  `_attempt`
+        # is the sequence number of the newest admission; `_settled` is the
+        # attempt whose outcome has already been recorded, so a second report
+        # for the same attempt -- a cancellation arriving after a successful
+        # send, say -- cannot overwrite the first.
+        self._attempt: dict[str, int] = {}
+        self._settled: dict[str, int] = {}
 
     def _prune(self, now: float) -> None:
         """Drop bookkeeping for alarms that have stopped firing.
@@ -255,9 +265,13 @@ class _EventDedup:
         self._seen = {key: stamp for key, stamp in self._seen.items() if stamp >= horizon}
         self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in self._seen}
         self._undelivered &= set(self._seen)
+        self._attempt = {key: seq for key, seq in self._attempt.items() if key in self._seen}
+        self._settled = {key: seq for key, seq in self._settled.items() if key in self._seen}
 
     def _allow(self, event_id: str, now: float) -> bool:
         self._last_allowed[event_id] = now
+        self._attempt[event_id] = self._attempt.get(event_id, 0) + 1
+        self._settled.pop(event_id, None)
         # Allowing an attempt CLEARS the failure marker; `note_outcome` re-adds
         # it only if this attempt actually fails.  Leaving it set makes the
         # marker describe an attempt that is already superseded: the retry
@@ -291,22 +305,72 @@ class _EventDedup:
             # Anchored at the LAST NARRATION, not at the first suppressed
             # refire.  Anchoring at the suppression start adds the refire
             # interval to every silence: an alarm re-firing every 29.9 s would
-            # first suppress at 29.9 s and only escalate at 329.9 s, breaking
-            # the `escalate_after_s + window_s` bound this class claims.
+            # first suppress at 29.9 s and only escalate at 329.9 s.
+            #
+            # "Last narration" means the last CONFIRMED DELIVERY where one is
+            # known -- `note_outcome(delivered=True)` moves this stamp forward.
+            # So the silence the operator experiences between narrations they
+            # actually received is bounded by `escalate_after_s` plus one refire
+            # interval plus the GENERATION LATENCY of the later narration, which
+            # `config/agent.yaml` bounds at `timeout_s`.  That third term is
+            # real and is stated rather than omitted: a bound that ignores it is
+            # false whenever inference takes time.
             return self._allow(event_id, now)
         return False
 
-    def note_outcome(self, event_id: str, *, delivered: bool) -> None:
+    def current_attempt(self, event_id: str) -> int:
+        """The sequence number of the newest admission for ``event_id``.
+
+        Read immediately after a ``True`` from `should_dispatch`, by the single
+        task that owns the gate, and carried through the handler so the outcome
+        can be attributed to the attempt that produced it.
+        """
+
+        return self._attempt.get(event_id, 0)
+
+    def note_outcome(self, event_id: str, *, delivered: bool, attempt: int | None = None) -> None:
         """Record whether the narration for ``event_id`` reached any target.
 
         This is the input the ledger never had.  ``mark_delivered`` existed but
         was called only by tests -- production never reported an outcome, so a
         narration lost to a broken transport still bought a full window of
         silence.
+
+        ``attempt`` scopes the report, and two orderings make that necessary
+        rather than tidy:
+
+        * **A late failure must not undo a newer success.**  Two inferences can
+          run concurrently and each may take up to ``timeout_s``, so attempt B
+          can be admitted, delivered and settled while attempt A is still
+          pending.  Without scoping, A's eventual failure re-arms an alarm the
+          operator has already been told about, and the next refire narrates a
+          third time.
+        * **An attempt settles ONCE.**  A cancellation arriving after the
+          summary was delivered -- ``stop()`` during the optional Slice B
+          follow-up, for instance -- would otherwise overwrite a confirmed
+          delivery with a failure.
+
+        A report carrying no ``attempt`` is accepted unconditionally; that is
+        the pre-existing test-facing behaviour and is deliberately unchanged.
         """
+
+        if attempt is not None:
+            if attempt != self._attempt.get(event_id):
+                return  # a superseded attempt reporting after a newer one began
+            if self._settled.get(event_id) == attempt:
+                return  # this attempt already reported; the first word wins
+            self._settled[event_id] = attempt
 
         if delivered:
             self._undelivered.discard(event_id)
+            # THE ESCALATION CLOCK STARTS WHEN THE OPERATOR WAS TOLD, not when
+            # the gate admitted the attempt.  Generation can take up to
+            # ``timeout_s``, and stamping at admission makes the silence the
+            # operator experiences depend on how long the PREVIOUS narration
+            # took to generate -- a quantity the bound never accounted for.
+            # ``time.monotonic()`` here is always >= the admission stamp, so
+            # this is a forward move, never a rewind.
+            self._last_allowed[event_id] = time.monotonic()
         else:
             self._undelivered.add(event_id)
 
@@ -510,12 +574,26 @@ class AssistantLiveAgent:
                             dedup_id,
                         )
                         continue
+                    attempt = None if dedup_id is None else self._dedup.current_attempt(dedup_id)
                     t = asyncio.create_task(
-                        self._safe_handle(event, dedup_id=dedup_id),
+                        self._safe_handle(event, dedup_id=dedup_id, attempt=attempt),
                         name=f"gemma_{event.event_type}",
                     )
                     self._handler_tasks.add(t)
                     t.add_done_callback(self._handler_tasks.discard)
+                    if dedup_id is not None:
+                        # Backstop for the one cancellation the handler cannot
+                        # see: a task cancelled BEFORE its coroutine first runs
+                        # never enters any `except`, yet the gate has already
+                        # advanced.  `note_outcome` settles an attempt once, so
+                        # this is a no-op whenever the handler already reported.
+                        t.add_done_callback(
+                            lambda done, key=dedup_id, seq=attempt: (
+                                self._dedup.note_outcome(key, delivered=False, attempt=seq)
+                                if done.cancelled()
+                                else None
+                            )
+                        )
             except asyncio.CancelledError:
                 return
             except Exception:
@@ -560,14 +638,21 @@ class AssistantLiveAgent:
             self._call_timestamps.popleft()
         return len(self._call_timestamps) < self._config.max_calls_per_hour
 
-    async def _safe_handle(self, event: EngineEvent, *, dedup_id: str | None = None) -> None:
+    async def _safe_handle(
+        self,
+        event: EngineEvent,
+        *,
+        dedup_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
         """Handle one event with rate-limit + semaphore + error isolation.
 
         ``dedup_id`` carries the ledger key so the delivery OUTCOME can be
-        reported back (OC-028).  Every path that ends without a delivered
+        reported back (OC-028), and ``attempt`` scopes that outcome to the
+        admission that produced it.  Every path that ends without a delivered
         narration -- rate limit, generation failure, empty response, refused
-        transport -- must report ``delivered=False``, or a narration the
-        operator never saw would buy a full window of silence.
+        transport, cancellation -- must report ``delivered=False``, or a
+        narration the operator never saw would buy a full window of silence.
         """
 
         if not self._check_rate_limit():
@@ -577,47 +662,57 @@ class AssistantLiveAgent:
                 event.event_type,
             )
             if dedup_id is not None:
-                self._dedup.note_outcome(dedup_id, delivered=False)
+                self._dedup.note_outcome(dedup_id, delivered=False, attempt=attempt)
             return
 
-        async with self._semaphore:
-            self._call_timestamps.append(time.monotonic())
-            try:
-                if event.event_type in {
-                    "experiment_finalize",
-                    "experiment_stop",
-                    "experiment_abort",
-                }:
-                    await self._handle_experiment_finalize(event)
-                elif event.event_type == "sensor_anomaly_critical":
-                    await self._handle_sensor_anomaly(event)
-                elif event.event_type == "shift_handover_request":
-                    await self._handle_shift_handover(event)
-                elif event.event_type == "periodic_report_request":
-                    await self._handle_periodic_report(event)
-                else:
-                    await self._handle_alarm_fired(event, dedup_id=dedup_id)
-            except asyncio.CancelledError:
-                # `stop()` cancels in-flight handlers, and CancelledError is a
-                # BaseException, so it passes straight through the two handlers
-                # below.  The gate has already advanced `_last_allowed`, so
-                # without this the cancelled attempt buys real silence for a
-                # narration that reached nobody: restart the agent inside the
-                # escalation interval and the refire is suppressed by an alarm
-                # summary that was killed mid-generation.
-                if dedup_id is not None:
-                    self._dedup.note_outcome(dedup_id, delivered=False)
-                raise
-            except (OllamaUnavailableError, OllamaModelMissingError) as exc:
-                if dedup_id is not None:
-                    self._dedup.note_outcome(dedup_id, delivered=False)
-                logger.warning("AssistantLiveAgent: Ollama недоступен — %s", exc)
-            except Exception:
-                if dedup_id is not None:
-                    self._dedup.note_outcome(dedup_id, delivered=False)
-                logger.warning("AssistantLiveAgent: ошибка обработки %s", event.event_type, exc_info=True)
+        # The cancellation handler wraps the semaphore ACQUISITION, not just the
+        # work.  With every inference slot occupied, an admitted CRITICAL can be
+        # cancelled by `stop()` while it is still queued for a slot -- the gate
+        # has advanced but nothing has been generated, and a handler that only
+        # catches cancellation after acquiring would never report it.
+        try:
+            async with self._semaphore:
+                self._call_timestamps.append(time.monotonic())
+                try:
+                    if event.event_type in {
+                        "experiment_finalize",
+                        "experiment_stop",
+                        "experiment_abort",
+                    }:
+                        await self._handle_experiment_finalize(event)
+                    elif event.event_type == "sensor_anomaly_critical":
+                        await self._handle_sensor_anomaly(event)
+                    elif event.event_type == "shift_handover_request":
+                        await self._handle_shift_handover(event)
+                    elif event.event_type == "periodic_report_request":
+                        await self._handle_periodic_report(event)
+                    else:
+                        await self._handle_alarm_fired(event, dedup_id=dedup_id, attempt=attempt)
+                except (OllamaUnavailableError, OllamaModelMissingError) as exc:
+                    if dedup_id is not None:
+                        self._dedup.note_outcome(dedup_id, delivered=False, attempt=attempt)
+                    logger.warning("AssistantLiveAgent: Ollama недоступен — %s", exc)
+                except Exception:
+                    if dedup_id is not None:
+                        self._dedup.note_outcome(dedup_id, delivered=False, attempt=attempt)
+                    logger.warning("AssistantLiveAgent: ошибка обработки %s", event.event_type, exc_info=True)
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so it passes straight through
+            # the handlers above.  Reporting it as undelivered is safe even when
+            # the summary already succeeded: `note_outcome` settles an attempt
+            # ONCE, so a cancellation during the optional Slice B follow-up
+            # cannot overwrite a delivery the operator already received.
+            if dedup_id is not None:
+                self._dedup.note_outcome(dedup_id, delivered=False, attempt=attempt)
+            raise
 
-    async def _handle_alarm_fired(self, event: EngineEvent, *, dedup_id: str | None = None) -> None:
+    async def _handle_alarm_fired(
+        self,
+        event: EngineEvent,
+        *,
+        dedup_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
         audit_id = self._audit.make_audit_id()
         payload = event.payload
 
@@ -691,7 +786,11 @@ class AssistantLiveAgent:
             # which is weaker than the audit's "did this reach everybody".
             # Answering the audit's question here resends to people who already
             # have it whenever a sibling destination is down.
-            self._dedup.note_outcome(dedup_id, delivered=_reached_any_recipient(outcomes))
+            self._dedup.note_outcome(
+                dedup_id,
+                delivered=_reached_any_recipient(outcomes),
+                attempt=attempt,
+            )
 
         logger.info(
             "AssistantLiveAgent: alarm_fired обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
