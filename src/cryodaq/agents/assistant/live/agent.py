@@ -233,7 +233,7 @@ class _EventDedup:
         self._window_s = window_s
         self._escalate_after_s = escalate_after_s
         self._seen: dict[str, float] = {}
-        self._suppressing_since: dict[str, float] = {}
+        self._last_allowed: dict[str, float] = {}
         self._undelivered: set[str] = set()
 
     def _prune(self, now: float) -> None:
@@ -245,32 +245,39 @@ class _EventDedup:
 
         horizon = now - max(self._window_s, self._escalate_after_s)
         self._seen = {key: stamp for key, stamp in self._seen.items() if stamp >= horizon}
-        self._suppressing_since = {key: stamp for key, stamp in self._suppressing_since.items() if key in self._seen}
+        self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in self._seen}
         self._undelivered &= set(self._seen)
 
-    def _allow(self, event_id: str) -> bool:
-        self._suppressing_since.pop(event_id, None)
+    def _allow(self, event_id: str, now: float) -> bool:
+        self._last_allowed[event_id] = now
         return True
 
     def should_dispatch(self, event_id: str) -> bool:
         now = time.monotonic()
-        last = self._seen.get(event_id)
-        suppressing_since = self._suppressing_since.get(event_id)
+        last_seen = self._seen.get(event_id)
+        last_allowed = self._last_allowed.get(event_id)
         self._seen[event_id] = now
         self._prune(now)
 
-        if last is None or last < now - self._window_s:
+        if last_seen is None or last_seen < now - self._window_s:
             # Genuinely quiet for a full window: the original semantics.
-            return self._allow(event_id)
-        if event_id in self._undelivered:
-            # The last narration did not reach any target.  Suppressing now
-            # would trade the operator's only notice for silence.
-            return self._allow(event_id)
-        if suppressing_since is None:
-            self._suppressing_since[event_id] = now
-            return False
-        if now - suppressing_since >= self._escalate_after_s:
-            return self._allow(event_id)
+            return self._allow(event_id, now)
+        if last_allowed is None:
+            return self._allow(event_id, now)
+        if event_id in self._undelivered and now - last_allowed >= self._window_s:
+            # A narration that reached nobody buys no silence -- but it buys no
+            # LICENCE either.  Without the window bound here, a transport outage
+            # turns every refire during an in-flight retry into another
+            # generation and send, which is the same storm the window exists to
+            # prevent, arriving through the recovery path instead.
+            return self._allow(event_id, now)
+        if now - last_allowed >= self._escalate_after_s:
+            # Anchored at the LAST NARRATION, not at the first suppressed
+            # refire.  Anchoring at the suppression start adds the refire
+            # interval to every silence: an alarm re-firing every 29.9 s would
+            # first suppress at 29.9 s and only escalate at 329.9 s, breaking
+            # the `escalate_after_s + window_s` bound this class claims.
+            return self._allow(event_id, now)
         return False
 
     def note_outcome(self, event_id: str, *, delivered: bool) -> None:
@@ -292,8 +299,27 @@ class _EventDedup:
 
         now = time.monotonic()
         self._seen[event_id] = now
+        self._last_allowed[event_id] = now
         self._prune(now)
         self.note_outcome(event_id, delivered=True)
+
+
+def _reached_any_recipient(outcomes: dict[str, Any]) -> bool:
+    """True when at least one recipient of any target accepted the narration.
+
+    Deliberately weaker than ``_is_delivered_outcome``, which requires every
+    recipient of a target to succeed.  That strictness is right for the AUDIT
+    trail and wrong for suppression: a narration that reached one of two
+    Telegram chats HAS been seen, and resending it because the other chat is
+    broken spams the operator who is already reading it.
+    """
+
+    for state in outcomes.values():
+        if state == "delivered":
+            return True
+        if isinstance(state, dict) and any(recipient == "delivered" for recipient in state.values()):
+            return True
+    return False
 
 
 def _event_dedup_id(event: EngineEvent) -> str | None:
@@ -609,7 +635,7 @@ class AssistantLiveAgent:
                 result.truncated,
                 audit_id,
             )
-        dispatched, _ = await self._dispatch_with_audit(
+        dispatched, outcomes = await self._dispatch_with_audit(
             event=event,
             audit_id=audit_id,
             payload=payload,
@@ -628,11 +654,17 @@ class AssistantLiveAgent:
 
         if dedup_id is not None:
             # OC-028: the ledger suppresses duplicates of what the operator
-            # RECEIVED.  An empty `dispatched` means no target accepted it --
-            # refused transport, blocked audit, truncated or empty generation --
-            # and the next occurrence of this alarm must not be silenced by a
-            # narration nobody saw.
-            self._dedup.note_outcome(dedup_id, delivered=bool(dispatched))
+            # RECEIVED, so nothing accepted means the next occurrence must not
+            # be silenced by a narration nobody saw.
+            #
+            # `dispatched` is the wrong test on its own: `_is_delivered_outcome`
+            # requires EVERY recipient of a target to succeed, so one broken chat
+            # among several marks the whole target undelivered even though an
+            # operator did read it.  Suppression asks "did this reach anybody",
+            # which is weaker than the audit's "did this reach everybody".
+            # Answering the audit's question here resends to people who already
+            # have it whenever a sibling destination is down.
+            self._dedup.note_outcome(dedup_id, delivered=_reached_any_recipient(outcomes))
 
         logger.info(
             "AssistantLiveAgent: alarm_fired обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
@@ -641,7 +673,17 @@ class AssistantLiveAgent:
             dispatched,
         )
         if self._config.slice_b_suggestion and not result.truncated and result.text.strip():
-            await self._generate_diagnostic_suggestion(event, payload)
+            # Slice B is an OPTIONAL follow-up.  Its failure must not reach
+            # _safe_handle's handler, which would mark this alarm's dedup id
+            # undelivered AFTER the summary above already reached the operator --
+            # and the next refire inside the window would then resend a narration
+            # they have read, because a diagnostic extra failed.
+            try:
+                await self._generate_diagnostic_suggestion(event, payload)
+            except (OllamaUnavailableError, OllamaModelMissingError) as exc:
+                logger.warning("AssistantLiveAgent: Slice B недоступен - %s", exc)
+            except Exception:
+                logger.warning("AssistantLiveAgent: ошибка Slice B", exc_info=True)
 
     async def _generate_diagnostic_suggestion(self, event: EngineEvent, alarm_payload: dict[str, Any]) -> None:
         """Generate and dispatch Slice B diagnostic suggestion (second LLM call).

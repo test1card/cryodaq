@@ -113,9 +113,16 @@ def test_a_narration_that_reached_nobody_buys_no_silence(clock) -> None:
     assert ledger.should_dispatch("alarm:lost") is True
     ledger.note_outcome("alarm:lost", delivered=False)
 
+    # TIGHTENED IN REVIEW.  The rule was first written as "buys no silence",
+    # which let every refire through while delivery kept failing -- a transport
+    # outage became the same storm the window exists to prevent, arriving via
+    # the recovery path.  It is now "buys no MORE THAN ONE WINDOW of silence".
     clock.return_value = 1000.0 + 1.0
+    assert ledger.should_dispatch("alarm:lost") is False, "the retry must still be window-bounded"
+
+    clock.return_value = 1000.0 + WINDOW + 0.1
     assert ledger.should_dispatch("alarm:lost") is True, (
-        "a narration no target accepted must not suppress the next occurrence"
+        "a narration no target accepted must not buy a full escalation interval of silence"
     )
 
 
@@ -126,11 +133,11 @@ def test_delivery_recovering_restores_ordinary_suppression(clock) -> None:
     ledger.should_dispatch("alarm:recover")
     ledger.note_outcome("alarm:recover", delivered=False)
 
-    clock.return_value = 1001.0
+    clock.return_value = 1000.0 + WINDOW + 0.1
     assert ledger.should_dispatch("alarm:recover") is True
     ledger.note_outcome("alarm:recover", delivered=True)
 
-    clock.return_value = 1002.0
+    clock.return_value = 1000.0 + WINDOW + 1.1
     assert ledger.should_dispatch("alarm:recover") is False
 
 
@@ -182,3 +189,90 @@ def test_bookkeeping_does_not_grow_without_bound(clock) -> None:
     clock.return_value = 1000.0 + ESCALATE * 2
     ledger.should_dispatch("alarm:final")
     assert len(ledger._seen) <= 2, f"ledger retained {len(ledger._seen)} entries after the horizon"
+
+
+# ---------------------------------------------------------------------------
+# Round 2 — four findings against 7efd6879, two of them P1.
+# ---------------------------------------------------------------------------
+
+
+def test_the_silence_bound_holds_for_a_refire_just_inside_the_window(clock) -> None:
+    """The bound this module claims was false for an interval it never tested.
+
+    ``test_a_continuously_flapping_critical...`` asserts
+    ``longest_silence <= ESCALATE + WINDOW`` and passed only because it used a
+    10 s refire interval.  With the escalation anchored at the FIRST SUPPRESSED
+    REFIRE, an alarm re-firing every 29.9 s is first suppressed at 29.9 s and
+    only escalates at 329.9 s -- so the operator's silence is
+    ``ESCALATE + interval``, which exceeds the claimed bound as the interval
+    approaches the window.  Anchoring at the LAST NARRATION removes the term.
+
+    A guard that asserts a bound the implementation does not hold is worse than
+    no guard: it is cited as coverage.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    interval = WINDOW - 0.1
+
+    assert ledger.should_dispatch("alarm:edge") is True
+    ledger.note_outcome("alarm:edge", delivered=True)
+    narrated_at = [start]
+
+    for step in range(1, 121):  # ~1 hour of refires just inside the window
+        clock.return_value = start + step * interval
+        if ledger.should_dispatch("alarm:edge"):
+            narrated_at.append(clock.return_value)
+            ledger.note_outcome("alarm:edge", delivered=True)
+
+    gaps = [later - earlier for earlier, later in zip(narrated_at, narrated_at[1:], strict=False)]
+    assert max(gaps) <= ESCALATE + WINDOW, (
+        f"silence reached {max(gaps):.1f}s, above the claimed {ESCALATE + WINDOW:.0f}s bound"
+    )
+
+
+def test_a_failed_delivery_does_not_license_unbounded_retries(clock) -> None:
+    """Re-arming must not become its own storm.
+
+    While delivery keeps failing, every refire used to pass the gate, so a
+    transport outage turned recovery into the same flood the window exists to
+    prevent -- bounded only by the semaphore and the hourly rate limit.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:outage") is True
+    ledger.note_outcome("alarm:outage", delivered=False)
+
+    allowed = 0
+    for step in range(1, 61):  # 60 refires, 1 s apart, transport still down
+        clock.return_value = start + step
+        if ledger.should_dispatch("alarm:outage"):
+            allowed += 1
+            ledger.note_outcome("alarm:outage", delivered=False)
+
+    # One window elapsed over 60 s, so at most one retry may have been allowed.
+    assert allowed <= 2, f"{allowed} retries in 60 s of outage -- the window bound is gone"
+    assert allowed >= 1, "a persistent outage must still retry eventually"
+
+
+def test_a_partially_delivered_narration_counts_as_seen() -> None:
+    """One broken chat among several must not trigger a resend to everyone.
+
+    ``_is_delivered_outcome`` requires EVERY recipient of a target to succeed,
+    which is right for the audit trail and wrong for suppression: if one of two
+    Telegram chats received the narration, an operator has read it.
+    """
+
+    from cryodaq.agents.assistant.live.agent import _reached_any_recipient
+    from cryodaq.agents.assistant.live.output_router import _is_delivered_outcome
+
+    partial = {"telegram": {"-100111": "delivered", "-100222": "failed"}}
+    assert _is_delivered_outcome(partial["telegram"]) is False, "premise: the audit view rejects partial"
+    assert _reached_any_recipient(partial) is True, "suppression must treat a partial delivery as seen"
+
+    nobody = {"telegram": {"-100111": "failed", "-100222": "outcome_unknown"}}
+    assert _reached_any_recipient(nobody) is False
+
+    assert _reached_any_recipient({"operator_log": "delivered"}) is True
+    assert _reached_any_recipient({}) is False
