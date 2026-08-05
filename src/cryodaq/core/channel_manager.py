@@ -67,6 +67,7 @@ class ChannelManager:
 
     def __init__(self, config_path: Path | None = None) -> None:
         self._channels: dict[str, dict[str, Any]] = {}
+        self._default_quantity: str | None = None
         # Hardware-pinned landmark channels (Т11/Т12) populated by the
         # engine from physical_alarms.yaml. Default empty so direct
         # ChannelManager() construction (tests, GUI standalone) keeps
@@ -91,16 +92,13 @@ class ChannelManager:
 
         if not self._config_path.exists():
             raise ChannelConfigError(
-                f"channels.yaml not found at {self._config_path} — refusing "
-                f"to start without channel configuration"
+                f"channels.yaml not found at {self._config_path} — refusing to start without channel configuration"
             )
         try:
             with self._config_path.open(encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh)
         except yaml.YAMLError as exc:
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: YAML parse error — {exc}"
-            ) from exc
+            raise ChannelConfigError(f"channels.yaml at {self._config_path}: YAML parse error — {exc}") from exc
 
         if not isinstance(raw, dict):
             raise ChannelConfigError(
@@ -108,10 +106,12 @@ class ChannelManager:
             )
         channels = raw.get("channels")
         if not isinstance(channels, dict):
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: missing or invalid 'channels' key"
-            )
+            raise ChannelConfigError(f"channels.yaml at {self._config_path}: missing or invalid 'channels' key")
         self._channels = channels
+        declared_default = raw.get("default_quantity")
+        if declared_default is not None and not isinstance(declared_default, str):
+            raise ChannelConfigError(f"channels.yaml at {self._config_path}: default_quantity must be a string")
+        self._default_quantity = declared_default
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
 
     def save(self, path: Path | None = None) -> None:
@@ -275,6 +275,52 @@ class ChannelManager:
         """
         return ch_ref.strip().translate(self._LATIN_TO_CYRILLIC)
 
+    # ------------------------------------------------------------------
+    # OC-030 — declared quantity, replacing role inference from spelling
+    # ------------------------------------------------------------------
+
+    def get_quantity(self, channel_id: str) -> str | None:
+        """Return the DECLARED physical quantity of a channel, or None.
+
+        The seven GUI sites this replaces asked ``channel.startswith("Т")`` and
+        treated the answer as "this is a temperature".  That is an inference
+        from the identifier's spelling: a legitimate rename silently changed
+        which channels appeared on an operator screen, and a non-temperature
+        channel whose name happened to start with the same letter was routed as
+        a temperature.
+
+        Returns None when nothing is declared -- callers must NOT fall back to
+        spelling, and must not silently drop the channel either.  See
+        ``docs/design-system/patterns/state-visualization.md``: an unclassified
+        reading renders marked, not hidden.  A vanished pressure readout is what
+        caused revert ``0bea0449``.
+        """
+
+        short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        info = self._channels.get(short_id)
+        if info is None:
+            return None
+        declared = info.get("quantity")
+        if isinstance(declared, str) and declared:
+            return declared
+        return self._default_quantity
+
+    def is_temperature_channel(self, channel_id: str) -> bool:
+        """True only when the channel DECLARES itself a temperature."""
+
+        return self.get_quantity(channel_id) == "temperature"
+
+    def get_temperature_channels(self) -> list[str]:
+        """Every channel declared as a temperature, in configuration order."""
+
+        return [ch_id for ch_id in self._channels if self.is_temperature_channel(ch_id)]
+
+    def get_visible_temperature_channels(self) -> list[str]:
+        """Visible AND declared-temperature, preserving visible ordering."""
+
+        declared = set(self.get_temperature_channels())
+        return [ch for ch in self.get_all_visible() if self.normalize_channel_id(ch) in declared or ch in declared]
+
     def get_cold_channels(self) -> list[str]:
         """Return list of channel IDs marked as cold (cryogenic).
 
@@ -351,14 +397,17 @@ class ChannelManager:
             high = float(candidate[1])
         except (TypeError, ValueError):
             logger.warning(
-                "ChannelManager: alarm_band for %s contains non-numeric "
-                "values (%r); ignoring", short_id, candidate,
+                "ChannelManager: alarm_band for %s contains non-numeric values (%r); ignoring",
+                short_id,
+                candidate,
             )
             return None
         if low > high:
             logger.warning(
-                "ChannelManager: alarm_band for %s is reversed [%s..%s]; "
-                "ignoring", short_id, low, high,
+                "ChannelManager: alarm_band for %s is reversed [%s..%s]; ignoring",
+                short_id,
+                low,
+                high,
             )
             return None
         return (low, high)
@@ -370,11 +419,7 @@ class ChannelManager:
         (e.g. "all warm-by-design channels"). Order matches YAML
         declaration order.
         """
-        return [
-            ch_id
-            for ch_id, info in self._channels.items()
-            if info.get("thermal_zone") == zone
-        ]
+        return [ch_id for ch_id, info in self._channels.items() if info.get("thermal_zone") == zone]
 
     def resolve_channel_reference(self, reference: str) -> str:
         """Resolve a channel reference to its canonical runtime label.
@@ -395,9 +440,7 @@ class ChannelManager:
         info = self._channels.get(short_id)
         if info is None:
             known = sorted(self._channels.keys())
-            raise ChannelConfigError(
-                f"unknown channel reference '{reference}' — known channels: {', '.join(known)}"
-            )
+            raise ChannelConfigError(f"unknown channel reference '{reference}' — known channels: {', '.join(known)}")
         name = info.get("name", "")
         return f"{short_id} {name}" if name else short_id
 

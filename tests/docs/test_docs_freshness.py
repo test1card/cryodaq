@@ -171,7 +171,11 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-024",
         "OC-026",
         "OC-028",
-        "OC-030",
+        # OC-030 removed: all seven GUI sites select by declared quantity,
+        # guarded by tests/core/test_declared_channel_quantity.py with a
+        # measured no-regression baseline (24 of 24 identical to the old
+        # spelling selection). The declaration is operator-owned, not yet
+        # descriptor-derived, and the row says so.
         "OC-034",
         "OC-036",
         "OC-037",

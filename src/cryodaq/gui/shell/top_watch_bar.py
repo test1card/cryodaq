@@ -1074,7 +1074,7 @@ class TopWatchBar(QWidget):
         ch = reading.channel
         vital_key: str | None = None
 
-        if ch.startswith("\u0422") and reading.unit == "K":
+        if self._channel_mgr.is_temperature_channel(ch) and reading.unit == "K":
             # v0.55.4 A5 fix: get_all_visible() returns short IDs like
             # "\u04221"; the driver emits readings as "\u04221 <display suffix>".
             # _refresh_channels looks up the short id, so stamp under
@@ -1191,7 +1191,7 @@ class TopWatchBar(QWidget):
             self._channel_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
             return
 
-        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("Т")]
+        visible_ids = self._channel_mgr.get_visible_temperature_channels()
         total = len(visible_ids)
         if total == 0:
             self._channel_label.setText("◇ Нет настроенных каналов")

@@ -133,7 +133,7 @@ class TempPlotWidget(QWidget):
         if pi.legend is not None:
             pi.legend.clear()
 
-        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if ch.startswith("\u0422")]
+        visible_ids = self._channel_mgr.get_visible_temperature_channels()
         for idx, ch_id in enumerate(visible_ids):
             display = self._channel_mgr.get_display_name(ch_id)
             # DESIGN: tokens/chart-tokens.md — palette cycles PLOT_LINE_PALETTE

@@ -1628,8 +1628,15 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
             return
 
         lines: list[str] = []
-        # Show temperature channels (K) first, then others
-        temp_chs = sorted(ch for ch in data if ch.startswith("Т") or ch.startswith("T"))
+        # OC-030: ordering by DECLARED quantity, not by identifier spelling.
+        # This site differs from the other six in one important way -- `other_chs`
+        # catches everything `temp_chs` does not, so no channel was ever dropped
+        # here; the spelling test only decided ORDER. It is migrated anyway
+        # because the same inference reads as authority to the next editor, and
+        # because it matched Latin "T" as well as Cyrillic "Т", which silently
+        # promoted unrelated channels into the temperature group.
+        channel_mgr = get_channel_manager()
+        temp_chs = sorted(ch for ch in data if channel_mgr.is_temperature_channel(ch))
         other_chs = sorted(ch for ch in data if ch not in temp_chs)
         ordered = (temp_chs + other_chs)[:12]  # limit display
 
