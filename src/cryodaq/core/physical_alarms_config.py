@@ -14,6 +14,8 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,30 +23,15 @@ class PhysicalAlarmsConfigError(RuntimeError):
     """Production physical-alarm configuration is absent or unsafe to use."""
 
 
-class _OwnedSafeLoader(yaml.SafeLoader):
-    """`yaml.SafeLoader`'s grammar, without sharing its mutable tables.
-
-    The two legacy paths in this module used `yaml.safe_load`, which is
-    `yaml.SafeLoader` itself, so any library that had called
-    `yaml.SafeLoader.add_constructor(...)` or `add_implicit_resolver(...)` --
-    ordinary PyYAML use, not an attack -- decided how a safety-bearing alarm
-    configuration parses. The production path above already owns its tables;
-    these two did not, which left the weaker path as the reachable one.
-
-    **The vocabulary is deliberately identical**, and no duplicate-key or
-    alias refusal is added here. Those refusals belong to the production
-    loader, which is documented as raising; this loader is on the legacy
-    fallback path, which is documented as never raising and as retaining
-    defaults. Adding a refusal here would convert files that parse today into
-    fail-safe escalation, and this change is meant to remove a poisoning path
-    without changing what parses.
-    """
-
-    yaml_constructors = dict(yaml.SafeLoader.yaml_constructors)
-    yaml_multi_constructors = dict(yaml.SafeLoader.yaml_multi_constructors)
-    yaml_implicit_resolvers = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
-    yaml_path_resolvers = dict(yaml.SafeLoader.yaml_path_resolvers)
-    bool_values = dict(yaml.SafeLoader.bool_values)
+# The two legacy paths in this module used `yaml.safe_load`, which IS
+# `yaml.SafeLoader`, so any library that had called its public
+# `add_constructor` / `add_implicit_resolver` decided how a safety-bearing alarm
+# configuration parses.  The shared owned loader carries the reasoning and the
+# known limit; no duplicate-key or alias refusal is added on this path, because
+# the legacy loader is documented as never raising and as retaining defaults,
+# and a refusal here would convert files that parse today into fail-safe
+# escalation.  Those refusals belong to the production loader below.
+_OwnedSafeLoader = OwnedSafeLoader
 
 
 def _unique_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False):

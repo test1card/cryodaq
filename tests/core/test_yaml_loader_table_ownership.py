@@ -51,6 +51,7 @@ CHANNEL_POISON = (
 )
 
 SHIPPED_ALARMS_CONFIG = REPO_ROOT / "config" / "physical_alarms.yaml"
+SHIPPED_ALARM_CONFIG = REPO_ROOT / "config" / "alarms_v3.yaml"
 
 ALARMS_DOCUMENT = """\
 cooldown:
@@ -172,6 +173,34 @@ def test_production_loader_snapshots_its_tables_at_import_not_at_call() -> None:
         + CHANNEL_POISON
         + "import pathlib\n"
         + f"loaded = load_production_physical_alarms_config(pathlib.Path({str(SHIPPED_ALARMS_CONFIG)!r}))\n"
+        + 'print("POISONED" if "POISONED" in repr(loaded) else "CLEAN")\n'
+    )
+    assert _run(probe) == "CLEAN"
+
+
+def test_shipped_alarm_config_channel_lists_cannot_be_substituted() -> None:
+    """`core/alarm_config.py`, found in review after three loaders were fixed.
+
+    It used bare ``yaml.safe_load`` and loads the CRITICAL alarm definitions.
+    Measured before the fix, against the SHIPPED ``config/alarms_v3.yaml`` with a
+    resolver registered AFTER the module imported: the ``vacuum_loss_cold`` and
+    ``calibrated_sensor_fault`` channel lists came back as a substituted string,
+    with no diagnostic and no refusal -- so the alarm engine would arm on
+    channels that do not exist.
+
+    Recorded because the miss matters: an earlier version of the OC-040 row said
+    the post-import ordering was CLOSED, when three loaders had been fixed and
+    this fourth one had not been looked for.  Fixing instances of a class is not
+    the same as closing the class, and the register said the stronger thing.
+    """
+
+    probe = (
+        "from cryodaq.core.alarm_config import load_alarm_config\n"
+        + CHANNEL_POISON
+        + "import pathlib\n"
+        + f"loaded = load_alarm_config(pathlib.Path({str(SHIPPED_ALARM_CONFIG)!r}))\n"
+        + "engine, alarms = loaded\n"
+        + 'assert alarms, "no alarms parsed -- an empty result is an absent measurement, not a pass"\n'
         + 'print("POISONED" if "POISONED" in repr(loaded) else "CLEAN")\n'
     )
     assert _run(probe) == "CLEAN"

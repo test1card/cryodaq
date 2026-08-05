@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
+
 
 class AlarmConfigError(RuntimeError):
     """Raised when alarms_v3.yaml cannot be loaded in a fail-closed manner.
@@ -105,8 +107,14 @@ def load_alarm_config(
         )
 
     try:
+        # NOT `yaml.safe_load`: that is `yaml.SafeLoader` itself, whose parsing
+        # tables any library can mutate through documented public APIs.  Measured
+        # on this shipped configuration before the change: a resolver for
+        # `^Т[0-9]+$` registered after this module imported made the CRITICAL
+        # `vacuum_loss_cold` and `calibrated_sensor_fault` channel lists load as
+        # a substituted string, with no diagnostic and no refusal.
         with open(path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
+            raw = yaml.load(f, Loader=OwnedSafeLoader)
     except yaml.YAMLError as exc:
         raise AlarmConfigError(f"alarms_v3.yaml at {path}: YAML parse error — {exc}") from exc
 
