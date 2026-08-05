@@ -2554,11 +2554,24 @@ class ExperimentManager:
                 # and this dict used to drop it, so a finalised record could not
                 # later be attributed to a declared measurement identity and
                 # downstream grouping fell back to spelling.  Carry the identity
-                # through.  `descriptor` is None for rows written before the
-                # descriptor catalog existed; that stays None rather than being
-                # back-filled from the channel string, because inferring identity
-                # from spelling is the defect, not the fix.
+                # through.
+                #
+                # A row written before the descriptor catalog existed has NO
+                # declared identity, and the bounded readers do not report that
+                # as None: `_read_sqlite_bounded` and `_read_parquet_bounded`
+                # call `resolve_legacy_descriptor` whenever `descriptor_hash` is
+                # NULL, so `row.descriptor` is a synthetic `legacy=True` object
+                # carrying a `legacy:<digest>` channel_id and a hash derived from
+                # the very channel SPELLING this row exists to stop trusting.
+                # Persisting that would make unattributable history look
+                # descriptor-backed -- the inference dressed as a declaration.
+                # `legacy` is already the repository's marker for absent identity
+                # (`reporting/sections.py::_reading_series_key` and
+                # `_visible_quantity` both refuse it), so treat it as absent here
+                # too and leave the cells empty.
                 descriptor = row.descriptor
+                if descriptor is not None and descriptor.legacy:
+                    descriptor = None
                 rows_newest_first.append(
                     {
                         "timestamp": datetime.fromtimestamp(row.timestamp, tz=UTC),
