@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import os
 import re
 import shlex
 import stat
 import subprocess
+import sys
 import tomllib
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -152,6 +154,67 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
     ):
         failures.append("OC-008 closure must require normalised semantic keys and the OC-031 bypass regressions")
     assert not failures, "\n".join(failures)
+
+
+def test_open_cells_sweep_counts_are_rederived_from_the_live_sweep() -> None:
+    """Counts the register cites about the C2 sweep must come from the sweep.
+
+    Prevention ``REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301``.  Two register
+    errors on 2026-08-05 shared one shape -- a number measured in a narrow scope
+    and then asserted in a broad one:
+
+    * OC-008's GUI surface was written as **21**, the count of entries whose
+      REASON LABEL is GUI-specific, while the row's gate is about GUI routing
+      sites by PATH, of which there are **89**.  A fourfold understatement of
+      open work.
+    * OC-031 was called substantially closed on a 135/135 exact registry, which
+      holds on the CI interpreter and fails 110 of 135 on the minimum the
+      project declares supported.
+
+    Prose review did not catch either; both survived into a pushed commit.  So
+    the numbers are re-derived here instead of being trusted, which is the
+    "parsed registry rather than fragile wording search" the root contract asks
+    for.  A drifting count now fails rather than quietly misleading a planner.
+
+    This asserts the counts on the RUNNING interpreter only.  The cross-version
+    divergence is a property of the sweep's fingerprint and is tracked in OC-031
+    itself -- a guard cannot re-derive a number for an interpreter it is not
+    running on, and pretending otherwise would repeat the original error.
+    """
+
+    sweep_module = REPO_ROOT / "tests" / "test_c2_repo_wide_spelling_sweep.py"
+    if not sweep_module.exists():  # pragma: no cover - the sweep is tracked
+        pytest.fail(f"the C2 sweep is missing: {sweep_module}")
+
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    try:
+        sweep = importlib.import_module("test_c2_repo_wide_spelling_sweep")
+    finally:
+        sys.path.remove(str(REPO_ROOT / "tests"))
+
+    sites = sweep._sites(REPO_ROOT)
+    total = len(sites)
+    gui_by_path = len([site for site in sites if "/gui/" in site.path.replace("\\", "/")])
+
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    assert f"{total} detected sites and {total} registrations" in text, (
+        f"OPEN_CELLS does not cite the live sweep total of {total} detected sites"
+    )
+    # Substance, not emphasis: asserting the markdown bold markers would make
+    # this guard fail on a reword that changed nothing measurable.
+    basis = f"{gui_by_path} of the {total} entries, counted by path under `src/cryodaq/gui/`"
+    assert basis in text, f"OPEN_CELLS does not cite the live GUI-by-path count of {gui_by_path} of {total}"
+
+    # The subset figure may still appear -- it is a true fact about reason
+    # labels -- but never unqualified, because that is the error this prevents.
+    for row_id in ("OC-008", "OC-031"):
+        row = next((line for line in text.splitlines() if line.startswith(f"| {row_id} |")), None)
+        assert row is not None, f"{row_id} row is missing from the register"
+        if f"{gui_by_path} of the {total}" not in row:
+            continue
+        assert "counted by path" in row or "by path under" in row, (
+            f"{row_id} cites a GUI count without naming the basis it was counted over"
+        )
 
 
 def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
