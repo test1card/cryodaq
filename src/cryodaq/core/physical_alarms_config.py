@@ -47,6 +47,40 @@ class _OwnedSafeLoader(yaml.SafeLoader):
     bool_values = dict(yaml.SafeLoader.bool_values)
 
 
+def _unique_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False):
+    """Refuse duplicate mapping keys instead of silently taking the last one."""
+
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise PhysicalAlarmsConfigError(f"duplicate configuration key {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+class _UniqueSafeLoader(_OwnedSafeLoader):
+    """Production loader: the owned tables above, plus duplicate-key refusal.
+
+    *** THIS CLASS MUST STAY AT MODULE LEVEL. ***  It previously lived inside
+    ``load_production_physical_alarms_config``, and a class body executes when
+    its statement executes -- so the table copies were taken at CALL time, from
+    whatever ``yaml.SafeLoader`` held at engine startup.  A library that
+    registered a constructor or resolver after this module was imported but
+    before startup invoked the loader had its value copied straight in, and a
+    valid ``physical_alarms.yaml`` then parsed with substituted channel
+    identities while ``escalate_to_safety`` stayed false.  The comment sitting
+    on those very lines described that mechanism while the code performed it.
+
+    Inheriting from ``_OwnedSafeLoader`` is what makes the snapshot happen once,
+    at import: ``add_constructor`` below is COPY-ON-WRITE and would otherwise
+    copy from the live host table at the moment it is called.
+    """
+
+
+_UniqueSafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
 # ---------------------------------------------------------------------------
 # Hard-coded defaults (all tunables)
 # ---------------------------------------------------------------------------
@@ -324,30 +358,6 @@ def load_production_physical_alarms_config(
     defaults must use ``load_physical_alarms_config`` instead.
     """
 
-    class _UniqueSafeLoader(yaml.SafeLoader):
-        # OWNED PARSING TABLES -- see the note in
-        # cryodaq/storage/channel_descriptors.py.  This loader is defined inside
-        # the function, and `add_constructor` below is COPY-ON-WRITE, so it would
-        # copy `yaml_constructors` from the LIVE host table at call time and any
-        # poisoning would transfer by VALUE.  A test asserting
-        # `is not yaml.SafeLoader.yaml_constructors` therefore passes and proves
-        # nothing; the copy has to be taken from a pristine source here instead.
-        yaml_constructors = dict(yaml.SafeLoader.yaml_constructors)
-        yaml_multi_constructors = dict(yaml.SafeLoader.yaml_multi_constructors)
-        yaml_implicit_resolvers = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
-        yaml_path_resolvers = dict(yaml.SafeLoader.yaml_path_resolvers)
-        bool_values = dict(yaml.SafeLoader.bool_values)
-
-    def _mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False):
-        mapping: dict[object, object] = {}
-        for key_node, value_node in node.value:
-            key = loader.construct_object(key_node, deep=deep)
-            if key in mapping:
-                raise PhysicalAlarmsConfigError(f"duplicate configuration key {key!r}")
-            mapping[key] = loader.construct_object(value_node, deep=deep)
-        return mapping
-
-    _UniqueSafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping)
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:

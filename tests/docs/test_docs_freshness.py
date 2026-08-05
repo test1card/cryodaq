@@ -176,6 +176,15 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-036",
         "OC-037",
         "OC-039",
+        # OC-040 registered deliberately. The engine YAML loaders' pre-import
+        # ordering was first written NONBLOCKING on the argument that poisoning
+        # needs host control of import order; review showed that is wrong -- a
+        # dependency or sitecustomize registering a public PyYAML constructor at
+        # its own import time is ordinary behaviour, and the result is silent
+        # false replacement of safety-bearing alarm configuration. This gate
+        # firing on the retag is the gate working: a newly blocking row has to
+        # be registered here on purpose, never absorbed quietly.
+        "OC-040",
     )
     derived_blocking = tuple(sorted(cell_id for cell_id, fields in rows.items() if "BLOCKS-DEPLOYMENT" in fields[9]))
     assert derived_blocking == expected_blocking, (

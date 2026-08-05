@@ -41,6 +41,17 @@ POISON = (
     'yaml.SafeLoader.add_constructor("!kelvin", lambda loader, node: "POISONED")\n'
 )
 
+# The same shape, aimed at the canonical Cyrillic channel identities the SHIPPED
+# production config actually carries.  Implicit resolvers key on the first
+# character, which is U+0422 CYRILLIC CAPITAL TE -- not Latin T.
+CHANNEL_POISON = (
+    "import re as _re, yaml as _yaml\n"
+    '_yaml.SafeLoader.add_implicit_resolver("!chan", _re.compile("^\\u0422[0-9]+$"), ["\\u0422"])\n'
+    '_yaml.SafeLoader.add_constructor("!chan", lambda loader, node: "POISONED")\n'
+)
+
+SHIPPED_ALARMS_CONFIG = REPO_ROOT / "config" / "physical_alarms.yaml"
+
 ALARMS_DOCUMENT = """\
 cooldown:
   enabled: true
@@ -138,6 +149,53 @@ def test_library_registration_after_import_cannot_reach_the_alarm_channel_identi
     assert _run(_alarms_probe(document, "post")) == "CLEAN"
 
 
+def test_production_loader_snapshots_its_tables_at_import_not_at_call() -> None:
+    """The PRODUCTION startup path, which the first version of this file missed.
+
+    ``_UniqueSafeLoader`` was declared INSIDE
+    ``load_production_physical_alarms_config``.  A class body executes when its
+    statement executes, so the table copies were taken at CALL time -- from
+    whatever ``yaml.SafeLoader`` held at engine startup, poisoned entry included.
+    The earlier tests here all imported module-level loaders and so could not
+    see it: they proved the property for three loaders and left the one on the
+    startup path unexercised.
+
+    This asserts the ordering that defect needed -- the library registers AFTER
+    the module is imported but BEFORE the loader is called -- and it drives the
+    SHIPPED ``config/physical_alarms.yaml`` rather than a fixture, with a poison
+    aimed at the canonical Cyrillic channel identities that document actually
+    contains.  So it demonstrates a real startup parsing a real file.
+    """
+
+    probe = (
+        "from cryodaq.core.physical_alarms_config import load_production_physical_alarms_config\n"
+        + CHANNEL_POISON
+        + "import pathlib\n"
+        + f"loaded = load_production_physical_alarms_config(pathlib.Path({str(SHIPPED_ALARMS_CONFIG)!r}))\n"
+        + 'print("POISONED" if "POISONED" in repr(loaded) else "CLEAN")\n'
+    )
+    assert _run(probe) == "CLEAN"
+
+
+def test_production_loader_still_refuses_duplicate_keys(tmp_path: Path) -> None:
+    """Moving the loader to module level must not drop the refusal it carried.
+
+    ``add_constructor`` now runs once at import rather than on every call, so
+    this asserts the behaviour survived the move rather than assuming it did.
+    """
+
+    from cryodaq.core.physical_alarms_config import (
+        PhysicalAlarmsConfigError,
+        load_production_physical_alarms_config,
+    )
+
+    document = tmp_path / "physical_alarms.yaml"
+    shipped = SHIPPED_ALARMS_CONFIG.read_text(encoding="utf-8")
+    document.write_text(shipped + "\nvacuum:\n  enabled: true\n", encoding="utf-8")
+    with pytest.raises(PhysicalAlarmsConfigError, match="duplicate"):
+        load_production_physical_alarms_config(document)
+
+
 def test_library_registration_before_import_is_a_disclosed_limit(tmp_path: Path) -> None:
     """The other ordering is NOT closed, and this test says so out loud.
 
@@ -165,6 +223,7 @@ def test_library_registration_before_import_is_a_disclosed_limit(tmp_path: Path)
         ("cryodaq.storage.channel_descriptors", "_StrictDescriptorLoader"),
         ("cryodaq.periodic_config", "_StrictSafeLoader"),
         ("cryodaq.core.physical_alarms_config", "_OwnedSafeLoader"),
+        ("cryodaq.core.physical_alarms_config", "_UniqueSafeLoader"),
     ],
 )
 def test_each_loader_resists_registration_after_import(module_name: str, loader_name: str) -> None:
@@ -186,6 +245,7 @@ def test_each_loader_resists_registration_after_import(module_name: str, loader_
         ("cryodaq.storage.channel_descriptors", "_StrictDescriptorLoader"),
         ("cryodaq.periodic_config", "_StrictSafeLoader"),
         ("cryodaq.core.physical_alarms_config", "_OwnedSafeLoader"),
+        ("cryodaq.core.physical_alarms_config", "_UniqueSafeLoader"),
     ],
 )
 def test_no_parsing_table_is_shared_with_yaml_safeloader(module_name: str, loader_name: str) -> None:
