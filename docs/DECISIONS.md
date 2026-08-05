@@ -191,6 +191,35 @@ authorizes the cycle; it is not review evidence. The owner supplied the ruling
 and does not sign the independent review or hosted-evidence receipts required
 by the plan.
 
+## [Owner] 2026-08-05 — Unmatched channels render desaturated with a Russian marker
+
+A channel with no descriptor match is an **operator-visible option**: the
+operator chooses whether such channels are obscured. The default renders the
+value **desaturated** (`theme.MUTED_FOREGROUND`) with the Russian marker `н/о`,
+and the unambiguous wording (`без дескриптора`) in the tooltip and accessible
+name.
+
+Owner, on the marker: *"н/о это норм вариант, оператор не обезьяна, а другие
+варианты слишком длинные для маленького поля под число"* — the field is a narrow
+numeric one and the operator is trained.
+
+Three constraints ride with the decision, each from a measured failure:
+
+- **Not `—`.** `src/cryodaq/reporting/sections.py` documents `—` as the
+  UNAVAILABLE marker, under a NaN-доктрина whose stated reason is that an
+  operator would otherwise "read a confident number where none exists". An
+  unclassified channel's value IS available; only its classification is missing,
+  so one glyph must not carry both meanings.
+- **The textual marker is load-bearing, not decorative.** The panel conformance
+  obligations require non-colour state cues; desaturation alone is colour-only.
+- **Obscuring must be discoverable.** When hidden channels exist, show a count
+  (`скрыто: N`) or keep them listed on the settings surface. A live reading that
+  becomes invisible by configuration is the vanishing-readout failure returning
+  through a setting — the failure behind the `169f7e96` / `0bea0449` revert.
+
+This decision gates the OC-008/OC-030 site migrations; its absence is what the
+ratified plan names as the cause of that revert.
+
 ## [Coordinator] Native required-workflow identity is not a status name
 
 A repository rule admits a candidate only when it natively binds the required

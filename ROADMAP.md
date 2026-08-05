@@ -833,9 +833,12 @@ and gating on nothing but the owner's time at the stand.**
   with the cluster under the most careful review. OC-028 and OC-004 slot in as
   independent small PRs.
 - **Phase 2 — the conformance floor.** The deliverables specified later in this
-  section, in the order contract + template → harness + seeded corpus → signed
-  actuation gate. Every conformance claim is scoped "plugin-side floor" until
-  the Phase 1 site migration completes.
+  section, **in the order those specifications already give**: this summary
+  deliberately does not restate a sequence, because a planning entry point that
+  orders the work differently from the specification it points at will be
+  followed instead of it. What the phase adds beyond those specifications is a
+  single scoping rule: every conformance claim is scoped "plugin-side floor"
+  until the Phase 1 site migration completes.
 - **Phase 3 — the adaptation skill and the forward test.** The forward test is
   its own gate, graded by a context that did not write the contract, and runs
   only after Phase 1 completes: run earlier it either fails for the wrong
@@ -902,8 +905,11 @@ Three constraints follow, and each exists because of a measured failure:
 this document, and the explicit exclusions in the post-Montana strategy
 (Byzantine same-process resistance, repo-wide mutation ratchets, receipt-latency
 provenance until a thesis chapter consumes it, the fault-injection campaign
-harness, formal methods, the full reproducibility chain, wholesale panel
-migration, and fleet/projector view) remain excluded. They are referenced rather
+harness, formal methods, the full reproducibility chain, and wholesale panel
+migration) remain excluded. **F37 fleet/projector view is NOT in that list**: this
+document keeps it as deferred feature work at its own entry below, and an earlier
+draft of this paragraph reclassified it as excluded, which is a change of status
+no amendment of the ordering is entitled to make. They are referenced rather
 than restated so that dropping them is not quietly re-litigated.
 
 **Owner queue — decisions that are not the coordinator's to make:**
