@@ -737,7 +737,7 @@ def _incumbent_snapshot() -> tuple[object, dict[str, str]]:
 
 
 _RUNTIME_PROBE = r"""
-import hashlib, json, os, runpy, sys
+import hashlib, json, os, runpy, sys, types
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -898,6 +898,11 @@ def _encode(value, depth, home, seen):
             # exact type plus the object's own repr, which for builtins encodes
             # the underlying implementation rather than a writable label.
             return f"<builtin {type(value).__module__}.{type(value).__name__} {value!r}>"
+        if isinstance(value, types.ModuleType):
+            # Modules all encoded as "<builtins.module>" before this, so
+            # rebinding one module attribute to a DIFFERENT module was
+            # invisible -- measured, `dataclasses.re = sys` reported nothing.
+            return f"<module {getattr(value, '__name__', '?')}>"
         return f"<{type(value).__module__}.{type(value).__name__}>"
     except Exception:
         return "<unencodable>"
@@ -975,6 +980,21 @@ def _read_affinity():
         return None
 
 
+_import_cache_baseline_keys = set(sys.path_importer_cache)
+
+
+def _import_cache_shape():
+    # Key GROWTH is ordinary import bookkeeping and is tolerated -- that is why
+    # this attribute was excluded from the fingerprint in the first place.  What
+    # is NOT tolerated is an existing finder being replaced or nulled, so only
+    # keys present when the probe started are compared, by finder type.
+    return sorted(
+        (str(key), type(sys.path_importer_cache.get(key)).__name__)
+        for key in _import_cache_baseline_keys
+        if key in sys.path_importer_cache or True
+    )
+
+
 def snapshot():
     # EVERY file under the checkout, not an enumerated list of interesting ones.
     # Naming five config paths would have left a write to any sixth path -- a
@@ -998,6 +1018,15 @@ def snapshot():
         # fingerprint nor the audit hook sees it.  Measured -- the tracing
         # control reported nothing at all until this dimension existed.
         "hooks": [repr(sys.gettrace()), repr(sys.getprofile())],
+        # `sys.path_importer_cache` is excluded from the module fingerprint
+        # because it grows on every import and would drown the signal.  Excluding
+        # it ENTIRELY was wrong: a package can retune future import resolution
+        # through it with nothing reported -- measured,
+        # `sys.path_importer_cache[sys.path[0]] = None` produced no differences.
+        # Key GROWTH is ordinary import bookkeeping and is tolerated; a key whose
+        # finder is REPLACED or nulled is not, so existing keys are compared by
+        # the type of their finder.
+        "import_cache": _import_cache_shape(),
         # Standard-stream CONFIGURATION is incumbent host state, and this
         # package already treats it as such -- the CLI reconfigures stdout and
         # stderr to utf-8/replace and restores them afterwards, and there is a
@@ -1009,6 +1038,14 @@ def snapshot():
         # property the probe must be able to see change.
         "streams": [
             [
+                # IDENTITY first.  The configuration tuple alone was satisfied by
+                # a REPLACEMENT object carrying the same name/encoding/errors/
+                # buffering -- measured, `sys.stdout = type(sys.stdout)(...)`
+                # reported nothing.  Replacing the host's stream object is a
+                # mutation of incumbent state whether or not it is configured
+                # identically.
+                id(stream),
+                type(stream).__module__ + "." + type(stream).__qualname__,
                 getattr(stream, "name", "?"),
                 getattr(stream, "encoding", None),
                 getattr(stream, "errors", None),
@@ -1098,7 +1135,33 @@ _baseline = _fingerprint()
 # Only names PRESENT NOW are excluded, and only in `__main__`.  A package that
 # writes a NEW name into `__main__` is still caught, because that name is not in
 # this set -- the exclusion is the instrument, not the module.
-_INSTRUMENT_NAMES = frozenset(vars(sys.modules["__main__"]))
+_INSTRUMENT_NAMES = frozenset(vars(sys.modules["__main__"])) | {
+    # Names this probe binds AFTER the baseline.  They must be listed, because
+    # the attribute comparison now takes the UNION of before and after -- which
+    # is what makes a package's NEW attribute visible -- and that same change
+    # makes the instrument's own later bindings visible too.  A clean run
+    # reported eight of them as moved module state.
+    #
+    # Listed explicitly rather than derived, because there is nothing to derive
+    # from: they do not exist yet at this point.  KNOWN LIMIT, stated rather
+    # than hidden: a package that writes a name COLLIDING with one of these into
+    # __main__ is not distinguishable from the instrument writing it.
+    "_INSTRUMENT_NAMES",
+    "_argv_rewrites",
+    # Bound only on the cli branch: the per-profile loop variables.
+    "_expected_argv",
+    "_harness_argv",
+    "profile",
+    "_expected_new",
+    "_final",
+    "_moved",
+    "after",
+    "before",
+    "differences",
+    "lab_profile",
+    "measured",
+    "text",
+}
 
 # Taken BEFORE the package is imported or executed: an effect that happens at
 # import time is exactly what an in-process guard cannot see, because by then
@@ -1180,13 +1243,35 @@ def _allowed_new_module(name):
 # adding one is a visible decision rather than a widened prefix.
 _ALLOWED_NEW_MODULES = frozenset({"__future__", "cryodaq", "cryodaq.drivers"})
 _expected_new = sorted(name for name in set(_final) - set(_baseline) if not _allowed_new_module(name))
+def _attribute_moved(module_name, attribute, before_value, after_value):
+    if (module_name, attribute) in _volatile:
+        return False
+    if module_name == "__main__" and attribute in _INSTRUMENT_NAMES:
+        return False
+    return before_value != after_value
+
+
+# Compare the UNION of baseline and final attribute names, not just the
+# baseline's.  Iterating only the baseline meant a NEW attribute was never
+# compared at all: `sys.cryodaq_probe_added = 1` reported nothing, and the
+# comment claiming a package writing a new name into __main__ "is still caught"
+# was therefore FALSE.  A name that appears is a mutation of incumbent module
+# state exactly as much as a name that changes.
+# Modules present in BOTH snapshots.  A module that ARRIVED is reported by the
+# new_modules dimension; counting every attribute of a newly imported module as
+# "moved" double-reports arrival and buried the signal (measured: a clean run
+# reported all 12 __future__ attributes as moved).  Within a surviving module,
+# the attribute set is compared as a UNION so a NEW attribute is caught.
 _moved = sorted(
     f"{module_name}.{attribute}"
-    for module_name, attributes in _baseline.items()
-    for attribute, value in attributes.items()
-    if (module_name, attribute) not in _volatile
-    and not (module_name == "__main__" and attribute in _INSTRUMENT_NAMES)
-    and _final.get(module_name, {}).get(attribute) != value
+    for module_name in set(_baseline) & set(_final)
+    for attribute in set(_baseline.get(module_name, {})) | set(_final.get(module_name, {}))
+    if _attribute_moved(
+        module_name,
+        attribute,
+        _baseline.get(module_name, {}).get(attribute),
+        _final.get(module_name, {}).get(attribute),
+    )
 )
 if _moved:
     differences.append("module_state")
