@@ -1641,7 +1641,21 @@ def test_import_and_parse_leave_incumbent_process_state_untouched(tmp_path: Path
     package, so an import-time write would be inside its baseline.
     """
 
-    assert _probe(_isolated_checkout(tmp_path), mode)["differences"] == []
+    report = _probe(_isolated_checkout(tmp_path), mode)
+    assert report["differences"] == [], report
+    if mode == "cli":
+        # ASSERT the exit statuses, do not merely report them.  Recording a
+        # dimension the assertions never consume is the same defect as computing
+        # one and never reporting it -- which this file already had once, in
+        # `_expected_new`.  The documented command must ACCEPT the valid profile
+        # and REJECT every hostile one; a regression that changes only the
+        # validation result moves no incumbent state, so `differences` alone
+        # cannot see it.
+        results = dict(report["cli_results"])
+        assert results, report
+        for profile_path, status in results.items():
+            expected = 0 if profile_path.endswith("valid.yaml") else 2
+            assert status == expected, (profile_path, status, report["cli_results"])
 
 
 def test_effect_probe_reports_a_newly_imported_module(tmp_path: Path) -> None:
