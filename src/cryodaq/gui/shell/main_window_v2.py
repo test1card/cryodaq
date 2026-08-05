@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from cryodaq.core.channel_manager import get_channel_manager
+from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.shell.bottom_status_bar import BottomStatusBar
@@ -47,6 +48,10 @@ from cryodaq.gui.shell.overlays.operator_log_panel import OperatorLogPanel
 from cryodaq.gui.shell.tool_rail import ToolRail
 from cryodaq.gui.shell.top_watch_bar import TopWatchBar
 from cryodaq.gui.shell.views.analytics_view import AnalyticsView
+from cryodaq.gui.state.channel_descriptor_store import (
+    ChannelDescriptorStore,
+    DescriptorStoreIssue,
+)
 from cryodaq.gui.zmq_client import ZmqBridge
 
 logger = logging.getLogger(__name__)
@@ -108,6 +113,7 @@ class MainWindowV2(QMainWindow):
         self._last_reading_time = 0.0
         self._last_safety_state: str | None = None
         self._last_safety_reason: str = ""
+        self._channel_descriptor_store = ChannelDescriptorStore(parent=self)
 
         self.setWindowTitle("CryoDAQ")
         self.setMinimumSize(1280, 800)
@@ -425,6 +431,29 @@ class MainWindowV2(QMainWindow):
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
     # ------------------------------------------------------------------
+
+    @property
+    def channel_descriptor_store(self) -> ChannelDescriptorStore:
+        """Read-only access to the GUI-root-owned observational store."""
+
+        return self._channel_descriptor_store
+
+    @property
+    def descriptor_issue_count(self) -> int:
+        return self._channel_descriptor_store.issue_count
+
+    @property
+    def last_descriptor_issue(self) -> DescriptorStoreIssue | None:
+        return self._channel_descriptor_store.last_issue
+
+    @Slot(object)
+    def _dispatch_qualified_reading(self, qualified: DescriptorQualifiedReading) -> None:
+        """Update descriptor authority before preserving legacy Reading dispatch."""
+
+        if type(qualified) is not DescriptorQualifiedReading:
+            raise TypeError("qualified must be exactly DescriptorQualifiedReading")
+        self._channel_descriptor_store.accept(qualified)
+        self._dispatch_reading(qualified.reading)
 
     @Slot(object)
     def _dispatch_reading(self, reading: Reading) -> None:

@@ -31,6 +31,13 @@ from cryodaq.instance_lock import release_lock, try_acquire_lock
 logger = logging.getLogger("cryodaq.gui")
 
 
+def _drain_descriptor_readings(bridge: ZmqBridge, window: MainWindow) -> None:
+    """Drain the data queue exactly once through the descriptor-aware API."""
+
+    for qualified in bridge.poll_readings_with_descriptor():
+        window._dispatch_qualified_reading(qualified)
+
+
 def _load_bundled_fonts() -> None:
     """Load bundled fonts (Fira Sans, Fira Code, Inter, JetBrains Mono).
 
@@ -274,8 +281,7 @@ def main() -> None:
     timer.setInterval(10)  # 100 Hz
 
     def _tick() -> None:
-        for reading in bridge.poll_readings():
-            window._dispatch_reading(reading)
+        _drain_descriptor_readings(bridge, window)
         snapshot_ingress.pump()
 
         # Auto-restart subprocess if it dies or stops sending heartbeats
