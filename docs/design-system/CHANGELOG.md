@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-07-20
-version: 4.0.3
+last_updated: 2026-08-05
+version: 4.1.0
 ---
 
 # Design System Changelog
@@ -13,22 +13,38 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
-## [4.0.3] — 2026-07-20
+## [4.1.0] — 2026-08-05
 
 ### Added
 
-- 2026-08-05: `patterns/state-visualization.md` — the **classification axis**: a
-  channel whose reading arrives normally but which no descriptor matches.
-  **SPECIFIED, NOT YET IMPLEMENTED** — no production surface renders it today;
-  it is recorded ahead of the OC-008/OC-030 descriptor site migrations so those
-  implement one agreed treatment rather than inventing several. Value stays
-  `FOREGROUND` per RULE-DATA-005, chrome and label desaturate, `н/о` carries the
-  non-colour channel with `без дескриптора` in the tooltip and accessible name,
-  and hiding such channels is an operator option that must stay discoverable.
-  Owner decision of 2026-08-05, recorded in `docs/DECISIONS.md`; cross-referenced
-  from `rules/data-display-rules.md` RULE-DATA-005. No version bump: additive
-  specification of an unimplemented state, following the
-  `patterns/command-outcome-unknown.md` precedent below.
+- `patterns/state-visualization.md` — the **classification axis**: whether a
+  channel's reading is backed by a matched descriptor, by none
+  (`IdentityStatus.LEGACY_ABSENT`), or by one that was refused
+  (`IdentityStatus.REFUSED`). Orthogonal to severity and to freshness, like
+  connectivity. Owner decision of 2026-08-05, recorded in `docs/DECISIONS.md`;
+  cross-referenced from `rules/data-display-rules.md` RULE-DATA-005.
+
+### Corrected
+
+- **This state already ships, and an earlier draft of this entry called it
+  unimplemented.** `gui/dashboard/sensor_cell.py::_apply_identity_state` renders
+  both the absent and refused cases today, and
+  `tests/gui/dashboard/test_sensor_cell.py` asserts the value stays visible
+  alongside the cue. What the entry adds is the TARGET treatment — the `н/о`
+  in-field marker with `без дескриптора` in tooltip and accessible name — and
+  the record that the shipped treatment diverges from it in two ways worth
+  migrating: it has no in-field marker, and it borrows `STATUS_STALE` for the
+  chrome, which is the freshness axis's token. Calling the state unimplemented
+  would have let the OC-008/OC-030 site migrations skip the surface that
+  already renders it.
+- Version bumped 4.0.3 → 4.1.0. A reusable state semantic changed, and the root
+  contract requires the version to move with it in the same slice; an earlier
+  draft argued for no bump from the `command-outcome-unknown` precedent below,
+  which is a precedent for the entry's shape and not for skipping the version.
+
+## [4.0.3] — 2026-07-20
+
+### Added
 
 - 2026-07-25: `patterns/command-outcome-unknown.md` — new cross-surface pattern
   for mutation-outcome uncertainty (`_outcome_unknown` / `delivery_state` /

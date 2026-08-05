@@ -263,11 +263,12 @@ Variants for status:
   Do NOT color the value itself in STATUS_STALE — it fails WCAG AA body
   contrast (2.94:1). The stale signal is carried by border + tooltip,
   not by value color.
-- Channel with no descriptor match (SPECIFIED, NOT YET IMPLEMENTED): value in
-  FOREGROUND, label and chrome desaturated, `н/о` marker in the field, and
-  `без дескриптора` in the tooltip and accessible name. The full contract,
-  including the operator's option to hide such channels, is in
-  `patterns/state-visualization.md`.
+- Channel with no descriptor match: value in FOREGROUND, label and chrome
+  desaturated, `н/о` marker in the field, and `без дескриптора` in the tooltip
+  and accessible name. **The shipped `SensorCell` treatment diverges** — it
+  carries the cue only in the hint line and borrows `STATUS_STALE` for the
+  chrome. The full contract, both divergences, and the operator's option to hide
+  such channels are in `patterns/state-visualization.md`.
 
 **Rationale:** Consistent layout across 20+ sensor cells allows operator scanning. Eye locks into pattern: "label on top, value in middle, unit suffix." Breaking pattern (value-first, or unit-above-value) forces re-parsing per cell.
 

@@ -40,23 +40,35 @@ Backend payloads, stored history, alarm ordering, acknowledgement, and
 escalation are not rewritten. New presentation producers must not emit
 `warning`; compatibility remains until all supported history/backends stop.
 
-## Classification axis — a channel with no descriptor match
+## Classification axis — descriptor matched, absent, or refused
 
-**Status: SPECIFIED, NOT YET IMPLEMENTED.** No production surface renders this
-state today. It is recorded here so that the OC-008/OC-030 descriptor site
-migrations implement one agreed treatment instead of inventing several, and so
-that this file is not silent about a state the roadmap already commits to.
-Owner decision of 2026-08-05, recorded in `docs/DECISIONS.md`.
+**Status: IMPLEMENTED, AND THE SHIPPED TREATMENT DIVERGES FROM THE TARGET
+BELOW.** `gui/dashboard/sensor_cell.py::_apply_identity_state` renders both the
+absent and the refused case today, and
+`tests/gui/dashboard/test_sensor_cell.py` asserts the value stays visible
+alongside the cue. The target treatment is the owner decision of 2026-08-05
+recorded in `docs/DECISIONS.md`; migrating the shipped surfaces onto it is work
+for OC-008/OC-030, which is why the divergence is written down here rather than
+left for each site to rediscover.
 
 Descriptor classification is **its own axis**, like freshness and connectivity —
-not a severity rung. A channel whose reading is arriving normally but which no
-descriptor matches is neither caution nor fault: the *value* is available and
-correct, only its *classification* is missing.
+not a severity rung. A channel whose reading is arriving normally but whose
+descriptor is missing or refused is neither caution nor fault: the *value* is
+available and correct, only its *classification* is not.
 
-| Accepted source value | Operator text | Presentation |
+| `IdentityStatus` | Shipped today | Target |
 |---|---|---|
-| descriptor matched | (no marker) | ordinary reading |
-| no descriptor match | `н/о` marker + `без дескриптора` in tooltip and accessible name | desaturated chrome and label; **value stays `FOREGROUND`** |
+| matched | ordinary reading | unchanged |
+| `LEGACY_ABSENT` | hint `Идентификация недоступна: описание канала отсутствует`, `STATUS_STALE` border, value visible | in-field `н/о` marker, `без дескриптора` in tooltip and accessible name, desaturated chrome and label, value visible |
+| `REFUSED` | hint `Идентификация недоступна: описание канала отклонено`, `SENSOR_ERROR` chrome, value visible | unchanged in severity; a refused descriptor is a fault of the descriptor, and the reading must still render |
+
+**The two divergences to migrate, named so they are not argued twice.** The
+shipped absent case has **no in-field marker** — the cue lives only in the hint
+line, so a compact surface that omits the hint loses the state entirely. And it
+borrows **`STATUS_STALE`**, which is the freshness axis's token: a cell that is
+both unclassified and stale then signals one axis twice and the other not at
+all, while the cell separately appends `· Устарело`. Freshness and
+classification are independent and must stay independently readable.
 
 Four invariants, each from a measured failure:
 

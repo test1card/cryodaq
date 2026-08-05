@@ -886,6 +886,21 @@ proceed in parallel with that spine provided every conformance claim is scoped
 "plugin-side floor" until the migration completes. Only the constrained
 mid-tier-agent forward test is genuinely blocked on the completed spine.
 
+**That parallel permission is subordinate to the activation rule in `AGENTS.md`,
+and this document does not override it.** `AGENTS.md` holds the phase INACTIVE
+until this roadmap marks its prerequisites complete, and forbids claiming that
+`PLUGIN_CONTRACT.md`, `tests/conformance/` or `plugins/_template/` exists or
+accepts generated plugins. So until Phase 1 completes and this document says so,
+parallel Phase 2 work means **drafting and review, not landing those paths on
+`master` and not any claim that they accept plugins**. An implementer who reads
+only this section and starts creating them will hit that governance stop, which
+is the failure this paragraph exists to prevent.
+
+Whether the activation rule should instead be SPLIT — artifact prework allowed,
+generated-plugin acceptance still blocked — is a question about the root
+contract and is queued below. It is not decided here, because an amendment to
+the ordering has no authority to relax a rule in `AGENTS.md`.
+
 **Owner decision, 2026-08-05 — what an unmatched channel renders as.** A channel
 with no descriptor match is an **operator-visible option**: the operator chooses
 whether such channels are obscured. **The default is to render the channel
@@ -953,6 +968,12 @@ than restated so that dropping them is not quietly re-litigated.
    it, or read as closed once the visit happens.
 4. OC-013 physical-OFF measurement — Phase H, at the stand, closed by the owner
    rather than by code.
+5. Whether the plugin-phase activation rule in `AGENTS.md` should be SPLIT into
+   artifact prework (allowed during Phase 1) and generated-plugin acceptance
+   (still blocked until the spine completes). As written it is one switch, so
+   the parallel Phase 2 work this document permits cannot land its paths. The
+   conservative reading is applied above until this is answered; answering it
+   either way is cheap and unblocks real work.
 
 This roadmap-authoring pass fixes the specification, acceptance criteria, and
 architecture decisions only. It does not implement a plugin, conformance
