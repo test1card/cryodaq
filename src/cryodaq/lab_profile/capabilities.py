@@ -2,7 +2,7 @@
 
 Derivation from the registered driver specifications (``BUILTIN_DRIVER_METADATA``)
 is the ONLY source of capability truth for a lab profile.  A profile never
-declares capabilities; it declares instruments, and the registry alone decides
+declares capabilities; it declares instruments, and the INERT METADATA TABLE alone decides
 what those instruments can do and which trust class they carry.
 """
 
@@ -14,13 +14,13 @@ from .schema import LabCapabilities, ProfileInstrument
 
 
 def derive_capabilities(instruments: tuple[ProfileInstrument, ...]) -> LabCapabilities:
-    """Derive the capability truth of a lab profile from the driver registry.
+    """Derive the capability truth of a lab profile from the inert driver metadata.
 
     Reads only ``BUILTIN_DRIVER_METADATA``.  The union of each declared
     instrument's ``spec.capabilities`` and ``spec.authority`` is the whole
     answer.  ``LabCapabilities.__post_init__`` independently recomputes that
     union and rejects any instance — derived or hand-built — whose values
-    disagree with the registry or reach source authority.
+    disagree with that table or reach source authority.
     """
 
     instrument_types = tuple(item.type_name for item in instruments)

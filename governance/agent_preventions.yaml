@@ -2932,7 +2932,23 @@ false_green_pairs:
       an os.fork process creation; an os.utime metadata rewrite that changes no bytes; an os.putenv that
       changes what children inherit without touching os.environ; and on POSIX an os.umask change and an
       os.nice scheduling change. Each now has a positive control verified to report exactly its own
-      dimension. 2026-08-04, pending immutable capture.
+      dimension. Further escapes closed after review: a stream REPLACED with an identically configured
+      object; a NEW attribute added to an already-imported module; a module-valued attribute rebound to a
+      different or freshly built same-named module; an already-imported module REMOVED from sys.modules; a
+      path_importer_cache finder replaced or nulled; an import-control list replaced by a same-content
+      subclass; and the CLI's own exit statuses, which were recorded and never asserted -- so a regression
+      changing only the VALIDATION RESULT moved no incumbent state and nothing failed. That last one is now
+      asserted per profile by
+      tests/lab_profile/test_downstream_readonly.py::test_import_and_parse_leave_incumbent_process_state_untouched,
+      verified red by making main() return 0 unconditionally.
+      *** BOUNDED LIMITATION, DISCLOSED RATHER THAN CLAIMED CLOSED. *** The capability audit does NOT
+      observe process signalling (os.kill), interpreter scheduler knobs (sys.setswitchinterval) or
+      filesystem node creation (os.mkfifo) reached through aliases. That surface is unbounded -- each round
+      of this shape revealed the next syscall -- and this record must not be read as asserting coverage of
+      it. The module fingerprint is likewise a floor, not totality. What the boundary rests on does not
+      depend on either: under total parser compromise the actuation boundary holds because schema.py
+      re-derives instrument authority from BUILTIN_DRIVER_METADATA, guarded separately by
+      test_actuation_boundary_survives_a_fully_compromised_parser. 2026-08-05, pending immutable capture.
 
     green_evidence: pending
   - id: LAB-PROFILE-SYMBOL-ALLOWLIST-FALSE-GREEN-004
@@ -5746,6 +5762,14 @@ records:
       - node: tests/lab_profile/test_downstream_readonly.py::test_host_cannot_replace_the_parse_entry_point
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_actuation_boundary_survives_a_fully_compromised_parser
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_import_guard_accepts_inert_imports
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_driver_metadata_projection_is_inert_and_exact
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_hostile_corpus_leaves_incumbent_state_untouched
+        ci_partition: remaining
+      - node: tests/lab_profile/test_downstream_readonly.py::test_package_grants_no_authority_objects
         ci_partition: remaining
       - node: tests/lab_profile/test_downstream_readonly.py::test_no_inherited_pyyaml_callable_comes_from_outside_pyyaml
         ci_partition: remaining
