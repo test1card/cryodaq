@@ -168,7 +168,11 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-013",
         "OC-020",
         "OC-023",
-        "OC-024",
+        # OC-024 removed: the finalisation table now carries channel_id,
+        # descriptor_hash and descriptor_revision, guarded by
+        # tests/core/test_experiment_archive_descriptors.py. The other archive
+        # exports were deliberately NOT audited in that change, and the row
+        # says so rather than implying the class is closed.
         "OC-026",
         "OC-028",
         "OC-030",

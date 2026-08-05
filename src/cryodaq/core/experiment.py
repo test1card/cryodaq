@@ -2550,6 +2550,15 @@ class ExperimentManager:
                     truncated = True
                     complete = False
                     continue
+                # OC-024: the archive already resolves a descriptor for each row
+                # and this dict used to drop it, so a finalised record could not
+                # later be attributed to a declared measurement identity and
+                # downstream grouping fell back to spelling.  Carry the identity
+                # through.  `descriptor` is None for rows written before the
+                # descriptor catalog existed; that stays None rather than being
+                # back-filled from the channel string, because inferring identity
+                # from spelling is the defect, not the fix.
+                descriptor = row.descriptor
                 rows_newest_first.append(
                     {
                         "timestamp": datetime.fromtimestamp(row.timestamp, tz=UTC),
@@ -2558,6 +2567,9 @@ class ExperimentManager:
                         "value": float("nan") if row.value is None else row.value,
                         "unit": row.unit,
                         "status": row.status,
+                        "channel_id": None if descriptor is None else descriptor.channel_id,
+                        "descriptor_hash": None if descriptor is None else descriptor.descriptor_hash,
+                        "descriptor_revision": None if descriptor is None else descriptor.descriptor_revision,
                     }
                 )
                 per_channel[row.channel] = channel_count + 1
@@ -2692,10 +2704,38 @@ class ExperimentManager:
             temp_path.unlink(missing_ok=True)
 
     def _write_measured_values_table(self, path: Path, readings: list[dict[str, Any]]) -> None:
+        """Write the finalisation table, carrying declared measurement identity.
+
+        OC-024: this table used to carry only timestamp, instrument, channel,
+        value, unit and status.  An archived record therefore could not be
+        attributed to a declared identity afterwards, and any downstream
+        grouping had to fall back to the channel SPELLING -- the same inference
+        the descriptor spine exists to remove.
+
+        The three identity columns are appended, never inserted, so an existing
+        reader that indexes the first six columns positionally is unaffected.
+        An empty cell means the row predates the descriptor catalog; it is left
+        empty rather than back-filled from the channel string, because guessing
+        identity from spelling is the defect this row records.
+        """
+
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["timestamp", "instrument_id", "channel", "value", "unit", "status"])
+            writer.writerow(
+                [
+                    "timestamp",
+                    "instrument_id",
+                    "channel",
+                    "value",
+                    "unit",
+                    "status",
+                    "channel_id",
+                    "descriptor_hash",
+                    "descriptor_revision",
+                ]
+            )
             for item in readings:
+                revision = item.get("descriptor_revision")
                 writer.writerow(
                     [
                         item["timestamp"].isoformat(),
@@ -2704,6 +2744,9 @@ class ExperimentManager:
                         item["value"] if math.isfinite(item["value"]) else "",
                         item["unit"],
                         item["status"],
+                        item.get("channel_id") or "",
+                        item.get("descriptor_hash") or "",
+                        "" if revision is None else str(revision),
                     ]
                 )
 
