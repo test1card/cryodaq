@@ -205,16 +205,29 @@ def test_open_cells_sweep_counts_are_rederived_from_the_live_sweep() -> None:
     basis = f"{gui_by_path} of the {total} entries, counted by path under `src/cryodaq/gui/`"
     assert basis in text, f"OPEN_CELLS does not cite the live GUI-by-path count of {gui_by_path} of {total}"
 
-    # The subset figure may still appear -- it is a true fact about reason
-    # labels -- but never unqualified, because that is the error this prevents.
+    # EVERY affected row is checked POSITIVELY.  An earlier version of this
+    # guard skipped any row that did not already contain the correct figure,
+    # so a row reverting to the old unqualified count fell through the
+    # `continue` and was never examined -- while the file-wide assertion above
+    # stayed satisfied by whichever row was still right.  That is precisely the
+    # one-row-away recurrence this prevention exists for, and the guard would
+    # have looked enforced while it happened.
+    gui_by_reason = len([site for site in sites if site.reason.startswith("GUI ")])
     for row_id in ("OC-008", "OC-031"):
         row = next((line for line in text.splitlines() if line.startswith(f"| {row_id} |")), None)
         assert row is not None, f"{row_id} row is missing from the register"
-        if f"{gui_by_path} of the {total}" not in row:
-            continue
+        assert f"{gui_by_path} of the {total}" in row, (
+            f"{row_id} does not cite the GUI-by-path count of {gui_by_path} of {total}"
+        )
         assert "counted by path" in row or "by path under" in row, (
             f"{row_id} cites a GUI count without naming the basis it was counted over"
         )
+        # The reason-label subset may appear -- it is a true fact -- but only
+        # where it is named as the subset it is.
+        if f"{gui_by_reason} of the {total}" in row:
+            assert "reason" in row.lower(), (
+                f"{row_id} cites the {gui_by_reason}-entry subset without naming it a reason-label count"
+            )
 
 
 def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
