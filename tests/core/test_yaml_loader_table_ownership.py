@@ -298,6 +298,33 @@ def test_no_parsing_table_is_shared_with_yaml_safeloader(module_name: str, loade
         assert getattr(loader, table) is not getattr(yaml.SafeLoader, table), table
 
 
+@pytest.mark.parametrize(
+    ("module_name", "loader_name"),
+    [
+        ("cryodaq.storage.channel_descriptors", "_StrictDescriptorLoader"),
+        ("cryodaq.periodic_config", "_StrictSafeLoader"),
+        ("cryodaq.core.physical_alarms_config", "_OwnedSafeLoader"),
+        ("cryodaq.core.physical_alarms_config", "_UniqueSafeLoader"),
+    ],
+)
+def test_every_fixed_loader_derives_from_the_one_shared_owner(module_name: str, loader_name: str) -> None:
+    """The register claims these share ONE owned loader; this makes that checkable.
+
+    Two of them used to repeat the table copies locally instead of inheriting
+    them.  That reads as equivalent and is not: the whole point of the shared
+    class is that a later hardening -- replacing its copied tables with
+    package-owned pristine constructors, which is what OC-040 requires to close
+    -- reaches every loader at once.  A local copy would silently stay on the
+    old, pre-import-poisonable path while the register recorded the class as
+    handled, which is the failure mode this row has already produced once.
+    """
+
+    from cryodaq._owned_yaml import OwnedSafeLoader
+
+    loader = getattr(__import__(module_name, fromlist=[loader_name]), loader_name)
+    assert issubclass(loader, OwnedSafeLoader), f"{module_name}.{loader_name} does not share the owned loader"
+
+
 def test_the_owned_vocabulary_is_not_narrowed() -> None:
     """Owning the tables must not change what parses.
 
