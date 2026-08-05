@@ -216,9 +216,17 @@ class _EventDedup:
     for as long as it lasted.  Two bounds now break that silence, per the owner
     decision of 2026-08-05 recorded in ``docs/DECISIONS.md``:
 
-    * **A re-narration that never reached the operator buys no silence.**  The
-      ledger suppresses duplicates of what was DELIVERED, not of what was
-      attempted.  If the transport was broken, the next event goes through.
+    * **A re-narration that never reached the operator buys no silence -- but
+      it buys no licence either.**  The ledger suppresses duplicates of what
+      was DELIVERED, not of what was attempted.  A failed attempt therefore
+      re-arms the alarm, and the retry is admitted once ``window_s`` has
+      elapsed since that attempt -- NOT on the very next event.  The
+      unconditional version of this rule was reviewed out: during a transport
+      outage it turns every refire into another generation and send, which is
+      the same storm the window exists to prevent, arriving by the recovery
+      path.  Allowing an attempt also CLEARS the failure marker, so the bound
+      is measured against the attempt in flight rather than against one that
+      has already been superseded.
     * **A CRITICAL that stays active is re-narrated every**
       ``escalate_after_s``.  This is ELAPSED TIME since suppression began, not
       a count of suppressed events: an alarm re-firing every second would reach
@@ -250,6 +258,14 @@ class _EventDedup:
 
     def _allow(self, event_id: str, now: float) -> bool:
         self._last_allowed[event_id] = now
+        # Allowing an attempt CLEARS the failure marker; `note_outcome` re-adds
+        # it only if this attempt actually fails.  Leaving it set makes the
+        # marker describe an attempt that is already superseded: the retry
+        # branch above fires on `_undelivered` plus one elapsed window, and the
+        # default Ollama timeout is longer than the 30 s window, so a refire
+        # arriving while the fresh narration is still IN FLIGHT would start yet
+        # another retry on the strength of a failure that has been answered.
+        self._undelivered.discard(event_id)
         return True
 
     def should_dispatch(self, event_id: str) -> bool:
@@ -581,6 +597,17 @@ class AssistantLiveAgent:
                     await self._handle_periodic_report(event)
                 else:
                     await self._handle_alarm_fired(event, dedup_id=dedup_id)
+            except asyncio.CancelledError:
+                # `stop()` cancels in-flight handlers, and CancelledError is a
+                # BaseException, so it passes straight through the two handlers
+                # below.  The gate has already advanced `_last_allowed`, so
+                # without this the cancelled attempt buys real silence for a
+                # narration that reached nobody: restart the agent inside the
+                # escalation interval and the refire is suppressed by an alarm
+                # summary that was killed mid-generation.
+                if dedup_id is not None:
+                    self._dedup.note_outcome(dedup_id, delivered=False)
+                raise
             except (OllamaUnavailableError, OllamaModelMissingError) as exc:
                 if dedup_id is not None:
                     self._dedup.note_outcome(dedup_id, delivered=False)

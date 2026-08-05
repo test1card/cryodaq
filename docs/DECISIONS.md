@@ -257,7 +257,22 @@ ratified plan names as the cause of that revert.
 The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
 
 - **A — a narration that reached nobody buys no silence.** If no target accepted
-  it, the next occurrence of that alarm is not suppressed.
+  it, that alarm is re-armed rather than held quiet for the full window.
+
+  **A is bounded, and the unbounded reading was reviewed out.** "The next
+  occurrence is not suppressed" is not what shipped: during a transport outage
+  every refire would become another generation and send, which is the storm the
+  window exists to prevent, arriving by the recovery path. The retry is admitted
+  once `window_s` has elapsed since the failed attempt. Allowing an attempt also
+  clears the failure marker, so the bound is measured against the attempt in
+  flight and not against one already superseded — without that, a refire during
+  an in-flight retry starts a second one, because the default Ollama timeout is
+  longer than the 30 s window.
+
+  **A cancelled attempt counts as undelivered.** `stop()` cancels in-flight
+  handlers and `CancelledError` is a `BaseException`, so it does not reach the
+  `except Exception` paths that report the outcome. The gate has already moved
+  its clock by then, so a killed narration would otherwise buy real silence.
 - **B — a CRITICAL that stays active is re-narrated on a bounded interval**,
   currently 300 s, rather than being silenced for as long as it keeps firing.
 

@@ -276,3 +276,101 @@ def test_a_partially_delivered_narration_counts_as_seen() -> None:
 
     assert _reached_any_recipient({"operator_log": "delivered"}) is True
     assert _reached_any_recipient({}) is False
+
+
+def test_allowing_a_retry_clears_the_marker_so_an_in_flight_attempt_is_not_retried_again(clock) -> None:
+    """A stale failure marker describes an attempt that has been superseded.
+
+    The retry branch fires on ``_undelivered`` plus one elapsed window.  The
+    default Ollama timeout is longer than the 30 s window, so an alarm can
+    refire while the retry narration is still being generated.  If allowing an
+    attempt left the old marker in place, that refire would start a SECOND
+    retry on the strength of a failure the in-flight attempt is already
+    answering -- and neither has reported an outcome yet.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:slow") is True
+    ledger.note_outcome("alarm:slow", delivered=False)
+
+    # The alarm keeps firing every 5 s throughout.  That matters: `_seen` is
+    # refreshed on every call, so continuous flapping keeps the ordinary
+    # "quiet for a full window" branch out of the way and leaves the retry
+    # branch as the only thing that can admit a dispatch here.
+    retried_at: list[float] = []
+    for step in range(1, 7):  # t+5 .. t+30, the first window
+        clock.return_value = start + step * 5.0
+        if ledger.should_dispatch("alarm:slow"):
+            retried_at.append(clock.return_value)
+
+    assert retried_at == [start + WINDOW], f"the bounded retry should land once, at t+{WINDOW:.0f}s; got {retried_at}"
+    assert "alarm:slow" not in ledger._undelivered, (
+        "allowing an attempt must clear the marker; the previous failure has been answered"
+    )
+
+    # That retry is still generating -- no outcome reported -- while the alarm
+    # goes on firing for another full window.
+    for step in range(7, 13):  # t+35 .. t+60
+        clock.return_value = start + step * 5.0
+        assert ledger.should_dispatch("alarm:slow") is False, (
+            f"a refire at t+{step * 5.0:.0f}s started a second retry while the first was in flight"
+        )
+
+    # The attempt eventually fails; only THEN is the alarm re-armed.
+    ledger.note_outcome("alarm:slow", delivered=False)
+    clock.return_value = start + 65.0
+    assert ledger.should_dispatch("alarm:slow") is True
+
+
+def test_a_delivered_outcome_still_suppresses_after_the_marker_is_cleared(clock) -> None:
+    """Clearing on allow must not weaken ordinary suppression.
+
+    The obvious way to get the node above green is to stop honouring
+    ``_undelivered`` at all, which would restore the original defect.  This
+    asserts the ordinary path is unchanged: a DELIVERED narration still buys a
+    full window of quiet.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:quiet") is True
+    ledger.note_outcome("alarm:quiet", delivered=True)
+
+    for step in (1.0, WINDOW - 0.1):
+        clock.return_value = start + step
+        assert ledger.should_dispatch("alarm:quiet") is False, f"suppression broke {step}s after a delivery"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_alarm_attempt_is_recorded_as_undelivered() -> None:
+    """``stop()`` must not let a killed narration buy silence.
+
+    ``CancelledError`` is a ``BaseException``, so it passes straight through the
+    ``except Exception`` handlers that report the outcome, while the gate has
+    already advanced its clock.  ``_dedup`` is built in ``__init__``, so a
+    stop/start cycle on the same instance keeps the ledger and the suppression
+    survives with it.
+    """
+
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._config = MagicMock(max_calls_per_hour=100)
+    agent._call_timestamps = __import__("collections").deque()
+    agent._semaphore = asyncio.Semaphore(1)
+    agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+    agent._handle_alarm_fired = AsyncMock(side_effect=asyncio.CancelledError())
+
+    event = MagicMock(event_type="alarm_fired")
+    assert agent._dedup.should_dispatch("alarm:cancelled") is True
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent._safe_handle(event, dedup_id="alarm:cancelled")
+
+    assert "alarm:cancelled" in agent._dedup._undelivered, (
+        "a cancelled attempt reached nobody, so it must not be treated as a delivered narration"
+    )
