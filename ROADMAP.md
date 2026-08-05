@@ -814,13 +814,37 @@ Acceptance:
 
 ### Recommended post-Montana sequence
 
-The default high-return set is roadmap items **1, 3, and 4**: establish
-mutation-testing evidence, make critical documentation/wiring claims
-executable, and add clock-domain-safe receipt-latency evidence for the
-scientific uncertainty model. Documentation checks can proceed in parallel.
+**SUPERSEDED by the phase ordering below (owner-ratified, 2026-08-01;
+reconciled 2026-08-05).** The item-numbered sequence that stood here assumed the
+agent-native work was separable from the descriptor cluster. It is not: an
+adapted lab's channels have different names by definition, so a conformance
+floor built over spelling-routed identity certifies plugins into a system that
+misroutes them.
 
-If a separate robustness campaign is justified, use the risk sequence
-mutation evidence → receipt-latency evidence → isolated fault injection. Then:
+**The order is Phase 0 → 1 → 2 → 3, with Phase H running in parallel throughout
+and gating on nothing but the owner's time at the stand.**
+
+- **Phase 0 — register truth and first blood.** Tier-0 register retag (merged);
+  the notification delivery proof, OC-026 (merged); the OC-039 disposition.
+  Proves the PR-review-merge workflow end to end at small scale.
+- **Phase 1 — the descriptor spine.** The engine-loader ownership fix; then
+  OC-031's registry re-key; then the OC-008/OC-030 site migrations in bounded
+  batches carrying rendering evidence for every touched surface; OC-023 rides
+  with the cluster under the most careful review. OC-028 and OC-004 slot in as
+  independent small PRs.
+- **Phase 2 — the conformance floor.** The deliverables specified later in this
+  section, in the order contract + template → harness + seeded corpus → signed
+  actuation gate. Every conformance claim is scoped "plugin-side floor" until
+  the Phase 1 site migration completes.
+- **Phase 3 — the adaptation skill and the forward test.** The forward test is
+  its own gate, graded by a context that did not write the contract, and runs
+  only after Phase 1 completes: run earlier it either fails for the wrong
+  reason or passes vacuously.
+- **Phase H — hardware.** Parallel throughout, owner-paced. **Put the first
+  hardware session on a calendar, not in a queue** — it is the one item that
+  fails silently while everything else feels like progress.
+
+The longer-horizon items below remain correctly ordered among themselves:
 
 1. Reduce concentrated coordinator/snapshot debt only when the measured
    maintenance return justifies the change.
@@ -841,10 +865,57 @@ reproducibility programme—not simply because further complexity is possible.
 
 ### Phase: Agent-Native Plugin Authoring (final post-Montana phase)
 
-This is the last planned engineering-quality phase. It begins only after the
-Montana software candidate has passed its own acceptance and handoff gates and
-after the higher-return post-Montana work above has been dispositioned. It does
-not block or redefine the Montana PR.
+This is the last planned engineering-quality phase, and it is **Phase 2 and
+Phase 3** of the ordering above. Its prerequisite is not "the higher-return work
+above" as a whole: it is specifically the **descriptor spine** — the foundational
+descriptor contract (landed), OC-031's re-key, and the OC-008/OC-030 site
+migration. Work on the contract, template, harness and signed actuation gate may
+proceed in parallel with that spine provided every conformance claim is scoped
+"plugin-side floor" until the migration completes. Only the constrained
+mid-tier-agent forward test is genuinely blocked on the completed spine.
+
+**Owner decision, 2026-08-05 — what an unmatched channel renders as.** A channel
+with no descriptor match is an **operator-visible option**: the operator chooses
+whether such channels are obscured. **The default is to render the value
+desaturated** (`theme.MUTED_FOREGROUND`, an existing token) **with the Russian
+marker `н/о`**, and the unambiguous wording (`без дескриптора`) in the tooltip
+and accessible name where there is room for it.
+
+Three constraints follow, and each exists because of a measured failure:
+
+- **Not `—`.** `reporting/sections.py` documents `—` as the *unavailable*
+  marker, under a NaN-доктрина whose stated reason is that an operator would
+  otherwise "read a confident number where none exists". An unclassified
+  channel's value IS available; only its classification is missing. One glyph
+  must not mean both.
+- **The textual marker is load-bearing, not decorative.** The panel conformance
+  obligations in this phase require non-colour state cues, and desaturation
+  alone is colour-only. The marker is what makes the state accessible, and it
+  may not later be "simplified" away.
+- **Obscuring must be discoverable.** When hidden channels exist, show a count
+  (`скрыто: N`) or keep them listed on the settings surface. A live reading that
+  becomes invisible by configuration is the vanishing-readout failure returning
+  through a setting — the failure that caused the `169f7e96` / `0bea0449`
+  revert.
+
+**Negative scope stands unamended.** The "deliberately do not chase" list in
+this document, and the explicit exclusions in the post-Montana strategy
+(Byzantine same-process resistance, repo-wide mutation ratchets, receipt-latency
+provenance until a thesis chapter consumes it, the fault-injection campaign
+harness, formal methods, the full reproducibility chain, wholesale panel
+migration, and fleet/projector view) remain excluded. They are referenced rather
+than restated so that dropping them is not quietly re-litigated.
+
+**Owner queue — decisions that are not the coordinator's to make:**
+
+1. Marker wording for unclassified channels beyond the default recorded above,
+   if the operator-facing text should differ.
+2. Refuse-versus-warn on the import-time capability-metadata drift check in
+   `src/cryodaq/drivers/registry.py`. It ships fail-closed; the engine does not
+   consume that table operationally, so a derived-artifact freshness gate would
+   remove the failure mode rather than choose between the two.
+3. OC-034 repository settings and OC-013 physical-OFF measurement — Phase H,
+   closed by the owner rather than by code.
 
 This roadmap-authoring pass fixes the specification, acceptance criteria, and
 architecture decisions only. It does not implement a plugin, conformance
