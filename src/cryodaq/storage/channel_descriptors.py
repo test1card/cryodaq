@@ -184,6 +184,30 @@ class ChannelDescriptorStorageError(RuntimeError):
 class _StrictDescriptorLoader(yaml.SafeLoader):
     """Bounded YAML grammar with neither aliases nor duplicate mapping keys."""
 
+    # OWNED PARSING TABLES.  Subclassing yaml.SafeLoader shares these five
+    # mutable class attributes BY REFERENCE, so any library that has ever called
+    # yaml.SafeLoader.add_constructor(...) or add_implicit_resolver(...) -- which
+    # is ordinary PyYAML use, not an attack -- decides what this loader parses.
+    # Measured before this fix on the descriptor loader:
+    # yaml.load("b: 5", Loader=...) returned {'b': 999} and fired a side effect.
+    #
+    # The vocabulary is NOT narrowed: the shipped configs require float, so
+    # copying the defaults keeps behaviour identical while removing the shared
+    # reference.  KNOWN LIMIT, stated rather than implied: the copy is taken at
+    # class-definition time. It closes registration that happens AFTER this
+    # module is imported. It does NOT close registration that happens BEFORE --
+    # and that is not only the deliberate-attacker case: a third-party library
+    # imported ahead of this module and registering at ITS import time poisons by
+    # ordering accident. Measured both ways: post-import poisoning no longer
+    # reaches this loader; pre-import poisoning still does. Closing the second
+    # requires constructors DEFINED IN THE PACKAGE, as cryodaq.lab_profile does,
+    # which is a larger change than this one and is recorded rather than implied.
+    yaml_constructors = dict(yaml.SafeLoader.yaml_constructors)
+    yaml_multi_constructors = dict(yaml.SafeLoader.yaml_multi_constructors)
+    yaml_implicit_resolvers = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+    yaml_path_resolvers = dict(yaml.SafeLoader.yaml_path_resolvers)
+    bool_values = dict(yaml.SafeLoader.bool_values)
+
     def __init__(self, stream: object) -> None:
         super().__init__(stream)
         self._descriptor_depth = 0

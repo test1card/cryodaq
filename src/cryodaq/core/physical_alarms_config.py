@@ -21,6 +21,32 @@ class PhysicalAlarmsConfigError(RuntimeError):
     """Production physical-alarm configuration is absent or unsafe to use."""
 
 
+class _OwnedSafeLoader(yaml.SafeLoader):
+    """`yaml.SafeLoader`'s grammar, without sharing its mutable tables.
+
+    The two legacy paths in this module used `yaml.safe_load`, which is
+    `yaml.SafeLoader` itself, so any library that had called
+    `yaml.SafeLoader.add_constructor(...)` or `add_implicit_resolver(...)` --
+    ordinary PyYAML use, not an attack -- decided how a safety-bearing alarm
+    configuration parses. The production path above already owns its tables;
+    these two did not, which left the weaker path as the reachable one.
+
+    **The vocabulary is deliberately identical**, and no duplicate-key or
+    alias refusal is added here. Those refusals belong to the production
+    loader, which is documented as raising; this loader is on the legacy
+    fallback path, which is documented as never raising and as retaining
+    defaults. Adding a refusal here would convert files that parse today into
+    fail-safe escalation, and this change is meant to remove a poisoning path
+    without changing what parses.
+    """
+
+    yaml_constructors = dict(yaml.SafeLoader.yaml_constructors)
+    yaml_multi_constructors = dict(yaml.SafeLoader.yaml_multi_constructors)
+    yaml_implicit_resolvers = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+    yaml_path_resolvers = dict(yaml.SafeLoader.yaml_path_resolvers)
+    bool_values = dict(yaml.SafeLoader.bool_values)
+
+
 # ---------------------------------------------------------------------------
 # Hard-coded defaults (all tunables)
 # ---------------------------------------------------------------------------
@@ -239,7 +265,7 @@ def load_physical_alarms_config(path: Path) -> tuple[dict[str, Any], dict[str, A
 
     try:
         with path.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = yaml.load(fh, Loader=_OwnedSafeLoader)
     except Exception as exc:  # existing corrupt input must never abort startup
         return _invalid_existing_config_defaults(f"read/decode/YAML error: {exc}")
 
@@ -299,7 +325,18 @@ def load_production_physical_alarms_config(
     """
 
     class _UniqueSafeLoader(yaml.SafeLoader):
-        pass
+        # OWNED PARSING TABLES -- see the note in
+        # cryodaq/storage/channel_descriptors.py.  This loader is defined inside
+        # the function, and `add_constructor` below is COPY-ON-WRITE, so it would
+        # copy `yaml_constructors` from the LIVE host table at call time and any
+        # poisoning would transfer by VALUE.  A test asserting
+        # `is not yaml.SafeLoader.yaml_constructors` therefore passes and proves
+        # nothing; the copy has to be taken from a pristine source here instead.
+        yaml_constructors = dict(yaml.SafeLoader.yaml_constructors)
+        yaml_multi_constructors = dict(yaml.SafeLoader.yaml_multi_constructors)
+        yaml_implicit_resolvers = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
+        yaml_path_resolvers = dict(yaml.SafeLoader.yaml_path_resolvers)
+        bool_values = dict(yaml.SafeLoader.bool_values)
 
     def _mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False):
         mapping: dict[object, object] = {}
@@ -404,7 +441,7 @@ def load_channel_landmarks(path: Path) -> dict[str, dict[str, Any]]:
         return {}
     try:
         with path.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = yaml.load(fh, Loader=_OwnedSafeLoader)
     except Exception as exc:
         logger.warning("physical_alarms.yaml landmarks: YAML error — %s", exc)
         return {}
