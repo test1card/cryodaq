@@ -831,6 +831,19 @@ def _audit(event, args):
 sys.addaudithook(_audit)
 
 
+def _cell_identity(cell):
+    # TYPE and IDENTITY, not the recursive value.  Encoding cell contents
+    # recursively reached lazily-built structures and made a clean run report
+    # `fractions.*` and `numbers.*` as moved; id() is stable for a live object
+    # and still separates a replacement function whose closure holds different
+    # objects from the original.
+    try:
+        contents = cell.cell_contents
+    except ValueError:  # an empty cell in a not-yet-closed closure
+        return ("<empty>", 0)
+    return (type(contents).__qualname__, id(contents))
+
+
 def _encode(value, depth, home, seen):
     # Structural encoding of one object, depth-capped and cycle-safe.
     if depth <= 0:
@@ -848,7 +861,12 @@ def _encode(value, depth, home, seen):
                 for k, v in sorted(value.items(), key=lambda kv: repr(kv[0]))
             ) + "}"
         if isinstance(value, (list, tuple)):
-            return "[" + ",".join(_encode(x, depth - 1, home, seen) for x in value) + "]"
+            # IDENTITY as well as contents.  An incumbent import-control list
+            # replaced by a same-content SUBCLASS -- `sys.path = PathList(sys.path)`,
+            # `sys.meta_path = EvilList(sys.meta_path)` -- encoded identically
+            # while changing what the host's import machinery actually runs.
+            body = ",".join(_encode(x, depth - 1, home, seen) for x in value)
+            return f"[{body}]#{type(value).__qualname__}#{id(value)}"
         if isinstance(value, (set, frozenset)):
             return "[" + ",".join(_encode(x, depth - 1, home, seen) for x in sorted(value, key=repr)) + "]"
         if isinstance(value, type):
@@ -892,7 +910,7 @@ def _encode(value, depth, home, seen):
                     f" g={function_globals.get('__name__', '?') if function_globals is not None else '?'}"
                     f"/{globals_identity}"
                     f" d={_encode(getattr(value, '__defaults__', None), depth - 1, home, seen)}"
-                    f" c={len(getattr(value, '__closure__', ()) or ())}>"
+                    f" c={[_cell_identity(cell) for cell in (getattr(value, '__closure__', ()) or ())]}>"
                 )
             # C functions and builtins have no code object.  Fall back to the
             # exact type plus the object's own repr, which for builtins encodes
@@ -983,7 +1001,11 @@ def _read_affinity():
         return None
 
 
-_import_cache_baseline_keys = set(sys.path_importer_cache)
+# Populated at snapshot time, NOT at definition time.  Capturing the key set
+# when this module object was created meant entries added by the probe's own
+# calibration warm-up existed in the before-snapshot but were never compared --
+# so replacing an already-warmed finder was invisible.
+_import_cache_baseline_keys = set()
 
 
 def _import_cache_shape():
@@ -1155,8 +1177,10 @@ _INSTRUMENT_NAMES = frozenset(vars(sys.modules["__main__"])) | {
     "_INSTRUMENT_NAMES",
     "_argv_rewrites",
     # Bound only on the cli branch: the per-profile loop variables.
+    "_cli_results",
     "_expected_argv",
     "_harness_argv",
+    "_harness_argv_object",
     "profile",
     "_expected_new",
     "_final",
@@ -1172,9 +1196,11 @@ _INSTRUMENT_NAMES = frozenset(vars(sys.modules["__main__"])) | {
 # Taken BEFORE the package is imported or executed: an effect that happens at
 # import time is exactly what an in-process guard cannot see, because by then
 # the package has already run.
+_import_cache_baseline_keys.update(sys.path_importer_cache)
 before = snapshot()
 
 _argv_rewrites = []
+_cli_results = []
 if mode == "import":
     import cryodaq.lab_profile as lab_profile
 
@@ -1201,27 +1227,40 @@ else:
     # `differences: []`.  The restore below overwrites exactly the evidence the
     # after-snapshot was supposed to find.  So argv is now compared BEFORE it is
     # restored, once per profile, and any divergence is its own finding.
+    # The OBJECT as well as its contents.  `list(sys.argv)` copies, so restoring
+    # the copy installed a different list with identical contents -- which the
+    # container-identity encoding correctly reports as incumbent state moving.
+    # That was the instrument's own doing, so it restores both.
+    _harness_argv_object = sys.argv
     _harness_argv = list(sys.argv)
     _argv_rewrites = []
+    _cli_results = []
     for profile in payload["profiles"]:
         _expected_argv = ["cryodaq.lab_profile", profile]
         sys.argv = list(_expected_argv)
         try:
             runpy.run_module("cryodaq.lab_profile", run_name="__main__", alter_sys=True)
-        except SystemExit:
-            pass
+            # No SystemExit at all: the entry point returned without exiting.
+            _cli_results.append([profile, "no-exit"])
+        except SystemExit as exit_status:
+            # The exit CODE is the documented command's answer.  Discarding it
+            # meant a regression that changed only the validation RESULT -- an
+            # invalid profile newly ACCEPTED, say -- left the probe silent,
+            # because nothing about incumbent state has to move for that.
+            _cli_results.append([profile, exit_status.code])
         except BaseException:
             # A crashing entry point must not stop the after-snapshot.  The
             # effect it already had IS the measurement, and reporting "tree
             # changed" names the damage; dying here would only report that
             # something threw.
-            pass
+            _cli_results.append([profile, "raised"])
         # Measured HERE, before any restore: runpy with alter_sys=True sets and
         # then restores argv[0] itself, so anything still different at this
         # point was written by the package under test.
         if list(sys.argv) != _expected_argv:
             _argv_rewrites.append({"expected": _expected_argv, "observed": list(sys.argv)[:8]})
-    sys.argv = _harness_argv
+    sys.argv = _harness_argv_object
+    sys.argv[:] = _harness_argv
     measured = sys.modules["cryodaq.lab_profile"].__file__
 
 after = snapshot()
@@ -1308,6 +1347,7 @@ report_path.write_text(
             "new_modules": _expected_new[:12],
             "removed_modules": _removed_modules[:12],
             "argv_rewrites": _argv_rewrites[:4],
+            "cli_results": _cli_results,
         }
     ),
     encoding="utf-8",
