@@ -902,7 +902,10 @@ def _encode(value, depth, home, seen):
             # Modules all encoded as "<builtins.module>" before this, so
             # rebinding one module attribute to a DIFFERENT module was
             # invisible -- measured, `dataclasses.re = sys` reported nothing.
-            return f"<module {getattr(value, '__name__', '?')}>"
+            # The NAME alone is not identity either: `dataclasses.re =
+            # type(sys)('re')` builds a fresh empty module that answers to the
+            # same name, and encoded by name it matched the real `re`.
+            return f"<module {getattr(value, '__name__', '?')}#{id(value)}>"
         return f"<{type(value).__module__}.{type(value).__name__}>"
     except Exception:
         return "<unencodable>"
@@ -988,10 +991,13 @@ def _import_cache_shape():
     # this attribute was excluded from the fingerprint in the first place.  What
     # is NOT tolerated is an existing finder being replaced or nulled, so only
     # keys present when the probe started are compared, by finder type.
+    # IDENTITY, not just type: swapping one FileFinder for another FileFinder
+    # left the tuple unchanged, so future import resolution could be retuned
+    # with nothing reported. id() is meaningful here because before and after
+    # are taken in the SAME process.
     return sorted(
-        (str(key), type(sys.path_importer_cache.get(key)).__name__)
+        (str(key), type(sys.path_importer_cache.get(key)).__name__, id(sys.path_importer_cache.get(key)))
         for key in _import_cache_baseline_keys
-        if key in sys.path_importer_cache or True
     )
 
 
@@ -1243,6 +1249,11 @@ def _allowed_new_module(name):
 # adding one is a visible decision rather than a widened prefix.
 _ALLOWED_NEW_MODULES = frozenset({"__future__", "cryodaq", "cryodaq.drivers"})
 _expected_new = sorted(name for name in set(_final) - set(_baseline) if not _allowed_new_module(name))
+# REMOVAL is a mutation of the incumbent module cache exactly as much as
+# addition, and only additions were reported: popping an already-imported module
+# (measured with `yaml`) left the probe silent, while every later import in the
+# host would re-execute it.
+_removed_modules = sorted(set(_baseline) - set(_final))
 def _attribute_moved(module_name, attribute, before_value, after_value):
     if (module_name, attribute) in _volatile:
         return False
@@ -1275,6 +1286,8 @@ _moved = sorted(
 )
 if _moved:
     differences.append("module_state")
+if _removed_modules:
+    differences.append("removed_modules")
 if _expected_new:
     # This was computed and then NEVER USED, so module-set growth was never
     # reported at all: injecting a plain `import decimal` into the checkout left
@@ -1293,6 +1306,7 @@ report_path.write_text(
             "tree": measured,
             "moved_modules": _moved[:12],
             "new_modules": _expected_new[:12],
+            "removed_modules": _removed_modules[:12],
             "argv_rewrites": _argv_rewrites[:4],
         }
     ),

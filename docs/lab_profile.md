@@ -119,7 +119,9 @@ and the third adds `burst_sensor`. The derived `LabCapabilities` is therefore:
 - `grants_control_authority`: `False` — a profile is data, not authority
 
 `LabCapabilities.__post_init__` independently recomputes that union from the
-registry and rejects any instance — derived or hand-built — whose values
+inert metadata table (`BUILTIN_DRIVER_METADATA` in
+`src/cryodaq/drivers/capability_metadata.py`) -- **not** from the registry,
+which this package never imports, as stated above. It rejects any instance — derived or hand-built — whose values
 disagree with it, whose instrument types leave the closed allowlist, or that
 reach any source capability (`controlled_source`, `verified_off_source`) or
 the `reviewed_source` trust class. An in-memory profile cannot smuggle
