@@ -825,13 +825,17 @@ misroutes them.
 and gating on nothing but the owner's time at the stand.**
 
 - **Phase 0 — register truth and first blood.** Tier-0 register retag (merged);
-  the notification delivery proof, OC-026 (merged); the OC-039 disposition.
+  the notification delivery proof for OC-026 (merged as PR #11 -- the ROW
+  itself remains open, with acceptance pending a second independent reviewer and
+  the prevention record's `green_evidence`); the OC-039 disposition.
   Proves the PR-review-merge workflow end to end at small scale.
 - **Phase 1 — the descriptor spine.** The engine-loader ownership fix; then
   OC-031's registry re-key; then the OC-008/OC-030 site migrations in bounded
   batches carrying rendering evidence for every touched surface; OC-023 rides
-  with the cluster under the most careful review. OC-028 and OC-004 slot in as
-  independent small PRs.
+  with the cluster under the most careful review, and **OC-024's archive
+  finalisation descriptors belong to the same spine** -- archive rows carry
+  instrument and channel identity, so they are a descriptor surface like any
+  other. OC-028 and OC-004 slot in as independent small PRs.
 - **Phase 2 — the conformance floor.** The deliverables specified later in this
   section, **in the order those specifications already give**: this summary
   deliberately does not restate a sequence, because a planning entry point that
@@ -881,8 +885,11 @@ mid-tier-agent forward test is genuinely blocked on the completed spine.
 with no descriptor match is an **operator-visible option**: the operator chooses
 whether such channels are obscured. **The default is to render the value
 desaturated** (`theme.MUTED_FOREGROUND`, an existing token) **with the Russian
-marker `н/о`**, and the unambiguous wording (`без дескриптора`) in the tooltip
-and accessible name where there is room for it.
+marker `н/о`**. The unambiguous wording (`без дескриптора`) is **required** in
+the tooltip and accessible name -- not offered "where there is room" -- because
+`н/о` alone is ambiguous between *не определено* and *не обнаружено*, and the
+second reading would falsely claim the channel is not detected. See the ruling in
+`docs/DECISIONS.md`.
 
 Three constraints follow, and each exists because of a measured failure:
 
@@ -901,15 +908,18 @@ Three constraints follow, and each exists because of a measured failure:
   through a setting — the failure that caused the `169f7e96` / `0bea0449`
   revert.
 
-**Negative scope stands unamended.** The "deliberately do not chase" list in
-this document, and the explicit exclusions in the post-Montana strategy
-(Byzantine same-process resistance, repo-wide mutation ratchets, receipt-latency
-provenance until a thesis chapter consumes it, the fault-injection campaign
-harness, formal methods, the full reproducibility chain, and wholesale panel
-migration) remain excluded. **F37 fleet/projector view is NOT in that list**: this
-document keeps it as deferred feature work at its own entry below, and an earlier
-draft of this paragraph reclassified it as excluded, which is a change of status
-no amendment of the ordering is entitled to make. They are referenced rather
+**Negative scope stands unamended, BY REFERENCE.** The "deliberately do not
+chase" list in this document and the explicit exclusions in the post-Montana
+strategy are unchanged by this amendment.
+
+They are deliberately **not restated here**, and two earlier drafts of this
+paragraph show why. Restating turned items into exclusions that this document
+holds as planned or conditional work -- mutation-testing evidence, the
+reproducibility chain, formal verification, receipt-latency provenance and the
+fleet/projector view F37 all appear elsewhere as deferred or conditional, not
+excluded. An amendment to the ORDERING has no authority to change an item's
+STATUS, and a duplicated list is how it happens without anyone intending it.
+Read each item at its own entry. They are referenced rather
 than restated so that dropping them is not quietly re-litigated.
 
 **Owner queue — decisions that are not the coordinator's to make:**
