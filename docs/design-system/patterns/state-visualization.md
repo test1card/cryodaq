@@ -1,10 +1,10 @@
 ---
 title: State Visualization
-keywords: state, visualization, ok, warning, caution, fault, stale, status, color, border, icon, redundant-channels
-applies_to: how to visually communicate state (OK, warning, caution, fault, stale, disconnected)
+keywords: state, visualization, ok, warning, caution, fault, stale, status, color, border, icon, redundant-channels, unclassified, descriptor, н/о
+applies_to: how to visually communicate state (OK, warning, caution, fault, stale, disconnected, unclassified)
 status: canonical
-references: rules/color-rules.md, rules/accessibility-rules.md, tokens/colors.md, patterns/command-outcome-unknown.md
-last_updated: 2026-07-25
+references: rules/color-rules.md, rules/accessibility-rules.md, rules/data-display-rules.md, tokens/colors.md, patterns/command-outcome-unknown.md
+last_updated: 2026-08-05
 ---
 
 # State Visualization
@@ -39,6 +39,47 @@ visible. They are not mutually exclusive severity states.
 Backend payloads, stored history, alarm ordering, acknowledgement, and
 escalation are not rewritten. New presentation producers must not emit
 `warning`; compatibility remains until all supported history/backends stop.
+
+## Classification axis — a channel with no descriptor match
+
+**Status: SPECIFIED, NOT YET IMPLEMENTED.** No production surface renders this
+state today. It is recorded here so that the OC-008/OC-030 descriptor site
+migrations implement one agreed treatment instead of inventing several, and so
+that this file is not silent about a state the roadmap already commits to.
+Owner decision of 2026-08-05, recorded in `docs/DECISIONS.md`.
+
+Descriptor classification is **its own axis**, like freshness and connectivity —
+not a severity rung. A channel whose reading is arriving normally but which no
+descriptor matches is neither caution nor fault: the *value* is available and
+correct, only its *classification* is missing.
+
+| Accepted source value | Operator text | Presentation |
+|---|---|---|
+| descriptor matched | (no marker) | ordinary reading |
+| no descriptor match | `н/о` marker + `без дескриптора` in tooltip and accessible name | desaturated chrome and label; **value stays `FOREGROUND`** |
+
+Four invariants, each from a measured failure:
+
+- **The value keeps `FOREGROUND`.** RULE-DATA-005 holds the value colour
+  constant across normal, caution, fault and stale, and carries state on the
+  chrome, the label and the marker. Dimming the number would say the reading is
+  degraded, which is false here. (An earlier draft of the owner decision put
+  `MUTED_FOREGROUND` on the value; corrected against this rule.)
+- **Not `—`.** `src/cryodaq/reporting/sections.py` documents `—` as the
+  UNAVAILABLE marker under a NaN-доктрина whose stated reason is that an
+  operator would otherwise read a confident number where none exists. One glyph
+  must not also mean "classification missing".
+- **The textual marker is load-bearing, not decorative.** Desaturation alone is
+  colour-only and fails the two-channel rule below; `н/о` is the second channel.
+  The longer `без дескриптора` carries the unambiguous meaning, because `н/о`
+  alone reads as either *не определено* or *не обнаружено*, and the second is a
+  false claim that the channel is not detected. The narrow numeric field is why
+  the short marker is the in-field form (owner: *"оператор не обезьяна"*).
+- **Obscuring is an operator option, and must stay discoverable.** The operator
+  may choose to hide unmatched channels; when any are hidden, show a count
+  (`скрыто: N`) or keep them listed on the settings surface. A live reading that
+  becomes invisible by configuration is the vanishing-readout failure of the
+  `169f7e96` / `0bea0449` revert returning through a setting.
 
 ## Two-channel signaling rule
 

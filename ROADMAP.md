@@ -874,22 +874,36 @@ reproducibility programme—not simply because further complexity is possible.
 
 This is the last planned engineering-quality phase, and it is **Phase 2 and
 Phase 3** of the ordering above. Its prerequisite is not "the higher-return work
-above" as a whole: it is specifically the **descriptor spine** — the foundational
-descriptor contract (landed), OC-031's re-key, and the OC-008/OC-030 site
-migration. Work on the contract, template, harness and signed actuation gate may
+above" as a whole: it is specifically the **descriptor spine as Phase 1 defines
+it above** — including OC-024's archive-finalisation descriptors, whose rows
+`docs/OPEN_CELLS.md` records as missing descriptor data and BLOCKS-DEPLOYMENT.
+The membership of the spine is deliberately **not restated here**: a prerequisite
+that lists the spine separately from the phase defining it drifts out of
+agreement with it, and a planner entering the roadmap through this section would
+then start plugin claims while archive records still lose stable identity.
+Work on the contract, template, harness and signed actuation gate may
 proceed in parallel with that spine provided every conformance claim is scoped
 "plugin-side floor" until the migration completes. Only the constrained
 mid-tier-agent forward test is genuinely blocked on the completed spine.
 
 **Owner decision, 2026-08-05 — what an unmatched channel renders as.** A channel
 with no descriptor match is an **operator-visible option**: the operator chooses
-whether such channels are obscured. **The default is to render the value
-desaturated** (`theme.MUTED_FOREGROUND`, an existing token) **with the Russian
-marker `н/о`**. The unambiguous wording (`без дескриптора`) is **required** in
-the tooltip and accessible name -- not offered "where there is room" -- because
-`н/о` alone is ambiguous between *не определено* and *не обнаружено*, and the
-second reading would falsely claim the channel is not detected. See the ruling in
-`docs/DECISIONS.md`.
+whether such channels are obscured. **The default is to render the channel
+desaturated and marked with the Russian marker `н/о`**. The unambiguous wording
+(`без дескриптора`) is **required** in the tooltip and accessible name -- not
+offered "where there is room" -- because `н/о` alone is ambiguous between *не
+определено* and *не обнаружено*, and the second reading would falsely claim the
+channel is not detected. See the ruling in `docs/DECISIONS.md` and the state
+contract in `docs/design-system/patterns/state-visualization.md`.
+
+**Which element carries the desaturation is a design-system question, and the
+design system already answers it.** An earlier draft of this paragraph put
+`theme.MUTED_FOREGROUND` on the numeric value. `RULE-DATA-005` holds the value at
+`FOREGROUND` in every state it enumerates -- normal, caution, fault and stale
+alike -- and carries state on the chrome, the label and the marker. The
+unclassified state takes the same treatment, for the same reason that rules out
+`—` below: the reading itself is available and correct, and a dimmed number says
+the reading is degraded when only its classification is missing.
 
 Three constraints follow, and each exists because of a measured failure:
 
@@ -930,8 +944,15 @@ than restated so that dropping them is not quietly re-litigated.
    `src/cryodaq/drivers/registry.py`. It ships fail-closed; the engine does not
    consume that table operationally, so a derived-artifact freshness gate would
    remove the failure mode rather than choose between the two.
-3. OC-034 repository settings and OC-013 physical-OFF measurement — Phase H,
-   closed by the owner rather than by code.
+3. OC-034 repository settings — the required status, the protected
+   receipt-producing qualification authority, durable cross-run replay refusal,
+   and the restriction on direct release upload. Owner-closed rather than
+   code-closed, but it is a **release-promotion gate, not a Phase H hardware
+   item**: `docs/OPEN_CELLS.md` records it as BLOCKS-DEPLOYMENT. On the hardware
+   calendar it could be deferred with a lab visit that has nothing to do with
+   it, or read as closed once the visit happens.
+4. OC-013 physical-OFF measurement — Phase H, at the stand, closed by the owner
+   rather than by code.
 
 This roadmap-authoring pass fixes the specification, acceptance criteria, and
 architecture decisions only. It does not implement a plugin, conformance

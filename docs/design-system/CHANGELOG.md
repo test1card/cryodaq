@@ -17,6 +17,19 @@ the design-system-specific definitions of "breaking" from
 
 ### Added
 
+- 2026-08-05: `patterns/state-visualization.md` — the **classification axis**: a
+  channel whose reading arrives normally but which no descriptor matches.
+  **SPECIFIED, NOT YET IMPLEMENTED** — no production surface renders it today;
+  it is recorded ahead of the OC-008/OC-030 descriptor site migrations so those
+  implement one agreed treatment rather than inventing several. Value stays
+  `FOREGROUND` per RULE-DATA-005, chrome and label desaturate, `н/о` carries the
+  non-colour channel with `без дескриптора` in the tooltip and accessible name,
+  and hiding such channels is an operator option that must stay discoverable.
+  Owner decision of 2026-08-05, recorded in `docs/DECISIONS.md`; cross-referenced
+  from `rules/data-display-rules.md` RULE-DATA-005. No version bump: additive
+  specification of an unimplemented state, following the
+  `patterns/command-outcome-unknown.md` precedent below.
+
 - 2026-07-25: `patterns/command-outcome-unknown.md` — new cross-surface pattern
   for mutation-outcome uncertainty (`_outcome_unknown` / `delivery_state` /
   `commit_state`, the `_close_locked()` raise-on-non-empty invariant, and a

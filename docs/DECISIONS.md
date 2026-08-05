@@ -218,9 +218,18 @@ read the pull-request payload.
 
 A channel with no descriptor match is an **operator-visible option**: the
 operator chooses whether such channels are obscured. The default renders the
-value **desaturated** (`theme.MUTED_FOREGROUND`) with the Russian marker `н/о`,
-and the unambiguous wording (`без дескриптора`) in the tooltip and accessible
-name.
+channel **desaturated** with the Russian marker `н/о`, and the unambiguous
+wording (`без дескриптора`) in the tooltip and accessible name.
+
+**Which element the desaturation lands on is a design-system question, not part
+of the owner's ruling.** An earlier draft of this entry put
+`theme.MUTED_FOREGROUND` on the numeric value; `RULE-DATA-005` holds the value at
+`FOREGROUND` in normal, caution, fault and stale alike, and carries state on the
+chrome, the label and the marker. The unclassified state takes the same
+treatment, for the same reason as the `—` constraint below: the reading is
+available and correct, and a dimmed number claims the reading is degraded when
+only its classification is missing. The contract is
+`docs/design-system/patterns/state-visualization.md`.
 
 Owner, on the marker: *"н/о это норм вариант, оператор не обезьяна, а другие
 варианты слишком длинные для маленького поля под число"* — the field is a narrow
