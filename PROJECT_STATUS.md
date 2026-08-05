@@ -83,6 +83,20 @@ Open checkpoint and deployment invariants:
    falsified the fixed-port/startup explanation. It fails only in the safe
    direction, and its diagnostic retry is not a fix. If it makes P7 red, the
    one-shot cycle terminates because required hosted evidence is red.
+6. **OC-040 — BLOCKS-DEPLOYMENT: engine YAML loaders inherit PyYAML's mutable
+   parsing tables.** Subclassing `yaml.SafeLoader`, or calling `yaml.safe_load`,
+   shares five mutable class attributes, so any library using the documented
+   `add_constructor` / `add_implicit_resolver` / `add_path_resolver` APIs decides
+   what a safety-bearing configuration parses. Measured on the shipped
+   `config/physical_alarms.yaml` against the defect as it shipped: the
+   `cold_channel`, `warm_channel` and `reference_temp_channel` identities that
+   CooldownAlarm and VacuumGuard bind to were **silently substituted**, with the
+   document otherwise intact and no diagnostic. Four loaders now share
+   `src/cryodaq/_owned_yaml.py`; **50 bare call sites across 30 modules remain**,
+   including `core/safety_manager.py`, `core/interlock.py`,
+   `core/channel_manager.py` and `engine.py`, and the pre-import ordering is open
+   for all of them. Unlike OC-037 and OC-039 this one fails in the UNSAFE
+   direction — it does not refuse, it proceeds on substituted values.
 
 ---
 

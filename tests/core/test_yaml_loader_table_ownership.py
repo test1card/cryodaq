@@ -44,9 +44,31 @@ POISON = (
 # The same shape, aimed at the canonical Cyrillic channel identities the SHIPPED
 # production config actually carries.  Implicit resolvers key on the first
 # character, which is U+0422 CYRILLIC CAPITAL TE -- not Latin T.
+#
+# *** AN IMPLICIT RESOLVER CANNOT REACH A QUOTED SCALAR. ***  This one therefore
+# reaches the BARE landmark keys (`Т12:`) in physical_alarms.yaml and NOT the
+# quoted safety-bearing fields (`cold_channel: "Т12"`).  Worse, it maps both
+# landmark keys onto one value, so against the defective loader the duplicate-key
+# refusal ABORTS startup -- which is a red result for the wrong reason.  Use
+# CHANNEL_PATH_POISON below for anything asserting silent substitution of the
+# channel identities themselves.
 CHANNEL_POISON = (
     "import re as _re, yaml as _yaml\n"
     '_yaml.SafeLoader.add_implicit_resolver("!chan", _re.compile("^\\u0422[0-9]+$"), ["\\u0422"])\n'
+    '_yaml.SafeLoader.add_constructor("!chan", lambda loader, node: "POISONED")\n'
+)
+
+# A PATH resolver retags by POSITION, so quoting is no defence.  It writes into
+# `yaml_path_resolvers` -- the one shared table none of the other probes here
+# exercise -- and it substitutes exactly the fields CooldownAlarm and VacuumGuard
+# bind to, while leaving the landmark keys intact so no duplicate-key refusal can
+# mask the result.  Measured on the shipped file: cold_channel, warm_channel and
+# reference_temp_channel all become the substituted value; both landmarks survive.
+CHANNEL_PATH_POISON = (
+    "import yaml as _yaml\n"
+    '_yaml.SafeLoader.add_path_resolver("!chan", ["cooldown", "cold_channel"], str)\n'
+    '_yaml.SafeLoader.add_path_resolver("!chan", ["cooldown", "warm_channel"], str)\n'
+    '_yaml.SafeLoader.add_path_resolver("!chan", ["vacuum", "reference_temp_channel"], str)\n'
     '_yaml.SafeLoader.add_constructor("!chan", lambda loader, node: "POISONED")\n'
 )
 
@@ -163,17 +185,56 @@ def test_production_loader_snapshots_its_tables_at_import_not_at_call() -> None:
 
     This asserts the ordering that defect needed -- the library registers AFTER
     the module is imported but BEFORE the loader is called -- and it drives the
-    SHIPPED ``config/physical_alarms.yaml`` rather than a fixture, with a poison
-    aimed at the canonical Cyrillic channel identities that document actually
-    contains.  So it demonstrates a real startup parsing a real file.
+    SHIPPED ``config/physical_alarms.yaml`` rather than a fixture.
+
+    *** THE POISON HERE WAS ONCE THE WRONG INSTRUMENT, AND ITS RED WAS A FRAMING
+    ARTIFACT. ***  It used ``CHANNEL_POISON``, an implicit resolver, while the
+    shipped file QUOTES ``cold_channel``, ``warm_channel`` and
+    ``reference_temp_channel``.  Implicit resolvers do not apply to quoted
+    scalars, so it never touched them -- it hit the bare landmark keys and mapped
+    both onto one value, and the defective loader then went red on the
+    DUPLICATE-KEY REFUSAL rather than on the silent substitution this test
+    claims to demonstrate.  A guard that fails for the wrong reason still looks
+    green when fixed.
+
+    ``CHANNEL_PATH_POISON`` retags by POSITION, so quoting is no defence.
+
+    **What each revert actually produces, measured against real production
+    rather than assumed** -- the three cases are not equivalent and only one is
+    the defect that shipped:
+
+    ===========================================  ==========================
+    arrangement                                  path-resolver poison gives
+    ===========================================  ==========================
+    class INSIDE the function (what shipped)     SILENT SUBSTITUTION of all
+                                                 three channel identities,
+                                                 landmarks intact, no
+                                                 diagnostic
+    module-level class on ``yaml.SafeLoader``    REFUSAL -- fail-closed
+    module-level class on ``OwnedSafeLoader``    clean
+    ===========================================  ==========================
+
+    The middle row is why a red here must be read carefully: reverting only the
+    BASE CLASS leaves ``add_constructor`` copy-on-writing the constructor table
+    at IMPORT time, before any poison, so the retagged node finds no constructor
+    and the loader raises.  That is red, and safe, and NOT the shipped defect.
+    Only moving the class back inside the function reproduces the silent
+    substitution this test exists to prevent.
     """
 
     probe = (
         "from cryodaq.core.physical_alarms_config import load_production_physical_alarms_config\n"
-        + CHANNEL_POISON
+        + CHANNEL_PATH_POISON
         + "import pathlib\n"
-        + f"loaded = load_production_physical_alarms_config(pathlib.Path({str(SHIPPED_ALARMS_CONFIG)!r}))\n"
-        + 'print("POISONED" if "POISONED" in repr(loaded) else "CLEAN")\n'
+        + f"path = pathlib.Path({str(SHIPPED_ALARMS_CONFIG)!r})\n"
+        + "cooldown, vacuum, landmarks = load_production_physical_alarms_config(path)\n"
+        # Assert the substitution target SPECIFICALLY, not just the absence of a
+        # marker anywhere: the channel identities CooldownAlarm and VacuumGuard
+        # bind to.  Checking only `"POISONED" not in repr(...)` would also pass
+        # if the loader raised, or returned nothing at all.
+        + "targets = (cooldown['cold_channel'], cooldown['warm_channel'], vacuum['reference_temp_channel'])\n"
+        + "assert len(landmarks) == 2, f'landmarks collapsed to {sorted(landmarks)}: refusal may mask this'\n"
+        + 'print("POISONED" if "POISONED" in targets else "CLEAN")\n'
     )
     assert _run(probe) == "CLEAN"
 
