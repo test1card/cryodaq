@@ -156,6 +156,23 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
     assert not failures, "\n".join(failures)
 
 
+@cache
+def _declared_minimum_python_version() -> str:
+    """Return the floor from `pyproject.toml`'s `requires-python`, e.g. ``3.12``.
+
+    Derived rather than written down, because the caveat this supports is about
+    a SPECIFIC declared floor.  If the project raises its minimum, a hardcoded
+    "3.12" would keep asserting a sentence about a version nobody supports any
+    more -- a stale claim held in place by its own guard.
+    """
+
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        requires = tomllib.load(handle)["project"]["requires-python"]
+    match = re.search(r">=\s*(\d+\.\d+)", requires)
+    assert match is not None, f"cannot read a minimum version out of requires-python {requires!r}"
+    return match.group(1)
+
+
 def test_open_cells_sweep_counts_are_rederived_from_the_live_sweep() -> None:
     """Counts the register cites about the C2 sweep must come from the sweep.
 
@@ -228,6 +245,52 @@ def test_open_cells_sweep_counts_are_rederived_from_the_live_sweep() -> None:
             assert "reason" in row.lower(), (
                 f"{row_id} cites the {gui_by_reason}-entry subset without naming it a reason-label count"
             )
+
+
+def test_open_cells_oc031_preserves_its_supported_interpreter_caveat() -> None:
+    """The count is only half of what OC-031 must keep saying.
+
+    Prevention ``REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301``; false-green pair
+    ``SWEEP-COUNT-GUARD-INTERPRETER-CAVEAT-FALSE-GREEN-303``.
+
+    The registry's exactness holds on the CI interpreter and rejects 110 of its
+    own 135 challenges on the version `pyproject.toml` declares as the floor.
+    The sibling count guard asserts only the GUI-by-path wording, so OC-031
+    could be edited back to an unqualified "N detected and N registered"
+    closure with the interpreter caveat dropped, and that guard would still
+    pass -- the same one-row-away hole, one property along.  Codex found it on
+    ``bd9f2cf8``.
+
+    This is a separate node rather than more assertions in the sibling because
+    it is a separate property, and because the false-green registry binds one
+    pair per guard node: folding them together would have made the two escapes
+    indistinguishable in the register.
+    """
+
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    oc_031 = next((line for line in text.splitlines() if line.startswith("| OC-031 |")), None)
+    assert oc_031 is not None, "OC-031 row is missing from the register"
+
+    minimum = _declared_minimum_python_version()
+    assert f"Python {minimum}" in oc_031, (
+        f"OC-031 cites the registry's exactness without naming Python {minimum}, the floor "
+        f"`pyproject.toml` declares, on which that exactness does not hold"
+    )
+    assert "errors over" in oc_031, (
+        f"OC-031 names Python {minimum} without stating how many challenges it rejects there"
+    )
+
+    # Re-derive the MECHANISM rather than trusting the sentence that describes
+    # it.  The divergence exists because the challenge fingerprint hashes
+    # `ast.dump` text, which is version-dependent.  If that ever stops being
+    # true the caveat should be removed -- but only after someone measures it
+    # again, which is exactly the step this prevention exists to force.
+    sweep_source = _read(REPO_ROOT / "tests" / "test_c2_repo_wide_spelling_sweep.py")
+    assert "ast.dump(" in sweep_source, (
+        "the C2 sweep no longer fingerprints via `ast.dump`, so the interpreter-binding this guard "
+        f"asserts about OC-031 may be stale: re-measure the registry on Python {minimum} and on CI "
+        "before editing the caveat out of the row"
+    )
 
 
 def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
@@ -805,7 +868,7 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
     assert_current(text, tracked, contents)
     for old, replacement in (
         ("All 6 tracked workflows", "All 4 tracked workflows"),
-        ("all 18 tracked governance-test modules", "all 12 tracked governance-test modules"),
+        ("all 19 tracked governance-test modules", "all 12 tracked governance-test modules"),
         (
             "all 10 tracked workflow-referenced CI/governance runner modules",
             "all 9 tracked workflow-referenced CI/governance runner modules",
