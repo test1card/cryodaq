@@ -170,7 +170,11 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-023",
         "OC-024",
         "OC-026",
-        "OC-028",
+        # OC-028 removed from the BLOCKS-DEPLOYMENT inventory: the owner ruled
+        # A+B on 2026-08-05 and both bounds are implemented and guarded by
+        # tests/agents/assistant/test_agent_narration_floor.py. This gate firing
+        # on the removal is the gate working -- a row leaving the blocking set
+        # has to be deliberate, never absorbed quietly.
         "OC-030",
         "OC-034",
         "OC-036",

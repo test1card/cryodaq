@@ -251,3 +251,30 @@ Three constraints ride with the decision, each from a measured failure:
 
 This decision gates the OC-008/OC-030 site migrations; its absence is what the
 ratified plan names as the cause of that revert.
+
+## [Owner] 2026-08-05 — A still-active CRITICAL must break its own silence
+
+The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
+
+- **A — a narration that reached nobody buys no silence.** If no target accepted
+  it, the next occurrence of that alarm is not suppressed.
+- **B — a CRITICAL that stays active is re-narrated on a bounded interval**,
+  currently 300 s, rather than being silenced for as long as it keeps firing.
+
+**Why the interval is elapsed time and not a count of suppressed events.** The
+decision was first phrased as "after 10 suppressed windows (5 minutes)". Those
+are not the same thing: an alarm re-firing every second reaches ten suppressed
+events in ten seconds. The operator-facing meaning is the wall-clock silence, so
+that is what the code measures and what
+`tests/agents/assistant/test_agent_narration_floor.py` asserts — the longest gap
+between narrations of a live CRITICAL, not the number of them.
+
+**Severity scope needs no separate rule.** `_should_handle` already filters this
+path to CRITICAL, so every event reaching the ledger is CRITICAL and there is no
+lower severity here to treat differently.
+
+**What made this reachable at all:** `mark_delivered` existed but appeared
+exactly once in `src/` — its own definition. Production never reported a delivery
+outcome, only tests called it, so a narration lost to a broken transport was
+indistinguishable from one the operator read. The outcome is now reported from
+the dispatch path.

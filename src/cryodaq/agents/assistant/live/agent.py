@@ -208,25 +208,92 @@ class _EventDedup:
     here: a flapping alarm produces exactly one narrative for the duration
     of the flap-burst, and only after the alarm has been quiet for the
     full window does the next genuine re-fire produce a fresh response.
+
+    OC-028 — the sliding window had no floor, and that is the opposite failure.
+    ``_seen`` was refreshed on every attempt INCLUDING suppressed ones, so the
+    "quiet for a full window" condition can never be reached while the alarm
+    keeps firing: a continuously flapping CRITICAL was narrated exactly ONCE,
+    for as long as it lasted.  Two bounds now break that silence, per the owner
+    decision of 2026-08-05 recorded in ``docs/DECISIONS.md``:
+
+    * **A re-narration that never reached the operator buys no silence.**  The
+      ledger suppresses duplicates of what was DELIVERED, not of what was
+      attempted.  If the transport was broken, the next event goes through.
+    * **A CRITICAL that stays active is re-narrated every**
+      ``escalate_after_s``.  This is ELAPSED TIME since suppression began, not
+      a count of suppressed events: an alarm re-firing every second would reach
+      any event count almost immediately, which is not what "after N windows"
+      means to an operator.
+
+    Only CRITICAL ``alarm_fired`` events reach this gate -- ``_should_handle``
+    filters the rest -- so there is no lower severity here to treat differently.
     """
 
-    def __init__(self, window_s: float = 30.0) -> None:
+    def __init__(self, window_s: float = 30.0, escalate_after_s: float = 300.0) -> None:
         self._window_s = window_s
+        self._escalate_after_s = escalate_after_s
         self._seen: dict[str, float] = {}
+        self._suppressing_since: dict[str, float] = {}
+        self._undelivered: set[str] = set()
+
+    def _prune(self, now: float) -> None:
+        """Drop bookkeeping for alarms that have stopped firing.
+
+        Pruned on the ESCALATION horizon, not the dedup window: an entry has to
+        outlive ``window_s`` for the escalation to be reachable at all.
+        """
+
+        horizon = now - max(self._window_s, self._escalate_after_s)
+        self._seen = {key: stamp for key, stamp in self._seen.items() if stamp >= horizon}
+        self._suppressing_since = {key: stamp for key, stamp in self._suppressing_since.items() if key in self._seen}
+        self._undelivered &= set(self._seen)
+
+    def _allow(self, event_id: str) -> bool:
+        self._suppressing_since.pop(event_id, None)
+        return True
 
     def should_dispatch(self, event_id: str) -> bool:
         now = time.monotonic()
-        cutoff = now - self._window_s
         last = self._seen.get(event_id)
+        suppressing_since = self._suppressing_since.get(event_id)
         self._seen[event_id] = now
-        self._seen = {key: timestamp for key, timestamp in self._seen.items() if timestamp >= cutoff}
-        return last is None or last < cutoff
+        self._prune(now)
+
+        if last is None or last < now - self._window_s:
+            # Genuinely quiet for a full window: the original semantics.
+            return self._allow(event_id)
+        if event_id in self._undelivered:
+            # The last narration did not reach any target.  Suppressing now
+            # would trade the operator's only notice for silence.
+            return self._allow(event_id)
+        if suppressing_since is None:
+            self._suppressing_since[event_id] = now
+            return False
+        if now - suppressing_since >= self._escalate_after_s:
+            return self._allow(event_id)
+        return False
+
+    def note_outcome(self, event_id: str, *, delivered: bool) -> None:
+        """Record whether the narration for ``event_id`` reached any target.
+
+        This is the input the ledger never had.  ``mark_delivered`` existed but
+        was called only by tests -- production never reported an outcome, so a
+        narration lost to a broken transport still bought a full window of
+        silence.
+        """
+
+        if delivered:
+            self._undelivered.discard(event_id)
+        else:
+            self._undelivered.add(event_id)
 
     def mark_delivered(self, event_id: str) -> None:
+        """Backwards-compatible alias for a successful delivery."""
+
         now = time.monotonic()
-        cutoff = now - self._window_s
         self._seen[event_id] = now
-        self._seen = {key: timestamp for key, timestamp in self._seen.items() if timestamp >= cutoff}
+        self._prune(now)
+        self.note_outcome(event_id, delivered=True)
 
 
 def _event_dedup_id(event: EngineEvent) -> str | None:
@@ -276,7 +343,9 @@ class AssistantLiveAgent:
         # F-BotPolish: drop duplicate alarm_fired events inside a 30 s window
         # so re-firing alarms (stale → fresh → stale) don't flood Telegram
         # with near-identical Gemma narratives.
-        self._dedup = _EventDedup(window_s=30.0)
+        # OC-028: 30 s dedup window, and a 300 s floor after which a CRITICAL
+        # that is still firing is re-narrated rather than silenced forever.
+        self._dedup = _EventDedup(window_s=30.0, escalate_after_s=300.0)
 
     async def start(self) -> None:
         """Subscribe to EventBus and begin event processing."""
@@ -400,7 +469,7 @@ class AssistantLiveAgent:
                         )
                         continue
                     t = asyncio.create_task(
-                        self._safe_handle(event),
+                        self._safe_handle(event, dedup_id=dedup_id),
                         name=f"gemma_{event.event_type}",
                     )
                     self._handler_tasks.add(t)
@@ -449,14 +518,24 @@ class AssistantLiveAgent:
             self._call_timestamps.popleft()
         return len(self._call_timestamps) < self._config.max_calls_per_hour
 
-    async def _safe_handle(self, event: EngineEvent) -> None:
-        """Handle one event with rate-limit + semaphore + error isolation."""
+    async def _safe_handle(self, event: EngineEvent, *, dedup_id: str | None = None) -> None:
+        """Handle one event with rate-limit + semaphore + error isolation.
+
+        ``dedup_id`` carries the ledger key so the delivery OUTCOME can be
+        reported back (OC-028).  Every path that ends without a delivered
+        narration -- rate limit, generation failure, empty response, refused
+        transport -- must report ``delivered=False``, or a narration the
+        operator never saw would buy a full window of silence.
+        """
+
         if not self._check_rate_limit():
             logger.warning(
                 "AssistantLiveAgent: rate limit reached (%d/hr), dropping %s",
                 self._config.max_calls_per_hour,
                 event.event_type,
             )
+            if dedup_id is not None:
+                self._dedup.note_outcome(dedup_id, delivered=False)
             return
 
         async with self._semaphore:
@@ -475,13 +554,17 @@ class AssistantLiveAgent:
                 elif event.event_type == "periodic_report_request":
                     await self._handle_periodic_report(event)
                 else:
-                    await self._handle_alarm_fired(event)
+                    await self._handle_alarm_fired(event, dedup_id=dedup_id)
             except (OllamaUnavailableError, OllamaModelMissingError) as exc:
+                if dedup_id is not None:
+                    self._dedup.note_outcome(dedup_id, delivered=False)
                 logger.warning("AssistantLiveAgent: Ollama недоступен — %s", exc)
             except Exception:
+                if dedup_id is not None:
+                    self._dedup.note_outcome(dedup_id, delivered=False)
                 logger.warning("AssistantLiveAgent: ошибка обработки %s", event.event_type, exc_info=True)
 
-    async def _handle_alarm_fired(self, event: EngineEvent) -> None:
+    async def _handle_alarm_fired(self, event: EngineEvent, *, dedup_id: str | None = None) -> None:
         audit_id = self._audit.make_audit_id()
         payload = event.payload
 
@@ -542,6 +625,14 @@ class AssistantLiveAgent:
             targets=targets,
             allow_dispatch=not result.truncated and bool(result.text.strip()),
         )
+
+        if dedup_id is not None:
+            # OC-028: the ledger suppresses duplicates of what the operator
+            # RECEIVED.  An empty `dispatched` means no target accepted it --
+            # refused transport, blocked audit, truncated or empty generation --
+            # and the next occurrence of this alarm must not be silenced by a
+            # narration nobody saw.
+            self._dedup.note_outcome(dedup_id, delivered=bool(dispatched))
 
         logger.info(
             "AssistantLiveAgent: alarm_fired обработан (audit_id=%s, latency=%.1fs, dispatched=%s)",
