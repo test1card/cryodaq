@@ -35,7 +35,7 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +76,7 @@ def control_mutation(
     old: str,
     new: str,
     occurrences: int = 1,
+    expect_absent: Sequence[str] = (),
     encoding: str = "utf-8",
 ) -> Iterator[AppliedControl]:
     """Replace ``old`` with ``new`` in ``path`` for the body, then restore.
@@ -84,6 +85,14 @@ def control_mutation(
     not appear exactly ``occurrences`` times, or if the replacement leaves the
     file's bytes unchanged.  Raises `ControlNotRestored` if the original bytes
     are not back on disk afterwards.
+
+    ``expect_absent`` addresses a DIFFERENT failure from the anchor count: a
+    control that applies cleanly but reverts only part of the behaviour.
+    Reverting a CSV header while leaving the data rows nine fields wide matched
+    its anchor once, changed bytes, and produced 1 of 7 red instead of 6 of 7 --
+    which reads as a weak guard rather than a partial revert.  Naming the
+    symbols the revert is supposed to remove turns that into a refusal: each
+    string must not appear anywhere in the mutated file.
 
     A restore failure raised from the ``finally`` block will displace an
     exception in flight from the body.  That is the intended precedence: a
@@ -109,12 +118,24 @@ def control_mutation(
     if mutated == original:
         raise ControlNotApplied(f"control replacement left {path} byte-identical")
 
-    path.write_bytes(mutated)
-    on_disk = path.read_bytes()
-    if on_disk == original:
-        raise ControlNotApplied(f"control wrote {path} but the bytes on disk did not change")
-
+    # The restoration scope opens BEFORE the write.  If the write lands and the
+    # verifying read then fails -- a transient filesystem error is enough --
+    # returning here would leave the target mutated and silently contaminate
+    # every later measurement in the session.  Nothing between here and the
+    # `finally` may exit by any other route.
     try:
+        path.write_bytes(mutated)
+        on_disk = path.read_bytes()
+        if on_disk == original:
+            raise ControlNotApplied(f"control wrote {path} but the bytes on disk did not change")
+
+        residue = [needle for needle in expect_absent if needle in on_disk.decode(encoding)]
+        if residue:
+            raise ControlNotApplied(
+                f"control applied to {path} but left {residue} in place; it reverts only part of the "
+                "behaviour, so a small red set means an incomplete control rather than a weak guard"
+            )
+
         yield AppliedControl(path=path, original=original, mutated=on_disk)
     finally:
         path.write_bytes(original)

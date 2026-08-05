@@ -3042,13 +3042,13 @@ records:
     status: open
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: Every red-before control run to establish that a guard covers the production code it names.
+    applies_to: A red-before control that MUTATES NOTHING, or that reverts only part of the behaviour it names, while reporting a result that reads as coverage evidence. It does NOT cover a control that goes red for the wrong reason - see the debt clause in the invariant.
     classification: evidence_misbinding
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A control that changes nothing produces exactly the output of a control that changed everything and found no defect, so the failure is silent by construction and the pass is then recorded as coverage evidence. Three instances on 2026-08-05, each reporting something reassuring - a CSV header reverted while the data rows stayed nine fields wide (1 of 7 red instead of 6 of 7, read as a weak guard rather than a partial revert), a loader's base class reverted producing a fail-closed refusal instead of the silent substitution the test claimed to prove (red for the wrong reason), and a string replacement matching one register row's wording but not the other's, which mutated NOTHING and reported a pass.
-    invariant: 'A control refuses rather than reports: tests/support/control_mutation.py raises before running the body unless the anchor matches exactly the expected number of times and the bytes on disk actually differ, and raises afterwards unless the target was restored byte-identical. It operates on bytes rather than text, because a text-mode round trip rewrites line endings in a file the control is supposed to leave untouched. What this record does NOT yet claim: it cannot force a future control to route through the helper, so adoption is the open half of this prevention and is why status is open rather than closed.'
+    consequence: A control that changes nothing produces exactly the output of a control that changed everything and found no defect, so the failure is silent by construction and the pass is then recorded as coverage evidence. Three instances on 2026-08-05, each reporting something reassuring - (i) a CSV header reverted while the data rows stayed nine fields wide, giving 1 of 7 red instead of 6 of 7, which reads as a weak guard rather than a partial revert; (ii) a loader's base class reverted, producing a fail-closed refusal instead of the silent substitution the test claimed to prove - red for the wrong reason; (iii) a string replacement matching one register row's wording but not the other's, which mutated NOTHING and reported a pass. Two more on 2026-08-06 - an archive fixture written to a filename the reader's glob never matches, returning empty with complete=True and zero issues, and a ledger test whose refire timing routed the dispatch through a different branch than the one under test.
+    invariant: 'A control refuses rather than reports: tests/support/control_mutation.py raises before running the body unless the anchor matches exactly the expected number of times and the bytes on disk actually differ, raises when a caller-declared expect_absent symbol survives the mutation, and raises afterwards unless the target was restored byte-identical - with the restoration scope opened BEFORE the write, so a write that lands and then fails verification cannot leave the tree modified. It operates on bytes rather than text, because a text-mode round trip rewrites line endings in a file the control is supposed to leave untouched. THREE THINGS THIS RECORD DOES NOT CLAIM, each an open debt rather than a covered case. (1) Incident (iii), the no-op, is fully covered. (2) Incident (i), the partial revert, is covered ONLY when the caller declares expect_absent; nothing forces that declaration, so an undeclared partial revert still applies cleanly and still reports a small red set. (3) Incident (ii), red for the wrong reason, is NOT covered at all: the helper does not observe why the suite failed, and a control that produces a refusal where a substitution was claimed passes every check here. Adoption is a fourth debt - the helper cannot force a future control to route through it. Status stays open on all four.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -3066,6 +3066,12 @@ records:
       - node: tests/governance/test_control_mutation_helper.py::test_a_failed_restore_is_raised_and_not_swallowed
         ci_partition: remaining
       - node: tests/governance/test_control_mutation_helper.py::test_crlf_bytes_are_not_rewritten_by_the_round_trip
+        ci_partition: remaining
+      - node: tests/governance/test_control_mutation_helper.py::test_a_write_that_lands_is_restored_even_if_the_verifying_read_fails
+        ci_partition: remaining
+      - node: tests/governance/test_control_mutation_helper.py::test_a_partial_revert_is_refused_when_the_control_names_what_it_removes
+        ci_partition: remaining
+      - node: tests/governance/test_control_mutation_helper.py::test_expect_absent_is_opt_in_and_does_not_change_existing_controls
         ci_partition: remaining
     red_evidence: a_helper_without_the_no_op_refusal_lets_a_body_run_against_untouched_production_and_report_a_pass_reproduced_by_the_first_node_2026_08_06_pending_immutable_capture
     green_evidence: pending

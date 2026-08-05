@@ -125,6 +125,87 @@ def test_a_failed_restore_is_raised_and_not_swallowed(tmp_path: Path) -> None:
     real_write(path, original)
 
 
+def test_a_write_that_lands_is_restored_even_if_the_verifying_read_fails(tmp_path: Path) -> None:
+    """The restoration scope must open BEFORE the write, not after it.
+
+    Codex found this on `b0a29cb1`: the write landed, the verifying `read_bytes`
+    raised, and the function returned without ever entering `try/finally` --
+    leaving the target mutated and silently contaminating every later
+    measurement in the session. A fail-closed restoration contract that can be
+    escaped by a transient read error is not fail-closed.
+    """
+
+    path = tmp_path / "production.py"
+    path.write_bytes(b"value = 1\n")
+    original = path.read_bytes()
+    real_read = Path.read_bytes
+    seen: list[int] = []
+
+    def flaky_read(self: Path) -> bytes:
+        seen.append(1)
+        if len(seen) == 2:  # the read immediately after the mutation write
+            raise OSError("transient filesystem error")
+        return real_read(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "read_bytes", flaky_read)
+        with pytest.raises(OSError, match="transient"):
+            with control_mutation(path, old="value = 1", new="value = 2"):
+                pytest.fail("the body must not run when verification failed")
+
+    assert real_read(path) == original, "the target was left mutated after a failed verification"
+
+
+def test_a_partial_revert_is_refused_when_the_control_names_what_it_removes(tmp_path: Path) -> None:
+    """The second 2026-08-05 failure class, and the one the anchor count misses.
+
+    Reverting a CSV header while leaving the data rows nine fields wide matched
+    its anchor exactly once and changed bytes, so no count check could catch it.
+    It produced 1 of 7 red instead of 6 of 7 -- indistinguishable from a weak
+    guard unless you already suspect the control.
+    """
+
+    path = tmp_path / "writer.py"
+    path.write_bytes(b'HEADER = ["ts", "descriptor_hash"]\nROW = [ts, descriptor_hash]\n')
+    original = path.read_bytes()
+
+    with pytest.raises(ControlNotApplied, match="reverts only part"):
+        with control_mutation(
+            path,
+            old='HEADER = ["ts", "descriptor_hash"]',
+            new='HEADER = ["ts"]',
+            expect_absent=["descriptor_hash"],
+        ):
+            pytest.fail("the body must not run for a partial revert")
+
+    assert path.read_bytes() == original
+
+    # The COMPLETE revert of the same behaviour is accepted.
+    with control_mutation(
+        path,
+        old='HEADER = ["ts", "descriptor_hash"]\nROW = [ts, descriptor_hash]',
+        new='HEADER = ["ts"]\nROW = [ts]',
+        expect_absent=["descriptor_hash"],
+    ):
+        assert b"descriptor_hash" not in path.read_bytes()
+
+    assert path.read_bytes() == original
+
+
+def test_expect_absent_is_opt_in_and_does_not_change_existing_controls(tmp_path: Path) -> None:
+    """Silence must keep meaning what it meant.
+
+    If omitting `expect_absent` started refusing controls, every existing caller
+    would break at once and the pressure would be to stop using the helper --
+    which is worse than the failure it prevents.
+    """
+
+    path = tmp_path / "production.py"
+    path.write_bytes(b"alpha = 1\nalpha_helper = 1\n")
+    with control_mutation(path, old="alpha = 1", new="alpha = 2"):
+        assert b"alpha_helper = 1" in path.read_bytes()
+
+
 def test_crlf_bytes_are_not_rewritten_by_the_round_trip(tmp_path: Path) -> None:
     """Newline translation is how a 'restored' file silently stops matching.
 

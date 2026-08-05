@@ -156,6 +156,17 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
     assert not failures, "\n".join(failures)
 
 
+# A RECORDED measurement, not a re-derivable one: the number of C2 challenges
+# whose fingerprint the registry rejects on the declared minimum interpreter.
+# Measured 2026-08-05 by importing the sweep under Python 3.12 and counting
+# through `_registry_errors` -- an earlier attempt grepped pytest output and
+# reported 55, which was a truncation artifact of the measurement rather than a
+# property of the sweep. This guard runs on ONE interpreter and cannot measure
+# another; pinning the figure here means the row and the constant have to move
+# together, and moving them requires re-running the sweep on that interpreter.
+_RECORDED_MINIMUM_INTERPRETER_ERRORS = 110
+
+
 @cache
 def _declared_minimum_python_version() -> str:
     """Return the floor from `pyproject.toml`'s `requires-python`, e.g. ``3.12``.
@@ -276,8 +287,39 @@ def test_open_cells_oc031_preserves_its_supported_interpreter_caveat() -> None:
         f"OC-031 cites the registry's exactness without naming Python {minimum}, the floor "
         f"`pyproject.toml` declares, on which that exactness does not hold"
     )
-    assert "errors over" in oc_031, (
-        f"OC-031 names Python {minimum} without stating how many challenges it rejects there"
+
+    # `"errors over" in row` was NOT enough, and Codex demonstrated it on
+    # `b0a29cb1`: rewriting 110 to a false 0 kept that substring and the guard
+    # kept passing, so the control for "drop the magnitude" established nothing.
+    # Parse the numbers instead.
+    match = re.search(r"\*\*.*?(\d+) errors over (\d+) challenges\*\*", oc_031)
+    assert match is not None, (
+        f"OC-031 names Python {minimum} without stating how many of how many challenges it rejects "
+        "there, in the form `<n> errors over <m> challenges`"
+    )
+    errors, denominator = int(match.group(1)), int(match.group(2))
+
+    # The DENOMINATOR is re-derivable from the live sweep, so it is checked
+    # against the sweep rather than trusted.
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    try:
+        sweep = importlib.import_module("test_c2_repo_wide_spelling_sweep")
+    finally:
+        sys.path.remove(str(REPO_ROOT / "tests"))
+    sites = sweep._sites(REPO_ROOT)
+    assert denominator == len(sites), (
+        f"OC-031 says the divergence is over {denominator} challenges; the live sweep has {len(sites)}"
+    )
+    # The MAGNITUDE cannot be re-derived here -- this guard runs on one
+    # interpreter and cannot measure another without claiming a number it did
+    # not take, which is the error the whole prevention exists for.  So it is
+    # pinned as a RECORDED measurement, and changing the row requires changing
+    # this constant, which requires re-running the sweep on that interpreter.
+    assert 0 < errors <= denominator, f"OC-031 reports {errors} errors over {denominator} challenges"
+    assert errors == _RECORDED_MINIMUM_INTERPRETER_ERRORS, (
+        f"OC-031 says {errors} errors on Python {minimum}; the recorded measurement is "
+        f"{_RECORDED_MINIMUM_INTERPRETER_ERRORS}. If the sweep changed, RE-MEASURE on Python {minimum} "
+        "and update both this constant and the row -- do not edit one to match the other."
     )
 
     # Re-derive the MECHANISM rather than trusting the sentence that describes
@@ -832,6 +874,18 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         assert f"all {len(governance_modules)} tracked governance-test modules" in oc_012_lower
         assert f"all {len(runner_modules)} tracked workflow-referenced ci/governance runner modules" in oc_012_lower
         assert set(runner_modules) == required_runner_modules
+        # The AGGREGATE, not only its three components.  The row cites an
+        # "exact N-path ... inventory" beside the hash, and until this
+        # assertion existed that N was checked by nothing: adding a governance
+        # module moved all three component counts and the hash, every one of
+        # which the guard demanded be updated, while the total silently went
+        # stale at 34.  Codex found it on `b0a29cb1`.
+        inventory_size = len(workflows) + len(governance_modules) + len(runner_modules)
+        assert f"the exact {inventory_size}-path" in oc_012_lower, (
+            f"OC-012 does not cite the live inventory size of {inventory_size} paths "
+            f"({len(workflows)} workflows + {len(governance_modules)} governance tests "
+            f"+ {len(runner_modules)} runner modules)"
+        )
         assert "registry/config references were swept" not in oc_012_lower
         assert "sha256:" + hashlib.sha256(manifest).hexdigest() in oc_012
         recorded = recorded_oc030_locators(oc_030)
@@ -869,6 +923,7 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
     for old, replacement in (
         ("All 6 tracked workflows", "All 4 tracked workflows"),
         ("all 19 tracked governance-test modules", "all 12 tracked governance-test modules"),
+        ("The exact 35-path", "The exact 34-path"),
         (
             "all 10 tracked workflow-referenced CI/governance runner modules",
             "all 9 tracked workflow-referenced CI/governance runner modules",
