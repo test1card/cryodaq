@@ -375,6 +375,14 @@ class _EventDedup:
         # gap is visible.
         if last_seen is not None and last_seen < now - max(self._window_s, self._escalate_after_s):
             self._retire(event_id)
+            # CLEAR THE LOCAL FIRST-SIGHTING STATE TOO.  `_retire` drops the
+            # stored state, but this local still held the old timestamp -- so
+            # the backpressure check below saw a refire and refused the FIRST
+            # event of the new occurrence.  Production sources publish only on
+            # transition, so nothing later repairs that: the narration is lost,
+            # not delayed.  After retirement this event IS a first sighting and
+            # must be treated as one everywhere.
+            last_seen = None
             last_allowed = None
 
         self._seen[event_id] = now

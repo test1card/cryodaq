@@ -896,6 +896,41 @@ def test_a_first_sighting_is_never_refused_by_backpressure(clock) -> None:
         assert ledger.should_dispatch("alarm:saturating-0") is False
 
 
+def test_a_retired_occurrence_returning_under_backpressure_is_a_first_sighting(clock) -> None:
+    """The saturated stale-same-id boundary, and it loses an alarm if wrong.
+
+    `_retire` drops the stored state, but the LOCAL `last_seen` still held the
+    old timestamp -- so with the queue full the backpressure check saw a refire
+    and refused the first event of the NEW occurrence. Production sources
+    publish only on transition, so nothing later repairs that: the narration is
+    lost rather than delayed.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+
+    # Saturate the queue with alarms that never complete.
+    for step in range(_MAX_OUTSTANDING_ATTEMPTS):
+        clock.return_value = start + step
+        assert ledger.should_dispatch(f"alarm:holding-{step}") is True
+
+    # The target alarm is seen once, alongside them.
+    seen_at = start + _MAX_OUTSTANDING_ATTEMPTS
+    clock.return_value = seen_at
+    assert ledger.should_dispatch("alarm:returning") is True
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS + 1, "premise: the queue must be saturated"
+
+    # NOTHING ELSE FIRES in the gap. That matters: `_prune` runs on every
+    # dispatch, so another alarm firing here would prune the target's state and
+    # the return would be an ordinary first sighting -- never reaching
+    # `_retire` at all. An earlier version of this node did exactly that and
+    # passed with the defect present.
+    clock.return_value = seen_at + ESCALATE + WINDOW + 60.0
+    assert ledger.should_dispatch("alarm:returning") is True, (
+        "a retired occurrence's first event was refused as a refire; that narration is lost, not delayed"
+    )
+
+
 @pytest.mark.asyncio
 async def test_an_unscoped_outcome_still_settles_its_attempt() -> None:
     """A leak here silences the rig, which is worse than a double report.
