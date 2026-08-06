@@ -1131,6 +1131,16 @@ async def test_the_handler_records_a_partial_delivery_as_seen() -> None:
         attempt=attempt,
     )
 
+    # `_allow` already clears `_undelivered`, so asserting only that is true the
+    # instant the gate admits -- the node would pass with every outcome-reporting
+    # call deleted.  Assert the handler actually SETTLED the attempt and stamped
+    # the delivery clock.
+    assert attempt not in agent._dedup._pending, (
+        "the handler never reported an outcome, so the attempt is still in flight"
+    )
+    assert "alarm:partial" in agent._dedup._last_told, (
+        "a partial delivery was not recorded as the operator having been told"
+    )
     assert "alarm:partial" not in agent._dedup._undelivered, (
         "a narration one recipient read was recorded as reaching nobody, so it will be resent to them"
     )
@@ -1205,10 +1215,127 @@ def test_a_retired_return_is_refused_while_its_own_attempt_is_queued(clock) -> N
         if ledger.should_dispatch("alarm:cycling"):
             admitted += 1
 
-    assert admitted == 0, f"{admitted} retired returns were exempted while this alarm's own attempt was queued"
+    # EVERY new occurrence is narrated. Production publishes only the new
+    # TRIGGERED transition, and the queued attempt belongs to the RETIRED
+    # occurrence -- `note_outcome`'s generation check refuses its eventual
+    # success as stale -- so it cannot substitute. Refusing here would lose each
+    # occurrence outright.
+    assert admitted == 6, f"only {admitted} of 6 retired returns were narrated; the rest are lost, not delayed"
+
+    # AND the queue does not grow, because retirement RELEASES the slot the
+    # retired attempt held. That is what makes the two compatible: the bound is
+    # kept by freeing dead work rather than by refusing live alarms.
     assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS, (
         f"the pending set grew to {len(ledger._pending)} through repeated retirement"
     )
+    assert len(ledger._pending_alarm) == len(ledger._pending)
+
+
+@pytest.mark.asyncio
+async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None:
+    """Drive the retirement cycle through the REAL loop, because the recorded
+    consequence is TASK CREATION.
+
+    `-336` records pending ids AND queued handler tasks growing without bound
+    through the retirement path.  The ledger-level node above sees only
+    `_pending`: it never instantiates `AssistantLiveAgent`, occupies its
+    semaphore or inspects `_handler_tasks`, so a regression that moved or
+    omitted the gate in `_event_loop` would leave it green while handlers grew
+    exactly as `-320` records.  Both directions are visible here:
+
+    * a REFIRE must cost nothing once the queue is saturated -- that is the
+      term that ran away, and it reaches the admitting escalation branch at all
+      only because the clock is driven past `escalate_after_s` while the alarm
+      keeps firing;
+    * a genuinely NEW occurrence, after retirement, must still cost exactly one
+      -- refusing it loses the narration outright, because production sources
+      publish on the `TRIGGERED` transition only.
+
+    So the asserted growth is one handler per OCCURRENCE and none per refire,
+    with the pending set flat across every cycle.
+    """
+
+    import asyncio
+    from collections import deque
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._config = MagicMock(slice_a_notification=True, alarm_fired_enabled=True, max_calls_per_hour=10_000)
+    agent._call_timestamps = deque()
+    agent._semaphore = asyncio.Semaphore(1)
+    agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+    agent._handler_tasks = set()
+    agent._queue = asyncio.Queue()
+    agent._handle_alarm_fired = AsyncMock(side_effect=lambda *a, **k: asyncio.Event().wait())
+
+    await agent._semaphore.acquire()  # the inference slot never frees: dispatch is stuck
+
+    async def fire(alarm_id: str) -> None:
+        await agent._queue.put(MagicMock(event_type="alarm_fired", payload={"alarm_id": alarm_id, "level": "CRITICAL"}))
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+    cycles = 4
+    loop_task = asyncio.create_task(agent._event_loop())
+    try:
+        with patch("cryodaq.agents.assistant.live.agent.time.monotonic") as mono:
+            now = 1000.0
+            mono.return_value = now
+
+            # Saturate with alarms that never complete, the target among them.
+            for index in range(_MAX_OUTSTANDING_ATTEMPTS - 1):
+                now += 1.0
+                mono.return_value = now
+                await fire(f"sat-{index}")
+            now += 1.0
+            mono.return_value = now
+            await fire("cycling")
+
+            saturated = len(agent._handler_tasks)
+            assert saturated == _MAX_OUTSTANDING_ATTEMPTS, (
+                f"premise: the queue must be saturated; {saturated} handlers exist"
+            )
+
+            for cycle in range(cycles):
+                # The alarm stays active and keeps firing well past the
+                # escalation interval.  Each refire keeps `_seen` fresh, so the
+                # escalation branch IS reached -- the cap is the only thing
+                # refusing, and nothing else in this node would notice if it
+                # stopped.
+                for _ in range(80):
+                    now += 5.0
+                    mono.return_value = now
+                    await fire("cycling")
+                assert len(agent._handler_tasks) == saturated + cycle, (
+                    f"cycle {cycle}: handlers grew to {len(agent._handler_tasks)} on refires alone, "
+                    f"expected {saturated + cycle}, with the dispatch path stuck"
+                )
+
+                # It then clears, stays quiet past the prune horizon, and the
+                # condition returns.  Nothing else fires in the gap, so this
+                # reaches `_retire` rather than an ordinary prune.
+                now += ESCALATE + WINDOW + 60.0
+                mono.return_value = now
+                await fire("cycling")
+                assert len(agent._handler_tasks) == saturated + cycle + 1, (
+                    f"cycle {cycle}: the new occurrence created no handler -- production publishes only on the "
+                    "TRIGGERED transition, so that narration is lost, not delayed"
+                )
+
+            assert len(agent._handler_tasks) == saturated + cycles
+            # And the bound the cap exists for is untouched: retirement frees
+            # the slot its own dead attempt held, so admitting every occurrence
+            # costs the pending set nothing.
+            assert len(agent._dedup._pending) == _MAX_OUTSTANDING_ATTEMPTS, (
+                f"the pending set grew to {len(agent._dedup._pending)} across {cycles} retirement cycles"
+            )
+    finally:
+        loop_task.cancel()
+        for task in [loop_task, *agent._handler_tasks]:
+            task.cancel()
+        await asyncio.gather(loop_task, *agent._handler_tasks, return_exceptions=True)
 
 
 def test_settled_state_costs_nothing_per_admission(clock) -> None:
@@ -1246,9 +1373,17 @@ def test_settled_state_costs_nothing_per_admission(clock) -> None:
         if name not in {"_pending"} and isinstance(value, (set, dict, list)) and "settl" in name
     }
     assert not settled_state, f"settlement bookkeeping other than the pending set exists again: {sorted(settled_state)}"
+    # `_pending_alarm` is per-ATTEMPT bookkeeping whose name does not contain
+    # "settl", so the filter above cannot see it -- and removing its cleanup
+    # would retain all 500 churn ids while that check stayed green.  Assert it
+    # explicitly: every structure whose size can grow with LIFETIME ADMISSIONS
+    # has to be covered, not just the ones that happen to be named for settling.
+    assert set(ledger._pending_alarm) == {stalled}, (
+        f"_pending_alarm retained {len(ledger._pending_alarm)} ids after 500 settled admissions"
+    )
     # Per-ALARM state for alarms seen recently is legitimate and is pruned on the
-    # escalation horizon; what must not exist is per-SETTLED-ATTEMPT state, which
-    # the check above asserts by absence.
+    # escalation horizon; what must not exist is per-ATTEMPT state that outlives
+    # settlement.
     # The stalled attempt is still recognised, however long it takes to report.
     assert ledger._has_settled(stalled) is False
     ledger.note_outcome("alarm:forever-pending", delivered=True, attempt=stalled)

@@ -332,7 +332,17 @@ class _EventDedup:
         self._last_allowed.pop(event_id, None)
         self._admitted_at.pop(event_id, None)
         self._last_told.pop(event_id, None)
-        self._attempt.pop(event_id, None)
+        outstanding = self._attempt.pop(event_id, None)
+        if outstanding is not None:
+            # RETIREMENT FREES THE QUEUE SLOT.  The retired attempt can no
+            # longer narrate this alarm -- the generation check in
+            # `note_outcome` treats its eventual success as belonging to the
+            # previous occurrence and refuses it -- so holding a backpressure
+            # slot for it is doubly wrong: the slot never releases, and it would
+            # refuse the new occurrence's only event on the strength of work
+            # that cannot speak for it.
+            self._pending.discard(outstanding)
+            self._pending_alarm.pop(outstanding, None)
         self._generation.pop(event_id, None)
         self._undelivered.discard(event_id)
 
