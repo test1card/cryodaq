@@ -2535,12 +2535,30 @@ class ExperimentManager:
                 issues.append(f"issue_overflow:{result.issue_overflow}")
             for row in reversed(result.rows):
                 channel_count = per_channel.get(row.channel, 0)
+                identity = row.descriptor
+                if identity is not None and identity.legacy:
+                    identity = None
                 encoded_size = (
                     96
                     + len(row.instrument_id.encode("utf-8"))
                     + len(row.channel.encode("utf-8"))
                     + len(row.unit.encode("utf-8"))
                     + len(row.status.encode("utf-8"))
+                    # The three identity columns are RETAINED, so they have to be
+                    # BUDGETED.  A maximum-length channel_id plus the hash and
+                    # revision is roughly 200 bytes a row; counting only the
+                    # original projection lets a long finalisation hold and write
+                    # substantially more than the 32 MiB cap allows, which is the
+                    # bound that keeps a big experiment from exhausting memory.
+                    + (
+                        0
+                        if identity is None
+                        else (
+                            len(identity.channel_id.encode("utf-8"))
+                            + len(identity.descriptor_hash.encode("utf-8"))
+                            + len(str(identity.descriptor_revision).encode("utf-8"))
+                        )
+                    )
                 )
                 if (
                     len(rows_newest_first) >= max_total_points
@@ -2569,9 +2587,7 @@ class ExperimentManager:
                 # (`reporting/sections.py::_reading_series_key` and
                 # `_visible_quantity` both refuse it), so treat it as absent here
                 # too and leave the cells empty.
-                descriptor = row.descriptor
-                if descriptor is not None and descriptor.legacy:
-                    descriptor = None
+                descriptor = identity  # already legacy-filtered for the budget above
                 rows_newest_first.append(
                     {
                         "timestamp": datetime.fromtimestamp(row.timestamp, tz=UTC),

@@ -3025,6 +3025,35 @@ false_green_pairs:
     green_evidence: pending
 
 records:
+  - id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
+    status: open
+    scope: product_contract
+    authority_source: docs/OPEN_CELLS.md#oc-024
+    applies_to: Every row the experiment finalisation writer persists to measured_values.csv from the bounded archive readers.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: An archived record cannot later be attributed to a declared measurement identity, so downstream grouping falls back to the channel SPELLING - the inference the descriptor spine exists to remove. The identity was already resolved and then discarded one statement before it would have been persisted - ArchiveReader.query_reading_rows_bounded returns BoundedReadingRow.descriptor and ExperimentManager._load_experiment_readings built its row dict without it. A second, sharper failure rides on top - absence is NOT reported as None, because the bounded readers call resolve_legacy_descriptor whenever the stored hash is NULL, so a pre-catalog row arrives as a synthetic legacy=True descriptor whose channel_id is legacy plus a digest OF THE CHANNEL SPELLING. A loader testing only for None persists that and makes unattributable history look descriptor-backed.
+    invariant: 'measured_values.csv carries channel_id, descriptor_hash and descriptor_revision APPENDED after the six legacy columns, so a positional reader of the old table is unaffected; a row whose descriptor is absent OR legacy writes empty cells rather than an inferred identity; and the three retained identity values are counted in the retained-byte budget that bounds finalisation memory. WHAT THIS DOES NOT CLAIM - it delivers ATTRIBUTABILITY, not descriptor-derived grouping - reporting/data.py builds HistoricalReading from this table with no descriptor at all, so the report path still groups by spelling - and the four sibling exporters reachable from the same operator-facing archive panel were NOT measured, which is why OC-024 stays BLOCKS-DEPLOYMENT.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_experiment_archive_descriptors.py::test_the_finalisation_table_carries_declared_identity
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_descriptors.py::test_a_row_without_a_descriptor_stays_empty_and_is_not_inferred
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_descriptors.py::test_the_six_legacy_columns_keep_their_positions
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_a_declared_identity_survives_the_archive_round_trip
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_a_pre_catalog_row_arrives_with_no_identity_rather_than_a_synthetic_one
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_reader_really_does_synthesize_a_legacy_descriptor_here
+        ci_partition: core
+    red_evidence: reverting_the_csv_header_and_the_loader_together_turns_6_of_the_7_writer_nodes_red_and_reverting_the_entire_loader_carry_turns_4_of_the_6_loader_nodes_red_while_all_7_writer_nodes_stay_GREEN_which_is_the_finding_that_the_writer_suite_cannot_observe_a_loader_regression_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
     status: open
     scope: repository

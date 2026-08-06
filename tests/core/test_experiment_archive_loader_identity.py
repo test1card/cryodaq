@@ -217,7 +217,7 @@ def test_every_identity_column_is_populated_from_the_archive(tmp_path: Path, fie
 
     A file-wide assertion that "identity is carried" can stay satisfied by one
     populated column while another silently reverts -- the one-row-away hole
-    that `REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301` records.
+    that `ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318` records.
     """
 
     _archive(tmp_path, descriptor=_descriptor())
