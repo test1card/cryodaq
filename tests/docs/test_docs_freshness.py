@@ -965,8 +965,8 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
     assert_current(text, tracked, contents)
     for old, replacement in (
         ("All 6 tracked workflows", "All 4 tracked workflows"),
-        ("all 19 tracked governance-test modules", "all 12 tracked governance-test modules"),
-        ("The exact 35-path", "The exact 34-path"),
+        ("all 18 tracked governance-test modules", "all 12 tracked governance-test modules"),
+        ("The exact 34-path", "The exact 33-path"),
         (
             "all 10 tracked workflow-referenced CI/governance runner modules",
             "all 9 tracked workflow-referenced CI/governance runner modules",

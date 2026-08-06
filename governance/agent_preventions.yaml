@@ -56,38 +56,6 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
-  - id: CONTROL-HELPER-BYTECODE-SHADOW-FALSE-GREEN-307
-    status: open
-    scope: repository
-    runtime_prevention_id: CONTROL-WITHOUT-VERIFIED-MUTATION-302
-    guard: tests/governance/test_control_mutation_helper.py::test_a_restored_file_is_not_shadowed_by_the_mutant_bytecode
-    ci_partition: remaining
-    red_evidence: an_equal_length_replacement_restored_inside_the_same_timestamp_second_left_the_mutants_pyc_valid_so_the_next_interpreter_loaded_the_mutant_while_the_source_read_correct_reproduced_body_prints_2_disk_restored_to_1_next_process_still_prints_2_and_again_across_interpreters_when_only_the_running_cache_tag_was_dropped_2026_08_06_pending_immutable_capture
-    green_evidence: pending
-  - id: CONTROL-HELPER-CONCURRENT-CLOBBER-FALSE-GREEN-308
-    status: open
-    scope: repository
-    runtime_prevention_id: CONTROL-WITHOUT-VERIFIED-MUTATION-302
-    guard: tests/governance/test_control_mutation_helper.py::test_a_concurrent_edit_is_preserved_rather_than_overwritten
-    ci_partition: remaining
-    red_evidence: the_restore_was_unconditional_so_a_second_authors_bytes_were_replaced_by_the_helpers_stale_snapshot_and_the_overwrite_was_then_validated_as_a_successful_restore_2026_08_06_pending_immutable_capture
-    green_evidence: pending
-  - id: CONTROL-HELPER-PREWRITE-CLOBBER-FALSE-GREEN-309
-    status: open
-    scope: repository
-    runtime_prevention_id: CONTROL-WITHOUT-VERIFIED-MUTATION-302
-    guard: tests/governance/test_control_mutation_helper.py::test_an_edit_landing_before_the_mutation_write_is_preserved
-    ci_partition: remaining
-    red_evidence: guarding_only_the_restore_left_the_other_end_open_an_edit_landing_between_the_helpers_read_and_its_write_was_erased_by_the_mutation_itself_and_the_control_then_measured_and_restored_a_file_whose_real_content_it_had_destroyed_2026_08_06_pending_immutable_capture
-    green_evidence: pending
-  - id: CONTROL-HELPER-CWD-FOLLOW-FALSE-GREEN-310
-    status: open
-    scope: repository
-    runtime_prevention_id: CONTROL-WITHOUT-VERIFIED-MUTATION-302
-    guard: tests/governance/test_control_mutation_helper.py::test_a_relative_target_survives_the_body_changing_directory
-    ci_partition: remaining
-    red_evidence: a_relative_target_was_re_resolved_against_the_process_working_directory_at_every_use_so_a_body_that_chdirs_left_the_original_mutated_and_wrote_the_restore_into_a_same_named_file_in_the_new_directory_while_reporting_success_2026_08_06_pending_immutable_capture
-    green_evidence: pending
   - id: SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311
     status: open
     scope: repository
@@ -3079,51 +3047,6 @@ records:
       - node: tests/docs/test_docs_freshness.py::test_open_cells_oc031_binds_the_error_count_to_the_declared_floor
         ci_partition: remaining
     red_evidence: reintroducing_the_reason_label_subset_as_the_gui_surface_turns_the_guard_red_and_the_register_was_restored_byte_identical_2026_08_05_pending_immutable_capture
-    green_evidence: pending
-  - id: CONTROL-WITHOUT-VERIFIED-MUTATION-302
-    status: open
-    scope: repository
-    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: A red-before control that MUTATES NOTHING, or that reverts only part of the behaviour it names, while reporting a result that reads as coverage evidence. It does NOT cover a control that goes red for the wrong reason - see the debt clause in the invariant.
-    classification: evidence_misbinding
-    correction_owner: primary
-    guard_owner: primary
-    disposition_owner: reviewer
-    consequence: A control that changes nothing produces exactly the output of a control that changed everything and found no defect, so the failure is silent by construction and the pass is then recorded as coverage evidence. Three instances on 2026-08-05, each reporting something reassuring - (i) a CSV header reverted while the data rows stayed nine fields wide, giving 1 of 7 red instead of 6 of 7, which reads as a weak guard rather than a partial revert; (ii) a loader's base class reverted, producing a fail-closed refusal instead of the silent substitution the test claimed to prove - red for the wrong reason; (iii) a string replacement matching one register row's wording but not the other's, which mutated NOTHING and reported a pass. Two more on 2026-08-06 - an archive fixture written to a filename the reader's glob never matches, returning empty with complete=True and zero issues, and a ledger test whose refire timing routed the dispatch through a different branch than the one under test.
-    invariant: 'A control refuses rather than reports: tests/support/control_mutation.py raises before running the body unless the anchor matches exactly the expected number of times and the bytes on disk actually differ, raises when a caller-declared expect_absent symbol survives the mutation, and raises afterwards unless the target was restored byte-identical - with the restoration scope opened BEFORE the write, so a write that lands and then fails verification cannot leave the tree modified. It operates on bytes rather than text, because a text-mode round trip rewrites line endings in a file the control is supposed to leave untouched. THREE THINGS THIS RECORD DOES NOT CLAIM, each an open debt rather than a covered case. (1) Incident (iii), the no-op, is fully covered. (2) Incident (i), the partial revert, is covered ONLY when the caller declares expect_absent; nothing forces that declaration, so an undeclared partial revert still applies cleanly and still reports a small red set. (3) Incident (ii), red for the wrong reason, is NOT covered at all: the helper does not observe why the suite failed, and a control that produces a refusal where a substitution was claimed passes every check here. Adoption is a fourth debt - the helper cannot force a future control to route through it. Status stays open on all four.'
-    rule_refs:
-      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    guards:
-      - node: tests/governance/test_control_mutation_helper.py::test_a_control_that_matches_nothing_refuses_instead_of_reporting_a_pass
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_replacement_identical_to_its_anchor_refuses
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_an_ambiguous_anchor_refuses_rather_than_reverting_an_arbitrary_one
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_control_that_applies_yields_and_the_target_really_changed
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_restoration_survives_a_failing_body
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_failed_restore_is_raised_and_not_swallowed
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_crlf_bytes_are_not_rewritten_by_the_round_trip
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_write_that_lands_is_restored_even_if_the_verifying_read_fails
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_partial_revert_is_refused_when_the_control_names_what_it_removes
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_expect_absent_is_opt_in_and_does_not_change_existing_controls
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_restored_file_is_not_shadowed_by_the_mutant_bytecode
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_concurrent_edit_is_preserved_rather_than_overwritten
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_an_edit_landing_before_the_mutation_write_is_preserved
-        ci_partition: remaining
-      - node: tests/governance/test_control_mutation_helper.py::test_a_relative_target_survives_the_body_changing_directory
-        ci_partition: remaining
-    red_evidence: a_helper_without_the_no_op_refusal_lets_a_body_run_against_untouched_production_and_report_a_pass_reproduced_by_the_first_node_2026_08_06_pending_immutable_capture
     green_evidence: pending
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
     status: open
