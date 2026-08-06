@@ -120,6 +120,30 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: three_separate_nodes_stepped_the_clock_forward_without_refiring_the_alarm_so_seen_went_stale_and_the_ordinary_quiet_for_a_full_window_branch_admitted_the_dispatch_while_the_escalation_and_retry_branches_under_test_were_never_reached_the_helper_flap_quietly_now_carries_the_refires_so_they_cannot_be_omitted_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311
+    status: open
+    scope: repository
+    runtime_prevention_id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    guard: tests/docs/test_docs_freshness.py::test_open_cells_oc031_binds_the_error_count_to_the_declared_floor
+    ci_partition: remaining
+    red_evidence: the_caveat_guard_asserted_the_substring_errors_over_so_rewriting_110_to_a_false_0_kept_passing_and_after_that_was_parsed_it_still_matched_the_version_label_and_the_magnitude_in_separate_clauses_so_the_row_could_attribute_the_failure_to_python_3_13_which_the_row_itself_says_agrees_with_ci_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: SWEEP-COUNT-GUARD-ROW-SKIP-FALSE-GREEN-302
+    status: open
+    scope: repository
+    runtime_prevention_id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    guard: tests/docs/test_docs_freshness.py::test_open_cells_sweep_counts_are_rederived_from_the_live_sweep
+    ci_partition: remaining
+    red_evidence: the_guard_iterated_both_affected_rows_but_continued_past_any_row_not_already_carrying_the_correct_figure_so_a_row_reverting_to_the_reason_label_subset_was_never_examined_while_the_file_wide_assertion_stayed_satisfied_by_whichever_row_was_still_right_2026_08_05_pending_immutable_capture
+    green_evidence: pending
+  - id: SWEEP-COUNT-GUARD-INTERPRETER-CAVEAT-FALSE-GREEN-303
+    status: open
+    scope: repository
+    runtime_prevention_id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    guard: tests/docs/test_docs_freshness.py::test_open_cells_oc031_preserves_its_supported_interpreter_caveat
+    ci_partition: remaining
+    red_evidence: the_guard_asserted_only_the_gui_by_path_wording_so_oc_031_could_be_edited_back_to_an_unqualified_detected_equals_registered_closure_with_the_declared_floor_interpreter_divergence_dropped_and_the_guard_still_passed_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: SQLITE-LIVE-BATCH-PRODUCTION-PATH-FALSE-GREEN-208
     status: open
     scope: product_contract
@@ -3121,6 +3145,29 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it
         ci_partition: agents
     red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every count or closure claim written into docs/OPEN_CELLS.md about the C2 spelling sweep.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A number measured in a narrow scope and then asserted in a broad one can narrow or close a register row while the underlying work is open. Two instances on 2026-08-05 - a GUI surface reported as 21 reason-labelled entries when the row's gate is about 89 sites by path, and an OC-031 closure claimed from a registry that is exact on the CI interpreter and rejects 110 of 135 challenges on the minimum the project declares supported. Prose review did not catch either, and both survived into a pushed commit.
+    invariant: 'Counts the register cites about the C2 sweep are re-derived from the sweep itself rather than trusted as prose: the detected-site total and the GUI-by-path count are computed from tests/test_c2_repo_wide_spelling_sweep.py at test time, and a row citing a GUI count must name the basis it was counted over. The guard asserts the running interpreter only, because it cannot re-derive a number for a runtime it is not executing on and claiming otherwise would repeat the error one level up; the cross-version divergence is tracked in OC-031 itself.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_open_cells_sweep_counts_are_rederived_from_the_live_sweep
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_open_cells_oc031_preserves_its_supported_interpreter_caveat
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_open_cells_oc031_binds_the_error_count_to_the_declared_floor
+        ci_partition: remaining
+    red_evidence: reintroducing_the_reason_label_subset_as_the_gui_surface_turns_the_guard_red_and_the_register_was_restored_byte_identical_2026_08_05_pending_immutable_capture
     green_evidence: pending
   - id: G4-SOURCE-CONTROL-AUTHORITY-038
     status: open
