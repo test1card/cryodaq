@@ -16,6 +16,9 @@ rather than a warning: the caller cannot tell the two apart afterwards.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,6 +26,7 @@ import pytest
 from tests.support.control_mutation import (
     ControlNotApplied,
     ControlNotRestored,
+    ControlTargetChanged,
     control_mutation,
 )
 
@@ -204,6 +208,87 @@ def test_expect_absent_is_opt_in_and_does_not_change_existing_controls(tmp_path:
     path.write_bytes(b"alpha = 1\nalpha_helper = 1\n")
     with control_mutation(path, old="alpha = 1", new="alpha = 2"):
         assert b"alpha_helper = 1" in path.read_bytes()
+
+
+def test_a_restored_file_is_not_shadowed_by_the_mutant_bytecode(tmp_path: Path) -> None:
+    """The sharpest escape found so far, and it needs a real interpreter to see.
+
+    Source-timestamp `.pyc` invalidation compares mtime AND SIZE. A control
+    whose replacement is the same length as its anchor, restored inside the same
+    timestamp second, leaves both unchanged -- so a `.pyc` written from the
+    MUTANT during the control body stays valid, and the next process loads the
+    mutant while `read_bytes()` on the source reads correct. Every later
+    measurement in the session is then made against code nobody can see on disk.
+
+    Codex reproduced this on `6c27f0ee`. This node reproduces it through actual
+    child interpreters rather than reasoning about the loader.
+    """
+
+    module = tmp_path / "victim.py"
+    module.write_bytes(b"VALUE = 1\n")
+    program = f"import sys; sys.path.insert(0, {str(tmp_path)!r}); import victim; print(victim.VALUE)"
+
+    def child() -> str:
+        done = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, check=True)
+        return done.stdout.strip()
+
+    assert child() == "1", "premise: the child must see the original value"
+
+    with control_mutation(module, old="VALUE = 1", new="VALUE = 2") as applied:
+        assert len(applied.mutated) == len(applied.original), (
+            "premise: the replacement must be the same length, or the size check would catch it"
+        )
+        assert child() == "2", "premise: the child must see the mutant and cache bytecode for it"
+
+    assert module.read_bytes() == b"VALUE = 1\n"
+    assert child() == "1", "a child interpreter still loaded the mutant from cached bytecode after restore"
+
+
+def test_a_concurrent_edit_is_preserved_rather_than_overwritten(tmp_path: Path) -> None:
+    """Restoring over someone else's work and calling it success is worse than failing.
+
+    The helper restores only what it put there. Anything else on disk means a
+    second author, and their bytes are left for adjudication.
+    """
+
+    path = tmp_path / "shared.py"
+    path.write_bytes(b"value = 1\n")
+
+    with pytest.raises(ControlTargetChanged):
+        with control_mutation(path, old="value = 1", new="value = 2"):
+            path.write_bytes(b"value = 3  # concurrent author\n")
+
+    assert path.read_bytes() == b"value = 3  # concurrent author\n", (
+        "the helper overwrote a concurrent edit with its own stale snapshot"
+    )
+
+
+def test_a_relative_target_survives_the_body_changing_directory(tmp_path: Path) -> None:
+    """A relative path is re-resolved at every use, and cwd is process-global.
+
+    Reproduced by Codex: a control on `a/x.py` whose body chdirs into `b` exits
+    reporting success, with `a/x.py` still mutated and a helpfully created
+    `b/x.py` holding the original bytes.
+    """
+
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    target = first / "x.py"
+    target.write_bytes(b"value = 1\n")
+
+    origin = Path.cwd()
+    os.chdir(tmp_path)
+    try:
+        with control_mutation(Path("a/x.py"), old="value = 1", new="value = 2"):
+            os.chdir(second)
+            assert (first / "x.py").read_bytes() == b"value = 2\n"
+    finally:
+        os.chdir(origin)
+
+    assert target.read_bytes() == b"value = 1\n", "the original target was left mutated"
+    assert not (second / "x.py").exists(), "the helper wrote the restore into the wrong directory"
 
 
 def test_crlf_bytes_are_not_rewritten_by_the_round_trip(tmp_path: Path) -> None:

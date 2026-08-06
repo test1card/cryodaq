@@ -35,12 +35,21 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["AppliedControl", "ControlNotApplied", "ControlNotRestored", "control_mutation"]
+__all__ = [
+    "AppliedControl",
+    "ControlNotApplied",
+    "ControlNotRestored",
+    "ControlTargetChanged",
+    "control_mutation",
+]
 
 
 class ControlNotApplied(AssertionError):
@@ -54,6 +63,35 @@ class ControlNotApplied(AssertionError):
 
 class ControlNotRestored(AssertionError):
     """The target was left modified. The working tree is now untrustworthy."""
+
+
+class ControlTargetChanged(AssertionError):
+    """Someone else edited the target while the control held it.
+
+    Restoring would destroy their work and then report success, so the helper
+    refuses and leaves the file exactly as found for adjudication.  A control
+    that quietly overwrote a concurrent author would be a worse outcome than
+    the measurement it was protecting.
+    """
+
+
+def _invalidate_bytecode(path: Path) -> None:
+    """Drop any cached ``.pyc`` for ``path``.
+
+    Source-timestamp invalidation compares mtime AND SIZE.  A control whose
+    replacement is the same length as its anchor -- ``VALUE = 1`` to
+    ``VALUE = 2`` -- restored inside the same timestamp second leaves both
+    unchanged, so a ``.pyc`` written from the MUTANT during the control body is
+    still considered valid afterwards and the next interpreter loads the mutant
+    while the source on disk reads correct.  Codex reproduced exactly that.
+    """
+
+    try:
+        cached = importlib.util.cache_from_source(str(path))
+    except (NotImplementedError, ValueError):  # pragma: no cover - not a source path
+        return
+    with contextlib.suppress(OSError):
+        os.remove(cached)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +141,13 @@ def control_mutation(
     if occurrences < 1:
         raise ValueError("a control must replace at least one occurrence")
 
+    # Resolve ONCE, before anything else.  A relative path is re-resolved
+    # against the process working directory at every use, so a control body
+    # that chdirs -- or any code it calls that does -- would leave the mutant in
+    # place and helpfully write the "restored" original into a file of the same
+    # name in the new directory. Codex reproduced that too.
+    path = Path(path).resolve()
+
     original = path.read_bytes()
     text = original.decode(encoding)
     found = text.count(old)
@@ -123,8 +168,12 @@ def control_mutation(
     # returning here would leave the target mutated and silently contaminate
     # every later measurement in the session.  Nothing between here and the
     # `finally` may exit by any other route.
+    # Bound before the try so the restore can still recognise its own write if
+    # the verifying read below raises.
+    on_disk = mutated
     try:
         path.write_bytes(mutated)
+        _invalidate_bytecode(path)
         on_disk = path.read_bytes()
         if on_disk == original:
             raise ControlNotApplied(f"control wrote {path} but the bytes on disk did not change")
@@ -138,6 +187,18 @@ def control_mutation(
 
         yield AppliedControl(path=path, original=original, mutated=on_disk)
     finally:
+        # Restore only what THIS control put there.  If the bytes on disk are
+        # neither the mutant nor already the original, someone else edited the
+        # file while the control held it -- restoring would destroy their work
+        # and then report success.  Refuse, and leave the path exactly as found
+        # so it can be adjudicated.
+        current = path.read_bytes()
+        if current not in (on_disk, original):
+            raise ControlTargetChanged(
+                f"{path} was edited by something else while the control held it; refusing to overwrite. "
+                "The file is left as found -- reconcile it before trusting any measurement from this session."
+            )
         path.write_bytes(original)
+        _invalidate_bytecode(path)
         if path.read_bytes() != original:
             raise ControlNotRestored(f"{path} was not restored byte-identical; the working tree is modified")

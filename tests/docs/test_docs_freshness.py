@@ -292,10 +292,20 @@ def test_open_cells_oc031_preserves_its_supported_interpreter_caveat() -> None:
     # `b0a29cb1`: rewriting 110 to a false 0 kept that substring and the guard
     # kept passing, so the control for "drop the magnitude" established nothing.
     # Parse the numbers instead.
-    match = re.search(r"\*\*.*?(\d+) errors over (\d+) challenges\*\*", oc_031)
+    #
+    # And parse them from the SAME CLAUSE as the version label.  Asserting
+    # `f"Python {minimum}" in row` anywhere, then matching a magnitude anywhere
+    # else, lets the row read "Python 3.12 remains the supported floor, but
+    # **Python 3.13 gives 110 errors over 135 challenges**" -- attributing the
+    # failure to the interpreter the row itself says AGREES with CI, while both
+    # assertions pass. Codex demonstrated that one too, on `6c27f0ee`.
+    match = re.search(
+        rf"\*\*Python {re.escape(minimum)}\b[^*]*?(\d+) errors over (\d+) challenges\*\*",
+        oc_031,
+    )
     assert match is not None, (
-        f"OC-031 names Python {minimum} without stating how many of how many challenges it rejects "
-        "there, in the form `<n> errors over <m> challenges`"
+        f"OC-031 does not attribute an error count to Python {minimum} in one clause, in the form "
+        f"`**Python {minimum} ... <n> errors over <m> challenges**`"
     )
     errors, denominator = int(match.group(1)), int(match.group(2))
 
