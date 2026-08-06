@@ -836,6 +836,42 @@ async def test_an_unscoped_outcome_still_settles_its_attempt() -> None:
     assert ledger._pending == set(), "the compatibility alias left a phantom pending attempt"
 
 
+def test_a_duplicate_compatibility_delivery_does_not_move_the_clock(clock) -> None:
+    """Settlement decides whether the clocks may move, not the caller.
+
+    `mark_delivered` stamped `_seen` and `_last_allowed` BEFORE `note_outcome`
+    could reject the report, so a legacy caller arriving after the scoped router
+    callback had already settled -- or the alias called twice -- postponed the
+    next escalation on a duplicate.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:alias") is True
+    attempt = ledger.current_attempt("alarm:alias")
+
+    clock.return_value = start + 2.0
+    ledger.note_outcome("alarm:alias", delivered=True, attempt=attempt)
+    told = ledger._last_allowed["alarm:alias"]
+
+    # A legacy caller reports the same delivery much later.
+    clock.return_value = start + 250.0
+    ledger.mark_delivered("alarm:alias")
+    assert ledger._last_allowed["alarm:alias"] == told, (
+        "a duplicate compatibility report advanced the clock and postponed the escalation"
+    )
+
+    # Calling the alias twice must not move it either.
+    clock.return_value = start + 260.0
+    ledger.mark_delivered("alarm:alias")
+    assert ledger._last_allowed["alarm:alias"] == told
+
+    # And the escalation still arrives on schedule, measured from the delivery.
+    _flap_quietly(ledger, "alarm:alias", clock, frm=told + 5.0, to=told + ESCALATE)
+    clock.return_value = told + ESCALATE
+    assert ledger.should_dispatch("alarm:alias") is True
+
+
 def test_settled_state_costs_nothing_per_admission(clock) -> None:
     """Bookkeeping must scale with CONCURRENCY, not with lifetime admissions.
 

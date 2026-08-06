@@ -562,12 +562,16 @@ class _EventDedup:
         self._undelivered.add(event_id)
 
     def mark_delivered(self, event_id: str) -> None:
-        """Backwards-compatible alias for a successful delivery."""
+        """Backwards-compatible alias for a successful delivery.
 
-        now = time.monotonic()
-        self._seen[event_id] = now
-        self._last_allowed[event_id] = now
-        self._prune(now)
+        THE CLOCKS ARE MOVED BY `note_outcome`, NOT HERE.  Stamping first let an
+        arbitrarily late compatibility report -- a legacy caller after the
+        scoped router callback had already settled, or the alias called twice --
+        advance `_seen` and `_last_allowed` before settle-once could reject it,
+        postponing the next escalation on a duplicate.  Settlement decides
+        whether the clocks may move.
+        """
+
         self.note_outcome(event_id, delivered=True)
 
 
