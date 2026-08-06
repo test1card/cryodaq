@@ -296,6 +296,14 @@ class _EventDedup:
         # after this one was admitted.
         self._admitted_at: dict[str, float] = {}
         self._last_told: dict[str, float] = {}
+        # Attempts whose OCCURRENCE has been dropped -- retired here or pruned
+        # on the horizon -- and which therefore can no longer narrate anything:
+        # the generation check refuses their outcomes as belonging to a previous
+        # occurrence.  Freeing their queue slot is not enough, because the work
+        # itself is still queued; whoever owns the tasks drains this list and
+        # cancels them.  The ledger cannot, because it does not own them.
+        # Drained on every dispatch, so it holds at most one dispatch's worth.
+        self._abandoned: list[int] = []
 
     def _prune(self, now: float) -> None:
         """Drop bookkeeping for alarms that have stopped firing.
@@ -308,6 +316,14 @@ class _EventDedup:
         self._seen = {key: stamp for key, stamp in self._seen.items() if stamp >= horizon}
         self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in self._seen}
         self._undelivered &= set(self._seen)
+        # PRUNING DOES NOT ABANDON.  It is tempting -- the ids it leaves in
+        # `_pending` are orphans -- but a pruned alarm's attempt may be SLOW
+        # rather than dead: the alarm fired once, its narration is still queued,
+        # and the operator has not been told.  Releasing it here would let the
+        # owner of the tasks cancel work that is the operator's only notice of
+        # that alarm.  The orphan is instead cleared at the moment the same
+        # alarm is admitted again, in `_allow`, where a replacement narration
+        # provably exists.
         self._attempt = {key: seq for key, seq in self._attempt.items() if key in self._seen}
         self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in self._seen}
         self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in self._seen}
@@ -321,6 +337,29 @@ class _EventDedup:
         # see `_mark_settled`.  Nothing to do here.
         return
 
+    def _abandon(self, event_id: str) -> None:
+        """Release the queue slot held by one alarm's outstanding attempt.
+
+        Used by both paths that end an occurrence -- `_retire` for the alarm
+        currently firing, `_prune` for alarms that have stopped -- because the
+        consequence is identical either way: the attempt cannot narrate the next
+        occurrence, so holding a slot for it refuses live alarms on behalf of
+        dead work.
+        """
+
+        outstanding = self._attempt.pop(event_id, None)
+        if outstanding is None:
+            return
+        self._pending.discard(outstanding)
+        self._pending_alarm.pop(outstanding, None)
+        self._abandoned.append(outstanding)
+
+    def take_abandoned(self) -> list[int]:
+        """Hand over the attempts whose occurrence has ended, and forget them."""
+
+        drained, self._abandoned = self._abandoned, []
+        return drained
+
     def _retire(self, event_id: str) -> None:
         """Drop one alarm's occurrence state so the next admission starts fresh.
 
@@ -332,22 +371,32 @@ class _EventDedup:
         self._last_allowed.pop(event_id, None)
         self._admitted_at.pop(event_id, None)
         self._last_told.pop(event_id, None)
-        outstanding = self._attempt.pop(event_id, None)
-        if outstanding is not None:
-            # RETIREMENT FREES THE QUEUE SLOT.  The retired attempt can no
-            # longer narrate this alarm -- the generation check in
-            # `note_outcome` treats its eventual success as belonging to the
-            # previous occurrence and refuses it -- so holding a backpressure
-            # slot for it is doubly wrong: the slot never releases, and it would
-            # refuse the new occurrence's only event on the strength of work
-            # that cannot speak for it.
-            self._pending.discard(outstanding)
-            self._pending_alarm.pop(outstanding, None)
+        # RETIREMENT FREES THE QUEUE SLOT.  The retired attempt can no longer
+        # narrate this alarm -- the generation check in `note_outcome` treats
+        # its eventual success as belonging to the previous occurrence and
+        # refuses it -- so holding a backpressure slot for it is doubly wrong:
+        # the slot never releases, and it would refuse the new occurrence's only
+        # event on the strength of work that cannot speak for it.
+        self._abandon(event_id)
         self._generation.pop(event_id, None)
         self._undelivered.discard(event_id)
 
     def _allow(self, event_id: str, now: float) -> bool:
         fresh_occurrence = event_id not in self._attempt
+        if fresh_occurrence:
+            # CLEAR THIS ALARM'S ORPHANS, and do it HERE rather than in `_retire`
+            # or `_prune`, because here a replacement narration provably exists:
+            # the admission on this very line.  An orphan is an attempt from a
+            # previous occurrence, left pending when that occurrence was retired
+            # or pruned; the generation check refuses its outcome as stale, so
+            # it can no longer narrate anything, yet it held a queue slot for
+            # ever and its coroutine stayed alive waiting for an inference slot.
+            # That is how one alarm clearing and returning past each horizon
+            # added a pending id and a live task on every cycle.
+            for orphan in [seq for seq, alarm in self._pending_alarm.items() if alarm == event_id]:
+                self._pending.discard(orphan)
+                del self._pending_alarm[orphan]
+                self._abandoned.append(orphan)
         self._last_allowed[event_id] = now
         self._admitted_at[event_id] = now
         self._next_attempt += 1
@@ -404,7 +453,18 @@ class _EventDedup:
         self._seen[event_id] = now
         self._prune(now)
 
-        already_queued = any(self._pending_alarm.get(seq) == event_id for seq in self._pending)
+        # SCOPED TO THE CURRENT OCCURRENCE.  Asking only "does this alarm own a
+        # queued attempt?" counts ORPHANS -- attempts left pending when a
+        # previous occurrence was pruned, which the generation check has already
+        # disqualified from narrating anything.  A pruned alarm that returned
+        # was then refused on the strength of work that could not speak for it,
+        # and production publishes only that returning `TRIGGERED` transition,
+        # so the narration was lost rather than delayed.  No generation means no
+        # current occurrence, which is exactly the returning case.
+        generation = self._generation.get(event_id)
+        already_queued = generation is not None and any(
+            self._pending_alarm.get(seq) == event_id and seq >= generation for seq in self._pending
+        )
         if (last_seen is not None or already_queued) and len(self._pending) >= _MAX_OUTSTANDING_ATTEMPTS:
             # BACKPRESSURE AT THE GATE, ahead of every admitting branch -- a
             # check placed after them never applies to a repeat admission, which
@@ -702,6 +762,12 @@ class AssistantLiveAgent:
         self._semaphore = asyncio.Semaphore(config.max_concurrent_inferences)
         self._call_timestamps: deque[float] = deque()
         self._handler_tasks: set[asyncio.Task] = set()
+        # Which task is doing the work of which attempt, and which attempts have
+        # actually STARTED -- i.e. hold an inference slot.  Both are keyed by
+        # attempt id and dropped when the task finishes, so they are bounded by
+        # the work in flight rather than by lifetime admissions.
+        self._attempt_tasks: dict[int, asyncio.Task] = {}
+        self._started_attempts: set[int] = set()
         self._task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[EngineEvent] | None = None
         # F-BotPolish: drop duplicate alarm_fired events inside a 30 s window
@@ -838,7 +904,15 @@ class AssistantLiveAgent:
                     # F-BotPolish: pre-invocation dedup gate — slice handler
                     # logic itself is unchanged.
                     dedup_id = _event_dedup_id(event)
-                    if dedup_id is not None and not self._dedup.should_dispatch(dedup_id):
+                    admitted = True
+                    if dedup_id is not None:
+                        admitted = self._dedup.should_dispatch(dedup_id)
+                        # DRAIN WHETHER OR NOT THIS EVENT WAS ADMITTED.  A
+                        # refused refire still runs `_prune`, which is where most
+                        # occurrences end; skipping the drain on the refused path
+                        # would leave that dead work queued for ever.
+                        self._cancel_abandoned_handlers()
+                    if not admitted:
                         logger.debug(
                             "AssistantLiveAgent: dropping duplicate event %s",
                             dedup_id,
@@ -851,6 +925,14 @@ class AssistantLiveAgent:
                     )
                     self._handler_tasks.add(t)
                     t.add_done_callback(self._handler_tasks.discard)
+                    if attempt is not None:
+                        self._attempt_tasks[attempt] = t
+                        t.add_done_callback(
+                            lambda _done, seq=attempt: (
+                                self._attempt_tasks.pop(seq, None),
+                                self._started_attempts.discard(seq),
+                            )
+                        )
                     if dedup_id is not None:
                         # Backstop for the one cancellation the handler cannot
                         # see: a task cancelled BEFORE its coroutine first runs
@@ -908,6 +990,31 @@ class AssistantLiveAgent:
             self._call_timestamps.popleft()
         return len(self._call_timestamps) < self._config.max_calls_per_hour
 
+    def _cancel_abandoned_handlers(self) -> None:
+        """Cancel queued work whose occurrence has ended.
+
+        Freeing the ledger slot bounds the ADMISSION queue; it does nothing
+        about the coroutine, which stays alive waiting for an inference slot
+        that may never free. An alarm clearing and returning past every horizon
+        therefore added one live task per cycle -- linear growth through the
+        hole the cap exists to close.
+
+        ONLY WORK THAT HAS NOT STARTED IS CANCELLED. An attempt holding an
+        inference slot may be mid-generation or mid-send, and cancelling it
+        would lose a narration in flight to save a task -- the wrong trade in a
+        lab where a lost CRITICAL is never repaired. Started work needs no cap
+        anyway: the semaphore already bounds it at `max_concurrent_inferences`.
+        """
+
+        for seq in self._dedup.take_abandoned():
+            task = self._attempt_tasks.pop(seq, None)
+            if task is None or task.done() or seq in self._started_attempts:
+                continue
+            task.cancel()
+        # `_started_attempts` is cleared by each task's own done-callback, not
+        # here: this method must not forget that a still-running attempt holds
+        # a slot.
+
     async def _safe_handle(
         self,
         event: EngineEvent,
@@ -942,6 +1049,12 @@ class AssistantLiveAgent:
         # catches cancellation after acquiring would never report it.
         try:
             async with self._semaphore:
+                # PAST THIS LINE THE WORK IS NO LONGER CANCELLABLE ON THE
+                # LEDGER'S SAY-SO: generation or a send may be under way, and
+                # `_cancel_abandoned_handlers` must not trade a narration in
+                # flight for a queue slot.
+                if attempt is not None:
+                    self._started_attempts.add(attempt)
                 self._call_timestamps.append(time.monotonic())
                 try:
                     if event.event_type in {

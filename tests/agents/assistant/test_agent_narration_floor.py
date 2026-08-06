@@ -35,6 +35,14 @@ from cryodaq.agents.assistant.live.agent import _MAX_OUTSTANDING_ATTEMPTS, _Even
 WINDOW = 30.0
 ESCALATE = 300.0
 
+# The most live handler tasks a SINGLE cycling alarm may leave behind with the
+# dispatch path stuck, whatever the cycle count. It is deliberately a constant
+# and not a function of the cycles: the defect being guarded is a ceiling that
+# grows with how long the alarm has been flapping, which is not a ceiling.
+# `_MAX_OUTSTANDING_ATTEMPTS` covers the saturating alarms, plus the current
+# occurrence's own attempt.
+_RETIREMENT_TASK_CEILING = _MAX_OUTSTANDING_ATTEMPTS + 1
+
 
 @pytest.fixture
 def clock():
@@ -961,6 +969,8 @@ async def test_the_event_loop_stops_creating_handlers_when_dispatch_is_saturated
     agent._semaphore = asyncio.Semaphore(1)
     agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
     agent._handler_tasks = set()
+    agent._attempt_tasks = {}
+    agent._started_attempts = set()
     agent._queue = asyncio.Queue()
     agent._handle_alarm_fired = AsyncMock(side_effect=lambda *a, **k: asyncio.Event().wait())
 
@@ -1073,6 +1083,8 @@ def _alarm_agent(*, outcomes, audit_cancels: bool = False):
     agent._call_timestamps = deque()
     agent._semaphore = asyncio.Semaphore(1)
     agent._handler_tasks = set()
+    agent._attempt_tasks = {}
+    agent._started_attempts = set()
     agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
 
     agent._audit = MagicMock()
@@ -1232,7 +1244,8 @@ def test_a_retired_return_is_refused_while_its_own_attempt_is_queued(clock) -> N
 
 
 @pytest.mark.asyncio
-async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None:
+@pytest.mark.parametrize("cycles", [2, 8])
+async def test_the_event_loop_bounds_handlers_across_retirement_cycles(cycles: int) -> None:
     """Drive the retirement cycle through the REAL loop, because the recorded
     consequence is TASK CREATION.
 
@@ -1241,18 +1254,20 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None
     `_pending`: it never instantiates `AssistantLiveAgent`, occupies its
     semaphore or inspects `_handler_tasks`, so a regression that moved or
     omitted the gate in `_event_loop` would leave it green while handlers grew
-    exactly as `-320` records.  Both directions are visible here:
+    exactly as `-320` records.
 
-    * a REFIRE must cost nothing once the queue is saturated -- that is the
-      term that ran away, and it reaches the admitting escalation branch at all
-      only because the clock is driven past `escalate_after_s` while the alarm
-      keeps firing;
-    * a genuinely NEW occurrence, after retirement, must still cost exactly one
-      -- refusing it loses the narration outright, because production sources
-      publish on the `TRIGGERED` transition only.
+    **THE CEILING IS RUN AT TWO DIFFERENT CYCLE COUNTS AND ASSERTED EQUAL.**
+    The first version of this node asserted `saturated + cycles` and called that
+    bounded -- which is linear growth stated as a bound, and raising `cycles`
+    would have demonstrated the defect the node claimed to prevent.  Freeing the
+    ledger slot was never enough: the coroutine stayed alive waiting for an
+    inference slot that never frees, so each clear/return cycle added one live
+    task.  The parametrisation is the assertion: a ceiling that depends on how
+    long the alarm has been cycling is not a ceiling.
 
-    So the asserted growth is one handler per OCCURRENCE and none per refire,
-    with the pending set flat across every cycle.
+    What must still hold at the same time, and is what makes this a bound rather
+    than a silence: every new occurrence is admitted, because production sources
+    publish on the `TRIGGERED` transition only, and refires cost nothing.
     """
 
     import asyncio
@@ -1267,6 +1282,8 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None
     agent._semaphore = asyncio.Semaphore(1)
     agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
     agent._handler_tasks = set()
+    agent._attempt_tasks = {}
+    agent._started_attempts = set()
     agent._queue = asyncio.Queue()
     agent._handle_alarm_fired = AsyncMock(side_effect=lambda *a, **k: asyncio.Event().wait())
 
@@ -1277,7 +1294,6 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None
         for _ in range(4):
             await asyncio.sleep(0)
 
-    cycles = 4
     loop_task = asyncio.create_task(agent._event_loop())
     try:
         with patch("cryodaq.agents.assistant.live.agent.time.monotonic") as mono:
@@ -1298,19 +1314,36 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None
                 f"premise: the queue must be saturated; {saturated} handlers exist"
             )
 
+            peak = saturated
             for cycle in range(cycles):
                 # The alarm stays active and keeps firing well past the
                 # escalation interval.  Each refire keeps `_seen` fresh, so the
-                # escalation branch IS reached -- the cap is the only thing
-                # refusing, and nothing else in this node would notice if it
-                # stopped.
-                for _ in range(80):
+                # escalation branch IS reached -- nothing else in this node
+                # would notice if the gate stopped refusing.
+                held = agent._dedup.current_attempt("alarm:cycling")
+                for step in range(80):
                     now += 5.0
                     mono.return_value = now
                     await fire("cycling")
-                assert len(agent._handler_tasks) == saturated + cycle, (
-                    f"cycle {cycle}: handlers grew to {len(agent._handler_tasks)} on refires alone, "
-                    f"expected {saturated + cycle}, with the dispatch path stuck"
+                    if step % 10 == 9:
+                        # KEEP THE SATURATING ALARMS ALIVE.  They are stuck, not
+                        # gone.  An alarm that stops firing is pruned on the same
+                        # 300 s horizon the escalation branch needs, and its
+                        # queued work is then cancelled -- so without this the
+                        # queue would drain mid-burst and the node would measure
+                        # an UNSATURATED gate while claiming to measure a
+                        # saturated one.  It failed exactly that way first.
+                        for index in range(_MAX_OUTSTANDING_ATTEMPTS - 1):
+                            await fire(f"sat-{index}")
+                    peak = max(peak, len(agent._handler_tasks))
+                # MEASURED ON THIS ALARM'S OWN ADMISSION, not on the global task
+                # count: the burst deliberately re-saturates the gate, so the
+                # task total legitimately climbs back to the cap and an
+                # assertion on it would be measuring the saturating alarms
+                # rather than the one under test.  Eighty refires spanning more
+                # than one escalation interval must produce no new attempt.
+                assert agent._dedup.current_attempt("alarm:cycling") == held, (
+                    f"cycle {cycle}: 80 refires produced a new admission with the dispatch path stuck"
                 )
 
                 # It then clears, stays quiet past the prune horizon, and the
@@ -1318,17 +1351,30 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None
                 # reaches `_retire` rather than an ordinary prune.
                 now += ESCALATE + WINDOW + 60.0
                 mono.return_value = now
+                # `alarm:` PREFIX MATTERS.  `_event_dedup_id` keys the ledger by
+                # `alarm:<alarm_id>`, so asking for the raw payload id returns
+                # the missing-entry default of 0 and compares equal to itself
+                # for ever -- an assertion that passes whatever production does.
+                previous_attempt = agent._dedup.current_attempt("alarm:cycling")
                 await fire("cycling")
-                assert len(agent._handler_tasks) == saturated + cycle + 1, (
-                    f"cycle {cycle}: the new occurrence created no handler -- production publishes only on the "
+                for _ in range(6):  # let the cancellations settle
+                    await asyncio.sleep(0)
+                peak = max(peak, len(agent._handler_tasks))
+                # Asserted on the ADMISSION, not on the task count, because the
+                # task count is exactly what cancellation is allowed to move.
+                assert agent._dedup.current_attempt("alarm:cycling") != previous_attempt, (
+                    f"cycle {cycle}: the returning occurrence was refused -- production publishes only on the "
                     "TRIGGERED transition, so that narration is lost, not delayed"
                 )
 
-            assert len(agent._handler_tasks) == saturated + cycles
-            # And the bound the cap exists for is untouched: retirement frees
-            # the slot its own dead attempt held, so admitting every occurrence
-            # costs the pending set nothing.
-            assert len(agent._dedup._pending) == _MAX_OUTSTANDING_ATTEMPTS, (
+            # THE ASSERTION THE PARAMETRISATION EXISTS FOR.  `_CEILING` is a
+            # constant, so a run with four times the cycles may not exceed it.
+            assert peak <= _RETIREMENT_TASK_CEILING, (
+                f"{cycles} retirement cycles peaked at {peak} live handler tasks, above the fixed "
+                f"ceiling of {_RETIREMENT_TASK_CEILING} -- the ceiling scales with cycling, so it is not one"
+            )
+            # And the admission queue is bounded too, by the same release.
+            assert len(agent._dedup._pending) <= _MAX_OUTSTANDING_ATTEMPTS, (
                 f"the pending set grew to {len(agent._dedup._pending)} across {cycles} retirement cycles"
             )
     finally:
@@ -1336,6 +1382,135 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles() -> None
         for task in [loop_task, *agent._handler_tasks]:
             task.cancel()
         await asyncio.gather(loop_task, *agent._handler_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_narration_already_in_flight_is_not_cancelled_by_its_own_replacement() -> None:
+    """The limit on cancelling abandoned work, and it had NO guard.
+
+    Cancelling an abandoned attempt is safe only while it is still queued: it
+    has generated nothing and sent nothing, so nothing is lost. Once it holds an
+    inference slot it may be mid-generation or mid-send, and cancelling it to
+    reclaim a queue slot trades a narration the operator is about to receive for
+    bookkeeping -- the wrong direction in a rig where a lost CRITICAL is never
+    repaired, because sources publish only on the `TRIGGERED` transition.
+
+    A CONTROL FOUND THIS ONE. Deleting the line that marks an attempt as started
+    left the whole agents suite green: the protection existed and nothing
+    asserted it, so any later simplification would have removed it silently.
+    """
+
+    import asyncio
+    from collections import deque
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._config = MagicMock(slice_a_notification=True, alarm_fired_enabled=True, max_calls_per_hour=10_000)
+    agent._call_timestamps = deque()
+    agent._semaphore = asyncio.Semaphore(1)  # FREE: the first handler really starts
+    agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+    agent._handler_tasks = set()
+    agent._attempt_tasks = {}
+    agent._started_attempts = set()
+    agent._queue = asyncio.Queue()
+
+    async def _never_finishes(*_args, **_kwargs) -> None:
+        # AN ASYNC side_effect, not a lambda returning a coroutine.  AsyncMock
+        # RETURNS whatever a plain callable side_effect gives it without
+        # awaiting, so the lambda form used elsewhere in this file completes
+        # instantly here -- it only blocks in those nodes because the semaphore
+        # is held and the handler never reaches this call at all.
+        await asyncio.Event().wait()
+
+    agent._handle_alarm_fired = AsyncMock(side_effect=_never_finishes)
+
+    async def fire() -> None:
+        await agent._queue.put(MagicMock(event_type="alarm_fired", payload={"alarm_id": "slow", "level": "CRITICAL"}))
+        for _ in range(6):
+            await asyncio.sleep(0)
+
+    loop_task = asyncio.create_task(agent._event_loop())
+    try:
+        with patch("cryodaq.agents.assistant.live.agent.time.monotonic") as mono:
+            mono.return_value = 1000.0
+            await fire()
+            in_flight = next(iter(agent._handler_tasks))
+            attempt = agent._dedup.current_attempt("alarm:slow")
+            assert attempt in agent._started_attempts, (
+                "premise: the handler must have ACQUIRED the inference slot, or this node tests the queued case"
+            )
+
+            # The alarm goes quiet past the horizon and returns, so the in-flight
+            # attempt's occurrence is retired and abandoned while its send is
+            # still running.
+            mono.return_value = 1000.0 + ESCALATE + WINDOW + 60.0
+            await fire()
+
+            assert not in_flight.cancelled() and not in_flight.done(), (
+                "a narration holding the inference slot was cancelled to reclaim a queue slot; "
+                "the operator loses it and production never re-publishes"
+            )
+            assert agent._dedup.current_attempt("alarm:slow") != attempt, (
+                "premise: the returning occurrence must have been admitted"
+            )
+    finally:
+        loop_task.cancel()
+        for task in [loop_task, *agent._handler_tasks]:
+            task.cancel()
+        await asyncio.gather(loop_task, *agent._handler_tasks, return_exceptions=True)
+
+
+def test_a_pruned_occurrence_returning_under_backpressure_is_admitted(clock) -> None:
+    """The CROSS-ALARM prune boundary, which no node covered.
+
+    `test_a_retired_occurrence_returning_under_backpressure_is_a_first_sighting`
+    covers the LONE alarm, where `_retire` runs because nothing else fires in
+    the gap. The far commoner shape is the opposite: other alarms keep firing,
+    so `_prune` -- not `_retire` -- drops this one's occurrence. `_prune` leaves
+    its attempt in `_pending`/`_pending_alarm` on purpose, because that attempt
+    may be slow rather than dead and is the operator's only notice of the alarm.
+
+    The orphan must not then be used to REFUSE the alarm's return. It cannot
+    narrate the new occurrence -- the generation check disqualifies it -- so
+    refusing on its account trades a live narration for nothing, and production
+    publishes only the returning `TRIGGERED` transition, so it is lost rather
+    than delayed.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+
+    # Saturate, the target among them, and let nothing complete.
+    for step in range(_MAX_OUTSTANDING_ATTEMPTS - 1):
+        clock.return_value = start + step
+        assert ledger.should_dispatch(f"alarm:holding-{step}") is True
+    clock.return_value = start + _MAX_OUTSTANDING_ATTEMPTS
+    assert ledger.should_dispatch("alarm:returning") is True
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS, "premise: the queue must be saturated"
+    orphan = ledger.current_attempt("alarm:returning")
+
+    # THE OTHERS KEEP FIRING while the target goes quiet. That is what makes
+    # this the prune path and not the retire path: `_seen` for the target ages
+    # past the horizon and `_prune` drops it during someone else's dispatch,
+    # so the target never reaches `_retire` at all.
+    at = start + _MAX_OUTSTANDING_ATTEMPTS
+    while at < start + _MAX_OUTSTANDING_ATTEMPTS + ESCALATE + WINDOW + 60.0:
+        at += 30.0
+        clock.return_value = at
+        ledger.should_dispatch("alarm:holding-0")
+    assert "alarm:returning" not in ledger._seen, "premise: the target must have been PRUNED, not retired"
+    assert orphan in ledger._pending, "premise: pruning must leave the in-flight attempt queued"
+
+    clock.return_value = at + 1.0
+    assert ledger.should_dispatch("alarm:returning") is True, (
+        "a pruned occurrence's return was refused because its own orphan looked queued; that narration is lost"
+    )
+    # And admitting it reclaims the orphan's slot rather than adding to it, so
+    # the cap still holds for the alarms that really are in flight.
+    assert orphan not in ledger._pending, "the orphan kept its queue slot after a replacement was admitted"
+    assert len(ledger._pending) <= _MAX_OUTSTANDING_ATTEMPTS
 
 
 def test_settled_state_costs_nothing_per_admission(clock) -> None:
@@ -1525,6 +1700,8 @@ async def test_cancellation_before_the_handler_first_runs_is_reported() -> None:
     agent._semaphore = asyncio.Semaphore(1)
     agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
     agent._handler_tasks = set()
+    agent._attempt_tasks = {}
+    agent._started_attempts = set()
     agent._queue = asyncio.Queue()
     agent._handle_alarm_fired = AsyncMock()
 

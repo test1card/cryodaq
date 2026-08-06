@@ -403,8 +403,13 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-024",
         "OC-026",
         # OC-028 STAYS BLOCKING. The owner's A+B behaviour is implemented, but
-        # ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304 and all eighteen false-green
-        # pairs are status: open with green_evidence: pending, and AGENTS.md:343-350
+        # ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304 and every one of its
+        # false-green pairs are status: open with green_evidence: pending, and
+        # AGENTS.md:343-350
+        # DELIBERATELY NOT A NUMBER. This comment said "all eighteen" while the
+        # registry held nineteen, and the same slice's OC-028 row said nineteen
+        # -- a reviewed slice contradicting itself. The count moves every round;
+        # the registry is the place that knows it.
         # forbids closing a completion disposition while its prevention is open.
         # Partial delivery across a cancellation inside the router is also not
         # preserved; the row names that as an uncovered case rather than implying it
