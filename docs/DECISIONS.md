@@ -276,14 +276,22 @@ The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
 - **B — a CRITICAL that stays active is re-narrated on a bounded interval**,
   currently 300 s, rather than being silenced for as long as it keeps firing.
 
-  **The bound is stated as the operator experiences it, and 300 s alone was not
-  it.** The clock is anchored at CONFIRMED DELIVERY, not at the moment the gate
-  admitted an attempt — otherwise the silence an operator experiences depends on
-  how long the *previous* narration took to generate, a term the claim never
-  accounted for. Between narrations the operator actually received, the bound is
-  `300 s + one refire interval + generation latency`, where the last is bounded
-  by `timeout_s` (120 s as shipped). The generation term is named rather than
-  omitted; a bound that ignores it is false whenever inference takes time.
+  **What is bounded is ADMISSION, not receipt, and two earlier versions of this
+  entry said otherwise.** The clock is anchored at CONFIRMED DELIVERY rather
+  than at the moment the gate admitted an attempt, so the interval between
+  admissions of a live CRITICAL is `300 s + one refire interval` measured from
+  when the operator was last told.
+
+  It does **not** follow that the operator hears from us within that interval.
+  Between admission and delivery sit the hourly rate limit — which can reject an
+  admitted escalation outright until its bucket drains — the inference
+  semaphore, context assembly, audit-intent persistence, generation, and
+  sequential per-recipient transport acknowledgements. No end-to-end deadline
+  spans them. A rejected or slow attempt reports undelivered and is retried, so
+  silence is not permanent; that is a weaker statement than a bound and is
+  deliberately written as one. The first version of this entry claimed 300 s
+  flat, the second claimed `300 s + refire + timeout_s`, and both were false.
+  A real received-to-received deadline would be a design change beyond OC-028.
 
   **An outcome belongs to the attempt that produced it.** Two inferences can run
   concurrently and each may take up to `timeout_s`, so the same alarm can have

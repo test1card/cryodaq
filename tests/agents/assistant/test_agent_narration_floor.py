@@ -49,6 +49,37 @@ def _ledger() -> _EventDedup:
     return _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
 
 
+def _flap_quietly(
+    ledger: _EventDedup,
+    event_id: str,
+    clock,
+    *,
+    frm: float,
+    to: float,
+    interval: float = 5.0,
+) -> None:
+    """Refire continuously from ``frm`` to ``to`` and assert nothing was admitted.
+
+    THIS EXISTS BECAUSE THE SAME MISTAKE HAS BEEN MADE THREE TIMES in this
+    file.  ``_seen`` is refreshed on every call, so a test that simply jumps the
+    clock forward leaves the alarm looking QUIET -- and the ordinary
+    quiet-for-a-full-window branch then admits the dispatch, while the branch
+    actually under test is never reached.  The node passes, or fails, for a
+    reason unrelated to its name.
+
+    Every suppression assertion in this file should go through here rather than
+    stepping the clock by hand, so the refires cannot be forgotten again.
+    """
+
+    at = frm
+    while at < to:
+        clock.return_value = at
+        assert ledger.should_dispatch(event_id) is False, (
+            f"{event_id} was admitted at t={at:.1f}, inside the interval this test expects to be quiet"
+        )
+        at += interval
+
+
 def test_a_continuously_flapping_critical_is_re_narrated_not_silenced_forever(clock) -> None:
     """The defect this row exists for, stated as a behaviour.
 
@@ -465,16 +496,9 @@ def test_the_escalation_clock_starts_when_the_operator_was_told(clock) -> None:
     latency = 120.0
     assert ledger.should_dispatch("alarm:latency") is True
 
-    # The alarm keeps firing every 5 s throughout.  Without that the ordinary
-    # "quiet for a full window" branch admits the next dispatch and this node
-    # would never reach the escalation branch it claims to measure -- the trap
-    # that made an earlier version of this file green for the wrong reason.
-    def refire(at: float) -> bool:
-        clock.return_value = at
-        return ledger.should_dispatch("alarm:latency")
-
-    for offset in range(5, int(latency) + 1, 5):
-        assert refire(start + offset) is False, f"unexpected dispatch at t+{offset}s, before delivery"
+    # The alarm keeps firing throughout -- see `_flap_quietly` for why every
+    # suppression assertion in this file has to.
+    _flap_quietly(ledger, "alarm:latency", clock, frm=start + 5.0, to=start + latency)
 
     # Generation takes 120 s -- the shipped `timeout_s` -- and only then lands.
     clock.return_value = start + latency
@@ -483,47 +507,143 @@ def test_the_escalation_clock_starts_when_the_operator_was_told(clock) -> None:
 
     # Anchored at ADMISSION, escalation would fire at start+300, i.e. 180 s
     # after delivery.  Anchored at DELIVERY it must stay quiet until +300 s.
-    for offset in range(5, int(ESCALATE), 5):
-        assert refire(delivered + offset) is False, (
-            f"escalation fired {offset}s after delivery -- the clock is still anchored at admission"
-        )
+    _flap_quietly(ledger, "alarm:latency", clock, frm=delivered + 5.0, to=delivered + ESCALATE)
 
-    assert refire(delivered + ESCALATE) is True
+    clock.return_value = delivered + ESCALATE
+    assert ledger.should_dispatch("alarm:latency") is True
 
 
-def test_the_operator_visible_silence_bound_includes_generation_latency(clock) -> None:
-    """State the bound the system actually holds, and hold it.
+def test_the_ledger_bounds_admissions_and_claims_nothing_about_delivery(clock) -> None:
+    """Assert the bound this class OWNS, and refuse to assert the one it does not.
 
-    The row used to claim 330 s. Between DELIVERIES the true bound is
-    ``escalate_after_s + refire interval + generation latency``, because the
-    later narration has to be generated before anyone reads it. Asserting the
-    smaller number would be asserting something false about an alarm path.
+    An earlier version of this node manufactured a delivery at
+    ``admission + 120`` and then asserted a received-to-received maximum from
+    it.  That is circular: it fabricated the very quantity in dispute and never
+    touched the production path, so it could not have failed however slow real
+    delivery became.  Codex named it on ``96e5a878``.
+
+    What the ledger genuinely bounds is the interval between ADMISSIONS,
+    measured from the last confirmed delivery.  Everything after admission --
+    the hourly rate limit, the semaphore, context assembly, audit-intent
+    persistence, generation, sequential transport acknowledgements -- belongs to
+    a pipeline with no end-to-end deadline, and is asserted nowhere in this file
+    precisely because nothing here can hold it.
     """
 
     ledger = _ledger()
     start = 1000.0
-    latency = 120.0
     interval = WINDOW - 0.1
 
-    delivered_at: list[float] = []
-    now = start
-    pending: float | None = None
+    admitted_at: list[float] = []
     for step in range(0, 400):
-        now = start + step * interval
-        clock.return_value = now
-        if pending is not None and now >= pending:
-            clock.return_value = pending
+        clock.return_value = start + step * interval
+        if ledger.should_dispatch("alarm:live"):
+            admitted_at.append(clock.return_value)
             ledger.note_outcome("alarm:live", delivered=True, attempt=ledger.current_attempt("alarm:live"))
-            delivered_at.append(pending)
-            pending = None
-            clock.return_value = now
-        if pending is None and ledger.should_dispatch("alarm:live"):
-            pending = now + latency
 
-    gaps = [later - earlier for earlier, later in zip(delivered_at, delivered_at[1:], strict=False)]
-    bound = ESCALATE + interval + latency
-    assert delivered_at, "no narration was ever delivered"
-    assert max(gaps) <= bound, f"operator silence reached {max(gaps):.1f}s, above the stated bound {bound:.1f}s"
+    gaps = [later - earlier for earlier, later in zip(admitted_at, admitted_at[1:], strict=False)]
+    bound = ESCALATE + interval
+    assert admitted_at, "the alarm was never admitted at all"
+    assert max(gaps) <= bound, f"admission gap reached {max(gaps):.1f}s, above the bound {bound:.1f}s"
+
+
+def test_a_stale_delivery_still_counts_as_the_operator_having_been_told(clock) -> None:
+    """The inverse ordering: attempt A DELIVERS after attempt B was admitted.
+
+    The scoping rule as first written discarded every report from a superseded
+    attempt.  That is right for a failure and wrong for a success: the operator
+    really did read A's narration, at the moment reported, and throwing it away
+    lets B's failure license a resend seconds after they read it.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+
+    assert ledger.should_dispatch("alarm:ordering") is True
+    attempt_a = ledger.current_attempt("alarm:ordering")
+
+    clock.return_value = start + WINDOW + 1.0
+    assert ledger.should_dispatch("alarm:ordering") is True
+    attempt_b = ledger.current_attempt("alarm:ordering")
+    assert attempt_b != attempt_a, "premise: the two admissions must be distinguishable"
+
+    # B fails first; A then succeeds -- the slow attempt reached someone.
+    ledger.note_outcome("alarm:ordering", delivered=False, attempt=attempt_b)
+    delivery = start + WINDOW + 10.0
+    clock.return_value = delivery
+    ledger.note_outcome("alarm:ordering", delivered=True, attempt=attempt_a)
+
+    assert "alarm:ordering" not in ledger._undelivered, (
+        "a confirmed delivery from the older attempt was discarded, so B's failure still re-arms the alarm"
+    )
+
+    # And the clock moved to the DELIVERY, so the next narration is measured
+    # from when the operator was told rather than from B's admission.
+    _flap_quietly(ledger, "alarm:ordering", clock, frm=delivery + 5.0, to=delivery + ESCALATE)
+    clock.return_value = delivery + ESCALATE
+    assert ledger.should_dispatch("alarm:ordering") is True
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_the_audit_write_does_not_discard_the_delivery() -> None:
+    """``stop()`` landing inside ``_audit.complete``, after the send succeeded.
+
+    ``_dispatch_with_audit`` never returns, so the caller never learns the
+    narration was delivered, and the cancellation fallback would settle a
+    delivered attempt as undelivered -- resending to an operator who has read
+    it.  The outcome is therefore recorded the moment the router reports, before
+    the audit settlement write.
+    """
+
+    import asyncio
+    from typing import Any
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._audit = MagicMock()
+    agent._audit.prepare = AsyncMock(return_value="intent.json")
+
+    async def cancelled_settlement(**_: Any) -> None:
+        raise asyncio.CancelledError()
+
+    agent._audit.complete = cancelled_settlement
+    agent._router = MagicMock()
+    agent._router.dispatch_detailed = AsyncMock(return_value={"telegram": {"-100111": "delivered"}})
+
+    ledger = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+    assert ledger.should_dispatch("alarm:audit") is True
+    attempt = ledger.current_attempt("alarm:audit")
+
+    from cryodaq.agents.assistant.live.agent import _reached_any_recipient
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent._dispatch_with_audit(
+            event=MagicMock(event_type="alarm_fired", payload={}, experiment_id=None),
+            audit_id="a1",
+            payload={},
+            context_assembled="",
+            prompt_template="alarm_summary",
+            model="m",
+            system_prompt="",
+            user_prompt="",
+            response="text",
+            tokens={"in": 1, "out": 1},
+            latency_s=0.1,
+            errors=[],
+            targets=[],
+            on_outcomes=lambda reported: ledger.note_outcome(
+                "alarm:audit", delivered=_reached_any_recipient(reported), attempt=attempt
+            ),
+        )
+
+    assert "alarm:audit" not in ledger._undelivered, (
+        "cancellation inside the audit write discarded a delivery the operator had already received"
+    )
+    # And the blanket cancellation fallback must not be able to undo it.
+    ledger.note_outcome("alarm:audit", delivered=False, attempt=attempt)
+    assert "alarm:audit" not in ledger._undelivered
 
 
 @pytest.mark.asyncio

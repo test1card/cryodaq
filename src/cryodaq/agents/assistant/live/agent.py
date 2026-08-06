@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -309,12 +310,28 @@ class _EventDedup:
             #
             # "Last narration" means the last CONFIRMED DELIVERY where one is
             # known -- `note_outcome(delivered=True)` moves this stamp forward.
-            # So the silence the operator experiences between narrations they
-            # actually received is bounded by `escalate_after_s` plus one refire
-            # interval plus the GENERATION LATENCY of the later narration, which
-            # `config/agent.yaml` bounds at `timeout_s`.  That third term is
-            # real and is stated rather than omitted: a bound that ignores it is
-            # false whenever inference takes time.
+            #
+            # WHAT THIS BOUNDS, AND WHAT IT DOES NOT.  This class bounds the
+            # interval between ADMISSIONS at `escalate_after_s` plus one refire
+            # interval, measured from the last confirmed delivery where there is
+            # one.  It does NOT bound the interval between narrations the
+            # operator RECEIVES, and two earlier versions of this comment
+            # claimed that it did.  Between admission and delivery lie terms
+            # this gate neither owns nor observes:
+            #
+            #   * the hourly rate limit, which can REJECT an admitted escalation
+            #     outright until the bucket drains -- up to an hour;
+            #   * waiting on `_semaphore` behind other inferences;
+            #   * context assembly and audit-intent persistence;
+            #   * generation, bounded by `timeout_s` only because Ollama is
+            #     asked to stop, not because anything downstream is;
+            #   * sequential per-recipient transport acknowledgements.
+            #
+            # A rejected or slow attempt reports `delivered=False`, so the alarm
+            # re-arms and is retried -- silence is not permanent -- but no
+            # end-to-end deadline exists, so no received-to-received maximum can
+            # honestly be stated here.  Enforcing one would need a deadline that
+            # spans this whole path, which is a design change beyond OC-028.
             return self._allow(event_id, now)
         return False
 
@@ -354,9 +371,22 @@ class _EventDedup:
         the pre-existing test-facing behaviour and is deliberately unchanged.
         """
 
+        if attempt is not None and attempt != self._attempt.get(event_id):
+            # A SUPERSEDED attempt is reporting after a newer one was admitted.
+            # Its FAILURE is noise -- the newer attempt is the live one, and
+            # re-arming on an obsolete failure is what attempt scoping exists to
+            # stop.  Its SUCCESS is not noise: the operator genuinely received
+            # that narration, at the moment reported, and discarding it would
+            # let a newer attempt's failure license a resend seconds after they
+            # read it.  So a stale delivery still clears the marker and still
+            # moves the clock; it simply does not settle the CURRENT attempt,
+            # which is still in flight and must report for itself.
+            if delivered:
+                self._undelivered.discard(event_id)
+                self._last_allowed[event_id] = time.monotonic()
+            return
+
         if attempt is not None:
-            if attempt != self._attempt.get(event_id):
-                return  # a superseded attempt reporting after a newer one began
             if self._settled.get(event_id) == attempt:
                 return  # this attempt already reported; the first word wins
             self._settled[event_id] = attempt
@@ -507,8 +537,18 @@ class AssistantLiveAgent:
         targets: list[OutputTarget],
         prefix_suffix: str = "",
         allow_dispatch: bool = True,
+        on_outcomes: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[list[str], dict[str, Any]]:
-        """Persist intent, dispatch, and persist exact per-target settlement."""
+        """Persist intent, dispatch, and persist exact per-target settlement.
+
+        ``on_outcomes`` is invoked the moment the router reports, BEFORE the
+        audit settlement write.  The window matters: ``stop()`` can cancel this
+        coroutine while ``_audit.complete`` is awaiting its shielded filesystem
+        write, in which case this function never returns and the caller never
+        learns that the narration was delivered -- so the cancellation fallback
+        would settle a delivered attempt as undelivered and the next refire
+        would resend a narration the operator has already read.
+        """
         trigger_event = {
             "event_type": event.event_type,
             "payload": payload,
@@ -541,6 +581,8 @@ class AssistantLiveAgent:
                 audit_id=audit_id,
                 prefix_suffix=prefix_suffix,
             )
+            if on_outcomes is not None:
+                on_outcomes(outcomes)
             for target, state in outcomes.items():
                 if not _is_delivered_outcome(state):
                     errors.append(f"output_{target}_{state}")
@@ -772,6 +814,21 @@ class AssistantLiveAgent:
             errors=errors,
             targets=targets,
             allow_dispatch=not result.truncated and bool(result.text.strip()),
+            # Record the outcome the INSTANT the router reports it, not after
+            # the audit settlement write.  `stop()` landing inside
+            # `_audit.complete` would otherwise mean this coroutine never
+            # returns, the assignment below never runs, and the cancellation
+            # fallback settles a DELIVERED attempt as undelivered -- so the
+            # next refire resends a narration the operator has already read.
+            on_outcomes=(
+                None
+                if dedup_id is None
+                else lambda reported: self._dedup.note_outcome(
+                    dedup_id,
+                    delivered=_reached_any_recipient(reported),
+                    attempt=attempt,
+                )
+            ),
         )
 
         if dedup_id is not None:
