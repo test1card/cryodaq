@@ -75,7 +75,7 @@ false_green_pairs:
   - id: ARCHIVE-BUDGET-ARITHMETIC-FALSE-GREEN-329
     status: open
     scope: product_contract
-    runtime_prevention_id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
+    runtime_prevention_id: ARCHIVE-RETAINED-BUDGET-UNDERCHARGE-335
     guard: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
     ci_partition: core
     red_evidence: removing_the_identity_terms_from_retained_row_bytes_left_every_other_mapped_guard_GREEN_because_reaching_the_32_MiB_cap_inline_required_an_archive_no_guard_builds_this_is_distinct_from_324_which_mutates_the_CALL_while_the_helper_stays_correct_and_from_325_which_covers_charging_identity_that_is_not_persisted_2026_08_06_pending_immutable_capture
@@ -83,7 +83,7 @@ false_green_pairs:
   - id: ARCHIVE-BUDGET-WIRING-FALSE-GREEN-324
     status: open
     scope: product_contract
-    runtime_prevention_id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
+    runtime_prevention_id: ARCHIVE-RETAINED-BUDGET-UNDERCHARGE-335
     guard: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_the_budget_with_the_identity_it_persists
     ci_partition: core
     red_evidence: replacing_the_identity_argument_with_None_AT_THE_CALL_SITE_left_all_14_nodes_green_because_extracting_retained_row_bytes_made_the_arithmetic_assertable_while_leaving_the_CALL_unguarded_so_the_helper_stayed_correct_in_isolation_while_production_stopped_charging_for_what_it_persists_2026_08_06_pending_immutable_capture
@@ -3107,6 +3107,27 @@ records:
         ci_partition: core
     red_evidence: dropping_ONLY_the_legacy_as_absent_filter_turns_1_of_the_6_loader_nodes_red_while_the_loader_carry_itself_remains_intact_which_is_what_makes_this_independently_reproducible_from_318_measured_on_89c2da8d_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: ARCHIVE-RETAINED-BUDGET-UNDERCHARGE-335
+    status: open
+    scope: product_contract
+    authority_source: docs/OPEN_CELLS.md#oc-024
+    applies_to: Every finalisation row charged against the 32 MiB retained-byte accumulator that bounds experiment finalisation memory.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The declared identity is persisted correctly and NOT charged for, so a long finalisation retains and writes substantially more than the cap permits - the bound that stands between a large experiment and memory exhaustion. This is independent of ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318 in both directions - reverting the loader carry discards identity but correctly charges nothing for identity that is then not persisted, while removing the identity terms from the accounting, or passing None only at its call site, leaves the identity in the CSV and undercharges - so neither failure can be reopened or disposed by the other.
+    invariant: 'The retained-byte charge for a row includes every identity value that row persists: `_retained_row_bytes` sums the encoded lengths of channel_id, descriptor_hash and descriptor_revision, and the loader passes the filtered identity to it rather than None.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_the_budget_with_the_identity_it_persists
+        ci_partition: core
+    red_evidence: two_independent_mutations_reach_it_removing_the_identity_terms_from_retained_row_bytes_and_passing_None_at_its_CALL_SITE_and_each_left_every_other_mapped_guard_green_because_reaching_the_cap_inline_requires_an_archive_no_guard_builds_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
     status: open
     scope: product_contract
@@ -3116,8 +3137,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: An archived record cannot later be attributed to a declared measurement identity, so downstream grouping falls back to the channel SPELLING - the inference the descriptor spine exists to remove. The identity was already resolved and then discarded one statement before it would have been persisted - ArchiveReader.query_reading_rows_bounded returns BoundedReadingRow.descriptor and ExperimentManager._load_experiment_readings built its row dict without it. A second, sharper failure rides on top - absence is NOT reported as None, because the bounded readers call resolve_legacy_descriptor whenever the stored hash is NULL, so a pre-catalog row arrives as a synthetic legacy=True descriptor whose channel_id is legacy plus a digest OF THE CHANNEL SPELLING. A loader testing only for None persists that and makes unattributable history look descriptor-backed.
-    invariant: 'measured_values.csv carries channel_id, descriptor_hash and descriptor_revision APPENDED after the six legacy columns, so a positional reader of the old table is unaffected; a row whose descriptor is absent OR legacy writes empty cells rather than an inferred identity; and the three retained identity values are counted in the retained-byte budget that bounds finalisation memory. WHAT THIS DOES NOT CLAIM - it delivers ATTRIBUTABILITY, not descriptor-derived grouping - reporting/data.py builds HistoricalReading from this table with no descriptor at all, so the report path still groups by spelling - and the four sibling exporters reachable from the same operator-facing archive panel were NOT measured, which is why OC-024 stays BLOCKS-DEPLOYMENT.'
+    consequence: An archived record cannot later be attributed to a declared measurement identity, so downstream grouping falls back to the channel SPELLING - the inference the descriptor spine exists to remove. The identity was already resolved and then discarded one statement before it would have been persisted - ArchiveReader.query_reading_rows_bounded returns BoundedReadingRow.descriptor and ExperimentManager._load_experiment_readings built its row dict without it. Persisting an INVENTED identity where none exists is the opposite failure and is recorded separately as ARCHIVE-SYNTHETIC-LEGACY-IDENTITY-PERSISTED-331; charging the memory bound for bytes the row does not persist is recorded as ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327; and failing to charge for bytes it does persist is ARCHIVE-RETAINED-BUDGET-UNDERCHARGE-335. This record covers ONLY the loss of identity that exists.
+    invariant: 'measured_values.csv carries channel_id, descriptor_hash and descriptor_revision APPENDED after the six legacy columns, so a positional reader of the old table is unaffected; identity the archive resolved reaches the finalisation row rather than being dropped one statement before it would be persisted. The absent-identity and budget invariants belong to -331, -327 and -335 and are not restated here. WHAT THIS DOES NOT CLAIM - it delivers ATTRIBUTABILITY, not descriptor-derived grouping - reporting/data.py builds HistoricalReading from this table with no descriptor at all, so the report path still groups by spelling - and the four sibling exporters reachable from the same operator-facing archive panel were NOT measured, which is why OC-024 stays BLOCKS-DEPLOYMENT.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -3127,10 +3148,6 @@ records:
       - node: tests/core/test_experiment_archive_descriptors.py::test_the_six_legacy_columns_keep_their_positions
         ci_partition: core
       - node: tests/core/test_experiment_archive_loader_identity.py::test_a_declared_identity_survives_the_archive_round_trip
-        ci_partition: core
-      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
-        ci_partition: core
-      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_the_budget_with_the_identity_it_persists
         ci_partition: core
     red_evidence: replacing_the_identity_argument_with_None_AT_THE_CALL_SITE_left_all_14_nodes_green_because_the_extracted_helper_stayed_correct_in_isolation_while_production_stopped_charging_for_what_it_persists_so_the_WIRING_is_now_asserted_by_driving_the_real_loader_and_recording_the_argument; and_dropping_the_identity_terms_from_the_retained_byte_accounting_leaves_every_other_mapped_guard_GREEN_because_reaching_the_32_MiB_cap_inline_required_an_archive_no_guard_builds_which_is_why_the_accounting_was_extracted_and_is_now_asserted_directly_2026_08_06_pending_immutable_capture; and_reverting_the_csv_header_and_the_loader_together_turns_6_of_the_7_writer_nodes_red_and_reverting_the_entire_loader_carry_turns_4_of_the_6_loader_nodes_red_while_all_7_writer_nodes_stay_GREEN_which_is_the_finding_that_the_writer_suite_cannot_observe_a_loader_regression_2026_08_06_pending_immutable_capture
     green_evidence: pending
