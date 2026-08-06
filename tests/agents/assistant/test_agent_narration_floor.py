@@ -920,6 +920,84 @@ async def test_an_unscoped_outcome_still_settles_its_attempt() -> None:
     assert ledger._pending == set(), "the compatibility alias left a phantom pending attempt"
 
 
+@pytest.mark.asyncio
+async def test_the_event_loop_stops_creating_handlers_when_dispatch_is_saturated() -> None:
+    """Drive the REAL loop, because the recorded defect is task creation.
+
+    The ledger-level node asserts the gate's answer.  It does not instantiate
+    `AssistantLiveAgent`, occupy its semaphore, create handler tasks or inspect
+    `_handler_tasks` -- so a regression that MOVES OR OMITS the gate in
+    `_event_loop` would leave it green while handlers again grow without bound,
+    which is the consequence `-320` actually records.
+    """
+
+    import asyncio
+    from collections import deque
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._config = MagicMock(slice_a_notification=True, alarm_fired_enabled=True, max_calls_per_hour=10_000)
+    agent._call_timestamps = deque()
+    agent._semaphore = asyncio.Semaphore(1)
+    agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+    agent._handler_tasks = set()
+    agent._queue = asyncio.Queue()
+    agent._handle_alarm_fired = AsyncMock(side_effect=lambda *a, **k: asyncio.Event().wait())
+
+    await agent._semaphore.acquire()  # the inference slot never frees: dispatch is stuck
+
+    loop_task = asyncio.create_task(agent._event_loop())
+    try:
+        # THE CLOCK HAS TO BE DRIVEN.  Without it real time barely advances
+        # across the awaits, so a refire never reaches the escalation branch and
+        # no handler would be created whether the gate exists or not -- the node
+        # passes while measuring nothing.  A control confirmed exactly that:
+        # removing the gate left this green.
+        with patch("cryodaq.agents.assistant.live.agent.time.monotonic") as mono:
+            now = 1000.0
+            mono.return_value = now
+
+            # Distinct alarms saturate the gate.  Each is a first sighting, so
+            # each is admitted by design, and none completes.
+            for index in range(_MAX_OUTSTANDING_ATTEMPTS):
+                now += 1.0
+                mono.return_value = now
+                await agent._queue.put(
+                    MagicMock(event_type="alarm_fired", payload={"alarm_id": f"sat-{index}", "level": "CRITICAL"})
+                )
+                for _ in range(4):
+                    await asyncio.sleep(0)
+            saturated = len(agent._handler_tasks)
+            assert saturated >= _MAX_OUTSTANDING_ATTEMPTS, (
+                f"premise: the queue must be saturated; only {saturated} handlers were created"
+            )
+
+            # Now the term that ran away: ONE alarm refiring past several
+            # escalation intervals while nothing completes.  Each refire keeps
+            # `_seen` fresh, so this reaches the escalation branch -- the branch
+            # that, without the cap, admits and creates another handler.
+            for _ in range(400):
+                now += 5.0
+                mono.return_value = now
+                await agent._queue.put(
+                    MagicMock(event_type="alarm_fired", payload={"alarm_id": "sat-0", "level": "CRITICAL"})
+                )
+                for _ in range(4):
+                    await asyncio.sleep(0)
+
+            assert len(agent._handler_tasks) == saturated, (
+                f"handler tasks grew from {saturated} to {len(agent._handler_tasks)} on refires alone, "
+                "with the dispatch path stuck"
+            )
+    finally:
+        loop_task.cancel()
+        for task in [loop_task, *agent._handler_tasks]:
+            task.cancel()
+        await asyncio.gather(loop_task, *agent._handler_tasks, return_exceptions=True)
+
+
 def test_settled_state_costs_nothing_per_admission(clock) -> None:
     """Bookkeeping must scale with CONCURRENCY, not with lifetime admissions.
 
