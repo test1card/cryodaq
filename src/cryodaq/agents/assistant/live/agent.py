@@ -278,6 +278,15 @@ class _EventDedup:
         # than by history.
         self._settled_below = 0
         self._settled_above: set[int] = set()
+        # Admitted but not yet settled.  The watermark may never be forced past
+        # one of these: doing so makes `_has_settled` answer True for an attempt
+        # that has never reported, so its genuine first outcome is discarded.
+        self._pending: set[int] = set()
+        # The attempt id at which each alarm's CURRENT occurrence began -- reset
+        # whenever the alarm is admitted with no prior state, i.e. after a prune.
+        # A success from before that line describes a different occurrence and
+        # must not suppress this one.
+        self._generation: dict[str, int] = {}
         # When the CURRENT attempt was admitted, and when the operator was last
         # confirmed to have been told.  Kept apart from `_last_allowed` because
         # a failure must not re-arm an alarm that a DIFFERENT attempt narrated
@@ -304,10 +313,17 @@ class _EventDedup:
         return
 
     def _allow(self, event_id: str, now: float) -> bool:
+        fresh_occurrence = event_id not in self._attempt
         self._last_allowed[event_id] = now
         self._admitted_at[event_id] = now
         self._next_attempt += 1
         self._attempt[event_id] = self._next_attempt
+        self._pending.add(self._next_attempt)
+        if fresh_occurrence:
+            # No prior state: either the first ever admission for this alarm, or
+            # the first after `_prune` dropped it.  Everything before this line
+            # belongs to a different occurrence.
+            self._generation[event_id] = self._next_attempt
         # Allowing an attempt CLEARS the failure marker; `note_outcome` re-adds
         # it only if this attempt actually fails.  Leaving it set makes the
         # marker describe an attempt that is already superseded: the retry
@@ -384,6 +400,7 @@ class _EventDedup:
         """Record ``attempt`` as settled and advance the watermark over it."""
 
         self._settled_above.add(attempt)
+        self._pending.discard(attempt)
         while self._settled_below + 1 in self._settled_above:
             self._settled_below += 1
             self._settled_above.discard(self._settled_below)
@@ -395,8 +412,18 @@ class _EventDedup:
         # rather than hidden: a report from an attempt that far behind is
         # treated as a first report.
         if self._next_attempt - self._settled_below > _SETTLED_ATTEMPT_MEMORY:
-            self._settled_below = self._next_attempt - _SETTLED_ATTEMPT_MEMORY
-            self._settled_above = {seq for seq in self._settled_above if seq > self._settled_below}
+            forced = self._next_attempt - _SETTLED_ATTEMPT_MEMORY
+            if self._pending:
+                # NEVER past a still-pending id.  Forcing over one makes
+                # `_has_settled` answer True for an attempt that has not
+                # reported, so its genuine first outcome is dropped -- and a
+                # newer failure can then re-arm an alarm the operator was just
+                # told about.  The loss this cap trades against is memory, and
+                # memory is the cheaper of the two.
+                forced = min(forced, min(self._pending) - 1)
+            if forced > self._settled_below:
+                self._settled_below = forced
+                self._settled_above = {seq for seq in self._settled_above if seq > self._settled_below}
 
     def current_attempt(self, event_id: str) -> int:
         """The sequence number of the newest admission for ``event_id``.
@@ -446,6 +473,15 @@ class _EventDedup:
             if self._has_settled(attempt):
                 return
             self._mark_settled(attempt)
+
+        if delivered and attempt is not None and attempt < self._generation.get(event_id, 0):
+            # A success from BEFORE this alarm's current occurrence began -- the
+            # old state was pruned and the id was re-admitted since.  That
+            # narration described a different occurrence, possibly a different
+            # experiment, so letting it clear `_undelivered` and advance the
+            # clocks would suppress the CURRENT alarm for a full escalation
+            # interval on the strength of something nobody was told about it.
+            return
 
         if delivered:
             self._undelivered.discard(event_id)

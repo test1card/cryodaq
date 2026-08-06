@@ -30,7 +30,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cryodaq.agents.assistant.live.agent import _EventDedup
+from cryodaq.agents.assistant.live.agent import _SETTLED_ATTEMPT_MEMORY, _EventDedup
 
 WINDOW = 30.0
 ESCALATE = 300.0
@@ -93,20 +93,24 @@ def test_a_continuously_flapping_critical_is_re_narrated_not_silenced_forever(cl
     assert ledger.should_dispatch("alarm:vacuum_loss") is True
     ledger.note_outcome("alarm:vacuum_loss", delivered=True)
 
-    narrated_at = [start]
+    admitted_at = [start]
     for step in range(1, 181):  # 30 minutes of a CRITICAL re-firing every 10 s
         clock.return_value = start + step * 10.0
         if ledger.should_dispatch("alarm:vacuum_loss"):
-            narrated_at.append(clock.return_value)
+            admitted_at.append(clock.return_value)
             ledger.note_outcome("alarm:vacuum_loss", delivered=True)
 
-    # The property that matters is not how many messages arrive; it is how long
-    # an operator can be left hearing nothing about a live CRITICAL.  A silence
-    # cannot exceed one escalation interval plus the window that starts it.
-    gaps = [later - earlier for earlier, later in zip(narrated_at, narrated_at[1:], strict=False)]
-    longest_silence = max(gaps)
-    assert longest_silence <= ESCALATE + WINDOW, (
-        f"operator heard nothing for {longest_silence:.0f}s about a live CRITICAL"
+    # The property is the gap between ADMISSIONS, not between narrations the
+    # operator received.  `note_outcome` is called synchronously on a mocked
+    # clock here, so nothing in this file exercises the rate limit, semaphore,
+    # inference, audit persistence or transport that sit between an admission
+    # and a receipt -- and NO received-to-received maximum is asserted anywhere
+    # in this suite.  Calling these timestamps "silence" would smuggle the
+    # operator-visible bound back in through a variable name.
+    gaps = [later - earlier for earlier, later in zip(admitted_at, admitted_at[1:], strict=False)]
+    longest_admission_gap = max(gaps)
+    assert longest_admission_gap <= ESCALATE + WINDOW, (
+        f"{longest_admission_gap:.0f}s between ADMISSIONS for a live CRITICAL"
     )
     # And the ceiling the dedup window exists for must still hold.
     assert min(gaps) >= ESCALATE, f"re-narrated after only {min(gaps):.0f}s -- the spam bound is gone"
@@ -248,17 +252,18 @@ def test_the_silence_bound_holds_for_a_refire_just_inside_the_window(clock) -> N
 
     assert ledger.should_dispatch("alarm:edge") is True
     ledger.note_outcome("alarm:edge", delivered=True)
-    narrated_at = [start]
+    admitted_at = [start]
 
     for step in range(1, 121):  # ~1 hour of refires just inside the window
         clock.return_value = start + step * interval
         if ledger.should_dispatch("alarm:edge"):
-            narrated_at.append(clock.return_value)
+            admitted_at.append(clock.return_value)
             ledger.note_outcome("alarm:edge", delivered=True)
 
-    gaps = [later - earlier for earlier, later in zip(narrated_at, narrated_at[1:], strict=False)]
+    # ADMISSION gaps, not receipts -- see the note in the first node.
+    gaps = [later - earlier for earlier, later in zip(admitted_at, admitted_at[1:], strict=False)]
     assert max(gaps) <= ESCALATE + WINDOW, (
-        f"silence reached {max(gaps):.1f}s, above the claimed {ESCALATE + WINDOW:.0f}s bound"
+        f"admission gap reached {max(gaps):.1f}s, above the claimed {ESCALATE + WINDOW:.0f}s bound"
     )
 
 
@@ -704,6 +709,76 @@ def test_an_outstanding_attempt_keeps_its_settled_identity(clock) -> None:
     assert ledger._last_allowed.get("alarm:stalled", told) == told, (
         "a second report for an evicted attempt moved the clock to the audit-completion time"
     )
+
+
+def test_a_pending_attempt_survives_a_forced_watermark_jump(clock) -> None:
+    """The watermark must never be forced past an attempt that has not reported.
+
+    Doing so makes ``_has_settled`` answer True for a live attempt, so its
+    genuine FIRST outcome is discarded as a duplicate -- and a newer failure can
+    then re-arm an alarm the operator was just told about.  The earlier boundary
+    node cannot see this: its old attempt reports BEFORE the later admissions.
+    Here it reports after enough of them to force the jump.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:pending") is True
+    pending = ledger.current_attempt("alarm:pending")
+
+    # Many later attempts are admitted AND settled, driving the watermark on.
+    for index in range(_SETTLED_ATTEMPT_MEMORY + 32):
+        clock.return_value = start + 1.0 + index
+        other = f"alarm:filler-{index}"
+        assert ledger.should_dispatch(other) is True
+        ledger.note_outcome(other, delivered=True, attempt=ledger.current_attempt(other))
+
+    assert not ledger._has_settled(pending), (
+        "the watermark was forced past a live attempt, so its first report will be discarded"
+    )
+
+    # Its first and only report finally arrives.
+    clock.return_value = start + 90000.0
+    ledger.note_outcome("alarm:pending", delivered=True, attempt=pending)
+    assert "alarm:pending" not in ledger._undelivered
+
+
+def test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one(clock) -> None:
+    """A stale success is only good within the occurrence it belongs to.
+
+    After the alarm's state is pruned and the same id fires again, an old
+    attempt can still complete -- the delivery path is unbounded.  Applying it
+    would clear the NEW occurrence's marker and advance its clocks, suppressing
+    a live alarm for a full escalation interval on the strength of a narration
+    that described a different occurrence.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:generations") is True
+    old_attempt = ledger.current_attempt("alarm:generations")
+
+    # The alarm goes quiet past the prune horizon.  `_prune` runs inside
+    # `should_dispatch` AFTER `_seen` is refreshed, so this alarm's own refire
+    # can never prune it -- a DIFFERENT alarm has to fire in the gap.  That is
+    # the production shape too: the ledger is shared across alarms.
+    clock.return_value = start + ESCALATE + WINDOW + 60.0
+    ledger.should_dispatch("alarm:someone-else")
+    assert "alarm:generations" not in ledger._attempt, "premise: the old occurrence must have been pruned"
+
+    clock.return_value = start + ESCALATE + WINDOW + 120.0
+    assert ledger.should_dispatch("alarm:generations") is True
+    new_attempt = ledger.current_attempt("alarm:generations")
+    assert new_attempt != old_attempt
+
+    ledger.note_outcome("alarm:generations", delivered=False, attempt=new_attempt)
+    assert "alarm:generations" in ledger._undelivered, "premise: the current occurrence reached nobody"
+
+    # The old attempt, from the previous occurrence, finally succeeds.
+    clock.return_value = start + ESCALATE + WINDOW + 130.0
+    ledger.note_outcome("alarm:generations", delivered=True, attempt=old_attempt)
+
+    assert "alarm:generations" in ledger._undelivered, "a success from a pruned occurrence suppressed the current one"
 
 
 def test_an_attempt_id_is_never_reused_after_pruning(clock) -> None:

@@ -56,6 +56,30 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_allowing_a_retry_clears_the_marker_so_an_in_flight_attempt_is_not_retried_again
+    ci_partition: agents
+    red_evidence: the_bounded_retry_node_reports_every_admitted_attempt_as_failed_immediately_so_deleting_the_clear_of_undelivered_in_allow_left_it_green_only_a_node_that_leaves_an_admitted_retry_IN_FLIGHT_fails_when_that_production_fix_is_removed_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-WATERMARK-OVERRUN-FALSE-GREEN-315
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_pending_attempt_survives_a_forced_watermark_jump
+    ci_partition: agents
+    red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-PRUNED-GENERATION-FALSE-GREEN-316
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one
+    ci_partition: agents
+    red_evidence: a_success_from_an_attempt_admitted_before_the_alarms_state_was_pruned_cleared_the_NEW_occurrences_undelivered_marker_and_advanced_its_clocks_suppressing_a_live_alarm_for_a_full_escalation_interval_on_a_narration_describing_a_different_occurrence_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-QUIET-BRANCH-PRECEDENCE-FALSE-GREEN-312
     status: open
     scope: product_contract
@@ -3079,6 +3103,12 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_slow_delivery_does_not_leave_the_quiet_branch_armed
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_outstanding_attempt_keeps_its_settled_identity
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_allowing_a_retry_clears_the_marker_so_an_in_flight_attempt_is_not_retried_again
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_pending_attempt_survives_a_forced_watermark_jump
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one
         ci_partition: agents
     red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
     green_evidence: pending
