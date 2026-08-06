@@ -646,6 +646,66 @@ def test_a_settled_attempt_reporting_twice_does_not_drag_the_clock(clock) -> Non
     )
 
 
+def test_a_slow_delivery_does_not_leave_the_quiet_branch_armed(clock) -> None:
+    """The corrected clock is useless if an earlier branch never consults it.
+
+    ``should_dispatch`` checks "quiet for a full window" BEFORE the delivery
+    clock.  A delivery slower than ``window_s`` used to leave ``_seen`` at the
+    admission, so a refire seconds after the operator was told took that first
+    branch and narrated again immediately -- past every later check.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:slowsend") is True
+    attempt = ledger.current_attempt("alarm:slowsend")
+
+    # Generation and dispatch take 90 s, and the alarm emits nothing meanwhile.
+    delivered_at = start + 90.0
+    clock.return_value = delivered_at
+    ledger.note_outcome("alarm:slowsend", delivered=True, attempt=attempt)
+
+    clock.return_value = delivered_at + 3.0
+    assert ledger.should_dispatch("alarm:slowsend") is False, (
+        "a refire seconds after delivery took the stale-quiet branch and re-narrated"
+    )
+
+
+def test_an_outstanding_attempt_keeps_its_settled_identity(clock) -> None:
+    """Idempotence cannot be bounded by id distance when delivery is unbounded.
+
+    An attempt that falls far behind would have its first report evicted from
+    the settled set and its second accepted -- moving the clock to the
+    audit-completion time, which is the postponement settle-once exists to
+    prevent.  The floor is the oldest attempt that has not settled.
+    """
+
+    from cryodaq.agents.assistant.live.agent import _SETTLED_ATTEMPT_MEMORY
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:stalled") is True
+    stalled = ledger.current_attempt("alarm:stalled")
+
+    # It reports delivery once, from the router callback.
+    clock.return_value = start + 5.0
+    ledger.note_outcome("alarm:stalled", delivered=True, attempt=stalled)
+    told = ledger._last_allowed["alarm:stalled"]
+
+    # Far more than the distance limit of other admissions go by.
+    for index in range(_SETTLED_ATTEMPT_MEMORY + 16):
+        clock.return_value = start + 100.0 + index
+        ledger.should_dispatch(f"alarm:other-{index}")
+
+    # Its audit settlement finally completes and reports the same attempt again.
+    clock.return_value = start + 100000.0
+    ledger.note_outcome("alarm:stalled", delivered=True, attempt=stalled)
+
+    assert ledger._last_allowed.get("alarm:stalled", told) == told, (
+        "a second report for an evicted attempt moved the clock to the audit-completion time"
+    )
+
+
 def test_an_attempt_id_is_never_reused_after_pruning(clock) -> None:
     """A per-alarm counter is pruned with its alarm; a global one cannot be.
 

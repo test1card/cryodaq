@@ -265,7 +265,19 @@ class _EventDedup:
         # unique this single set answers both "has this attempt reported?" for
         # the current attempt and for a superseded one, which is what makes a
         # stale report idempotent instead of applying twice.
-        self._settled_attempts: set[int] = set()
+        # Settled attempts, as a WATERMARK plus the out-of-order remainder.
+        # Every id at or below `_settled_below` has settled; ids above it that
+        # settled early live in `_settled_above` until the watermark catches up.
+        #
+        # A plain bounded set cannot do this job.  The delivery path has no
+        # end-to-end bound, so an attempt far enough behind would have its first
+        # report evicted and its second accepted -- restoring the double-report
+        # the set exists to stop.  Because ids are issued in order and nearly
+        # all settle, `_settled_above` holds only what is genuinely in flight,
+        # so this is EXACT idempotence in memory bounded by concurrency rather
+        # than by history.
+        self._settled_below = 0
+        self._settled_above: set[int] = set()
         # When the CURRENT attempt was admitted, and when the operator was last
         # confirmed to have been told.  Kept apart from `_last_allowed` because
         # a failure must not re-arm an alarm that a DIFFERENT attempt narrated
@@ -287,11 +299,9 @@ class _EventDedup:
         self._attempt = {key: seq for key, seq in self._attempt.items() if key in self._seen}
         self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in self._seen}
         self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in self._seen}
-        # Bounded by ID DISTANCE rather than by alarm, so an id stays known long
-        # after its alarm is pruned -- that is the whole point of the change --
-        # while the set cannot grow without limit on a long-lived agent.
-        floor = self._next_attempt - _SETTLED_ATTEMPT_MEMORY
-        self._settled_attempts = {seq for seq in self._settled_attempts if seq > floor}
+        # `_settled_below` and `_settled_above` are pruned as they are written;
+        # see `_mark_settled`.  Nothing to do here.
+        return
 
     def _allow(self, event_id: str, now: float) -> bool:
         self._last_allowed[event_id] = now
@@ -367,6 +377,27 @@ class _EventDedup:
             return self._allow(event_id, now)
         return False
 
+    def _has_settled(self, attempt: int) -> bool:
+        return attempt <= self._settled_below or attempt in self._settled_above
+
+    def _mark_settled(self, attempt: int) -> None:
+        """Record ``attempt`` as settled and advance the watermark over it."""
+
+        self._settled_above.add(attempt)
+        while self._settled_below + 1 in self._settled_above:
+            self._settled_below += 1
+            self._settled_above.discard(self._settled_below)
+        # An attempt that NEVER reports -- a task lost without any handler or
+        # callback running -- would otherwise hold the watermark forever and let
+        # `_settled_above` grow with it.  Forcing the watermark forward past a
+        # very old gap trades exact idempotence for that one ancient attempt
+        # against unbounded memory.  It is a real, bounded loss and is stated
+        # rather than hidden: a report from an attempt that far behind is
+        # treated as a first report.
+        if self._next_attempt - self._settled_below > _SETTLED_ATTEMPT_MEMORY:
+            self._settled_below = self._next_attempt - _SETTLED_ATTEMPT_MEMORY
+            self._settled_above = {seq for seq in self._settled_above if seq > self._settled_below}
+
     def current_attempt(self, event_id: str) -> int:
         """The sequence number of the newest admission for ``event_id``.
 
@@ -412,12 +443,20 @@ class _EventDedup:
             # and the second report drags the clock from the moment of delivery
             # to the moment the audit write finished, postponing the next
             # admission by however long the filesystem took.
-            if attempt in self._settled_attempts:
+            if self._has_settled(attempt):
                 return
-            self._settled_attempts.add(attempt)
+            self._mark_settled(attempt)
 
         if delivered:
             self._undelivered.discard(event_id)
+            # A CONFIRMED DELIVERY IS ALSO A FRESH OBSERVATION OF THIS ALARM.
+            # Without this, a delivery slower than `window_s` leaves `_seen` at
+            # the admission, so the very next refire takes the "quiet for a full
+            # window" branch -- which is evaluated BEFORE the delivery clock --
+            # and narrates again seconds after the operator was told.  The
+            # corrected clock below is useless if an earlier branch never
+            # consults it.
+            self._seen[event_id] = now
             # THE ESCALATION CLOCK STARTS WHEN THE OPERATOR WAS TOLD, not when
             # the gate admitted the attempt.  Generation can take up to
             # ``timeout_s``, and stamping at admission makes the silence the
@@ -846,6 +885,21 @@ class AssistantLiveAgent:
                 result.truncated,
                 audit_id,
             )
+        # Settle-once makes a second report harmless, but "harmless" depends on
+        # the settled id still being remembered when it arrives.  Not making the
+        # second report at all is the structural fix; the ledger's idempotence
+        # is then a backstop rather than the mechanism.
+        reported_early = False
+
+        def record_outcome(reported: dict[str, Any]) -> None:
+            nonlocal reported_early
+            reported_early = True
+            self._dedup.note_outcome(
+                dedup_id,  # type: ignore[arg-type]
+                delivered=_reached_any_recipient(reported),
+                attempt=attempt,
+            )
+
         dispatched, outcomes = await self._dispatch_with_audit(
             event=event,
             audit_id=audit_id,
@@ -867,18 +921,15 @@ class AssistantLiveAgent:
             # returns, the assignment below never runs, and the cancellation
             # fallback settles a DELIVERED attempt as undelivered -- so the
             # next refire resends a narration the operator has already read.
-            on_outcomes=(
-                None
-                if dedup_id is None
-                else lambda reported: self._dedup.note_outcome(
-                    dedup_id,
-                    delivered=_reached_any_recipient(reported),
-                    attempt=attempt,
-                )
-            ),
+            on_outcomes=None if dedup_id is None else record_outcome,
         )
 
-        if dedup_id is not None:
+        if dedup_id is not None and not reported_early:
+            # Only when the router callback did NOT run -- dispatch skipped for a
+            # truncated or empty generation, or refused before it began.  When it
+            # did run, the outcome is already recorded at the real acknowledgement
+            # and reporting again here would settle the same attempt twice.
+            #
             # OC-028: the ledger suppresses duplicates of what the operator
             # RECEIVED, so nothing accepted means the next occurrence must not
             # be silenced by a narration nobody saw.
