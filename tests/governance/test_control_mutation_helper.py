@@ -143,15 +143,28 @@ def test_a_write_that_lands_is_restored_even_if_the_verifying_read_fails(tmp_pat
     path.write_bytes(b"value = 1\n")
     original = path.read_bytes()
     real_read = Path.read_bytes
-    seen: list[int] = []
+    real_write = Path.write_bytes
+    written: list[int] = []
+
+    def counting_write(self: Path, data: bytes) -> int:
+        written.append(1)
+        return real_write(self, data)
+
+    failed_once: list[int] = []
 
     def flaky_read(self: Path) -> bytes:
-        seen.append(1)
-        if len(seen) == 2:  # the read immediately after the mutation write
+        # Fail exactly ONCE, on the first read after the mutation write --
+        # whichever ordinal that is. Counting raw calls made this test brittle:
+        # adding the pre-write compare shifted the index and it would have
+        # sabotaged the wrong read. Failing repeatedly is also wrong: it would
+        # break the restore itself and assert something this node is not about.
+        if written and not failed_once:
+            failed_once.append(1)
             raise OSError("transient filesystem error")
         return real_read(self)
 
     with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "write_bytes", counting_write)
         patch.setattr(Path, "read_bytes", flaky_read)
         with pytest.raises(OSError, match="transient"):
             with control_mutation(path, old="value = 1", new="value = 2"):
@@ -242,6 +255,42 @@ def test_a_restored_file_is_not_shadowed_by_the_mutant_bytecode(tmp_path: Path) 
 
     assert module.read_bytes() == b"VALUE = 1\n"
     assert child() == "1", "a child interpreter still loaded the mutant from cached bytecode after restore"
+
+
+def test_an_edit_landing_before_the_mutation_write_is_preserved(tmp_path: Path) -> None:
+    """The window at the OTHER end, which the restoration check cannot see.
+
+    Guarding only the restore protected the wrong side: another writer landing
+    between the helper's read and its write was erased by the mutation itself,
+    and the control then measured -- and dutifully restored -- a file whose real
+    content it had already destroyed. Codex reproduced it after the restore-side
+    fix.
+    """
+
+    path = tmp_path / "shared.py"
+    path.write_bytes(b"value = 1\n")
+    original = path.read_bytes()
+    real_read = Path.read_bytes
+    reads: list[int] = []
+
+    def read_then_let_someone_else_write(self: Path) -> bytes:
+        data = real_read(self)
+        reads.append(1)
+        if len(reads) == 1:  # the helper's initial read of the original
+            real_write = Path.write_bytes
+            real_write(path, b"value = 3  # concurrent\n")
+        return data
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "read_bytes", read_then_let_someone_else_write)
+        with pytest.raises(ControlTargetChanged):
+            with control_mutation(path, old="value = 1", new="value = 2"):
+                pytest.fail("the body must not run once the target has moved under us")
+
+    assert real_read(path) == b"value = 3  # concurrent\n", (
+        "the mutation erased a concurrent edit that landed after the helper's read"
+    )
+    assert real_read(path) != original
 
 
 def test_a_concurrent_edit_is_preserved_rather_than_overwritten(tmp_path: Path) -> None:

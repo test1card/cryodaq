@@ -84,14 +84,22 @@ def _invalidate_bytecode(path: Path) -> None:
     unchanged, so a ``.pyc`` written from the MUTANT during the control body is
     still considered valid afterwards and the next interpreter loads the mutant
     while the source on disk reads correct.  Codex reproduced exactly that.
+
+    Every cache tag is removed, not just this interpreter's.  A control can run
+    under one supported Python and launch a child under another --
+    `cache_from_source()` names only the RUNNING interpreter's tag, so a helper
+    on 3.12 left `victim.cpython-314.pyc` in place and the next 3.14 child
+    loaded the mutant. Codex reproduced that after the single-tag fix, which is
+    why this globs the whole `__pycache__` entry for the stem instead.
     """
 
-    try:
-        cached = importlib.util.cache_from_source(str(path))
-    except (NotImplementedError, ValueError):  # pragma: no cover - not a source path
-        return
-    with contextlib.suppress(OSError):
-        os.remove(cached)
+    for cached in path.parent.glob(f"__pycache__/{path.stem}.*.pyc"):
+        with contextlib.suppress(OSError):
+            os.remove(cached)
+    # Legacy same-directory `.pyc`, and any cache this interpreter would name
+    # that the glob above cannot see.
+    with contextlib.suppress(NotImplementedError, ValueError, OSError):
+        os.remove(importlib.util.cache_from_source(str(path)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +180,19 @@ def control_mutation(
     # the verifying read below raises.
     on_disk = mutated
     try:
+        # Write only if the target is still what was read.  The restoration
+        # check alone protected the wrong end: another writer landing between
+        # the read above and this write was erased before anything could notice,
+        # and the control then measured -- and restored -- a file whose real
+        # content it had destroyed. This narrows that window to the gap between
+        # these two adjacent statements; it does NOT close it, because there is
+        # no atomic compare-and-write here, and pretending otherwise would be
+        # the same overclaim this helper exists to prevent.
+        if path.read_bytes() != original:
+            raise ControlTargetChanged(
+                f"{path} changed between the control's read and its write; refusing to mutate. "
+                "Reconcile the file before trusting any measurement from this session."
+            )
         path.write_bytes(mutated)
         _invalidate_bytecode(path)
         on_disk = path.read_bytes()

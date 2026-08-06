@@ -299,39 +299,6 @@ def test_open_cells_oc031_preserves_its_supported_interpreter_caveat() -> None:
     # **Python 3.13 gives 110 errors over 135 challenges**" -- attributing the
     # failure to the interpreter the row itself says AGREES with CI, while both
     # assertions pass. Codex demonstrated that one too, on `6c27f0ee`.
-    match = re.search(
-        rf"\*\*Python {re.escape(minimum)}\b[^*]*?(\d+) errors over (\d+) challenges\*\*",
-        oc_031,
-    )
-    assert match is not None, (
-        f"OC-031 does not attribute an error count to Python {minimum} in one clause, in the form "
-        f"`**Python {minimum} ... <n> errors over <m> challenges**`"
-    )
-    errors, denominator = int(match.group(1)), int(match.group(2))
-
-    # The DENOMINATOR is re-derivable from the live sweep, so it is checked
-    # against the sweep rather than trusted.
-    sys.path.insert(0, str(REPO_ROOT / "tests"))
-    try:
-        sweep = importlib.import_module("test_c2_repo_wide_spelling_sweep")
-    finally:
-        sys.path.remove(str(REPO_ROOT / "tests"))
-    sites = sweep._sites(REPO_ROOT)
-    assert denominator == len(sites), (
-        f"OC-031 says the divergence is over {denominator} challenges; the live sweep has {len(sites)}"
-    )
-    # The MAGNITUDE cannot be re-derived here -- this guard runs on one
-    # interpreter and cannot measure another without claiming a number it did
-    # not take, which is the error the whole prevention exists for.  So it is
-    # pinned as a RECORDED measurement, and changing the row requires changing
-    # this constant, which requires re-running the sweep on that interpreter.
-    assert 0 < errors <= denominator, f"OC-031 reports {errors} errors over {denominator} challenges"
-    assert errors == _RECORDED_MINIMUM_INTERPRETER_ERRORS, (
-        f"OC-031 says {errors} errors on Python {minimum}; the recorded measurement is "
-        f"{_RECORDED_MINIMUM_INTERPRETER_ERRORS}. If the sweep changed, RE-MEASURE on Python {minimum} "
-        "and update both this constant and the row -- do not edit one to match the other."
-    )
-
     # Re-derive the MECHANISM rather than trusting the sentence that describes
     # it.  The divergence exists because the challenge fingerprint hashes
     # `ast.dump` text, which is version-dependent.  If that ever stops being
@@ -342,6 +309,72 @@ def test_open_cells_oc031_preserves_its_supported_interpreter_caveat() -> None:
         "the C2 sweep no longer fingerprints via `ast.dump`, so the interpreter-binding this guard "
         f"asserts about OC-031 may be stale: re-measure the registry on Python {minimum} and on CI "
         "before editing the caveat out of the row"
+    )
+
+
+def test_open_cells_oc031_binds_the_error_count_to_the_declared_floor() -> None:
+    """The magnitude, its denominator, and which interpreter each belongs to.
+
+    Prevention ``REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301``; false-green pair
+    ``SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311``.
+
+    A separate node from the caveat guard because the false-green registry binds
+    one pair per node, and because this property has now escaped twice in two
+    different ways: first the guard asserted the substring ``errors over``, so
+    rewriting 110 to a false 0 kept passing; then it parsed the version and the
+    magnitude independently, so the row could attribute the failure to Python
+    3.13 -- the interpreter it elsewhere says AGREES with CI -- and still pass.
+    Both were found by review, not here.
+    """
+
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    oc_031 = next((line for line in text.splitlines() if line.startswith("| OC-031 |")), None)
+    assert oc_031 is not None, "OC-031 row is missing from the register"
+    minimum = _declared_minimum_python_version()
+
+    # ONE clause: the declared floor and its own error count.
+    match = re.search(
+        rf"\*\*Python {re.escape(minimum)}\b[^*]*?(\d+) errors over (\d+) challenges\*\*",
+        oc_031,
+    )
+    assert match is not None, (
+        f"OC-031 does not attribute an error count to Python {minimum} in one clause, in the form "
+        f"`**Python {minimum} ... <n> errors over <m> challenges**`"
+    )
+    errors, denominator = int(match.group(1)), int(match.group(2))
+
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    try:
+        sweep = importlib.import_module("test_c2_repo_wide_spelling_sweep")
+    finally:
+        sys.path.remove(str(REPO_ROOT / "tests"))
+    sites = sweep._sites(REPO_ROOT)
+
+    # The DENOMINATOR is re-derivable, so it is derived rather than trusted.
+    assert denominator == len(sites), (
+        f"OC-031 says the divergence is over {denominator} challenges; the live sweep has {len(sites)}"
+    )
+    # So is the count on the interpreter this test is RUNNING on. The row claims
+    # the registry is exact on CI; that half needs no pinned constant, and
+    # asserting it here is what stops the row describing a runtime nobody
+    # measured while the guard nods along.
+    running_errors = len(sweep._registry_errors(sites))
+    assert f"{running_errors} registry errors" in oc_031 or f"gives {running_errors} registry errors" in oc_031, (
+        f"OC-031 does not state the live count for the running interpreter "
+        f"(Python {sys.version_info.major}.{sys.version_info.minor}), which is {running_errors}"
+    )
+
+    # The MAGNITUDE on the declared floor cannot be re-derived here -- this
+    # process is not that interpreter, and measuring it by assertion would be
+    # claiming a number nobody took, which is the error the whole prevention
+    # exists for. It is pinned as a RECORDED measurement instead, so the row and
+    # the constant have to move together and moving them means re-running the
+    # sweep over there.
+    assert 0 < errors <= denominator, f"OC-031 reports {errors} errors over {denominator} challenges"
+    assert errors == _RECORDED_MINIMUM_INTERPRETER_ERRORS, (
+        f"OC-031 says {errors} errors on Python {minimum}; the recorded measurement is "
+        f"{_RECORDED_MINIMUM_INTERPRETER_ERRORS}. If the sweep changed, RE-MEASURE on Python {minimum} "
+        "and update both this constant and the row -- do not edit one to match the other."
     )
 
 
