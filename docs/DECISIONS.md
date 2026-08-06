@@ -287,8 +287,13 @@ The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
   admitted escalation outright until its bucket drains — the inference
   semaphore, context assembly, audit-intent persistence, generation, and
   sequential per-recipient transport acknowledgements. No end-to-end deadline
-  spans them. A rejected or slow attempt reports undelivered and is retried, so
-  silence is not permanent; that is a weaker statement than a bound and is
+  spans them. A rejected or slow attempt reports undelivered and is retried ON THE NEXT
+  REFIRE -- and only then. `engine_wiring/runtime_tasks.py` publishes
+  `alarm_fired` on a `TRIGGERED` transition, and no timer consumes the
+  undelivered marker, so a CRITICAL whose sole transition was rejected by the
+  hourly rate limit and which then stays active without transitioning again
+  is never narrated at all. Saying silence is not permanent, unqualified, was
+  false; that is a weaker statement than a bound and is
   deliberately written as one. The first version of this entry claimed 300 s
   flat, the second claimed `300 s + refire + timeout_s`, and both were false.
   A real received-to-received deadline would be a design change beyond OC-028.

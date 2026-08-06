@@ -104,11 +104,27 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: an_unscoped_note_outcome_or_the_mark_delivered_alias_never_removed_the_issued_id_from_pending_so_after_MAX_OUTSTANDING_ATTEMPTS_such_alarms_the_new_backpressure_check_refused_every_later_admission_forever_with_no_work_in_flight_and_the_compatibility_and_pruning_nodes_never_inspected_pending_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: NARRATION-GUARD-PARTIAL-DELIVERY-HELPER-ONLY-FALSE-GREEN-333
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_records_a_partial_delivery_as_seen
+    ci_partition: agents
+    red_evidence: the_previous_node_proved_only_that_reached_any_recipient_returns_the_right_value_IN_ISOLATION_so_it_stayed_green_when_the_handler_used_the_audit_strict_is_delivered_outcome_instead_which_settles_a_partial_telegram_result_as_FAILED_and_resends_to_the_recipient_who_already_read_it_confirmed_by_control_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-AUDIT-CANCEL-INJECTED-CALLBACK-FALSE-GREEN-334
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write
+    ci_partition: agents
+    red_evidence: the_previous_node_called_dispatch_with_audit_directly_and_supplied_the_outcome_callback_itself_so_deleting_the_production_on_outcomes_wiring_from_handle_alarm_fired_left_it_GREEN_while_cancellation_inside_audit_complete_settled_a_delivered_attempt_as_undelivered_confirmed_by_control_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-UNBOUNDED-QUEUE-FALSE-GREEN-320
     status: open
     scope: product_contract
     runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
-    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_saturated_dispatch_path_stops_admitting_new_attempts
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_event_loop_stops_creating_handlers_when_dispatch_is_saturated
     ci_partition: agents
     red_evidence: removing_the_gate_turns_THREE_nodes_red_including_the_event_loop_node_which_drives_the_real_event_loop_with_a_blocked_semaphore_and_a_driven_clock_and_asserts_handler_tasks_do_not_grow_on_refires_an_earlier_version_without_the_driven_clock_stayed_GREEN_under_that_control_because_real_time_never_reached_an_escalation; and_with_both_inference_slots_stuck_every_escalation_admitted_another_attempt_and_created_another_handler_task_and_a_queued_task_neither_consumes_rate_limit_capacity_nor_settles_its_id_so_handler_tasks_and_the_pending_set_grew_without_bound_until_shutdown_and_no_node_left_work_uncompleted_2026_08_06_pending_immutable_capture
     green_evidence: pending
@@ -3174,13 +3190,9 @@ records:
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_cancellation_while_queued_for_an_inference_slot_is_reported
         ci_partition: agents
-      - node: tests/agents/assistant/test_agent_narration_floor.py::test_cancellation_during_the_audit_write_does_not_discard_the_delivery
-        ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_cancellation_before_the_handler_first_runs_is_reported
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_escalation_clock_starts_when_the_operator_was_told
-        ci_partition: agents
-      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_partially_delivered_narration_counts_as_seen
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_newer_failure_does_not_undo_an_older_confirmed_delivery
         ci_partition: agents
@@ -3211,6 +3223,10 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_occurrence_returning_under_backpressure_is_a_first_sighting
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_unscoped_outcome_still_settles_its_attempt
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_records_a_partial_delivery_as_seen
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_duplicate_compatibility_delivery_does_not_move_the_clock
         ci_partition: agents

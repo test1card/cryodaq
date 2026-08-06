@@ -395,7 +395,7 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-024",
         "OC-026",
         # OC-028 STAYS BLOCKING. The owner's A+B behaviour is implemented, but
-        # ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304 and all seven false-green
+        # ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304 and all seventeen false-green
         # pairs are status: open with green_evidence: pending, and AGENTS.md:343-350
         # forbids closing a completion disposition while its prevention is open.
         # Partial delivery across a cancellation inside the router is also not

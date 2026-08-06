@@ -292,28 +292,6 @@ def test_a_failed_delivery_does_not_license_unbounded_retries(clock) -> None:
     assert allowed >= 1, "a persistent outage must still retry eventually"
 
 
-def test_a_partially_delivered_narration_counts_as_seen() -> None:
-    """One broken chat among several must not trigger a resend to everyone.
-
-    ``_is_delivered_outcome`` requires EVERY recipient of a target to succeed,
-    which is right for the audit trail and wrong for suppression: if one of two
-    Telegram chats received the narration, an operator has read it.
-    """
-
-    from cryodaq.agents.assistant.live.agent import _reached_any_recipient
-    from cryodaq.agents.assistant.live.output_router import _is_delivered_outcome
-
-    partial = {"telegram": {"-100111": "delivered", "-100222": "failed"}}
-    assert _is_delivered_outcome(partial["telegram"]) is False, "premise: the audit view rejects partial"
-    assert _reached_any_recipient(partial) is True, "suppression must treat a partial delivery as seen"
-
-    nobody = {"telegram": {"-100111": "failed", "-100222": "outcome_unknown"}}
-    assert _reached_any_recipient(nobody) is False
-
-    assert _reached_any_recipient({"operator_log": "delivered"}) is True
-    assert _reached_any_recipient({}) is False
-
-
 def test_allowing_a_retry_clears_the_marker_so_an_in_flight_attempt_is_not_retried_again(clock) -> None:
     """A stale failure marker describes an attempt that has been superseded.
 
@@ -1062,6 +1040,130 @@ def test_a_duplicate_compatibility_delivery_does_not_move_the_clock(clock) -> No
     assert ledger._last_allowed["alarm:alias"] == told
 
 
+def _alarm_agent(*, outcomes, audit_cancels: bool = False):
+    """An AssistantLiveAgent wired just enough to run `_handle_alarm_fired`.
+
+    Driving the real handler is the point: a node that calls
+    `_dispatch_with_audit` itself, or supplies the outcome callback itself,
+    stays green when the production wiring in `_handle_alarm_fired` is deleted.
+    """
+
+    import asyncio
+    from collections import deque
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
+
+    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
+    agent._config = MagicMock(
+        brand_name="X",
+        max_tokens=64,
+        temperature=0.0,
+        num_ctx=1024,
+        max_calls_per_hour=100,
+        slice_b_suggestion=False,
+        telegram_enabled=True,
+        operator_log_enabled=False,
+    )
+    agent._call_timestamps = deque()
+    agent._semaphore = asyncio.Semaphore(1)
+    agent._handler_tasks = set()
+    agent._dedup = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+
+    agent._audit = MagicMock()
+    agent._audit.make_audit_id = MagicMock(return_value="a1")
+    agent._audit.prepare = AsyncMock(return_value="intent.json")
+    if audit_cancels:
+
+        async def cancelling(**_):
+            raise asyncio.CancelledError()
+
+        agent._audit.complete = cancelling
+    else:
+        agent._audit.complete = AsyncMock(return_value="settled.json")
+
+    agent._ctx_builder = MagicMock()
+    agent._ctx_builder.build_alarm_context = AsyncMock(
+        return_value=MagicMock(
+            alarm_id="vacuum_loss",
+            level="CRITICAL",
+            channels=["T12"],
+            values={"T12": 4.2},
+            phase=None,
+            experiment_id=None,
+            experiment_age_s=None,
+            target_temp=None,
+        )
+    )
+    agent._ollama = MagicMock()
+    agent._ollama.generate = AsyncMock(
+        return_value=MagicMock(text="narration", model="m", tokens_in=1, tokens_out=1, latency_s=0.1, truncated=False)
+    )
+    agent._router = MagicMock()
+    agent._router.dispatch_detailed = AsyncMock(return_value=outcomes)
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_the_handler_records_a_partial_delivery_as_seen() -> None:
+    """Drive `_handle_alarm_fired`, not `_reached_any_recipient` in isolation.
+
+    Testing the helper alone stays green if the handler stops using it, or uses
+    the audit-strict `_is_delivered_outcome` instead -- and then a partial
+    Telegram result settles the attempt as FAILED and resends to the recipient
+    who already read it.
+    """
+
+    from unittest.mock import MagicMock
+
+    agent = _alarm_agent(outcomes={"telegram": {"-100111": "delivered", "-100222": "failed"}})
+    assert agent._dedup.should_dispatch("alarm:partial") is True
+    attempt = agent._dedup.current_attempt("alarm:partial")
+
+    await agent._handle_alarm_fired(
+        MagicMock(event_type="alarm_fired", payload={"alarm_id": "vacuum_loss"}, experiment_id=None),
+        dedup_id="alarm:partial",
+        attempt=attempt,
+    )
+
+    assert "alarm:partial" not in agent._dedup._undelivered, (
+        "a narration one recipient read was recorded as reaching nobody, so it will be resent to them"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write() -> None:
+    """Drive the handler so the production `on_outcomes` wiring is what is tested.
+
+    Supplying the callback from the test leaves the node green when
+    `on_outcomes=record_outcome` is deleted from `_handle_alarm_fired` -- and in
+    that regression cancellation inside `_audit.complete` stops the handler
+    seeing the successful send, so `_safe_handle` settles it undelivered and the
+    next refire resends a narration the operator already has.
+    """
+
+    import asyncio
+    from unittest.mock import MagicMock
+
+    agent = _alarm_agent(outcomes={"telegram": {"-100111": "delivered"}}, audit_cancels=True)
+    assert agent._dedup.should_dispatch("alarm:auditcancel") is True
+    attempt = agent._dedup.current_attempt("alarm:auditcancel")
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent._handle_alarm_fired(
+            MagicMock(event_type="alarm_fired", payload={"alarm_id": "vacuum_loss"}, experiment_id=None),
+            dedup_id="alarm:auditcancel",
+            attempt=attempt,
+        )
+
+    assert "alarm:auditcancel" not in agent._dedup._undelivered, (
+        "cancellation inside the audit write discarded a delivery the operator had already received"
+    )
+    # And the blanket cancellation fallback must not be able to undo it.
+    agent._dedup.note_outcome("alarm:auditcancel", delivered=False, attempt=attempt)
+    assert "alarm:auditcancel" not in agent._dedup._undelivered
+
+
 def test_settled_state_costs_nothing_per_admission(clock) -> None:
     """Bookkeeping must scale with CONCURRENCY, not with lifetime admissions.
 
@@ -1171,68 +1273,6 @@ def test_an_attempt_id_is_never_reused_after_pruning(clock) -> None:
     ledger.note_outcome("alarm:pruned", delivered=False, attempt=stale_attempt)
     ledger.note_outcome("alarm:pruned", delivered=True, attempt=fresh_attempt)
     assert "alarm:pruned" not in ledger._undelivered
-
-
-@pytest.mark.asyncio
-async def test_cancellation_during_the_audit_write_does_not_discard_the_delivery() -> None:
-    """``stop()`` landing inside ``_audit.complete``, after the send succeeded.
-
-    ``_dispatch_with_audit`` never returns, so the caller never learns the
-    narration was delivered, and the cancellation fallback would settle a
-    delivered attempt as undelivered -- resending to an operator who has read
-    it.  The outcome is therefore recorded the moment the router reports, before
-    the audit settlement write.
-    """
-
-    import asyncio
-    from typing import Any
-    from unittest.mock import AsyncMock, MagicMock
-
-    from cryodaq.agents.assistant.live.agent import AssistantLiveAgent
-
-    agent = AssistantLiveAgent.__new__(AssistantLiveAgent)
-    agent._audit = MagicMock()
-    agent._audit.prepare = AsyncMock(return_value="intent.json")
-
-    async def cancelled_settlement(**_: Any) -> None:
-        raise asyncio.CancelledError()
-
-    agent._audit.complete = cancelled_settlement
-    agent._router = MagicMock()
-    agent._router.dispatch_detailed = AsyncMock(return_value={"telegram": {"-100111": "delivered"}})
-
-    ledger = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
-    assert ledger.should_dispatch("alarm:audit") is True
-    attempt = ledger.current_attempt("alarm:audit")
-
-    from cryodaq.agents.assistant.live.agent import _reached_any_recipient
-
-    with pytest.raises(asyncio.CancelledError):
-        await agent._dispatch_with_audit(
-            event=MagicMock(event_type="alarm_fired", payload={}, experiment_id=None),
-            audit_id="a1",
-            payload={},
-            context_assembled="",
-            prompt_template="alarm_summary",
-            model="m",
-            system_prompt="",
-            user_prompt="",
-            response="text",
-            tokens={"in": 1, "out": 1},
-            latency_s=0.1,
-            errors=[],
-            targets=[],
-            on_outcomes=lambda reported: ledger.note_outcome(
-                "alarm:audit", delivered=_reached_any_recipient(reported), attempt=attempt
-            ),
-        )
-
-    assert "alarm:audit" not in ledger._undelivered, (
-        "cancellation inside the audit write discarded a delivery the operator had already received"
-    )
-    # And the blanket cancellation fallback must not be able to undo it.
-    ledger.note_outcome("alarm:audit", delivered=False, attempt=attempt)
-    assert "alarm:audit" not in ledger._undelivered
 
 
 @pytest.mark.asyncio
