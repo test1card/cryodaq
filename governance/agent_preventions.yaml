@@ -56,6 +56,22 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: ARCHIVE-BUDGET-WIRING-FALSE-GREEN-324
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
+    guard: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_the_budget_with_the_identity_it_persists
+    ci_partition: core
+    red_evidence: replacing_the_identity_argument_with_None_AT_THE_CALL_SITE_left_all_14_nodes_green_because_extracting_retained_row_bytes_made_the_arithmetic_assertable_while_leaving_the_CALL_unguarded_so_the_helper_stayed_correct_in_isolation_while_production_stopped_charging_for_what_it_persists_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: ARCHIVE-BUDGET-OVERCHARGE-FALSE-GREEN-325
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
+    guard: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_nothing_for_a_legacy_row
+    ci_partition: core
+    red_evidence: the_legacy_filter_runs_before_the_call_so_nothing_asserted_that_a_row_whose_identity_is_NOT_persisted_is_also_not_charged_an_over_charging_budget_is_a_different_defect_from_an_under_charging_one_but_it_is_still_a_wrong_bound_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311
     status: open
     scope: repository
