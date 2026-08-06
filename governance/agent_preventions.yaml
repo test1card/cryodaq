@@ -64,10 +64,18 @@ false_green_pairs:
     ci_partition: core
     red_evidence: reverting_the_ENTIRE_production_loader_carry_left_all_SEVEN_writer_nodes_GREEN_because_that_module_drives_write_measured_values_table_with_synthetic_dictionaries_and_never_touches_the_loader_or_ArchiveReader_so_a_loader_regression_was_invisible_to_every_mapped_guard_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: ARCHIVE-SYNTHETIC-LEGACY-FALSE-GREEN-332
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-SYNTHETIC-LEGACY-IDENTITY-PERSISTED-331
+    guard: tests/core/test_experiment_archive_loader_identity.py::test_a_pre_catalog_row_arrives_with_no_identity_rather_than_a_synthetic_one
+    ci_partition: core
+    red_evidence: the_seven_writer_nodes_drive_synthetic_dictionaries_and_never_see_a_legacy_descriptor_at_all_so_persisting_a_manufactured_legacy_identity_was_invisible_to_every_guard_until_a_node_read_a_real_pre_catalog_archive_back_through_the_production_ArchiveReader_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: ARCHIVE-BUDGET-ARITHMETIC-FALSE-GREEN-329
     status: open
     scope: product_contract
-    runtime_prevention_id: ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327
+    runtime_prevention_id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
     guard: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
     ci_partition: core
     red_evidence: removing_the_identity_terms_from_retained_row_bytes_left_every_other_mapped_guard_GREEN_because_reaching_the_32_MiB_cap_inline_required_an_archive_no_guard_builds_this_is_distinct_from_324_which_mutates_the_CALL_while_the_helper_stays_correct_and_from_325_which_covers_charging_identity_that_is_not_persisted_2026_08_06_pending_immutable_capture
@@ -3074,9 +3082,30 @@ records:
     guards:
       - node: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_nothing_for_a_legacy_row
         ci_partition: core
-      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
-        ci_partition: core
     red_evidence: the_legacy_filter_runs_before_the_call_so_passing_an_unfiltered_legacy_descriptor_to_retained_row_bytes_charges_for_identity_the_row_writes_as_empty_cells_and_no_node_asserted_the_charge_matches_what_is_persisted_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: ARCHIVE-SYNTHETIC-LEGACY-IDENTITY-PERSISTED-331
+    status: open
+    scope: product_contract
+    authority_source: docs/OPEN_CELLS.md#oc-024
+    applies_to: Every finalisation row whose archived reading predates the descriptor catalog.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Unattributable history is rendered as descriptor-backed. This is the OPPOSITE failure to ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318 and is independently reproducible - that record covers DISCARDING identity that exists, this one covers PERSISTING an identity that does not. The bounded readers never report absence as None - `_read_sqlite_bounded` and `_read_parquet_bounded` call `resolve_legacy_descriptor` whenever the stored hash is NULL - so a pre-catalog row arrives as a synthetic legacy=True descriptor whose channel_id is `legacy:<digest OF THE CHANNEL SPELLING>` and whose hash is derived from that same spelling. Writing it puts the inference this row exists to remove into the column that exists to distinguish declaration from spelling.
+    invariant: 'A descriptor marked legacy is treated as ABSENT at the finalisation boundary: the loader filters it to None before the row dict is built, so the identity cells are written empty rather than carrying a manufactured value. `legacy` is already the repository-wide marker for absent identity - reporting/sections.py::_reading_series_key and ::_visible_quantity both refuse it - and the finalisation loader agrees with them rather than inventing a second convention.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_a_pre_catalog_row_arrives_with_no_identity_rather_than_a_synthetic_one
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_reader_really_does_synthesize_a_legacy_descriptor_here
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_descriptors.py::test_a_row_without_a_descriptor_stays_empty_and_is_not_inferred
+        ci_partition: core
+    red_evidence: dropping_ONLY_the_legacy_as_absent_filter_turns_1_of_the_6_loader_nodes_red_while_the_loader_carry_itself_remains_intact_which_is_what_makes_this_independently_reproducible_from_318_measured_on_89c2da8d_2026_08_06_pending_immutable_capture
     green_evidence: pending
   - id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
     status: open
@@ -3095,15 +3124,11 @@ records:
     guards:
       - node: tests/core/test_experiment_archive_descriptors.py::test_the_finalisation_table_carries_declared_identity
         ci_partition: core
-      - node: tests/core/test_experiment_archive_descriptors.py::test_a_row_without_a_descriptor_stays_empty_and_is_not_inferred
-        ci_partition: core
       - node: tests/core/test_experiment_archive_descriptors.py::test_the_six_legacy_columns_keep_their_positions
         ci_partition: core
       - node: tests/core/test_experiment_archive_loader_identity.py::test_a_declared_identity_survives_the_archive_round_trip
         ci_partition: core
-      - node: tests/core/test_experiment_archive_loader_identity.py::test_a_pre_catalog_row_arrives_with_no_identity_rather_than_a_synthetic_one
-        ci_partition: core
-      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_reader_really_does_synthesize_a_legacy_descriptor_here
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
         ci_partition: core
       - node: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_the_budget_with_the_identity_it_persists
         ci_partition: core
