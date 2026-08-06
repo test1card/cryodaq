@@ -56,6 +56,22 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: ARCHIVE-LOADER-PATH-FALSE-GREEN-328
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
+    guard: tests/core/test_experiment_archive_loader_identity.py::test_a_declared_identity_survives_the_archive_round_trip
+    ci_partition: core
+    red_evidence: reverting_the_ENTIRE_production_loader_carry_left_all_SEVEN_writer_nodes_GREEN_because_that_module_drives_write_measured_values_table_with_synthetic_dictionaries_and_never_touches_the_loader_or_ArchiveReader_so_a_loader_regression_was_invisible_to_every_mapped_guard_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: ARCHIVE-BUDGET-ARITHMETIC-FALSE-GREEN-329
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327
+    guard: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
+    ci_partition: core
+    red_evidence: removing_the_identity_terms_from_retained_row_bytes_left_every_other_mapped_guard_GREEN_because_reaching_the_32_MiB_cap_inline_required_an_archive_no_guard_builds_this_is_distinct_from_324_which_mutates_the_CALL_while_the_helper_stays_correct_and_from_325_which_covers_charging_identity_that_is_not_persisted_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: ARCHIVE-BUDGET-WIRING-FALSE-GREEN-324
     status: open
     scope: product_contract
@@ -67,7 +83,7 @@ false_green_pairs:
   - id: ARCHIVE-BUDGET-OVERCHARGE-FALSE-GREEN-325
     status: open
     scope: product_contract
-    runtime_prevention_id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
+    runtime_prevention_id: ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327
     guard: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_nothing_for_a_legacy_row
     ci_partition: core
     red_evidence: the_legacy_filter_runs_before_the_call_so_nothing_asserted_that_a_row_whose_identity_is_NOT_persisted_is_also_not_charged_an_over_charging_budget_is_a_different_defect_from_an_under_charging_one_but_it_is_still_a_wrong_bound_2026_08_06_pending_immutable_capture
@@ -3041,6 +3057,27 @@ false_green_pairs:
     green_evidence: pending
 
 records:
+  - id: ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327
+    status: open
+    scope: product_contract
+    authority_source: docs/OPEN_CELLS.md#oc-024
+    applies_to: Every finalisation row charged against the retained-byte accumulator that bounds experiment finalisation memory.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The 32 MiB accumulator is what stands between a large experiment and memory exhaustion, and a bound computed from values the row does not persist is wrong in the direction that TRUNCATES DATA EARLY. A legacy descriptor is filtered out of the row but reaches `_retained_row_bytes` unfiltered, so roughly 200 bytes per row are charged for identity written as empty cells - a long finalisation then retains and writes FEWER rows than the bound permits and reports truncation the operator did not cause. This is the mirror of ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318, which covers discarding declared identity and UNDER-charging for identity that IS retained; neither consequence nor invariant there reaches over-charging.
+    invariant: 'The retained-byte charge for a row equals the bytes that row actually persists: `_retained_identity` filters a legacy descriptor to None BEFORE `_retained_row_bytes` sees it, and the loader passes the filtered value, so a row whose identity cells are written empty is charged nothing for them.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_nothing_for_a_legacy_row
+        ci_partition: core
+      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
+        ci_partition: core
+    red_evidence: the_legacy_filter_runs_before_the_call_so_passing_an_unfiltered_legacy_descriptor_to_retained_row_bytes_charges_for_identity_the_row_writes_as_empty_cells_and_no_node_asserted_the_charge_matches_what_is_persisted_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: ARCHIVE-FINALISATION-IDENTITY-DISCARDED-318
     status: open
     scope: product_contract
@@ -3068,11 +3105,7 @@ records:
         ci_partition: core
       - node: tests/core/test_experiment_archive_loader_identity.py::test_the_reader_really_does_synthesize_a_legacy_descriptor_here
         ci_partition: core
-      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_retained_byte_budget_charges_for_the_identity_it_retains
-        ci_partition: core
       - node: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_the_budget_with_the_identity_it_persists
-        ci_partition: core
-      - node: tests/core/test_experiment_archive_loader_identity.py::test_the_loader_charges_nothing_for_a_legacy_row
         ci_partition: core
     red_evidence: replacing_the_identity_argument_with_None_AT_THE_CALL_SITE_left_all_14_nodes_green_because_the_extracted_helper_stayed_correct_in_isolation_while_production_stopped_charging_for_what_it_persists_so_the_WIRING_is_now_asserted_by_driving_the_real_loader_and_recording_the_argument; and_dropping_the_identity_terms_from_the_retained_byte_accounting_leaves_every_other_mapped_guard_GREEN_because_reaching_the_32_MiB_cap_inline_required_an_archive_no_guard_builds_which_is_why_the_accounting_was_extracted_and_is_now_asserted_directly_2026_08_06_pending_immutable_capture; and_reverting_the_csv_header_and_the_loader_together_turns_6_of_the_7_writer_nodes_red_and_reverting_the_entire_loader_carry_turns_4_of_the_6_loader_nodes_red_while_all_7_writer_nodes_stay_GREEN_which_is_the_finding_that_the_writer_suite_cannot_observe_a_loader_regression_2026_08_06_pending_immutable_capture
     green_evidence: pending
@@ -5305,6 +5338,7 @@ records:
         - production_test_divergence
         - publication_loss
         - retained_handle_loss
+        - silent_failure
         - stale_authority
     red_evidence: registry_corpus_on_2026_07_26_contains_five_classifications_with_exactly_two_records_and_no_prior_class_level_disposition_or_enforcement
     green_evidence: pending
