@@ -304,9 +304,13 @@ The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
 decision was first phrased as "after 10 suppressed windows (5 minutes)". Those
 are not the same thing: an alarm re-firing every second reaches ten suppressed
 events in ten seconds. The operator-facing meaning is the wall-clock silence, so
-that is what the code measures and what
-`tests/agents/assistant/test_agent_narration_floor.py` asserts — the longest gap
-between narrations of a live CRITICAL, not the number of them.
+that is what the code measures. What
+`tests/agents/assistant/test_agent_narration_floor.py` asserts is the longest
+gap between **admissions** of a live CRITICAL — not the number of them, and
+**not** the gap between narrations the operator received. Calling admissions
+"narrations" would restore, in the evidence sentence, exactly the
+operator-visible claim the paragraph above withdraws; the guard records
+`admitted_at` and deliberately asserts nothing about receipt.
 
 **Severity scope needs no separate rule.** `_should_handle` already filters this
 path to CRITICAL, so every event reaching the ledger is CRITICAL and there is no

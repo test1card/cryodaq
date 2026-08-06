@@ -170,11 +170,14 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-023",
         "OC-024",
         "OC-026",
-        # OC-028 removed from the BLOCKS-DEPLOYMENT inventory: the owner ruled
-        # A+B on 2026-08-05 and both bounds are implemented and guarded by
-        # tests/agents/assistant/test_agent_narration_floor.py. This gate firing
-        # on the removal is the gate working -- a row leaving the blocking set
-        # has to be deliberate, never absorbed quietly.
+        # OC-028 STAYS BLOCKING. The owner's A+B behaviour is implemented, but
+        # ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304 and both its false-green
+        # pairs are status: open with green_evidence: pending, and AGENTS.md:343-350
+        # forbids closing a completion disposition while its prevention is open.
+        # Partial delivery across a cancellation inside the router is also not
+        # preserved; the row names that as an uncovered case rather than implying it
+        # is covered.
+        "OC-028",
         "OC-030",
         "OC-034",
         "OC-036",

@@ -3027,7 +3027,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: An operator stops being told about a CRITICAL condition that is still active, and nothing in the system says so. The dedup gate refreshed its seen-timestamp on every attempt INCLUDING suppressed ones, so the quiet-for-a-full-window condition was unreachable while the alarm kept firing and a continuously flapping CRITICAL was narrated exactly ONCE for as long as it lasted. Three further holes rode on top - a narration lost to a broken transport still bought a full window of silence because production never reported a delivery outcome at all; an outcome was keyed by the alarm rather than by the attempt, so with two inferences in flight a superseded attempt's failure could re-arm an alarm a newer attempt had delivered and a superseded attempt's SUCCESS could be discarded; and cancellation of an in-flight handler bypassed every outcome report because CancelledError is a BaseException.
-    invariant: 'The ledger suppresses duplicates of what the operator RECEIVED, and the interval between admissions is bounded: a failed or cancelled attempt re-arms the alarm after one window, a still-active CRITICAL is re-admitted escalate_after_s after the last CONFIRMED DELIVERY, and every outcome is scoped to the attempt that produced it and settles that attempt once. WHAT THIS RECORD DOES NOT CLAIM: it bounds ADMISSIONS, not receipts. The hourly rate limit, the inference semaphore, context assembly, audit-intent persistence, generation and sequential per-recipient transport acknowledgements all sit between admission and delivery, and no end-to-end deadline spans them - so no received-to-received maximum is asserted anywhere in the code, the tests or the register. Two earlier versions of this claim did assert one and were false.'
+    invariant: 'The ledger suppresses duplicates of what the operator RECEIVED, and the interval between admissions is bounded: a failed or cancelled attempt re-arms the alarm after one window, a still-active CRITICAL is re-admitted escalate_after_s after the last CONFIRMED DELIVERY, and every outcome is scoped to the attempt that produced it and settles that attempt once. WHAT THIS RECORD DOES NOT CLAIM. (1) PARTIAL DELIVERY IS NOT PRESERVED ACROSS A CANCELLATION INSIDE THE ROUTER: with several recipients, stop() arriving between the first acknowledgement and the second means dispatch_detailed never returns, the outcome callback never fires, and the attempt settles undelivered even though one recipient was reached - so the next refire resends to them. Closing that needs per-recipient incremental reporting inside the router, which is a change to the router rather than to this ledger. (2) It bounds ADMISSIONS, not receipts. The hourly rate limit, the inference semaphore, context assembly, audit-intent persistence, generation and sequential per-recipient transport acknowledgements all sit between admission and delivery, and no end-to-end deadline spans them - so no received-to-received maximum is asserted anywhere in the code, the tests or the register. Two earlier versions of this claim did assert one and were false.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -3051,6 +3051,14 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_cancellation_before_the_handler_first_runs_is_reported
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_escalation_clock_starts_when_the_operator_was_told
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_partially_delivered_narration_counts_as_seen
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_newer_failure_does_not_undo_an_older_confirmed_delivery
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_settled_attempt_reporting_twice_does_not_drag_the_clock
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_attempt_id_is_never_reused_after_pruning
         ci_partition: agents
     red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
     green_evidence: pending

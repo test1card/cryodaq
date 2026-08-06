@@ -584,6 +584,98 @@ def test_a_stale_delivery_still_counts_as_the_operator_having_been_told(clock) -
     assert ledger.should_dispatch("alarm:ordering") is True
 
 
+def test_a_newer_failure_does_not_undo_an_older_confirmed_delivery(clock) -> None:
+    """The opposite ordering to the node above: A DELIVERS, then B FAILS.
+
+    Scoping alone does not cover it.  B is the current attempt, so its failure
+    is not stale and settles normally -- and it re-armed the alarm even though
+    A had told the operator seconds earlier, admitting a resend one window
+    later.  The rule that closes it is about the OPERATOR, not about attempt
+    numbers: a failure cannot re-arm when someone has been told since this
+    attempt was admitted.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+
+    assert ledger.should_dispatch("alarm:inverse") is True
+    attempt_a = ledger.current_attempt("alarm:inverse")
+
+    clock.return_value = start + WINDOW + 1.0
+    assert ledger.should_dispatch("alarm:inverse") is True
+    attempt_b = ledger.current_attempt("alarm:inverse")
+
+    # A -- admitted first, still in flight -- reaches the operator.
+    clock.return_value = start + WINDOW + 5.0
+    ledger.note_outcome("alarm:inverse", delivered=True, attempt=attempt_a)
+    told = clock.return_value
+
+    # B then fails.  It is the CURRENT attempt, so this is not the stale case.
+    clock.return_value = start + WINDOW + 8.0
+    ledger.note_outcome("alarm:inverse", delivered=False, attempt=attempt_b)
+
+    assert "alarm:inverse" not in ledger._undelivered, (
+        "a failure re-armed an alarm the operator had been told about after that attempt was admitted"
+    )
+    _flap_quietly(ledger, "alarm:inverse", clock, frm=told + 5.0, to=told + ESCALATE)
+
+
+def test_a_settled_attempt_reporting_twice_does_not_drag_the_clock(clock) -> None:
+    """The router reports at acknowledgement; the audit write finishes later.
+
+    Both call `note_outcome` for the same attempt.  If the second one applied,
+    the clock would move from the moment of delivery to the moment the
+    filesystem finished -- postponing the next admission by unbounded audit
+    latency, on the alarm path.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:twice") is True
+    attempt = ledger.current_attempt("alarm:twice")
+
+    clock.return_value = start + 2.0
+    ledger.note_outcome("alarm:twice", delivered=True, attempt=attempt)
+    first = ledger._last_allowed["alarm:twice"]
+
+    clock.return_value = start + 90.0  # a slow audit settlement
+    ledger.note_outcome("alarm:twice", delivered=True, attempt=attempt)
+
+    assert ledger._last_allowed["alarm:twice"] == first, (
+        "a second report for the same attempt moved the clock to the audit-completion time"
+    )
+
+
+def test_an_attempt_id_is_never_reused_after_pruning(clock) -> None:
+    """A per-alarm counter is pruned with its alarm; a global one cannot be.
+
+    The delivery path has no end-to-end bound, so a task can still report after
+    its alarm has gone quiet and been pruned.  With per-alarm numbering the next
+    occurrence of that alarm is numbered 1 again, and the old task's outcome
+    settles the NEW attempt -- so the genuine new delivery is then ignored as a
+    duplicate.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:pruned") is True
+    stale_attempt = ledger.current_attempt("alarm:pruned")
+
+    # The alarm stops firing for longer than the prune horizon.
+    clock.return_value = start + ESCALATE + WINDOW + 60.0
+    assert ledger.should_dispatch("alarm:pruned") is True
+    fresh_attempt = ledger.current_attempt("alarm:pruned")
+
+    assert fresh_attempt != stale_attempt, (
+        f"attempt id {fresh_attempt} was reused after pruning; the stalled task can now settle a new attempt"
+    )
+
+    # The stalled task finally reports failure. It must not touch the new attempt.
+    ledger.note_outcome("alarm:pruned", delivered=False, attempt=stale_attempt)
+    ledger.note_outcome("alarm:pruned", delivered=True, attempt=fresh_attempt)
+    assert "alarm:pruned" not in ledger._undelivered
+
+
 @pytest.mark.asyncio
 async def test_cancellation_during_the_audit_write_does_not_discard_the_delivery() -> None:
     """``stop()`` landing inside ``_audit.complete``, after the send succeeded.

@@ -252,8 +252,26 @@ class _EventDedup:
         # attempt whose outcome has already been recorded, so a second report
         # for the same attempt -- a cancellation arriving after a successful
         # send, say -- cannot overwrite the first.
+        # Attempt ids are drawn from ONE monotonic counter for the whole agent,
+        # never a per-alarm sequence.  A per-alarm counter is pruned with its
+        # alarm, and the delivery path has no end-to-end bound -- so an attempt
+        # still pending past the prune horizon, on an alarm that has stopped
+        # firing, would see the next occurrence of that alarm numbered `1` again
+        # and could settle it with an outcome belonging to the old task.  A
+        # counter that never rewinds cannot collide.
+        self._next_attempt = 0
         self._attempt: dict[str, int] = {}
-        self._settled: dict[str, int] = {}
+        # Settled attempt IDS, not per-alarm state.  Because ids are globally
+        # unique this single set answers both "has this attempt reported?" for
+        # the current attempt and for a superseded one, which is what makes a
+        # stale report idempotent instead of applying twice.
+        self._settled_attempts: set[int] = set()
+        # When the CURRENT attempt was admitted, and when the operator was last
+        # confirmed to have been told.  Kept apart from `_last_allowed` because
+        # a failure must not re-arm an alarm that a DIFFERENT attempt narrated
+        # after this one was admitted.
+        self._admitted_at: dict[str, float] = {}
+        self._last_told: dict[str, float] = {}
 
     def _prune(self, now: float) -> None:
         """Drop bookkeeping for alarms that have stopped firing.
@@ -267,16 +285,30 @@ class _EventDedup:
         self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in self._seen}
         self._undelivered &= set(self._seen)
         self._attempt = {key: seq for key, seq in self._attempt.items() if key in self._seen}
-        self._settled = {key: seq for key, seq in self._settled.items() if key in self._seen}
+        self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in self._seen}
+        self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in self._seen}
+        # Bounded by ID DISTANCE rather than by alarm, so an id stays known long
+        # after its alarm is pruned -- that is the whole point of the change --
+        # while the set cannot grow without limit on a long-lived agent.
+        floor = self._next_attempt - _SETTLED_ATTEMPT_MEMORY
+        self._settled_attempts = {seq for seq in self._settled_attempts if seq > floor}
 
     def _allow(self, event_id: str, now: float) -> bool:
         self._last_allowed[event_id] = now
-        self._attempt[event_id] = self._attempt.get(event_id, 0) + 1
-        self._settled.pop(event_id, None)
+        self._admitted_at[event_id] = now
+        self._next_attempt += 1
+        self._attempt[event_id] = self._next_attempt
         # Allowing an attempt CLEARS the failure marker; `note_outcome` re-adds
         # it only if this attempt actually fails.  Leaving it set makes the
         # marker describe an attempt that is already superseded: the retry
         # branch above fires on `_undelivered` plus one elapsed window, and the
+        # default Ollama timeout is longer than the 30 s window, so a refire
+        # arriving while the fresh narration is still IN FLIGHT would start yet
+        # another retry on the strength of a failure that has been answered.
+        # Allowing an attempt CLEARS the failure marker; `note_outcome` re-adds
+        # it only if this attempt actually fails.  Leaving it set makes the
+        # marker describe an attempt that is already superseded: the retry
+        # branch fires on `_undelivered` plus one elapsed window, and the
         # default Ollama timeout is longer than the 30 s window, so a refire
         # arriving while the fresh narration is still IN FLIGHT would start yet
         # another retry on the strength of a failure that has been answered.
@@ -371,25 +403,18 @@ class _EventDedup:
         the pre-existing test-facing behaviour and is deliberately unchanged.
         """
 
-        if attempt is not None and attempt != self._attempt.get(event_id):
-            # A SUPERSEDED attempt is reporting after a newer one was admitted.
-            # Its FAILURE is noise -- the newer attempt is the live one, and
-            # re-arming on an obsolete failure is what attempt scoping exists to
-            # stop.  Its SUCCESS is not noise: the operator genuinely received
-            # that narration, at the moment reported, and discarding it would
-            # let a newer attempt's failure license a resend seconds after they
-            # read it.  So a stale delivery still clears the marker and still
-            # moves the clock; it simply does not settle the CURRENT attempt,
-            # which is still in flight and must report for itself.
-            if delivered:
-                self._undelivered.discard(event_id)
-                self._last_allowed[event_id] = time.monotonic()
-            return
+        now = time.monotonic()
 
         if attempt is not None:
-            if self._settled.get(event_id) == attempt:
-                return  # this attempt already reported; the first word wins
-            self._settled[event_id] = attempt
+            # ONE settle per attempt, current or superseded.  Without this a
+            # superseded attempt reports twice -- once from the router callback
+            # at the real acknowledgement, once again after `_audit.complete` --
+            # and the second report drags the clock from the moment of delivery
+            # to the moment the audit write finished, postponing the next
+            # admission by however long the filesystem took.
+            if attempt in self._settled_attempts:
+                return
+            self._settled_attempts.add(attempt)
 
         if delivered:
             self._undelivered.discard(event_id)
@@ -398,11 +423,27 @@ class _EventDedup:
             # ``timeout_s``, and stamping at admission makes the silence the
             # operator experiences depend on how long the PREVIOUS narration
             # took to generate -- a quantity the bound never accounted for.
-            # ``time.monotonic()`` here is always >= the admission stamp, so
-            # this is a forward move, never a rewind.
-            self._last_allowed[event_id] = time.monotonic()
-        else:
-            self._undelivered.add(event_id)
+            # `now` is always >= the admission stamp, so this is a forward move.
+            self._last_told[event_id] = now
+            self._last_allowed[event_id] = now
+            return
+
+        if attempt is not None and attempt != self._attempt.get(event_id):
+            # A SUPERSEDED attempt FAILING is noise: the newer attempt is the
+            # live one, and re-arming on an obsolete failure is what attempt
+            # scoping exists to stop.  (A superseded attempt SUCCEEDING is not
+            # noise, and is handled above -- the operator really did read it.)
+            return
+
+        if self._last_told.get(event_id, float("-inf")) >= self._admitted_at.get(event_id, float("inf")):
+            # THE OPERATOR HAS BEEN TOLD SINCE THIS ATTEMPT WAS ADMITTED, by a
+            # different attempt that was still in flight when this one started.
+            # Re-arming now would resend a narration they have already read --
+            # the inverse ordering of the case above, and the one that survived
+            # the first version of attempt scoping.
+            return
+
+        self._undelivered.add(event_id)
 
     def mark_delivered(self, event_id: str) -> None:
         """Backwards-compatible alias for a successful delivery."""
@@ -430,6 +471,12 @@ def _reached_any_recipient(outcomes: dict[str, Any]) -> bool:
         if isinstance(state, dict) and any(recipient == "delivered" for recipient in state.values()):
             return True
     return False
+
+
+# How many attempt ids stay recognisable after they settle.  Large enough that a
+# report from a long-stalled task is still matched -- the delivery path has no
+# end-to-end bound -- and small enough that the set cannot grow without limit.
+_SETTLED_ATTEMPT_MEMORY = 4096
 
 
 def _event_dedup_id(event: EngineEvent) -> str | None:
