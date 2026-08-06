@@ -30,7 +30,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cryodaq.agents.assistant.live.agent import _SETTLED_ATTEMPT_MEMORY, _EventDedup
+from cryodaq.agents.assistant.live.agent import _MAX_OUTSTANDING_ATTEMPTS, _EventDedup
 
 WINDOW = 30.0
 ESCALATE = 300.0
@@ -685,8 +685,6 @@ def test_an_outstanding_attempt_keeps_its_settled_identity(clock) -> None:
     prevent.  The floor is the oldest attempt that has not settled.
     """
 
-    from cryodaq.agents.assistant.live.agent import _SETTLED_ATTEMPT_MEMORY
-
     ledger = _ledger()
     start = 1000.0
     assert ledger.should_dispatch("alarm:stalled") is True
@@ -698,7 +696,7 @@ def test_an_outstanding_attempt_keeps_its_settled_identity(clock) -> None:
     told = ledger._last_allowed["alarm:stalled"]
 
     # Far more than the distance limit of other admissions go by.
-    for index in range(_SETTLED_ATTEMPT_MEMORY + 16):
+    for index in range(200):
         clock.return_value = start + 100.0 + index
         ledger.should_dispatch(f"alarm:other-{index}")
 
@@ -727,7 +725,7 @@ def test_a_pending_attempt_survives_a_forced_watermark_jump(clock) -> None:
     pending = ledger.current_attempt("alarm:pending")
 
     # Many later attempts are admitted AND settled, driving the watermark on.
-    for index in range(_SETTLED_ATTEMPT_MEMORY + 32):
+    for index in range(200):
         clock.return_value = start + 1.0 + index
         other = f"alarm:filler-{index}"
         assert ledger.should_dispatch(other) is True
@@ -812,6 +810,70 @@ def test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it(clock)
     assert ledger.should_dispatch("alarm:retired") is True, (
         "the first event of a new occurrence was suppressed by a narration about the retired one"
     )
+
+
+def test_a_saturated_dispatch_path_stops_admitting_new_attempts(clock) -> None:
+    """Backpressure at the gate, because nothing downstream provides any.
+
+    With both inference slots stuck in an unbounded dispatch or audit operation,
+    every escalation admitted another attempt and created another handler task.
+    A queued task neither consumes rate-limit capacity -- the timestamp is
+    appended only after the semaphore is acquired -- nor settles its id, so a
+    continuously refiring CRITICAL grew the task set and the pending set without
+    bound until shutdown.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    admitted = 0
+    for step in range(_MAX_OUTSTANDING_ATTEMPTS * 3):
+        # A distinct alarm each time, so nothing is suppressed by dedup itself:
+        # this measures the OUTSTANDING bound, not the window.
+        clock.return_value = start + step
+        if ledger.should_dispatch(f"alarm:stuck-{step}"):
+            admitted += 1  # deliberately never settled -- the dispatch path is stuck
+
+    assert admitted == _MAX_OUTSTANDING_ATTEMPTS, (
+        f"{admitted} attempts admitted with nothing completing; the outstanding bound is {_MAX_OUTSTANDING_ATTEMPTS}"
+    )
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS
+
+    # And once work drains, the gate admits again -- this is backpressure, not a
+    # latch that silences the rig after one bad hour.
+    for attempt in list(ledger._pending)[:5]:
+        ledger._mark_settled(attempt)
+    clock.return_value = start + 10_000.0
+    assert ledger.should_dispatch("alarm:after-drain") is True
+
+
+def test_settled_state_costs_nothing_per_admission(clock) -> None:
+    """Bookkeeping must scale with CONCURRENCY, not with lifetime admissions.
+
+    The watermark-plus-remainder shape that preceded this grew without bound
+    whenever one attempt stayed pending: the clamp protecting that id also
+    stopped the watermark advancing past everything after it, so every later
+    settled id accumulated. Deriving "settled" from the pending set removes the
+    storage entirely.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:forever-pending") is True
+    stalled = ledger.current_attempt("alarm:forever-pending")
+
+    for step in range(500):
+        clock.return_value = start + 1.0 + step
+        other = f"alarm:churn-{step}"
+        assert ledger.should_dispatch(other) is True
+        ledger.note_outcome(other, delivered=True, attempt=ledger.current_attempt(other))
+
+    assert ledger._pending == {stalled}, (
+        f"bookkeeping grew with lifetime admissions: {len(ledger._pending)} ids retained"
+    )
+    # The stalled attempt is still recognised, however long it takes to report.
+    assert ledger._has_settled(stalled) is False
+    ledger.note_outcome("alarm:forever-pending", delivered=True, attempt=stalled)
+    assert ledger._has_settled(stalled) is True
 
 
 def test_a_lone_alarm_retires_its_own_stale_state(clock) -> None:

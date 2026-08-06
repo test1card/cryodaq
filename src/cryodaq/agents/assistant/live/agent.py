@@ -265,22 +265,20 @@ class _EventDedup:
         # unique this single set answers both "has this attempt reported?" for
         # the current attempt and for a superseded one, which is what makes a
         # stale report idempotent instead of applying twice.
-        # Settled attempts, as a WATERMARK plus the out-of-order remainder.
-        # Every id at or below `_settled_below` has settled; ids above it that
-        # settled early live in `_settled_above` until the watermark catches up.
+        # Settled attempts are DERIVED, not stored.  Every id this ledger has
+        # ever issued is in exactly one of three states -- not yet issued,
+        # pending, or settled -- so "has it settled?" is
+        # `issued and not pending`, and the only thing worth keeping is the
+        # PENDING set.
         #
-        # A plain bounded set cannot do this job.  The delivery path has no
-        # end-to-end bound, so an attempt far enough behind would have its first
-        # report evicted and its second accepted -- restoring the double-report
-        # the set exists to stop.  Because ids are issued in order and nearly
-        # all settle, `_settled_above` holds only what is genuinely in flight,
-        # so this is EXACT idempotence in memory bounded by concurrency rather
-        # than by history.
-        self._settled_below = 0
-        self._settled_above: set[int] = set()
-        # Admitted but not yet settled.  The watermark may never be forced past
-        # one of these: doing so makes `_has_settled` answer True for an attempt
-        # that has never reported, so its genuine first outcome is discarded.
+        # Two earlier shapes were wrong in opposite directions.  A set of
+        # settled ids bounded by distance evicted an old attempt's first report
+        # and accepted its second.  A watermark plus an out-of-order remainder
+        # fixed that but grew with LIFETIME ADMISSIONS whenever one attempt
+        # stayed pending, because the clamp that protected it also stopped the
+        # watermark advancing past everything after it.  Deriving the answer has
+        # neither failure: memory is exactly the in-flight set, and idempotence
+        # is exact for every id.
         self._pending: set[int] = set()
         # The attempt id at which each alarm's CURRENT occurrence began -- reset
         # whenever the alarm is admitted with no prior state, i.e. after a prune.
@@ -382,6 +380,26 @@ class _EventDedup:
         self._seen[event_id] = now
         self._prune(now)
 
+        if len(self._pending) >= _MAX_OUTSTANDING_ATTEMPTS:
+            # BACKPRESSURE AT THE GATE, ahead of every admitting branch -- a
+            # first sighting takes the quiet-window branch, so a check placed
+            # after it never applies to the case that produces the growth.
+            #
+            # With both inference slots stuck in an unbounded dispatch or audit
+            # operation, every escalation admitted another attempt and created
+            # another handler task. A queued task neither consumes rate-limit
+            # capacity -- the timestamp is appended only after the semaphore is
+            # acquired -- nor settles its id, so a continuously refiring
+            # CRITICAL grew `_handler_tasks` and the pending set without bound
+            # until shutdown.
+            #
+            # Refusing trades a narration for a bound, and that is the right way
+            # round: the attempts already queued will narrate when they drain,
+            # so this does not silence the alarm. It declines to tell the
+            # operator a 65th time by a system that has not managed to tell them
+            # once.
+            return False
+
         if last_seen is None or last_seen < now - self._window_s:
             # Genuinely quiet for a full window: the original semantics.
             return self._allow(event_id, now)
@@ -428,36 +446,17 @@ class _EventDedup:
         return False
 
     def _has_settled(self, attempt: int) -> bool:
-        return attempt <= self._settled_below or attempt in self._settled_above
+        """True when ``attempt`` was issued and is no longer in flight.
+
+        No history is consulted, so a report arriving arbitrarily late is still
+        recognised as a duplicate -- which matters because the delivery path has
+        no end-to-end bound.
+        """
+
+        return attempt <= self._next_attempt and attempt not in self._pending
 
     def _mark_settled(self, attempt: int) -> None:
-        """Record ``attempt`` as settled and advance the watermark over it."""
-
-        self._settled_above.add(attempt)
         self._pending.discard(attempt)
-        while self._settled_below + 1 in self._settled_above:
-            self._settled_below += 1
-            self._settled_above.discard(self._settled_below)
-        # An attempt that NEVER reports -- a task lost without any handler or
-        # callback running -- would otherwise hold the watermark forever and let
-        # `_settled_above` grow with it.  Forcing the watermark forward past a
-        # very old gap trades exact idempotence for that one ancient attempt
-        # against unbounded memory.  It is a real, bounded loss and is stated
-        # rather than hidden: a report from an attempt that far behind is
-        # treated as a first report.
-        if self._next_attempt - self._settled_below > _SETTLED_ATTEMPT_MEMORY:
-            forced = self._next_attempt - _SETTLED_ATTEMPT_MEMORY
-            if self._pending:
-                # NEVER past a still-pending id.  Forcing over one makes
-                # `_has_settled` answer True for an attempt that has not
-                # reported, so its genuine first outcome is dropped -- and a
-                # newer failure can then re-arm an alarm the operator was just
-                # told about.  The loss this cap trades against is memory, and
-                # memory is the cheaper of the two.
-                forced = min(forced, min(self._pending) - 1)
-            if forced > self._settled_below:
-                self._settled_below = forced
-                self._settled_above = {seq for seq in self._settled_above if seq > self._settled_below}
 
     def current_attempt(self, event_id: str) -> int:
         """The sequence number of the newest admission for ``event_id``.
@@ -592,10 +591,12 @@ def _reached_any_recipient(outcomes: dict[str, Any]) -> bool:
     return False
 
 
-# How many attempt ids stay recognisable after they settle.  Large enough that a
-# report from a long-stalled task is still matched -- the delivery path has no
-# end-to-end bound -- and small enough that the set cannot grow without limit.
-_SETTLED_ATTEMPT_MEMORY = 4096
+# How many narration attempts may be in flight at once before the gate refuses
+# to admit more.  Far above any healthy load -- two inference slots and a 30 s
+# window cannot produce this many outstanding attempts unless the dispatch path
+# has stopped completing -- so reaching it is a symptom, and the bound exists so
+# the symptom does not become an unbounded task and id accumulation.
+_MAX_OUTSTANDING_ATTEMPTS = 64
 
 
 def _event_dedup_id(event: EngineEvent) -> str | None:

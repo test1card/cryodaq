@@ -72,6 +72,22 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: NARRATION-GUARD-UNBOUNDED-QUEUE-FALSE-GREEN-320
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_saturated_dispatch_path_stops_admitting_new_attempts
+    ci_partition: agents
+    red_evidence: with_both_inference_slots_stuck_every_escalation_admitted_another_attempt_and_created_another_handler_task_and_a_queued_task_neither_consumes_rate_limit_capacity_nor_settles_its_id_so_handler_tasks_and_the_pending_set_grew_without_bound_until_shutdown_and_no_node_left_work_uncompleted_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-SETTLED-STATE-GROWTH-FALSE-GREEN-321
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_settled_state_costs_nothing_per_admission
+    ci_partition: agents
+    red_evidence: the_watermark_plus_remainder_shape_grew_with_LIFETIME_ADMISSIONS_whenever_one_attempt_stayed_pending_because_the_clamp_protecting_that_id_also_stopped_the_watermark_advancing_past_everything_after_it_and_no_node_held_an_attempt_pending_across_a_long_admission_sequence_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-LONE-ALARM-RETIREMENT-FALSE-GREEN-319
     status: open
     scope: product_contract
@@ -3153,6 +3169,10 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_lone_alarm_retires_its_own_stale_state
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_saturated_dispatch_path_stops_admitting_new_attempts
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_settled_state_costs_nothing_per_admission
         ci_partition: agents
     red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
     green_evidence: pending
