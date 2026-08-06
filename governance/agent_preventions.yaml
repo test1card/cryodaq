@@ -72,6 +72,22 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: NARRATION-GUARD-BACKPRESSURE-LOSES-FIRST-SIGHTING-FALSE-GREEN-322
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_first_sighting_is_never_refused_by_backpressure
+    ci_partition: agents
+    red_evidence: the_backpressure_cap_added_for_320_refused_the_FIRST_event_of_a_new_critical_when_other_alarms_held_the_queue_and_production_sources_publish_only_on_transition_so_a_condition_that_stays_active_would_have_its_narration_lost_permanently_rather_than_delayed_no_node_mixed_a_saturated_queue_with_a_new_alarm_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-PHANTOM-PENDING-FALSE-GREEN-323
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_an_unscoped_outcome_still_settles_its_attempt
+    ci_partition: agents
+    red_evidence: an_unscoped_note_outcome_or_the_mark_delivered_alias_never_removed_the_issued_id_from_pending_so_after_MAX_OUTSTANDING_ATTEMPTS_such_alarms_the_new_backpressure_check_refused_every_later_admission_forever_with_no_work_in_flight_and_the_compatibility_and_pruning_nodes_never_inspected_pending_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-UNBOUNDED-QUEUE-FALSE-GREEN-320
     status: open
     scope: product_contract
@@ -3173,6 +3189,10 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_saturated_dispatch_path_stops_admitting_new_attempts
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_settled_state_costs_nothing_per_admission
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_first_sighting_is_never_refused_by_backpressure
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_unscoped_outcome_still_settles_its_attempt
         ci_partition: agents
     red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
     green_evidence: pending

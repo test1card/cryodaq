@@ -380,10 +380,21 @@ class _EventDedup:
         self._seen[event_id] = now
         self._prune(now)
 
-        if len(self._pending) >= _MAX_OUTSTANDING_ATTEMPTS:
+        if last_seen is not None and len(self._pending) >= _MAX_OUTSTANDING_ATTEMPTS:
             # BACKPRESSURE AT THE GATE, ahead of every admitting branch -- a
-            # first sighting takes the quiet-window branch, so a check placed
-            # after it never applies to the case that produces the growth.
+            # check placed after them never applies to a repeat admission, which
+            # is where the growth comes from.
+            #
+            # A FIRST SIGHTING IS NEVER REFUSED.  `last_seen is None` means this
+            # alarm has not been heard from, and the queued attempts belong to
+            # OTHER alarms -- they will not narrate this one.  Production
+            # sources publish on transition (`engine_wiring/runtime_tasks.py`
+            # only on `TRIGGERED`), so a condition that stays active and never
+            # transitions again would lose its narration permanently.  Losing an
+            # alarm entirely is a worse failure than an unbounded queue, and the
+            # bound that remains -- one outstanding first sighting per distinct
+            # alarm id -- is set by the rig's alarm inventory rather than by
+            # refire rate, which is the term that ran away.
             #
             # With both inference slots stuck in an unbounded dispatch or audit
             # operation, every escalation admitted another attempt and created
@@ -495,6 +506,16 @@ class _EventDedup:
         """
 
         now = time.monotonic()
+
+        if attempt is None:
+            # AN UNSCOPED REPORT STILL SETTLES THE ALARM'S CURRENT ATTEMPT.
+            # Without this the issued id is never removed from `_pending`, so
+            # every unscoped caller -- including `mark_delivered` -- leaves a
+            # phantom in flight, and after `_MAX_OUTSTANDING_ATTEMPTS` such
+            # alarms the backpressure check refuses every later admission
+            # forever with no work actually running.  A leak that silences the
+            # rig is a worse outcome than the double-report scoping prevents.
+            attempt = self._attempt.get(event_id)
 
         if attempt is not None:
             # ONE settle per attempt, current or superseded.  Without this a

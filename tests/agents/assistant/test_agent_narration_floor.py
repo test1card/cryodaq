@@ -825,25 +825,99 @@ def test_a_saturated_dispatch_path_stops_admitting_new_attempts(clock) -> None:
 
     ledger = _ledger()
     start = 1000.0
-    admitted = 0
-    for step in range(_MAX_OUTSTANDING_ATTEMPTS * 3):
-        # A distinct alarm each time, so nothing is suppressed by dedup itself:
-        # this measures the OUTSTANDING bound, not the window.
-        clock.return_value = start + step
-        if ledger.should_dispatch(f"alarm:stuck-{step}"):
-            admitted += 1  # deliberately never settled -- the dispatch path is stuck
 
-    assert admitted == _MAX_OUTSTANDING_ATTEMPTS, (
-        f"{admitted} attempts admitted with nothing completing; the outstanding bound is {_MAX_OUTSTANDING_ATTEMPTS}"
-    )
+    # Saturate with first sightings that never complete -- the stuck dispatch.
+    for step in range(_MAX_OUTSTANDING_ATTEMPTS):
+        clock.return_value = start + step
+        assert ledger.should_dispatch(f"alarm:stuck-{step}") is True
     assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS
 
-    # And once work drains, the gate admits again -- this is backpressure, not a
-    # latch that silences the rig after one bad hour.
-    for attempt in list(ledger._pending)[:5]:
+    # One alarm keeps firing.  Its REFIRES are the term that ran away: without
+    # the cap every escalation admits another attempt and creates another
+    # handler task while nothing completes.  They must keep being refused for as
+    # long as the queue is full, however long it flaps -- and the refires keep
+    # `_seen` fresh, so this never falls through to the first-sighting path.
+    admitted_refires = 0
+    at = start + _MAX_OUTSTANDING_ATTEMPTS
+    for _ in range(400):  # ~33 minutes, several escalation intervals
+        at += 5.0
+        clock.return_value = at
+        if ledger.should_dispatch("alarm:stuck-0"):
+            admitted_refires += 1
+
+    assert admitted_refires == 0, (
+        f"{admitted_refires} refires admitted while {len(ledger._pending)} attempts were outstanding"
+    )
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS, "the pending set grew despite the cap"
+
+    # Once work drains the gate admits again -- backpressure, not a latch that
+    # silences the rig after one bad hour.
+    for attempt in list(ledger._pending)[:8]:
         ledger._mark_settled(attempt)
-    clock.return_value = start + 10_000.0
-    assert ledger.should_dispatch("alarm:after-drain") is True
+    at += 5.0
+    clock.return_value = at
+    assert ledger.should_dispatch("alarm:stuck-0") is True
+
+
+def test_a_first_sighting_is_never_refused_by_backpressure(clock) -> None:
+    """Backpressure must not lose an alarm outright.
+
+    The queued attempts belong to OTHER alarms and will not narrate this one.
+    Production sources publish on TRANSITION -- `engine_wiring/runtime_tasks.py`
+    only on `TRIGGERED` -- so a condition that stays active and never
+    transitions again would have its narration lost permanently rather than
+    delayed.  Losing an alarm is a worse failure than an unbounded queue.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    for step in range(_MAX_OUTSTANDING_ATTEMPTS):
+        clock.return_value = start + step
+        assert ledger.should_dispatch(f"alarm:saturating-{step}") is True
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS, "premise: the gate must be saturated"
+
+    # Close in time deliberately: jumping past the escalation horizon would
+    # PRUNE the saturating alarms, and the assertion below would then be about
+    # retired state rather than about backpressure.
+    clock.return_value = start + _MAX_OUTSTANDING_ATTEMPTS + 1.0
+    assert ledger.should_dispatch("alarm:brand-new") is True, (
+        "a first sighting was refused while other alarms held the queue; that narration is lost, not delayed"
+    )
+
+    # A REFIRE of an already-seen alarm is still refused -- that is the term
+    # that ran away, and it is not lost because the queued attempt narrates it.
+    # It has to keep firing to stay "already seen": a gap past the escalation
+    # horizon retires the alarm, and a retired alarm's next event is a FIRST
+    # SIGHTING again, which is exempt by design.
+    at = start + _MAX_OUTSTANDING_ATTEMPTS
+    for _ in range(80):
+        at += 5.0
+        clock.return_value = at
+        assert ledger.should_dispatch("alarm:saturating-0") is False
+
+
+@pytest.mark.asyncio
+async def test_an_unscoped_outcome_still_settles_its_attempt() -> None:
+    """A leak here silences the rig, which is worse than a double report.
+
+    `mark_delivered` and any unscoped `note_outcome` never removed the issued id
+    from `_pending`, so after `_MAX_OUTSTANDING_ATTEMPTS` such alarms the
+    backpressure check would refuse every later admission forever with no work
+    actually in flight.
+    """
+
+    ledger = _EventDedup(window_s=WINDOW, escalate_after_s=ESCALATE)
+
+    for index in range(_MAX_OUTSTANDING_ATTEMPTS + 8):
+        alarm = f"alarm:unscoped-{index}"
+        assert ledger.should_dispatch(alarm) is True
+        ledger.note_outcome(alarm, delivered=True)  # no attempt id -- the old shape
+
+    assert ledger._pending == set(), f"{len(ledger._pending)} phantom attempts left in flight by unscoped reports"
+
+    ledger.should_dispatch("alarm:via-alias")
+    ledger.mark_delivered("alarm:via-alias")
+    assert ledger._pending == set(), "the compatibility alias left a phantom pending attempt"
 
 
 def test_settled_state_costs_nothing_per_admission(clock) -> None:
@@ -870,6 +944,20 @@ def test_settled_state_costs_nothing_per_admission(clock) -> None:
     assert ledger._pending == {stalled}, (
         f"bookkeeping grew with lifetime admissions: {len(ledger._pending)} ids retained"
     )
+    # `_pending` alone is not enough to catch the regression this guards.  Under
+    # the watermark-plus-remainder design every churn attempt ALSO removed
+    # itself from `_pending`, so this assertion held while `_settled_above` grew
+    # by all 500 settled ids.  The leak lived in a second structure, so the node
+    # has to assert that no such structure exists.
+    settled_state = {
+        name: value
+        for name, value in vars(ledger).items()
+        if name not in {"_pending"} and isinstance(value, (set, dict, list)) and "settl" in name
+    }
+    assert not settled_state, f"settlement bookkeeping other than the pending set exists again: {sorted(settled_state)}"
+    # Per-ALARM state for alarms seen recently is legitimate and is pruned on the
+    # escalation horizon; what must not exist is per-SETTLED-ATTEMPT state, which
+    # the check above asserts by absence.
     # The stalled attempt is still recognised, however long it takes to report.
     assert ledger._has_settled(stalled) is False
     ledger.note_outcome("alarm:forever-pending", delivered=True, attempt=stalled)
