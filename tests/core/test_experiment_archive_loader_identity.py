@@ -269,6 +269,73 @@ def test_the_retained_byte_budget_charges_for_the_identity_it_retains() -> None:
     assert _retained_row_bytes(row, _retained_identity(legacy)) == without
 
 
+def test_the_loader_charges_the_budget_with_the_identity_it_persists(tmp_path: Path, monkeypatch) -> None:
+    """Guard the WIRING, not just the arithmetic.
+
+    Extracting `_retained_row_bytes` made the accounting assertable and left its
+    CALL unguarded: Codex replaced the `identity` argument with `None` at the
+    call site and all 14 nodes stayed green, so the helper could remain correct
+    in isolation while production stopped charging for what it persists.
+
+    This drives the real `_load_experiment_readings` and asserts the argument it
+    passes, so a miswired call fails here rather than at 32 MiB in a lab.
+    """
+
+    from cryodaq.core import experiment as experiment_module
+
+    descriptor = _descriptor()
+    _archive(tmp_path, descriptor=descriptor)
+
+    charged: list[object] = []
+    real = experiment_module._retained_row_bytes
+
+    def recording(row: object, identity: object) -> int:
+        charged.append(identity)
+        return real(row, identity)
+
+    monkeypatch.setattr(experiment_module, "_retained_row_bytes", recording)
+
+    rows = _load(tmp_path)
+    assert len(rows) == 1, "premise: the archive must yield exactly one row"
+    assert len(charged) == 1, f"the budget was consulted {len(charged)} times for one row"
+
+    identity = charged[0]
+    assert identity is not None, "the loader charged the budget as though the row carried no identity"
+    assert identity.channel_id == descriptor.channel_id
+    assert identity.descriptor_hash == descriptor.descriptor_hash
+
+    # And the value actually persisted agrees with what was charged for.
+    assert rows[0]["channel_id"] == identity.channel_id
+    assert rows[0]["descriptor_hash"] == identity.descriptor_hash
+
+
+def test_the_loader_charges_nothing_for_a_legacy_row(tmp_path: Path, monkeypatch) -> None:
+    """The mirror: what is not persisted must not be charged.
+
+    A budget that over-charges is a different defect from one that under-charges
+    but it is still a wrong bound, and the legacy filter runs before the call --
+    so this asserts the two agree at the call site rather than by inspection.
+    """
+
+    from cryodaq.core import experiment as experiment_module
+
+    _archive(tmp_path, descriptor=None)
+
+    charged: list[object] = []
+    real = experiment_module._retained_row_bytes
+
+    def recording(row: object, identity: object) -> int:
+        charged.append(identity)
+        return real(row, identity)
+
+    monkeypatch.setattr(experiment_module, "_retained_row_bytes", recording)
+
+    rows = _load(tmp_path)
+    assert len(rows) == 1
+    assert charged == [None], "a legacy row was charged for identity it does not persist"
+    assert rows[0]["channel_id"] is None
+
+
 @pytest.mark.parametrize("field_name", ["channel_id", "descriptor_hash", "descriptor_revision"])
 def test_every_identity_column_is_populated_from_the_archive(tmp_path: Path, field_name: str) -> None:
     """Assert each column positively.
