@@ -430,6 +430,53 @@ def _serialized_lifecycle_mutation(method: Any) -> Any:
     return wrapped
 
 
+def _retained_identity(descriptor: Any) -> Any:
+    """The descriptor a finalisation row may persist, or ``None``.
+
+    The bounded archive readers never report absent identity as ``None``: they
+    synthesize a ``legacy=True`` descriptor whose ``channel_id`` is
+    ``legacy:<digest of the channel spelling>``.  Persisting that would make
+    unattributable history look descriptor-backed, so ``legacy`` is treated as
+    absent -- the convention `reporting/sections.py` already enforces.
+    """
+
+    if descriptor is None or descriptor.legacy:
+        return None
+    return descriptor
+
+
+def _retained_row_bytes(row: Any, identity: Any) -> int:
+    """Bytes to charge one retained finalisation row against the memory bound.
+
+    THE IDENTITY COLUMNS ARE RETAINED, SO THEY MUST BE BUDGETED.  A
+    maximum-length ``channel_id`` plus the hash and revision is roughly 200
+    bytes per row; charging only the original instrument/channel/unit/status
+    projection lets a long finalisation hold and write substantially more than
+    the 32 MiB cap allows -- and that cap is what stands between a large
+    experiment and memory exhaustion.
+
+    Extracted from the loader so the accounting can be asserted directly.
+    Inline, the only way to exercise it was to build an archive large enough to
+    approach the cap, which no guard did -- so dropping the identity terms left
+    every mapped guard green.
+    """
+
+    size = (
+        96
+        + len(row.instrument_id.encode("utf-8"))
+        + len(row.channel.encode("utf-8"))
+        + len(row.unit.encode("utf-8"))
+        + len(row.status.encode("utf-8"))
+    )
+    if identity is not None:
+        size += (
+            len(identity.channel_id.encode("utf-8"))
+            + len(identity.descriptor_hash.encode("utf-8"))
+            + len(str(identity.descriptor_revision).encode("utf-8"))
+        )
+    return size
+
+
 class ExperimentManager:
     def __init__(
         self,
@@ -2535,31 +2582,8 @@ class ExperimentManager:
                 issues.append(f"issue_overflow:{result.issue_overflow}")
             for row in reversed(result.rows):
                 channel_count = per_channel.get(row.channel, 0)
-                identity = row.descriptor
-                if identity is not None and identity.legacy:
-                    identity = None
-                encoded_size = (
-                    96
-                    + len(row.instrument_id.encode("utf-8"))
-                    + len(row.channel.encode("utf-8"))
-                    + len(row.unit.encode("utf-8"))
-                    + len(row.status.encode("utf-8"))
-                    # The three identity columns are RETAINED, so they have to be
-                    # BUDGETED.  A maximum-length channel_id plus the hash and
-                    # revision is roughly 200 bytes a row; counting only the
-                    # original projection lets a long finalisation hold and write
-                    # substantially more than the 32 MiB cap allows, which is the
-                    # bound that keeps a big experiment from exhausting memory.
-                    + (
-                        0
-                        if identity is None
-                        else (
-                            len(identity.channel_id.encode("utf-8"))
-                            + len(identity.descriptor_hash.encode("utf-8"))
-                            + len(str(identity.descriptor_revision).encode("utf-8"))
-                        )
-                    )
-                )
+                identity = _retained_identity(row.descriptor)
+                encoded_size = _retained_row_bytes(row, identity)
                 if (
                     len(rows_newest_first) >= max_total_points
                     or channel_count >= max_points_per_channel

@@ -34,6 +34,7 @@ import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -209,6 +210,63 @@ def test_the_reader_really_does_synthesize_a_legacy_descriptor_here(tmp_path: Pa
     assert descriptor is not None, "premise broken: the reader now reports absent identity as None"
     assert descriptor.legacy is True
     assert descriptor.channel_id.startswith("legacy:")
+
+
+def test_the_retained_byte_budget_charges_for_the_identity_it_retains() -> None:
+    """What is retained must be budgeted.
+
+    The 32 MiB accumulator is what stands between a large experiment and memory
+    exhaustion.  Each row now carries three identity values -- roughly 200 bytes
+    for a maximum-length channel_id -- and charging only the original
+    instrument/channel/unit/status projection lets a long finalisation hold and
+    write substantially more than the cap allows.
+
+    Asserted on the accounting directly rather than by building an archive large
+    enough to approach the cap.  Inline, that was the ONLY way to reach it, and
+    no guard did -- so dropping the identity terms left every mapped guard
+    green. Codex found that on `9893a65c`.
+    """
+
+    from cryodaq.core.experiment import _retained_identity, _retained_row_bytes
+
+    class _Row:
+        instrument_id = "LS218_1"
+        channel = "cryostat.stage2.temperature"
+        unit = "K"
+        status = "ok"
+
+    row = _Row()
+    descriptor = _descriptor()
+    resolved = SimpleNamespace(
+        channel_id=descriptor.channel_id,
+        descriptor_hash=descriptor.descriptor_hash,
+        descriptor_revision=descriptor.descriptor_revision,
+        legacy=False,
+    )
+    legacy = SimpleNamespace(
+        channel_id="legacy:" + "f" * 64,
+        descriptor_hash="sha256:" + "e" * 64,
+        descriptor_revision=1,
+        legacy=True,
+    )
+
+    without = _retained_row_bytes(row, None)
+    with_identity = _retained_row_bytes(row, _retained_identity(resolved))
+
+    expected = (
+        len(resolved.channel_id.encode("utf-8"))
+        + len(resolved.descriptor_hash.encode("utf-8"))
+        + len(str(resolved.descriptor_revision).encode("utf-8"))
+    )
+    assert with_identity - without == expected, (
+        "the identity columns are retained but not charged against the memory bound"
+    )
+    assert with_identity > without
+
+    # A legacy descriptor is not persisted, so it must not be charged either --
+    # the budget has to agree with what the writer actually stores.
+    assert _retained_identity(legacy) is None
+    assert _retained_row_bytes(row, _retained_identity(legacy)) == without
 
 
 @pytest.mark.parametrize("field_name", ["channel_id", "descriptor_hash", "descriptor_revision"])
