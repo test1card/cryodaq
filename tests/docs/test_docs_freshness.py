@@ -392,6 +392,14 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-013",
         "OC-020",
         "OC-023",
+        # OC-024 STAYS BLOCKING. The finalisation table now carries declared
+        # identity, but the four archive exporters reachable from the same
+        # operator-facing panel (csv_export, hdf5_export, parquet_archive,
+        # xlsx_export) still emit channel-spelling-only schemas and were not
+        # measured. Deregistering the row here would close the deployment gate
+        # for that path on the strength of a prose residual -- which is the
+        # fix-one-instance-then-close-the-class error this registry exists to
+        # catch, and which REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301 records.
         "OC-024",
         "OC-026",
         # OC-028 STAYS BLOCKING. The owner's A+B behaviour is implemented, but
