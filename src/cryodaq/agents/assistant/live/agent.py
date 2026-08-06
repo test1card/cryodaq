@@ -308,6 +308,12 @@ class _EventDedup:
         self._attempt = {key: seq for key, seq in self._attempt.items() if key in self._seen}
         self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in self._seen}
         self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in self._seen}
+        # The generation marker is pruned WITH its alarm.  Left behind, it still
+        # names the retired occurrence's attempt, so a success from that
+        # occurrence arriving BEFORE the alarm fires again compares equal and is
+        # accepted -- recreating `_seen` and `_last_allowed` and suppressing the
+        # new occurrence's first event.
+        self._generation = {key: seq for key, seq in self._generation.items() if key in self._seen}
         # `_settled_below` and `_settled_above` are pruned as they are written;
         # see `_mark_settled`.  Nothing to do here.
         return
@@ -473,6 +479,16 @@ class _EventDedup:
             if self._has_settled(attempt):
                 return
             self._mark_settled(attempt)
+
+        if delivered and attempt is not None and event_id not in self._attempt:
+            # The alarm has been RETIRED -- its state was pruned and it has not
+            # fired since.  A success arriving now belongs to that retired
+            # occurrence, and applying it would recreate `_seen` and
+            # `_last_allowed` out of nothing, so the next occurrence's FIRST
+            # event would be suppressed as a duplicate of a narration about
+            # something else.  This is the mirror of the check below: there the
+            # alarm had already re-fired, here it has not re-fired yet.
+            return
 
         if delivered and attempt is not None and attempt < self._generation.get(event_id, 0):
             # A success from BEFORE this alarm's current occurrence began -- the

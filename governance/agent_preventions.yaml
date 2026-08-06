@@ -72,6 +72,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: NARRATION-GUARD-RETIRED-RESURRECTION-FALSE-GREEN-317
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it
+    ci_partition: agents
+    red_evidence: the_generation_check_added_for_316_covered_only_the_ordering_where_the_alarm_had_already_re_fired_when_the_retired_attempt_succeeded_FIRST_the_marker_still_named_it_so_the_success_was_accepted_and_recreated_seen_and_last_allowed_out_of_nothing_suppressing_the_new_occurrences_very_first_event_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-PRUNED-GENERATION-FALSE-GREEN-316
     status: open
     scope: product_contract
@@ -3109,6 +3117,8 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_pending_attempt_survives_a_forced_watermark_jump
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it
         ci_partition: agents
     red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
     green_evidence: pending

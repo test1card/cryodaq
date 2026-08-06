@@ -781,6 +781,39 @@ def test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one(cl
     assert "alarm:generations" in ledger._undelivered, "a success from a pruned occurrence suppressed the current one"
 
 
+def test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it(clock) -> None:
+    """The opposite ordering to the node above, and the generation check misses it.
+
+    If the retired attempt succeeds BEFORE the alarm fires again, `_generation`
+    still names that attempt, so the comparison accepts it -- and applying it
+    recreates `_seen` and `_last_allowed` out of nothing, so the NEW
+    occurrence's very first event is suppressed as a duplicate of a narration
+    about something else.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:retired") is True
+    retired = ledger.current_attempt("alarm:retired")
+
+    # Another alarm fires past the horizon, pruning this one.
+    clock.return_value = start + ESCALATE + WINDOW + 60.0
+    ledger.should_dispatch("alarm:someone-else")
+    assert "alarm:retired" not in ledger._attempt, "premise: the occurrence must have been retired"
+
+    # The retired attempt succeeds -- BEFORE the alarm fires again.
+    clock.return_value = start + ESCALATE + WINDOW + 70.0
+    ledger.note_outcome("alarm:retired", delivered=True, attempt=retired)
+
+    assert "alarm:retired" not in ledger._seen, "a retired occurrence's success recreated the alarm's state"
+
+    # The new occurrence's FIRST event must be narrated, not suppressed.
+    clock.return_value = start + ESCALATE + WINDOW + 75.0
+    assert ledger.should_dispatch("alarm:retired") is True, (
+        "the first event of a new occurrence was suppressed by a narration about the retired one"
+    )
+
+
 def test_an_attempt_id_is_never_reused_after_pruning(clock) -> None:
     """A per-alarm counter is pruned with its alarm; a global one cannot be.
 
