@@ -56,6 +56,22 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: NARRATION-GUARD-QUIET-BRANCH-PRECEDENCE-FALSE-GREEN-312
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_slow_delivery_does_not_leave_the_quiet_branch_armed
+    ci_partition: agents
+    red_evidence: the_whole_suite_was_green_while_a_delivery_slower_than_window_s_left_seen_at_the_admission_so_the_next_refire_took_the_quiet_for_a_full_window_branch_which_is_evaluated_before_the_delivery_clock_and_re_narrated_seconds_after_the_operator_was_told_no_node_exercised_a_delivery_slower_than_the_window_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-SETTLED-EVICTION-FALSE-GREEN-313
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_an_outstanding_attempt_keeps_its_settled_identity
+    ci_partition: agents
+    red_evidence: settle_once_was_bounded_by_id_distance_so_an_attempt_far_enough_behind_had_its_first_report_evicted_and_its_second_accepted_moving_the_clock_to_the_audit_completion_time_and_the_suite_stayed_green_because_no_node_crossed_the_eviction_boundary_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-VACUOUS-PAYLOAD-FALSE-GREEN-305
     status: open
     scope: product_contract
@@ -3059,6 +3075,10 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_settled_attempt_reporting_twice_does_not_drag_the_clock
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_attempt_id_is_never_reused_after_pruning
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_slow_delivery_does_not_leave_the_quiet_branch_armed
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_outstanding_attempt_keeps_its_settled_identity
         ci_partition: agents
     red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
     green_evidence: pending
