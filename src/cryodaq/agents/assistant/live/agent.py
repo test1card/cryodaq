@@ -280,6 +280,11 @@ class _EventDedup:
         # neither failure: memory is exactly the in-flight set, and idempotence
         # is exact for every id.
         self._pending: set[int] = set()
+        # Which alarm each outstanding attempt belongs to.  The exemption
+        # below needs it: a first sighting is exempt because the queued
+        # attempts belong to OTHER alarms, and that reason fails when one of
+        # them belongs to this one.
+        self._pending_alarm: dict[int, str] = {}
         # The attempt id at which each alarm's CURRENT occurrence began -- reset
         # whenever the alarm is admitted with no prior state, i.e. after a prune.
         # A success from before that line describes a different occurrence and
@@ -338,6 +343,7 @@ class _EventDedup:
         self._next_attempt += 1
         self._attempt[event_id] = self._next_attempt
         self._pending.add(self._next_attempt)
+        self._pending_alarm[self._next_attempt] = event_id
         if fresh_occurrence:
             # No prior state: either the first ever admission for this alarm, or
             # the first after `_prune` dropped it.  Everything before this line
@@ -388,14 +394,20 @@ class _EventDedup:
         self._seen[event_id] = now
         self._prune(now)
 
-        if last_seen is not None and len(self._pending) >= _MAX_OUTSTANDING_ATTEMPTS:
+        already_queued = any(self._pending_alarm.get(seq) == event_id for seq in self._pending)
+        if (last_seen is not None or already_queued) and len(self._pending) >= _MAX_OUTSTANDING_ATTEMPTS:
             # BACKPRESSURE AT THE GATE, ahead of every admitting branch -- a
             # check placed after them never applies to a repeat admission, which
             # is where the growth comes from.
             #
-            # A FIRST SIGHTING IS NEVER REFUSED.  `last_seen is None` means this
-            # alarm has not been heard from, and the queued attempts belong to
-            # OTHER alarms -- they will not narrate this one.  Production
+            # A FIRST SIGHTING IS REFUSED ONLY IF THIS ALARM ALREADY HAS AN
+            # ATTEMPT OUTSTANDING.  The exemption exists because the queued
+            # attempts belong to OTHER alarms and will not narrate this one --
+            # and that reason fails when one of them belongs to this alarm.
+            # Without the `already_queued` term, an alarm that clears and
+            # retriggers past each prune horizon is retired and exempted every
+            # time, so pending ids and queued handler tasks grow without bound
+            # through the very hole the cap exists to close.  Production
             # sources publish on transition (`engine_wiring/runtime_tasks.py`
             # only on `TRIGGERED`), so a condition that stays active and never
             # transitions again would lose its narration permanently.  Losing an
@@ -457,9 +469,14 @@ class _EventDedup:
             #   * sequential per-recipient transport acknowledgements.
             #
             # A rejected or slow attempt reports `delivered=False`, so the alarm
-            # re-arms and is retried -- silence is not permanent -- but no
-            # end-to-end deadline exists, so no received-to-received maximum can
-            # honestly be stated here.  Enforcing one would need a deadline that
+            # re-arms and is retried ON THE NEXT REFIRE -- and only then.
+            # `engine_wiring/runtime_tasks.py` publishes `alarm_fired` on a
+            # TRIGGERED transition and nothing consumes `_undelivered` on a
+            # timer, so a CRITICAL whose sole transition was rejected by the
+            # hourly rate limit and which then stays active without
+            # transitioning again is NEVER NARRATED AT ALL.  Saying silence is
+            # not permanent, unqualified, was false.  And no end-to-end deadline
+            # exists, so no received-to-received maximum can be stated here.  Enforcing one would need a deadline that
             # spans this whole path, which is a design change beyond OC-028.
             return self._allow(event_id, now)
         return False
@@ -476,6 +493,7 @@ class _EventDedup:
 
     def _mark_settled(self, attempt: int) -> None:
         self._pending.discard(attempt)
+        self._pending_alarm.pop(attempt, None)
 
     def current_attempt(self, event_id: str) -> int:
         """The sequence number of the newest admission for ``event_id``.

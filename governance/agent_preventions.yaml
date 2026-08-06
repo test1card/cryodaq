@@ -72,6 +72,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: NARRATION-GUARD-RETIREMENT-EXEMPTION-UNBOUNDED-FALSE-GREEN-336
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_return_is_refused_while_its_own_attempt_is_queued
+    ci_partition: agents
+    red_evidence: the_first_sighting_exemption_added_for_322_was_unconditional_so_an_alarm_that_clears_and_retriggers_past_each_prune_horizon_was_retired_and_exempted_every_cycle_growing_pending_ids_and_handler_tasks_without_bound_through_the_hole_the_cap_exists_to_close_and_the_existing_node_established_65_pending_attempts_but_repeated_the_retirement_only_ONCE_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-RETIRED-REFIRE-REFUSED-FALSE-GREEN-326
     status: open
     scope: product_contract
@@ -3221,6 +3229,8 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_first_sighting_is_never_refused_by_backpressure
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_occurrence_returning_under_backpressure_is_a_first_sighting
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_return_is_refused_while_its_own_attempt_is_queued
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_unscoped_outcome_still_settles_its_attempt
         ci_partition: agents

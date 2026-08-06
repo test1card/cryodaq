@@ -892,11 +892,16 @@ def test_a_retired_occurrence_returning_under_backpressure_is_a_first_sighting(c
         clock.return_value = start + step
         assert ledger.should_dispatch(f"alarm:holding-{step}") is True
 
-    # The target alarm is seen once, alongside them.
+    # The target alarm is seen once, alongside them, and ITS narration completes.
+    # That matters: the exemption is for an alarm with nothing outstanding of its
+    # own, because the queued attempts belong to other alarms and will not
+    # narrate this one.  An alarm whose OWN attempt is still queued is covered by
+    # `test_a_retired_return_is_refused_while_its_own_attempt_is_queued`.
     seen_at = start + _MAX_OUTSTANDING_ATTEMPTS
     clock.return_value = seen_at
     assert ledger.should_dispatch("alarm:returning") is True
-    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS + 1, "premise: the queue must be saturated"
+    ledger.note_outcome("alarm:returning", delivered=True, attempt=ledger.current_attempt("alarm:returning"))
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS, "premise: the queue must be saturated"
 
     # NOTHING ELSE FIRES in the gap. That matters: `_prune` runs on every
     # dispatch, so another alarm firing here would prune the target's state and
@@ -1162,6 +1167,48 @@ async def test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write() -
     # And the blanket cancellation fallback must not be able to undo it.
     agent._dedup.note_outcome("alarm:auditcancel", delivered=False, attempt=attempt)
     assert "alarm:auditcancel" not in agent._dedup._undelivered
+
+
+def test_a_retired_return_is_refused_while_its_own_attempt_is_queued(clock) -> None:
+    """Retirement must not become an unbounded exemption.
+
+    An alarm that clears and retriggers past each prune horizon is retired every
+    time, and `_retire` sets the local `last_seen` to None -- so a first-sighting
+    exemption granted unconditionally lets that one alarm add a pending id and a
+    handler task on every cycle, growing both without bound through the very
+    hole the cap exists to close.
+
+    The exemption's reason is that the queued attempts belong to OTHER alarms.
+    When one of them belongs to THIS alarm, the reason fails, and nothing is
+    lost by refusing: that queued attempt narrates this alarm.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    for step in range(_MAX_OUTSTANDING_ATTEMPTS - 1):
+        clock.return_value = start + step
+        assert ledger.should_dispatch(f"alarm:holding-{step}") is True
+
+    # The target is admitted and never completes -- its attempt stays queued.
+    at = start + _MAX_OUTSTANDING_ATTEMPTS
+    clock.return_value = at
+    assert ledger.should_dispatch("alarm:cycling") is True
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS, "premise: the queue must be saturated"
+
+    # It now clears and retriggers past the horizon, repeatedly.  Nothing else
+    # fires, so each return retires its own state and looks like a first
+    # sighting -- which is exactly the ordering that used to be exempt.
+    admitted = 0
+    for _ in range(6):
+        at += ESCALATE + WINDOW + 60.0
+        clock.return_value = at
+        if ledger.should_dispatch("alarm:cycling"):
+            admitted += 1
+
+    assert admitted == 0, f"{admitted} retired returns were exempted while this alarm's own attempt was queued"
+    assert len(ledger._pending) == _MAX_OUTSTANDING_ATTEMPTS, (
+        f"the pending set grew to {len(ledger._pending)} through repeated retirement"
+    )
 
 
 def test_settled_state_costs_nothing_per_admission(clock) -> None:
