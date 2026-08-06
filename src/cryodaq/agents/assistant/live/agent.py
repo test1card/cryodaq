@@ -388,6 +388,37 @@ class _EventDedup:
         self._seen[event_id] = now
         self._prune(now)
 
+        if last_seen is not None and len(self._pending) >= _MAX_OUTSTANDING_ATTEMPTS:
+            # BACKPRESSURE AT THE GATE, ahead of every admitting branch -- a
+            # check placed after them never applies to a repeat admission, which
+            # is where the growth comes from.
+            #
+            # A FIRST SIGHTING IS NEVER REFUSED.  `last_seen is None` means this
+            # alarm has not been heard from, and the queued attempts belong to
+            # OTHER alarms -- they will not narrate this one.  Production
+            # sources publish on transition (`engine_wiring/runtime_tasks.py`
+            # only on `TRIGGERED`), so a condition that stays active and never
+            # transitions again would lose its narration permanently.  Losing an
+            # alarm entirely is a worse failure than an unbounded queue, and the
+            # bound that remains -- one outstanding first sighting per distinct
+            # alarm id -- is set by the rig's alarm inventory rather than by
+            # refire rate, which is the term that ran away.
+            #
+            # With both inference slots stuck in an unbounded dispatch or audit
+            # operation, every escalation admitted another attempt and created
+            # another handler task. A queued task neither consumes rate-limit
+            # capacity -- the timestamp is appended only after the semaphore is
+            # acquired -- nor settles its id, so a continuously refiring
+            # CRITICAL grew `_handler_tasks` and the pending set without bound
+            # until shutdown.
+            #
+            # Refusing trades a narration for a bound, and that is the right way
+            # round: the attempts already queued will narrate when they drain,
+            # so this does not silence the alarm. It declines to tell the
+            # operator a 65th time by a system that has not managed to tell them
+            # once.
+            return False
+
         if last_seen is None or last_seen < now - self._window_s:
             # Genuinely quiet for a full window: the original semantics.
             return self._allow(event_id, now)
@@ -488,10 +519,10 @@ class _EventDedup:
             # AN UNSCOPED REPORT STILL SETTLES THE ALARM'S CURRENT ATTEMPT.
             # Without this the issued id is never removed from `_pending`, so
             # every unscoped caller -- including `mark_delivered` -- leaves a
-            # phantom in flight -- and `_has_settled` derives its answer from
-            # that set, so the id would never be recognised as settled and a
-            # duplicate report arriving later would be applied a second time,
-            # dragging the clock exactly as scoping exists to prevent.
+            # phantom in flight, and after `_MAX_OUTSTANDING_ATTEMPTS` such
+            # alarms the backpressure check refuses every later admission
+            # forever with no work actually running.  A leak that silences the
+            # rig is a worse outcome than the double-report scoping prevents.
             attempt = self._attempt.get(event_id)
 
         if attempt is not None:
@@ -565,11 +596,11 @@ class _EventDedup:
         """Backwards-compatible alias for a successful delivery.
 
         THE CLOCKS ARE MOVED BY `note_outcome`, NOT HERE.  Stamping first let an
-        arbitrarily late compatibility report -- a legacy caller after the
-        scoped router callback had already settled, or the alias called twice --
-        advance `_seen` and `_last_allowed` before settle-once could reject it,
-        postponing the next escalation on a duplicate.  Settlement decides
-        whether the clocks may move.
+        arbitrarily late compatibility report -- a legacy caller arriving after
+        the scoped router callback had already settled, or the alias called
+        twice -- advance `_seen` and `_last_allowed` before settle-once could
+        reject it, postponing the next escalation on a duplicate.  Settlement
+        decides whether the clocks may move.
         """
 
         self.note_outcome(event_id, delivered=True)
@@ -591,6 +622,14 @@ def _reached_any_recipient(outcomes: dict[str, Any]) -> bool:
         if isinstance(state, dict) and any(recipient == "delivered" for recipient in state.values()):
             return True
     return False
+
+
+# How many narration attempts may be in flight at once before the gate refuses
+# to admit more.  Far above any healthy load -- two inference slots and a 30 s
+# window cannot produce this many outstanding attempts unless the dispatch path
+# has stopped completing -- so reaching it is a symptom, and the bound exists so
+# the symptom does not become an unbounded task and id accumulation.
+_MAX_OUTSTANDING_ATTEMPTS = 64
 
 
 def _event_dedup_id(event: EngineEvent) -> str | None:
