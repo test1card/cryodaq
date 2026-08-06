@@ -318,6 +318,21 @@ class _EventDedup:
         # see `_mark_settled`.  Nothing to do here.
         return
 
+    def _retire(self, event_id: str) -> None:
+        """Drop one alarm's occurrence state so the next admission starts fresh.
+
+        Everything `_prune` would remove for an alarm that has gone quiet, but
+        applied to a single id at a moment `_prune` cannot see.
+        """
+
+        self._seen.pop(event_id, None)
+        self._last_allowed.pop(event_id, None)
+        self._admitted_at.pop(event_id, None)
+        self._last_told.pop(event_id, None)
+        self._attempt.pop(event_id, None)
+        self._generation.pop(event_id, None)
+        self._undelivered.discard(event_id)
+
     def _allow(self, event_id: str, now: float) -> bool:
         fresh_occurrence = event_id not in self._attempt
         self._last_allowed[event_id] = now
@@ -351,6 +366,19 @@ class _EventDedup:
         now = time.monotonic()
         last_seen = self._seen.get(event_id)
         last_allowed = self._last_allowed.get(event_id)
+
+        # RETIRE THIS ALARM'S OWN STALE STATE FIRST.  `_prune` runs after
+        # `_seen` is refreshed, so it can never retire the alarm currently
+        # firing -- and a lone CRITICAL, the only one qualifying, therefore kept
+        # its `_attempt` and `_generation` across an arbitrarily long silence.
+        # A success from that retired occurrence then passed the generation
+        # check and cleared the CURRENT occurrence's failure marker.  Retiring
+        # here uses the PRE-REFRESH timestamp, which is the only moment the
+        # gap is visible.
+        if last_seen is not None and last_seen < now - max(self._window_s, self._escalate_after_s):
+            self._retire(event_id)
+            last_allowed = None
+
         self._seen[event_id] = now
         self._prune(now)
 

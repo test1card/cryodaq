@@ -814,6 +814,43 @@ def test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it(clock)
     )
 
 
+def test_a_lone_alarm_retires_its_own_stale_state(clock) -> None:
+    """The same-id-only path, which no amount of pruning can reach.
+
+    `_prune` runs AFTER `_seen` is refreshed, so it can never retire the alarm
+    that is currently firing.  A lone CRITICAL -- the only one qualifying, which
+    is the ordinary case on a quiet rig -- therefore kept its `_attempt` and
+    `_generation` across an arbitrarily long silence, and a success from that
+    retired occurrence passed the generation check and cleared the CURRENT
+    occurrence's failure marker.
+
+    The earlier prune nodes all used a SECOND alarm to trigger the sweep, so
+    none of them could see this.
+    """
+
+    ledger = _ledger()
+    start = 1000.0
+    assert ledger.should_dispatch("alarm:lonely") is True
+    old_attempt = ledger.current_attempt("alarm:lonely")
+
+    # Nothing else ever fires.  The same alarm returns after the horizon.
+    clock.return_value = start + ESCALATE + WINDOW + 120.0
+    assert ledger.should_dispatch("alarm:lonely") is True
+    new_attempt = ledger.current_attempt("alarm:lonely")
+    assert new_attempt != old_attempt
+
+    ledger.note_outcome("alarm:lonely", delivered=False, attempt=new_attempt)
+    assert "alarm:lonely" in ledger._undelivered, "premise: the current occurrence reached nobody"
+
+    # The retired occurrence's narration finally lands.
+    clock.return_value = start + ESCALATE + WINDOW + 130.0
+    ledger.note_outcome("alarm:lonely", delivered=True, attempt=old_attempt)
+
+    assert "alarm:lonely" in ledger._undelivered, (
+        "a success from the retired occurrence cleared the current one's failure marker"
+    )
+
+
 def test_an_attempt_id_is_never_reused_after_pruning(clock) -> None:
     """A per-alarm counter is pruned with its alarm; a global one cannot be.
 
