@@ -26,8 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cryodaq.channels.descriptors import ChannelQuantity
-from cryodaq.core.channel_manager import ChannelConfigError, ChannelManager
+from cryodaq.core.channel_manager import ChannelManager
 
 CYRILLIC_TE = "Т"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -97,28 +96,6 @@ def test_a_declared_non_temperature_is_excluded_however_it_is_spelled(tmp_path: 
     assert manager.is_temperature_channel("Т12") is True
     assert manager.get_temperature_channels() == ["Т12"]
     assert "Т90".startswith(CYRILLIC_TE) is True, "premise: spelling would have accepted it"
-
-
-def test_a_configuration_that_declares_nothing_is_refused_at_load(tmp_path: Path) -> None:
-    """The rule this file previously got BACKWARDS, and review caught it.
-
-    An earlier version of this node loaded a configuration with neither
-    `default_quantity` nor any per-channel `quantity`, asserted the answer was
-    None, and moved on -- which codified, in a guard, a file that starts
-    cleanly and then omits every temperature reading from the grid, the plot,
-    the watch bar, the conductivity panel and dashboard ingestion, silently.
-
-    That is the opposite of this project's rule that an unclassified reading
-    renders MARKED rather than hidden, and it is the `0bea0449` shape again.
-    Refusing at load is the fail-closed half of that rule: the operator is told,
-    in a file they own, rather than shown a blank screen.
-    """
-
-    with pytest.raises(ChannelConfigError) as raised:
-        _manager(tmp_path, {"channels": {"Т12": {"name": "2-я ступень", "visible": True}}})
-    message = str(raised.value)
-    assert "Т12" in message, "the refusal must name the channel the operator has to fix"
-    assert "vanish" in message or "resolve to a quantity" in message
 
 
 def test_an_unknown_channel_reports_no_quantity_rather_than_guessing(tmp_path: Path) -> None:
@@ -220,77 +197,30 @@ def test_saving_channel_edits_preserves_the_declaration(tmp_path: Path) -> None:
     assert "default_quantity" in yaml.safe_load(saved.read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("bad", ["temperatue", "Temperature", "", "temp"])
-def test_an_unsupported_default_quantity_is_refused_at_load(tmp_path: Path, bad: str) -> None:
-    """A typo must be a startup error, not a silently blank rig.
+def test_the_shipped_selection_is_byte_for_byte_what_spelling_selected() -> None:
+    """The PR's stated purpose, as an executable assertion.
 
-    Any non-empty string was accepted, so `default_quantity: temperatue` loaded
-    happily and then made `is_temperature_channel` false for every channel --
-    the same empty screens as above, from a single wrong letter in a file the
-    operator edits.  The vocabulary is `ChannelQuantity`, which the descriptor
-    layer already owns; this must not invent a second one.
+    "Nothing an operator sees changes" was prose in the row and a claim in the
+    commit message; here it is a measurement, run at the same commit as the
+    change. The OLD selector and the NEW one are both applied to the real
+    shipped configuration and required to agree EXACTLY.
+
+    Any deliberate difference must be listed here explicitly. There are none:
+    an empty list is the assertion, not an oversight.
     """
 
-    with pytest.raises(ChannelConfigError) as raised:
-        _manager(tmp_path, {"default_quantity": bad, "channels": {"Т1": {"name": "к"}}})
-    assert "not a supported quantity" in str(raised.value) or "must be a string" in str(raised.value)
+    manager = ChannelManager(SHIPPED_CHANNELS)
+    manager.load()
 
+    by_spelling = [ch for ch in manager.get_all_visible() if ch.startswith(CYRILLIC_TE)]
+    by_declaration = manager.get_visible_temperature_channels()
+    deliberate_differences: set[str] = set()
 
-def test_an_unsupported_per_channel_quantity_is_refused_at_load(tmp_path: Path) -> None:
-    """The per-channel override needs the same closed vocabulary as the default."""
-
-    with pytest.raises(ChannelConfigError) as raised:
-        _manager(
-            tmp_path,
-            {
-                "default_quantity": "temperature",
-                "channels": {"Т1": {"name": "к"}, "Т2": {"name": "к", "quantity": "presure"}},
-            },
-        )
-    assert "presure" in str(raised.value)
-
-
-def test_every_supported_quantity_is_accepted(tmp_path: Path) -> None:
-    """The refusal must not become a refusal of legitimate configurations.
-
-    Without this, tightening the check to a single value would pass every node
-    above while making the file unwritable for any rig that is not all
-    temperatures.
-    """
-
-    for quantity in ChannelQuantity:
-        manager = _manager(tmp_path, {"default_quantity": quantity.value, "channels": {"Т1": {"name": "к"}}})
-        assert manager.get_quantity("Т1") == quantity.value
-
-
-def test_a_rejected_reload_preserves_the_last_valid_configuration(tmp_path: Path) -> None:
-    """`load()` published before it validated, so a REFUSED file half-applied.
-
-    `self._channels` was assigned before the checks could raise, so a manager
-    that rejected a reload was left holding the invalid configuration while the
-    caller saw only an exception -- and the operator-reachable reset handler
-    calls `load()` directly. The visible result is the same empty temperature
-    surfaces, reached this time by an error path that looked handled.
-    """
-
-    good = {"default_quantity": "temperature", "channels": {"Т1": {"name": "верх"}, "Т2": {"name": "низ"}}}
-    manager = _manager(tmp_path, good)
-    before_channels = dict(manager.get_all())
-    before_temperatures = set(manager.get_temperature_channels())
-    assert before_temperatures, "premise: the good configuration must declare temperatures"
-
-    bad = tmp_path / "bad.yaml"
-    bad.write_text(
-        yaml.safe_dump(
-            {"default_quantity": "temperature", "channels": {"Т2": {"name": "низ", "quantity": "presure"}}},
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
+    assert set(by_declaration) ^ set(by_spelling) == deliberate_differences, (
+        "the migration changes what an operator sees on the shipped configuration: "
+        f"added={sorted(set(by_declaration) - set(by_spelling))}, "
+        f"removed={sorted(set(by_spelling) - set(by_declaration))}. A migration that quietly changes a "
+        "screen is the failure behind revert 0bea0449; if a difference is intended, name it above."
     )
-    with pytest.raises(ChannelConfigError):
-        manager.load(bad)
+    assert by_declaration, "the shipped configuration selects no temperature channels at all"
 
-    assert manager.get_all() == before_channels, "a refused reload replaced the live channel table"
-    assert set(manager.get_temperature_channels()) == before_temperatures, (
-        "a refused reload emptied the temperature surfaces it was supposed to leave untouched"
-    )

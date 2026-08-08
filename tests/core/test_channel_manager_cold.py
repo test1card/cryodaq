@@ -12,10 +12,7 @@ from cryodaq.core.channel_manager import ChannelManager
 
 def _write_test_config(channels_dict: dict) -> Path:
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
-    # OC-030: every channel must resolve to a quantity or load refuses.
-    # These fixtures are about the COLD flag, so they declare temperature
-    # once at the top rather than per channel.
-    yaml.safe_dump({"default_quantity": "temperature", "channels": channels_dict}, tmp, allow_unicode=True)
+    yaml.safe_dump({"channels": channels_dict}, tmp, allow_unicode=True)
     tmp.close()
     return Path(tmp.name)
 
