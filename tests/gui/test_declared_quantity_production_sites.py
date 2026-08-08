@@ -260,17 +260,35 @@ def test_the_dashboard_buffers_only_declared_temperatures(app, mixed_manager: Ch
     )
 
 
-def test_the_analytics_summary_orders_only_declared_temperatures(app, mixed_manager: ChannelManager) -> None:
-    """The ordering site. It never DROPPED a channel, which is why it was easy
-    to overlook -- but the same inference reads as authority to the next
-    editor, and it matched Latin `T` as well as Cyrillic `Т`.
+def test_the_analytics_summary_orders_only_declared_temperatures(
+    app, mixed_manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordering site, driven through `_on_stats_loaded` itself.
+
+    An earlier version of this node re-implemented the `sorted(...)` expression
+    against the manager and asserted on its own output -- so it passed while the
+    production method could have been anything. `unguarded_production_files`
+    reported the file still 0-red and that is how it was caught: the node was
+    testing the test.
+
+    This site never DROPPED a channel -- `other_chs` catches whatever
+    `temp_chs` does not -- so the assertion is about ORDER: declared
+    temperatures first, whatever they are spelled.
     """
 
-    data = {"Т1": 1.0, RENAMED: 2.0, PRESSURE_SPELLED_TE: 3.0}
-    ordered = sorted(ch for ch in data if mixed_manager.is_temperature_channel(ch))
+    from cryodaq.gui.shell.views import analytics_widgets
 
-    assert RENAMED in ordered
-    assert PRESSURE_SPELLED_TE not in ordered, (
-        "a declared pressure channel is ordered among the temperature statistics"
+    monkeypatch.setattr(analytics_widgets, "get_channel_manager", lambda: mixed_manager)
+    widget = analytics_widgets.ExperimentSummaryWidget()
+    widget._on_stats_loaded(
+        {"ok": True, "data": {PRESSURE_SPELLED_TE: [(0.0, 1.0)], RENAMED: [(0.0, 2.0)], "Т1": [(0.0, 3.0)]}}
     )
 
+    rendered = widget._stats_label.text()
+    assert RENAMED in rendered and PRESSURE_SPELLED_TE in rendered, (
+        "this site must not DROP anything; it only decides order"
+    )
+    assert rendered.index(RENAMED) < rendered.index(PRESSURE_SPELLED_TE), (
+        "a channel DECLARED as pressure is ordered among the temperatures, ahead of a renamed temperature, "
+        "because its name starts with Cyrillic Те"
+    )
