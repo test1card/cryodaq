@@ -41,8 +41,23 @@ def test_cold_start_channels_are_unavailable_until_real_reading() -> None:
     _app()
 
     class _FakeChannelMgr:
+        # DECLARED, not spelled.  Deriving this list with a `startswith` test
+        # would put the OC-030 inference back inside the guard, and the node
+        # would keep passing if production regressed to spelling.
+        _QUANTITY = {"Т1": "temperature", "Т2": "temperature", "Pressure": "pressure"}
+
         def get_all_visible(self) -> list[str]:
             return ["Т1", "Т2", "Pressure"]
+
+        def is_temperature_channel(self, channel_id: str) -> bool:
+            # Short-form resolution matters: drivers emit "Т1 <suffix>" while the
+            # manager keys on "Т1", so matching the full string would answer
+            # False for every real reading and pass for the wrong reason.
+            short = channel_id.split(" ")[0]
+            return self._QUANTITY.get(short) == "temperature"
+
+        def get_visible_temperature_channels(self) -> list[str]:
+            return [ch for ch in self.get_all_visible() if self.is_temperature_channel(ch)]
 
     bar = TopWatchBar(channel_manager=_FakeChannelMgr())  # type: ignore[arg-type]
     bar._fast_timer.stop()
@@ -71,8 +86,20 @@ def test_on_reading_stores_under_short_id() -> None:
     _app()
 
     class _FakeChannelMgr:
+        _QUANTITY = {"Т1": "temperature"}
+
         def get_all_visible(self) -> list[str]:
             return ["Т1"]
+
+        def is_temperature_channel(self, channel_id: str) -> bool:
+            # Short-form resolution matters: drivers emit "Т1 <suffix>" while the
+            # manager keys on "Т1", so matching the full string would answer
+            # False for every real reading and pass for the wrong reason.
+            short = channel_id.split(" ")[0]
+            return self._QUANTITY.get(short) == "temperature"
+
+        def get_visible_temperature_channels(self) -> list[str]:
+            return [ch for ch in self.get_all_visible() if self.is_temperature_channel(ch)]
 
     bar = TopWatchBar(channel_manager=_FakeChannelMgr())  # type: ignore[arg-type]
     bar._fast_timer.stop()

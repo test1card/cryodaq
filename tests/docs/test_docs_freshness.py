@@ -164,7 +164,12 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
 # property of the sweep. This guard runs on ONE interpreter and cannot measure
 # another; pinning the figure here means the row and the constant have to move
 # together, and moving them requires re-running the sweep on that interpreter.
-_RECORDED_MINIMUM_INTERPRETER_ERRORS = 110
+# RE-MEASURED 2026-08-08 after the OC-030 migration removed nine registrations
+# and added one, taking the sweep from 135 challenges to 127: 94 errors, via
+# `uv run --python 3.12 --with pytest --no-project`, interpreter 3.12.13,
+# counting through `_registry_errors` exactly as the note above prescribes. The
+# row moved with it in the same commit.
+_RECORDED_MINIMUM_INTERPRETER_ERRORS = 94
 
 
 @cache
@@ -944,12 +949,35 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         assert "registry/config references were swept" not in oc_012_lower
         assert "sha256:" + hashlib.sha256(manifest).hexdigest() in oc_012
         recorded = recorded_oc030_locators(oc_030)
-        assert recorded, "OC-030 must record at least one GUI locator"
-        assert recorded == live_oc030_locators(candidate_paths, candidate_contents), (
-            "OC-030 locators must match every live Cyrillic-Te spelling-selection site",
-            recorded,
-            live_oc030_locators(candidate_paths, candidate_contents),
-        )
+        live = live_oc030_locators(candidate_paths, candidate_contents)
+        # THE ASSERTION CHANGES WITH THE ROW'S STATE, and gets STRONGER when the
+        # row closes. While sites are live, the row must list them exactly --
+        # that is the original contract. Once the row reports the migration
+        # done, "record at least one locator" is unsatisfiable by construction:
+        # the locators are gone, and a line number that used to point at a
+        # `startswith` test now points at unrelated code. So the closed state
+        # asserts the thing actually worth asserting -- that NO live
+        # spelling-selection site exists anywhere under the GUI tree. That
+        # catches a site added in a file this row never named, which the
+        # recorded-equals-live form could not.
+        migrated = "IMPLEMENTED" in rows["OC-030"][2] or "CLOSED" in rows["OC-030"][2]
+        if migrated:
+            assert live == {}, (
+                "OC-030 reports the migration complete, but live Cyrillic-Te spelling-selection "
+                "sites exist under src/cryodaq/gui/",
+                live,
+            )
+            assert not recorded, (
+                "OC-030 is closed but still cites path:line locators; they no longer point at the code they describe",
+                recorded,
+            )
+        else:
+            assert recorded, "OC-030 must record at least one GUI locator"
+            assert recorded == live, (
+                "OC-030 locators must match every live Cyrillic-Te spelling-selection site",
+                recorded,
+                live,
+            )
         # The closure gate's prose count must agree with the locator set it
         # summarizes: a stale "all N sites" lets an implementer close the row
         # while leaving a live spelling-inference site unfixed.
@@ -967,12 +995,32 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             11: "eleven",
             12: "twelve",
         }
-        total_locators = sum(len(lines) for lines in recorded.values())
-        assert total_locators in number_words
-        assert f"at all {number_words[total_locators]} sites" in oc_030.lower(), (
-            "OC-030 closure gate must name the exact live locator count",
-            total_locators,
-        )
+        if migrated:
+            # Closed: there is no live locator count to agree with, so the
+            # count that must not go stale is the MIGRATED one. The row has to
+            # name how many sites it converted, and that number has to match
+            # the files it lists -- otherwise "all seven migrated" survives a
+            # site being quietly dropped from the list.
+            migrated_files = set(re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)`", oc_030))
+            assert migrated_files, "OC-030 reports the migration done but names no migrated file"
+            claimed = [word for count, word in number_words.items() if f"{word} sites" in oc_030.lower()]
+            assert len(claimed) == 1, ("OC-030 must state exactly one migrated-site count", claimed)
+            claimed_count = next(count for count, word in number_words.items() if word == claimed[0])
+            # Sites >= files, never fewer: one file held two of them. Deriving
+            # the site count from the file list is impossible, so this asserts
+            # the one relation that is always true and still catches a file
+            # being dropped from the list or the count being cut.
+            assert claimed_count >= len(migrated_files), (
+                f"OC-030 claims {claimed_count} migrated sites but lists {len(migrated_files)} files",
+                sorted(migrated_files),
+            )
+        else:
+            total_locators = sum(len(lines) for lines in recorded.values())
+            assert total_locators in number_words
+            assert f"at all {number_words[total_locators]} sites" in oc_030.lower(), (
+                "OC-030 closure gate must name the exact live locator count",
+                total_locators,
+            )
 
     assert_current(text, tracked, contents)
     for old, replacement in (
@@ -983,31 +1031,43 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             "all 10 tracked workflow-referenced CI/governance runner modules",
             "all 9 tracked workflow-referenced CI/governance runner modules",
         ),
+        # OC-030 IS CLOSED, so the mutations below exercise the closed row's
+        # assertions rather than its old live-locator list. Re-citing a
+        # `path:line` must fail, and so must a site count cut below the number
+        # of files the row names.
         (
-            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1632`",
-            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1626`",
+            "The seven sites are named by file and symbol",
+            "The seven sites are named by file and symbol, e.g. `src/cryodaq/gui/dashboard/temp_plot_widget.py:136`",
         ),
-        (
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:167`",
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:166`",
-        ),
-        ("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`", "`src/cryodaq/gui/dashboard/temp_plot_widget.py:135`"),
-        ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
-        ("at all seven sites", "at all six sites"),
-        (
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:109`",
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:108`",
-        ),
+        ("seven sites", "three sites"),
     ):
         mutated = text.replace(old, replacement, 1)
         assert mutated != text
         with pytest.raises(AssertionError):
             assert_current(mutated, tracked, contents)
 
-    omitted_locator = text.replace("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`; ", "", 1)
-    assert omitted_locator != text
+    omitted_files = text.replace("`src/cryodaq/gui/dashboard/temp_plot_widget.py`", "the plot widget", 1)
+    assert omitted_files != text
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/dashboard/dashboard_view.py`", "the dashboard", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py`", "the grid", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/shell/overlays/conductivity_panel.py`", "the panel", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/shell/top_watch_bar.py`", "the watch bar", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/shell/views/analytics_widgets.py`", "the widgets", 1)
     with pytest.raises(AssertionError):
-        assert_current(omitted_locator, tracked, contents)
+        assert_current(omitted_files, tracked, contents)
+
+    # THE STRONG ONE, and the old self-test could not express it: a NEW live
+    # spelling-selection site, in a file this row never named. While the row
+    # listed live locators, adding a site was indistinguishable from the row
+    # being stale; with the row closed, live must be empty, so any site
+    # anywhere under the GUI tree is a red event.
+    reintroduced = dict(contents)
+    gui_victim = next(path for path in tracked if path.startswith("src/cryodaq/gui/") and path.endswith(".py"))
+    reintroduced[gui_victim] = reintroduced[gui_victim] + '\nif channel.startswith("\u0422"):\n    pass\n'.encode(
+        "utf-8"
+    )
+    with pytest.raises(AssertionError):
+        assert_current(text, tracked, reintroduced)
 
     with pytest.raises(AssertionError):
         assert_current(text, [*tracked, ".github/workflows/new-drift.yml"], contents)

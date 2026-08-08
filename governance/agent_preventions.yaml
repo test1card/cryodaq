@@ -3065,6 +3065,37 @@ false_green_pairs:
     green_evidence: pending
 
 records:
+  - id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    status: open
+    scope: product_contract
+    authority_source: docs/OPEN_CELLS.md#oc-030
+    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled.
+    classification: silent_channel_omission
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator.
+    invariant: 'An operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. WHAT THIS RECORD DOES NOT CLAIM: the declaration currently lives in `config/channels.yaml` and is therefore OPERATOR-owned, not DESCRIPTOR-derived. Binding it to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here, so a wrong declaration in that file still misroutes a surface - it merely does so visibly, in a file the operator owns, instead of invisibly through a letter.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_declared_channel_quantity.py::test_a_renamed_temperature_channel_is_still_selected
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_declared_non_temperature_is_excluded_however_it_is_spelled
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_an_undeclared_channel_reports_no_quantity_rather_than_guessing
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_the_shipped_configuration_selects_exactly_what_spelling_selected
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_visible_temperature_channels_respect_visibility
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_full_channel_id_resolves_through_its_short_form
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_malformed_default_quantity_is_refused
+        ci_partition: core
+    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_2026_08_08_pending_immutable_capture
+    green_evidence: pending
   - id: ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327
     status: open
     scope: product_contract

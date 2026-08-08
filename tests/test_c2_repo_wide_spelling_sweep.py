@@ -465,6 +465,17 @@ class _Registration:
 
 _REGISTRY_ROWS = (
     (
+        "C2-145",
+        _Challenge(
+            "src/cryodaq/core/channel_manager.py",
+            "ChannelManager.get_quantity",
+            "computed membership over identity",
+            "158f4568e2f6f782d7f8",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "declared quantity is operator-owned in config/channels.yaml, not descriptor-derived",
+    ),
+    (
         "C2-001",
         _Challenge(
             "src/cryodaq/agents/assistant/live/context_builder.py",
@@ -883,17 +894,6 @@ _REGISTRY_ROWS = (
         "ASC driver configuration grammar authority",
     ),
     (
-        "C2-047",
-        _Challenge(
-            "src/cryodaq/gui/dashboard/dashboard_view.py",
-            "DashboardView.on_reading",
-            "identity spelling operation startswith()",
-            "313eafabdd5703f5a6ff",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "GUI routing infers presentation semantics from identity spelling",
-    ),
-    (
         "C2-048",
         _Challenge(
             "src/cryodaq/gui/dashboard/dashboard_view.py",
@@ -914,17 +914,6 @@ _REGISTRY_ROWS = (
         ),
         "OPEN-ROUTING-DEBT",
         "GUI routing infers presentation semantics from identity spelling",
-    ),
-    (
-        "C2-050",
-        _Challenge(
-            "src/cryodaq/gui/dashboard/dynamic_sensor_grid.py",
-            "DynamicSensorGrid._rebuild_cells",
-            "identity spelling operation startswith()",
-            "3c6dbafb8e26ad2968c1",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "temperature role inferred from channel spelling; descriptor-backed role is absent",
     ),
     (
         "C2-051",
@@ -969,17 +958,6 @@ _REGISTRY_ROWS = (
         ),
         "OPEN-ROUTING-DEBT",
         "GUI routing infers presentation semantics from identity spelling",
-    ),
-    (
-        "C2-055",
-        _Challenge(
-            "src/cryodaq/gui/dashboard/temp_plot_widget.py",
-            "TempPlotWidget._rebuild_curves",
-            "identity spelling operation startswith()",
-            "3c6dbafb8e26ad2968c1",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "temperature role inferred from channel spelling; descriptor-backed role is absent",
     ),
     (
         "C2-056",
@@ -1235,17 +1213,6 @@ _REGISTRY_ROWS = (
         "calibration channel role inferred from suffix",
     ),
     (
-        "C2-079",
-        _Challenge(
-            "src/cryodaq/gui/shell/overlays/conductivity_panel.py",
-            "_get_temperature_channels",
-            "identity spelling operation startswith()",
-            "52091197866b8d7f18ec",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "GUI routing infers presentation semantics from identity spelling",
-    ),
-    (
         "C2-080",
         _Challenge(
             "src/cryodaq/gui/shell/overlays/conductivity_panel.py",
@@ -1444,17 +1411,6 @@ _REGISTRY_ROWS = (
         "MultiLine role inferred from channel spelling",
     ),
     (
-        "C2-098",
-        _Challenge(
-            "src/cryodaq/gui/shell/top_watch_bar.py",
-            "TopWatchBar.on_reading",
-            "identity spelling operation startswith()",
-            "3c6dbafb8e26ad2968c1",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "watch-bar temperature routing inferred from prefix",
-    ),
-    (
         "C2-099",
         _Challenge(
             "src/cryodaq/gui/shell/top_watch_bar.py",
@@ -1464,39 +1420,6 @@ _REGISTRY_ROWS = (
         ),
         "OPEN-ROUTING-DEBT",
         "watch-bar pressure routing inferred from suffix",
-    ),
-    (
-        "C2-100",
-        _Challenge(
-            "src/cryodaq/gui/shell/top_watch_bar.py",
-            "TopWatchBar._refresh_channels",
-            "identity spelling operation startswith()",
-            "3c6dbafb8e26ad2968c1",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "temperature role inferred from channel spelling; descriptor-backed role is absent",
-    ),
-    (
-        "C2-101",
-        _Challenge(
-            "src/cryodaq/gui/shell/views/analytics_widgets.py",
-            "ExperimentSummaryWidget._on_stats_loaded",
-            "identity spelling operation startswith()",
-            "3c6dbafb8e26ad2968c1",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "temperature role inferred from channel spelling; descriptor-backed role is absent",
-    ),
-    (
-        "C2-102",
-        _Challenge(
-            "src/cryodaq/gui/shell/views/analytics_widgets.py",
-            "ExperimentSummaryWidget._on_stats_loaded",
-            "identity spelling operation startswith()",
-            "e5a21db8860e98e078cc",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "temperature role inferred from channel spelling; descriptor-backed role is absent",
     ),
     (
         "C2-103",
@@ -1922,17 +1845,6 @@ _REGISTRY_ROWS = (
         ),
         "BLOCKED-ON-SCHEMA",
         "Keithley power widget derives quantity and unit from a path segment",
-    ),
-    (
-        "C2-142",
-        _Challenge(
-            "src/cryodaq/gui/shell/views/analytics_widgets.py",
-            "ExperimentSummaryWidget._on_stats_loaded",
-            "computed membership over identity",
-            "b07f07ea30ca2541e190",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "non-temperature ordering depends on a spelling-derived temperature set",
     ),
     (
         "C2-143",
