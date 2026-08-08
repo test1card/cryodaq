@@ -31,7 +31,6 @@ than a measurement it never took.
 from __future__ import annotations
 
 import argparse
-import io
 import subprocess
 import sys
 from pathlib import Path
@@ -75,8 +74,8 @@ def main() -> int:
         print(dirty)
         return 2
 
-    print(f"| reverted production file | suite result |")
-    print(f"|---|---|")
+    print("| reverted production file | suite result |")
+    print("|---|---|")
     unguarded: list[str] = []
     for path in targets:
         source = Path(path)
@@ -86,17 +85,21 @@ def main() -> int:
             print(f"| `{path}` | NEW FILE at {options.base} — nothing to revert to, not measured |")
             continue
         try:
-            with io.open(source, "wb") as handle:
+            with open(source, "wb") as handle:
                 handle.write(before)
             if source.read_bytes() == original:
                 print(f"| `{path}` | identical to {options.base} — not measured |")
                 continue
             failed: list[str] = []
             for suite in suites:
-                run = _run([sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"])
-                failed += [line.split("::")[-1].strip() for line in run.stdout.splitlines() if line.startswith("FAILED")]
+                run = _run(
+                    [sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"]
+                )
+                failed += [
+                    line.split("::")[-1].strip() for line in run.stdout.splitlines() if line.startswith("FAILED")
+                ]
         finally:
-            with io.open(source, "wb") as handle:
+            with open(source, "wb") as handle:
                 handle.write(original)
             assert source.read_bytes() == original, f"{path} was NOT restored byte-identically"
         if failed:
