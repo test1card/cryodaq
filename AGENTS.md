@@ -340,14 +340,54 @@ green slices are not evidence that their combined commit is green.
 
 ## Primary AI-first rule: mistake-to-enforcement
 
-This is the repository's number-one AI-first operating rule. Every confirmed
-agent mistake must harden the governing layer through a durable, enforceable
-prevention disposition, not only an apology, transient note, local fix, or added
-prompt text. A review, integration, publication, or completion disposition cannot
-close while the corresponding prevention remains open. When current scope
-authorizes policy edits, amend this file or its linked governed guideline.
-Otherwise report the exact proposed rule and leave the governance follow-up
-explicitly open; never exceed current write authority.
+This is the repository's number-one AI-first operating rule. It has two tiers,
+separated by the severity floor below.
+
+Above the floor, a confirmed mistake must harden the governing layer through a
+durable, enforceable prevention disposition, not only an apology, transient
+note, local fix, or added prompt text. A review, integration, publication, or
+completion disposition cannot close while an above-floor prevention lacks its
+correction and its guard with red-before-fix / green-after-fix evidence proven
+against the production path. Evidence bound to a hosted CI run on a merged head
+is bookkeeping, appended after merge by a batch sweep; its absence never holds
+a disposition open and never blocks a merge.
+
+Below the floor, a confirmed mistake is fixed where it lives and recorded as
+one line in the defect-class ledger (`docs/DEFECT_CLASSES.md`). It creates no
+registry record, no false-green pair, and no guard obligation, and it blocks
+nothing. The third instance of the same ledger class is a promotion signal:
+enforce the class once, at the boundary where every instance becomes
+unreachable, instead of adding a fourth line.
+
+The severity floor. A mistake is above the floor only when BOTH are true:
+
+1. The defect is in production code -- code that runs when an operator uses
+   the instrument (`src/cryodaq/`). Defects in tests, guards, controls,
+   harnesses, CI workflows, scripts, documentation, or this registry itself
+   are below the floor, even when the thing the guard failed to catch is above
+   it: the product defect gets the record, the guard defect gets a ledger line.
+2. With the defect unfixed and the repository untouched, ordinary lab
+   operation could produce at least one of: a stored measurement lost,
+   altered, or attributed to the wrong channel; a displayed, reported, or
+   exported value that differs from what was measured; an alarm or interlock
+   that fails to fire, fires for the wrong channel, or whose notice never
+   reaches the operator; or the software claiming something happened (saved,
+   delivered, alarmed, completed) that did not. Unbounded resource growth on
+   the acquisition or alarm path also qualifies, because the crash it leads to
+   loses data.
+
+Both questions are yes/no about where the defect lives and its worst realistic
+consequence, not about likelihood, effort, or intent. Calibration from this
+campaign: the archive batch-loss counter reset, the silent in-range k_p poison
+(2.5 -> 9.5), and the retirement that permanently silenced a returning
+CRITICAL's narration are above the floor. A guard that asserted a "ceiling"
+which in fact grew linearly, a control that went red on an IndentationError
+instead of the property under test, and a stale count in a document are below
+it: fix, one ledger line, move on.
+
+When current scope authorizes policy edits, amend this file or its linked
+governed guideline. Otherwise report the exact proposed rule and leave the
+governance follow-up explicitly open; never exceed current write authority.
 
 - Record the concrete failure mode, the gate that prevents recurrence, and the
   evidence that verifies the gate. Rules such as "be careful" are not useful.
@@ -355,20 +395,26 @@ explicitly open; never exceed current write authority.
   strengthen or clarify that rule and its verification instead of adding a
   duplicate. Put long procedures in the appropriate authoritative document
   (normally `docs/ORCHESTRATION.md`) and add an explicit link here.
-- Apply this discipline to process errors, lost or overwritten work, incorrect
-  completion/evidence claims, unsafe assumptions, review escapes, CI escapes,
-  publication mistakes, and operator-impacting misunderstandings.
-- Classify each confirmed mistake with a stable incident/failure-mode ID,
+- Apply the above-floor discipline to any qualifying mistake wherever it
+  surfaced: review escapes, CI escapes, publication mistakes, and
+  operator-impacting misunderstandings. Process errors, lost or overwritten
+  agent work, incorrect completion or evidence claims, and unsafe assumptions
+  are corrected and take a defect-class ledger line; they are promoted to the
+  full discipline only at the class boundary after repetition, never per
+  instance.
+- Classify each above-floor mistake with a stable incident/failure-mode ID,
   reachable consequence, violated invariant, and prevention gate. When the
   failure is machine-testable, the corrective slice must include a
   deterministic guard or regression with red-before-fix and green-after-fix
   evidence. A prose-only rule remains open governance debt.
 - A deterministic failure that survives a green suite creates two prevention
-  obligations: the product/runtime failure and the false-green coverage escape.
-  Both receive stable IDs and independently enforceable guards. A known
-  reproduction may not remain only in reviewer notes or an ad-hoc script.
-- Specifying what a guard must falsify is a governing act, separate from
-  implementing it. Deciding that a correction is right is building work;
+  obligations only when the underlying failure is above the severity floor:
+  the product failure and the false-green coverage escape, each with a stable
+  ID and an independently enforceable guard. A known reproduction may not
+  remain only in reviewer notes or an ad-hoc script. When the underlying
+  failure is below the floor, both halves together are one ledger line.
+- For an above-floor guard, specifying what it must falsify is a governing
+  act, separate from implementing it. Deciding that a correction is right is building work;
   deciding what would prove it wrong is not. An agent that authored a correction
   does not, alone, settle what its guard must catch: state the failing shape
   explicitly and have it confirmed by whoever holds the disposition, exactly as
@@ -388,6 +434,9 @@ explicitly open; never exceed current write authority.
   to its governing rule, named test or validator, required default-CI job, and
   immutable red/green evidence. Missing, skipped, xfailed, deselected, renamed,
   weakened, or non-default-CI guards automatically reopen the prevention.
+  Green evidence naming a merged head is appended by the post-merge sweep;
+  `green_evidence: pending` on an otherwise-satisfied record neither reopens
+  it nor blocks any disposition.
 - Repeated variants of the same mistake strengthen the guard at the next useful
   abstraction boundary instead of accumulating example-specific prompt prose.
   The governing layer must make recurrence harder for every later agent, not
