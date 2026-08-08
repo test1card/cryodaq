@@ -78,14 +78,29 @@ _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS = {
     "close_requires_runtime_closed": True,
     "close_requires_immutable_red_and_green_evidence": True,
     # Green evidence names a MERGED head, which cannot exist before the merge it
-    # would gate -- so requiring it to close made `open` permanent by
-    # construction: 364 of 368 pairs read `pending` for that reason alone. It is
-    # now appended by the post-merge sweep, and `pending` on an otherwise
-    # satisfied pair neither reopens it nor blocks a disposition. The RED half
-    # is unchanged and still required before merge.
+    # would gate, so requiring it to close made `open` permanent by
+    # construction. It is now appended by the post-merge sweep, and `pending` on
+    # an otherwise satisfied record neither reopens it nor blocks a disposition.
+    # The RED half is unchanged and still required before merge.
+    #
+    # NO COUNT IS RECORDED HERE. An earlier version cited "364 of 368 pairs",
+    # which was already false in the tree that shipped it -- the number moves
+    # with every PR, and a validator is the worst place to freeze one. Anyone
+    # who wants the current figure should count it from the registry rather
+    # than read it here: load the YAML and count entries whose
+    # `green_evidence` is `pending` against the total.
     "green_evidence_bound_post_merge_by_sweep": True,
     "pending_green_evidence_blocks_disposition": False,
     "guard_removed_skipped_xfailed_deselected_or_nondefault": "reopen",
+}
+# The SAME post-merge evidence semantics, for runtime prevention records. The
+# first version of this change declared them only for false-green pairs, while
+# the registry's runtime records carry `green_evidence: pending` in bulk for the
+# identical structural reason -- so the deadlock fix covered the bookkeeping and
+# not the above-floor preventions whose disposition the rule also unblocks.
+_EXPECTED_RECORD_EVIDENCE_SEMANTICS = {
+    "green_evidence_bound_post_merge_by_sweep": True,
+    "pending_green_evidence_blocks_disposition": False,
 }
 _CLASSIFICATION_CORPUS_REPEAT_THRESHOLD = 2
 _PUBLICATION_DISPOSITION_RECEIPTS_PATH = Path("governance/publication_disposition_receipts.json")
@@ -861,6 +876,7 @@ def validate_registry(
         "policy_refs",
         "default_ci_jobs",
         "false_green_pair_semantics",
+        "record_evidence_semantics",
         "false_green_pairs",
         "records",
     }
@@ -878,6 +894,8 @@ def validate_registry(
         raise GovernanceContractError("default CI jobs are not exact")
     if payload["false_green_pair_semantics"] != _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS:
         raise GovernanceContractError("false-green pair semantics are not exact")
+    if payload["record_evidence_semantics"] != _EXPECTED_RECORD_EVIDENCE_SEMANTICS:
+        raise GovernanceContractError("record evidence semantics are not exact")
     partitions = set(payload["default_ci_jobs"])
     if partitions != {"agents", "core", "gui", "remaining"}:
         raise GovernanceContractError("default CI partitions are not exact")

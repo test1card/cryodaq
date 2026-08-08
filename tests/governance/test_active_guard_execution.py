@@ -138,6 +138,10 @@ def _registry(
             "gui": ["test (ubuntu-latest, gui)", "test (windows-latest, gui)"],
             "remaining": ["test (ubuntu-latest, remaining)", "test (windows-latest, remaining)"],
         },
+        "record_evidence_semantics": {
+            "green_evidence_bound_post_merge_by_sweep": True,
+            "pending_green_evidence_blocks_disposition": False,
+        },
         "false_green_pair_semantics": {
             "status": "required_and_linked",
             "scope": "inherited_from_runtime_prevention_id",
