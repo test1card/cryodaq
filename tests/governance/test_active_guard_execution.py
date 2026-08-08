@@ -147,6 +147,8 @@ def _registry(
             "disposition_owner": "reviewer",
             "close_requires_runtime_closed": True,
             "close_requires_immutable_red_and_green_evidence": True,
+            "green_evidence_bound_post_merge_by_sweep": True,
+            "pending_green_evidence_blocks_disposition": False,
             "guard_removed_skipped_xfailed_deselected_or_nondefault": "reopen",
         },
         "false_green_pairs": [],
