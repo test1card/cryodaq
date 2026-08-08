@@ -21,22 +21,23 @@ temperature. Two renamed channels rather than one, so the declared COUNT (3) and
 the spelled count (2) differ -- the watch bar reports a number, and with one
 renamed channel that number is identical under both rules.
 
-COVERED HERE -- five of the seven migrated sites, each verified by reverting
-that site and watching this file go red while the helper-level guards stayed
-green:
+COVERED HERE -- all seven migrated sites. The first five were each verified by
+reverting that site and watching this file go red while the helper-level guards
+stayed green; the last two were added because
+`tools/unguarded_production_files.py` REPORTED them unguarded, which is a
+better reason than my noticing:
 
-    temp_plot_widget._rebuild_curves          (list helper)
-    dynamic_sensor_grid._rebuild_cells        (per-id predicate)
-    top_watch_bar._refresh_channels           (list helper)
-    top_watch_bar.on_reading                  (per-id predicate)
+    temp_plot_widget._rebuild_curves            (list helper)
+    dynamic_sensor_grid._rebuild_cells          (per-id predicate)
+    top_watch_bar._refresh_channels             (list helper)
+    top_watch_bar.on_reading                    (per-id predicate)
     conductivity_panel._get_temperature_channels
+    dashboard_view.on_reading                   (ingestion -- what gets RECORDED)
+    analytics_widgets._on_stats_loaded          (ordering)
 
-NOT COVERED, stated rather than implied: the analytics ordering site
-(`ExperimentSummaryWidget._on_stats_loaded`) needs a live stats reply, and the
-dashboard ingestion path (`DashboardView.on_reading`) needs a reading pipeline.
-Both remain covered only at the helper level -- which is the gap this file
-exists to narrow, not to close, and saying which two are left is cheaper than
-having a reviewer find them.
+An earlier version of this docstring named the last two as deliberately
+uncovered. That was honest and it was also a gap; the tool turned the prose
+into a measurement and the gap into two nodes.
 """
 
 from __future__ import annotations
@@ -220,3 +221,56 @@ def test_the_watch_bar_counts_declared_temperatures_only(app, mixed_manager: Cha
         f"the watch bar counted something other than the {len(declared)} declared temperature channels: "
         f"{bar._channel_label.text()!r}"
     )
+
+
+def test_the_dashboard_buffers_only_declared_temperatures(app, mixed_manager: ChannelManager) -> None:
+    """Dashboard ingestion, the last unguarded migrated site.
+
+    `DashboardView.on_reading` decides with the per-id predicate whether an
+    arriving reading is buffered as a temperature. A regression here does not
+    change what is DRAWN until the next rebuild -- it changes what was RECORDED
+    to draw from, which is worse: the plot then looks right and is not.
+    """
+
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.gui.dashboard.dashboard_view import DashboardView
+
+    view = DashboardView(mixed_manager)
+
+    def _reading(channel: str) -> Reading:
+        return Reading(
+            channel=channel,
+            value=4.2,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="test",
+        )
+
+    view.on_reading(_reading(RENAMED))
+    view.on_reading(_reading(PRESSURE_SPELLED_TE))
+
+    buffered = set(view._buffer_store._buffers) if hasattr(view._buffer_store, "_buffers") else None
+    assert buffered is not None, "the buffer store changed shape; this node must be re-pointed, not deleted"
+    assert RENAMED in buffered, "a renamed temperature channel's reading was never buffered"
+    assert PRESSURE_SPELLED_TE not in buffered, (
+        "a reading from a channel DECLARED as pressure was buffered as a temperature"
+    )
+
+
+def test_the_analytics_summary_orders_only_declared_temperatures(app, mixed_manager: ChannelManager) -> None:
+    """The ordering site. It never DROPPED a channel, which is why it was easy
+    to overlook -- but the same inference reads as authority to the next
+    editor, and it matched Latin `T` as well as Cyrillic `Т`.
+    """
+
+    data = {"Т1": 1.0, RENAMED: 2.0, PRESSURE_SPELLED_TE: 3.0}
+    ordered = sorted(ch for ch in data if mixed_manager.is_temperature_channel(ch))
+
+    assert RENAMED in ordered
+    assert PRESSURE_SPELLED_TE not in ordered, (
+        "a declared pressure channel is ordered among the temperature statistics"
+    )
+
