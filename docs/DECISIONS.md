@@ -251,3 +251,78 @@ Three constraints ride with the decision, each from a measured failure:
 
 This decision gates the OC-008/OC-030 site migrations; its absence is what the
 ratified plan names as the cause of that revert.
+
+## [Owner] 2026-08-05 — A still-active CRITICAL must break its own silence
+
+The alarm-narration ledger gets **both** bounds (owner: *"a+b i agree"*):
+
+- **A — a narration that reached nobody buys no silence.** If no target accepted
+  it, that alarm is re-armed rather than held quiet for the full window.
+
+  **A is bounded, and the unbounded reading was reviewed out.** "The next
+  occurrence is not suppressed" is not what shipped: during a transport outage
+  every refire would become another generation and send, which is the storm the
+  window exists to prevent, arriving by the recovery path. The retry is admitted
+  once `window_s` has elapsed since the failed attempt. Allowing an attempt also
+  clears the failure marker, so the bound is measured against the attempt in
+  flight and not against one already superseded — without that, a refire during
+  an in-flight retry starts a second one, because the default Ollama timeout is
+  longer than the 30 s window.
+
+  **A cancelled attempt counts as undelivered.** `stop()` cancels in-flight
+  handlers and `CancelledError` is a `BaseException`, so it does not reach the
+  `except Exception` paths that report the outcome. The gate has already moved
+  its clock by then, so a killed narration would otherwise buy real silence.
+- **B — a CRITICAL that stays active is re-narrated on a bounded interval**,
+  currently 300 s, rather than being silenced for as long as it keeps firing.
+
+  **What is bounded is ADMISSION, not receipt, and two earlier versions of this
+  entry said otherwise.** The clock is anchored at CONFIRMED DELIVERY rather
+  than at the moment the gate admitted an attempt, so the interval between
+  admissions of a live CRITICAL is `300 s + one refire interval` measured from
+  when the operator was last told.
+
+  It does **not** follow that the operator hears from us within that interval.
+  Between admission and delivery sit the hourly rate limit — which can reject an
+  admitted escalation outright until its bucket drains — the inference
+  semaphore, context assembly, audit-intent persistence, generation, and
+  sequential per-recipient transport acknowledgements. No end-to-end deadline
+  spans them. A rejected or slow attempt reports undelivered and is retried ON THE NEXT
+  REFIRE -- and only then. `engine_wiring/runtime_tasks.py` publishes
+  `alarm_fired` on a `TRIGGERED` transition, and no timer consumes the
+  undelivered marker, so a CRITICAL whose sole transition was rejected by the
+  hourly rate limit and which then stays active without transitioning again
+  is never narrated at all. Saying silence is not permanent, unqualified, was
+  false; that is a weaker statement than a bound and is
+  deliberately written as one. The first version of this entry claimed 300 s
+  flat, the second claimed `300 s + refire + timeout_s`, and both were false.
+  A real received-to-received deadline would be a design change beyond OC-028.
+
+  **An outcome belongs to the attempt that produced it.** Two inferences can run
+  concurrently and each may take up to `timeout_s`, so the same alarm can have
+  two narrations in flight. A late failure from a superseded attempt must not
+  re-arm an alarm a newer attempt already delivered, and an attempt settles
+  once — so a cancellation arriving after a successful send cannot overwrite a
+  delivery the operator has read.
+
+**Why the interval is elapsed time and not a count of suppressed events.** The
+decision was first phrased as "after 10 suppressed windows (5 minutes)". Those
+are not the same thing: an alarm re-firing every second reaches ten suppressed
+events in ten seconds. The operator-facing meaning is the wall-clock silence, so
+that is what the code measures. What
+`tests/agents/assistant/test_agent_narration_floor.py` asserts is the longest
+gap between **admissions** of a live CRITICAL — not the number of them, and
+**not** the gap between narrations the operator received. Calling admissions
+"narrations" would restore, in the evidence sentence, exactly the
+operator-visible claim the paragraph above withdraws; the guard records
+`admitted_at` and deliberately asserts nothing about receipt.
+
+**Severity scope needs no separate rule.** `_should_handle` already filters this
+path to CRITICAL, so every event reaching the ledger is CRITICAL and there is no
+lower severity here to treat differently.
+
+**What made this reachable at all:** `mark_delivered` existed but appeared
+exactly once in `src/` — its own definition. Production never reported a delivery
+outcome, only tests called it, so a narration lost to a broken transport was
+indistinguishable from one the operator read. The outcome is now reported from
+the dispatch path.
