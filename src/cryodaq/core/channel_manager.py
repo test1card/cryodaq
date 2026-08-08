@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.paths import get_config_dir as _get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,28 @@ class ChannelManager:
         declared_default = raw.get("default_quantity")
         if declared_default is not None and not isinstance(declared_default, str):
             raise ChannelConfigError(f"channels.yaml at {self._config_path}: default_quantity must be a string")
+        # FAIL CLOSED ON AN UNKNOWN QUANTITY. Accepting any non-empty string
+        # meant `default_quantity: temperatue` loaded happily and then made
+        # `is_temperature_channel` false for every shipped channel -- emptying
+        # the dashboard grid, the plot, the watch bar and the conductivity
+        # panel with no diagnostic anywhere. A typo must be a startup error,
+        # not a silently blank rig. The vocabulary is not invented here: it is
+        # `ChannelQuantity`, which the descriptor layer already owns.
+        supported = {member.value for member in ChannelQuantity}
+        if declared_default is not None and declared_default not in supported:
+            raise ChannelConfigError(
+                f"channels.yaml at {self._config_path}: default_quantity {declared_default!r} is not a supported "
+                f"quantity; expected one of {sorted(supported)}"
+            )
+        for channel_id, info in channels.items():
+            if not isinstance(info, dict):
+                continue
+            declared = info.get("quantity")
+            if declared is not None and (not isinstance(declared, str) or declared not in supported):
+                raise ChannelConfigError(
+                    f"channels.yaml at {self._config_path}: channel {channel_id!r} declares quantity {declared!r}, "
+                    f"which is not supported; expected one of {sorted(supported)}"
+                )
         self._default_quantity = declared_default
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
 
@@ -118,9 +141,21 @@ class ChannelManager:
         """Сохранить конфигурацию каналов в YAML."""
         save_path = path or self._config_path
         save_path.parent.mkdir(parents=True, exist_ok=True)
+        # THE DECLARATION MUST SURVIVE A SAVE. Writing only `channels` dropped
+        # `default_quantity` the first time an operator renamed or hid a
+        # channel through the editor -- and every shipped channel relies on
+        # that default rather than a per-channel `quantity`. On the next
+        # restart nothing declared a temperature, so the grid, the plot, the
+        # watch bar and the conductivity panel all came up EMPTY. That is the
+        # `0bea0449` failure the migration exists to prevent, reintroduced
+        # through the save path.
+        payload: dict[str, Any] = {}
+        if self._default_quantity is not None:
+            payload["default_quantity"] = self._default_quantity
+        payload["channels"] = self._channels
         with save_path.open("w", encoding="utf-8") as fh:
             yaml.dump(
-                {"channels": self._channels},
+                payload,
                 fh,
                 allow_unicode=True,
                 default_flow_style=False,

@@ -408,11 +408,7 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-024",
         "OC-026",
         "OC-028",
-        # OC-030 removed: all seven GUI sites select by declared quantity,
-        # guarded by tests/core/test_declared_channel_quantity.py with a
-        # measured no-regression baseline (24 of 24 identical to the old
-        # spelling selection). The declaration is operator-owned, not yet
-        # descriptor-derived, and the row says so.
+        "OC-030",
         "OC-034",
         "OC-036",
         "OC-037",
@@ -960,12 +956,48 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         # spelling-selection site exists anywhere under the GUI tree. That
         # catches a site added in a file this row never named, which the
         # recorded-equals-live form could not.
-        migrated = "IMPLEMENTED" in rows["OC-030"][2] or "CLOSED" in rows["OC-030"][2]
+        # KEYED ON WHAT THE ROW CLAIMS ABOUT THE CODE, not on its status tag.
+        # The row stays DEFECT / BLOCKS-DEPLOYMENT while its prevention record
+        # is open -- AGENTS.md:343-350 -- even once the sites are migrated, so
+        # the status column cannot tell these two states apart. The claim can.
+        migrated = "the seven sites are migrated" in oc_030
         if migrated:
-            assert live == {}, (
-                "OC-030 reports the migration complete, but live Cyrillic-Te spelling-selection "
-                "sites exist under src/cryodaq/gui/",
-                live,
+            # THE EARLIER VERSION ASSERTED SOMETHING FALSE, and review caught
+            # it. It claimed "no spelling-selection site exists anywhere under
+            # the GUI tree" while recognising only the literal
+            # `.startswith("Т")`. Measured: TEN `identity spelling operation
+            # startswith()` sites remain under `src/cryodaq/gui/` doing other
+            # things, so the blanket claim was untrue -- and equivalent forms
+            # (`startswith(CYRILLIC_TE)`, `startswith(("Т",))`, `channel[:1] ==
+            # "Т"`) evaded the regex entirely.
+            #
+            # It is now derived from the AST sweep rather than a regex, and
+            # narrowed to what is actually true: every detected site is
+            # accounted for in the sweep registry, and none under the GUI is
+            # bucketed a live product defect. A reintroduction in ANY form the
+            # detector recognises -- startswith, endswith, slicing, indexing,
+            # regex, membership, equality -- becomes an unregistered detected
+            # site and fails here.
+            sys.path.insert(0, str(REPO_ROOT / "tests"))
+            try:
+                c2 = importlib.import_module("test_c2_repo_wide_spelling_sweep")
+            finally:
+                sys.path.remove(str(REPO_ROOT / "tests"))
+            registry_errors = c2._registry_errors(c2._sites(REPO_ROOT))
+            assert registry_errors == [], (
+                "OC-030 reports the migration complete, but the C2 sweep registry is not exact: a detected "
+                "site is unregistered, or a registration no longer has a site",
+                [str(error)[:160] for error in registry_errors],
+            )
+            gui_live = [
+                registration.registration_id
+                for registration in c2._REGISTRY
+                if registration.bucket == "LIVE-C2-PRODUCT-DEFECT"
+                and "/gui/" in registration.challenge.path.replace("\\", "/")
+            ]
+            assert gui_live == [], (
+                "OC-030 is closed but the sweep still registers a live C2 product defect under the GUI tree",
+                gui_live,
             )
             assert not recorded, (
                 "OC-030 is closed but still cites path:line locators; they no longer point at the code they describe",
@@ -1056,18 +1088,22 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
     with pytest.raises(AssertionError):
         assert_current(omitted_files, tracked, contents)
 
-    # THE STRONG ONE, and the old self-test could not express it: a NEW live
-    # spelling-selection site, in a file this row never named. While the row
-    # listed live locators, adding a site was indistinguishable from the row
-    # being stale; with the row closed, live must be empty, so any site
-    # anywhere under the GUI tree is a red event.
-    reintroduced = dict(contents)
-    gui_victim = next(path for path in tracked if path.startswith("src/cryodaq/gui/") and path.endswith(".py"))
-    reintroduced[gui_victim] = reintroduced[gui_victim] + '\nif channel.startswith("\u0422"):\n    pass\n'.encode(
-        "utf-8"
-    )
-    with pytest.raises(AssertionError):
-        assert_current(text, tracked, reintroduced)
+    # WHERE THE REINTRODUCTION CHECK LIVES, and why it is not mutated here.
+    # An earlier version of this self-test appended `startswith("\u0422")` to a GUI
+    # blob and asserted the guard went red. That mutation proved less than it
+    # appeared: it exercised the ONE literal spelling the old regex knew, so a
+    # reintroduction as `startswith(CYRILLIC_TE)` or `channel[:1] == "\u0422"` would
+    # have passed it. The closed branch above no longer reads blobs at all --
+    # it consumes the AST sweep, which recognises startswith, endswith,
+    # slicing, indexing, regex, membership and equality forms alike, and fails
+    # on any DETECTED site that is unregistered.
+    #
+    # That sweep carries its own self-test for exactly this
+    # (`test_c2_repo_wide_spelling_sweep.py::
+    # test_c2_registry_rejects_a_new_gui_site_and_names_a_genuine_fix`), which
+    # builds a tmp tree and adds a site. Duplicating it against in-memory blobs
+    # here would mean re-implementing the detector, and a second detector is a
+    # second thing to be wrong.
 
     with pytest.raises(AssertionError):
         assert_current(text, [*tracked, ".github/workflows/new-drift.yml"], contents)

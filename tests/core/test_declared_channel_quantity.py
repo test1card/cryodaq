@@ -26,7 +26,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.channels.descriptors import ChannelQuantity
+from cryodaq.core.channel_manager import ChannelConfigError, ChannelManager
 
 CYRILLIC_TE = "Т"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -153,3 +154,82 @@ def test_a_malformed_default_quantity_is_refused(tmp_path: Path, bad: object) ->
     )
     with pytest.raises(ChannelConfigError, match="default_quantity"):
         ChannelManager(target).load()
+
+
+def test_saving_channel_edits_preserves_the_declaration(tmp_path: Path) -> None:
+    """The defect a review found in this migration, stated as a behaviour.
+
+    `save()` serialised only `{"channels": ...}`, so the first time an operator
+    renamed or hid a channel through the editor, `default_quantity` was dropped
+    from the file.  Every shipped channel relies on that default rather than a
+    per-channel `quantity`, so on the next restart NOTHING declared a
+    temperature and the dashboard grid, the plot, the watch bar and the
+    conductivity panel all came up empty -- with no diagnostic anywhere.
+
+    That is `0bea0449` again, arriving through the save path rather than the
+    read path, and it would have been reached by ordinary use rather than by
+    any unusual configuration.
+    """
+
+    manager = ChannelManager(SHIPPED_CHANNELS)
+    manager.load()
+    before = set(manager.get_temperature_channels())
+    assert before, "premise: the shipped configuration must declare temperatures"
+
+    # Exactly what the editor does: rename one channel, hide another, save.
+    first, second = sorted(before)[:2]
+    manager.set_name(first, "Переименованный")
+    manager.set_visible(second, False)
+    saved = tmp_path / "channels.yaml"
+    manager.save(saved)
+
+    reloaded = ChannelManager(saved)
+    reloaded.load()
+    assert set(reloaded.get_temperature_channels()) == before, (
+        "the declaration did not survive a save: every temperature surface would come up empty "
+        f"after the next restart ({len(reloaded.get_temperature_channels())} of {len(before)} survived)"
+    )
+    assert "default_quantity" in yaml.safe_load(saved.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("bad", ["temperatue", "Temperature", "", "temp"])
+def test_an_unsupported_default_quantity_is_refused_at_load(tmp_path: Path, bad: str) -> None:
+    """A typo must be a startup error, not a silently blank rig.
+
+    Any non-empty string was accepted, so `default_quantity: temperatue` loaded
+    happily and then made `is_temperature_channel` false for every channel --
+    the same empty screens as above, from a single wrong letter in a file the
+    operator edits.  The vocabulary is `ChannelQuantity`, which the descriptor
+    layer already owns; this must not invent a second one.
+    """
+
+    with pytest.raises(ChannelConfigError) as raised:
+        _manager(tmp_path, {"default_quantity": bad, "channels": {"Т1": {"name": "к"}}})
+    assert "not a supported quantity" in str(raised.value) or "must be a string" in str(raised.value)
+
+
+def test_an_unsupported_per_channel_quantity_is_refused_at_load(tmp_path: Path) -> None:
+    """The per-channel override needs the same closed vocabulary as the default."""
+
+    with pytest.raises(ChannelConfigError) as raised:
+        _manager(
+            tmp_path,
+            {
+                "default_quantity": "temperature",
+                "channels": {"Т1": {"name": "к"}, "Т2": {"name": "к", "quantity": "presure"}},
+            },
+        )
+    assert "presure" in str(raised.value)
+
+
+def test_every_supported_quantity_is_accepted(tmp_path: Path) -> None:
+    """The refusal must not become a refusal of legitimate configurations.
+
+    Without this, tightening the check to a single value would pass every node
+    above while making the file unwritable for any rig that is not all
+    temperatures.
+    """
+
+    for quantity in ChannelQuantity:
+        manager = _manager(tmp_path, {"default_quantity": quantity.value, "channels": {"Т1": {"name": "к"}}})
+        assert manager.get_quantity("Т1") == quantity.value

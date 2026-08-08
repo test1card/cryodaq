@@ -56,6 +56,22 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: DECLARED-QUANTITY-LOST-ON-SAVE-FALSE-GREEN-341
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_saving_channel_edits_preserves_the_declaration
+    ci_partition: core
+    red_evidence: the_nine_guards_that_shipped_with_the_migration_only_ever_LOADED_a_configuration_and_never_SAVED_one_so_save_serialising_only_the_channels_key_dropped_default_quantity_the_first_time_an_operator_renamed_or_hid_a_channel_and_every_shipped_channel_relies_on_that_default_so_the_next_restart_declared_no_temperature_at_all_and_the_grid_plot_watch_bar_and_conductivity_panel_all_came_up_EMPTY_which_is_the_0bea0449_failure_arriving_through_the_write_path_found_in_review_not_by_the_suite_2026_08_08_pending_immutable_capture
+    green_evidence: pending
+  - id: QUANTITY-VOCABULARY-UNVALIDATED-FALSE-GREEN-342
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_an_unsupported_default_quantity_is_refused_at_load
+    ci_partition: core
+    red_evidence: load_accepted_any_non_empty_string_as_default_quantity_so_a_single_typo_such_as_temperatue_loaded_cleanly_and_then_made_is_temperature_channel_false_for_every_shipped_channel_emptying_all_migrated_surfaces_with_no_diagnostic_and_the_existing_malformed_default_node_only_covered_NON_STRING_values_so_the_whole_suite_stayed_green_the_closed_vocabulary_ChannelQuantity_already_existed_and_was_not_consulted_2026_08_08_pending_immutable_capture
+    green_evidence: pending
   - id: ARCHIVE-LOADER-PATH-FALSE-GREEN-328
     status: open
     scope: product_contract
@@ -3094,6 +3110,14 @@ records:
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_a_malformed_default_quantity_is_refused
         ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_saving_channel_edits_preserves_the_declaration
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_an_unsupported_default_quantity_is_refused_at_load
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_an_unsupported_per_channel_quantity_is_refused_at_load
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_every_supported_quantity_is_accepted
+        ci_partition: core
     red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_2026_08_08_pending_immutable_capture
     green_evidence: pending
   - id: ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327
@@ -5515,7 +5539,7 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_guard_coverage.py::test_g4_archived_revision_binds_source_control_to_the_compared_tree
         ci_partition: remaining
-    automation_limit: An independent audit found these gaps — coalescing registered exemption descriptors can hide an addition; a guard's execution dependencies are not covered because a live-candidate import can influence them; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
+    automation_limit: An independent audit found these gaps вЂ” coalescing registered exemption descriptors can hide an addition; a guard's execution dependencies are not covered because a live-candidate import can influence them; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
     red_evidence: local_exact_object_comparisons_reject_3d6d1a22_1d2c43ad_and_0f505dd6_with_stable_lost_challenge_and_added_exemption_ids_2026_07_28_pending_immutable_capture
     green_evidence: pending
   - id: REPLAY-COMPARISON-EVIDENCE-035
@@ -5814,8 +5838,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A test that gates incidental control-DB admission on the production 2.0s wall-clock budget fails red on a loaded shared runner without any product regression — post-merge master failed three times across two different tests in this family at 2.080s, 2.087s, and 5.224s of the 2.000s budget — and a refusal guard that classifies the deadline error after pytest.raises can never retry, because the regex mismatch converts the RuntimeError into an AssertionError.
-    invariant: The tests/storage/test_operator_log_idempotency.py module never gates incidental admission on the production wall-clock budget — an autouse fixture gives incidental uses a generous 60s budget while the deadline mechanism is verified deterministically by a clock-monkeypatched test that pins 2.0s explicitly. The trigger-authority scenario additionally classifies the deadline error before the refusal assertion and re-raises it raw; a bounded retry reruns the whole scenario on exactly that error with a fresh data directory per attempt, while an undetected trigger, a forged row, a lost row, or a missing refusal fails immediately without retry. The 2.0s production initialization deadline budget is unchanged and no fail-closed behavior is weakened.
+    consequence: A test that gates incidental control-DB admission on the production 2.0s wall-clock budget fails red on a loaded shared runner without any product regression вЂ” post-merge master failed three times across two different tests in this family at 2.080s, 2.087s, and 5.224s of the 2.000s budget вЂ” and a refusal guard that classifies the deadline error after pytest.raises can never retry, because the regex mismatch converts the RuntimeError into an AssertionError.
+    invariant: The tests/storage/test_operator_log_idempotency.py module never gates incidental admission on the production wall-clock budget вЂ” an autouse fixture gives incidental uses a generous 60s budget while the deadline mechanism is verified deterministically by a clock-monkeypatched test that pins 2.0s explicitly. The trigger-authority scenario additionally classifies the deadline error before the refusal assertion and re-raises it raw; a bounded retry reruns the whole scenario on exactly that error with a fresh data directory per attempt, while an undetected trigger, a forged row, a lost row, or a missing refusal fails immediately without retry. The 2.0s production initialization deadline budget is unchanged and no fail-closed behavior is weakened.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
