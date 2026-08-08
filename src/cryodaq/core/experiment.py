@@ -430,6 +430,53 @@ def _serialized_lifecycle_mutation(method: Any) -> Any:
     return wrapped
 
 
+def _retained_identity(descriptor: Any) -> Any:
+    """The descriptor a finalisation row may persist, or ``None``.
+
+    The bounded archive readers never report absent identity as ``None``: they
+    synthesize a ``legacy=True`` descriptor whose ``channel_id`` is
+    ``legacy:<digest of the channel spelling>``.  Persisting that would make
+    unattributable history look descriptor-backed, so ``legacy`` is treated as
+    absent -- the convention `reporting/sections.py` already enforces.
+    """
+
+    if descriptor is None or descriptor.legacy:
+        return None
+    return descriptor
+
+
+def _retained_row_bytes(row: Any, identity: Any) -> int:
+    """Bytes to charge one retained finalisation row against the memory bound.
+
+    THE IDENTITY COLUMNS ARE RETAINED, SO THEY MUST BE BUDGETED.  A
+    maximum-length ``channel_id`` plus the hash and revision is roughly 200
+    bytes per row; charging only the original instrument/channel/unit/status
+    projection lets a long finalisation hold and write substantially more than
+    the 32 MiB cap allows -- and that cap is what stands between a large
+    experiment and memory exhaustion.
+
+    Extracted from the loader so the accounting can be asserted directly.
+    Inline, the only way to exercise it was to build an archive large enough to
+    approach the cap, which no guard did -- so dropping the identity terms left
+    every mapped guard green.
+    """
+
+    size = (
+        96
+        + len(row.instrument_id.encode("utf-8"))
+        + len(row.channel.encode("utf-8"))
+        + len(row.unit.encode("utf-8"))
+        + len(row.status.encode("utf-8"))
+    )
+    if identity is not None:
+        size += (
+            len(identity.channel_id.encode("utf-8"))
+            + len(identity.descriptor_hash.encode("utf-8"))
+            + len(str(identity.descriptor_revision).encode("utf-8"))
+        )
+    return size
+
+
 class ExperimentManager:
     def __init__(
         self,
@@ -2535,13 +2582,8 @@ class ExperimentManager:
                 issues.append(f"issue_overflow:{result.issue_overflow}")
             for row in reversed(result.rows):
                 channel_count = per_channel.get(row.channel, 0)
-                encoded_size = (
-                    96
-                    + len(row.instrument_id.encode("utf-8"))
-                    + len(row.channel.encode("utf-8"))
-                    + len(row.unit.encode("utf-8"))
-                    + len(row.status.encode("utf-8"))
-                )
+                identity = _retained_identity(row.descriptor)
+                encoded_size = _retained_row_bytes(row, identity)
                 if (
                     len(rows_newest_first) >= max_total_points
                     or channel_count >= max_points_per_channel
@@ -2550,6 +2592,26 @@ class ExperimentManager:
                     truncated = True
                     complete = False
                     continue
+                # OC-024: the archive already resolves a descriptor for each row
+                # and this dict used to drop it, so a finalised record could not
+                # later be attributed to a declared measurement identity and
+                # downstream grouping fell back to spelling.  Carry the identity
+                # through.
+                #
+                # A row written before the descriptor catalog existed has NO
+                # declared identity, and the bounded readers do not report that
+                # as None: `_read_sqlite_bounded` and `_read_parquet_bounded`
+                # call `resolve_legacy_descriptor` whenever `descriptor_hash` is
+                # NULL, so `row.descriptor` is a synthetic `legacy=True` object
+                # carrying a `legacy:<digest>` channel_id and a hash derived from
+                # the very channel SPELLING this row exists to stop trusting.
+                # Persisting that would make unattributable history look
+                # descriptor-backed -- the inference dressed as a declaration.
+                # `legacy` is already the repository's marker for absent identity
+                # (`reporting/sections.py::_reading_series_key` and
+                # `_visible_quantity` both refuse it), so treat it as absent here
+                # too and leave the cells empty.
+                descriptor = identity  # already legacy-filtered for the budget above
                 rows_newest_first.append(
                     {
                         "timestamp": datetime.fromtimestamp(row.timestamp, tz=UTC),
@@ -2558,6 +2620,9 @@ class ExperimentManager:
                         "value": float("nan") if row.value is None else row.value,
                         "unit": row.unit,
                         "status": row.status,
+                        "channel_id": None if descriptor is None else descriptor.channel_id,
+                        "descriptor_hash": None if descriptor is None else descriptor.descriptor_hash,
+                        "descriptor_revision": None if descriptor is None else descriptor.descriptor_revision,
                     }
                 )
                 per_channel[row.channel] = channel_count + 1
@@ -2692,10 +2757,38 @@ class ExperimentManager:
             temp_path.unlink(missing_ok=True)
 
     def _write_measured_values_table(self, path: Path, readings: list[dict[str, Any]]) -> None:
+        """Write the finalisation table, carrying declared measurement identity.
+
+        OC-024: this table used to carry only timestamp, instrument, channel,
+        value, unit and status.  An archived record therefore could not be
+        attributed to a declared identity afterwards, and any downstream
+        grouping had to fall back to the channel SPELLING -- the same inference
+        the descriptor spine exists to remove.
+
+        The three identity columns are appended, never inserted, so an existing
+        reader that indexes the first six columns positionally is unaffected.
+        An empty cell means the row predates the descriptor catalog; it is left
+        empty rather than back-filled from the channel string, because guessing
+        identity from spelling is the defect this row records.
+        """
+
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(["timestamp", "instrument_id", "channel", "value", "unit", "status"])
+            writer.writerow(
+                [
+                    "timestamp",
+                    "instrument_id",
+                    "channel",
+                    "value",
+                    "unit",
+                    "status",
+                    "channel_id",
+                    "descriptor_hash",
+                    "descriptor_revision",
+                ]
+            )
             for item in readings:
+                revision = item.get("descriptor_revision")
                 writer.writerow(
                     [
                         item["timestamp"].isoformat(),
@@ -2704,6 +2797,9 @@ class ExperimentManager:
                         item["value"] if math.isfinite(item["value"]) else "",
                         item["unit"],
                         item["status"],
+                        item.get("channel_id") or "",
+                        item.get("descriptor_hash") or "",
+                        "" if revision is None else str(revision),
                     ]
                 )
 

@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib
 import json
 import os
 import re
 import shlex
 import stat
 import subprocess
+import sys
 import tomllib
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -154,6 +156,228 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
     assert not failures, "\n".join(failures)
 
 
+# A RECORDED measurement, not a re-derivable one: the number of C2 challenges
+# whose fingerprint the registry rejects on the declared minimum interpreter.
+# Measured 2026-08-05 by importing the sweep under Python 3.12 and counting
+# through `_registry_errors` -- an earlier attempt grepped pytest output and
+# reported 55, which was a truncation artifact of the measurement rather than a
+# property of the sweep. This guard runs on ONE interpreter and cannot measure
+# another; pinning the figure here means the row and the constant have to move
+# together, and moving them requires re-running the sweep on that interpreter.
+_RECORDED_MINIMUM_INTERPRETER_ERRORS = 110
+
+
+@cache
+def _declared_minimum_python_version() -> str:
+    """Return the floor from `pyproject.toml`'s `requires-python`, e.g. ``3.12``.
+
+    Derived rather than written down, because the caveat this supports is about
+    a SPECIFIC declared floor.  If the project raises its minimum, a hardcoded
+    "3.12" would keep asserting a sentence about a version nobody supports any
+    more -- a stale claim held in place by its own guard.
+    """
+
+    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
+        requires = tomllib.load(handle)["project"]["requires-python"]
+    match = re.search(r">=\s*(\d+\.\d+)", requires)
+    assert match is not None, f"cannot read a minimum version out of requires-python {requires!r}"
+    return match.group(1)
+
+
+def test_open_cells_sweep_counts_are_rederived_from_the_live_sweep() -> None:
+    """Counts the register cites about the C2 sweep must come from the sweep.
+
+    Prevention ``REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301``.  Two register
+    errors on 2026-08-05 shared one shape -- a number measured in a narrow scope
+    and then asserted in a broad one:
+
+    * OC-008's GUI surface was written as **21**, the count of entries whose
+      REASON LABEL is GUI-specific, while the row's gate is about GUI routing
+      sites by PATH, of which there are **89**.  A fourfold understatement of
+      open work.
+    * OC-031 was called substantially closed on a 135/135 exact registry, which
+      holds on the CI interpreter and fails 110 of 135 on the minimum the
+      project declares supported.
+
+    Prose review did not catch either; both survived into a pushed commit.  So
+    the numbers are re-derived here instead of being trusted, which is the
+    "parsed registry rather than fragile wording search" the root contract asks
+    for.  A drifting count now fails rather than quietly misleading a planner.
+
+    This asserts the counts on the RUNNING interpreter only.  The cross-version
+    divergence is a property of the sweep's fingerprint and is tracked in OC-031
+    itself -- a guard cannot re-derive a number for an interpreter it is not
+    running on, and pretending otherwise would repeat the original error.
+    """
+
+    sweep_module = REPO_ROOT / "tests" / "test_c2_repo_wide_spelling_sweep.py"
+    if not sweep_module.exists():  # pragma: no cover - the sweep is tracked
+        pytest.fail(f"the C2 sweep is missing: {sweep_module}")
+
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    try:
+        sweep = importlib.import_module("test_c2_repo_wide_spelling_sweep")
+    finally:
+        sys.path.remove(str(REPO_ROOT / "tests"))
+
+    sites = sweep._sites(REPO_ROOT)
+    total = len(sites)
+    gui_by_path = len([site for site in sites if "/gui/" in site.path.replace("\\", "/")])
+
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    assert f"{total} detected sites and {total} registrations" in text, (
+        f"OPEN_CELLS does not cite the live sweep total of {total} detected sites"
+    )
+    # Substance, not emphasis: asserting the markdown bold markers would make
+    # this guard fail on a reword that changed nothing measurable.
+    basis = f"{gui_by_path} of the {total} entries, counted by path under `src/cryodaq/gui/`"
+    assert basis in text, f"OPEN_CELLS does not cite the live GUI-by-path count of {gui_by_path} of {total}"
+
+    # EVERY affected row is checked POSITIVELY.  An earlier version of this
+    # guard skipped any row that did not already contain the correct figure,
+    # so a row reverting to the old unqualified count fell through the
+    # `continue` and was never examined -- while the file-wide assertion above
+    # stayed satisfied by whichever row was still right.  That is precisely the
+    # one-row-away recurrence this prevention exists for, and the guard would
+    # have looked enforced while it happened.
+    gui_by_reason = len([site for site in sites if site.reason.startswith("GUI ")])
+    for row_id in ("OC-008", "OC-031"):
+        row = next((line for line in text.splitlines() if line.startswith(f"| {row_id} |")), None)
+        assert row is not None, f"{row_id} row is missing from the register"
+        assert f"{gui_by_path} of the {total}" in row, (
+            f"{row_id} does not cite the GUI-by-path count of {gui_by_path} of {total}"
+        )
+        assert "counted by path" in row or "by path under" in row, (
+            f"{row_id} cites a GUI count without naming the basis it was counted over"
+        )
+        # The reason-label subset may appear -- it is a true fact -- but only
+        # where it is named as the subset it is.
+        if f"{gui_by_reason} of the {total}" in row:
+            assert "reason" in row.lower(), (
+                f"{row_id} cites the {gui_by_reason}-entry subset without naming it a reason-label count"
+            )
+
+
+def test_open_cells_oc031_preserves_its_supported_interpreter_caveat() -> None:
+    """The count is only half of what OC-031 must keep saying.
+
+    Prevention ``REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301``; false-green pair
+    ``SWEEP-COUNT-GUARD-INTERPRETER-CAVEAT-FALSE-GREEN-303``.
+
+    The registry's exactness holds on the CI interpreter and rejects 110 of its
+    own 135 challenges on the version `pyproject.toml` declares as the floor.
+    The sibling count guard asserts only the GUI-by-path wording, so OC-031
+    could be edited back to an unqualified "N detected and N registered"
+    closure with the interpreter caveat dropped, and that guard would still
+    pass -- the same one-row-away hole, one property along.  Codex found it on
+    ``bd9f2cf8``.
+
+    This is a separate node rather than more assertions in the sibling because
+    it is a separate property, and because the false-green registry binds one
+    pair per guard node: folding them together would have made the two escapes
+    indistinguishable in the register.
+    """
+
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    oc_031 = next((line for line in text.splitlines() if line.startswith("| OC-031 |")), None)
+    assert oc_031 is not None, "OC-031 row is missing from the register"
+
+    minimum = _declared_minimum_python_version()
+    assert f"Python {minimum}" in oc_031, (
+        f"OC-031 cites the registry's exactness without naming Python {minimum}, the floor "
+        f"`pyproject.toml` declares, on which that exactness does not hold"
+    )
+
+    # `"errors over" in row` was NOT enough, and Codex demonstrated it on
+    # `b0a29cb1`: rewriting 110 to a false 0 kept that substring and the guard
+    # kept passing, so the control for "drop the magnitude" established nothing.
+    # Parse the numbers instead.
+    #
+    # And parse them from the SAME CLAUSE as the version label.  Asserting
+    # `f"Python {minimum}" in row` anywhere, then matching a magnitude anywhere
+    # else, lets the row read "Python 3.12 remains the supported floor, but
+    # **Python 3.13 gives 110 errors over 135 challenges**" -- attributing the
+    # failure to the interpreter the row itself says AGREES with CI, while both
+    # assertions pass. Codex demonstrated that one too, on `6c27f0ee`.
+    # Re-derive the MECHANISM rather than trusting the sentence that describes
+    # it.  The divergence exists because the challenge fingerprint hashes
+    # `ast.dump` text, which is version-dependent.  If that ever stops being
+    # true the caveat should be removed -- but only after someone measures it
+    # again, which is exactly the step this prevention exists to force.
+    sweep_source = _read(REPO_ROOT / "tests" / "test_c2_repo_wide_spelling_sweep.py")
+    assert "ast.dump(" in sweep_source, (
+        "the C2 sweep no longer fingerprints via `ast.dump`, so the interpreter-binding this guard "
+        f"asserts about OC-031 may be stale: re-measure the registry on Python {minimum} and on CI "
+        "before editing the caveat out of the row"
+    )
+
+
+def test_open_cells_oc031_binds_the_error_count_to_the_declared_floor() -> None:
+    """The magnitude, its denominator, and which interpreter each belongs to.
+
+    Prevention ``REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301``; false-green pair
+    ``SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311``.
+
+    A separate node from the caveat guard because the false-green registry binds
+    one pair per node, and because this property has now escaped twice in two
+    different ways: first the guard asserted the substring ``errors over``, so
+    rewriting 110 to a false 0 kept passing; then it parsed the version and the
+    magnitude independently, so the row could attribute the failure to Python
+    3.13 -- the interpreter it elsewhere says AGREES with CI -- and still pass.
+    Both were found by review, not here.
+    """
+
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    oc_031 = next((line for line in text.splitlines() if line.startswith("| OC-031 |")), None)
+    assert oc_031 is not None, "OC-031 row is missing from the register"
+    minimum = _declared_minimum_python_version()
+
+    # ONE clause: the declared floor and its own error count.
+    match = re.search(
+        rf"\*\*Python {re.escape(minimum)}\b[^*]*?(\d+) errors over (\d+) challenges\*\*",
+        oc_031,
+    )
+    assert match is not None, (
+        f"OC-031 does not attribute an error count to Python {minimum} in one clause, in the form "
+        f"`**Python {minimum} ... <n> errors over <m> challenges**`"
+    )
+    errors, denominator = int(match.group(1)), int(match.group(2))
+
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    try:
+        sweep = importlib.import_module("test_c2_repo_wide_spelling_sweep")
+    finally:
+        sys.path.remove(str(REPO_ROOT / "tests"))
+    sites = sweep._sites(REPO_ROOT)
+
+    # The DENOMINATOR is re-derivable, so it is derived rather than trusted.
+    assert denominator == len(sites), (
+        f"OC-031 says the divergence is over {denominator} challenges; the live sweep has {len(sites)}"
+    )
+    # So is the count on the interpreter this test is RUNNING on. The row claims
+    # the registry is exact on CI; that half needs no pinned constant, and
+    # asserting it here is what stops the row describing a runtime nobody
+    # measured while the guard nods along.
+    running_errors = len(sweep._registry_errors(sites))
+    assert f"{running_errors} registry errors" in oc_031 or f"gives {running_errors} registry errors" in oc_031, (
+        f"OC-031 does not state the live count for the running interpreter "
+        f"(Python {sys.version_info.major}.{sys.version_info.minor}), which is {running_errors}"
+    )
+
+    # The MAGNITUDE on the declared floor cannot be re-derived here -- this
+    # process is not that interpreter, and measuring it by assertion would be
+    # claiming a number nobody took, which is the error the whole prevention
+    # exists for. It is pinned as a RECORDED measurement instead, so the row and
+    # the constant have to move together and moving them means re-running the
+    # sweep over there.
+    assert 0 < errors <= denominator, f"OC-031 reports {errors} errors over {denominator} challenges"
+    assert errors == _RECORDED_MINIMUM_INTERPRETER_ERRORS, (
+        f"OC-031 says {errors} errors on Python {minimum}; the recorded measurement is "
+        f"{_RECORDED_MINIMUM_INTERPRETER_ERRORS}. If the sweep changed, RE-MEASURE on Python {minimum} "
+        "and update both this constant and the row -- do not edit one to match the other."
+    )
+
+
 def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
     """Keep the register contiguous and do not let the general rubric reclassify owner gates."""
     text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
@@ -168,6 +392,14 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-013",
         "OC-020",
         "OC-023",
+        # OC-024 STAYS BLOCKING. The finalisation table now carries declared
+        # identity, but the four archive exporters reachable from the same
+        # operator-facing panel (csv_export, hdf5_export, parquet_archive,
+        # xlsx_export) still emit channel-spelling-only schemas and were not
+        # measured. Deregistering the row here would close the deployment gate
+        # for that path on the strength of a prose residual -- which is the
+        # fix-one-instance-then-close-the-class error this registry exists to
+        # catch, and which REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301 records.
         "OC-024",
         "OC-026",
         "OC-028",
@@ -697,6 +929,18 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         assert f"all {len(governance_modules)} tracked governance-test modules" in oc_012_lower
         assert f"all {len(runner_modules)} tracked workflow-referenced ci/governance runner modules" in oc_012_lower
         assert set(runner_modules) == required_runner_modules
+        # The AGGREGATE, not only its three components.  The row cites an
+        # "exact N-path ... inventory" beside the hash, and until this
+        # assertion existed that N was checked by nothing: adding a governance
+        # module moved all three component counts and the hash, every one of
+        # which the guard demanded be updated, while the total silently went
+        # stale at 34.  Codex found it on `b0a29cb1`.
+        inventory_size = len(workflows) + len(governance_modules) + len(runner_modules)
+        assert f"the exact {inventory_size}-path" in oc_012_lower, (
+            f"OC-012 does not cite the live inventory size of {inventory_size} paths "
+            f"({len(workflows)} workflows + {len(governance_modules)} governance tests "
+            f"+ {len(runner_modules)} runner modules)"
+        )
         assert "registry/config references were swept" not in oc_012_lower
         assert "sha256:" + hashlib.sha256(manifest).hexdigest() in oc_012
         recorded = recorded_oc030_locators(oc_030)
@@ -734,6 +978,7 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
     for old, replacement in (
         ("All 6 tracked workflows", "All 4 tracked workflows"),
         ("all 18 tracked governance-test modules", "all 12 tracked governance-test modules"),
+        ("The exact 34-path", "The exact 33-path"),
         (
             "all 10 tracked workflow-referenced CI/governance runner modules",
             "all 9 tracked workflow-referenced CI/governance runner modules",
