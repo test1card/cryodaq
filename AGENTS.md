@@ -361,11 +361,18 @@ unreachable, instead of adding a fourth line.
 
 The severity floor. A mistake is above the floor only when BOTH are true:
 
-1. The defect is in production code -- code that runs when an operator uses
-   the instrument (`src/cryodaq/`). Defects in tests, guards, controls,
-   harnesses, CI workflows, scripts, documentation, or this registry itself
-   are below the floor, even when the thing the guard failed to catch is above
-   it: the product defect gets the record, the guard defect gets a ledger line.
+1. The defect is RUNTIME-REACHABLE: it is in an artifact the instrument reads
+   or executes when an operator uses it. That is `src/cryodaq/`, and it is
+   equally the tracked configuration those modules consume -- interlock,
+   alarm, safety and channel configuration under `config/`, whose thresholds,
+   channel patterns and shutdown actions are as load-bearing as the code that
+   reads them. A wrong threshold in `config/interlocks.yaml` misfires an
+   interlock exactly as a wrong comparison in `core/interlock.py` does, and a
+   directory boundary that separated them would put the more likely mistake on
+   the cheaper side. Defects in tests, guards, controls, harnesses, CI
+   workflows, scripts, documentation, or this registry itself are below the
+   floor, even when the thing the guard failed to catch is above it: the
+   product defect gets the record, the guard defect gets a ledger line.
 2. With the defect unfixed and the repository untouched, ordinary lab
    operation could produce at least one of: a stored measurement lost,
    altered, or attributed to the wrong channel; a displayed, reported, or
@@ -375,6 +382,15 @@ The severity floor. A mistake is above the floor only when BOTH are true:
    delivered, alarmed, completed) that did not. Unbounded resource growth on
    the acquisition or alarm path also qualifies, because the crash it leads to
    loses data.
+
+   HAZARDOUS OUTPUT QUALIFIES ON ITS OWN, with no data consequence required.
+   A source left energized, an actuator command issued without authority, a
+   verified-OFF that is never reached, or a shutdown that loses its bound are
+   each above the floor by themselves. The earlier list described only ways of
+   losing or misstating DATA, which would have put a `safety_manager` defect
+   that leaves an output on -- while every reading stays correct -- into the
+   nonblocking ledger. This is a cryostat: energy is a worse thing to get
+   wrong than a number.
 
 Both questions are yes/no about where the defect lives and its worst realistic
 consequence, not about likelihood, effort, or intent. Calibration from this

@@ -77,6 +77,14 @@ _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS = {
     "disposition_owner": "reviewer",
     "close_requires_runtime_closed": True,
     "close_requires_immutable_red_and_green_evidence": True,
+    # Green evidence names a MERGED head, which cannot exist before the merge it
+    # would gate -- so requiring it to close made `open` permanent by
+    # construction: 364 of 368 pairs read `pending` for that reason alone. It is
+    # now appended by the post-merge sweep, and `pending` on an otherwise
+    # satisfied pair neither reopens it nor blocks a disposition. The RED half
+    # is unchanged and still required before merge.
+    "green_evidence_bound_post_merge_by_sweep": True,
+    "pending_green_evidence_blocks_disposition": False,
     "guard_removed_skipped_xfailed_deselected_or_nondefault": "reopen",
 }
 _CLASSIFICATION_CORPUS_REPEAT_THRESHOLD = 2
