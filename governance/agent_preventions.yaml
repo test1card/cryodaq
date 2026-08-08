@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: QUANTITY-VOCABULARY-UNVALIDATED-FALSE-GREEN-342
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_an_unsupported_default_quantity_is_refused_at_load
+    ci_partition: core
+    red_evidence: load_accepted_any_non_empty_string_as_default_quantity_so_a_single_typo_such_as_temperatue_loaded_cleanly_and_then_made_is_temperature_channel_false_for_every_shipped_channel_emptying_all_migrated_surfaces_with_no_diagnostic_and_the_existing_malformed_default_node_only_covered_NON_STRING_values_so_the_whole_suite_stayed_green_the_closed_vocabulary_ChannelQuantity_already_existed_and_was_not_consulted_2026_08_08_pending_immutable_capture
+    green_evidence: pending
   - id: DECLARED-QUANTITY-LOST-ON-SAVE-FALSE-GREEN-341
     status: open
     scope: product_contract
@@ -64,13 +72,173 @@ false_green_pairs:
     ci_partition: core
     red_evidence: the_nine_guards_that_shipped_with_the_migration_only_ever_LOADED_a_configuration_and_never_SAVED_one_so_save_serialising_only_the_channels_key_dropped_default_quantity_the_first_time_an_operator_renamed_or_hid_a_channel_and_every_shipped_channel_relies_on_that_default_so_the_next_restart_declared_no_temperature_at_all_and_the_grid_plot_watch_bar_and_conductivity_panel_all_came_up_EMPTY_which_is_the_0bea0449_failure_arriving_through_the_write_path_found_in_review_not_by_the_suite_2026_08_08_pending_immutable_capture
     green_evidence: pending
-  - id: QUANTITY-VOCABULARY-UNVALIDATED-FALSE-GREEN-342
+  - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
-    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
-    guard: tests/core/test_declared_channel_quantity.py::test_an_unsupported_default_quantity_is_refused_at_load
-    ci_partition: core
-    red_evidence: load_accepted_any_non_empty_string_as_default_quantity_so_a_single_typo_such_as_temperatue_loaded_cleanly_and_then_made_is_temperature_channel_false_for_every_shipped_channel_emptying_all_migrated_surfaces_with_no_diagnostic_and_the_existing_malformed_default_node_only_covered_NON_STRING_values_so_the_whole_suite_stayed_green_the_closed_vocabulary_ChannelQuantity_already_existed_and_was_not_consulted_2026_08_08_pending_immutable_capture
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_allowing_a_retry_clears_the_marker_so_an_in_flight_attempt_is_not_retried_again
+    ci_partition: agents
+    red_evidence: the_bounded_retry_node_reports_every_admitted_attempt_as_failed_immediately_so_deleting_the_clear_of_undelivered_in_allow_left_it_green_only_a_node_that_leaves_an_admitted_retry_IN_FLIGHT_fails_when_that_production_fix_is_removed_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-WATERMARK-OVERRUN-FALSE-GREEN-315
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_pending_attempt_survives_a_forced_watermark_jump
+    ci_partition: agents
+    red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-RETIREMENT-EXEMPTION-UNBOUNDED-FALSE-GREEN-336
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_return_is_refused_while_its_own_attempt_is_queued
+    ci_partition: agents
+    red_evidence: the_first_sighting_exemption_added_for_322_was_unconditional_so_an_alarm_that_clears_and_retriggers_past_each_prune_horizon_was_retired_and_exempted_every_cycle_growing_pending_ids_and_handler_tasks_without_bound_through_the_hole_the_cap_exists_to_close_and_the_existing_node_established_65_pending_attempts_but_repeated_the_retirement_only_ONCE_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-PRUNE-BOUNDARY-ORPHAN-REFUSAL-FALSE-GREEN-338
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_pruned_occurrence_returning_under_backpressure_is_admitted
+    ci_partition: agents
+    red_evidence: every_existing_node_covered_the_LONE_alarm_retire_path_where_nothing_else_fires_in_the_gap_so_the_far_commoner_CROSS_ALARM_prune_path_was_uncovered_prune_leaves_the_in_flight_attempt_queued_on_purpose_and_the_backpressure_check_then_counted_that_orphan_as_this_alarms_own_queued_work_and_refused_the_return_with_production_publishing_only_the_returning_TRIGGERED_transition_the_narration_was_lost_control_confirms_restoring_the_unscoped_already_queued_turns_this_node_red_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-IN-FLIGHT-CANCELLED-BY-REPLACEMENT-FALSE-GREEN-339
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_narration_already_in_flight_is_not_cancelled_by_its_own_replacement
+    ci_partition: agents
+    red_evidence: cancelling_abandoned_work_is_safe_only_while_it_is_still_QUEUED_and_the_line_that_marks_an_attempt_as_having_acquired_the_inference_slot_was_the_only_thing_stopping_a_mid_generation_or_mid_send_narration_being_cancelled_to_reclaim_a_queue_slot_deleting_that_line_left_the_ENTIRE_agents_suite_green_984_passed_so_the_protection_existed_and_nothing_asserted_it_found_by_control_not_by_review_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-RETIREMENT-CYCLE-LOOP-UNOBSERVED-FALSE-GREEN-337
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_event_loop_bounds_handlers_across_retirement_cycles
+    ci_partition: agents
+    red_evidence: the_336_node_asserts_the_ledgers_pending_set_only_and_never_instantiates_the_agent_occupies_its_semaphore_or_inspects_handler_tasks_so_the_queued_TASK_growth_that_336_and_320_both_record_was_unobserved_across_the_retirement_path_two_controls_confirm_this_node_sees_both_directions_removing_the_slot_release_in_retire_loses_every_returning_occurrences_handler_and_removing_the_gate_creates_one_per_escalation_on_refires_alone_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-RETIRED-REFIRE-REFUSED-FALSE-GREEN-326
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_occurrence_returning_under_backpressure_is_a_first_sighting
+    ci_partition: agents
+    red_evidence: retire_dropped_the_stored_state_but_the_LOCAL_last_seen_still_held_the_old_timestamp_so_with_the_queue_full_the_backpressure_check_saw_a_refire_and_refused_the_first_event_of_the_NEW_occurrence_and_production_sources_publish_only_on_transition_so_the_narration_is_lost_not_delayed_an_earlier_version_of_this_node_let_another_alarm_fire_in_the_gap_which_PRUNED_the_target_before_retire_could_run_and_passed_with_the_defect_present_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-BACKPRESSURE-LOSES-FIRST-SIGHTING-FALSE-GREEN-322
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_first_sighting_is_never_refused_by_backpressure
+    ci_partition: agents
+    red_evidence: the_backpressure_cap_added_for_320_refused_the_FIRST_event_of_a_new_critical_when_other_alarms_held_the_queue_and_production_sources_publish_only_on_transition_so_a_condition_that_stays_active_would_have_its_narration_lost_permanently_rather_than_delayed_no_node_mixed_a_saturated_queue_with_a_new_alarm_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-COMPATIBILITY-CLOCK-FALSE-GREEN-330
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_duplicate_compatibility_delivery_does_not_move_the_clock
+    ci_partition: agents
+    red_evidence: the_whole_suite_stayed_green_while_mark_delivered_stamped_seen_and_last_allowed_BEFORE_note_outcome_could_reject_a_duplicate_so_an_arbitrarily_late_compatibility_report_or_the_alias_called_twice_postponed_the_next_escalation_no_node_called_the_alias_after_a_scoped_settlement_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-PHANTOM-PENDING-FALSE-GREEN-323
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_an_unscoped_outcome_still_settles_its_attempt
+    ci_partition: agents
+    red_evidence: an_unscoped_note_outcome_or_the_mark_delivered_alias_never_removed_the_issued_id_from_pending_so_after_MAX_OUTSTANDING_ATTEMPTS_such_alarms_the_new_backpressure_check_refused_every_later_admission_forever_with_no_work_in_flight_and_the_compatibility_and_pruning_nodes_never_inspected_pending_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-PARTIAL-DELIVERY-HELPER-ONLY-FALSE-GREEN-333
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_records_a_partial_delivery_as_seen
+    ci_partition: agents
+    red_evidence: the_previous_node_proved_only_that_reached_any_recipient_returns_the_right_value_IN_ISOLATION_so_it_stayed_green_when_the_handler_used_the_audit_strict_is_delivered_outcome_instead_which_settles_a_partial_telegram_result_as_FAILED_and_resends_to_the_recipient_who_already_read_it_confirmed_by_control_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-AUDIT-CANCEL-INJECTED-CALLBACK-FALSE-GREEN-334
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write
+    ci_partition: agents
+    red_evidence: the_previous_node_called_dispatch_with_audit_directly_and_supplied_the_outcome_callback_itself_so_deleting_the_production_on_outcomes_wiring_from_handle_alarm_fired_left_it_GREEN_while_cancellation_inside_audit_complete_settled_a_delivered_attempt_as_undelivered_confirmed_by_control_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-UNBOUNDED-QUEUE-FALSE-GREEN-320
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_event_loop_stops_creating_handlers_when_dispatch_is_saturated
+    ci_partition: agents
+    red_evidence: removing_the_gate_turns_THREE_nodes_red_including_the_event_loop_node_which_drives_the_real_event_loop_with_a_blocked_semaphore_and_a_driven_clock_and_asserts_handler_tasks_do_not_grow_on_refires_an_earlier_version_without_the_driven_clock_stayed_GREEN_under_that_control_because_real_time_never_reached_an_escalation; and_with_both_inference_slots_stuck_every_escalation_admitted_another_attempt_and_created_another_handler_task_and_a_queued_task_neither_consumes_rate_limit_capacity_nor_settles_its_id_so_handler_tasks_and_the_pending_set_grew_without_bound_until_shutdown_and_no_node_left_work_uncompleted_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-SETTLED-STATE-GROWTH-FALSE-GREEN-321
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_settled_state_costs_nothing_per_admission
+    ci_partition: agents
+    red_evidence: the_watermark_plus_remainder_shape_grew_with_LIFETIME_ADMISSIONS_whenever_one_attempt_stayed_pending_because_the_clamp_protecting_that_id_also_stopped_the_watermark_advancing_past_everything_after_it_and_no_node_held_an_attempt_pending_across_a_long_admission_sequence_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-LONE-ALARM-RETIREMENT-FALSE-GREEN-319
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_lone_alarm_retires_its_own_stale_state
+    ci_partition: agents
+    red_evidence: every_earlier_prune_node_used_a_SECOND_alarm_to_trigger_the_sweep_so_none_could_see_that_prune_runs_after_seen_is_refreshed_and_therefore_never_retires_the_alarm_currently_firing_a_lone_critical_kept_its_attempt_and_generation_across_an_arbitrarily_long_silence_and_a_success_from_the_retired_occurrence_cleared_the_current_ones_failure_marker_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-RETIRED-RESURRECTION-FALSE-GREEN-317
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it
+    ci_partition: agents
+    red_evidence: the_generation_check_added_for_316_covered_only_the_ordering_where_the_alarm_had_already_re_fired_when_the_retired_attempt_succeeded_FIRST_the_marker_still_named_it_so_the_success_was_accepted_and_recreated_seen_and_last_allowed_out_of_nothing_suppressing_the_new_occurrences_very_first_event_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-PRUNED-GENERATION-FALSE-GREEN-316
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one
+    ci_partition: agents
+    red_evidence: a_success_from_an_attempt_admitted_before_the_alarms_state_was_pruned_cleared_the_NEW_occurrences_undelivered_marker_and_advanced_its_clocks_suppressing_a_live_alarm_for_a_full_escalation_interval_on_a_narration_describing_a_different_occurrence_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-QUIET-BRANCH-PRECEDENCE-FALSE-GREEN-312
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_slow_delivery_does_not_leave_the_quiet_branch_armed
+    ci_partition: agents
+    red_evidence: the_whole_suite_was_green_while_a_delivery_slower_than_window_s_left_seen_at_the_admission_so_the_next_refire_took_the_quiet_for_a_full_window_branch_which_is_evaluated_before_the_delivery_clock_and_re_narrated_seconds_after_the_operator_was_told_no_node_exercised_a_delivery_slower_than_the_window_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-SETTLED-EVICTION-FALSE-GREEN-313
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_an_outstanding_attempt_keeps_its_settled_identity
+    ci_partition: agents
+    red_evidence: settle_once_was_bounded_by_id_distance_so_an_attempt_far_enough_behind_had_its_first_report_evicted_and_its_second_accepted_moving_the_clock_to_the_audit_completion_time_and_the_suite_stayed_green_because_no_node_crossed_the_eviction_boundary_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-VACUOUS-PAYLOAD-FALSE-GREEN-305
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_cancellation_before_the_handler_first_runs_is_reported
+    ci_partition: agents
+    red_evidence: the_first_version_of_this_node_built_its_event_payload_with_severity_critical_but_should_handle_reads_level_so_the_gate_filtered_the_event_out_no_handler_task_was_ever_created_and_the_node_passed_while_exercising_nothing_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-WRONG-BRANCH-FALSE-GREEN-306
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_escalation_clock_starts_when_the_operator_was_told
+    ci_partition: agents
+    red_evidence: three_separate_nodes_stepped_the_clock_forward_without_refiring_the_alarm_so_seen_went_stale_and_the_ordinary_quiet_for_a_full_window_branch_admitted_the_dispatch_while_the_escalation_and_retry_branches_under_test_were_never_reached_the_helper_flap_quietly_now_carries_the_refires_so_they_cannot_be_omitted_2026_08_06_pending_immutable_capture
     green_evidence: pending
   - id: ARCHIVE-LOADER-PATH-FALSE-GREEN-328
     status: open
@@ -3120,6 +3288,87 @@ records:
         ci_partition: core
     red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_2026_08_08_pending_immutable_capture
     green_evidence: pending
+  - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    status: open
+    scope: product_contract
+    authority_source: docs/DECISIONS.md#owner-2026-08-05-a-still-active-critical-must-break-its-own-silence
+    applies_to: Every suppression decision the live assistant alarm-narration ledger makes for a CRITICAL alarm_fired event.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: An operator stops being told about a CRITICAL condition that is still active, and nothing in the system says so. The dedup gate refreshed its seen-timestamp on every attempt INCLUDING suppressed ones, so the quiet-for-a-full-window condition was unreachable while the alarm kept firing and a continuously flapping CRITICAL was narrated exactly ONCE for as long as it lasted. Three further holes rode on top - a narration lost to a broken transport still bought a full window of silence because production never reported a delivery outcome at all; an outcome was keyed by the alarm rather than by the attempt, so with two inferences in flight a superseded attempt's failure could re-arm an alarm a newer attempt had delivered and a superseded attempt's SUCCESS could be discarded; and cancellation of an in-flight handler bypassed every outcome report because CancelledError is a BaseException.
+    invariant: 'The ledger suppresses duplicates of what the operator RECEIVED, and the interval between admissions is bounded: a failed or cancelled attempt re-arms the alarm after one window, a still-active CRITICAL is re-admitted escalate_after_s after the last CONFIRMED DELIVERY, and every outcome is scoped to the attempt that produced it and settles that attempt once. WHAT THIS RECORD DOES NOT CLAIM. (1) PARTIAL DELIVERY IS NOT PRESERVED ACROSS A CANCELLATION INSIDE THE ROUTER: with several recipients, stop() arriving between the first acknowledgement and the second means dispatch_detailed never returns, the outcome callback never fires, and the attempt settles undelivered even though one recipient was reached - so the next refire resends to them. Closing that needs per-recipient incremental reporting inside the router, which is a change to the router rather than to this ledger. (2) It bounds ADMISSIONS, not receipts. The hourly rate limit, the inference semaphore, context assembly, audit-intent persistence, generation and sequential per-recipient transport acknowledgements all sit between admission and delivery, and no end-to-end deadline spans them - so no received-to-received maximum is asserted anywhere in the code, the tests or the register. Two earlier versions of this claim did assert one and were false.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_continuously_flapping_critical_is_re_narrated_not_silenced_forever
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_failed_delivery_does_not_license_unbounded_retries
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_ledger_bounds_admissions_and_claims_nothing_about_delivery
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_late_failure_from_a_superseded_attempt_does_not_re_arm_the_alarm
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_stale_delivery_still_counts_as_the_operator_having_been_told
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_attempt_settles_once_so_cancellation_cannot_undo_a_delivery
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_cancellation_while_queued_for_an_inference_slot_is_reported
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_cancellation_before_the_handler_first_runs_is_reported
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_escalation_clock_starts_when_the_operator_was_told
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_newer_failure_does_not_undo_an_older_confirmed_delivery
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_settled_attempt_reporting_twice_does_not_drag_the_clock
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_attempt_id_is_never_reused_after_pruning
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_slow_delivery_does_not_leave_the_quiet_branch_armed
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_outstanding_attempt_keeps_its_settled_identity
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_allowing_a_retry_clears_the_marker_so_an_in_flight_attempt_is_not_retried_again
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_event_loop_bounds_handlers_across_retirement_cycles
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_pruned_occurrence_returning_under_backpressure_is_admitted
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_narration_already_in_flight_is_not_cancelled_by_its_own_replacement
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_pending_attempt_survives_a_forced_watermark_jump
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_success_landing_before_the_alarm_refires_does_not_resurrect_it
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_lone_alarm_retires_its_own_stale_state
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_saturated_dispatch_path_stops_admitting_new_attempts
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_settled_state_costs_nothing_per_admission
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_first_sighting_is_never_refused_by_backpressure
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_occurrence_returning_under_backpressure_is_a_first_sighting
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_retired_return_is_refused_while_its_own_attempt_is_queued
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_an_unscoped_outcome_still_settles_its_attempt
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_records_a_partial_delivery_as_seen
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_duplicate_compatibility_delivery_does_not_move_the_clock
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_event_loop_stops_creating_handlers_when_dispatch_is_saturated
+        ci_partition: agents
+    red_evidence: reverting_the_ledger_to_the_sliding_quiet_window_turns_the_flapping_and_escalation_nodes_red_and_each_review_fix_was_controlled_individually_with_its_byte_delta_verified_2026_08_06_pending_immutable_capture
+    green_evidence: pending
   - id: ARCHIVE-BUDGET-CHARGES-ONLY-WHAT-IT-PERSISTS-327
     status: open
     scope: product_contract
@@ -5539,7 +5788,7 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_guard_coverage.py::test_g4_archived_revision_binds_source_control_to_the_compared_tree
         ci_partition: remaining
-    automation_limit: An independent audit found these gaps вЂ” coalescing registered exemption descriptors can hide an addition; a guard's execution dependencies are not covered because a live-candidate import can influence them; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
+    automation_limit: An independent audit found these gaps — coalescing registered exemption descriptors can hide an addition; a guard's execution dependencies are not covered because a live-candidate import can influence them; a reduction split across commits escapes if only the final parent pair is compared; and the declaration's reviewer field cannot be authenticated by an unsigned tracked file. The comparator requires the base and candidate Git objects in the exact checkout; workflow wiring is pending because .github/workflows/main.yml is owned by another active lane, and the Git-less exported candidate must never invoke or silently skip this comparison.
     red_evidence: local_exact_object_comparisons_reject_3d6d1a22_1d2c43ad_and_0f505dd6_with_stable_lost_challenge_and_added_exemption_ids_2026_07_28_pending_immutable_capture
     green_evidence: pending
   - id: REPLAY-COMPARISON-EVIDENCE-035
@@ -5838,8 +6087,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A test that gates incidental control-DB admission on the production 2.0s wall-clock budget fails red on a loaded shared runner without any product regression вЂ” post-merge master failed three times across two different tests in this family at 2.080s, 2.087s, and 5.224s of the 2.000s budget вЂ” and a refusal guard that classifies the deadline error after pytest.raises can never retry, because the regex mismatch converts the RuntimeError into an AssertionError.
-    invariant: The tests/storage/test_operator_log_idempotency.py module never gates incidental admission on the production wall-clock budget вЂ” an autouse fixture gives incidental uses a generous 60s budget while the deadline mechanism is verified deterministically by a clock-monkeypatched test that pins 2.0s explicitly. The trigger-authority scenario additionally classifies the deadline error before the refusal assertion and re-raises it raw; a bounded retry reruns the whole scenario on exactly that error with a fresh data directory per attempt, while an undetected trigger, a forged row, a lost row, or a missing refusal fails immediately without retry. The 2.0s production initialization deadline budget is unchanged and no fail-closed behavior is weakened.
+    consequence: A test that gates incidental control-DB admission on the production 2.0s wall-clock budget fails red on a loaded shared runner without any product regression — post-merge master failed three times across two different tests in this family at 2.080s, 2.087s, and 5.224s of the 2.000s budget — and a refusal guard that classifies the deadline error after pytest.raises can never retry, because the regex mismatch converts the RuntimeError into an AssertionError.
+    invariant: The tests/storage/test_operator_log_idempotency.py module never gates incidental admission on the production wall-clock budget — an autouse fixture gives incidental uses a generous 60s budget while the deadline mechanism is verified deterministically by a clock-monkeypatched test that pins 2.0s explicitly. The trigger-authority scenario additionally classifies the deadline error before the refusal assertion and re-raises it raw; a bounded retry reruns the whole scenario on exactly that error with a fresh data directory per attempt, while an undetected trigger, a forged row, a lost row, or a missing refusal fails immediately without retry. The 2.0s production initialization deadline budget is unchanged and no fail-closed behavior is weakened.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
