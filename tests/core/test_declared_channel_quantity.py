@@ -99,19 +99,47 @@ def test_a_declared_non_temperature_is_excluded_however_it_is_spelled(tmp_path: 
     assert "Т90".startswith(CYRILLIC_TE) is True, "premise: spelling would have accepted it"
 
 
-def test_an_undeclared_channel_reports_no_quantity_rather_than_guessing(tmp_path: Path) -> None:
-    """Absent declaration is absent, not inferred.
+def test_a_configuration_that_declares_nothing_is_refused_at_load(tmp_path: Path) -> None:
+    """The rule this file previously got BACKWARDS, and review caught it.
 
-    Callers must render such a channel MARKED rather than hidden -- see
-    docs/design-system/patterns/state-visualization.md.  Returning a guess here
-    would push the inference one layer down instead of removing it.
+    An earlier version of this node loaded a configuration with neither
+    `default_quantity` nor any per-channel `quantity`, asserted the answer was
+    None, and moved on -- which codified, in a guard, a file that starts
+    cleanly and then omits every temperature reading from the grid, the plot,
+    the watch bar, the conductivity panel and dashboard ingestion, silently.
+
+    That is the opposite of this project's rule that an unclassified reading
+    renders MARKED rather than hidden, and it is the `0bea0449` shape again.
+    Refusing at load is the fail-closed half of that rule: the operator is told,
+    in a file they own, rather than shown a blank screen.
     """
 
-    manager = _manager(tmp_path, {"channels": {"Т12": {"name": "2-я ступень", "visible": True}}})
+    with pytest.raises(ChannelConfigError) as raised:
+        _manager(tmp_path, {"channels": {"Т12": {"name": "2-я ступень", "visible": True}}})
+    message = str(raised.value)
+    assert "Т12" in message, "the refusal must name the channel the operator has to fix"
+    assert "vanish" in message or "resolve to a quantity" in message
 
-    assert manager.get_quantity("Т12") is None
-    assert manager.is_temperature_channel("Т12") is False
+
+def test_an_unknown_channel_reports_no_quantity_rather_than_guessing(tmp_path: Path) -> None:
+    """Absent declaration is absent, not inferred -- asserted where it can hold.
+
+    Every channel IN the file now resolves or load fails, so the no-guessing
+    rule is about ids the manager has never heard of: a reading that arrives
+    for a channel absent from the configuration must not be inferred into a
+    quantity from its spelling.
+    """
+
+    manager = _manager(
+        tmp_path,
+        {"default_quantity": "temperature", "channels": {"Т12": {"name": "2-я ступень", "visible": True}}},
+    )
+
     assert manager.get_quantity("NOT_A_CHANNEL") is None
+    assert manager.is_temperature_channel("NOT_A_CHANNEL") is False
+    # Spelled exactly like the declared ones, and still not inferred.
+    assert manager.get_quantity("Т99") is None
+    assert manager.is_temperature_channel("Т99") is False
 
 
 def test_a_full_channel_id_resolves_through_its_short_form(tmp_path: Path) -> None:
@@ -233,3 +261,36 @@ def test_every_supported_quantity_is_accepted(tmp_path: Path) -> None:
     for quantity in ChannelQuantity:
         manager = _manager(tmp_path, {"default_quantity": quantity.value, "channels": {"Т1": {"name": "к"}}})
         assert manager.get_quantity("Т1") == quantity.value
+
+
+def test_a_rejected_reload_preserves_the_last_valid_configuration(tmp_path: Path) -> None:
+    """`load()` published before it validated, so a REFUSED file half-applied.
+
+    `self._channels` was assigned before the checks could raise, so a manager
+    that rejected a reload was left holding the invalid configuration while the
+    caller saw only an exception -- and the operator-reachable reset handler
+    calls `load()` directly. The visible result is the same empty temperature
+    surfaces, reached this time by an error path that looked handled.
+    """
+
+    good = {"default_quantity": "temperature", "channels": {"Т1": {"name": "верх"}, "Т2": {"name": "низ"}}}
+    manager = _manager(tmp_path, good)
+    before_channels = dict(manager.get_all())
+    before_temperatures = set(manager.get_temperature_channels())
+    assert before_temperatures, "premise: the good configuration must declare temperatures"
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        yaml.safe_dump(
+            {"default_quantity": "temperature", "channels": {"Т2": {"name": "низ", "quantity": "presure"}}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ChannelConfigError):
+        manager.load(bad)
+
+    assert manager.get_all() == before_channels, "a refused reload replaced the live channel table"
+    assert set(manager.get_temperature_channels()) == before_temperatures, (
+        "a refused reload emptied the temperature surfaces it was supposed to leave untouched"
+    )

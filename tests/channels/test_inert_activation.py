@@ -180,6 +180,15 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
     source_root = Path(__file__).parents[2] / "src" / "cryodaq"
     assert _channel_contract_dependencies(source_root) == {
         "core/broker.py": _direct_imports("cryodaq.channels.persistence", "MAX_PERSISTED_ENVELOPE_BYTES"),
+        # OC-030. `channel_manager` validates the declared quantity in
+        # `channels.yaml` against the CLOSED vocabulary rather than accepting
+        # any string -- a typo such as `temperatue` otherwise loads cleanly and
+        # empties every temperature surface. The crossing is deliberate: the
+        # alternative is a SECOND copy of the vocabulary that can drift from
+        # this one, and a drifted copy is how a channel silently stops being a
+        # temperature. `core/sensor_diagnostics.py` already crosses for the
+        # same enum.
+        "core/channel_manager.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
         "core/descriptor_transport.py": _direct_imports(
             "cryodaq.channels.descriptors",
             "ChannelDescriptorV1",

@@ -2911,7 +2911,7 @@ false_green_pairs:
     runtime_prevention_id: FALSE-GREEN-001
     guard: tests/docs/test_docs_freshness.py::test_open_cell_inventory_and_oc030_locator_match_live_tree
     ci_partition: remaining
-    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_docs_guard_passed_with_four_of_six_workflows_twelve_of_seventeen_governance_modules_and_OC_030_locator_1626_instead_of_live_1632_2026_08_01
+    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_docs_guard_passed_with_four_of_six_workflows_twelve_of_seventeen_governance_modules_and_OC_030_locator_1626_instead_of_live_1632_2026_08_01_AND_2026_08_09_a_SECOND_escape_on_the_same_node_the_closed_state_branch_asserted_that_no_spelling_selection_site_exists_anywhere_under_the_gui_tree_while_recognising_only_the_literal_startswith_with_a_cyrillic_te_argument_measurement_shows_TEN_such_sites_remain_so_the_invariant_was_false_not_merely_narrow_and_equivalent_forms_evaded_it_entirely_it_also_read_paths_only_so_four_invented_symbols_passed_and_it_recognised_only_the_LIVE_C2_PRODUCT_DEFECT_bucket_which_is_empty_by_construction_so_a_reintroduction_registered_as_OPEN_ROUTING_DEBT_left_it_green_now_derived_from_the_AST_sweep_registry_with_symbols_resolved_and_the_surviving_set_pinned
     green_evidence: pending
   - id: MONTANA-REPORT-METRIC-FALSE-GREEN-234
     status: open
@@ -3268,8 +3268,20 @@ records:
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_a_declared_non_temperature_is_excluded_however_it_is_spelled
         ci_partition: core
-      - node: tests/core/test_declared_channel_quantity.py::test_an_undeclared_channel_reports_no_quantity_rather_than_guessing
+      - node: tests/core/test_declared_channel_quantity.py::test_an_unknown_channel_reports_no_quantity_rather_than_guessing
         ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_configuration_that_declares_nothing_is_refused_at_load
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_rejected_reload_preserves_the_last_valid_configuration
+        ci_partition: core
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_temperature_plot_draws_declared_temperatures_only
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_sensor_grid_builds_cells_for_declared_temperatures_only
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_watch_bar_counts_declared_temperatures_only
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_conductivity_channel_list_offers_declared_temperatures_only
+        ci_partition: gui
       - node: tests/core/test_declared_channel_quantity.py::test_the_shipped_configuration_selects_exactly_what_spelling_selected
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_visible_temperature_channels_respect_visibility

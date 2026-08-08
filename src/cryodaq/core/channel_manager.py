@@ -108,7 +108,13 @@ class ChannelManager:
         channels = raw.get("channels")
         if not isinstance(channels, dict):
             raise ChannelConfigError(f"channels.yaml at {self._config_path}: missing or invalid 'channels' key")
-        self._channels = channels
+        # NOTHING IS PUBLISHED UNTIL EVERY CHECK PASSES. `self._channels` used
+        # to be assigned here, before validation could raise, so a REJECTED
+        # reload left this manager holding the invalid configuration while the
+        # caller saw an exception -- and the operator-reachable reset handler
+        # calls `load()` directly. A refused reload must preserve the last good
+        # state, not half-apply the bad one. Everything below works in locals
+        # and both fields are assigned together at the end.
         declared_default = raw.get("default_quantity")
         if declared_default is not None and not isinstance(declared_default, str):
             raise ChannelConfigError(f"channels.yaml at {self._config_path}: default_quantity must be a string")
@@ -125,15 +131,34 @@ class ChannelManager:
                 f"channels.yaml at {self._config_path}: default_quantity {declared_default!r} is not a supported "
                 f"quantity; expected one of {sorted(supported)}"
             )
+        undeclared: list[str] = []
         for channel_id, info in channels.items():
-            if not isinstance(info, dict):
-                continue
-            declared = info.get("quantity")
+            declared = info.get("quantity") if isinstance(info, dict) else None
             if declared is not None and (not isinstance(declared, str) or declared not in supported):
                 raise ChannelConfigError(
                     f"channels.yaml at {self._config_path}: channel {channel_id!r} declares quantity {declared!r}, "
                     f"which is not supported; expected one of {sorted(supported)}"
                 )
+            if declared is None and declared_default is None:
+                undeclared.append(str(channel_id))
+        # EVERY CHANNEL MUST RESOLVE TO A QUANTITY, or startup fails.
+        # A file with no `default_quantity` and no per-channel `quantity`
+        # loaded happily and then made every temperature surface EMPTY: the
+        # grid, the plot, the watch bar, the conductivity panel and dashboard
+        # ingestion each omitted every reading, silently. That is the opposite
+        # of this project's rule that an unclassified reading renders MARKED
+        # rather than hidden (`docs/design-system/patterns/state-visualization.md`),
+        # and it is the `0bea0449` shape once more. Refusing at startup is the
+        # fail-closed half of that rule: the operator is told, in a file they
+        # own, instead of shown a blank screen. An earlier version of this
+        # change accepted such a file, and a test of mine codified that.
+        if undeclared:
+            raise ChannelConfigError(
+                f"channels.yaml at {self._config_path}: no default_quantity, and "
+                f"{len(undeclared)} channel(s) declare none either: {sorted(undeclared)[:8]}. Every channel must "
+                "resolve to a quantity or its readings vanish from every operator surface without a diagnostic."
+            )
+        self._channels = channels
         self._default_quantity = declared_default
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
 

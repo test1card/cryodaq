@@ -284,9 +284,17 @@ Phase B.3 implementation details to preserve:
   Grid reflows on every `resizeEvent`. When width is unavailable at first
   layout, falls back to `min(7, n_cells)` columns.
 - **Visible-channel filter.** Only channels from
-  `ChannelManager.get_all_visible()` whose id starts with Cyrillic Т
-  (U+0422) are rendered; hidden channels (channels.yaml `visible: false`)
-  are excluded at rebuild time, not hidden post-layout.
+  `ChannelManager.get_all_visible()` that DECLARE `quantity: temperature`
+  are rendered — `ChannelManager.is_temperature_channel()`, never the
+  identifier's spelling (OC-030). A channel renamed away from Cyrillic Т is
+  still rendered; a channel spelled with Т that declares another quantity is
+  not. Hidden channels (channels.yaml `visible: false`) are excluded at
+  rebuild time, not hidden post-layout.
+- **A channel with no declared quantity is refused at startup**, not shown
+  blank: `channels.yaml` needs a top-level `default_quantity` or a per-channel
+  `quantity`, or `ChannelManager.load()` raises `ChannelConfigError` naming the
+  channel. The alternative — starting cleanly with every temperature surface
+  silently empty — is the failure behind revert `0bea0449`.
 - **Runtime rebuild on channel set change.** The grid subscribes to
   `ChannelManager.on_change` and rebuilds cells when the visible set
   changes; subscription is torn down via `off_change` on `closeEvent` and

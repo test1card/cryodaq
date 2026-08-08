@@ -135,6 +135,11 @@ def test_get_alarm_band_handles_non_numeric_band(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                # OC-030: a channel that resolves to no quantity is refused at
+                # load, because starting cleanly with every temperature surface
+                # silently empty is the `0bea0449` failure. These fixtures are
+                # about alarm bands, so they declare the quantity and move on.
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",
@@ -159,6 +164,11 @@ def test_get_alarm_band_handles_reversed_range(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                # OC-030: a channel that resolves to no quantity is refused at
+                # load, because starting cleanly with every temperature surface
+                # silently empty is the `0bea0449` failure. These fixtures are
+                # about alarm bands, so they declare the quantity and move on.
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",
@@ -179,6 +189,11 @@ def test_get_alarm_band_handles_wrong_length_list(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                # OC-030: a channel that resolves to no quantity is refused at
+                # load, because starting cleanly with every temperature surface
+                # silently empty is the `0bea0449` failure. These fixtures are
+                # about alarm bands, so they declare the quantity and move on.
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",
@@ -201,6 +216,11 @@ def test_get_alarm_band_handles_alarm_band_not_dict(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                # OC-030: a channel that resolves to no quantity is refused at
+                # load, because starting cleanly with every temperature surface
+                # silently empty is the `0bea0449` failure. These fixtures are
+                # about alarm bands, so they declare the quantity and move on.
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",

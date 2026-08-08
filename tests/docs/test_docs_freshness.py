@@ -1001,15 +1001,44 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
                 "site is unregistered, or a registration no longer has a site",
                 [str(error)[:160] for error in registry_errors],
             )
-            gui_live = [
+            # EVERY NON-LEGITIMATE BUCKET COUNTS, not just the live-defect one.
+            # `LIVE-C2-PRODUCT-DEFECT` is currently empty by construction, so
+            # filtering on it alone meant a reintroduced selector registered as
+            # `OPEN-ROUTING-DEBT` or `BLOCKED-ON-SCHEMA` left the sweep exact
+            # AND this list empty, while the row still claimed the seven sites
+            # were migrated. Scoped to the six migrated FILES: other GUI paths
+            # legitimately carry open debt that OC-030 never claimed to close.
+            migrated_paths = set(re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)`", oc_030))
+            # Bound to the migrated SCOPES, not the files. Those files carry
+            # other unresolved C2 challenges in other functions that OC-030
+            # never claimed to close; asserting per-file would fail on work
+            # this row is not about.
+            migrated_scopes = {
+                symbol.rsplit(".", 1)[-1]
+                for _path, symbol in re.findall(
+                    r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030
+                )
+            }
+            regressed = sorted(
                 registration.registration_id
                 for registration in c2._REGISTRY
-                if registration.bucket == "LIVE-C2-PRODUCT-DEFECT"
-                and "/gui/" in registration.challenge.path.replace("\\", "/")
-            ]
-            assert gui_live == [], (
-                "OC-030 is closed but the sweep still registers a live C2 product defect under the GUI tree",
-                gui_live,
+                if registration.bucket != "LEGITIMATE"
+                and registration.challenge.path.replace("\\", "/") in migrated_paths
+                and registration.challenge.scope.rsplit(".", 1)[-1] in migrated_scopes
+            )
+            # PINNED, not empty. Three unresolved challenges survive inside
+            # migrated scopes and are NOT the OC-030 class: they route
+            # ANALYTICS TOPICS by suffix or prefix -- `endswith("/pressure")`,
+            # `startswith("analytics/")` -- rather than deciding a channel's
+            # temperature role from its spelling. The sweep's reason vocabulary
+            # cannot tell those two apart, so the honest guard pins the exact
+            # set: any NEW unresolved challenge in a migrated scope fails here,
+            # and removing one of these fails too, which forces the row to be
+            # re-read rather than silently drifting.
+            assert regressed == ["C2-048", "C2-049", "C2-099"], (
+                "the unresolved C2 challenges inside OC-030's migrated scopes changed; a new one is a "
+                "reintroduction of the defect this row closed, and a removed one means this pin is stale",
+                regressed,
             )
             assert not recorded, (
                 "OC-030 is closed but still cites path:line locators; they no longer point at the code they describe",
@@ -1045,8 +1074,20 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             # name how many sites it converted, and that number has to match
             # the files it lists -- otherwise "all seven migrated" survives a
             # site being quietly dropped from the list.
-            migrated_files = set(re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)`", oc_030))
+            migrated_files = set(migrated_paths)
             assert migrated_files, "OC-030 reports the migration done but names no migrated file"
+            # EVERY NAMED SYMBOL MUST EXIST. Four invented symbols passed
+            # unnoticed because this extraction read paths only. Each
+            # `file.py` (`Class.method`) pair is now resolved in the live tree.
+            for path, symbol in re.findall(
+                r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030
+            ):
+                blob = candidate_contents.get(path)
+                assert blob is not None, f"OC-030 names {path}, which is not in the frozen index"
+                leaf = symbol.rsplit(".", 1)[-1]
+                assert f"def {leaf}(" in blob.decode("utf-8"), (
+                    f"OC-030 names `{symbol}` in {path}, and no such definition exists there"
+                )
             claimed = [word for count, word in number_words.items() if f"{word} sites" in oc_030.lower()]
             assert len(claimed) == 1, ("OC-030 must state exactly one migrated-site count", claimed)
             claimed_count = next(count for count, word in number_words.items() if word == claimed[0])
