@@ -30,6 +30,7 @@ class DriverAuthority(StrEnum):
 
 class DriverCapability(StrEnum):
     PASSIVE_SENSOR = "passive_sensor"
+    HEALTH_TELEMETRY_DEVICE = "health_telemetry_device"
     CALIBRATABLE_SENSOR = "calibratable_sensor"
     BURST_SENSOR = "burst_sensor"
     SHARED_BUS_DEVICE = "shared_bus_device"

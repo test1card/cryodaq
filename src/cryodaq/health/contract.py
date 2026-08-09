@@ -288,16 +288,6 @@ class HealthTelemetrySnapshot:
 
 
 @runtime_checkable
-class HealthTelemetryDevice(Protocol):
-    """Narrow passive device shape; conformance alone grants no authority."""
-
-    @property
-    def health_descriptor(self) -> HealthDeviceDescriptor: ...
-
-    def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot: ...
-
-
-@runtime_checkable
 class HealthTelemetryReader(Protocol):
     """Public, type-erased view of an allowlist-issued passive reader."""
 
