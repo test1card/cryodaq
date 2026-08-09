@@ -1165,13 +1165,22 @@ def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -
     assert "automation_limit" in authority
     assert disposition_state(authority) == "incomplete"
 
-    # The explicit signal works for both registry shapes: runtime records use
-    # plural guards, while false-green pairs carry one singular guard.
+    # The explicit signal is insufficient until red-before-fix evidence is
+    # immutable, for both runtime records and false-green pairs.
     runtime = copy.deepcopy(next(record for record in records if record["status"] in {"open", "reopened"}))
     runtime["correction_complete"] = True
-    assert disposition_state(runtime) == "awaiting_green_sweep"
     pair = copy.deepcopy(payload["false_green_pairs"][0])
     pair["correction_complete"] = True
+    assert disposition_state(runtime) == "incomplete"
+    assert disposition_state(pair) == "incomplete"
+
+    immutable_red = {
+        "locator": "git:0123456789abcdef0123456789abcdef01234567",
+        "sha256": "sha256:" + "1" * 64,
+    }
+    runtime["red_evidence"] = copy.deepcopy(immutable_red)
+    pair["red_evidence"] = copy.deepcopy(immutable_red)
+    assert disposition_state(runtime) == "awaiting_green_sweep"
     assert disposition_state(pair) == "awaiting_green_sweep"
 
     runtime["green_evidence"] = {

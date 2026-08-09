@@ -147,7 +147,8 @@ def disposition_state(record: Mapping[str, Any]) -> str:
       immutable evidence on both sides.
     * ``awaiting_green_sweep`` -- open with explicit correction completion and
       only the post-merge green capture outstanding.
-    * ``incomplete`` -- open without explicit correction completion.
+    * ``incomplete`` -- open without explicit correction completion or
+      immutable red-before-fix evidence.
     """
 
     status = record.get("status")
@@ -169,6 +170,10 @@ def disposition_state(record: Mapping[str, Any]) -> str:
     # reviewer-owned explicit signal can make pending green bookkeeping the sole
     # remaining work; absence fails closed for both shapes.
     if record.get("correction_complete") is not True:
+        return "incomplete"
+    try:
+        _validate_immutable_evidence(record.get("red_evidence"), "red_evidence")
+    except GovernanceContractError:
         return "incomplete"
     # Measured on the live registry: SEVEN active records already carry captured
     # green evidence. They are not waiting for the sweep -- it has run for them,
