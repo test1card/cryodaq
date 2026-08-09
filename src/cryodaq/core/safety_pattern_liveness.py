@@ -41,7 +41,7 @@ import yaml
 
 from cryodaq.channels.descriptors import ChannelRole, ChannelSafetyClass
 from cryodaq.core.housekeeping import _extract_channel_refs
-from cryodaq.core.interlock import InterlockCondition
+from cryodaq.core.interlock import InterlockCondition, resolve_interlock_channel_ids
 from cryodaq.core.safety_manager import SafetyConfigError
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel
 
@@ -481,6 +481,9 @@ def _resolve_adaptive_patterns_to_raw(
                 )
             )
             continue
+        if any(compiled.fullmatch(label) for label in raw_labels):
+            resolved.append(ref)
+            continue
         canonical_matches = [channel_id for channel_id in canonical_ids if compiled.fullmatch(channel_id)]
         if not canonical_matches:
             dead.append(
@@ -618,17 +621,14 @@ def _resolve_keithley_heartbeats(
     return {channel: frozenset(identities) for channel, identities in resolved.items()}, dead
 
 
-def _load_interlock_conditions(config_path: Path) -> list[InterlockCondition]:
+def _load_interlock_conditions(
+    config_path: Path,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+) -> list[InterlockCondition]:
     """Parse interlocks.yaml into InterlockConditions.
 
-    Mirrors the production ``InterlockEngine.load_config`` entry construction
-    (src/cryodaq/core/interlock.py:309-319). ``InterlockCondition.__post_init__``
-    compiles + validates the pattern identically, and ``matches_channel()`` is
-    the production matcher (``_pattern.match``) — reusing it here avoids
-    hand-duplicating regex semantics. ``InterlockEngine`` itself cannot be
-    reused as the loader here because ``add_condition`` rejects every action
-    not present in the engine's actions dict; the validator needs only the
-    compiled patterns, not action dispatch.
+    Mirrors the production ``InterlockEngine.load_config`` binding resolution.
+    The validator needs only the resolved conditions, not action dispatch.
     """
     with config_path.open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
@@ -642,14 +642,18 @@ def _load_interlock_conditions(config_path: Path) -> list[InterlockCondition]:
                 InterlockCondition(
                     name=entry["name"],
                     description=entry.get("description", ""),
-                    channel_pattern=entry["channel_pattern"],
+                channel_ids=resolve_interlock_channel_ids(
+                    entry,
+                    config_path=config_path,
+                    descriptor_catalog=descriptor_catalog,
+                ),
                     threshold=float(entry.get("threshold", 0.0)),
                     comparison=entry.get("comparison", ">"),
                     action=entry.get("action", ""),
                     cooldown_s=float(entry.get("cooldown_s", 0.0)),
                 )
             )
-        except (KeyError, ValueError, TypeError, re.error):
+        except (KeyError, ValueError, TypeError):
             # A structurally-invalid interlock is OUT OF SCOPE for this
             # liveness diagnostic. InterlockEngine.load_config later raises
             # InterlockConfigError on the same entry before acquisition starts
@@ -737,13 +741,13 @@ def validate_safety_pattern_liveness(
 
     dead: list[_DeadPattern] = []
 
-    # Plane 1: interlocks (CANONICAL, .match). All interlocks are safety.
-    for condition in _load_interlock_conditions(interlocks_config_path):
+    # Plane 1: interlocks (exact canonical IDs resolved from physical bindings).
+    for condition in _load_interlock_conditions(interlocks_config_path, descriptor_catalog):
         if not any(condition.matches_channel(cid) for cid in canonical_ids):
             dead.append(
                 _DeadPattern(
-                    pattern=condition.channel_pattern,
-                    plane="canonical (InterlockEngine post-bind channel_id, .match)",
+                    pattern=", ".join(sorted(condition.channel_ids)),
+                    plane="canonical (InterlockEngine exact declared binding)",
                     source=f"{interlocks_config_path.name} (interlock {condition.name!r})",
                 )
             )

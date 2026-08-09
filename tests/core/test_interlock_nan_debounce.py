@@ -78,7 +78,7 @@ def _make_engine(
         InterlockCondition(
             name="overheat_zone",
             description="Перегрев зоны нагрева",
-            channel_pattern=r"Т5 .*",
+            channel_ids=frozenset({"Т5 Датчик"}),
             threshold=350.0,
             comparison=">",
             action="emergency_off",
@@ -260,7 +260,7 @@ async def test_usable_threshold_breach_still_trips() -> None:
         InterlockCondition(
             name="overheat_zone",
             description="Перегрев",
-            channel_pattern=r"Т5 .*",
+            channel_ids=frozenset({"Т5 Датчик"}),
             threshold=350.0,
             comparison=">",
             action="emergency_off",
@@ -346,7 +346,7 @@ def _trip_engine(*, comparison: str, threshold: float, handler=None) -> tuple[In
         InterlockCondition(
             name="iface",
             description="направленный интерлок",
-            channel_pattern=r"Т5 .*",
+            channel_ids=frozenset({"Т5 Датчик"}),
             threshold=threshold,
             comparison=comparison,
             action="emergency_off",

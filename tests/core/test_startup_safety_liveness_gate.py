@@ -78,7 +78,7 @@ def _real_alarms_v3_patterns() -> set[str]:
 
 def _real_merged_patterns() -> set[str]:
     return {
-        *engine.load_protected_channel_patterns(_INTERLOCKS_PATH),
+        *engine.load_protected_channel_patterns(_INTERLOCKS_PATH, descriptor_catalog=_real_catalog()),
         *_real_alarms_v3_patterns(),
     }
 

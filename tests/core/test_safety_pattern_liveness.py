@@ -66,7 +66,7 @@ from cryodaq.core.housekeeping import (
     load_critical_channels_from_alarms_v3,
     load_protected_channel_patterns,
 )
-from cryodaq.core.interlock import InterlockCondition
+from cryodaq.core.interlock import InterlockCondition, resolve_interlock_channel_ids
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager
 from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
@@ -98,17 +98,20 @@ def _load_roster() -> tuple[list[str], list[str]]:
 
 def _load_interlock_conditions() -> list[InterlockCondition]:
     raw = yaml.safe_load(_INTERLOCKS_PATH.read_text(encoding="utf-8"))
+    descriptor_catalog = load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
     conditions: list[InterlockCondition] = []
     for entry in raw.get("interlocks", []):
-        # Same construction path as InterlockEngine.load_config
-        # (src/cryodaq/core/interlock.py:311-319): __post_init__ compiles and
-        # validates channel_pattern identically, and matches_channel() is the
-        # production matcher (``_pattern.match``).
+        # Same construction path as InterlockEngine.load_config: resolve the
+        # declared physical source to the post-bind canonical channel_id.
         conditions.append(
             InterlockCondition(
                 name=entry["name"],
                 description=entry.get("description", ""),
-                channel_pattern=entry["channel_pattern"],
+                channel_ids=resolve_interlock_channel_ids(
+                    entry,
+                    config_path=_INTERLOCKS_PATH,
+                    descriptor_catalog=descriptor_catalog,
+                ),
                 threshold=float(entry.get("threshold", 0.0)),
                 comparison=entry.get("comparison", ">"),
                 action=entry.get("action", ""),
@@ -150,8 +153,8 @@ def test_roster_is_populated() -> None:
     INTERLOCK_CONDITIONS,
     ids=[_node_id(c.name) for c in INTERLOCK_CONDITIONS],
 )
-def test_interlock_pattern_matches_canonical_channel(condition: InterlockCondition) -> None:
-    """interlocks.yaml channel_pattern must match >=1 canonical channel_id.
+def test_interlock_binding_matches_canonical_channel(condition: InterlockCondition) -> None:
+    """Each interlock binding must resolve to >=1 canonical channel_id.
 
     InterlockEngine consumes the CANONICAL plane (DataBroker post-bind stream),
     so a pattern written for the raw emitted label (with display-name suffix)
@@ -159,9 +162,8 @@ def test_interlock_pattern_matches_canonical_channel(condition: InterlockConditi
     """
     matched = [cid for cid in CANONICAL_CHANNEL_IDS if condition.matches_channel(cid)]
     assert matched, (
-        f"interlock {condition.name!r} channel_pattern "
-        f"{condition.channel_pattern!r} matches NO canonical channel_id "
-        f"(InterlockEngine plane = post-bind Reading.channel). "
+        f"interlock {condition.name!r} binding {sorted(condition.channel_ids)!r} "
+        "matches NO canonical channel_id (InterlockEngine plane = post-bind Reading.channel). "
         f"Roster had {len(CANONICAL_CHANNEL_IDS)} canonical ids; sample: "
         f"{CANONICAL_CHANNEL_IDS[:6]}."
     )
@@ -181,7 +183,7 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
     manager._config.require_keithley_for_run = False
     canonical_before = list(manager._canonical_critical_ids)
     protected = [
-        *load_protected_channel_patterns(_INTERLOCKS_PATH),
+        *load_protected_channel_patterns(_INTERLOCKS_PATH, descriptor_catalog=descriptor_catalog),
         *load_critical_channels_from_alarms_v3(_ALARMS_V3_PATH),
     ]
 

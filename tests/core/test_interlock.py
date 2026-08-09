@@ -25,7 +25,7 @@ from cryodaq.drivers.base import Reading
 def _make_condition(
     name: str = "high_temp",
     description: str = "Temperature too high",
-    channel_pattern: str = r"T\d+",
+    channel_ids: frozenset[str] = frozenset({"T1"}),
     threshold: float = 300.0,
     comparison: str = ">",
     action: str = "emergency_off",
@@ -34,7 +34,7 @@ def _make_condition(
     return InterlockCondition(
         name=name,
         description=description,
-        channel_pattern=channel_pattern,
+        channel_ids=channel_ids,
         threshold=threshold,
         comparison=comparison,
         action=action,
@@ -225,7 +225,7 @@ async def test_action_called_async() -> None:
         InterlockCondition(
             name="cond_a",
             description="Condition A on T1",
-            channel_pattern=r"T1",
+            channel_ids=frozenset({"T1"}),
             threshold=300.0,
             comparison=">",
             action="action_a",
@@ -236,7 +236,7 @@ async def test_action_called_async() -> None:
         InterlockCondition(
             name="cond_b",
             description="Condition B on T2",
-            channel_pattern=r"T2",
+            channel_ids=frozenset({"T2"}),
             threshold=300.0,
             comparison=">",
             action="action_b",
@@ -278,7 +278,13 @@ async def test_action_called_async() -> None:
 async def test_regex_channel_matching() -> None:
     broker, engine, called = await _make_engine()
     # Pattern matches T1 through T8
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    engine.add_condition(
+        _make_condition(
+            channel_ids=frozenset({"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"}),
+            threshold=300.0,
+            comparison=">",
+        )
+    )
 
     await broker.publish(Reading.now("T5", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
@@ -296,7 +302,13 @@ async def test_regex_channel_matching() -> None:
 
 async def test_regex_no_match_ignored() -> None:
     broker, engine, called = await _make_engine()
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    engine.add_condition(
+        _make_condition(
+            channel_ids=frozenset({"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"}),
+            threshold=300.0,
+            comparison=">",
+        )
+    )
 
     # "PRESSURE_1" does not match T[1-8]
     await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
@@ -567,7 +579,7 @@ async def test_detector_warmup_pattern_matches_full_channel() -> None:
     engine.add_condition(
         _make_condition(
             name="detector_warmup",
-            channel_pattern="\u042212 .*",
+            channel_ids=frozenset({full_name}),
             threshold=300.0,
             comparison=">",
         )
@@ -606,7 +618,7 @@ async def test_multiple_interlocks() -> None:
         InterlockCondition(
             name="lock_a",
             description="High T",
-            channel_pattern=r"T\d+",
+            channel_ids=frozenset({"T3"}),
             threshold=300.0,
             comparison=">",
             action="action_a",
@@ -617,7 +629,7 @@ async def test_multiple_interlocks() -> None:
         InterlockCondition(
             name="lock_b",
             description="Low pressure",
-            channel_pattern=r"PRESSURE_\d+",
+            channel_ids=frozenset({"PRESSURE_1"}),
             threshold=1e-5,
             comparison="<",
             action="action_b",

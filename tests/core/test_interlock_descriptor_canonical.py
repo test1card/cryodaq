@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from shutil import copyfile
 
 import yaml
 
@@ -168,5 +169,64 @@ async def test_raw_companion_channel_does_not_trip_interlock() -> None:
 
         assert engine.get_state()["overheat_cryostat"] == InterlockState.ARMED
         assert tripped == []
+    finally:
+        await engine.stop()
+
+
+async def test_interlock_follows_declared_sensor_binding_after_canonical_id_rename(tmp_path: Path) -> None:
+    """Renaming Т12's canonical ID must not detach its detector interlock.
+
+    This exercises the production descriptor loader, ``InterlockEngine``, and
+    ``DataBroker``.  The physical descriptor identity stays ``(LS218_2,
+    input.4.temperature)`` while only the operator-visible canonical ID is
+    renamed.
+    """
+    renamed_id = "detector_stage_two"
+    descriptors_path = tmp_path / "channel_descriptors.yaml"
+    interlocks_path = tmp_path / "interlocks.yaml"
+    copyfile(DESCRIPTORS_PATH, descriptors_path)
+    copyfile(INTERLOCKS_PATH, interlocks_path)
+
+    manifest = yaml.safe_load(descriptors_path.read_text(encoding="utf-8"))
+    next(
+        descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т12"
+    )["channel_id"] = renamed_id
+    next(binding for binding in manifest["bindings"] if binding["channel_id"] == "Т12")["channel_id"] = renamed_id
+    descriptors_path.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    catalog = load_live_channel_descriptor_catalog(descriptors_path)
+    broker = DataBroker()
+    actions_seen: list[str] = []
+
+    async def _emergency_off() -> None:
+        actions_seen.append("emergency_off")
+
+    async def _stop_source() -> None:
+        actions_seen.append("stop_source")
+
+    engine = InterlockEngine(
+        broker=broker,
+        actions={"emergency_off": _emergency_off, "stop_source": _stop_source},
+    )
+    engine.load_config(interlocks_path)
+    await engine.start()
+    try:
+        instrument_id, emitted_channel = _instrument_for(renamed_id, catalog)
+        bound = _bound_reading(
+            catalog,
+            instrument_id=instrument_id,
+            emitted_channel=emitted_channel,
+            value=11.0,
+            unit="K",
+        )
+        assert bound.channel == renamed_id
+        await broker.publish(bound)
+        await asyncio.sleep(0.1)
+
+        assert engine.get_state()["detector_warmup"] == InterlockState.TRIPPED, (
+            "detector_warmup detached after a canonical channel-id rename instead of following "
+            "the declared LS218_2/input.4.temperature sensor binding"
+        )
+        assert actions_seen == ["stop_source"]
     finally:
         await engine.stop()

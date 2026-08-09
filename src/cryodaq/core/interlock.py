@@ -17,10 +17,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import re
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -36,6 +35,35 @@ from cryodaq.drivers.base import Reading
 
 class InterlockConfigError(RuntimeError):
     """Raised when interlocks.yaml cannot be loaded in a fail-closed manner."""
+
+
+def resolve_interlock_channel_ids(
+    entry: dict[str, Any], *, config_path: Path, descriptor_catalog: Any | None
+) -> frozenset[str]:
+    """Resolve an interlock's declared physical sensor bindings exactly."""
+    bindings = entry.get("channel_bindings")
+    if type(bindings) is not list or not bindings:
+        raise ValueError("channel_bindings must be a non-empty list")
+    if descriptor_catalog is None:
+        from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+
+        descriptor_catalog = load_live_channel_descriptor_catalog(config_path.parent / "channel_descriptors.yaml")
+    catalog = descriptor_catalog.storage_catalog_snapshot()
+    channel_ids: set[str] = set()
+    for binding in bindings:
+        if type(binding) is not dict or set(binding) != {"instrument_id", "source_key"}:
+            raise ValueError("channel_bindings entries must contain only instrument_id and source_key")
+        instrument_id = binding["instrument_id"]
+        source_key = binding["source_key"]
+        if type(instrument_id) is not str or type(source_key) is not str:
+            raise ValueError("channel_bindings identity values must be strings")
+        descriptor = catalog.by_source.get((instrument_id, source_key))
+        if descriptor is None:
+            raise ValueError(f"channel binding {instrument_id!r}/{source_key!r} is absent from the descriptor catalog")
+        channel_ids.add(descriptor.channel_id)
+    if len(channel_ids) != len(bindings):
+        raise ValueError("channel_bindings must resolve to unique declared sensors")
+    return frozenset(channel_ids)
 
 
 logger = logging.getLogger(__name__)
@@ -71,9 +99,9 @@ class InterlockCondition:
         Уникальное имя блокировки (идентификатор).
     description:
         Текстовое описание — отображается в интерфейсе и логах.
-    channel_pattern:
-        Регулярное выражение, которому должен соответствовать Reading.channel.
-        Пример: ``"Т[1-8] .*"`` — каналы Т1–Т8 с любым суффиксом.
+    channel_ids:
+        Канонические идентификаторы, разрешённые из объявленных физических
+        ``(instrument_id, source_key)`` привязок конфигурации.
     threshold:
         Пороговое значение для сравнения с Reading.value.
     comparison:
@@ -90,30 +118,25 @@ class InterlockCondition:
 
     name: str
     description: str
-    channel_pattern: str
+    channel_ids: frozenset[str]
     threshold: float
     comparison: str  # ">" или "<"
     action: str
     cooldown_s: float = 0.0
-
-    # Скомпилированное регулярное выражение — заполняется в __post_init__
-    _pattern: re.Pattern[str] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.comparison not in (">", "<"):
             raise ValueError(
                 f"Блокировка '{self.name}': недопустимый оператор сравнения '{self.comparison}'. Допустимы: '>' и '<'."
             )
-        try:
-            self._pattern = re.compile(self.channel_pattern)
-        except re.error as exc:
-            raise ValueError(
-                f"Блокировка '{self.name}': некорректный channel_pattern '{self.channel_pattern}': {exc}"
-            ) from exc
+        if type(self.channel_ids) is not frozenset or not self.channel_ids or any(
+            type(channel_id) is not str or not channel_id for channel_id in self.channel_ids
+        ):
+            raise ValueError(f"Блокировка '{self.name}': channel_ids must be a non-empty frozenset of strings")
 
     def matches_channel(self, channel: str) -> bool:
-        """Проверить, соответствует ли имя канала шаблону блокировки."""
-        return bool(self._pattern.match(channel))
+        """Проверить точное совпадение с объявленной привязкой датчика."""
+        return channel in self.channel_ids
 
     def is_triggered(self, value: float) -> bool:
         """Проверить, выполнено ли условие срабатывания для данного значения."""
@@ -254,7 +277,13 @@ class InterlockEngine:
     # Загрузка конфигурации
     # ------------------------------------------------------------------
 
-    def load_config(self, config_path: Path, *, snapshot: bytes | None = None) -> PhysicalPolicyReceipt:
+    def load_config(
+        self,
+        config_path: Path,
+        *,
+        snapshot: bytes | None = None,
+        descriptor_catalog: Any | None = None,
+    ) -> PhysicalPolicyReceipt:
         """Загрузить блокировки из YAML-файла.
 
         Ожидаемая структура файла::
@@ -262,7 +291,9 @@ class InterlockEngine:
             interlocks:
               - name: "имя_блокировки"
                 description: "Описание"
-                channel_pattern: "регулярное выражение"
+                channel_bindings:
+                  - instrument_id: "LS218_1"
+                    source_key: "input.1.temperature"
                 threshold: 350.0
                 comparison: ">"
                 action: "emergency_off"
@@ -308,7 +339,11 @@ class InterlockEngine:
                 condition = InterlockCondition(
                     name=entry["name"],
                     description=entry["description"],
-                    channel_pattern=entry["channel_pattern"],
+                    channel_ids=resolve_interlock_channel_ids(
+                        entry,
+                        config_path=config_path,
+                        descriptor_catalog=descriptor_catalog,
+                    ),
                     threshold=float(entry["threshold"]),
                     comparison=entry["comparison"],
                     action=entry["action"],
@@ -316,7 +351,7 @@ class InterlockEngine:
                 )
                 self.add_condition(condition)
                 loaded += 1
-            except (KeyError, ValueError, TypeError, re.error) as exc:
+            except (KeyError, ValueError, TypeError) as exc:
                 raise InterlockConfigError(
                     f"interlocks.yaml at {config_path}: invalid interlock entry — {type(exc).__name__}: {exc}"
                 ) from exc
@@ -386,7 +421,7 @@ class InterlockEngine:
         logger.info(
             "Блокировка добавлена: '%s' | канал: '%s' | порог: %s %s | действие: '%s' | кулдаун: %.1f с.",
             condition.name,
-            condition.channel_pattern,
+            sorted(condition.channel_ids),
             condition.comparison,
             condition.threshold,
             condition.action,
@@ -445,7 +480,7 @@ class InterlockEngine:
         """Основной цикл проверки блокировок.
 
         Непрерывно читает показания из очереди и проверяет все ARMED-блокировки,
-        чей channel_pattern совпадает с каналом пришедшего показания.
+        чьи объявленные привязки совпадают с каналом пришедшего показания.
         """
         assert self._queue is not None, "Очередь не инициализирована — вызовите start()"
 
@@ -460,7 +495,7 @@ class InterlockEngine:
 
     async def _process_reading(self, reading: Reading) -> None:
         """Проверить показание против всех подходящих ARMED-блокировок."""
-        # ARMED-блокировки, чей шаблон совпал с каналом показания.
+        # ARMED-блокировки, чьи объявленные привязки совпали с каналом показания.
         matching = [
             record
             for record in self._interlocks.values()
