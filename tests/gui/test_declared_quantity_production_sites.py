@@ -292,3 +292,48 @@ def test_the_analytics_summary_orders_only_declared_temperatures(
         "a channel DECLARED as pressure is ordered among the temperatures, ahead of a renamed temperature, "
         "because its name starts with Cyrillic Те"
     )
+
+
+def test_the_analytics_cutoff_changes_membership_not_only_order(
+    app, mixed_manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past twelve channels the ordering decides who is DISPLAYED AT ALL.
+
+    The sibling node above, and the production comment beside the code, both
+    said this site never drops a channel because `other_chs` catches whatever
+    `temp_chs` does not. That holds only below the cutoff: the two groups are
+    concatenated and then sliced to twelve. With more than twelve channels in
+    history, a channel's classification decides whether it appears — so
+    reclassifying one, by rename or by declaring it a non-temperature, changes
+    MEMBERSHIP of the operator's summary.
+
+    Here thirteen channels compete for twelve slots. The renamed temperature
+    must be shown and the Cyrillic-Те pressure channel must be the one displaced,
+    which is the exact inversion of what spelling would have produced.
+    """
+
+    from cryodaq.gui.shell.views import analytics_widgets
+
+    monkeypatch.setattr(analytics_widgets, "get_channel_manager", lambda: mixed_manager)
+    widget = analytics_widgets.ExperimentSummaryWidget()
+
+    # Eleven declared temperatures, plus the renamed temperature, plus the
+    # pressure channel spelled with Cyrillic Те: thirteen for twelve slots.
+    # Т9 is PRESSURE_SPELLED_TE, so generating it here would collide and leave
+    # twelve channels for twelve slots -- no cutoff, and nothing proven.
+    data = {f"Т{n}": [(0.0, float(n))] for n in list(range(1, 9)) + [10, 11, 12]}
+    data[RENAMED] = [(0.0, 99.0)]
+    data[PRESSURE_SPELLED_TE] = [(0.0, 1.0)]
+    assert len(data) == 13, "premise: more channels than the twelve-slot cutoff"
+
+    widget._on_stats_loaded({"ok": True, "data": data})
+    rendered = widget._stats_label.text()
+
+    assert RENAMED in rendered, (
+        "a renamed temperature was displaced from the summary by a channel that only LOOKS like a "
+        "temperature; past the cutoff this site drops channels, so classification decides membership"
+    )
+    assert PRESSURE_SPELLED_TE not in rendered, (
+        "a channel DECLARED as pressure occupies one of the twelve temperature-first slots because its "
+        "name starts with Cyrillic Те"
+    )

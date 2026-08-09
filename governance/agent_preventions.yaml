@@ -3304,6 +3304,8 @@ records:
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_summary_orders_only_declared_temperatures
         ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_cutoff_changes_membership_not_only_order
+        ci_partition: gui
       - node: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
         ci_partition: remaining
     red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_2026_08_08_pending_immutable_capture

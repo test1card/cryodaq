@@ -2,7 +2,7 @@
 title: Design System Changelog
 status: canonical
 last_updated: 2026-08-09
-version: 4.2.0
+version: 5.0.0
 ---
 
 # Design System Changelog
@@ -13,7 +13,7 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
-## [4.2.0] — 2026-08-09
+## [5.0.0] — 2026-08-09
 
 ### Changed
 
@@ -36,9 +36,12 @@ the design-system-specific definitions of "breaking" from
   vocabulary word ships separately on `fix/oc-030b-config-validation`; until it
   lands, treat the field as unchecked.
 
-  This is a MINOR bump rather than a patch: the selection contract that
-  `sensor-cell.md` documents has changed, and a consumer that relied on the
-  spelling rule will now be handed a different set of channels.
+  This is a MAJOR bump. `governance/versioning.md` reserves MAJOR for a rule
+  "significantly expanded such that existing compliant code becomes
+  non-compliant", and that is exactly what happened: a consumer that was
+  correct under the spelling rule is handed a different set of channels and
+  must change to stay correct. An earlier version of this entry called it
+  MINOR while its own next sentence described a breaking change.
 
 ## [4.1.0] — 2026-08-05
 

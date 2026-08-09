@@ -4,7 +4,7 @@ keywords: sensor, cell, channel, temperature, pressure, reading, kelvin, tile, g
 applies_to: single-channel data cell widget
 status: active
 implements: src/cryodaq/gui/dashboard/sensor_cell.py; src/cryodaq/gui/dashboard/dynamic_sensor_grid.py (Phase B.3)
-last_updated: 2026-07-12
+last_updated: 2026-08-09
 references: rules/data-display-rules.md, rules/accessibility-rules.md, patterns/numeric-formatting.md
 ---
 
@@ -55,7 +55,7 @@ Minimum cell size: 160×80px (per `DynamicSensorGrid._MIN_CELL_WIDTH` / `_CELL_H
 
 1. **Channel ID uses Cyrillic Т (U+0422).** Never Latin T. (RULE-COPY-001) This
    is a NAMING convention for the shipped channels, and it is not a selection
-   rule: since the declared-quantity change (4.2.0) no code may infer what a
+   rule: since the declared-quantity change (5.0.0) no code may infer what a
    channel MEASURES from how it is spelled. Both hold at once — the lab names
    channels this way, and a channel renamed away from it keeps appearing on the
    surfaces its declaration entitles it to. An earlier reading of this invariant
