@@ -72,6 +72,38 @@ false_green_pairs:
     ci_partition: gui
     red_evidence: the_existing_production_guard_for_the_analytics_ordering_site_drove_only_THREE_channels_so_it_exercised_ORDER_and_never_the_twelve_slot_cutoff_and_both_the_guard_and_the_comment_beside_the_production_code_asserted_that_other_chs_catches_whatever_temp_chs_does_not_and_therefore_no_channel_is_ever_dropped_here_which_is_FALSE_past_the_limit_because_the_two_groups_are_concatenated_and_sliced_to_twelve_so_which_group_a_channel_lands_in_decides_whether_it_is_DISPLAYED_AT_ALL_and_reclassifying_a_channel_by_rename_or_by_declaring_it_a_non_temperature_changes_MEMBERSHIP_of_the_operator_summary_rather_than_only_its_order_the_new_node_puts_thirteen_channels_against_twelve_slots_and_the_control_reverting_the_selector_to_spelling_DISPLACES_the_renamed_temperature_and_gives_its_slot_to_the_cyrillic_te_pressure_channel_with_production_restored_byte_identical_2026_08_09_pending_immutable_capture
     green_evidence: pending
+  - id: CHANNEL-RELOAD-REJECTED-PATH-FALSE-GREEN-348
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_does_not_adopt_the_rejected_path
+    ci_partition: core
+    red_evidence: the_first_atomic_reload_guard_asserted_only_that_the_live_channels_and_quantity_declaration_survived_a_refused_reload_so_load_could_still_adopt_the_rejected_config_path_and_every_registered_guard_stayed_green_the_exact_production_path_node_loads_valid_state_attempts_the_malformed_path_and_requires_self_config_path_to_remain_the_last_accepted_path_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: ANALYTICS-ARCHIVED-ABSENT-DESCRIPTOR-FALSE-GREEN-349
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_is_not_displaced_by_an_absent_declaration
+    ci_partition: gui
+    red_evidence: the_first_version_named_the_archived_channel_ARCHIVED_STAGE_7_which_sorted_before_the_twelve_declared_pressure_channels_so_alphabetical_order_kept_it_inside_the_cutoff_even_with_the_production_defect_restored_the_repaired_exact_node_names_it_ZZ_ARCHIVED_STAGE_7_so_only_the_archived_unknown_rank_can_keep_it_in_the_rendered_summary_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: ANALYTICS-LIVE-RECLASSIFICATION-FALSE-GREEN-350
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_ranking_uses_its_descriptor_after_live_reclassification
+    ci_partition: gui
+    red_evidence: the_absent_declaration_guard_only_covered_a_channel_missing_from_todays_configuration_so_the_widget_still_ranked_an_archived_channel_from_the_live_manager_when_the_same_identifier_remained_but_its_quantity_was_reclassified_the_exact_node_renders_thirteen_channels_then_changes_only_the_live_quantity_and_requires_the_real_production_widget_output_to_remain_byte_identical_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: ANALYTICS-MIGRATED-LEGACY-HISTORY-FALSE-GREEN-351
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_descriptor_history_keeps_migrated_legacy_rows_unknown
+    ci_partition: core
+    red_evidence: the_first_descriptor_carry_guard_wrote_only_a_declared_row_with_a_non_null_descriptor_hash_so_the_history_reader_unconditionally_resolved_the_referenced_hash_set_and_all_registered_nodes_stayed_green_when_a_migrated_database_contained_only_pre_descriptor_rows_an_empty_referenced_set_was_treated_as_a_malformed_catalog_and_the_existing_best_effort_file_boundary_dropped_the_entire_day_the_exact_production_path_node_writes_a_legacy_row_migrates_its_real_database_then_requires_descriptor_bearing_history_to_return_that_row_as_legacy_unknown_2026_08_10_pending_immutable_capture
+    green_evidence: pending
   - id: OC030-COVERAGE-CLAIM-UNDERIVED-FALSE-GREEN-345
     status: open
     scope: product_contract
@@ -3277,13 +3309,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/OPEN_CELLS.md#oc-030
-    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled, and every ChannelManager reload that replaces the declared channel-role state serving those surfaces.
+    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled, every archived-history surface that can consult mutable live channel classification, and every ChannelManager reload that replaces the declared channel-role state, accepted configuration path, or both.
     classification: silent_channel_omission
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator. A second confirmed path replaced the live channel set before validating default_quantity, so a rejected reload left the running manager serving new channels under the old declaration even though no configuration file described that state.
-    invariant: 'An operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. A rejected reload is atomic: the live channel set and its quantity declaration both remain unchanged. WHAT THIS RECORD DOES NOT CLAIM: the declaration currently lives in `config/channels.yaml` and is therefore OPERATOR-owned, not DESCRIPTOR-derived. Binding it to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here, so a wrong declaration in that file still misroutes a surface - it merely does so visibly, in a file the operator owns, instead of invisibly through a letter.'
+    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator. A second confirmed path replaced the live channel set before validating default_quantity, so a rejected reload left the running manager serving new channels under the old declaration even though no configuration file described that state, and a third adopted the rejected path despite preserving the served values. The archived analytics summary then consulted that mutable live manager, so reclassifying a still-present channel in today's configuration reordered and could truncate yesterday's recorded history. The first descriptor-carry implementation also treated a migrated day containing only pre-descriptor rows as a malformed empty catalog and dropped that day's history.
+    invariant: 'A live operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. An archived-history surface ranks from the descriptor catalog persisted with the returned readings and never from the live ChannelManager; a missing or legacy descriptor remains unknown rather than being guessed from current configuration or spelling. A rejected reload is atomic: the live channel set, its quantity declaration, and the selected `_config_path` all remain unchanged. WHAT THIS RECORD DOES NOT CLAIM: live-screen declarations currently live in `config/channels.yaml` and are therefore OPERATOR-owned, not descriptor-derived. Binding those live selectors to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -3316,6 +3348,10 @@ records:
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_leaves_the_live_channel_set_untouched
         ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_does_not_adopt_the_rejected_path
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_descriptor_history_keeps_migrated_legacy_rows_unknown
+        ci_partition: core
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_manager_disagrees_with_spelling_in_both_directions
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_dashboard_buffers_only_declared_temperatures
@@ -3324,9 +3360,13 @@ records:
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_cutoff_changes_membership_not_only_order
         ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_is_not_displaced_by_an_absent_declaration
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_ranking_uses_its_descriptor_after_live_reclassification
+        ci_partition: gui
       - node: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
         ci_partition: remaining
-    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_AND_the_confirmed_reload_ordering_defect_replaced_the_live_channel_set_before_rejecting_malformed_default_quantity_so_the_manager_served_new_channels_under_the_old_declaration_until_the_production_path_was_made_atomic_2026_08_09_pending_immutable_capture
+    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_AND_the_confirmed_reload_ordering_defect_replaced_the_live_channel_set_before_rejecting_malformed_default_quantity_so_the_manager_served_new_channels_under_the_old_declaration_until_the_production_path_was_made_atomic_2026_08_09_pending_immutable_capture_AND_restoring_the_analytics_widget_live_manager_lookup_made_the_same_archived_result_drop_ZZ_ARCHIVED_TEMPERATURE_after_only_the_live_quantity_changed_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture_AND_unconditionally_resolving_an_empty_persisted_descriptor_reference_set_dropped_a_real_migrated_legacy_day_and_turned_the_exact_storage_node_red_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture
     green_evidence: pending
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
