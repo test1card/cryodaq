@@ -54,6 +54,22 @@ def test_repository_root_is_stable_when_invoked_from_a_subdirectory(tmp_path: Pa
     assert subject.repository_root().resolve() == repository.resolve()
 
 
+def test_restore_path_never_chmods_through_a_symlink(tmp_path: Path, monkeypatch) -> None:
+    restored = tmp_path / "link.py"
+    chmod_calls: list[tuple[Path, int, bool]] = []
+
+    monkeypatch.setattr(subject.os, "symlink", lambda _target, _path: None)
+
+    def chmod(path: Path, mode: int, *, follow_symlinks: bool = True) -> None:
+        chmod_calls.append((path, mode, follow_symlinks))
+
+    monkeypatch.setattr(subject.os, "chmod", chmod)
+
+    subject.restore_path(restored, subject.PathIdentity("symlink", "target.py", 0o777))
+
+    assert chmod_calls == [(restored, 0o777, False)]
+
+
 def test_existing_tree_entry_with_unreadable_blob_is_not_treated_as_absent(monkeypatch) -> None:
     object_id = "0" * 40
 

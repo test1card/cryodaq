@@ -185,8 +185,17 @@ def restore_path(path: Path, identity: PathIdentity) -> None:
         path.write_bytes(bytes(identity.payload))
     else:  # pragma: no cover - construction is private and exhaustive
         raise AssertionError(f"unknown path identity {identity.kind!r}")
-    if identity.mode is not None:
+    if identity.mode is None:
+        return
+    if identity.kind != "symlink":
         os.chmod(path, identity.mode)
+        return
+    try:
+        os.chmod(path, identity.mode, follow_symlinks=False)
+    except NotImplementedError:
+        lchmod = getattr(os, "lchmod", None)
+        if lchmod is not None:
+            lchmod(path, identity.mode)
 
 
 def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
