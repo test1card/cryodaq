@@ -84,11 +84,20 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-# Production artifacts are not only Python: the severity floor counts tracked
-# runtime configuration -- interlock thresholds, channel patterns, shutdown
-# actions -- as production, because a wrong value there misfires an interlock
-# exactly as wrong code does.
-_DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml")
+# Production artifacts are not only Python, and not only this repository's own
+# process. The severity floor counts tracked runtime configuration -- interlock
+# thresholds, channel patterns, shutdown actions -- because a wrong value there
+# misfires an interlock exactly as wrong code does. It equally counts code this
+# repository UPLOADS to an instrument: `tsp/cryodaq_wdog.lua` is re-sent to the
+# Keithley on every connection and is the watchdog that takes the source down.
+#
+# That file is why the amendment stopped defining the floor as a list of
+# directories, and for one review round the TOOL still could not see it on
+# either axis -- no `.lua` suffix, no `tsp/` prefix -- so the instrument that
+# measures the floor disagreed with the floor's own text. A measuring tool that
+# cannot see the artifact its rule names is the first false-green that rule
+# would have shipped.
+_DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml", ".lua")
 
 
 @dataclass(frozen=True)
@@ -408,7 +417,7 @@ def main() -> int:
     parser.add_argument("--suffix", action="append", default=[])
     options = parser.parse_args()
     suites = options.suite or ["tests"]
-    includes = tuple(options.include or ["src/", "config/"])
+    includes = tuple(options.include or ["src/", "config/", "tsp/"])
     suffixes = tuple(options.suffix or _DEFAULT_SUFFIXES)
 
     point = merge_base(options.base)
