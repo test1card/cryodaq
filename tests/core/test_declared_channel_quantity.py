@@ -223,4 +223,3 @@ def test_the_shipped_selection_is_byte_for_byte_what_spelling_selected() -> None
         "screen is the failure behind revert 0bea0449; if a difference is intended, name it above."
     )
     assert by_declaration, "the shipped configuration selects no temperature channels at all"
-

@@ -1015,9 +1015,7 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             # this row is not about.
             migrated_scopes = {
                 symbol.rsplit(".", 1)[-1]
-                for _path, symbol in re.findall(
-                    r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030
-                )
+                for _path, symbol in re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030)
             }
             regressed = sorted(
                 registration.registration_id
@@ -1079,9 +1077,7 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             # EVERY NAMED SYMBOL MUST EXIST. Four invented symbols passed
             # unnoticed because this extraction read paths only. Each
             # `file.py` (`Class.method`) pair is now resolved in the live tree.
-            for path, symbol in re.findall(
-                r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030
-            ):
+            for path, symbol in re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030):
                 blob = candidate_contents.get(path)
                 assert blob is not None, f"OC-030 names {path}, which is not in the frozen index"
                 leaf = symbol.rsplit(".", 1)[-1]

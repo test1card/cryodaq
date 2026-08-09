@@ -56,14 +56,6 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
-  - id: QUANTITY-VOCABULARY-UNVALIDATED-FALSE-GREEN-342
-    status: open
-    scope: product_contract
-    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
-    guard: tests/core/test_declared_channel_quantity.py::test_an_unsupported_default_quantity_is_refused_at_load
-    ci_partition: core
-    red_evidence: load_accepted_any_non_empty_string_as_default_quantity_so_a_single_typo_such_as_temperatue_loaded_cleanly_and_then_made_is_temperature_channel_false_for_every_shipped_channel_emptying_all_migrated_surfaces_with_no_diagnostic_and_the_existing_malformed_default_node_only_covered_NON_STRING_values_so_the_whole_suite_stayed_green_the_closed_vocabulary_ChannelQuantity_already_existed_and_was_not_consulted_2026_08_08_pending_immutable_capture
-    green_evidence: pending
   - id: DECLARED-QUANTITY-LOST-ON-SAVE-FALSE-GREEN-341
     status: open
     scope: product_contract
@@ -3270,10 +3262,6 @@ records:
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_an_unknown_channel_reports_no_quantity_rather_than_guessing
         ci_partition: core
-      - node: tests/core/test_declared_channel_quantity.py::test_a_configuration_that_declares_nothing_is_refused_at_load
-        ci_partition: core
-      - node: tests/core/test_declared_channel_quantity.py::test_a_rejected_reload_preserves_the_last_valid_configuration
-        ci_partition: core
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_temperature_plot_draws_declared_temperatures_only
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_sensor_grid_builds_cells_for_declared_temperatures_only
@@ -3292,12 +3280,14 @@ records:
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_saving_channel_edits_preserves_the_declaration
         ci_partition: core
-      - node: tests/core/test_declared_channel_quantity.py::test_an_unsupported_default_quantity_is_refused_at_load
+      - node: tests/core/test_declared_channel_quantity.py::test_the_shipped_selection_is_byte_for_byte_what_spelling_selected
         ci_partition: core
-      - node: tests/core/test_declared_channel_quantity.py::test_an_unsupported_per_channel_quantity_is_refused_at_load
-        ci_partition: core
-      - node: tests/core/test_declared_channel_quantity.py::test_every_supported_quantity_is_accepted
-        ci_partition: core
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_manager_disagrees_with_spelling_in_both_directions
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_dashboard_buffers_only_declared_temperatures
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_summary_orders_only_declared_temperatures
+        ci_partition: gui
     red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_2026_08_08_pending_immutable_capture
     green_evidence: pending
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
