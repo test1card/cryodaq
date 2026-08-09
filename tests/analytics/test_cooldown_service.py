@@ -857,6 +857,7 @@ async def test_predict_publishes_derived_metric(tmp_path: Path, model_in_tmp: Pa
         assert "cooldown_predictor" in metric_reading.channel
         assert metric_reading.unit in ("h", "hours", "s", "seconds")
         assert metric_reading.metadata.get("plugin_id") == "cooldown_predictor"
+        assert metric_reading.metadata.get("producer_interval_s") == 0.05
 
     finally:
         await service.stop()

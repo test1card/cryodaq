@@ -80,6 +80,7 @@ _INTERNAL_COMMAND_FIELDS = frozenset({"_rid", "_bridge_generation"})
 # module is loaded in the GUI process, which must not import zmq/zmq_bridge
 # at module scope. Keep in sync with cryodaq.core.zmq_bridge.DEFAULT_TOPIC.
 DEFAULT_TOPIC = b"readings"
+READING_RECEIVED_MONOTONIC_KEY = "__received_monotonic_s"
 OPERATOR_SNAPSHOT_TOPIC = b"operator.snapshot"
 READING_MAX_WIRE_BYTES = 2 * 1024 * 1024
 OPERATOR_SNAPSHOT_MAX_WIRE_BYTES = 8 * 1024 * 1024
@@ -236,7 +237,9 @@ def _decode_reading_frames(frames: object) -> dict[str, Any]:
         raise ReadingFrameError("wrong reading topic")
     if len(payload) > READING_MAX_WIRE_BYTES:
         raise ReadingFrameError("reading payload too large")
-    return _unpack_reading_dict(payload)
+    reading = _unpack_reading_dict(payload)
+    reading[READING_RECEIVED_MONOTONIC_KEY] = time.monotonic()
+    return reading
 
 
 def _new_sub_socket(

@@ -13,7 +13,6 @@ import math
 import time
 from datetime import UTC, datetime
 
-import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -30,35 +29,10 @@ from cryodaq.gui.dashboard.phase_content.eta_display import (
     _format_duration_ru,
 )
 from cryodaq.gui.dashboard.phase_stepper import PhaseStepper
-from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
-# Cooldown ETA is the slowest configurable producer feeding this strip; the
-# thermal calculator rides the faster analytics batch loop. Three scheduled
-# periods tolerate jitter or one delayed publication without masking a death.
-_DEFAULT_COOLDOWN_PREDICT_INTERVAL_S = 30.0
 _STALE_INTERVAL_MULTIPLIER = 3.0
-
-
-def _configured_analytics_stale_after_s() -> float:
-    config_path = get_config_dir() / "cooldown.yaml"
-    if not config_path.is_file():
-        return _DEFAULT_COOLDOWN_PREDICT_INTERVAL_S * _STALE_INTERVAL_MULTIPLIER
-    try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        if type(raw) is not dict:
-            raise TypeError("root is not a mapping")
-        cooldown = raw.get("cooldown", {})
-        if type(cooldown) is not dict:
-            raise TypeError("cooldown is not a mapping")
-        interval_s = float(cooldown.get("predict_interval_s", _DEFAULT_COOLDOWN_PREDICT_INTERVAL_S))
-        if not math.isfinite(interval_s) or interval_s <= 0:
-            raise ValueError("predict_interval_s must be finite and positive")
-    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
-        logger.warning("analytics stale cadence unavailable from %s: %s", config_path, exc)
-        return _DEFAULT_COOLDOWN_PREDICT_INTERVAL_S * _STALE_INTERVAL_MULTIPLIER
-    return interval_s * _STALE_INTERVAL_MULTIPLIER
 
 
 _MAX_HEIGHT_PX = 55
@@ -66,20 +40,15 @@ _BUTTON_HEIGHT_PX = 28
 _DURATION_UPDATE_MS = 1000
 
 
-def _source_monotonic_stamp(reading) -> float:
-    receipt = time.monotonic()
-    source_timestamp = getattr(reading, "timestamp", None)
-    if (
-        isinstance(source_timestamp, datetime)
-        and source_timestamp.tzinfo is not None
-        and source_timestamp.utcoffset() is not None
-    ):
-        source_age_s = (datetime.now(UTC) - source_timestamp.astimezone(UTC)).total_seconds()
-        # A future source clock must not postpone expiry beyond receipt time.
-        return receipt - max(0.0, source_age_s)
-    # Compatibility readings without a usable source timestamp fall back to
-    # receipt time; they still expire normally, but queue delay is unknowable.
-    return receipt
+def _metadata_duration_s(reading, key: str, *, positive: bool = False) -> float | None:
+    metadata = getattr(reading, "metadata", None)
+    value = metadata.get(key) if type(metadata) is dict else None
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    duration = float(value)
+    if duration < 0 or (positive and duration == 0):
+        return None
+    return duration
 
 
 class PhaseAwareWidget(QWidget):
@@ -98,7 +67,6 @@ class PhaseAwareWidget(QWidget):
 
         self._current_phase: str | None = None
         self._phase_started_at: float | None = None
-        self._analytics_stale_after_s = _configured_analytics_stale_after_s()
         self._has_active_experiment: bool = False
         self._active_experiment_id: str | None = None
         self._mutation_enabled = True
@@ -109,12 +77,8 @@ class PhaseAwareWidget(QWidget):
         self._cached_r_thermal: float | None = None
         self._cached_pressure: float | None = None
         self._last_context_text: str = ""
-        # Monotonic equivalents of source production time. Without these, the
-        # values were revoked only by an experiment CHANGE, so a producer that
-        # died inside a live experiment left its last number rendering as
-        # current for as long as the window stayed open. Source age also keeps
-        # queued deliveries from being blessed as new on receipt.
-        self._cached_at: dict[str, float] = {}
+        self._cached_at: dict[str, float | None] = {}
+        self._stale_after_s: dict[str, float | None] = {}
 
         self._build_ui()
         self._apply_inactive_state()
@@ -416,6 +380,8 @@ class PhaseAwareWidget(QWidget):
                 self._cached_eta_s = None
                 self._cached_r_thermal = None
                 self._cached_pressure = None
+                self._cached_at.clear()
+                self._stale_after_s.clear()
             self._active_experiment_id = new_experiment_id
             self._current_phase = new_phase
             self._phase_started_at = new_started
@@ -437,20 +403,27 @@ class PhaseAwareWidget(QWidget):
             return
         if channel.endswith("/cooldown_eta"):
             self._cached_eta_s = value * 3600 if value > 0 else None
-            self._cached_at["eta"] = _source_monotonic_stamp(reading)
+            self._remember_freshness("eta", reading)
             self._refresh_context_label()
         elif channel.endswith("/R_thermal"):
             self._cached_r_thermal = value
-            self._cached_at["r_thermal"] = _source_monotonic_stamp(reading)
+            self._remember_freshness("r_thermal", reading)
             self._refresh_context_label()
         elif channel.endswith("/pressure"):
             self._cached_pressure = value
-            self._cached_at["pressure"] = _source_monotonic_stamp(reading)
+            self._remember_freshness("pressure", reading)
             self._refresh_context_label()
 
     # ------------------------------------------------------------------
     # State application
     # ------------------------------------------------------------------
+
+    def _remember_freshness(self, key: str, reading) -> None:
+        source_age_s = _metadata_duration_s(reading, "source_age_s")
+        interval_s = _metadata_duration_s(reading, "producer_interval_s", positive=True)
+        stale_after_s = None if interval_s is None else interval_s * _STALE_INTERVAL_MULTIPLIER
+        self._cached_at[key] = None if source_age_s is None else time.monotonic() - source_age_s
+        self._stale_after_s[key] = stale_after_s if stale_after_s is not None and math.isfinite(stale_after_s) else None
 
     def _mark_if_stale(self, key: str, rendered: str) -> str:
         """Mark a cached analytics value whose producer has gone quiet.
@@ -462,7 +435,8 @@ class PhaseAwareWidget(QWidget):
         """
 
         stamped = self._cached_at.get(key)
-        if stamped is None or time.monotonic() - stamped <= self._analytics_stale_after_s:
+        stale_after_s = self._stale_after_s.get(key)
+        if stamped is not None and stale_after_s is not None and time.monotonic() - stamped <= stale_after_s:
             return rendered
         return (
             f'<span style="border:1px solid {theme.STATUS_STALE}; '
@@ -475,6 +449,8 @@ class PhaseAwareWidget(QWidget):
         self._cached_eta_s = None
         self._cached_r_thermal = None
         self._cached_pressure = None
+        self._cached_at.clear()
+        self._stale_after_s.clear()
         self._stepper.setVisible(False)
         self._duration_label.setText("")
         self._controls.setVisible(False)

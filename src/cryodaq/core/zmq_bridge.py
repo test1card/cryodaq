@@ -790,6 +790,12 @@ class ZMQPublisher:
         if self._applied_cold_stage_channel is not None:
             metadata["engine_applied"] = {"cooldown": {"channel_cold": self._applied_cold_stage_channel}}
         async with self._send_lock:
+            if reading.channel.startswith("analytics/"):
+                source_age_s = time.time() - reading.timestamp.timestamp()
+                if math.isfinite(source_age_s) and source_age_s >= 0:
+                    metadata["source_age_s"] = source_age_s
+                else:
+                    metadata.pop("source_age_s", None)
             await self._send_allocated(
                 self._topic,
                 lambda sequence: _pack_reading(

@@ -18,6 +18,7 @@ silently lies -- a vanished readout is what caused revert `0bea0449`.
 from __future__ import annotations
 
 import os
+import queue
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -26,11 +27,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core import zmq_subprocess as subprocess_module
 from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.core.zmq_bridge import _pack_reading
+from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, _decode_reading_frames
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
+from cryodaq.gui import zmq_client as client_module
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.dashboard import phase_aware_widget as module
+from cryodaq.gui.zmq_client import ZmqBridge
 
 STALE_MARK = "устарело"
 
@@ -64,13 +70,25 @@ def _configured_dashboard(tmp_path, monkeypatch, *, cadence_s: float) -> Dashboa
     return view
 
 
-def _eta_reading(timestamp: datetime, value: float = 2.0) -> Reading:
+def _eta_reading(
+    timestamp: datetime,
+    value: float = 2.0,
+    *,
+    cadence_s: float | None = 30.0,
+    source_age_s: float | None = 0.0,
+) -> Reading:
+    metadata = {}
+    if cadence_s is not None:
+        metadata["producer_interval_s"] = cadence_s
+    if source_age_s is not None:
+        metadata["source_age_s"] = source_age_s
     return Reading(
         timestamp=timestamp,
         instrument_id="cooldown_predictor",
         channel="analytics/cooldown_predictor/cooldown_eta",
         value=value,
         unit="h",
+        metadata=metadata,
     )
 
 
@@ -79,7 +97,7 @@ def test_a_delayed_source_sample_arrives_already_marked_stale(app, tmp_path, mon
 
     _set_clock(monkeypatch, 1000.0)
     view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
-    view.on_reading(_eta_reading(datetime.now(UTC) - timedelta(seconds=181.0)))
+    view.on_reading(_eta_reading(datetime.now(UTC), source_age_s=181.0))
 
     text = view._phase_widget._context_label.text()
     assert "ETA" in text, "the production dashboard route did not render the cooldown ETA"
@@ -93,7 +111,7 @@ def test_stale_metric_uses_canonical_chrome_and_shape(app, tmp_path, monkeypatch
 
     _set_clock(monkeypatch, 1000.0)
     view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
-    view.on_reading(_eta_reading(datetime.now(UTC) - timedelta(seconds=181.0)))
+    view.on_reading(_eta_reading(datetime.now(UTC), source_age_s=181.0))
 
     text = view._phase_widget._context_label.text()
     assert "2ч" in text, "stale chrome hid the retained cooldown ETA"
@@ -106,7 +124,7 @@ def test_configured_slow_healthy_predictor_is_not_marked_before_next_publication
 
     _set_clock(monkeypatch, 1000.0)
     view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=180.0)
-    view.on_reading(_eta_reading(datetime.now(UTC)))
+    view.on_reading(_eta_reading(datetime.now(UTC), cadence_s=180.0))
 
     _set_clock(monkeypatch, 1181.0)
     view._phase_widget._duration_timer.timeout.emit()
@@ -130,6 +148,7 @@ def test_the_mark_is_per_value_not_per_widget(app, tmp_path, monkeypatch) -> Non
             channel="analytics/thermal_calculator/R_thermal",
             value=4.5,
             unit="K/W",
+            metadata={"producer_interval_s": 30.0, "source_age_s": 0.0},
         )
     )
 
@@ -141,6 +160,89 @@ def test_the_mark_is_per_value_not_per_widget(app, tmp_path, monkeypatch) -> Non
         f"expected exactly the dead feed to be marked, got {text.count(STALE_MARK)} marks in {text!r}"
     )
     assert "ETA" in text and "R" in text, "both metrics must stay visible; marking is not hiding"
+
+
+def test_each_metric_expires_on_its_own_producer_cadence(app, tmp_path, monkeypatch) -> None:
+    """A slow ETA producer must not mask a dead faster thermal feed."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=600.0)
+    view.on_reading(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="thermal_calculator",
+            channel="analytics/thermal_calculator/R_thermal",
+            value=4.5,
+            unit="K/W",
+            metadata={"producer_interval_s": 1.0, "source_age_s": 0.0},
+        )
+    )
+    view.on_reading(_eta_reading(datetime.now(UTC), cadence_s=600.0))
+
+    _set_clock(monkeypatch, 1004.0)
+    view._phase_widget._duration_timer.timeout.emit()
+
+    text = view._phase_widget._context_label.text()
+    assert text.count(STALE_MARK) == 1, f"only the dead 1 s thermal feed should be stale: {text!r}"
+    assert text.index(STALE_MARK) > text.index(">R "), f"the stale marker belongs to R_thermal: {text!r}"
+
+
+def test_engine_wall_clock_skew_does_not_age_a_fresh_value(app, tmp_path, monkeypatch) -> None:
+    """A producer-reported age is comparable even when Engine wall time is behind."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(_eta_reading(datetime.now(UTC) - timedelta(minutes=2), source_age_s=0.0))
+
+    text = view._phase_widget._context_label.text()
+    assert STALE_MARK not in text, f"remote wall-clock offset was misread as source age: {text!r}"
+
+
+def test_gui_queue_residence_cannot_refresh_an_old_transport_value(app, tmp_path, monkeypatch) -> None:
+    """Age accumulated after ZMQ receipt must survive the production GUI queue."""
+
+    _set_clock(monkeypatch, 1004.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=1.0)
+    reading = _eta_reading(datetime.now(UTC), cadence_s=1.0, source_age_s=0.5)
+
+    monkeypatch.setattr(subprocess_module, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+    queued = _decode_reading_frames([DEFAULT_TOPIC, _pack_reading(reading)])
+    bridge = ZmqBridge()
+    bridge._bridge_instance_id = "a" * 32
+    bridge._data_queue = queue.Queue()
+    bridge._data_queue.put_nowait(queued)
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: 1004.0))
+
+    [qualified] = bridge.poll_readings_with_descriptor()
+    view.on_reading(qualified.reading)
+
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text and "2ч" in text, f"transport delay hid the retained value: {text!r}"
+    assert STALE_MARK in text, f"four seconds of GUI queue residence reset a dead 1 s feed to fresh: {text!r}"
+
+
+def test_overflowed_producer_horizon_fails_closed_to_stale(app, tmp_path, monkeypatch) -> None:
+    """A finite cadence whose multiplier overflows must not become forever fresh."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=1e308)
+    view.on_reading(_eta_reading(datetime.now(UTC), cadence_s=1e308, source_age_s=0.0))
+
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text and "2ч" in text, f"invalid freshness metadata hid the retained value: {text!r}"
+    assert STALE_MARK in text, f"an infinite stale horizon rendered as healthy: {text!r}"
+
+
+def test_missing_source_age_is_visible_and_not_rendered_healthy(app, tmp_path, monkeypatch) -> None:
+    """Unknown provenance retains the value but must fail closed to stale."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(_eta_reading(datetime.now(UTC), source_age_s=None))
+
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text and "2ч" in text, f"missing provenance hid the retained value: {text!r}"
+    assert STALE_MARK in text, f"missing source age rendered as healthy: {text!r}"
 
 
 def test_a_fresh_analytics_value_is_not_marked(app, tmp_path, monkeypatch) -> None:
@@ -183,7 +285,7 @@ def test_a_value_whose_producer_died_is_marked_while_the_experiment_stays_active
     # The producer stops. Nothing changes except the clock, and the experiment
     # is never switched — which is precisely the case the old code missed.
     _set_clock(monkeypatch, 1000.0 + 3.0 * 30.0 + 1.0)
-    view._phase_widget._refresh_context_label()
+    view._phase_widget._duration_timer.timeout.emit()
 
     text = view._phase_widget._context_label.text()
     assert "ETA" in text, "the retained value vanished instead of being marked"

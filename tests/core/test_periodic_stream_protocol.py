@@ -102,6 +102,48 @@ async def test_reading_transport_is_additive_and_internal_marker_is_stripped() -
     }
 
 
+async def test_analytics_transport_carries_engine_comparable_source_age(monkeypatch) -> None:
+    publisher, socket = _prime_publisher()
+    reading = Reading(
+        timestamp=datetime(2026, 7, 10, tzinfo=UTC),
+        instrument_id="thermal_calculator",
+        channel="analytics/thermal_calculator/R_thermal",
+        value=4.2,
+        unit="K/W",
+        metadata={"producer_interval_s": 1.0},
+    )
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: reading.timestamp.timestamp() + 2.5)
+
+    await publisher._publish_reading(reading)
+
+    payload = msgpack.unpackb(socket.frames[0][1], raw=False)
+    assert payload["meta"]["source_age_s"] == 2.5
+
+
+async def test_analytics_source_age_is_measured_after_waiting_for_the_send_lock(monkeypatch) -> None:
+    publisher, socket = _prime_publisher()
+    reading = Reading(
+        timestamp=datetime(2026, 7, 10, tzinfo=UTC),
+        instrument_id="thermal_calculator",
+        channel="analytics/thermal_calculator/R_thermal",
+        value=4.2,
+        unit="K/W",
+        metadata={"producer_interval_s": 1.0},
+    )
+    now = {"value": reading.timestamp.timestamp() + 0.5}
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: now["value"])
+
+    await publisher._send_lock.acquire()
+    publish = asyncio.create_task(publisher._publish_reading(reading))
+    await asyncio.sleep(0)
+    now["value"] = reading.timestamp.timestamp() + 4.5
+    publisher._send_lock.release()
+    await publish
+
+    payload = msgpack.unpackb(socket.frames[0][1], raw=False)
+    assert payload["meta"]["source_age_s"] == 4.5
+
+
 async def test_reading_event_and_barrier_share_one_sequence() -> None:
     publisher, socket = _prime_publisher()
     queue: asyncio.Queue[Reading] = asyncio.Queue()
