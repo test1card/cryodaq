@@ -108,13 +108,27 @@ def _git_env() -> dict[str, str]:
     return {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
 
 
+def repository_root() -> Path:
+    """The one directory every relative path in this module resolves against.
+
+    `git diff --name-only` emits names relative to the REPOSITORY ROOT, while
+    `Path(name)` resolves against the current working directory. Invoked from a
+    subdirectory the two disagree, and the tool would then revert a path that
+    does not exist -- or, worse, one that does and is not the artifact Git named.
+    """
+
+    out = _run(["git", "rev-parse", "--show-toplevel"], env=_git_env())
+    out.check_returncode()
+    return Path(out.stdout.strip())
+
+
 def _git(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return _run(["git", "-C", str(Path.cwd()), "--no-replace-objects", *args], env=_git_env())
+    return _run(["git", "-C", str(repository_root()), "--no-replace-objects", *args], env=_git_env())
 
 
 def _git_bytes(args: list[str]) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        ["git", "-C", str(Path.cwd()), "--no-replace-objects", *args], capture_output=True, env=_git_env()
+        ["git", "-C", str(repository_root()), "--no-replace-objects", *args], capture_output=True, env=_git_env()
     )
 
 
@@ -135,8 +149,24 @@ def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ..
 
 
 def base_content(point: str, path: str) -> bytes | None:
-    out = _git_bytes(["show", f"{point}:{path}"])
-    return out.stdout if out.returncode == 0 else None
+    """The base blob, or None when the path genuinely does not exist there.
+
+    Any OTHER failure -- a missing object in a partial checkout, a corrupt
+    object, a permission error -- used to return None too, and None means
+    "added" further down, so the artifact was measured by DELETING it. An
+    unreadable base is not an added file; it is an unmeasurable one.
+    """
+
+    out = _git_bytes(["cat-file", "-e", f"{point}:{path}"])
+    if out.returncode != 0:
+        return None
+    blob = _git_bytes(["show", f"{point}:{path}"])
+    if blob.returncode != 0:
+        raise MeasurementError(
+            f"{path} exists at {point[:8]} but its blob could not be read: "
+            f"{blob.stderr.decode('utf-8', 'replace').strip()[:200]}"
+        )
+    return blob.stdout
 
 
 class MeasurementError(RuntimeError):
@@ -212,8 +242,9 @@ def main() -> int:
     unguarded: list[str] = []
     unmeasured: list[str] = []
     clobbered: list[str] = []
+    root = repository_root()
     for path in targets:
-        source = Path(path)
+        source = root / path
         # The FULL identity, not just the bytes. An added artifact that is a
         # symlink or carries an executable bit was being restored with
         # write_bytes, which yields a plain file with default permissions: the
@@ -226,13 +257,24 @@ def main() -> int:
         before = base_content(point, path)
         cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
         mutant: bytes | None = None
+        removed = False
         try:
             if before is None:
                 if original is None and not was_symlink:
                     unmeasured.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — absent from both sides |")
                     continue
+                # Window one applies here too. An added artifact took this
+                # branch without the reread and left `mutant` None, so the
+                # post-run check below could not fire for it: another lane's
+                # newly written file could be deleted and then recreated from
+                # bytes this tool captured before that lane wrote them.
+                if original is not None and source.read_bytes() != original:
+                    clobbered.append(path)
+                    print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to remove |")
+                    continue
                 source.unlink()  # an ADDED artifact is reverted by removing it
+                removed = True  # the mutation IS the file's absence
             else:
                 if original is not None and before == original:
                     print(f"| `{path}` | identical to the merge base — not measured |")
@@ -258,7 +300,10 @@ def main() -> int:
             # what is on disk is no longer the mutant we placed there, those are
             # someone else's bytes: leave them, and say so. An unconditional
             # restore here would erase work this tool never owned.
-            concurrent = mutant is not None and source.exists() and source.read_bytes() != mutant
+            if removed:
+                concurrent = source.exists()  # someone recreated it while the suite ran
+            else:
+                concurrent = mutant is not None and source.exists() and source.read_bytes() != mutant
             if concurrent:
                 clobbered.append(path)
                 print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
