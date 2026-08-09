@@ -13,6 +13,7 @@ from enum import StrEnum
 from cryodaq.channels.descriptors import ChannelDescriptorV1
 from cryodaq.channels.persistence import (
     PersistedChannelEnvelopeError,
+    PersistedChannelEnvelopeV1,
     decode_persisted_channel_envelope,
 )
 from cryodaq.drivers.base import Reading
@@ -42,6 +43,25 @@ class DescriptorQualifiedReading:
     @property
     def grants_control_authority(self) -> bool:
         return False
+
+
+def encode_descriptor_envelope(descriptor: ChannelDescriptorV1) -> bytes:
+    """Return the canonical envelope bytes for one descriptor.
+
+    This is the encode half of the translation whose decode half is
+    :func:`qualify_reading_descriptor`.  It lives here so that callers which
+    only need to COMPARE descriptor identity — the interlock engine binding its
+    declared sensors, for instance — can hold opaque bytes without importing the
+    channel contract itself.  Comparing bytes produced here against bytes taken
+    off the wire is the whole point: a caller that imported the envelope type
+    could also reach the descriptor's fields, and a safety component that can
+    read a descriptor's fields can be tempted to act on them.
+
+    Owns no persistence authority: this synthesises nothing and stores nothing,
+    it serialises a descriptor the caller already holds.
+    """
+
+    return PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json
 
 
 def qualify_reading_descriptor(

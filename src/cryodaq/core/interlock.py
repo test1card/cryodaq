@@ -27,8 +27,8 @@ from typing import Any
 
 import yaml
 
-from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.broker import DataBroker, PublishedReading
+from cryodaq.core.descriptor_transport import encode_descriptor_envelope
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
@@ -76,7 +76,7 @@ def resolve_interlock_channel_bindings(
                 instrument_id=instrument_id,
                 source_key=source_key,
                 channel_id=descriptor.channel_id,
-                descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json,
+                descriptor_envelope=encode_descriptor_envelope(descriptor),
             )
         )
     if len(resolved) != len(bindings):
