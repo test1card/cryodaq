@@ -62,6 +62,7 @@ _KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS = frozenset(
 )
 _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
+_FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
 
 
 def _json_bytes(payload: object) -> bytes:
@@ -382,6 +383,39 @@ def _seed_experiment(data_dir: Path, experiment_id: str) -> None:
     )
 
 
+def frozen_driver_import_command(executable: Path) -> list[str]:
+    if executable.name.lower() != "cryodaq.exe":
+        raise ValueError("smoke target must be CryoDAQ.exe")
+    return [str(executable), "--mode=verify-frozen-drivers"]
+
+
+def _expected_frozen_driver_import_payload() -> dict[str, object]:
+    from cryodaq.drivers.registry import ALLOWLISTED_DRIVER_MODULES, DRIVER_REGISTRY_COMPAT_VERSION
+
+    return {
+        "schema": 1,
+        "status": "PASS",
+        "registry_compat_version": DRIVER_REGISTRY_COMPAT_VERSION,
+        "modules": list(ALLOWLISTED_DRIVER_MODULES),
+    }
+
+
+def _parse_frozen_driver_import_payload(stdout: bytes) -> dict[str, object]:
+    text = stdout.decode("utf-8", errors="strict")
+    records = [
+        line.removeprefix(_FROZEN_DRIVER_IMPORT_PREFIX)
+        for line in text.splitlines()
+        if line.startswith(_FROZEN_DRIVER_IMPORT_PREFIX)
+    ]
+    if len(records) != 1:
+        raise ValueError(f"frozen driver import emitted {len(records)} result records instead of one")
+    payload = json.loads(records[0])
+    expected = _expected_frozen_driver_import_payload()
+    if payload != expected:
+        raise ValueError(f"frozen driver import payload does not match the source registry: {payload!r}")
+    return expected
+
+
 def frozen_report_command(executable: Path, experiment_id: str, generation_id: str) -> list[str]:
     if executable.name.lower() != "cryodaq.exe":
         raise ValueError("smoke target must be CryoDAQ.exe")
@@ -406,6 +440,42 @@ def _write_log(evidence_dir: Path, name: str, completed: subprocess.CompletedPro
         "stdout_sha256": _sha256(stdout),
         "stderr": stderr.name,
         "stderr_sha256": _sha256(stderr),
+    }
+
+
+def _run_frozen_driver_import_cell(
+    executable: Path,
+    root: Path,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    command = frozen_driver_import_command(executable)
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env.update({"CRYODAQ_ROOT": str(root), "PYTHONUTF8": "1"})
+    started = time.monotonic()
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    logs = _write_log(evidence_dir, "frozen_driver_imports", completed)
+    if completed.returncode != 0:
+        raise RuntimeError(f"frozen_driver_imports returned {completed.returncode}")
+    try:
+        validation = _parse_frozen_driver_import_payload(completed.stdout)
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"frozen_driver_imports produced invalid evidence: {exc}") from exc
+    return {
+        "name": "frozen_driver_imports",
+        "status": "PASS",
+        "duration_s": round(time.monotonic() - started, 3),
+        "argv": command,
+        "runtime": logs,
+        "validation": validation,
     }
 
 
@@ -829,6 +899,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         if executable.resolve() == source_exe.resolve():
             raise RuntimeError("UNICODE_COPY_NOT_USED")
 
+        cells.append(_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir))
         cells.append(_run_gui_startup_cell(executable, runtime_root, evidence_dir))
         cells.append(
             _run_report_cell(

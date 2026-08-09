@@ -11,7 +11,8 @@ Mode dispatch
 Under PyInstaller, ``sys.executable`` points at the bundled exe, NOT a Python
 interpreter. The launcher cannot fork "python -m cryodaq.engine" — it must
 re-invoke its own exe with a mode flag. We pop ``--mode=engine`` /
-``--mode=gui`` / ``--mode=report-render`` / ``--mode=launcher`` from
+``--mode=gui`` / ``--mode=report-render`` / ``--mode=verify-frozen-drivers`` /
+``--mode=launcher`` from
 ``sys.argv`` and dispatch to the
 matching ``main_*`` function. The flag is consumed before any downstream
 ``argparse`` runs, so it's invisible to ``cryodaq.engine.main``,
@@ -25,6 +26,8 @@ References
 """
 
 from __future__ import annotations
+
+_FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
 
 
 def _pop_mode_flag() -> str:
@@ -98,6 +101,36 @@ def main_report_render() -> None:
     raise SystemExit(main())
 
 
+def main_verify_frozen_drivers() -> None:
+    """Import every live registry target from inside a real frozen process."""
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
+    import json
+    import sys
+
+    if not getattr(sys, "frozen", False) or not hasattr(sys, "_MEIPASS"):
+        raise RuntimeError("frozen driver verification requires a PyInstaller executable")
+
+    from cryodaq.drivers.registry import (
+        ALLOWLISTED_DRIVER_MODULES,
+        DRIVER_REGISTRY_COMPAT_VERSION,
+        verify_allowlisted_driver_imports,
+    )
+
+    verified = verify_allowlisted_driver_imports()
+    if verified != ALLOWLISTED_DRIVER_MODULES:
+        raise RuntimeError("frozen driver import result does not match the live registry projection")
+    payload = {
+        "schema": 1,
+        "status": "PASS",
+        "registry_compat_version": DRIVER_REGISTRY_COMPAT_VERSION,
+        "modules": list(verified),
+    }
+    print(_FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
+
+
 def _dispatch() -> None:
     """Read ``--mode=...`` from ``sys.argv`` and call the matching ``main_*``."""
     import multiprocessing
@@ -125,6 +158,8 @@ def _dispatch() -> None:
         from cryodaq.reporting.__main__ import main
 
         raise SystemExit(main())
+    elif mode == "verify-frozen-drivers":
+        main_verify_frozen_drivers()
     else:
         from cryodaq.launcher import main
 

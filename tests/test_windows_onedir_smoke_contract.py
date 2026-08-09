@@ -51,6 +51,54 @@ def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
     assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
 
 
+def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:
+    source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
+
+    assert 'return [str(executable), "--mode=verify-frozen-drivers"]' in source
+    assert "_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir)" in source
+
+
+def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    evidence_dir = tmp_path / "evidence"
+    runtime_root.mkdir()
+    evidence_dir.mkdir()
+    executable = runtime_root / "CryoDAQ.exe"
+    executable.write_bytes(b"test placeholder")
+    expected = smoke._expected_frozen_driver_import_payload()
+    stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(expected) + "\n").encode()
+    captured: dict[str, object] = {}
+
+    def complete(command: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["command"] = command
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setenv("PYTHONHOME", "source-interpreter-control")
+    monkeypatch.setenv("PYTHONPATH", "source-tree-control")
+    monkeypatch.setattr(smoke.subprocess, "run", complete)
+
+    cell = smoke._run_frozen_driver_import_cell(executable, runtime_root, evidence_dir)
+
+    assert cell["status"] == "PASS"
+    assert cell["validation"] == expected
+    assert captured["command"] == [str(executable), "--mode=verify-frozen-drivers"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "PYTHONHOME" not in env
+    assert "PYTHONPATH" not in env
+
+    modules = expected["modules"]
+    assert isinstance(modules, list) and modules
+    incomplete = {**expected, "modules": modules[1:]}
+    incomplete_stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(incomplete) + "\n").encode()
+    with pytest.raises(ValueError, match="does not match the source registry"):
+        smoke._parse_frozen_driver_import_payload(incomplete_stdout)
+
+
 def test_windows_source_installer_is_ascii_and_reproducible() -> None:
     raw = (ROOT / "install.bat").read_bytes()
     assert raw.isascii()
