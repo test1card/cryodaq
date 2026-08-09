@@ -90,6 +90,10 @@ def base_content(point: str, path: str) -> bytes | None:
     return out.stdout.encode("utf-8") if out.returncode == 0 else None
 
 
+class MeasurementError(RuntimeError):
+    """A suite run whose result cannot be read as evidence either way."""
+
+
 def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     env = dict(os.environ, PYTHONPYCACHEPREFIX=str(cache_prefix), PYTHONDONTWRITEBYTECODE="")
     found: list[str] = []
@@ -97,7 +101,19 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
         run = _run(
             [sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"], env=env
         )
-        found += [line.split("::")[-1].strip() for line in run.stdout.splitlines() if line.startswith("FAILED")]
+        parsed = [line.split("::")[-1].strip() for line in run.stdout.splitlines() if line.startswith("FAILED")]
+        # A CRASHED suite prints no `FAILED` lines, so parsing stdout alone
+        # reads a native fault, an internal error, a usage error or an empty
+        # collection as "nothing failed" -- and in the CONTROL run that is a
+        # false green which certifies every revert that follows it. pytest
+        # exits 0 for all-passed and 1 for tests-failed; everything else (2
+        # interrupted, 3 internal, 4 usage, 5 nothing collected) means the
+        # measurement did not happen. An exit of 1 with no parsable FAILED
+        # line is the same situation wearing the expected exit code.
+        if run.returncode not in (0, 1) or (run.returncode == 1 and not parsed):
+            tail = "\n".join((run.stdout + run.stderr).splitlines()[-15:])
+            raise MeasurementError(f"pytest over {suite!r} exited {run.returncode} with no readable result:\n{tail}")
+        found += parsed
     return found
 
 
@@ -129,6 +145,9 @@ def main() -> int:
     control_cache = Path(tempfile.mkdtemp(prefix="unguarded-control-"))
     try:
         control = failures(suites, control_cache)
+    except MeasurementError as unreadable:
+        print(f"REFUSING: the control run produced no readable result, so nothing can be attributed:\n{unreadable}")
+        return 2
     finally:
         shutil.rmtree(control_cache, ignore_errors=True)
     if control:
@@ -160,7 +179,12 @@ def main() -> int:
                     print(f"| `{path}` | identical to the merge base — not measured |")
                     continue
                 source.write_bytes(before)
-            introduced = sorted(set(failures(suites, cache)) - set(control))
+            try:
+                introduced = sorted(set(failures(suites, cache)) - set(control))
+            except MeasurementError as unreadable:
+                unmeasured.append(path)
+                print(f"| `{path}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
+                continue
         finally:
             shutil.rmtree(cache, ignore_errors=True)
             if original is None:
