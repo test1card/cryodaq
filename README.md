@@ -849,9 +849,9 @@ someone who knows how the whole thing is wired.
 
 When one agent writes the code and then writes its own guard, in one sitting,
 from one mental model, the guard inherits the code's blind spots. It passes, it
-reads as coverage, and it cannot catch the defect it names. During the montana
-review this happened **five separate times**, each caught by an independent
-reviewer rather than by the guard:
+reads as coverage, and it cannot catch the defect it names. During the
+qualification-campaign review this happened **five separate times**, each
+caught by an independent reviewer rather than by the guard:
 
 - a summariser guard fed itself tidy synthetic input, so four successive
   versions of its parser shipped broken;
@@ -879,7 +879,8 @@ Two corollaries worth stating plainly:
    that really runs it. In-process and structural tests cannot see a
    transport-level break.
 2. **Documenting a trap is not preventing a trap.** Every hazard hit during the
-   montana review was already written down somewhere in this repository. The
+   qualification-campaign review was already written down somewhere in this
+   repository. The
    goal is not more prose telling an agent what to avoid; it is a governing
    layer that makes the failure unreachable.
 

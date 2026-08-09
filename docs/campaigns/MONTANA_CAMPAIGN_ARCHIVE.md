@@ -1664,8 +1664,16 @@ promotion".
      disposition and deferred-debt subsections stayed in ROADMAP.md as live
      disclosure, and the snapshot-sequencing amendment (P2-P5) also stayed
      there as live regeneration authority - the documentation gate anchors the
-     two-artifact regeneration requirement on its P3 bullet. Their verbatim
-     copies below are the historical record; ROADMAP.md carries the live text. -->
+     two-artifact regeneration requirement on its P3 bullet. Where each piece
+     lives, stated exactly: the amendment has a verbatim historical copy below
+     (inside the extracted body) AND live text in ROADMAP.md, which wins; the
+     open-cell disposition table and the deferred-debt list exist ONLY in
+     ROADMAP.md, with no archival copy, by decision - they are live disclosure
+     and an archived copy would go stale beside them. An earlier version of
+     this comment said all three had verbatim copies below; that was false for
+     two of the three, found by independent review (Kimi, PR #23), and is the
+     exact defect class this repository keeps producing - a provenance record
+     stating something false rather than stating nothing. -->
 
 <!-- Authored by the independent reviewer (gpt-5.6-sol) at the owner's request,
      2026-07-29, after the owner ratified the checkpoint threat model. It supersedes

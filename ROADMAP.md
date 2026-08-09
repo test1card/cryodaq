@@ -153,7 +153,7 @@ Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 - PR #1 is MERGED: state MERGED, merged 2026-07-31T23:37Z, merge commit
   `bea5579e913a85042c2e63c1f07bf44300ca060a` — a fast-forward, so the merge
   commit is the reviewed head itself.
-- Runs bound to that exact SHA: `CryoDAQ CI` (push) success, run 30673414655;
+- Runs bound to that exact SHA include: `CryoDAQ CI` (push) success, run 30673414655;
   `CryoDAQ protected CI evidence gate` success, run 30670510573 (a
   pull_request-event run); Docs Freshness Gate and Windows ONEDIR smoke
   success. A later scheduled nightly at the same SHA concluded failure (run
@@ -594,6 +594,14 @@ files so the same document is not rewritten twice:
 5. Agent-facing instruction docs (AGENTS.md, docs/ORCHESTRATION.md) — new-text
    conformance from now; whole-document conversion last, because their
    precision is load-bearing and meaning drift there is costliest.
+6. `docs/alarms_tuning_guide.md` and `docs/architecture.md` — both still carry
+   campaign-candidate framing on operator/architecture surfaces (their false
+   "active candidate" staleness was fixed ahead of this slice; the language
+   purge and STE pass complete here). ROADMAP.md itself is deliberately NOT a
+   purge target: its remaining campaign-name occurrences are the archived-plan
+   stub heading, section names, and generator/file identifiers — historical
+   identifiers the amendment explicitly permits (see OB-001's disposition
+   list).
 
 Honest costs, stated so this entry cannot decay into a checkbox: STE
 conversion of technical prose is slow (each slice is a real editing pass, not
@@ -611,9 +619,11 @@ archived campaign records are never rewritten.
 
 ## Post-Montana engineering-quality and research roadmap
 
-> **Scope boundary — this is the next programme, not current Montana work.**
+> **Scope boundary — this is the next programme, not campaign work.**
 > The items below start only after the Montana software, review, CI, publication,
-> and handoff gates are closed. They are not retroactive Montana acceptance
+> and handoff gates are closed — which happened with the 2026-07-31 merge (see
+> the archived-plan stub above), so this boundary is now satisfied rather than
+> pending. They are not retroactive Montana acceptance
 > criteria and must not delay the current branch merely to pursue an abstract
 > quality score. If future exploration exposes a violation of an existing
 > Montana safety invariant, that concrete defect is handled under the normal
