@@ -460,6 +460,19 @@ async def test_router_dispatches_range_stats() -> None:
     adapters.sqlite.range_stats.assert_awaited_once_with("T_cold", 60)
 
 
+async def test_router_distinguishes_adapter_failure_from_authoritative_empty() -> None:
+    adapters = _make_adapters()
+    adapters.cooldown.eta = AsyncMock(side_effect=RuntimeError("service down"))
+    router = QueryRouter(adapters)
+
+    failure = await router.fetch(QueryIntent(category=QueryCategory.ETA_COOLDOWN), "ETA?")
+    authoritative_empty = await router.fetch(QueryIntent(category=QueryCategory.UNKNOWN), "???")
+
+    assert failure != authoritative_empty
+    assert failure is None
+    assert authoritative_empty == {}
+
+
 async def test_router_never_raises_on_adapter_exception() -> None:
     """Router swallows adapter exceptions and returns {}."""
     adapters = _make_adapters()
