@@ -69,6 +69,10 @@ def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.Compl
     return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
 
+def _run_bytes(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(args, capture_output=True)
+
+
 def merge_base(base: str) -> str:
     out = _run(["git", "merge-base", base, "HEAD"])
     out.check_returncode()
@@ -86,8 +90,8 @@ def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ..
 
 
 def base_content(point: str, path: str) -> bytes | None:
-    out = _run(["git", "show", f"{point}:{path}"])
-    return out.stdout.encode("utf-8") if out.returncode == 0 else None
+    out = _run_bytes(["git", "show", f"{point}:{path}"])
+    return out.stdout if out.returncode == 0 else None
 
 
 class MeasurementError(RuntimeError):
