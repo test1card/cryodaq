@@ -153,11 +153,13 @@ Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 - PR #1 is MERGED: state MERGED, merged 2026-07-31T23:37Z, merge commit
   `bea5579e913a85042c2e63c1f07bf44300ca060a` — a fast-forward, so the merge
   commit is the reviewed head itself.
-- Runs bound to that exact SHA include: `CryoDAQ CI` (push) success, run 30673414655;
-  `CryoDAQ protected CI evidence gate` success, run 30670510573 (a
-  pull_request-event run); Docs Freshness Gate and Windows ONEDIR smoke
-  success. A later scheduled nightly at the same SHA concluded failure (run
-  30687236292); its cause is not derived here.
+- All seven runs bound to that exact SHA (GitHub API, re-measured 2026-08-10):
+  `CryoDAQ CI` (push) success, runs 30673414655 and 30670508638; `CryoDAQ CI`
+  (pull_request) success, run 30670510576; `CryoDAQ protected CI evidence
+  gate` (pull_request) success, run 30670510573; `Docs Freshness Gate`
+  (pull_request) success, run 30670510552; `CryoDAQ Windows ONEDIR Smoke`
+  (pull_request) success, run 30670510581; and `CryoDAQ Nightly` (schedule)
+  failure, run 30687236292, whose cause is not derived here.
 - The repository owner type is `User` (personal host), so native ruleset
   required-workflow binding is unavailable (measured 2026-08-10).
 - Branch protection on `master` returns "Branch not protected" (measured
@@ -621,9 +623,12 @@ archived campaign records are never rewritten.
 
 > **Scope boundary — this is the next programme, not campaign work.**
 > The items below start only after the Montana software, review, CI, publication,
-> and handoff gates are closed — which happened with the 2026-07-31 merge (see
-> the archived-plan stub above), so this boundary is now satisfied rather than
-> pending. They are not retroactive Montana acceptance
+> and handoff gates are closed. The software, review and CI gates closed with
+> the 2026-07-31 merge; the publication/handoff residual is still open — the
+> terminal outcome derived in the stub above is `MERGED_P9_OPEN`, with host
+> migration and native workflow binding tracked as OB-007 in
+> `docs/OBLIGATIONS.md`. Items below that do not depend on that residual may
+> start; nothing here claims the P9 gates are complete. They are not retroactive Montana acceptance
 > criteria and must not delay the current branch merely to pursue an abstract
 > quality score. If future exploration exposes a violation of an existing
 > Montana safety invariant, that concrete defect is handled under the normal

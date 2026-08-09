@@ -1656,8 +1656,10 @@ promotion".
 ## Owner-ratified P0-P9 plan, extracted from ROADMAP.md
 
 <!-- Extracted verbatim 2026-08-10 on branch docs/agent-layer-obligations,
-     source commit d05856ecb3e0d5002e37083f32f4b2d7acf5927f (ROADMAP.md lines 142-293
-     at that commit). Author of the plan: the independent reviewer (gpt-5.6-sol),
+     source commit d05856ecb3e0d5002e37083f32f4b2d7acf5927f (ROADMAP.md lines 142-262
+     at that commit; an earlier version of this comment said 142-293, which
+     wrongly included the lines 263-293 disposition/deferred-debt material this
+     very note says stayed in ROADMAP.md - caught by Codex review on PR #23). Author of the plan: the independent reviewer (gpt-5.6-sol),
      2026-07-29, owner-ratified. Extraction ruling: Fable, 2026-08-10 - the live-
      sounding Prerequisite phases cost a measured day of phase-system conflation
      after the campaign closed. The body below is byte-faithful; the Open-cell

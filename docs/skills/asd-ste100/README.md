@@ -1,5 +1,16 @@
 # ASD-STE100 Skill — Simplified Technical English for Agent Output
 
+> **Repository note (CryoDAQ, 2026-08-10).** The checked-in copy at
+> `docs/skills/asd-ste100/` is the reviewed, binding version for this
+> repository's documentation work (OB-012 in `docs/OBLIGATIONS.md`): its
+> `SKILL.md` carries the repository's archive/verbatim-quote exemption, which
+> the upstream does not. The installation command later in this file is the
+> upstream project's own instruction — do NOT follow it for work in this
+> repository; agents read the checked-in copy directly. Imported from upstream
+> `danyuchn/asd-ste100-skill` at revision
+> `8564f8985f15104c2184f90531bfd1bbb25f3d5b`; the only local modification is
+> the exemption bullet in `SKILL.md` Boundaries and this note.
+
 A Claude Code skill that rewrites dense, ambiguous English into [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) (STE) — the controlled-language standard the aerospace and defense industry built so aircraft maintenance instructions cannot be misread.
 
 This skill repurposes that same discipline for a different reader: an **AI agent** parsing another agent's output, a tool description, an error message, or an inter-agent instruction, with no human in the loop to resolve ambiguity.

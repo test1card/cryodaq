@@ -174,38 +174,30 @@ environment that actually produced it.
 
 ### Current acceptance boundary
 
-Historical checkpoint: commit
+The refactor merged into `master` on 2026-07-31 after independent review. The
+merge is a software checkpoint, not acceptance: it establishes no release
+readiness, physical-OFF proof, real-instrument, packaged-Windows, or
+laboratory-acceptance claim. `PROJECT_STATUS.md` defines the live boundary;
+`docs/OPEN_CELLS.md` is the live software-defect disclosure; deferred
+directions with trigger conditions are registered in `docs/OBLIGATIONS.md`.
+
+Historical checkpoint note: commit
 `503c8bf8d884654256ede4f08a9e44ab7b382242` is associated with reported
-eight-job GitHub Actions run `29662599972`. That evidence covers only that
-commit. The current working tree is large and dirty and has no immutable
-candidate SHA or covering CI result; current remote and pull-request state must
-be checked on GitHub.
+eight-job GitHub Actions run `29662599972`; that evidence covers only that
+commit.
 
-The latest review of the local SafetyManager shutdown/HOLD work is **REJECTED**:
-settlement tasks are not yet bounded and one terminal safety-child outcome can
-be consumed again. Local passing tests do not override that finding; the slice
-must be corrected, re-frozen, re-tested, and pass both mandatory reviews.
+A pre-merge review record stood in this section — a dirty-tree status, a
+**REJECTED** verdict on a then-local SafetyManager shutdown/HOLD slice, and a
+pre-merge work list. It described the pre-merge candidate, not the merged
+tree, and is superseded here; the text remains in this file's own pre-merge
+git history, and the current status of every such item is read from
+`docs/OPEN_CELLS.md`, never from this README.
 
-The remaining software work is explicit: quarantine USBTMC after ambiguous
-exchanges; seal and validate safety configuration transactionally; bind safety
-patterns to exact channel descriptors; coalesce shutdown-HOLD settlement and
-contain monitor/writer death; preserve operator-log identity through hot/cold
-rotation, REST, replay, reports, and the assistant; remove write ownership and
-mutation credentials from the observational assistant; finish shared GUI
-freshness/provenance/lifecycle truth; decide conductivity freshness behavior;
-and reconcile protocol, architecture, report metrics, and SVG maps. The
-Keithley/transport focused checks must be rerun and recorded against the eventual
-frozen candidate; no moving-worktree result closes physical gates.
-
-After those engineering gates close, one frozen commit must still pass native
-Windows and WSL partitions, lock/static/package/source-install checks, the
-sealed short soak, Windows ONEDIR, fresh eight-job hosted CI, a fresh-context
-review, and the coordinating agent's separate line-by-line review. External
-model review is additive, not a prerequisite for opening the PR. Physical
-instrument, dummy-load, host-death, independent final-element, long-duration
-soak, and laboratory operator acceptance remain separate and open until their
-prescribed evidence is recorded. The future 100+ sensor / 4K projector and
-semantic-zoom view is deferred and does not block ordinary lab readiness.
+Physical instrument, dummy-load, host-death, independent final-element,
+long-duration soak, and laboratory operator acceptance remain separate and
+open until their prescribed evidence is recorded. The future 100+ sensor / 4K
+projector and semantic-zoom view is deferred and does not block ordinary lab
+readiness.
 
 ## Interview guide for another agent
 
