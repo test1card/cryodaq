@@ -107,10 +107,17 @@ class ChannelManager:
         channels = raw.get("channels")
         if not isinstance(channels, dict):
             raise ChannelConfigError(f"channels.yaml at {self._config_path}: missing or invalid 'channels' key")
-        self._channels = channels
         declared_default = raw.get("default_quantity")
         if declared_default is not None and not isinstance(declared_default, str):
             raise ChannelConfigError(f"channels.yaml at {self._config_path}: default_quantity must be a string")
+        # EVERY CHECK BEFORE ANY MUTATION. `self._channels` used to be replaced
+        # on the line above this validation, so a RELOAD of a file with valid
+        # `channels` and a malformed `default_quantity` raised only after the
+        # live channel set had already been swapped: the manager kept serving
+        # the new channels under the old declaration, which is a configuration
+        # no file on disk describes. A reload that refuses must leave the
+        # running instrument exactly as it was.
+        self._channels = channels
         self._default_quantity = declared_default
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
 

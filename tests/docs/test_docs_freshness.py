@@ -2961,11 +2961,24 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
         assert path in indexed_paths, f"OC-030 names {path}, which is not in the frozen index"
         blob = contents.get(path)
         assert blob is not None, f"no frozen-index blob for {path}"
-        source = blob.decode("utf-8")
+        # PARSED, NOT MATCHED. A substring test cannot tell a CALL from a
+        # definition: `conductivity_panel.py` defines a local
+        # `_get_temperature_channels` helper, which contains the list-helper
+        # name, so it was classified `list` on the strength of its own
+        # function name rather than on any ChannelManager call. It happens to
+        # call the real helper too, so the label was right for the wrong
+        # reason -- and would have stayed `list` if that call were removed.
+        # Only an ATTRIBUTE call on some object counts, which a local
+        # definition and a bare local call are not.
+        called = {
+            node.func.attr
+            for node in ast.walk(ast.parse(blob.decode("utf-8")))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
         leaf = path.rsplit("/", 1)[-1]
-        if any(helper in source for helper in list_helpers):
+        if called & set(list_helpers):
             measured[leaf] = "list"
-        elif "is_temperature_channel" in source:
+        elif "is_temperature_channel" in called:
             measured[leaf] = "predicate"
         else:
             # THE THIRD STATE, which an earlier version of this node folded into

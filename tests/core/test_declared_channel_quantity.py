@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.core.channel_manager import ChannelConfigError, ChannelManager
 
 CYRILLIC_TE = "Т"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -248,3 +248,35 @@ def test_the_shipped_selection_is_byte_for_byte_what_spelling_selected(tmp_path:
     assert control.get_visible_temperature_channels() == ["RENAMED"], (
         "the shipped-only baseline cannot detect a return to spelling; this mixed declaration must"
     )
+
+
+def test_a_refused_reload_leaves_the_live_channel_set_untouched(tmp_path: Path) -> None:
+    """A reload that raises must not half-apply.
+
+    `load()` assigned `self._channels` before validating `default_quantity`, so
+    reloading a file whose channels are fine and whose declaration is malformed
+    swapped the live channel set and THEN raised. The manager was left serving
+    the new channels under the old declaration — a configuration no file on disk
+    describes, produced while an operator was running the instrument.
+    """
+
+    manager = _manager(
+        tmp_path,
+        {"default_quantity": "temperature", "channels": {"Т1": {"name": "one", "visible": True}}},
+    )
+    before_channels = list(manager.get_all())
+    before_quantity = manager.get_quantity("Т1")
+
+    target = tmp_path / "channels.yaml"
+    target.write_text(
+        yaml.safe_dump(
+            {"default_quantity": ["not", "a", "string"], "channels": {"Т9": {"name": "nine", "visible": True}}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ChannelConfigError):
+        manager.load()
+
+    assert list(manager.get_all()) == before_channels, "a refused reload replaced the live channel set"
+    assert manager.get_quantity("Т1") == before_quantity, "a refused reload changed what the live channels declare"
