@@ -9,6 +9,7 @@ MilestoneList) preserved in phase_content/ for B.10 Analytics overlay.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -29,6 +30,12 @@ from cryodaq.gui.dashboard.phase_content.eta_display import (
 from cryodaq.gui.dashboard.phase_stepper import PhaseStepper
 
 logger = logging.getLogger(__name__)
+
+# How long a cached analytics value may go unrefreshed before it is rendered as
+# stale. Analytics publish on their own cadence, far slower than a reading, so
+# this is deliberately generous: it is the point past which a number is more
+# likely to be a dead producer than a slow one.
+_ANALYTICS_STALE_AFTER_S = 180.0
 
 _MAX_HEIGHT_PX = 55
 _BUTTON_HEIGHT_PX = 28
@@ -61,6 +68,11 @@ class PhaseAwareWidget(QWidget):
         self._cached_r_thermal: float | None = None
         self._cached_pressure: float | None = None
         self._last_context_text: str = ""
+        # WHEN each cached analytics value last arrived. Without this the
+        # values were revoked only by an experiment CHANGE, so a producer that
+        # died inside a live experiment left its last number rendering as
+        # current for as long as the window stayed open -- OC-004 exactly.
+        self._cached_at: dict[str, float] = {}
 
         self._build_ui()
         self._apply_inactive_state()
@@ -68,6 +80,7 @@ class PhaseAwareWidget(QWidget):
         self._duration_timer = QTimer(self)
         self._duration_timer.setInterval(_DURATION_UPDATE_MS)
         self._duration_timer.timeout.connect(self._update_duration_display)
+        self._duration_timer.timeout.connect(self._refresh_context_label)
         self._duration_timer.start()
 
     # ------------------------------------------------------------------
@@ -223,15 +236,27 @@ class PhaseAwareWidget(QWidget):
 
             if self._current_phase == "cooldown":
                 if self._cached_eta_s is not None:
-                    parts.append(self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s)))
+                    parts.append(
+                        self._styled_metric("ETA", self._mark_if_stale("eta", _format_duration_ru(self._cached_eta_s)))
+                    )
                 if self._cached_r_thermal is not None:
-                    parts.append(self._styled_metric("R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"))
+                    parts.append(
+                        self._styled_metric(
+                            "R", self._mark_if_stale("r_thermal", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442")
+                        )
+                    )
             elif self._current_phase == "vacuum":
                 if self._cached_pressure is not None:
-                    parts.append(self._styled_metric("P", f"{self._cached_pressure:.2e} mbar"))
+                    parts.append(
+                        self._styled_metric("P", self._mark_if_stale("pressure", f"{self._cached_pressure:.2e} mbar"))
+                    )
             elif self._current_phase == "measurement":
                 if self._cached_r_thermal is not None:
-                    parts.append(self._styled_metric("R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"))
+                    parts.append(
+                        self._styled_metric(
+                            "R", self._mark_if_stale("r_thermal", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442")
+                        )
+                    )
             elif self._current_phase == "teardown":
                 if self._completed_phases_count > 0:
                     parts.append(
@@ -370,17 +395,34 @@ class PhaseAwareWidget(QWidget):
             return
         if channel.endswith("/cooldown_eta"):
             self._cached_eta_s = value * 3600 if value > 0 else None
+            self._cached_at["eta"] = time.monotonic()
             self._refresh_context_label()
         elif channel.endswith("/R_thermal"):
             self._cached_r_thermal = value
+            self._cached_at["r_thermal"] = time.monotonic()
             self._refresh_context_label()
         elif channel.endswith("/pressure"):
             self._cached_pressure = value
+            self._cached_at["pressure"] = time.monotonic()
             self._refresh_context_label()
 
     # ------------------------------------------------------------------
     # State application
     # ------------------------------------------------------------------
+
+    def _mark_if_stale(self, key: str, rendered: str) -> str:
+        """Mark a cached analytics value whose producer has gone quiet.
+
+        MARKED, NOT HIDDEN. A metric that silently disappears is no better than
+        one that silently lies -- a vanished readout is what caused revert
+        `0bea0449`, and this project's rule is that an unavailable reading
+        renders visibly unavailable.
+        """
+
+        stamped = self._cached_at.get(key)
+        if stamped is None or (time.monotonic() - stamped) <= _ANALYTICS_STALE_AFTER_S:
+            return rendered
+        return f"{rendered} \u00b7 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u043e"
 
     def _apply_inactive_state(self) -> None:
         self._has_active_experiment = False
