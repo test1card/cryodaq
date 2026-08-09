@@ -257,3 +257,33 @@ def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_pat
     assert runs == 2
     assert source.read_bytes() == b"VALUE = 'candidate'\n"
     assert "suite inputs drifted before mutation attribution" in capsys.readouterr().out
+
+
+def test_main_refuses_stable_uncommitted_suite_inputs(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_bytes(b"VALUE = 'base'\n")
+    _git(repository, "add", "src/production.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_bytes(b"VALUE = 'candidate'\n")
+    _git(repository, "commit", "-qam", "candidate")
+    suite_input = repository / "tests" / "test_guard.py"
+    suite_input.parent.mkdir()
+    suite_input.write_bytes(b"def test_guard(): pass\n")
+
+    runs = 0
+
+    def covered_only_by_untracked_test(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        return [] if source.read_bytes() == b"VALUE = 'candidate'\n" else ["test_guard"]
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", covered_only_by_untracked_test)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 2
+    assert runs == 0
+    assert "uncommitted candidate inputs" in capsys.readouterr().out

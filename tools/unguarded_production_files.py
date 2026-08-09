@@ -452,6 +452,12 @@ def main() -> int:
         print(dirty)
         return 2
 
+    uncommitted = _git(["status", "--porcelain=v1", "--untracked-files=all"]).stdout.strip()
+    if uncommitted:
+        print("REFUSING: uncommitted candidate inputs cannot be attributed to HEAD:")
+        print(uncommitted)
+        return 2
+
     root = repository_root()
     try:
         suite_inputs = capture_suite_inputs(root)
