@@ -116,7 +116,7 @@ def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path
     )
 
     assert subject.main() == 1  # the correct rename revert is intentionally unguarded
-    assert observed == [(False, True), (True, False)]
+    assert observed == [(False, True), (True, False), (True, False)]
     assert not old.exists()
     assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
 
@@ -174,7 +174,7 @@ def test_main_never_skips_a_mode_only_production_change_as_identical(tmp_path: P
     assert subject.main() == 1
     output = capsys.readouterr().out
     assert "identical to the merge base" not in output
-    assert runs == 2 or "NOT MEASURED" in output
+    assert runs == 3 or "NOT MEASURED" in output
 
 
 @pytest.mark.parametrize("drift", ["suite_input", "head"])
@@ -254,7 +254,7 @@ def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_pat
     )
 
     assert subject.main() == 2
-    assert runs == 2
+    assert runs == 3
     assert source.read_bytes() == b"VALUE = 'candidate'\n"
     assert "suite inputs drifted before mutation attribution" in capsys.readouterr().out
 
@@ -315,3 +315,150 @@ def test_main_refuses_to_certify_multiple_independent_hunks_as_one(tmp_path: Pat
     assert subject.main() == 1
     assert runs == 1
     assert "multiple independent diff hunks" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("runtime_path", "excluded_root"),
+    (("tsp/watchdog.lua", "tsp/"), ("plugins/runtime.py", "plugins/")),
+)
+def test_default_roster_selects_every_runtime_root_and_fails_when_one_is_removed(
+    tmp_path: Path, monkeypatch, runtime_path: str, excluded_root: str
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    source = repository / runtime_path
+    source.parent.mkdir()
+    source.write_text("VALUE = 'base'\n", encoding="utf-8")
+    _git(repository, "add", runtime_path)
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    _git(repository, "commit", "-qam", "candidate")
+    monkeypatch.chdir(repository)
+
+    def assert_selected(includes: tuple[str, ...]) -> None:
+        labels = {artifact.label for artifact in subject.changed_files(base, includes, subject._DEFAULT_SUFFIXES)}
+        assert runtime_path in labels
+
+    assert_selected(subject._DEFAULT_INCLUDES)
+    without_root = tuple(root for root in subject._DEFAULT_INCLUDES if root != excluded_root)
+    with pytest.raises(AssertionError):
+        assert_selected(without_root)
+
+
+@pytest.mark.parametrize("runtime_path", ("tsp/watchdog.lua", "plugins/runtime.py"))
+def test_main_filters_are_additive_and_reconfirm_mutant_red_then_candidate_green(
+    tmp_path: Path, monkeypatch, capsys, runtime_path: str
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    source = repository / runtime_path
+    source.parent.mkdir()
+    source.write_text("VALUE = 'base'\n", encoding="utf-8")
+    _git(repository, "add", runtime_path)
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    _git(repository, "commit", "-qam", "candidate")
+    observed: list[str] = []
+
+    def guard(_suites: list[str], _cache: Path) -> list[str]:
+        value = source.read_text(encoding="utf-8")
+        observed.append(value)
+        return [] if "candidate" in value else ["test_runtime_guard"]
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", guard)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "unguarded_production_files",
+            "--base",
+            base,
+            "--suite",
+            "tests",
+            "--include",
+            "src/",
+            "--suffix",
+            ".py",
+        ],
+    )
+
+    assert subject.main() == 0
+    assert observed == ["VALUE = 'candidate'\n", "VALUE = 'base'\n", "VALUE = 'base'\n", "VALUE = 'candidate'\n"]
+    assert runtime_path in capsys.readouterr().out
+
+
+def test_main_does_not_certify_a_failure_that_remains_red_after_restore(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 'base'\n", encoding="utf-8")
+    _git(repository, "add", "src/production.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    _git(repository, "commit", "-qam", "candidate")
+    results = iter(([], ["test_timing_sensitive"], ["test_timing_sensitive"], ["test_timing_sensitive"]))
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", lambda _suites, _cache: next(results))
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 1
+    assert source.read_text(encoding="utf-8") == "VALUE = 'candidate'\n"
+    assert "restored candidate was not green" in capsys.readouterr().out
+
+
+def test_failures_times_out_a_hanging_pytest_process(tmp_path: Path, monkeypatch) -> None:
+    hanging = tmp_path / "test_hangs.py"
+    hanging.write_text("import time\n\ndef test_hangs():\n    time.sleep(60)\n", encoding="utf-8")
+    monkeypatch.setattr(subject, "_PYTEST_TIMEOUT_SECONDS", 0.2)
+
+    with pytest.raises(subject.MeasurementError, match="exceeded 0.2 seconds"):
+        subject.failures([str(hanging)], tmp_path / "cache")
+
+
+def test_next_main_invocation_recovers_an_interrupted_mutation(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 'base'\n", encoding="utf-8")
+    _git(repository, "add", "src/production.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    _git(repository, "commit", "-qam", "candidate")
+    monkeypatch.chdir(repository)
+    original = subject.path_identity(source)
+    mutant = subject.git_entry(base, "src/production.py")
+    subject.arm_recovery(repository, (("src/production.py", original, mutant),))
+    assert mutant is not None
+    subject.materialize_git_entry(source, mutant)
+
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", "HEAD"])
+
+    assert subject.main() == 0
+    assert source.read_text(encoding="utf-8") == "VALUE = 'candidate'\n"
+    assert not (repository / subject._RECOVERY_NAME).exists()
+    assert "recovered the candidate from an interrupted mutation" in capsys.readouterr().out
+
+
+def test_recovery_never_overwrites_bytes_written_after_the_mutant(tmp_path: Path) -> None:
+    repository = tmp_path / "candidate"
+    repository.mkdir()
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    original = subject.path_identity(source)
+    mutant = subject.GitEntry("100644", "blob", "0" * 40, b"VALUE = 'base'\n")
+    subject.arm_recovery(repository, (("src/production.py", original, mutant),))
+    source.write_text("VALUE = 'another writer'\n", encoding="utf-8")
+
+    with pytest.raises(subject.MeasurementError, match="neither the recorded candidate nor mutant"):
+        subject.recover_pending(repository)
+
+    assert source.read_text(encoding="utf-8") == "VALUE = 'another writer'\n"
+    assert (repository / subject._RECOVERY_NAME).exists()

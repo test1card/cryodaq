@@ -13,7 +13,7 @@ than the production path: once the guard measured the writer only, and once
 five migrated GUI selectors could each be reverted with every guard still
 passing. Both were found in review, after the work was called done.
 
-TEN WAYS THIS TOOL COULD HAVE LIED, each closed here after review found it --
+FOURTEEN WAYS THIS TOOL COULD HAVE LIED, each closed here after review found it --
 and every one of them was found by review rather than by the author, which is
 the same asymmetry the tool exists to exploit:
 
@@ -60,11 +60,23 @@ the same asymmetry the tool exists to exploit:
   `GIT_WORK_TREE`, `GIT_INDEX_FILE`, grafts and replacement refs, so discovery
   could describe a FOREIGN repository while the writes still landed here.
   Queries are bound to this checkout with that environment stripped.
+* **A custom filter erased runtime artifacts.** `--include src/` replaced rather
+  than extended the default roster, silently dropping `tsp/` and `plugins/`;
+  `--suffix .py` could similarly drop the watchdog's `.lua`. Both are additive.
+* **A hanging mutant stranded the worktree.** Every pytest child now has a
+  120-second timeout, and restore intent is persisted before the rewrite so the
+  next invocation can recover after its parent is killed.
+* **A killed restore could truncate the candidate.** Candidate bytes are
+  restored through an atomic same-volume replacement.
+* **One flaky red counted as coverage.** A mutant failure must repeat exactly,
+  then the same node must disappear on the restored candidate in this invocation.
 
 USAGE
 
     python -m tools.unguarded_production_files --base origin/master \\
         --suite tests/gui --include src/ --include config/
+
+`--include` and `--suffix` add to the runtime defaults; they never remove them.
 
 Each artifact is restored from the ORIGINAL bytes read before mutation, and the
 restore is verified byte-for-byte. It refuses to run against a dirty tree for
@@ -75,6 +87,8 @@ measurement it never took.
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import os
 import shutil
 import stat
@@ -82,7 +96,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Production artifacts are not only Python, and not only this repository's own
 # process. The severity floor counts tracked runtime configuration -- interlock
@@ -108,6 +122,9 @@ from pathlib import Path
 # this roster tracks RUNTIME REACH, and a new runtime-loaded location belongs
 # here the day it is created.
 _DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml", ".lua")
+_DEFAULT_INCLUDES = ("src/", "config/", "tsp/", "plugins/")
+_PYTEST_TIMEOUT_SECONDS = 120
+_RECOVERY_NAME = ".audit-unguarded-production-recovery.json"
 
 
 @dataclass(frozen=True)
@@ -198,8 +215,35 @@ def restore_path(path: Path, identity: PathIdentity) -> None:
             lchmod(path, identity.mode)
 
 
-def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+def restore_path_atomically(root: Path, path: Path, identity: PathIdentity) -> None:
+    """Restore through a same-volume replacement so a killed writer cannot truncate the target."""
+
+    if identity.kind == "absent":
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-restore-", dir=root)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        restore_path(temporary, identity)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _run(
+    args: list[str], env: dict[str, str] | None = None, *, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=timeout,
+    )
 
 
 def _git_env() -> dict[str, str]:
@@ -333,7 +377,7 @@ def capture_suite_inputs(root: Path) -> SuiteInputs:
 
 
 def assert_suite_inputs_unchanged(expected: SuiteInputs, root: Path, *, excluded: tuple[str, ...] = ()) -> None:
-    omitted = set(excluded)
+    omitted = {*excluded, _RECOVERY_NAME, f"{_RECOVERY_NAME}.tmp"}
     first = _suite_inputs_once(root, omitted)
     second = _suite_inputs_once(root, omitted)
     if first != second:
@@ -411,13 +455,132 @@ def materialize_git_entry(path: Path, entry: GitEntry) -> None:
         raise MeasurementError(f"{path} Git mode {entry.mode} cannot be represented on this host")
 
 
+def _identity_json(identity: PathIdentity) -> dict[str, object]:
+    payload: object = identity.payload
+    if isinstance(payload, bytes):
+        payload = {"bytes": base64.b64encode(payload).decode("ascii")}
+    return {"kind": identity.kind, "payload": payload, "mode": identity.mode}
+
+
+def _identity_from_json(payload: object) -> PathIdentity:
+    if not isinstance(payload, dict) or payload.get("kind") not in {"absent", "file", "symlink"}:
+        raise ValueError("invalid original path identity")
+    value = payload.get("payload")
+    if isinstance(value, dict) and set(value) == {"bytes"}:
+        value = base64.b64decode(str(value["bytes"]), validate=True)
+    mode = payload.get("mode")
+    if mode is not None and not isinstance(mode, int):
+        raise ValueError("invalid original path mode")
+    return PathIdentity(str(payload["kind"]), value, mode)
+
+
+def _entry_json(entry: GitEntry | None) -> dict[str, str] | None:
+    if entry is None:
+        return None
+    return {
+        "mode": entry.mode,
+        "object_type": entry.object_type,
+        "object_id": entry.object_id,
+        "content": base64.b64encode(entry.content).decode("ascii"),
+    }
+
+
+def _entry_from_json(payload: object) -> GitEntry | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"mode", "object_type", "object_id", "content"}:
+        raise ValueError("invalid mutant Git identity")
+    return GitEntry(
+        str(payload["mode"]),
+        str(payload["object_type"]),
+        str(payload["object_id"]),
+        base64.b64decode(str(payload["content"]), validate=True),
+    )
+
+
+def _recovery_path(root: Path) -> Path:
+    return root / _RECOVERY_NAME
+
+
+def arm_recovery(root: Path, records: tuple[tuple[str, PathIdentity, GitEntry | None], ...]) -> None:
+    """Persist restore intent before changing any candidate path."""
+
+    journal = _recovery_path(root)
+    if journal.exists():
+        raise MeasurementError(f"pending recovery journal already exists at {journal}")
+    payload = {
+        "version": 1,
+        "paths": [
+            {"path": path, "original": _identity_json(original), "mutant": _entry_json(mutant)}
+            for path, original, mutant in records
+        ],
+    }
+    temporary = journal.with_suffix(journal.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(payload, stream, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, journal)
+
+
+def clear_recovery(root: Path) -> None:
+    _recovery_path(root).unlink(missing_ok=True)
+
+
+def recover_pending(root: Path) -> bool:
+    """Restore an interrupted mutation, but never overwrite unknown bytes."""
+
+    journal = _recovery_path(root)
+    if not journal.exists():
+        return False
+    try:
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("paths"), list):
+            raise ValueError("invalid recovery journal schema")
+        records: list[tuple[Path, PathIdentity, GitEntry | None]] = []
+        for record in payload["paths"]:
+            if not isinstance(record, dict) or set(record) != {"path", "original", "mutant"}:
+                raise ValueError("invalid recovery path record")
+            relative = str(record["path"])
+            parsed = PurePosixPath(relative)
+            if parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != relative:
+                raise ValueError(f"unsafe recovery path {relative!r}")
+            path = root.joinpath(*parsed.parts)
+            if not path.parent.resolve().is_relative_to(root.resolve()):
+                raise ValueError(f"recovery parent escapes the worktree: {relative!r}")
+            records.append((path, _identity_from_json(record["original"]), _entry_from_json(record["mutant"])))
+    except (OSError, TypeError, ValueError) as exc:
+        raise MeasurementError(f"pending recovery journal is unreadable: {exc}") from exc
+
+    states: list[tuple[Path, PathIdentity, bool]] = []
+    for path, original, mutant in records:
+        current = path_identity(path)
+        is_original = current == original
+        is_mutant = path_matches_git_entry(path, mutant)
+        if not (is_original or is_mutant):
+            raise MeasurementError(f"{path} matches neither the recorded candidate nor mutant; left untouched")
+        states.append((path, original, is_original))
+    for path, original, is_original in states:
+        if not is_original:
+            restore_path_atomically(root, path, original)
+        if path_identity(path) != original:
+            raise MeasurementError(f"{path} could not be restored from the recovery journal")
+    journal.unlink()
+    return True
+
+
 def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     env = dict(os.environ, PYTHONPYCACHEPREFIX=str(cache_prefix), PYTHONDONTWRITEBYTECODE="")
     found: list[str] = []
     for suite in suites:
-        run = _run(
-            [sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"], env=env
-        )
+        try:
+            run = _run(
+                [sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"],
+                env=env,
+                timeout=_PYTEST_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise MeasurementError(f"pytest over {suite!r} exceeded {_PYTEST_TIMEOUT_SECONDS} seconds") from exc
         parsed = [line.split("::")[-1].strip() for line in run.stdout.splitlines() if line.startswith("FAILED")]
         # A CRASHED suite prints no `FAILED` lines, so parsing stdout alone
         # reads a native fault, an internal error, a usage error or an empty
@@ -434,6 +597,22 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     return found
 
 
+def fresh_failures(suites: list[str], prefix: str) -> list[str]:
+    cache = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        return failures(suites, cache)
+    finally:
+        shutil.rmtree(cache, ignore_errors=True)
+
+
+def repeated_mutant_failures(suites: list[str]) -> list[str]:
+    first = sorted(set(fresh_failures(suites, "unguarded-mutant-")))
+    second = sorted(set(fresh_failures(suites, "unguarded-mutant-repeat-")))
+    if first != second:
+        raise MeasurementError("mutant failures did not repeat exactly on the second run")
+    return first
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/master")
@@ -442,8 +621,17 @@ def main() -> int:
     parser.add_argument("--suffix", action="append", default=[])
     options = parser.parse_args()
     suites = options.suite or ["tests"]
-    includes = tuple(options.include or ["src/", "config/", "tsp/", "plugins/"])
-    suffixes = tuple(options.suffix or _DEFAULT_SUFFIXES)
+    includes = tuple(dict.fromkeys((*_DEFAULT_INCLUDES, *options.include)))
+    suffixes = tuple(dict.fromkeys((*_DEFAULT_SUFFIXES, *options.suffix)))
+
+    root = repository_root()
+    try:
+        recovered = recover_pending(root)
+    except MeasurementError as unreadable:
+        print(f"REFUSING: an interrupted mutation could not be recovered safely: {unreadable}")
+        return 2
+    if recovered:
+        print("recovered the candidate from an interrupted mutation before measuring")
 
     point = merge_base(options.base)
     targets = changed_files(point, includes, suffixes)
@@ -464,7 +652,6 @@ def main() -> int:
         print(uncommitted)
         return 2
 
-    root = repository_root()
     try:
         suite_inputs = capture_suite_inputs(root)
     except MeasurementError as unreadable:
@@ -473,14 +660,11 @@ def main() -> int:
 
     # THE CONTROL. Without it, a suite that already fails hands the same failure
     # to every reverted artifact and every one is reported guarded.
-    control_cache = Path(tempfile.mkdtemp(prefix="unguarded-control-"))
     try:
-        control = failures(suites, control_cache)
+        control = fresh_failures(suites, "unguarded-control-")
     except MeasurementError as unreadable:
         print(f"REFUSING: the control run produced no readable result, so nothing can be attributed:\n{unreadable}")
         return 2
-    finally:
-        shutil.rmtree(control_cache, ignore_errors=True)
     if control:
         print(f"REFUSING: the control run is not green ({len(control)} failing), so no revert can be attributed:")
         for name in sorted(set(control))[:10]:
@@ -521,8 +705,8 @@ def main() -> int:
             new_original = path_identity(new)
             before = git_entry(point, target.base_path)
             candidate = git_entry("HEAD", target.candidate_path)
-            cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
             concurrent = False
+            armed = False
             old_mutant: PathIdentity | None = None
             new_mutant: PathIdentity | None = None
             drift_error: SuiteInputDrift | None = None
@@ -540,13 +724,21 @@ def main() -> int:
                     clobbered.append(target.label)
                     print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed before mutation |")
                     continue
+                arm_recovery(
+                    root,
+                    (
+                        (str(target.base_path), old_original, before),
+                        (str(target.candidate_path), new_original, None),
+                    ),
+                )
+                armed = True
                 old.parent.mkdir(parents=True, exist_ok=True)
                 materialize_git_entry(old, before)
                 old_mutant = path_identity(old)
                 new.unlink()
                 new_mutant = path_identity(new)
                 try:
-                    introduced = sorted(set(failures(suites, cache)) - set(control))
+                    introduced = sorted(set(repeated_mutant_failures(suites)) - set(control))
                     assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
                 except SuiteInputDrift as drift:
                     drift_error = drift
@@ -556,23 +748,37 @@ def main() -> int:
                     print(f"| `{target.label}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
                     continue
             finally:
-                shutil.rmtree(cache, ignore_errors=True)
                 old_unchanged = old_mutant is not None and path_identity(old) == old_mutant
                 new_unchanged = new_mutant is not None and path_identity(new) == new_mutant
                 concurrent = old_mutant is not None and not (old_unchanged and new_unchanged)
                 if old_unchanged:
-                    restore_path(old, old_original)
+                    restore_path_atomically(root, old, old_original)
                 if new_unchanged:
-                    restore_path(new, new_original)
+                    restore_path_atomically(root, new, new_original)
                 if concurrent:
                     clobbered.append(target.label)
                     print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed during the run |")
+                if armed and (
+                    concurrent or (path_identity(old) == old_original and path_identity(new) == new_original)
+                ):
+                    clear_recovery(root)
             if drift_error is not None:
                 print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
                 return 2
             if concurrent:
                 continue
             if introduced:
+                try:
+                    restored = fresh_failures(suites, "unguarded-restored-")
+                    assert_suite_inputs_unchanged(suite_inputs, root)
+                except MeasurementError as unreadable:
+                    unmeasured.append(target.label)
+                    print(f"| `{target.label}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
+                    continue
+                if restored:
+                    unmeasured.append(target.label)
+                    print(f"| `{target.label}` | **NOT MEASURED** — restored candidate was not green |")
+                    continue
                 print(f"| `{target.label}` | **{len(introduced)} new** — {', '.join(introduced[:3])} |")
             else:
                 print(f"| `{target.label}` | **0 new — UNGUARDED** |")
@@ -582,7 +788,7 @@ def main() -> int:
         original = path_identity(source)
         before = git_entry(point, target.base_path)
         candidate = git_entry("HEAD", target.candidate_path)
-        cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
+        armed = False
         mutant: PathIdentity | None = None
         drift_error: SuiteInputDrift | None = None
         try:
@@ -600,6 +806,8 @@ def main() -> int:
                     clobbered.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to remove |")
                     continue
+                arm_recovery(root, ((path, original, None),))
+                armed = True
                 source.unlink()  # an ADDED artifact is reverted by removing it
                 mutant = path_identity(source)
             else:
@@ -617,10 +825,12 @@ def main() -> int:
                     clobbered.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to overwrite |")
                     continue
+                arm_recovery(root, ((path, original, before),))
+                armed = True
                 materialize_git_entry(source, before)
                 mutant = path_identity(source)
             try:
-                introduced = sorted(set(failures(suites, cache)) - set(control))
+                introduced = sorted(set(repeated_mutant_failures(suites)) - set(control))
                 assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
             except SuiteInputDrift as drift:
                 drift_error = drift
@@ -630,7 +840,6 @@ def main() -> int:
                 print(f"| `{path}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
                 continue
         finally:
-            shutil.rmtree(cache, ignore_errors=True)
             # WINDOW TWO. Another worker may have written while pytest ran. If
             # what is on disk is no longer the mutant we placed there, those are
             # someone else's bytes: leave them, and say so. An unconditional
@@ -640,14 +849,27 @@ def main() -> int:
                 clobbered.append(path)
                 print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
             else:
-                restore_path(source, original)
+                restore_path_atomically(root, source, original)
                 assert path_identity(source) == original, f"{path} was NOT restored with its complete identity"
+            if armed and (concurrent or path_identity(source) == original):
+                clear_recovery(root)
         if drift_error is not None:
             print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
             return 2
         if concurrent:
             continue
         if introduced:
+            try:
+                restored = fresh_failures(suites, "unguarded-restored-")
+                assert_suite_inputs_unchanged(suite_inputs, root)
+            except MeasurementError as unreadable:
+                unmeasured.append(path)
+                print(f"| `{path}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
+                continue
+            if restored:
+                unmeasured.append(path)
+                print(f"| `{path}` | **NOT MEASURED** — restored candidate was not green |")
+                continue
             print(f"| `{path}` | **{len(introduced)} new** — {', '.join(introduced[:3])} |")
         else:
             print(f"| `{path}` | **0 new — UNGUARDED** |")
