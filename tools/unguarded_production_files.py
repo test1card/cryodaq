@@ -81,6 +81,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 # Production artifacts are not only Python: the severity floor counts tracked
@@ -88,6 +89,57 @@ from pathlib import Path
 # actions -- as production, because a wrong value there misfires an interlock
 # exactly as wrong code does.
 _DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml")
+
+
+@dataclass(frozen=True)
+class ChangedArtifact:
+    """One production change, including both names of a rename."""
+
+    base_path: str | None
+    candidate_path: str | None
+
+    @property
+    def label(self) -> str:
+        if self.base_path != self.candidate_path:
+            return f"{self.base_path} -> {self.candidate_path}"
+        return str(self.candidate_path or self.base_path)
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(path for path in (self.base_path, self.candidate_path) if path is not None))
+
+
+@dataclass(frozen=True)
+class PathIdentity:
+    """Filesystem identity sufficient to preserve another writer's path."""
+
+    kind: str
+    payload: bytes | str | None = None
+    mode: int | None = None
+
+
+def path_identity(path: Path) -> PathIdentity:
+    if path.is_symlink():
+        return PathIdentity("symlink", os.readlink(path), stat.S_IMODE(path.lstat().st_mode))
+    if not path.exists():
+        return PathIdentity("absent")
+    if not path.is_file():
+        raise MeasurementError(f"{path} is not a regular file or symlink")
+    return PathIdentity("file", path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+
+
+def restore_path(path: Path, identity: PathIdentity) -> None:
+    path.unlink(missing_ok=True)
+    if identity.kind == "absent":
+        return
+    if identity.kind == "symlink":
+        os.symlink(str(identity.payload), path)
+    elif identity.kind == "file":
+        path.write_bytes(bytes(identity.payload))
+    else:  # pragma: no cover - construction is private and exhaustive
+        raise AssertionError(f"unknown path identity {identity.kind!r}")
+    if identity.mode is not None:
+        os.chmod(path, identity.mode)
 
 
 def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -138,14 +190,31 @@ def merge_base(base: str) -> str:
     return out.stdout.strip()
 
 
-def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ...]) -> list[str]:
-    out = _git(["diff", "--name-only", point, "HEAD"])
+def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ...]) -> list[ChangedArtifact]:
+    out = _git(["diff", "--name-status", "-z", "--find-renames", point, "HEAD"])
     out.check_returncode()
-    return sorted(
-        line.strip()
-        for line in out.stdout.splitlines()
-        if line.strip().endswith(suffixes) and any(line.strip().startswith(prefix) for prefix in includes)
-    )
+    fields = out.stdout.split("\0")
+    if fields and not fields[-1]:
+        fields.pop()
+    artifacts: list[ChangedArtifact] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith("R"):
+            old, new = fields[index : index + 2]
+            index += 2
+            artifact = ChangedArtifact(old, new)
+        else:
+            path = fields[index]
+            index += 1
+            kind = status[:1]
+            artifact = ChangedArtifact(None if kind == "A" else path, None if kind == "D" else path)
+        if any(
+            path.endswith(suffixes) and any(path.startswith(prefix) for prefix in includes) for path in artifact.paths
+        ):
+            artifacts.append(artifact)
+    return sorted(artifacts, key=lambda artifact: artifact.label)
 
 
 def base_content(point: str, path: str) -> bytes | None:
@@ -213,7 +282,8 @@ def main() -> int:
         print(f"no production artifacts changed against {point[:8]}; nothing to measure")
         return 0
 
-    dirty = _git(["status", "--porcelain", "--", *targets]).stdout.strip()
+    target_paths = tuple(dict.fromkeys(path for target in targets for path in target.paths))
+    dirty = _git(["status", "--porcelain", "--", *target_paths]).stdout.strip()
     if dirty:
         print("REFUSING: these artifacts have uncommitted changes, so a revert could not be undone safely:")
         print(dirty)
@@ -243,7 +313,57 @@ def main() -> int:
     unmeasured: list[str] = []
     clobbered: list[str] = []
     root = repository_root()
-    for path in targets:
+    for target in targets:
+        path = str(target.candidate_path or target.base_path)
+        if target.base_path != target.candidate_path:
+            old = root / str(target.base_path)
+            new = root / str(target.candidate_path)
+            old_original = path_identity(old)
+            new_original = path_identity(new)
+            before = base_content(point, str(target.base_path))
+            cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
+            concurrent = False
+            old_mutant: PathIdentity | None = None
+            new_mutant: PathIdentity | None = None
+            try:
+                if before is None or old_original.kind != "absent" or new_original.kind == "absent":
+                    unmeasured.append(target.label)
+                    print(f"| `{target.label}` | **NOT MEASURED** — rename pair has an unreadable identity |")
+                    continue
+                if path_identity(old) != old_original or path_identity(new) != new_original:
+                    clobbered.append(target.label)
+                    print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed before mutation |")
+                    continue
+                new.unlink()
+                old.write_bytes(before)
+                old_mutant = path_identity(old)
+                new_mutant = path_identity(new)
+                try:
+                    introduced = sorted(set(failures(suites, cache)) - set(control))
+                except MeasurementError as unreadable:
+                    unmeasured.append(target.label)
+                    print(f"| `{target.label}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
+                    continue
+            finally:
+                shutil.rmtree(cache, ignore_errors=True)
+                old_unchanged = old_mutant is not None and path_identity(old) == old_mutant
+                new_unchanged = new_mutant is not None and path_identity(new) == new_mutant
+                concurrent = old_mutant is not None and not (old_unchanged and new_unchanged)
+                if old_unchanged:
+                    restore_path(old, old_original)
+                if new_unchanged:
+                    restore_path(new, new_original)
+                if concurrent:
+                    clobbered.append(target.label)
+                    print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed during the run |")
+            if concurrent:
+                continue
+            if introduced:
+                print(f"| `{target.label}` | **{len(introduced)} new** — {', '.join(introduced[:3])} |")
+            else:
+                print(f"| `{target.label}` | **0 new — UNGUARDED** |")
+                unguarded.append(target.label)
+            continue
         source = root / path
         # The FULL identity, not just the bytes. An added artifact that is a
         # symlink or carries an executable bit was being restored with
