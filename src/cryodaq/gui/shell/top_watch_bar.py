@@ -1074,7 +1074,13 @@ class TopWatchBar(QWidget):
         ch = reading.channel
         vital_key: str | None = None
 
-        if self._channel_mgr.is_temperature_channel(ch) and reading.unit == "K":
+        # `channel_manager=None` is a supported construction mode (see __init__
+        # and the guard at the vitals refresh below). Without a manager nothing
+        # DECLARES a quantity, so no reading can be claimed as a temperature --
+        # and falling back to the spelling test here would reintroduce exactly
+        # the defect this change removes. Skipping the branch also leaves the
+        # pressure path below reachable, which an unguarded dereference did not.
+        if self._channel_mgr is not None and self._channel_mgr.is_temperature_channel(ch) and reading.unit == "K":
             # v0.55.4 A5 fix: get_all_visible() returns short IDs like
             # "\u04221"; the driver emits readings as "\u04221 <display suffix>".
             # _refresh_channels looks up the short id, so stamp under

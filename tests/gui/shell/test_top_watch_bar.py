@@ -707,3 +707,48 @@ def test_mode_badge_cursor_is_pointing_hand() -> None:
     from PySide6.QtCore import Qt
 
     assert bar._mode_badge.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+def test_a_bar_built_without_a_channel_manager_still_ingests_readings() -> None:
+    """`channel_manager=None` is a supported construction mode, and it crashed.
+
+    Migrating the temperature test from spelling to declaration put
+    `self._channel_mgr.is_temperature_channel(...)` at the top of `on_reading`
+    with no None check, so every standalone consumer raised AttributeError on
+    the first reading — before control could reach the pressure branch below it.
+    The vitals refresh already guarded the same attribute, which is why this was
+    a regression rather than a missing feature.
+
+    Without a manager nothing DECLARES a quantity, so no reading may be claimed
+    as a temperature. Falling back to the spelling test would reintroduce the
+    defect this change exists to remove.
+    """
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    _app()
+    bar = TopWatchBar()
+    assert bar._channel_mgr is None, "this node is meaningless if a manager was injected"
+    bar._fast_timer.stop()
+    bar._slow_timer.stop()
+    bar._channel_refresh_timer.stop()
+
+    def _reading(channel: str, value: float, unit: str) -> Reading:
+        return Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="LS218_1",
+            channel=channel,
+            value=value,
+            unit=unit,
+            status=ChannelStatus.OK,
+        )
+
+    # A Cyrillic-Те channel in Kelvin: the shape that used to be inferred as a
+    # temperature by spelling. It must not raise, and must not be claimed.
+    bar.on_reading(_reading("Т1 Криостат верх", 4.2, "K"))
+    assert "Т1" not in bar._channel_last_seen, "nothing declares a quantity, so nothing is a temperature"
+
+    # The pressure path sits AFTER the crashing line, so this is what the
+    # unguarded dereference actually cost a standalone consumer.
+    bar.on_reading(_reading("VACUUM/pressure", 1.2e-5, "mbar"))

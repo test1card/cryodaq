@@ -477,7 +477,7 @@ table earns its keep.
 | Surface | File / key | What a missing entry costs |
 |---|---|---|
 | Dashboard name, visibility, group | `config/channels.yaml` (`name`, `visible`, `group`) | channel appears with a raw identity, ungrouped |
-| **Measured quantity** | `config/channels.yaml` top-level `default_quantity`, or per-channel `quantity` | **startup FAILS** with `ChannelConfigError` naming the channel. Every operator surface selects by declared quantity (OC-030), so a channel that resolves to none would otherwise vanish from the dashboard grid, the temperature plot, the watch bar and the conductivity source list at once, with no diagnostic. The vocabulary is `ChannelQuantity`; a typo such as `temperatue` is refused rather than accepted. |
+| **Measured quantity** | `config/channels.yaml` top-level `default_quantity`, or per-channel `quantity` | **the channel silently stops being a temperature, and NOTHING refuses the file.** Every operator surface selects by declared quantity (OC-030), so a channel that resolves to no quantity vanishes from the dashboard grid, the temperature plot, the watch bar and the conductivity source list at once, with no diagnostic. **Measured on this branch, not inferred:** a top-level typo such as `temperatue` loads cleanly and then makes `is_temperature_channel` answer False for every shipped channel, emptying all four surfaces. An earlier version of this row promised that startup FAILS with `ChannelConfigError` and that the typo is refused. It does not and it is not — that validation lives on `fix/oc-030b-config-validation` and is not in this change. Until it lands, treat the quantity declaration as load-bearing and unchecked. |
 | Cryogenic-state indicator | `config/channels.yaml` `is_cold` | **defaults to `true`** — a warm flange sensor left unmarked drags the cold-state indicator |
 | Phase-aware alarm bands | `config/channels.yaml` `thermal_zone`, `alarm_band` | no band; falls through to whatever `config/alarms_v3.yaml` happens to cover |
 | Cooldown prediction | `config/cooldown.yaml` `channel_cold` / `channel_warm` | prediction runs against the wrong stage |
@@ -489,9 +489,12 @@ Two specific traps:
 
 - `config/channels.yaml` has **no** local override and **no** completeness
   check against the descriptor manifest. A channel present in the manifest and
-  absent here silently takes defaults — EXCEPT for the measured quantity, which
-  since OC-030 has no silent default: a channel that resolves to no quantity
-  fails startup rather than disappearing from every temperature surface.
+  absent here silently takes defaults. **The measured quantity is the most
+  dangerous of these**, because since OC-030 every temperature surface selects
+  on it: a channel that resolves to no quantity disappears from all of them at
+  once, and no check refuses the file. Verify the declaration by eye after any
+  edit; the guard that would refuse a misspelled vocabulary word is not on this
+  branch.
 - Operator-facing strings in this fork are Russian, and the design system
   requires that to stay consistent (`AGENTS.md`, GUI/UX gate). Adopt your own
   operators' language deliberately and completely; do **not** leave shipped

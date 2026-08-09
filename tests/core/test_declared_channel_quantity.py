@@ -222,6 +222,17 @@ def test_the_shipped_selection_is_byte_for_byte_what_spelling_selected(tmp_path:
         f"removed={sorted(set(by_spelling) - set(by_declaration))}. A migration that quietly changes a "
         "screen is the failure behind revert 0bea0449; if a difference is intended, name it above."
     )
+    # ORDER IS PART OF THE CONTRACT, and the set comparison above cannot see it.
+    # `get_visible_temperature_channels` documents that it preserves visible
+    # ordering, and the grid, the plot and the watch bar all render in the order
+    # they are handed. Reversing or sorting the result would leave every
+    # membership assertion on this branch green while every operator screen
+    # reordered itself, so "byte-for-byte" is asserted as a SEQUENCE here.
+    assert by_declaration == by_spelling, (
+        "the migration preserves membership but not ORDER: "
+        f"declared={by_declaration}, spelling={by_spelling}. Operator surfaces render in the order they "
+        "are given, so a reordering is a visible change even when the set is identical."
+    )
     assert by_declaration, "the shipped configuration selects no temperature channels at all"
 
     control = _manager(
