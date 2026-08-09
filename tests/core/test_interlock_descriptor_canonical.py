@@ -19,13 +19,14 @@ every configured Т-interlock still trips its configured action.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from shutil import copyfile
 
 import yaml
 
 from cryodaq.core.broker import DataBroker
+from cryodaq.core.housekeeping import AdaptiveThrottle, load_protected_channel_patterns
 from cryodaq.core.interlock import InterlockEngine, InterlockState
 from cryodaq.drivers.base import Reading
 from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog, load_live_channel_descriptor_catalog
@@ -188,9 +189,9 @@ async def test_interlock_follows_declared_sensor_binding_after_canonical_id_rena
     copyfile(INTERLOCKS_PATH, interlocks_path)
 
     manifest = yaml.safe_load(descriptors_path.read_text(encoding="utf-8"))
-    next(
-        descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т12"
-    )["channel_id"] = renamed_id
+    next(descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т12")["channel_id"] = (
+        renamed_id
+    )
     next(binding for binding in manifest["bindings"] if binding["channel_id"] == "Т12")["channel_id"] = renamed_id
     descriptors_path.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
@@ -230,3 +231,47 @@ async def test_interlock_follows_declared_sensor_binding_after_canonical_id_rena
         assert actions_seen == ["stop_source"]
     finally:
         await engine.stop()
+
+
+def test_adaptive_throttle_protection_follows_binding_after_canonical_id_rename(tmp_path: Path) -> None:
+    """A canonical rename must not let the raw protected reading be thinned."""
+    renamed_id = "detector_stage_two"
+    descriptors_path = tmp_path / "channel_descriptors.yaml"
+    interlocks_path = tmp_path / "interlocks.yaml"
+    copyfile(DESCRIPTORS_PATH, descriptors_path)
+    copyfile(INTERLOCKS_PATH, interlocks_path)
+
+    manifest = yaml.safe_load(descriptors_path.read_text(encoding="utf-8"))
+    next(descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т12")["channel_id"] = (
+        renamed_id
+    )
+    next(binding for binding in manifest["bindings"] if binding["channel_id"] == "Т12")["channel_id"] = renamed_id
+    descriptors_path.write_text(yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    catalog = load_live_channel_descriptor_catalog(descriptors_path)
+    protected_patterns = load_protected_channel_patterns(interlocks_path, descriptor_catalog=catalog)
+    instrument_id, emitted_channel = _instrument_for(renamed_id, catalog)
+    throttle = AdaptiveThrottle(
+        {
+            "enabled": True,
+            "stable_duration_s": 0.0,
+            "max_interval_s": 60.0,
+            "absolute_delta": {"default": 100.0},
+        },
+        protected_patterns=protected_patterns,
+    )
+    first_timestamp = datetime.now(UTC)
+    readings = [
+        Reading(
+            timestamp=first_timestamp + timedelta(seconds=offset_s),
+            instrument_id=instrument_id,
+            channel=emitted_channel,
+            value=11.0,
+            unit="K",
+        )
+        for offset_s in (0.0, 1.0)
+    ]
+
+    assert throttle.filter_for_archive([readings[0]]) == [readings[0]]
+    assert throttle.filter_for_archive([readings[1]]) == [readings[1]]
+    assert throttle.suppressed_count == 0

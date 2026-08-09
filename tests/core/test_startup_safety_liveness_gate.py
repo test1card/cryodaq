@@ -1,10 +1,9 @@
 """Startup safety channel-pattern liveness diagnostic (F-1 class).
 
 Proves ``validate_safety_pattern_liveness`` checks the planes and exact runtime
-AdaptiveThrottle union it is given.  It also proves the engine's temporary lab
-policy catches only ``SafetyPatternLivenessError``, logs CRITICAL, and continues
-with the actually selected local descriptor replacement.  An unrelated error
-still aborts startup.
+AdaptiveThrottle union it is given. It also proves the engine propagates both
+``SafetyPatternLivenessError`` and unrelated validator errors before
+persistence, using the actually selected local descriptor replacement.
 
 The validator reuses the engine's already-loaded ``SafetyManager`` and the
 pre-computed legacy-plus-v3 AdaptiveThrottle union; these tests mirror that
@@ -31,7 +30,7 @@ import yaml
 
 import cryodaq.engine as engine
 from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3, load_housekeeping_config
-from cryodaq.core.interlock import InterlockEngine
+from cryodaq.core.interlock import InterlockConfigError, InterlockEngine
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
@@ -318,12 +317,8 @@ def test_all_physical_policy_loaders_return_applied_snapshot_receipts(tmp_path: 
         assert receipt.sha256 == hashlib.sha256(path.read_bytes()).hexdigest(), policy
 
 
-def test_real_v3_patterns_validate_cleanly_before_legacy_union() -> None:
-    """All non-legacy production safety planes are live on the base manifest.
-
-    The legacy interlock regexes are separately shown dead on their second,
-    raw AdaptiveThrottle plane below; modern v3 patterns cover those channels.
-    """
+def test_real_v3_patterns_validate_cleanly_without_interlock_throttle_union() -> None:
+    """All production safety planes are live without interlock throttle refs."""
     validate_safety_pattern_liveness(
         descriptor_catalog=_real_catalog(),
         interlocks_config_path=_INTERLOCKS_PATH,
@@ -478,7 +473,7 @@ async def test_run_engine_does_not_catch_unrelated_validator_exception(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The temporary policy catches exactly SafetyPatternLivenessError."""
+    """Startup propagates unrelated validator defects before persistence."""
     observed = _install_engine_startup_harness(
         tmp_path,
         monkeypatch,
@@ -496,35 +491,24 @@ async def test_run_engine_does_not_catch_unrelated_validator_exception(
     assert observed["writer_called"] is False
 
 
-def test_dead_interlock_pattern_raises_canonical(tmp_path) -> None:
-    """A dead canonical interlock pattern makes the validator raise.
-
-    Writes a temp interlocks.yaml whose pattern matches NO canonical
-    channel_id. The validator must raise and name the dead pattern, its plane,
-    and the interlocks config source.
-    """
+def test_interlock_binding_absent_from_catalog_fails_config_load(tmp_path) -> None:
+    """An interlock binding absent from the selected catalog fails closed."""
     interlocks_cfg = tmp_path / "interlocks.yaml"
     interlocks_cfg.write_text(
         "interlocks:\n"
-        "  - name: dead_interlock_never_matches\n"
+        "  - name: missing_declared_sensor\n"
         "    description: synthetic dead ref\n"
-        '    channel_pattern: "__DEAD_INTERLOCK_CHANNEL__$"\n'
+        "    channel_bindings:\n"
+        '      - instrument_id: "__MISSING_INSTRUMENT__"\n'
+        '        source_key: "__MISSING_SOURCE__"\n'
         "    threshold: 1.0\n"
         '    comparison: ">"\n'
         '    action: "emergency_off"\n',
         encoding="utf-8",
     )
-    with pytest.raises(SafetyPatternLivenessError) as exc_info:
-        validate_safety_pattern_liveness(
-            descriptor_catalog=_real_catalog(),
-            interlocks_config_path=interlocks_cfg,
-            safety_manager=_real_safety_manager(),
-            adaptive_throttle_patterns=_real_alarms_v3_patterns(),
-        )
-    message = str(exc_info.value)
-    assert "__DEAD_INTERLOCK_CHANNEL__" in message
-    assert "canonical" in message
-    assert "interlocks.yaml" in message
+    interlock_engine = InterlockEngine(None, actions={"emergency_off": lambda: None})
+    with pytest.raises(InterlockConfigError, match="__MISSING_INSTRUMENT__.*__MISSING_SOURCE__"):
+        interlock_engine.load_config(interlocks_cfg, descriptor_catalog=_real_catalog())
 
 
 def test_dead_safety_critical_declaration_raises_from_canonical_authority() -> None:

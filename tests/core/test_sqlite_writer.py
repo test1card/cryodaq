@@ -447,7 +447,10 @@ def _shipped_protected_patterns() -> tuple[LiveChannelDescriptorCatalog, list[st
     manager.load_config(_CONFIG_DIR / "safety.yaml")
     manager._config.require_keithley_for_run = False
     requested = {
-        *load_protected_channel_patterns(_CONFIG_DIR / "interlocks.yaml"),
+        *load_protected_channel_patterns(
+            _CONFIG_DIR / "interlocks.yaml",
+            descriptor_catalog=descriptor_catalog,
+        ),
         *load_critical_channels_from_alarms_v3(_CONFIG_DIR / "alarms_v3.yaml"),
     }
     resolved = validate_safety_pattern_liveness(
