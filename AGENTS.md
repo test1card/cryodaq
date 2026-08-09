@@ -369,7 +369,19 @@ The severity floor. A mistake is above the floor only when BOTH are true:
    reads them. A wrong threshold in `config/interlocks.yaml` misfires an
    interlock exactly as a wrong comparison in `core/interlock.py` does, and a
    directory boundary that separated them would put the more likely mistake on
-   the cheaper side. Defects in tests, guards, controls, harnesses, CI
+   the cheaper side.
+
+   IT IS ALSO CODE THIS REPOSITORY UPLOADS TO AN INSTRUMENT, wherever it lives.
+   `tsp/cryodaq_wdog.lua` is read from the repository and re-uploaded to the
+   Keithley on every connection (`drivers/instruments/keithley_2604b.py`), and
+   it is the watchdog that takes the source down. It executes during an
+   experiment, on the hardware, with authority over a live output -- a defect
+   in it is hazardous output by the second criterion below, and reading the
+   floor as a list of DIRECTORIES rather than of runtime reach would have put
+   it on the cheaper side. Runtime reach is the test; `src/cryodaq/` and
+   `config/` are where it usually lands, not its definition.
+
+   Defects in tests, guards, controls, harnesses, CI
    workflows, scripts, documentation, or this registry itself are below the
    floor, even when the thing the guard failed to catch is above it: the
    product defect gets the record, the guard defect gets a ledger line.
