@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.interlock import (
     InterlockCondition,
@@ -47,6 +48,31 @@ def _make_condition(
 
 def _descriptor_catalog():
     return load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
+
+
+async def _publish_bound_sensor(
+    broker: DataBroker,
+    catalog,
+    *,
+    instrument_id: str,
+    source_key: str,
+    value: float,
+) -> None:
+    descriptor = catalog.storage_catalog_snapshot().by_source[(instrument_id, source_key)]
+    emitted_channel = catalog.emitted_channel_for_channel_id(descriptor.channel_id)
+    bound = catalog.bind(
+        Reading.now(
+            emitted_channel,
+            value,
+            descriptor.unit,
+            instrument_id=instrument_id,
+        )
+    )
+    await broker.publish(
+        bound.reading,
+        persistence_authoritative=True,
+        descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(bound.descriptor).canonical_json,
+    )
 
 
 async def _make_engine(
@@ -469,7 +495,8 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
 
     broker = DataBroker()
     engine = InterlockEngine(broker=broker, actions={"emergency_off": _action})
-    engine.load_config(config_file, descriptor_catalog=_descriptor_catalog())
+    descriptor_catalog = _descriptor_catalog()
+    engine.load_config(config_file, descriptor_catalog=descriptor_catalog)
 
     # Interlock must be registered and start ARMED
     states = engine.get_state()
@@ -479,7 +506,13 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
     await engine.start()
     try:
         # --- Behavioral check 1: matching channel + above threshold → TRIPPED, action fired ---
-        await broker.publish(Reading.now("Т5", 450.0, "K", instrument_id="test"))
+        await _publish_bound_sensor(
+            broker,
+            descriptor_catalog,
+            instrument_id="LS218_1",
+            source_key="input.5.temperature",
+            value=450.0,
+        )
         await asyncio.sleep(0.05)
         assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
             "Interlock loaded from YAML did not trip on bound Т5=450 > 400 (threshold not loaded)"
@@ -506,7 +539,13 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
 
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="cryodaq.core.interlock"):
-            await broker.publish(Reading.now("Т5", 450.0, "K", instrument_id="test"))
+            await _publish_bound_sensor(
+                broker,
+                descriptor_catalog,
+                instrument_id="LS218_1",
+                source_key="input.5.temperature",
+                value=450.0,
+            )
             await asyncio.sleep(0.05)
         # Protection is NOT blinded by the cooldown — it re-trips and re-acts.
         assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (

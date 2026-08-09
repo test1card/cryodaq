@@ -27,7 +27,8 @@ from typing import Any
 
 import yaml
 
-from cryodaq.core.broker import DataBroker
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
+from cryodaq.core.broker import DataBroker, PublishedReading
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
@@ -37,9 +38,19 @@ class InterlockConfigError(RuntimeError):
     """Raised when interlocks.yaml cannot be loaded in a fail-closed manner."""
 
 
-def resolve_interlock_channel_ids(
+@dataclass(frozen=True, slots=True)
+class InterlockChannelBinding:
+    """One declared sensor identity and its exact persisted descriptor."""
+
+    instrument_id: str
+    source_key: str
+    channel_id: str
+    descriptor_envelope: bytes
+
+
+def resolve_interlock_channel_bindings(
     entry: dict[str, Any], *, config_path: Path, descriptor_catalog: Any | None
-) -> frozenset[str]:
+) -> frozenset[InterlockChannelBinding]:
     """Resolve an interlock's declared physical sensor bindings exactly."""
     bindings = entry.get("channel_bindings")
     if type(bindings) is not list or not bindings:
@@ -49,7 +60,7 @@ def resolve_interlock_channel_ids(
 
         descriptor_catalog = load_live_channel_descriptor_catalog(config_path.parent / "channel_descriptors.yaml")
     catalog = descriptor_catalog.storage_catalog_snapshot()
-    channel_ids: set[str] = set()
+    resolved: set[InterlockChannelBinding] = set()
     for binding in bindings:
         if type(binding) is not dict or set(binding) != {"instrument_id", "source_key"}:
             raise ValueError("channel_bindings entries must contain only instrument_id and source_key")
@@ -60,10 +71,31 @@ def resolve_interlock_channel_ids(
         descriptor = catalog.by_source.get((instrument_id, source_key))
         if descriptor is None:
             raise ValueError(f"channel binding {instrument_id!r}/{source_key!r} is absent from the descriptor catalog")
-        channel_ids.add(descriptor.channel_id)
-    if len(channel_ids) != len(bindings):
+        resolved.add(
+            InterlockChannelBinding(
+                instrument_id=instrument_id,
+                source_key=source_key,
+                channel_id=descriptor.channel_id,
+                descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json,
+            )
+        )
+    if len(resolved) != len(bindings):
         raise ValueError("channel_bindings must resolve to unique declared sensors")
-    return frozenset(channel_ids)
+    return frozenset(resolved)
+
+
+def resolve_interlock_channel_ids(
+    entry: dict[str, Any], *, config_path: Path, descriptor_catalog: Any | None
+) -> frozenset[str]:
+    """Resolve the canonical channel IDs for declared interlock sensors."""
+    return frozenset(
+        binding.channel_id
+        for binding in resolve_interlock_channel_bindings(
+            entry,
+            config_path=config_path,
+            descriptor_catalog=descriptor_catalog,
+        )
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -122,6 +154,7 @@ class InterlockCondition:
     threshold: float
     comparison: str  # ">" или "<"
     action: str
+    channel_bindings: frozenset[InterlockChannelBinding] = frozenset()
     cooldown_s: float = 0.0
 
     def __post_init__(self) -> None:
@@ -135,10 +168,32 @@ class InterlockCondition:
             or any(type(channel_id) is not str or not channel_id for channel_id in self.channel_ids)
         ):
             raise ValueError(f"Блокировка '{self.name}': channel_ids must be a non-empty frozenset of strings")
+        if type(self.channel_bindings) is not frozenset or any(
+            type(binding) is not InterlockChannelBinding for binding in self.channel_bindings
+        ):
+            raise ValueError(f"Блокировка '{self.name}': channel_bindings must be a frozenset of resolved bindings")
+        if (
+            self.channel_bindings
+            and frozenset(binding.channel_id for binding in self.channel_bindings) != self.channel_ids
+        ):
+            raise ValueError(f"Блокировка '{self.name}': channel_ids disagree with channel_bindings")
 
     def matches_channel(self, channel: str) -> bool:
         """Проверить точное совпадение с объявленной привязкой датчика."""
         return channel in self.channel_ids
+
+    def matches_reading(self, reading: Reading, descriptor_envelope: bytes | None) -> bool:
+        """Match the full declared runtime identity, including source provenance."""
+        if not self.channel_bindings:
+            return self.matches_channel(reading.channel)
+        if type(descriptor_envelope) is not bytes:
+            return False
+        return any(
+            reading.instrument_id == binding.instrument_id
+            and reading.channel == binding.channel_id
+            and descriptor_envelope == binding.descriptor_envelope
+            for binding in self.channel_bindings
+        )
 
     def is_triggered(self, value: float) -> bool:
         """Проверить, выполнено ли условие срабатывания для данного значения."""
@@ -258,7 +313,7 @@ class InterlockEngine:
         self._dead_channel_handler = dead_channel_handler
         self._interlocks: dict[str, _InterlockRecord] = {}
         self._events: deque[InterlockEvent] = deque(maxlen=_MAX_EVENTS)
-        self._queue: asyncio.Queue[Reading] | None = None
+        self._queue: asyncio.Queue[PublishedReading] | None = None
         self._task: asyncio.Task[None] | None = None
 
         # P2-5 debounce state: per-channel non-usable window + thresholds.
@@ -338,17 +393,19 @@ class InterlockEngine:
         loaded = 0
         for entry in entries:
             try:
+                channel_bindings = resolve_interlock_channel_bindings(
+                    entry,
+                    config_path=config_path,
+                    descriptor_catalog=descriptor_catalog,
+                )
                 condition = InterlockCondition(
                     name=entry["name"],
                     description=entry["description"],
-                    channel_ids=resolve_interlock_channel_ids(
-                        entry,
-                        config_path=config_path,
-                        descriptor_catalog=descriptor_catalog,
-                    ),
+                    channel_ids=frozenset(binding.channel_id for binding in channel_bindings),
                     threshold=float(entry["threshold"]),
                     comparison=entry["comparison"],
                     action=entry["action"],
+                    channel_bindings=channel_bindings,
                     cooldown_s=float(entry.get("cooldown_s", 0.0)),
                 )
                 self.add_condition(condition)
@@ -447,6 +504,7 @@ class InterlockEngine:
         self._queue = await self._broker.subscribe(
             _SUBSCRIPTION_NAME,
             maxsize=10_000,
+            wants_descriptor_envelope=True,
         )
         self._task = asyncio.create_task(self._check_loop(), name="interlock_check_loop")
         logger.info(
@@ -489,19 +547,22 @@ class InterlockEngine:
         logger.debug("Цикл проверки блокировок запущен.")
         try:
             while True:
-                reading: Reading = await self._queue.get()
-                await self._process_reading(reading)
+                published: PublishedReading = await self._queue.get()
+                await self._process_reading(
+                    published.reading,
+                    descriptor_envelope=published.descriptor_envelope,
+                )
         except asyncio.CancelledError:
             logger.debug("Цикл проверки блокировок завершён по отмене задачи.")
             raise
 
-    async def _process_reading(self, reading: Reading) -> None:
+    async def _process_reading(self, reading: Reading, *, descriptor_envelope: bytes | None = None) -> None:
         """Проверить показание против всех подходящих ARMED-блокировок."""
         # ARMED-блокировки, чьи объявленные привязки совпали с каналом показания.
         matching = [
             record
             for record in self._interlocks.values()
-            if record.state == InterlockState.ARMED and record.condition.matches_channel(reading.channel)
+            if record.state == InterlockState.ARMED and record.condition.matches_reading(reading, descriptor_envelope)
         ]
 
         # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на

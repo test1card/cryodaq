@@ -25,6 +25,7 @@ from shutil import copyfile
 
 import yaml
 
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.housekeeping import AdaptiveThrottle, load_protected_channel_patterns
 from cryodaq.core.interlock import InterlockEngine, InterlockState
@@ -78,6 +79,19 @@ def _bound_reading(
     return catalog.bind(raw_reading).reading
 
 
+async def _publish_bound(
+    broker: DataBroker,
+    catalog: LiveChannelDescriptorCatalog,
+    reading: Reading,
+) -> None:
+    descriptor = catalog.storage_catalog_snapshot().by_channel_id[reading.channel]
+    await broker.publish(
+        reading,
+        persistence_authoritative=True,
+        descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json,
+    )
+
+
 async def test_canonical_channel_ids_trip_every_configured_t_interlock() -> None:
     """Each Т-interlock in config/interlocks.yaml must trip on its canonical channel_id.
 
@@ -119,7 +133,7 @@ async def test_canonical_channel_ids_trip_every_configured_t_interlock() -> None
                     unit="K",
                 )
                 assert bound.channel == canonical_id  # sanity: bind() must emit the canonical id
-                await broker.publish(bound)
+                await _publish_bound(broker, catalog, bound)
 
         await asyncio.sleep(0.1)
 
@@ -165,7 +179,7 @@ async def test_raw_companion_channel_does_not_trip_interlock() -> None:
             unit="sensor_unit",
         )
         assert bound.channel == "Т1.raw"
-        await broker.publish(bound)
+        await _publish_bound(broker, catalog, bound)
         await asyncio.sleep(0.1)
 
         assert engine.get_state()["overheat_cryostat"] == InterlockState.ARMED
@@ -221,7 +235,7 @@ async def test_interlock_follows_declared_sensor_binding_after_canonical_id_rena
             unit="K",
         )
         assert bound.channel == renamed_id
-        await broker.publish(bound)
+        await _publish_bound(broker, catalog, bound)
         await asyncio.sleep(0.1)
 
         assert engine.get_state()["detector_warmup"] == InterlockState.TRIPPED, (

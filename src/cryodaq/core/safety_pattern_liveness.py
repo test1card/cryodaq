@@ -41,7 +41,7 @@ import yaml
 
 from cryodaq.channels.descriptors import ChannelRole, ChannelSafetyClass
 from cryodaq.core.housekeeping import _extract_channel_refs
-from cryodaq.core.interlock import InterlockCondition, resolve_interlock_channel_ids
+from cryodaq.core.interlock import InterlockCondition, resolve_interlock_channel_bindings
 from cryodaq.core.safety_manager import SafetyConfigError
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel
 
@@ -671,18 +671,20 @@ def _load_interlock_conditions(
         if not isinstance(entry, dict):
             continue
         try:
+            channel_bindings = resolve_interlock_channel_bindings(
+                entry,
+                config_path=config_path,
+                descriptor_catalog=descriptor_catalog,
+            )
             conditions.append(
                 InterlockCondition(
                     name=entry["name"],
                     description=entry.get("description", ""),
-                    channel_ids=resolve_interlock_channel_ids(
-                        entry,
-                        config_path=config_path,
-                        descriptor_catalog=descriptor_catalog,
-                    ),
+                    channel_ids=frozenset(binding.channel_id for binding in channel_bindings),
                     threshold=float(entry.get("threshold", 0.0)),
                     comparison=entry.get("comparison", ">"),
                     action=entry.get("action", ""),
+                    channel_bindings=channel_bindings,
                     cooldown_s=float(entry.get("cooldown_s", 0.0)),
                 )
             )
