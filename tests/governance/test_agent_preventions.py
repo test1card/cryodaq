@@ -1149,16 +1149,7 @@ def test_all_repository_python_sources_compile_before_pytest_evidence() -> None:
 
 
 def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -> None:
-    """`pending_green_evidence_blocks_disposition: false` must be actionable.
-
-    The semantics mapping declares that green evidence is appended after merge by
-    a batch sweep and that its absence blocks nothing. Nothing could act on that
-    declaration while a record awaiting the sweep was indistinguishable from one
-    where the correction or its guard had never been built: both are
-    `status: open` with `green_evidence: pending`. `disposition_state` derives
-    the difference from the record itself, so a consumer can enforce the rule
-    instead of guessing which kind of `open` it is looking at.
-    """
+    """Only explicit correction completion makes pending green nonblocking."""
 
     payload = _registry()
     records = payload["records"]
@@ -1168,19 +1159,40 @@ def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -
         sorted(set(states.values()))
     )
 
-    # The distinction is real in this registry, not merely representable.
-    awaiting = [record for record in records if disposition_state(record) == "awaiting_green_sweep"]
-    assert awaiting, "no record is awaiting the post-merge sweep, so this derivation is untested by the live data"
-    for record in awaiting:
-        assert record["status"] in {"open", "reopened"}, record["id"]
-        assert record["green_evidence"] == "pending", record["id"]
-        assert record["guards"], record["id"]
+    # Registered guards and red prose cannot prove the correction is complete.
+    authority = next(record for record in records if record["id"] == "GUARD-FALSIFICATION-AUTHORITY-029")
+    assert authority["guards"] and authority["red_evidence"] != "pending"
+    assert "automation_limit" in authority
+    assert disposition_state(authority) == "incomplete"
 
-    # A record whose guard has not been built is NOT the same state, which is the
-    # whole point: it is the one that still holds a disposition open.
-    stripped = copy.deepcopy(next(record for record in awaiting))
-    stripped["guards"] = []
-    assert disposition_state(stripped) == "incomplete"
+    # The explicit signal works for both registry shapes: runtime records use
+    # plural guards, while false-green pairs carry one singular guard.
+    runtime = copy.deepcopy(next(record for record in records if record["status"] in {"open", "reopened"}))
+    runtime["correction_complete"] = True
+    assert disposition_state(runtime) == "awaiting_green_sweep"
+    pair = copy.deepcopy(payload["false_green_pairs"][0])
+    pair["correction_complete"] = True
+    assert disposition_state(pair) == "awaiting_green_sweep"
+
+    runtime["green_evidence"] = {
+        "locator": "git:0123456789abcdef0123456789abcdef01234567",
+        "sha256": "sha256:" + "0" * 64,
+    }
+    assert disposition_state(runtime) == "evidence_complete"
+
+    valid = _registry()
+    valid["records"][0]["correction_complete"] = True
+    valid["false_green_pairs"][0]["correction_complete"] = False
+    validate_registry(valid)
+
+    invalid = _registry()
+    invalid["records"][0]["correction_complete"] = "yes"
+    with pytest.raises(GovernanceContractError, match="correction_complete must be boolean"):
+        validate_registry(invalid)
+    invalid_pair = _registry()
+    invalid_pair["false_green_pairs"][0]["correction_complete"] = "yes"
+    with pytest.raises(GovernanceContractError, match="correction_complete must be boolean"):
+        validate_registry(invalid_pair)
 
     # And a terminal record never reports either open state.
     for record in records:

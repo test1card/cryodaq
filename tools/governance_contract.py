@@ -134,7 +134,7 @@ def closure_semantics_sha256(entry: Mapping[str, Any]) -> str:
 
 
 def disposition_state(record: Mapping[str, Any]) -> str:
-    """Derive the record's lifecycle state, so `pending` is not one bucket.
+    """Read the record's lifecycle state without treating evidence as completion.
 
     `record_evidence_semantics` declares that green evidence is appended after
     merge by a batch sweep and that its absence blocks nothing. A consumer could
@@ -143,15 +143,11 @@ def disposition_state(record: Mapping[str, Any]) -> str:
     both are `status: open` with `green_evidence: pending`. Anything enforcing
     the declaration had to guess, so the declaration was unenforceable.
 
-    Derived, never stored, so it cannot drift from the record it describes:
-
     * ``closed`` / ``expired`` -- terminal, and already required to carry
       immutable evidence on both sides.
-    * ``awaiting_green_sweep`` -- open, guards registered, red-before captured,
-      and only the post-merge green capture outstanding. This is the state the
-      semantics call non-blocking.
-    * ``incomplete`` -- open with the correction or its guard still missing.
-      This one genuinely holds a disposition open.
+    * ``awaiting_green_sweep`` -- open with explicit correction completion and
+      only the post-merge green capture outstanding.
+    * ``incomplete`` -- open without explicit correction completion.
     """
 
     status = record.get("status")
@@ -166,9 +162,13 @@ def disposition_state(record: Mapping[str, Any]) -> str:
     # unreadable for them.
     if status not in {"open", "reopened"}:
         return "unknown"
-    red = record.get("red_evidence")
     green = record.get("green_evidence")
-    if not (record.get("guards") and red and red != "pending"):
+    # Guard registration and red prose are enforcement evidence, not evidence
+    # that the correction itself is done. They also differ structurally between
+    # runtime records (`guards`) and false-green pairs (`guard`). Only the
+    # reviewer-owned explicit signal can make pending green bookkeeping the sole
+    # remaining work; absence fails closed for both shapes.
+    if record.get("correction_complete") is not True:
         return "incomplete"
     # Measured on the live registry: SEVEN active records already carry captured
     # green evidence. They are not waiting for the sweep -- it has run for them,
@@ -262,6 +262,7 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "automation_limit",
         "guard_source_blobs",
         "classification_corpus",
+        "correction_complete",
     }
 )
 
@@ -1003,6 +1004,8 @@ def validate_registry(
             _nonempty(record["human_gate"], f"{record_id}.human_gate")
         if "automation_limit" in record:
             _nonempty(record["automation_limit"], f"{record_id}.automation_limit")
+        if "correction_complete" in record and not isinstance(record["correction_complete"], bool):
+            raise GovernanceContractError(f"{record_id}.correction_complete must be boolean")
         if record["status"] not in _STATUSES or record["scope"] not in _SCOPES:
             raise GovernanceContractError(f"record status or scope is invalid: {record_id}")
         for field in ("authority_source", "applies_to", "classification", "consequence", "invariant"):
@@ -1110,7 +1113,12 @@ def validate_registry(
     }
     pair_guards: set[str] = set()
     for pair in pairs:
-        optional_pair_fields = {"platform", "closure_semantics_sha256", "guard_source_blobs"}
+        optional_pair_fields = {
+            "platform",
+            "closure_semantics_sha256",
+            "guard_source_blobs",
+            "correction_complete",
+        }
         if (
             not isinstance(pair, Mapping)
             or not required_pair_fields <= set(pair)
@@ -1121,6 +1129,8 @@ def validate_registry(
         if _ID.fullmatch(pair_id) is None or pair_id in pair_ids or pair_id in record_ids:
             raise GovernanceContractError(f"false-green pair id is invalid or duplicate: {pair_id}")
         pair_ids.add(pair_id)
+        if "correction_complete" in pair and not isinstance(pair["correction_complete"], bool):
+            raise GovernanceContractError(f"{pair_id}.correction_complete must be boolean")
         runtime = record_by_id.get(pair["runtime_prevention_id"])
         if runtime is None:
             raise GovernanceContractError(f"{pair_id} has a dangling runtime prevention")
