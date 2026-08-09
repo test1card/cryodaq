@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: OC030-COVERAGE-CLAIM-UNDERIVED-FALSE-GREEN-345
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
+    ci_partition: remaining
+    red_evidence: the_OC_030_evidence_cell_made_a_coverage_claim_about_the_migrated_GUI_files_TWICE_that_no_guard_derived_first_reporting_the_parity_as_24_for_24_which_is_a_true_number_about_get_temperature_channels_while_every_operator_screen_renders_the_16_that_get_visible_temperature_channels_returns_and_then_claiming_that_every_migrated_screen_calls_get_visible_temperature_channels_which_is_also_false_because_dashboard_view_and_dynamic_sensor_grid_and_analytics_widgets_call_ONLY_is_temperature_channel_and_never_touch_either_list_helper_so_the_quoted_parities_do_not_cover_them_and_both_claims_survived_the_entire_green_suite_because_nothing_derived_the_inventory_from_the_tree_two_controls_confirm_the_new_node_sees_both_directions_restating_the_claim_as_an_assertion_without_a_refutation_marker_and_removing_a_predicate_only_file_from_the_row_each_turn_it_red_2026_08_09_pending_immutable_capture
+    green_evidence: pending
   - id: SHIPPED-ONLY-QUANTITY-CONTROL-FALSE-GREEN-343
     status: open
     scope: product_contract
@@ -3296,6 +3304,8 @@ records:
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_summary_orders_only_declared_temperatures
         ci_partition: gui
+      - node: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
+        ci_partition: remaining
     red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_2026_08_08_pending_immutable_capture
     green_evidence: pending
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304

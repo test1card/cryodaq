@@ -995,11 +995,39 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
                 c2 = importlib.import_module("test_c2_repo_wide_spelling_sweep")
             finally:
                 sys.path.remove(str(REPO_ROOT / "tests"))
-            registry_errors = c2._registry_errors(c2._sites(REPO_ROOT))
-            assert registry_errors == [], (
-                "OC-030 reports the migration complete, but the C2 sweep registry is not exact: a detected "
-                "site is unregistered, or a registration no longer has a site",
-                [str(error)[:160] for error in registry_errors],
+            # INTERPRETER-INDEPENDENT BY CONSTRUCTION. `_registry_errors`
+            # compares whole `_Challenge`s, and a challenge carries a SHA of
+            # `ast.dump(...)` text, which is not stable across Python versions:
+            # on the declared 3.12 floor every one of the 127 challenges can
+            # mismatch on fingerprint alone, and this assertion would then fail
+            # for a reason OC-030 is not about, before reaching the scoped
+            # checks below. That version instability is OC-031's open defect and
+            # is guarded by its own node, which pins the floor count.
+            #
+            # What THIS guard is for is correspondence: a detected site that is
+            # unregistered, or a registration whose site is gone. That property
+            # lives in (path, scope, reason) and does not depend on the
+            # interpreter, so it is compared without the fingerprint. A drift in
+            # fingerprint alone otherwise appears here as a PAIRED
+            # unexpected+missing entry for the same site and reads as a
+            # regression.
+            sites = c2._sites(REPO_ROOT)
+
+            def _correspondence(challenge: object) -> tuple[str, str, str]:
+                return (
+                    challenge.path.replace("\\", "/"),  # type: ignore[attr-defined]
+                    challenge.scope,  # type: ignore[attr-defined]
+                    challenge.reason,  # type: ignore[attr-defined]
+                )
+
+            registered = Counter(_correspondence(entry.challenge) for entry in c2._REGISTRY)
+            detected = Counter(_correspondence(site.challenge) for site in sites)
+            unregistered = sorted(f"{path}::{scope} ({reason})" for path, scope, reason in (detected - registered))
+            vanished = sorted(f"{path}::{scope} ({reason})" for path, scope, reason in (registered - detected))
+            assert not unregistered and not vanished, (
+                "OC-030 reports the migration complete, but the C2 sweep registry does not correspond to the "
+                "live tree: a detected site is unregistered, or a registration no longer has a site",
+                {"unregistered": unregistered[:10], "vanished": vanished[:10]},
             )
             # EVERY NON-LEGITIMATE BUCKET COUNTS, not just the live-defect one.
             # `LIVE-C2-PRODUCT-DEFECT` is currently empty by construction, so
@@ -2898,3 +2926,62 @@ def test_architecture_generation_rolls_back_published_outputs_when_a_later_repla
         generator.generate()
     assert all((output / name).read_bytes() == b"original" for name in names)
     assert not metrics_path.exists()
+
+
+def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None:
+    """The call-site inventory, derived rather than asserted in prose.
+
+    OC-030's evidence cell twice made a coverage claim about the migrated GUI
+    files that nobody had measured. First it reported the parity as "24 for 24",
+    a true number about `get_temperature_channels()` while every operator screen
+    renders the 16 that `get_visible_temperature_channels()` returns. The
+    correction then claimed that "every migrated screen calls
+    `get_visible_temperature_channels()`" -- also false, and written without
+    running the command that refutes it. Both survived the whole green suite,
+    because nothing derived the inventory from the tree.
+
+    Three of the six migrated files call ONLY the per-channel predicate and
+    never touch either list helper, so the two list parities the row quotes do
+    not by themselves cover them. That distinction is what a reader needs in
+    order to know what the parity evidence proves, so it is measured here from
+    the frozen index and required to appear in the row.
+    """
+
+    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    oc_030 = next((line for line in text.splitlines() if line.startswith("| OC-030 |")), None)
+    assert oc_030 is not None, "OC-030 row is missing from the register"
+
+    _snapshot, indexed_paths, contents = _architecture_inventory()
+    migrated = sorted(set(re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)`", oc_030)))
+    assert migrated, "OC-030 names no migrated GUI file, so this guard would prove nothing"
+
+    list_helpers = ("get_visible_temperature_channels", "get_temperature_channels")
+    predicate_only: list[str] = []
+    for path in migrated:
+        assert path in indexed_paths, f"OC-030 names {path}, which is not in the frozen index"
+        blob = contents.get(path)
+        assert blob is not None, f"no frozen-index blob for {path}"
+        source = blob.decode("utf-8")
+        if not any(helper in source for helper in list_helpers) and "is_temperature_channel" in source:
+            predicate_only.append(path)
+
+    # The claim the row must not ASSERT again. The row is allowed to QUOTE it in
+    # order to record that it was false -- repudiating a past claim is what this
+    # register is for, and a guard that forbade the words outright would forbid
+    # the correction along with the error. So an occurrence is accepted only
+    # when the same sentence marks it false; a bare restatement is not.
+    claim = "every migrated screen calls `get_visible_temperature_channels()`"
+    for match in re.finditer(re.escape(claim), oc_030):
+        window = oc_030[match.end() : match.end() + 160]
+        assert "false" in window.lower(), (
+            "OC-030 asserts that every migrated screen calls the visible-list helper, without marking it "
+            f"false within the same sentence. These call only the per-channel predicate: {predicate_only}"
+        )
+
+    # And the files that make it false must be named where the parity is quoted.
+    for path in predicate_only:
+        leaf = path.rsplit("/", 1)[-1]
+        assert leaf in oc_030, (
+            f"{path} calls only `is_temperature_channel` and never a list helper, so the 16-for-16 and "
+            f"24-for-24 parities do not cover it, but OC-030 does not name {leaf} in its evidence"
+        )
