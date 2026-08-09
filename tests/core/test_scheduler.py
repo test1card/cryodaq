@@ -7,6 +7,9 @@ import asyncio
 import pytest
 
 from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker
+from cryodaq.core.interlock import InterlockCondition, InterlockEngine
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers import registry as driver_registry
 from cryodaq.drivers.base import InstrumentDriver, Reading
@@ -17,6 +20,7 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     _issue_registry_runtime_binding,
 )
+from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
 # ---------------------------------------------------------------------------
 # Concrete mock driver for use in all scheduler tests
@@ -287,6 +291,151 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
     assert max_concurrent == 1, (
         f"GPIB connects must be sequential (max concurrent=1), got {max_concurrent}. connect_order={connect_order}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OC-041: a shared-bus read failure must feed the interlock fail-closed path
+# ---------------------------------------------------------------------------
+
+
+async def test_shared_bus_read_failure_faults_interlock_protected_zone() -> None:
+    """The real shared-bus scheduler must publish failed-poll samples.
+
+    A LakeShore/GPIB-style driver which raises on every poll must drive the
+    actual InterlockEngine and SafetyManager to FAULT_LATCHED.  Without that
+    scheduler publication, ``overheat_cryostat`` stays armed because the
+    interlock engine receives no samples at all.
+    """
+
+    class FailingTemperatureDriver(LakeShore218S):
+        async def read_channels(self) -> list[Reading]:
+            self.read_calls += 1
+            raise OSError("simulated GPIB read failure")
+
+    poll_interval_s = 0.01
+    min_samples = 5
+    # The failure window is derived from the configured device cadence: five
+    # failed polls span four configured intervals, not a scheduler constant.
+    min_duration_s = poll_interval_s * (min_samples - 1)
+    broker = DataBroker()
+    safety_broker = SafetyBroker()
+    safety = SafetyManager(safety_broker, keithley_driver=None, mock=True)
+    safety._config.require_keithley_for_run = False
+    await safety.start()
+    scheduler: Scheduler | None = None
+    interlocks: InterlockEngine | None = None
+    try:
+        safety._config.critical_channels = []
+        await safety_broker.publish(Reading.now("Т11 Теплообменник 1", 4.5, "K", instrument_id="healthy"))
+        await asyncio.sleep(1.5)
+        assert (await safety.request_run(0.5, 40.0, 1.0))["ok"] is True
+        assert safety.state is SafetyState.RUNNING
+        fault_latched = asyncio.Event()
+
+        async def dead_channel_handler(condition: InterlockCondition, reading: Reading) -> bool:
+            latched = await safety.on_interlock_dead_channel(condition.name, reading.channel, value=reading.value)
+            if latched:
+                fault_latched.set()
+            return latched
+
+        async def no_op() -> None:
+            return None
+
+        interlocks = InterlockEngine(
+            broker,
+            actions={"emergency_off": no_op},
+            dead_channel_handler=dead_channel_handler,
+        )
+        interlocks.add_condition(
+            InterlockCondition(
+                name="overheat_cryostat",
+                description="Cryostat overheat",
+                channel_pattern=r"Т[1-8]$|Т[1-8] .*",
+                threshold=350.0,
+                comparison=">",
+                action="emergency_off",
+            )
+        )
+        interlocks._nonusable_min_samples = min_samples
+        interlocks._nonusable_min_duration_s = min_duration_s
+        await interlocks.start()
+
+        driver = FailingTemperatureDriver(
+            "LS218_1",
+            "GPIB0::12::INSTR",
+            channel_labels={1: "Т1 Криостат верх"},
+            mock=True,
+        )
+        driver.read_calls = 0
+        scheduler = Scheduler(
+            broker,
+            safety_broker=safety_broker,
+            publish_unpersisted_readings=True,
+        )
+        scheduler.add(InstrumentConfig(driver=driver, runtime_binding=_bus_binding(driver, "GPIB0", poll_interval_s)))
+        await scheduler.start()
+
+        await asyncio.wait_for(fault_latched.wait(), timeout=2.0)
+        assert safety.state is SafetyState.FAULT_LATCHED
+    finally:
+        if scheduler is not None:
+            await scheduler.stop()
+        if interlocks is not None:
+            await interlocks.stop()
+        await safety.stop()
+
+
+async def test_shared_bus_healthy_slow_poll_does_not_escalate() -> None:
+    """A configured slow but healthy poll only supplies usable samples."""
+
+    poll_interval_s = 0.06
+    min_samples = 5
+    min_duration_s = poll_interval_s * (min_samples - 1)
+    broker = DataBroker()
+    escalated = asyncio.Event()
+
+    async def dead_channel_handler(_condition: InterlockCondition, _reading: Reading) -> bool:
+        escalated.set()
+        return True
+
+    async def no_op() -> None:
+        return None
+
+    interlocks = InterlockEngine(
+        broker,
+        actions={"emergency_off": no_op},
+        dead_channel_handler=dead_channel_handler,
+    )
+    interlocks.add_condition(
+        InterlockCondition(
+            name="overheat_cryostat",
+            description="Cryostat overheat",
+            channel_pattern=r"Т1$|Т1 .*",
+            threshold=350.0,
+            comparison=">",
+            action="emergency_off",
+        )
+    )
+    interlocks._nonusable_min_samples = min_samples
+    interlocks._nonusable_min_duration_s = min_duration_s
+    await interlocks.start()
+    scheduler = Scheduler(broker, publish_unpersisted_readings=True)
+
+    class SlowHealthyDriver(MockDriver):
+        async def read_channels(self) -> list[Reading]:
+            self.read_calls += 1
+            return [Reading.now("Т1 Криостат верх", 4.2, "K", instrument_id=self.name)]
+
+    driver = SlowHealthyDriver("LS218_1")
+    scheduler.add(InstrumentConfig(driver=driver, runtime_binding=_bus_binding(driver, "GPIB0", poll_interval_s)))
+    try:
+        await scheduler.start()
+        await asyncio.sleep(min_duration_s + poll_interval_s)
+        assert driver.read_calls >= 2
+        assert not escalated.is_set(), "healthy configured slow polls must not be treated as instrument silence"
+    finally:
+        await scheduler.stop()
+        await interlocks.stop()
 
 
 # ---------------------------------------------------------------------------

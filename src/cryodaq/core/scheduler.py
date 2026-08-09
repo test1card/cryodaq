@@ -847,6 +847,7 @@ class Scheduler:
                     await self._settle_reviewed_read_uncertainty(state, "standalone read timeout")
                 state.consecutive_errors += 1
                 state.total_errors += 1
+                await self._publish_failed_poll_readings(state)
                 logger.warning(
                     "Таймаут опроса '%s' (%.1fs), ошибок подряд: %d",
                     name,
@@ -872,6 +873,7 @@ class Scheduler:
                     await self._settle_reviewed_read_uncertainty(state, "standalone read error")
                 state.consecutive_errors += 1
                 state.total_errors += 1
+                await self._publish_failed_poll_readings(state)
                 logger.warning("Ошибка опроса '%s', ошибок подряд: %d", name, state.consecutive_errors)
                 if reviewed:
                     await self._backoff(state, max_s=_STANDALONE_MAX_BACKOFF_S)
@@ -1115,6 +1117,7 @@ class Scheduler:
                         failures += 1
                         state.consecutive_errors += 1
                         state.total_errors += 1
+                        await self._publish_failed_poll_readings(state)
                         next_eligible[driver.name] = clock() + recovery_backoff[driver.name]
                         continue
                 if reviewed and (
@@ -1202,6 +1205,7 @@ class Scheduler:
                     failures += 1
                     state.consecutive_errors += 1
                     state.total_errors += 1
+                    await self._publish_failed_poll_readings(state)
                     binding = cfg.runtime_binding
                     if (
                         binding is not None
@@ -1272,7 +1276,19 @@ class Scheduler:
                         correlated_failures = 0
                         ifc_succeeded = False
 
-    async def _process_readings(self, state: _InstrumentState, readings: list[Any]) -> None:
+    async def _publish_failed_poll_readings(self, state: _InstrumentState) -> None:
+        """Publish fixed-inventory failed-poll samples without transport I/O."""
+        readings = state.config.driver.failure_readings()
+        if readings:
+            await self._process_readings(state, readings, successful_poll=False)
+
+    async def _process_readings(
+        self,
+        state: _InstrumentState,
+        readings: list[Any],
+        *,
+        successful_poll: bool = True,
+    ) -> None:
         """Persist, calibrate, and publish readings — shared by both loop types."""
         driver = state.config.driver
         name = driver.name
@@ -1290,9 +1306,10 @@ class Scheduler:
         persisted_readings = list(readings)
         if self._adaptive_throttle is not None:
             persisted_readings = self._adaptive_throttle.filter_for_archive(readings)
-        state.total_reads += 1
-        state.consecutive_errors = 0
-        state.backoff_s = INITIAL_BACKOFF_S
+        if successful_poll:
+            state.total_reads += 1
+            state.consecutive_errors = 0
+            state.backoff_s = INITIAL_BACKOFF_S
 
         if self._sqlite_writer is None and not self._publish_unpersisted_readings:
             if not self._missing_persistence_reported:

@@ -110,6 +110,14 @@ class InstrumentDriver(ABC):
         async with self._lock:
             return await self.read_channels()
 
+    def failure_readings(self) -> list[Reading]:
+        """Return current non-usable readings when a whole poll fails.
+
+        This hook performs no I/O. Drivers with a fixed channel inventory
+        override it so Scheduler can publish a failed poll normally.
+        """
+        return []
+
     async def __aenter__(self) -> InstrumentDriver:
         await self.connect()
         return self
