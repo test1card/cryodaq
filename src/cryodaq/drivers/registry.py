@@ -7,6 +7,7 @@ authority; only a binding on the reviewed-source roster below can do so.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import math
 import re
@@ -523,6 +524,38 @@ del _PASSIVE_SPECS, _SOURCE_SPECS
 ALLOWLISTED_DRIVER_MODULES: Final[tuple[str, ...]] = tuple(
     sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values())
 )
+
+
+def verify_allowlisted_driver_imports() -> tuple[str, ...]:
+    """Import every registered driver and resolve its declared implementation class.
+
+    This is deliberately opt-in so importing the registry remains inert during
+    ordinary startup. The frozen entry point also calls this verifier from a
+    dedicated smoke mode, where a missing PyInstaller hidden import becomes a
+    process failure instead of a silently unavailable instrument.
+    """
+
+    verified: list[str] = []
+    seen_modules: set[str] = set()
+    for type_name, spec in BUILTIN_DRIVER_SPECS.items():
+        if spec.module in seen_modules:
+            raise DriverRegistryError(f"allowlisted driver module is duplicated: {spec.module!r}")
+        seen_modules.add(spec.module)
+        try:
+            module = importlib.import_module(spec.module)
+        except Exception as exc:
+            raise DriverRegistryError(
+                f"allowlisted driver {type_name!r} failed to import {spec.module!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+        implementation = getattr(module, spec.class_name, None)
+        if not isinstance(implementation, type) or not issubclass(implementation, InstrumentDriver):
+            raise DriverRegistryError(
+                f"allowlisted driver {type_name!r} does not resolve "
+                f"{spec.module}.{spec.class_name} to an InstrumentDriver class"
+            )
+        verified.append(spec.module)
+    return tuple(sorted(verified))
+
 
 # The authoritative inert capability table lives in
 # cryodaq.drivers.capability_metadata so downstream consumers can import
