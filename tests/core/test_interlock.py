@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.interlock import (
     InterlockCondition,
@@ -16,6 +17,9 @@ from cryodaq.core.interlock import (
     InterlockState,
 )
 from cryodaq.drivers.base import Reading
+from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+
+_DESCRIPTORS_PATH = Path(__file__).resolve().parents[2] / "config" / "channel_descriptors.yaml"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,7 +29,7 @@ from cryodaq.drivers.base import Reading
 def _make_condition(
     name: str = "high_temp",
     description: str = "Temperature too high",
-    channel_pattern: str = r"T\d+",
+    channel_ids: frozenset[str] = frozenset({"T1"}),
     threshold: float = 300.0,
     comparison: str = ">",
     action: str = "emergency_off",
@@ -34,11 +38,40 @@ def _make_condition(
     return InterlockCondition(
         name=name,
         description=description,
-        channel_pattern=channel_pattern,
+        channel_ids=channel_ids,
         threshold=threshold,
         comparison=comparison,
         action=action,
         cooldown_s=cooldown_s,
+    )
+
+
+def _descriptor_catalog():
+    return load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH)
+
+
+async def _publish_bound_sensor(
+    broker: DataBroker,
+    catalog,
+    *,
+    instrument_id: str,
+    source_key: str,
+    value: float,
+) -> None:
+    descriptor = catalog.storage_catalog_snapshot().by_source[(instrument_id, source_key)]
+    emitted_channel = catalog.emitted_channel_for_channel_id(descriptor.channel_id)
+    bound = catalog.bind(
+        Reading.now(
+            emitted_channel,
+            value,
+            descriptor.unit,
+            instrument_id=instrument_id,
+        )
+    )
+    await broker.publish(
+        bound.reading,
+        persistence_authoritative=True,
+        descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(bound.descriptor).canonical_json,
     )
 
 
@@ -225,7 +258,7 @@ async def test_action_called_async() -> None:
         InterlockCondition(
             name="cond_a",
             description="Condition A on T1",
-            channel_pattern=r"T1",
+            channel_ids=frozenset({"T1"}),
             threshold=300.0,
             comparison=">",
             action="action_a",
@@ -236,7 +269,7 @@ async def test_action_called_async() -> None:
         InterlockCondition(
             name="cond_b",
             description="Condition B on T2",
-            channel_pattern=r"T2",
+            channel_ids=frozenset({"T2"}),
             threshold=300.0,
             comparison=">",
             action="action_b",
@@ -271,14 +304,20 @@ async def test_action_called_async() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Regex channel_pattern matches correct channels
+# 5. Declared channel IDs match the intended channels
 # ---------------------------------------------------------------------------
 
 
-async def test_regex_channel_matching() -> None:
+async def test_declared_channel_ids_match() -> None:
     broker, engine, called = await _make_engine()
-    # Pattern matches T1 through T8
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    # The declared set covers T1 through T8.
+    engine.add_condition(
+        _make_condition(
+            channel_ids=frozenset({"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"}),
+            threshold=300.0,
+            comparison=">",
+        )
+    )
 
     await broker.publish(Reading.now("T5", 350.0, "K", instrument_id="test"))
     await asyncio.sleep(0.05)
@@ -294,11 +333,17 @@ async def test_regex_channel_matching() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_regex_no_match_ignored() -> None:
+async def test_undeclared_channel_id_ignored() -> None:
     broker, engine, called = await _make_engine()
-    engine.add_condition(_make_condition(channel_pattern=r"T[1-8]", threshold=300.0, comparison=">"))
+    engine.add_condition(
+        _make_condition(
+            channel_ids=frozenset({"T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8"}),
+            threshold=300.0,
+            comparison=">",
+        )
+    )
 
-    # "PRESSURE_1" does not match T[1-8]
+    # "PRESSURE_1" is outside the declared set.
     await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
     await asyncio.sleep(0.05)
 
@@ -338,7 +383,7 @@ async def test_greater_than_comparison() -> None:
 
 async def test_less_than_comparison() -> None:
     broker, engine, called = await _make_engine()
-    engine.add_condition(_make_condition(threshold=2.0, comparison="<", channel_pattern=r"T\d+"))
+    engine.add_condition(_make_condition(threshold=2.0, comparison="<", channel_ids=frozenset({"T1"})))
 
     # Value above threshold — should NOT trip
     await broker.publish(Reading.now("T1", 3.0, "K", instrument_id="test"))
@@ -417,13 +462,13 @@ async def test_event_history_bounded() -> None:
 
 
 async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
-    """load_config must parse threshold, comparison, channel_pattern, action, and cooldown_s.
+    """load_config must parse binding, threshold, comparison, action, and cooldown_s.
 
     All fields are verified BEHAVIORALLY — no private internals accessed:
-    1. A reading that matches the pattern AND exceeds the threshold trips the interlock
+        1. A reading on the bound channel AND above threshold trips the interlock
        and fires the action.
-    2. A reading on a non-matching channel does NOT trip.
-    3. After acknowledging and re-arming, a second matching reading within the cooldown
+    2. A reading on an unbound channel does NOT trip.
+    3. After acknowledging and re-arming, a second bound reading within the cooldown
        window still PROTECTS (re-trips + re-runs the action) but the loud trip
        announcement is deduplicated — proving cooldown_s was loaded and is active.
     """
@@ -432,7 +477,7 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
             {
                 "name": "overheat",
                 "description": "Overheating protection",
-                "channel_pattern": r"T\d+",
+                "channel_bindings": [{"instrument_id": "LS218_1", "source_key": "input.5.temperature"}],
                 "threshold": 400.0,
                 "comparison": ">",
                 "action": "emergency_off",
@@ -450,7 +495,8 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
 
     broker = DataBroker()
     engine = InterlockEngine(broker=broker, actions={"emergency_off": _action})
-    engine.load_config(config_file)
+    descriptor_catalog = _descriptor_catalog()
+    engine.load_config(config_file, descriptor_catalog=descriptor_catalog)
 
     # Interlock must be registered and start ARMED
     states = engine.get_state()
@@ -460,10 +506,16 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
     await engine.start()
     try:
         # --- Behavioral check 1: matching channel + above threshold → TRIPPED, action fired ---
-        await broker.publish(Reading.now("T5", 450.0, "K", instrument_id="test"))
+        await _publish_bound_sensor(
+            broker,
+            descriptor_catalog,
+            instrument_id="LS218_1",
+            source_key="input.5.temperature",
+            value=450.0,
+        )
         await asyncio.sleep(0.05)
         assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
-            "Interlock loaded from YAML did not trip on T5=450 > 400 (threshold not loaded)"
+            "Interlock loaded from YAML did not trip on bound Т5=450 > 400 (threshold not loaded)"
         )
         assert action_count[0] == 1, "YAML-loaded action was not called on first trip"
 
@@ -472,12 +524,12 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
         engine.acknowledge("overheat")
         await asyncio.sleep(0.01)
         assert engine.get_state()["overheat"] == InterlockState.ARMED, "Expected ARMED after acknowledge()"
-        # "PRESSURE_1" does not match r"T\d+" — must stay ARMED (not re-tripped)
+        # "PRESSURE_1" is not the declared sensor — must stay ARMED (not re-tripped)
         await broker.publish(Reading.now("PRESSURE_1", 9999.0, "Pa", instrument_id="test"))
         await asyncio.sleep(0.05)
         assert engine.get_state()["overheat"] == InterlockState.ARMED, (
             "Non-matching channel 'PRESSURE_1' unexpectedly tripped 'overheat' "
-            "(channel_pattern may not have been loaded)"
+            "(declared binding may not have been loaded)"
         )
 
         # --- Behavioral check 3: cooldown_s loaded → re-trip within the window
@@ -487,7 +539,13 @@ async def test_load_config_yaml(tmp_path: Path, caplog) -> None:
 
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="cryodaq.core.interlock"):
-            await broker.publish(Reading.now("T5", 450.0, "K", instrument_id="test"))
+            await _publish_bound_sensor(
+                broker,
+                descriptor_catalog,
+                instrument_id="LS218_1",
+                source_key="input.5.temperature",
+                value=450.0,
+            )
             await asyncio.sleep(0.05)
         # Protection is NOT blinded by the cooldown — it re-trips and re-acts.
         assert engine.get_state()["overheat"] == InterlockState.TRIPPED, (
@@ -567,7 +625,7 @@ async def test_detector_warmup_pattern_matches_full_channel() -> None:
     engine.add_condition(
         _make_condition(
             name="detector_warmup",
-            channel_pattern="\u042212 .*",
+            channel_ids=frozenset({full_name}),
             threshold=300.0,
             comparison=">",
         )
@@ -606,7 +664,7 @@ async def test_multiple_interlocks() -> None:
         InterlockCondition(
             name="lock_a",
             description="High T",
-            channel_pattern=r"T\d+",
+            channel_ids=frozenset({"T3"}),
             threshold=300.0,
             comparison=">",
             action="action_a",
@@ -617,7 +675,7 @@ async def test_multiple_interlocks() -> None:
         InterlockCondition(
             name="lock_b",
             description="Low pressure",
-            channel_pattern=r"PRESSURE_\d+",
+            channel_ids=frozenset({"PRESSURE_1"}),
             threshold=1e-5,
             comparison="<",
             action="action_b",
@@ -681,7 +739,7 @@ def test_interlock_valid_config_loads(tmp_path):
                     {
                         "name": "test_lock",
                         "description": "test",
-                        "channel_pattern": "Т1 .*",
+                        "channel_bindings": [{"instrument_id": "LS218_1", "source_key": "input.1.temperature"}],
                         "threshold": 350.0,
                         "comparison": ">",
                         "action": "emergency_off",
@@ -697,5 +755,5 @@ def test_interlock_valid_config_loads(tmp_path):
         broker=None,
         actions={"emergency_off": lambda: None},
     )
-    engine.load_config(cfg)
+    engine.load_config(cfg, descriptor_catalog=_descriptor_catalog())
     assert len(engine.get_state()) == 1
