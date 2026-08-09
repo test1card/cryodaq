@@ -657,6 +657,25 @@ async def test_query_agent_format_alarm_with_active_alarms() -> None:
     assert "WARNING" in captured_prompt[0]
 
 
+async def test_query_agent_router_failure_is_operator_visible() -> None:
+    adapters = _make_adapters()
+    adapters.cooldown.eta = AsyncMock(side_effect=RuntimeError("service down"))
+    ollama = MagicMock()
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("eta_cooldown")),
+            _make_gen_result("No forecast."),
+        ]
+    )
+
+    agent = _make_agent(ollama, adapters)
+    response = await agent.handle_query("Is a cooldown forecast available?")
+
+    assert response == _FALLBACK
+    assert ollama.generate.await_count == 1
+    assert agent._audit.log.await_args.kwargs["errors"] == ["query_context_unavailable"]
+
+
 async def test_query_agent_failed_alarm_transport_formats_unavailable() -> None:
     """A failed engine alarm query must not format as an empty alarm set."""
     adapters = _make_adapters()
