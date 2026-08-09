@@ -1259,6 +1259,35 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
     assert summary["manifest_sha256"].startswith("sha256:")
 
 
+@pytest.mark.parametrize("profile_name", ["12h", "72h"])
+def test_cli_distinguishes_defined_but_unactivated_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    profile_name: str,
+) -> None:
+    from scripts import soak_mock_stack_runner as runner
+
+    class PlatformOnly:
+        @staticmethod
+        def require_platform() -> None:
+            return None
+
+        def __init__(self) -> None:
+            pytest.fail("an unactivated long profile must not construct the short-profile runner")
+
+    monkeypatch.setattr(runner, "_PosixSoakRunner", PlatformOnly)
+    evidence_dir = tmp_path / profile_name
+
+    assert soak.main(["--profile", profile_name, "--evidence-dir", str(evidence_dir)]) == 3
+    assert capsys.readouterr().err == (
+        f"soak profile {profile_name!r} is defined but not activated: "
+        "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
+        "long-duration evidence remains open\n"
+    )
+    assert not evidence_dir.exists()
+
+
 @_POSIX_EVIDENCE
 def test_module_entrypoint_preserves_exact_evidence_type(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]

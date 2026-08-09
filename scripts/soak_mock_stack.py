@@ -2627,7 +2627,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except runner._RunnerActivationDisabled:
         return 2
     if selected.name != "short":
-        return 2
+        print(
+            f"soak profile {selected.name!r} is defined but not activated: "
+            "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
+            "long-duration evidence remains open",
+            file=sys.stderr,
+        )
+        return 3
     try:
         evidence = Evidence(args.evidence_dir or _default_evidence_dir(selected))
     except (FileExistsError, EvidenceCapabilityError):
