@@ -42,6 +42,22 @@ _BUTTON_HEIGHT_PX = 28
 _DURATION_UPDATE_MS = 1000
 
 
+def _source_monotonic_stamp(reading) -> float:
+    receipt = time.monotonic()
+    source_timestamp = getattr(reading, "timestamp", None)
+    if (
+        isinstance(source_timestamp, datetime)
+        and source_timestamp.tzinfo is not None
+        and source_timestamp.utcoffset() is not None
+    ):
+        source_age_s = (datetime.now(UTC) - source_timestamp.astimezone(UTC)).total_seconds()
+        # A future source clock must not postpone expiry beyond receipt time.
+        return receipt - max(0.0, source_age_s)
+    # Compatibility readings without a usable source timestamp fall back to
+    # receipt time; they still expire normally, but queue delay is unknowable.
+    return receipt
+
+
 class PhaseAwareWidget(QWidget):
     """Compact dashboard phase strip: stepper + inline context + controls."""
 
@@ -68,10 +84,11 @@ class PhaseAwareWidget(QWidget):
         self._cached_r_thermal: float | None = None
         self._cached_pressure: float | None = None
         self._last_context_text: str = ""
-        # WHEN each cached analytics value last arrived. Without this the
+        # Monotonic equivalents of source production time. Without these, the
         # values were revoked only by an experiment CHANGE, so a producer that
         # died inside a live experiment left its last number rendering as
-        # current for as long as the window stayed open -- OC-004 exactly.
+        # current for as long as the window stayed open. Source age also keeps
+        # queued deliveries from being blessed as new on receipt.
         self._cached_at: dict[str, float] = {}
 
         self._build_ui()
@@ -395,15 +412,15 @@ class PhaseAwareWidget(QWidget):
             return
         if channel.endswith("/cooldown_eta"):
             self._cached_eta_s = value * 3600 if value > 0 else None
-            self._cached_at["eta"] = time.monotonic()
+            self._cached_at["eta"] = _source_monotonic_stamp(reading)
             self._refresh_context_label()
         elif channel.endswith("/R_thermal"):
             self._cached_r_thermal = value
-            self._cached_at["r_thermal"] = time.monotonic()
+            self._cached_at["r_thermal"] = _source_monotonic_stamp(reading)
             self._refresh_context_label()
         elif channel.endswith("/pressure"):
             self._cached_pressure = value
-            self._cached_at["pressure"] = time.monotonic()
+            self._cached_at["pressure"] = _source_monotonic_stamp(reading)
             self._refresh_context_label()
 
     # ------------------------------------------------------------------

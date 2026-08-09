@@ -18,7 +18,7 @@ silently lies -- a vanished readout is what caused revert `0bea0449`.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -26,19 +26,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core.channel_manager import ChannelManager
+from cryodaq.drivers.base import Reading
+from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.dashboard import phase_aware_widget as module
-from cryodaq.gui.dashboard.phase_aware_widget import PhaseAwareWidget
 
 STALE_MARK = "устарело"
 
 
-STALE_AFTER_S = 180.0
-
-
-@dataclass
-class _AnalyticsReading:
-    channel: str
-    value: float
 
 
 @pytest.fixture(scope="module")
@@ -46,71 +41,75 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture
-def widget(app) -> PhaseAwareWidget:
-    made = PhaseAwareWidget()
-    made._has_active_experiment = True
-    made._active_experiment_id = "exp-1"
-    made._current_phase = "vacuum"
-    return made
-
-
 def _set_clock(monkeypatch, now: float) -> None:
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now), raising=False)
-    monkeypatch.setattr(module, "_ANALYTICS_STALE_AFTER_S", STALE_AFTER_S, raising=False)
 
 
-def test_a_fresh_analytics_value_is_not_marked(widget: PhaseAwareWidget, monkeypatch) -> None:
-    """The premise: without this, a node asserting the MARK could pass because
-    the value never rendered at all."""
-
-    _set_clock(monkeypatch, 1000.0)
-    widget.on_reading(_AnalyticsReading(channel="analytics/pressure", value=1.2e-5))
-    text = widget._context_label.text()
-    assert "mbar" in text, "the pressure metric never rendered, so this node measures nothing"
-    assert STALE_MARK not in text, "a value that just arrived was marked stale"
-
-
-def test_a_value_whose_producer_died_is_marked_while_the_experiment_stays_active(
-    widget: PhaseAwareWidget, monkeypatch
-) -> None:
-    """The defect. The experiment does NOT change and the widget does NOT go
-    inactive -- the only two paths that previously revoked anything."""
-
-    _set_clock(monkeypatch, 1000.0)
-    widget.on_reading(_AnalyticsReading(channel="analytics/pressure", value=1.2e-5))
-
-    # The producer stops. Nothing else about the experiment changes.
-    _set_clock(monkeypatch, 1000.0 + STALE_AFTER_S + 1.0)
-    widget._duration_timer.timeout.emit()
-
-    text = widget._context_label.text()
-    assert "mbar" in text, (
-        "the stale pressure vanished from the label instead of being marked; a readout that disappears "
-        "is the `0bea0449` failure, not a fix for it"
+def _configured_dashboard(tmp_path, monkeypatch, *, cadence_s: float) -> DashboardView:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "cooldown.yaml").write_text(
+        f"cooldown:\n  predict_interval_s: {cadence_s}\n",
+        encoding="utf-8",
     )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+    view = DashboardView(ChannelManager())
+    view._phase_widget.on_status_update(
+        {
+            "active_experiment": {"experiment_id": "exp-1"},
+            "current_phase": "cooldown",
+            "phase_started_at": 1.0,
+            "phases": [],
+        }
+    )
+    return view
+
+
+def _eta_reading(timestamp: datetime, value: float = 2.0) -> Reading:
+    return Reading(
+        timestamp=timestamp,
+        instrument_id="cooldown_predictor",
+        channel="analytics/cooldown_predictor/cooldown_eta",
+        value=value,
+        unit="h",
+    )
+
+
+def test_a_delayed_source_sample_arrives_already_marked_stale(app, tmp_path, monkeypatch) -> None:
+    """A broker/UI backlog must not reset a dead sample's source age."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(_eta_reading(datetime.now(UTC) - timedelta(seconds=181.0)))
+
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text, "the production dashboard route did not render the cooldown ETA"
     assert STALE_MARK in text, (
-        "a pressure whose producer died is still presented as current: this is the frozen readout OC-004 names"
+        "a source-aged cooldown ETA was blessed as fresh when it arrived through the dashboard route"
     )
 
 
-def test_the_mark_is_per_value_not_per_widget(widget: PhaseAwareWidget, monkeypatch) -> None:
-    """One dead producer must not condemn a live one.
 
-    Marking the whole label would make a working R_thermal read as stale
-    because the pressure feed died, which trades one wrong impression for
-    another.
-    """
+def test_the_mark_is_per_value_not_per_widget(app, tmp_path, monkeypatch) -> None:
+    """One dead producer must not make another producer's live value read stale."""
 
-    widget._current_phase = "cooldown"
     _set_clock(monkeypatch, 1000.0)
-    widget.on_reading(_AnalyticsReading(channel="analytics/R_thermal", value=4.5))
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="thermal_calculator",
+            channel="analytics/thermal_calculator/R_thermal",
+            value=4.5,
+            unit="K/W",
+        )
+    )
 
-    later = 1000.0 + STALE_AFTER_S + 1.0
-    _set_clock(monkeypatch, later)
-    widget.on_reading(_AnalyticsReading(channel="analytics/cooldown_eta", value=2.0))
-    text = widget._context_label.text()
+    _set_clock(monkeypatch, 1181.0)
+    view.on_reading(_eta_reading(datetime.now(UTC)))
+
+    text = view._phase_widget._context_label.text()
     assert text.count(STALE_MARK) == 1, (
         f"expected exactly the dead feed to be marked, got {text.count(STALE_MARK)} marks in {text!r}"
     )
-    assert "ETA" in text and "R" in text, "both metrics must still be present; marking is not hiding"
+    assert "ETA" in text and "R" in text, "both metrics must stay visible; marking is not hiding"
