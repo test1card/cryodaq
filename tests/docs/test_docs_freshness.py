@@ -995,39 +995,30 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
                 c2 = importlib.import_module("test_c2_repo_wide_spelling_sweep")
             finally:
                 sys.path.remove(str(REPO_ROOT / "tests"))
-            # INTERPRETER-INDEPENDENT BY CONSTRUCTION. `_registry_errors`
-            # compares whole `_Challenge`s, and a challenge carries a SHA of
-            # `ast.dump(...)` text, which is not stable across Python versions:
-            # on the declared 3.12 floor every one of the 127 challenges can
-            # mismatch on fingerprint alone, and this assertion would then fail
-            # for a reason OC-030 is not about, before reaching the scoped
-            # checks below. That version instability is OC-031's open defect and
-            # is guarded by its own node, which pins the floor count.
+            # THE FINGERPRINT IS THE DISCRIMINATOR, AND IT STAYS. An earlier
+            # version of this block compared only (path, scope, reason) to make
+            # the assertion survive the declared 3.12 floor, where every
+            # challenge mismatches on fingerprint alone. That traded a TRUE
+            # failure for a FALSE PASS: 127 sites collapse to 94 distinct
+            # triples, 22 of them repeating, so replacing one policy with
+            # another at the same site -- `startswith("analytics/")` becoming
+            # `startswith("Т")` inside the same scope, with the same reason
+            # label -- left the multiset identical and this guard green. That
+            # substitution is exactly the escape OC-031 records, and the
+            # fingerprint is the only thing in a challenge that sees it.
             #
-            # What THIS guard is for is correspondence: a detected site that is
-            # unregistered, or a registration whose site is gone. That property
-            # lives in (path, scope, reason) and does not depend on the
-            # interpreter, so it is compared without the fingerprint. A drift in
-            # fingerprint alone otherwise appears here as a PAIRED
-            # unexpected+missing entry for the same site and reads as a
-            # regression.
-            sites = c2._sites(REPO_ROOT)
-
-            def _correspondence(challenge: object) -> tuple[str, str, str]:
-                return (
-                    challenge.path.replace("\\", "/"),  # type: ignore[attr-defined]
-                    challenge.scope,  # type: ignore[attr-defined]
-                    challenge.reason,  # type: ignore[attr-defined]
-                )
-
-            registered = Counter(_correspondence(entry.challenge) for entry in c2._REGISTRY)
-            detected = Counter(_correspondence(site.challenge) for site in sites)
-            unregistered = sorted(f"{path}::{scope} ({reason})" for path, scope, reason in (detected - registered))
-            vanished = sorted(f"{path}::{scope} ({reason})" for path, scope, reason in (registered - detected))
-            assert not unregistered and not vanished, (
-                "OC-030 reports the migration complete, but the C2 sweep registry does not correspond to the "
-                "live tree: a detected site is unregistered, or a registration no longer has a site",
-                {"unregistered": unregistered[:10], "vanished": vanished[:10]},
+            # So whole challenges are compared again. On the 3.12 floor this
+            # node fails, and that failure is TRUE: the registry genuinely
+            # cannot be validated on an interpreter whose `ast.dump` text
+            # differs, which is OC-031's open defect and is pinned by its own
+            # node. Making this pass there would mean asserting a property
+            # nobody measured.
+            registry_errors = c2._registry_errors(c2._sites(REPO_ROOT))
+            assert registry_errors == [], (
+                "OC-030 reports the migration complete, but the C2 sweep registry is not exact: a detected "
+                "site is unregistered, a registration no longer has a site, or a registered site changed "
+                "policy shape. On Python 3.12 this also fires for OC-031's recorded fingerprint instability",
+                [str(error)[:160] for error in registry_errors],
             )
             # EVERY NON-LEGITIMATE BUCKET COUNTS, not just the live-defect one.
             # `LIVE-C2-PRODUCT-DEFECT` is currently empty by construction, so
@@ -2978,10 +2969,20 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
             f"false within the same sentence. These call only the per-channel predicate: {predicate_only}"
         )
 
-    # And the files that make it false must be named where the parity is quoted.
-    for path in predicate_only:
-        leaf = path.rsplit("/", 1)[-1]
-        assert leaf in oc_030, (
-            f"{path} calls only `is_temperature_channel` and never a list helper, so the 16-for-16 and "
-            f"24-for-24 parities do not cover it, but OC-030 does not name {leaf} in its evidence"
-        )
+    # BOTH CATEGORIES, COMPARED EXACTLY. An earlier version of this node only
+    # required each predicate-only filename to appear SOMEWHERE in the row --
+    # and every migrated filename already appears there, in the migration
+    # inventory. So deleting the whole per-file breakdown left it green, and a
+    # file that started calling a list helper would not have moved it either.
+    # It asserted the presence of words rather than the truth of a claim.
+    #
+    # The row therefore carries an explicit inventory that this parses, and the
+    # two sides must agree in both directions. `list` means the file calls a
+    # list helper; `predicate` means it calls only `is_temperature_channel`.
+    declared = dict(re.findall(r"`([A-Za-z0-9_]+\.py)`=(list|predicate)\b", oc_030))
+    measured = {path.rsplit("/", 1)[-1]: ("predicate" if path in predicate_only else "list") for path in migrated}
+    assert declared == measured, (
+        "OC-030's selector inventory disagrees with the tree. A file marked `list` calls a list helper; "
+        "`predicate` means it calls only `is_temperature_channel`, so the 16-for-16 and 24-for-24 parities "
+        f"do not cover it. declared={declared}, measured={measured}"
+    )
