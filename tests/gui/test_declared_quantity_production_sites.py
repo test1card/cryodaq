@@ -337,3 +337,58 @@ def test_the_analytics_cutoff_changes_membership_not_only_order(
         "a channel DECLARED as pressure occupies one of the twelve temperature-first slots because its "
         "name starts with Cyrillic Те"
     )
+
+
+def test_archived_history_is_not_displaced_by_an_absent_declaration(
+    app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed experiment must summarise the same after an unrelated config edit.
+
+    This widget summarises ARCHIVED history, and `readings_history` supplies
+    names and point pairs with no descriptor. Classifying a channel the current
+    configuration has never heard of as "not a temperature" demoted it behind
+    today's declared channels and, past the twelve-row cutoff, dropped it — so
+    the same finished experiment produced a different summary after someone
+    edited `channels.yaml`.
+
+    The pre-OC-030 code avoided this for the wrong reason: it tested the archived
+    NAME, which needs no configuration at all. Migrating to a declared quantity
+    is correct and it introduced the dependency, so an ABSENT declaration now
+    ranks ahead of a declared non-temperature rather than being pushed off the
+    end of the list.
+    """
+
+    from cryodaq.gui.shell.views import analytics_widgets
+
+    # Twelve DECLARED pressure channels, so the archived channel is competing
+    # against declarations rather than against other unknowns.
+    payload = {
+        "default_quantity": "temperature",
+        "channels": {
+            f"P{n:02d}": {"name": f"давление {n}", "visible": True, "quantity": "pressure"} for n in range(12)
+        },
+    }
+    target = tmp_path / "channels.yaml"
+    target.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
+    manager = ChannelManager(target)
+    manager.load()
+    monkeypatch.setattr(analytics_widgets, "get_channel_manager", lambda: manager)
+    widget = analytics_widgets.ExperimentSummaryWidget()
+
+    # Sorts AFTER every declared name, or alphabetical ordering alone saves it
+    # and this node passes without exercising the cutoff. My first version used
+    # "ARCHIVED_..." and the control proved it green against the defect.
+    archived = "ZZ_ARCHIVED_STAGE_7"
+    assert manager.get_quantity(archived) is None, "premise: the current configuration must not know it"
+
+    data = {ch: [(0.0, 1.0)] for ch in payload["channels"]}
+    data[archived] = [(0.0, 42.0)]
+    assert len(data) == 13, "premise: more channels than the twelve-slot cutoff"
+
+    widget._on_stats_loaded({"ok": True, "data": data})
+    rendered = widget._stats_label.text()
+
+    assert archived in rendered, (
+        "archived history was displaced off the summary by channels the current configuration happens to "
+        "declare; a finished experiment must not re-summarise because channels.yaml was edited"
+    )

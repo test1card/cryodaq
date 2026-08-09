@@ -280,3 +280,31 @@ def test_a_refused_reload_leaves_the_live_channel_set_untouched(tmp_path: Path) 
 
     assert list(manager.get_all()) == before_channels, "a refused reload replaced the live channel set"
     assert manager.get_quantity("Т1") == before_quantity, "a refused reload changed what the live channels declare"
+
+
+def test_a_refused_reload_does_not_adopt_the_rejected_path(tmp_path: Path) -> None:
+    """The path is state, and a refused `load(new_path)` must not keep it.
+
+    `self._config_path = path` ran before any validation, so a reload that
+    REFUSED still left the manager pointing at the rejected file. The next
+    argument-less `load()` — and every `save()` — would then target a
+    configuration the instrument had already declined, which is how a rejected
+    file becomes the live one by a route nobody wrote down.
+    """
+
+    good = tmp_path / "good"
+    good.mkdir()
+    manager = _manager(good, {"default_quantity": "temperature", "channels": {"Т1": {"name": "one"}}})
+    original_path = manager._config_path
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        yaml.safe_dump({"default_quantity": 12345, "channels": {"Т9": {"name": "nine"}}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    with pytest.raises(ChannelConfigError):
+        manager.load(bad)
+
+    assert manager._config_path == original_path, "a refused reload adopted the rejected path"
+    # And the refusal must not have disturbed what the manager serves.
+    assert list(manager.get_all()) == ["Т1"]

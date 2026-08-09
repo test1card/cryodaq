@@ -87,29 +87,33 @@ class ChannelManager:
         Raises ChannelConfigError on missing file, malformed YAML, or
         missing 'channels' key. Fail-closed: no silent fallback to defaults.
         """
-        if path is not None:
-            self._config_path = path
+        # THE SELECTED PATH IS STATE TOO, and committing it early was the half of
+        # this defect my first fix missed. `self._config_path = path` ran before
+        # any validation, so a `load(new_path)` that REFUSED still left the
+        # manager pointing at the rejected file — the next argument-less
+        # `load()`, and every `save()`, would then target a configuration the
+        # instrument had already declined. Nothing is committed until the whole
+        # file validates.
+        candidate_path = self._config_path if path is None else path
 
-        if not self._config_path.exists():
+        if not candidate_path.exists():
             raise ChannelConfigError(
-                f"channels.yaml not found at {self._config_path} — refusing to start without channel configuration"
+                f"channels.yaml not found at {candidate_path} — refusing to start without channel configuration"
             )
         try:
-            with self._config_path.open(encoding="utf-8") as fh:
+            with candidate_path.open(encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh)
         except yaml.YAMLError as exc:
-            raise ChannelConfigError(f"channels.yaml at {self._config_path}: YAML parse error — {exc}") from exc
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: YAML parse error — {exc}") from exc
 
         if not isinstance(raw, dict):
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: expected mapping, got {type(raw).__name__}"
-            )
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: expected mapping, got {type(raw).__name__}")
         channels = raw.get("channels")
         if not isinstance(channels, dict):
-            raise ChannelConfigError(f"channels.yaml at {self._config_path}: missing or invalid 'channels' key")
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: missing or invalid 'channels' key")
         declared_default = raw.get("default_quantity")
         if declared_default is not None and not isinstance(declared_default, str):
-            raise ChannelConfigError(f"channels.yaml at {self._config_path}: default_quantity must be a string")
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: default_quantity must be a string")
         # EVERY CHECK BEFORE ANY MUTATION. `self._channels` used to be replaced
         # on the line above this validation, so a RELOAD of a file with valid
         # `channels` and a malformed `default_quantity` raised only after the
@@ -117,6 +121,7 @@ class ChannelManager:
         # the new channels under the old declaration, which is a configuration
         # no file on disk describes. A reload that refuses must leave the
         # running instrument exactly as it was.
+        self._config_path = candidate_path
         self._channels = channels
         self._default_quantity = declared_default
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
