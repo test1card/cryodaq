@@ -99,6 +99,43 @@ def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
         smoke._parse_frozen_driver_import_payload(incomplete_stdout)
 
 
+def test_frozen_driver_import_payload_rejects_integer_equality_type_collisions() -> None:
+    expected = smoke._expected_frozen_driver_import_payload()
+    for field in ("schema", "registry_compat_version"):
+        integer = expected[field]
+        assert type(integer) is int
+        collisions: list[object] = [float(integer)]
+        if integer in (0, 1):
+            collisions.append(bool(integer))
+        for collision in collisions:
+            assert collision == integer and type(collision) is not int
+            malformed = {**expected, field: collision}
+            assert malformed == expected
+            stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(malformed) + "\n").encode()
+            with pytest.raises(ValueError, match="exact field types"):
+                smoke._parse_frozen_driver_import_payload(stdout)
+
+
+def test_frozen_driver_import_payload_rejects_duplicate_json_fields() -> None:
+    expected = smoke._expected_frozen_driver_import_payload()
+    pairs = [
+        ("schema", 999),
+        ("schema", expected["schema"]),
+        ("status", "FAIL"),
+        ("status", expected["status"]),
+        ("registry_compat_version", 999),
+        ("registry_compat_version", expected["registry_compat_version"]),
+        ("modules", []),
+        ("modules", expected["modules"]),
+    ]
+    record = "{" + ",".join(f"{json.dumps(key)}:{json.dumps(value)}" for key, value in pairs) + "}"
+    assert json.loads(record) == expected
+    stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + record + "\n").encode()
+
+    with pytest.raises(ValueError, match="repeats field"):
+        smoke._parse_frozen_driver_import_payload(stdout)
+
+
 def test_windows_source_installer_is_ascii_and_reproducible() -> None:
     raw = (ROOT / "install.bat").read_bytes()
     assert raw.isascii()

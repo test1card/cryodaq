@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import sys
 from collections import Counter
 from dataclasses import replace
@@ -130,6 +131,22 @@ def _assert_frozen_driver_contract() -> None:
     if incorrectly_wired:
         raise FrozenDriverContractError(
             f"frozen driver modules must reach Analysis.hiddenimports exactly once: {incorrectly_wired}"
+        )
+    frozen_set = set(frozen)
+    hidden_driver_modules = {
+        module
+        for module in hidden
+        if module in frozen_set
+        or module == "cryodaq.drivers.instruments"
+        or module.startswith("cryodaq.drivers.instruments.")
+        or module == "cryodaq.drivers.passive_extensions"
+        or module.startswith("cryodaq.drivers.passive_extensions.")
+    }
+    analysis_driver_missing = sorted(frozen_set - hidden_driver_modules)
+    analysis_driver_extra = sorted(hidden_driver_modules - frozen_set)
+    if analysis_driver_missing or analysis_driver_extra:
+        raise FrozenDriverContractError(
+            f"analysis_driver_missing={analysis_driver_missing}; analysis_driver_extra={analysis_driver_extra}"
         )
 
     verified = driver_registry.verify_allowlisted_driver_imports()
@@ -269,6 +286,23 @@ def test_frozen_driver_allowlist_is_exactly_the_runtime_registry_and_importable(
     _assert_frozen_driver_contract()
 
 
+def test_frozen_driver_guard_rejects_misdeclared_abstract_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    live_specs = tuple(driver_registry.BUILTIN_DRIVER_SPECS.values())
+    seed = next(
+        spec
+        for spec in live_specs
+        if getattr(importlib.import_module(spec.module), "InstrumentDriver", None) is driver_registry.InstrumentDriver
+    )
+    corrupted = replace(seed, class_name="InstrumentDriver")
+    _replace_registry(
+        monkeypatch,
+        tuple(corrupted if spec is seed else spec for spec in live_specs),
+    )
+
+    with pytest.raises(driver_registry.DriverRegistryError, match="concrete InstrumentDriver class"):
+        _assert_frozen_driver_contract()
+
+
 def test_frozen_driver_guard_rejects_registry_only_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     live_specs = tuple(driver_registry.BUILTIN_DRIVER_SPECS.values())
     seed = next(spec for spec in live_specs if spec.reviewed_source_binding is None)
@@ -298,6 +332,56 @@ def test_frozen_driver_guard_rejects_frozen_only_driver(monkeypatch: pytest.Monk
     message = str(caught.value)
     assert "registry_only=[]" in message
     assert f"frozen_only=['{removed.module}']" in message
+
+
+def test_frozen_driver_guard_rejects_direct_hidden_driver_outside_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = SPEC.read_text(encoding="utf-8")
+    anchor = "hidden_imports = [\n"
+    assert source.count(anchor) == 1
+    unexpected = "cryodaq.drivers.instruments.unallowlisted_direct_control"
+    mutated_source = source.replace(anchor, f'{anchor}    "{unexpected}",\n', 1)
+    mutated_spec = tmp_path / "cryodaq.spec"
+    ast.parse(mutated_source, filename=str(mutated_spec))
+    mutated_spec.write_text(mutated_source, encoding="utf-8", newline="\n")
+    monkeypatch.setitem(globals(), "SPEC", mutated_spec)
+
+    with pytest.raises(FrozenDriverContractError) as caught:
+        _assert_frozen_driver_contract()
+
+    message = str(caught.value)
+    assert "analysis_driver_missing=[]" in message
+    assert f"analysis_driver_extra=['{unexpected}']" in message
+
+
+def test_frozen_driver_guard_rejects_unallowlisted_driver_from_broad_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = SPEC.read_text(encoding="utf-8")
+    anchor = "def _is_non_driver_application_module(name):\n    return not (\n"
+    assert source.count(anchor) == 1
+    unexpected = "cryodaq.drivers.instruments.unallowlisted_control"
+    replacement = (
+        "def _is_non_driver_application_module(name):\n"
+        f'    if name == "{unexpected}":\n'
+        "        return True\n"
+        "    return not (\n"
+    )
+    mutated_source = source.replace(anchor, replacement, 1)
+    mutated_spec = tmp_path / "cryodaq.spec"
+    ast.parse(mutated_source, filename=str(mutated_spec))
+    mutated_spec.write_text(mutated_source, encoding="utf-8", newline="\n")
+    monkeypatch.setitem(globals(), "SPEC", mutated_spec)
+
+    with pytest.raises(FrozenDriverContractError) as caught:
+        _assert_frozen_driver_contract()
+
+    message = str(caught.value)
+    assert "analysis_driver_missing=[]" in message
+    assert f"analysis_driver_extra=['{unexpected}']" in message
 
 
 def test_broad_collection_excludes_all_driver_namespaces_before_allowlist_addition() -> None:

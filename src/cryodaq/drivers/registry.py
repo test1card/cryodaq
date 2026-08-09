@@ -8,6 +8,7 @@ authority; only a binding on the reviewed-source roster below can do so.
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import math
 import re
@@ -548,10 +549,16 @@ def verify_allowlisted_driver_imports() -> tuple[str, ...]:
                 f"allowlisted driver {type_name!r} failed to import {spec.module!r}: {type(exc).__name__}: {exc}"
             ) from exc
         implementation = getattr(module, spec.class_name, None)
-        if not isinstance(implementation, type) or not issubclass(implementation, InstrumentDriver):
+        if (
+            not isinstance(implementation, type)
+            or implementation is InstrumentDriver
+            or not issubclass(implementation, InstrumentDriver)
+            or inspect.isabstract(implementation)
+            or implementation.__module__ != spec.module
+        ):
             raise DriverRegistryError(
                 f"allowlisted driver {type_name!r} does not resolve "
-                f"{spec.module}.{spec.class_name} to an InstrumentDriver class"
+                f"{spec.module}.{spec.class_name} to a concrete InstrumentDriver class defined by that module"
             )
         verified.append(spec.module)
     return tuple(sorted(verified))
