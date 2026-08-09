@@ -5561,7 +5561,7 @@ async def _handle_gui_command(
             from_ts = cmd.get("from_ts")
             to_ts = cmd.get("to_ts")
             limit = int(cmd.get("limit_per_channel", 3600))
-            data = await writer.read_readings_history(
+            data, descriptor_catalog = await writer.read_readings_history_with_descriptors(
                 channels=channels,
                 from_ts=float(from_ts) if from_ts is not None else None,
                 to_ts=float(to_ts) if to_ts is not None else None,
@@ -5571,6 +5571,7 @@ async def _handle_gui_command(
             return {
                 "ok": True,
                 "data": {ch: pts for ch, pts in data.items()},
+                "descriptor_catalog": descriptor_catalog,
             }
         if action == "cooldown_history_get":
             return await _run_cooldown_history_command(cmd, experiment_manager, writer)

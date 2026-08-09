@@ -281,7 +281,15 @@ def test_the_analytics_summary_orders_only_declared_temperatures(
     monkeypatch.setattr(analytics_widgets, "get_channel_manager", lambda: mixed_manager)
     widget = analytics_widgets.ExperimentSummaryWidget()
     widget._on_stats_loaded(
-        {"ok": True, "data": {PRESSURE_SPELLED_TE: [(0.0, 1.0)], RENAMED: [(0.0, 2.0)], "Т1": [(0.0, 3.0)]}}
+        {
+            "ok": True,
+            "data": {PRESSURE_SPELLED_TE: [(0.0, 1.0)], RENAMED: [(0.0, 2.0)], "Т1": [(0.0, 3.0)]},
+            "descriptor_catalog": {
+                PRESSURE_SPELLED_TE: {"quantity": "pressure"},
+                RENAMED: {"quantity": "temperature"},
+                "Т1": {"quantity": "temperature"},
+            },
+        }
     )
 
     rendered = widget._stats_label.text()
@@ -326,7 +334,13 @@ def test_the_analytics_cutoff_changes_membership_not_only_order(
     data[PRESSURE_SPELLED_TE] = [(0.0, 1.0)]
     assert len(data) == 13, "premise: more channels than the twelve-slot cutoff"
 
-    widget._on_stats_loaded({"ok": True, "data": data})
+    widget._on_stats_loaded(
+        {
+            "ok": True,
+            "data": data,
+            "descriptor_catalog": {channel: {"quantity": mixed_manager.get_quantity(channel)} for channel in data},
+        }
+    )
     rendered = widget._stats_label.text()
 
     assert RENAMED in rendered, (
@@ -385,10 +399,57 @@ def test_archived_history_is_not_displaced_by_an_absent_declaration(
     data[archived] = [(0.0, 42.0)]
     assert len(data) == 13, "premise: more channels than the twelve-slot cutoff"
 
-    widget._on_stats_loaded({"ok": True, "data": data})
+    widget._on_stats_loaded(
+        {
+            "ok": True,
+            "data": data,
+            "descriptor_catalog": {
+                **{channel: {"quantity": "pressure"} for channel in payload["channels"]},
+                archived: {"quantity": "legacy_unknown"},
+            },
+        }
+    )
     rendered = widget._stats_label.text()
 
     assert archived in rendered, (
         "archived history was displaced off the summary by channels the current configuration happens to "
         "declare; a finished experiment must not re-summarise because channels.yaml was edited"
     )
+
+
+def test_archived_history_ranking_uses_its_descriptor_after_live_reclassification(
+    app, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Today's channel reclassification cannot rewrite a completed summary."""
+
+    from cryodaq.gui.shell.views import analytics_widgets
+
+    archived = "ZZ_ARCHIVED_TEMPERATURE"
+    channels = {f"P{index:02d}": {"name": str(index), "quantity": "pressure"} for index in range(12)}
+    channels[archived] = {"name": "archived", "quantity": "temperature"}
+    target = tmp_path / "channels.yaml"
+    target.write_text(yaml.safe_dump({"channels": channels}, allow_unicode=True), encoding="utf-8")
+    manager = ChannelManager(target)
+    manager.load()
+    monkeypatch.setattr(analytics_widgets, "get_channel_manager", lambda: manager)
+    widget = analytics_widgets.ExperimentSummaryWidget()
+
+    result = {
+        "ok": True,
+        "data": {channel: [(0.0, 42.0)] for channel in channels},
+        "descriptor_catalog": {
+            channel: {"quantity": "temperature" if channel == archived else "pressure"} for channel in channels
+        },
+    }
+    widget._on_stats_loaded(result)
+    before = widget._stats_label.text()
+    assert archived in before, "premise: the experiment-time temperature must initially be rendered"
+
+    channels[archived]["quantity"] = "pressure"
+    target.write_text(yaml.safe_dump({"channels": channels}, allow_unicode=True), encoding="utf-8")
+    manager.load()
+    assert manager.get_quantity(archived) == "pressure", "premise: live configuration reclassified the channel"
+
+    widget._on_stats_loaded(result)
+    after = widget._stats_label.text()
+    assert after == before, "archived summary changed after the live configuration reclassified its channel"

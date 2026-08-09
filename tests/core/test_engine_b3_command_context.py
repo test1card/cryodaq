@@ -74,6 +74,24 @@ async def test_command_context_preserves_late_bound_cooldown_service() -> None:
     assert result == {"ok": True, "prediction": {"eta_h": 2.5}}
 
 
+async def test_readings_history_command_returns_the_persisted_descriptor_catalog() -> None:
+    context = _context()
+    context.writer.read_readings_history_with_descriptors = AsyncMock(
+        return_value=(
+            {"archive.temperature": [(1.0, 4.2)]},
+            {"archive.temperature": {"quantity": "temperature", "descriptor_hash": "sha256:history"}},
+        )
+    )
+
+    result = await _handle_gui_command({"cmd": "readings_history"}, context=context)
+
+    assert result == {
+        "ok": True,
+        "data": {"archive.temperature": [(1.0, 4.2)]},
+        "descriptor_catalog": {"archive.temperature": {"quantity": "temperature", "descriptor_hash": "sha256:history"}},
+    }
+
+
 async def test_multiline_auto_stop_uses_explicit_dependencies(tmp_path: Path) -> None:
     driver = MagicMock()
     driver.burst_stop = AsyncMock(return_value=tmp_path / "burst.bin")

@@ -12,7 +12,16 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.channels.descriptors import (
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage._sqlite import sqlite3
+from cryodaq.storage.channel_descriptors import initialize_descriptor_storage
 from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
 
@@ -526,3 +535,83 @@ async def test_async_read_readings_history(writer_with_data) -> None:
     assert async_data["Т1 Камера"] == sync_data["Т1 Камера"], (
         "Async wrapper must return identical data to sync implementation"
     )
+
+
+@pytest.mark.asyncio
+async def test_readings_history_carries_the_persisted_descriptor_catalog(tmp_path: Path) -> None:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id="archive.temperature",
+        instrument_id="thermometer",
+        source_key="input.1.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Archived temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([descriptor]))
+    try:
+        assert await writer.write_immediate(
+            [
+                Reading(
+                    timestamp=datetime.now(UTC),
+                    instrument_id=descriptor.instrument_id,
+                    channel=descriptor.channel_id,
+                    value=4.2,
+                    unit=descriptor.unit,
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+
+        data, catalog = await writer.read_readings_history_with_descriptors()
+
+        assert list(data) == [descriptor.channel_id]
+        assert catalog[descriptor.channel_id]["descriptor_hash"] == descriptor.descriptor_hash
+        assert catalog[descriptor.channel_id]["quantity"] == "temperature"
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_descriptor_history_keeps_migrated_legacy_rows_unknown(tmp_path: Path) -> None:
+    timestamp = datetime.now(UTC)
+    channel = "legacy.temperature"
+    writer = SQLiteWriter(tmp_path)
+    try:
+        assert await writer.write_immediate(
+            [
+                Reading(
+                    timestamp=timestamp,
+                    instrument_id="legacy-thermometer",
+                    channel=channel,
+                    value=5.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+    finally:
+        await writer.stop()
+
+    db_path = tmp_path / f"data_{timestamp.date().isoformat()}.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        initialize_descriptor_storage(conn)
+    finally:
+        conn.close()
+
+    reader = SQLiteWriter(tmp_path)
+    try:
+        data, catalog = await reader.read_readings_history_with_descriptors()
+
+        assert list(data) == [channel]
+        assert catalog[channel]["quantity"] == "legacy_unknown"
+        assert catalog[channel]["legacy"] is True
+    finally:
+        await reader.stop()

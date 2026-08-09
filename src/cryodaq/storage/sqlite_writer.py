@@ -595,6 +595,40 @@ _HISTORY_COLD_MIN_RETAINED_BYTES = 64 * 1024
 _HISTORY_COLD_DEADLINE_S = 10.0
 _HISTORY_COLD_CHUNK = timedelta(hours=168)
 
+
+def _merge_history_descriptor(
+    catalog: dict[str, dict[str, object]],
+    history_channel: str,
+    descriptor: Any,
+) -> None:
+    payload = {
+        "descriptor_hash": descriptor.descriptor_hash,
+        "channel_id": descriptor.channel_id,
+        "instrument_id": descriptor.instrument_id,
+        "source_key": descriptor.source_key,
+        "descriptor_revision": descriptor.descriptor_revision,
+        "quantity": descriptor.quantity,
+        "unit": descriptor.unit,
+        "role": descriptor.role,
+        "safety_class": descriptor.safety_class,
+        "display_group": descriptor.display_group,
+        "display_name": descriptor.display_name,
+        "visible_by_default": descriptor.visible_by_default,
+        "display_order": descriptor.display_order,
+        "legacy": descriptor.legacy,
+    }
+    existing = catalog.get(history_channel)
+    if existing is None or (existing["legacy"] and not payload["legacy"]):
+        catalog[history_channel] = payload
+        return
+    if not existing["legacy"] and payload["legacy"]:
+        return
+    if existing["quantity"] != payload["quantity"]:
+        raise ValueError("historical channel descriptors disagree on quantity")
+    if int(payload["descriptor_revision"]) > int(existing["descriptor_revision"]):
+        catalog[history_channel] = payload
+
+
 # Range and backport-safe set live in cryodaq.storage._sqlite (single source,
 # also used to pick the sqlite3 implementation). Imported above.
 
@@ -9394,6 +9428,7 @@ class SQLiteWriter:
         limit_per_channel: int = 3600,
         _channel_row_caps: dict[str, int] | None = None,
         _cold_deadline_monotonic: float | None = None,
+        _descriptor_catalog: dict[str, dict[str, object]] | None = None,
     ) -> dict[str, list[tuple[float, float]]]:
         """Read historical readings from SQLite.
 
@@ -9429,6 +9464,7 @@ class SQLiteWriter:
                         limit_per_channel=limit_per_channel,
                         _channel_row_caps=channel_caps,
                         _cold_deadline_monotonic=allocation_cold_deadline,
+                        _descriptor_catalog=_descriptor_catalog,
                     )
                     collected = sum(len(balanced.get(channel, ())) for channel in channels)
                     remaining = total_budget - collected
@@ -9517,9 +9553,43 @@ class SQLiteWriter:
                 break
             try:
                 conn = sqlite3.connect(str(db_path), timeout=5)
-                conn.row_factory = sqlite3.Row
                 try:
-                    base = "SELECT timestamp, channel, value, status FROM readings WHERE 1=1"
+                    descriptor_map: dict[str, Any] = {}
+                    has_descriptor_hash = False
+                    if _descriptor_catalog is not None:
+                        from cryodaq.storage.descriptor_archive import (
+                            MAX_ARCHIVE_DESCRIPTORS,
+                            load_referenced_descriptors,
+                            resolve_archived_descriptors,
+                            resolve_legacy_descriptor,
+                        )
+
+                        columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
+                        has_descriptor_hash = "descriptor_hash" in columns
+                        if has_descriptor_hash:
+                            verify_descriptor_storage(conn)
+                            descriptor_rows = conn.execute(
+                                "SELECT DISTINCT descriptor_hash FROM readings "
+                                "WHERE descriptor_hash IS NOT NULL LIMIT ?",
+                                (MAX_ARCHIVE_DESCRIPTORS + 1,),
+                            ).fetchall()
+                            if len(descriptor_rows) > MAX_ARCHIVE_DESCRIPTORS:
+                                raise ValueError("historical descriptor catalog exceeds bounds")
+                            referenced = {row[0] for row in descriptor_rows}
+                            if any(type(value) is not str for value in referenced):
+                                raise ValueError("historical descriptor hash is not text")
+                            if referenced:
+                                descriptor_map = resolve_archived_descriptors(
+                                    load_referenced_descriptors(conn, referenced), referenced
+                                )
+                        descriptor_column = "descriptor_hash" if has_descriptor_hash else "NULL"
+                        base = (
+                            "SELECT timestamp, instrument_id, channel, value, unit, status, "
+                            f"{descriptor_column} AS descriptor_hash FROM readings WHERE 1=1"
+                        )
+                    else:
+                        base = "SELECT timestamp, channel, value, status FROM readings WHERE 1=1"
+                    conn.row_factory = sqlite3.Row
                     time_clause = ""
                     time_params: list[Any] = []
                     if from_ts is not None:
@@ -9533,6 +9603,21 @@ class SQLiteWriter:
                         pending: list[tuple[str, float, float]] = []
                         for row in conn.execute(query, params):
                             ch = row["channel"]
+                            if _descriptor_catalog is not None:
+                                descriptor_hash = row["descriptor_hash"]
+                                if descriptor_hash is None:
+                                    descriptor = resolve_legacy_descriptor(row["instrument_id"], ch, row["unit"])
+                                else:
+                                    descriptor = descriptor_map.get(descriptor_hash)
+                                    if descriptor is None:
+                                        raise ValueError("historical descriptor hash is missing")
+                                    if (
+                                        descriptor.instrument_id != row["instrument_id"]
+                                        or descriptor.channel_id != ch
+                                        or descriptor.unit != row["unit"]
+                                    ):
+                                        raise ValueError("historical descriptor disagrees with reading")
+                                _merge_history_descriptor(_descriptor_catalog, ch, descriptor)
                             # NaN-доктрина: mask sentinel / error / legacy ±inf at
                             # the read boundary — the GUI-reconnect history feed
                             # must not surface a non-physical number.
@@ -9581,8 +9666,8 @@ class SQLiteWriter:
                         unfiltered_remaining -= collected
                 finally:
                     conn.close()
-            except Exception:
-                logger.warning("Ошибка чтения истории из %s", db_path)
+            except Exception as exc:
+                logger.warning("Ошибка чтения истории из %s: %s", db_path, exc)
 
         # Cold path: a window reaching before the oldest hot day would silently
         # miss days already rotated to Parquet. Union those cold rows through
@@ -9779,6 +9864,8 @@ class SQLiteWriter:
                                 )
                             for row in accepted:
                                 value = float("nan") if row.value is None else row.value
+                                if _descriptor_catalog is not None and row.descriptor is not None:
+                                    _merge_history_descriptor(_descriptor_catalog, row.channel, row.descriptor)
                                 result.setdefault(row.channel, []).append((row.timestamp, value))
                             cold_rows_remaining -= len(accepted)
                             if deficits is not None:
@@ -9820,7 +9907,30 @@ class SQLiteWriter:
             if len(result[ch]) > retained_cap:
                 result[ch] = result[ch][-retained_cap:]
 
+        if _descriptor_catalog is not None:
+            for channel in set(_descriptor_catalog).difference(result):
+                del _descriptor_catalog[channel]
+
         return result
+
+    def _read_readings_history_with_descriptors(
+        self,
+        *,
+        channels: list[str] | None = None,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        limit_per_channel: int = 3600,
+    ) -> tuple[dict[str, list[tuple[float, float]]], dict[str, dict[str, object]]]:
+        """Read points plus the persisted descriptor projection for those channels."""
+        descriptor_catalog: dict[str, dict[str, object]] = {}
+        data = self._read_readings_history(
+            channels=channels,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            limit_per_channel=limit_per_channel,
+            _descriptor_catalog=descriptor_catalog,
+        )
+        return data, descriptor_catalog
 
     async def read_readings_history(
         self,
@@ -9843,6 +9953,30 @@ class SQLiteWriter:
             task,
             read=True,
             name="sqlite_readings_history",
+        )
+        return await self._await_owned_task(owner)
+
+    async def read_readings_history_with_descriptors(
+        self,
+        *,
+        channels: list[str] | None = None,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        limit_per_channel: int = 3600,
+    ) -> tuple[dict[str, list[tuple[float, float]]], dict[str, dict[str, object]]]:
+        """Async descriptor-bearing history used by operator archive views."""
+        task = partial(
+            self._read_readings_history_with_descriptors,
+            channels=channels,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            limit_per_channel=limit_per_channel,
+        )
+        owner = self._owned_executor_task(
+            self._read_executor,
+            task,
+            read=True,
+            name="sqlite_readings_history_with_descriptors",
         )
         return await self._await_owned_task(owner)
 

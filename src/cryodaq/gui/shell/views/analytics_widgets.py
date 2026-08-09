@@ -1628,48 +1628,16 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
             return
 
         lines: list[str] = []
-        # OC-030: ordering by DECLARED quantity, not by identifier spelling.
-        # An earlier version of this comment said `other_chs` catches everything
-        # `temp_chs` does not, so no channel was ever dropped here and the
-        # spelling test only decided ORDER. That is FALSE past the cutoff below:
-        # the two groups are concatenated and then sliced to twelve, so which
-        # group a channel lands in decides whether it is DISPLAYED AT ALL once
-        # more than twelve channels have history. Reclassifying a channel --
-        # by renaming it, or by declaring it a non-temperature -- therefore
-        # changes membership of this summary, not merely its order. It also
-        # matched Latin "T" as well as Cyrillic "Т", which silently promoted
-        # unrelated channels into the temperature group and, past twelve,
-        # displaced real ones.
-        # THIS SUMMARISES ARCHIVED HISTORY, so a channel the CURRENT
-        # configuration has never heard of is not a non-temperature -- it is a
-        # channel whose declaration is simply not available here.
-        # `readings_history` supplies names and point pairs only, with no
-        # descriptor, so the live manager is the only classifier reachable at
-        # this call site. Reading an unknown channel as "not a temperature"
-        # demoted it behind today's temperatures and, past the twelve-row
-        # cutoff, dropped it -- so the SAME completed experiment summarised
-        # differently after an unrelated edit to `channels.yaml`.
-        #
-        # The pre-OC-030 code did not have this problem for a bad reason: it
-        # tested the archived NAME (`startswith`), which needs no configuration
-        # at all. Migrating to a declared quantity is right, and it made the
-        # ordering depend on mutable state; unknown channels therefore get their
-        # own rank between declared temperatures and declared non-temperatures,
-        # so an absent declaration can no longer push archived history off the
-        # end of the list.
-        #
-        # WHAT THIS DOES NOT FIX: the ordering is still taken from the current
-        # configuration rather than the descriptor catalog persisted with the
-        # experiment, so a channel RECLASSIFIED (not removed) still summarises
-        # by today's declaration. Binding to the experiment's own catalog needs
-        # descriptor data carried through the archive read path, which is a
-        # change to storage and reporting rather than to this widget.
-        channel_mgr = get_channel_manager()
+        # This is archived history: rank from the descriptors persisted with
+        # those readings, never from today's mutable channel configuration.
+        descriptor_catalog = result.get("descriptor_catalog", {})
 
         def _rank(channel: str) -> int:
-            if channel_mgr.is_temperature_channel(channel):
+            descriptor = descriptor_catalog.get(channel, {})
+            quantity = descriptor.get("quantity") if isinstance(descriptor, dict) else None
+            if quantity == "temperature":
                 return 0
-            return 1 if channel_mgr.get_quantity(channel) is None else 2
+            return 1 if quantity in (None, "legacy_unknown") else 2
 
         ordered = sorted(data, key=lambda ch: (_rank(ch), ch))[:12]  # limit display
 
