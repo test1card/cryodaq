@@ -78,11 +78,18 @@ def load_protected_channel_patterns(
                         raise HousekeepingConfigError("interlock bindings require the active descriptor catalog")
                     from cryodaq.core.interlock import resolve_interlock_channel_ids
 
-                    for channel_id in resolve_interlock_channel_ids(
-                        item,
-                        config_path=path,
-                        descriptor_catalog=descriptor_catalog,
-                    ):
+                    try:
+                        channel_ids = resolve_interlock_channel_ids(
+                            item,
+                            config_path=path,
+                            descriptor_catalog=descriptor_catalog,
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise HousekeepingConfigError(
+                            f"protected-channel config at {path}: invalid interlock binding — "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+                    for channel_id in channel_ids:
                         emitted_channel = descriptor_catalog.emitted_channel_for_channel_id(channel_id)
                         patterns.append(rf"^{re.escape(emitted_channel)}$")
                     continue
