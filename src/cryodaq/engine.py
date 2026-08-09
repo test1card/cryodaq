@@ -6562,7 +6562,8 @@ async def _run_engine(
         descriptor_catalog=live_descriptor_catalog,
         interlocks_config_path=interlocks_cfg,
         safety_manager=safety_manager,
-        adaptive_throttle_patterns=merged_patterns,
+        adaptive_throttle_patterns=v3_patterns,
+        adaptive_throttle_raw_patterns=legacy_patterns,
     )
     adaptive_throttle = AdaptiveThrottle(
         housekeeping_raw.get("adaptive_throttle", {}),

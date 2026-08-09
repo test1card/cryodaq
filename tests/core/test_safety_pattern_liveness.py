@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from shutil import copyfile
 
 import pytest
 import yaml
@@ -199,6 +200,55 @@ def test_safety_critical_patterns_resolve_to_exact_raw_channels() -> None:
         ("LS218_2", "Т11 Теплообменник 1"): "Т11",
         ("LS218_2", "Т12 Теплообменник 2"): "Т12",
     }
+
+
+def test_adaptive_binding_rejects_raw_label_colliding_with_protected_canonical_id(tmp_path: Path) -> None:
+    """A raw label may not impersonate another sensor's canonical identity."""
+    descriptors_path = tmp_path / "channel_descriptors.yaml"
+    interlocks_path = tmp_path / "interlocks.yaml"
+    alarms_path = tmp_path / "alarms_v3.yaml"
+    copyfile(_DESCRIPTORS_PATH, descriptors_path)
+    copyfile(_INTERLOCKS_PATH, interlocks_path)
+    alarms_path.write_text("global_alarms: {}\nphase_alarms: {}\n", encoding="utf-8")
+
+    manifest = yaml.safe_load(descriptors_path.read_text(encoding="utf-8"))
+    protected_descriptor = next(
+        descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т1"
+    )
+    unrelated_descriptor = next(
+        descriptor for descriptor in manifest["descriptors"] if descriptor["channel_id"] == "Т2"
+    )
+    protected_binding = next(binding for binding in manifest["bindings"] if binding["channel_id"] == "Т1")
+    unrelated_binding = next(binding for binding in manifest["bindings"] if binding["channel_id"] == "Т2")
+
+    protected_descriptor["channel_id"] = "protected_sensor_b"
+    protected_binding["channel_id"] = "protected_sensor_b"
+    protected_binding["emitted_channel"] = "protected_sensor_b_raw"
+    unrelated_descriptor["channel_id"] = "unrelated_sensor_a"
+    unrelated_binding["channel_id"] = "unrelated_sensor_a"
+    unrelated_binding["emitted_channel"] = "protected_sensor_b"
+    descriptors_path.write_text(
+        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    descriptor_catalog = load_live_channel_descriptor_catalog(descriptors_path)
+    manager = SafetyManager(SafetyBroker())
+    manager.load_config(_SAFETY_PATH)
+    manager._config.require_keithley_for_run = False
+
+    resolved = validate_safety_pattern_liveness(
+        descriptor_catalog=descriptor_catalog,
+        interlocks_config_path=interlocks_path,
+        safety_manager=manager,
+        adaptive_throttle_patterns=[r"^protected_sensor_b$"],
+        alarms_config_path=alarms_path,
+    )
+
+    assert resolved == [r"^protected_sensor_b_raw$"], (
+        "the protected sensor's canonical expression must reverse-map to its own raw label, "
+        "not accept another sensor's colliding raw label"
+    )
 
 
 @pytest.mark.parametrize(

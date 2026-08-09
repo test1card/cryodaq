@@ -439,6 +439,7 @@ def _resolve_adaptive_patterns_to_raw(
     canonical_ids: list[str],
     raw_labels: list[str],
     patterns: Collection[str],
+    raw_patterns: Collection[str] = (),
 ) -> tuple[list[str], list[_DeadPattern]]:
     """Expand canonical AdaptiveThrottle expressions to exact raw labels.
 
@@ -466,6 +467,36 @@ def _resolve_adaptive_patterns_to_raw(
 
     resolved: list[str] = []
     dead: list[_DeadPattern] = []
+
+    # Interlock bindings are resolved to raw labels before this function is
+    # called. Keep that provenance separate from canonical alarm references:
+    # one namespace may legally contain a spelling from the other namespace.
+    for ref in sorted(set(raw_patterns)):
+        if ref in _THROTTLE_BYPASS_PATTERNS:
+            resolved.append(ref)
+            continue
+        try:
+            compiled = re.compile(ref)
+        except re.error:
+            dead.append(
+                _DeadPattern(
+                    pattern=ref,
+                    plane="raw AdaptiveThrottle expression",
+                    source="AdaptiveThrottle raw protected patterns",
+                )
+            )
+            continue
+        if any(compiled.fullmatch(label) for label in raw_labels):
+            resolved.append(ref)
+            continue
+        dead.append(
+            _DeadPattern(
+                pattern=ref,
+                plane="raw AdaptiveThrottle expression",
+                source="AdaptiveThrottle raw protected patterns",
+            )
+        )
+
     for ref in sorted(set(patterns)):
         if ref in _THROTTLE_BYPASS_PATTERNS:
             resolved.append(ref)
@@ -481,11 +512,13 @@ def _resolve_adaptive_patterns_to_raw(
                 )
             )
             continue
-        if any(compiled.fullmatch(label) for label in raw_labels):
-            resolved.append(ref)
-            continue
         canonical_matches = [channel_id for channel_id in canonical_ids if compiled.fullmatch(channel_id)]
         if not canonical_matches:
+            # Backward-compatible validation for callers that already pass a
+            # raw-plane expression without the explicit provenance argument.
+            if any(compiled.fullmatch(label) for label in raw_labels):
+                resolved.append(ref)
+                continue
             dead.append(
                 _DeadPattern(
                     pattern=ref,
@@ -506,7 +539,7 @@ def _resolve_adaptive_patterns_to_raw(
                 )
                 continue
             resolved.append(rf"^{re.escape(raw_matches[0])}$")
-    return resolved, dead
+    return sorted(set(resolved)), dead
 
 
 def _resolve_keithley_heartbeats(
@@ -670,6 +703,7 @@ def validate_safety_pattern_liveness(
     interlocks_config_path: Path,
     safety_manager: SafetyManager,
     adaptive_throttle_patterns: Collection[str],
+    adaptive_throttle_raw_patterns: Collection[str] = (),
     alarms_config_path: Path | None = None,
 ) -> list[str]:
     """Raise if any CRITICAL/safety channel-pattern is dead against the
@@ -810,6 +844,7 @@ def validate_safety_pattern_liveness(
         canonical_ids=canonical_ids,
         raw_labels=raw_labels,
         patterns=adaptive_throttle_patterns,
+        raw_patterns=adaptive_throttle_raw_patterns,
     )
     dead.extend(adaptive_dead)
 

@@ -465,7 +465,8 @@ async def test_run_engine_uses_local_replacement_and_fails_closed_on_dead_patter
     selected_catalog = kwargs["descriptor_catalog"]
     assert set(selected_catalog._bindings) == {("probe", "local emitted")}
     assert ("base", "base emitted") not in selected_catalog._bindings
-    assert set(kwargs["adaptive_throttle_patterns"]) == {"legacy-only$", "v3-only"}
+    assert set(kwargs["adaptive_throttle_patterns"]) == {"v3-only"}
+    assert set(kwargs["adaptive_throttle_raw_patterns"]) == {"legacy-only$"}
     assert observed["writer_called"] is False
 
 
