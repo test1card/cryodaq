@@ -373,6 +373,17 @@ The severity floor. A mistake is above the floor only when BOTH are true:
    workflows, scripts, documentation, or this registry itself are below the
    floor, even when the thing the guard failed to catch is above it: the
    product defect gets the record, the guard defect gets a ledger line.
+
+   ONE EXCEPTION, because without it this clause contradicts the
+   deterministic-failure rule it does not amend. When a guard, control, or
+   evidence tool FALSELY CERTIFIED an above-floor product defect -- it ran, it
+   reported green, and the defect shipped or would have -- that escape is
+   ABOVE the floor and keeps its own stable ID and its own independently
+   enforceable guard, paired to the product record. A ledger line is not
+   enough there: the escape is the reason the product defect reached an
+   operator, and enforcing only the product fix leaves the path that hid it
+   open. A guard defect found BEFORE it certified anything, or one attached to
+   a below-floor defect, stays a ledger line.
 2. With the defect unfixed and the repository untouched, ordinary lab
    operation could produce at least one of: a stored measurement lost,
    altered, or attributed to the wrong channel; a displayed, reported, or

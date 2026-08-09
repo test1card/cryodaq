@@ -133,6 +133,54 @@ def closure_semantics_sha256(entry: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
+def disposition_state(record: Mapping[str, Any]) -> str:
+    """Derive the record's lifecycle state, so `pending` is not one bucket.
+
+    `record_evidence_semantics` declares that green evidence is appended after
+    merge by a batch sweep and that its absence blocks nothing. A consumer could
+    not act on that: a record whose correction and guard are done and is merely
+    waiting for the sweep looked exactly like one where nothing has been built --
+    both are `status: open` with `green_evidence: pending`. Anything enforcing
+    the declaration had to guess, so the declaration was unenforceable.
+
+    Derived, never stored, so it cannot drift from the record it describes:
+
+    * ``closed`` / ``expired`` -- terminal, and already required to carry
+      immutable evidence on both sides.
+    * ``awaiting_green_sweep`` -- open, guards registered, red-before captured,
+      and only the post-merge green capture outstanding. This is the state the
+      semantics call non-blocking.
+    * ``incomplete`` -- open with the correction or its guard still missing.
+      This one genuinely holds a disposition open.
+    """
+
+    status = record.get("status")
+    if status in {"closed", "expired"}:
+        return str(status)
+    # `reopened` is an ACTIVE status, not a third thing. Measured on the live
+    # registry: statuses are `open` (85) and `reopened` (5), and a reopened
+    # record is in exactly the same position as an open one -- its correction is
+    # either built and guarded or it is not. An earlier version of this function
+    # recognised only `open` and reported every reopened record `unknown`, which
+    # would have made the very state this derivation exists to expose
+    # unreadable for them.
+    if status not in {"open", "reopened"}:
+        return "unknown"
+    red = record.get("red_evidence")
+    green = record.get("green_evidence")
+    if not (record.get("guards") and red and red != "pending"):
+        return "incomplete"
+    # Measured on the live registry: SEVEN active records already carry captured
+    # green evidence. They are not waiting for the sweep -- it has run for them,
+    # and they stay open for their own residual reasons. Folding them into
+    # `awaiting_green_sweep` would have told a consumer to expect a capture that
+    # already happened, so they get their own state rather than a convenient
+    # bucket.
+    if green and green != "pending":
+        return "evidence_complete"
+    return "awaiting_green_sweep"
+
+
 def _validate_immutable_evidence(value: Any, field: str) -> None:
     if not isinstance(value, Mapping):
         raise GovernanceContractError(f"{field} immutable evidence shape is not exact")

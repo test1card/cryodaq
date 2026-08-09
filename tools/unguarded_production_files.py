@@ -13,7 +13,9 @@ than the production path: once the guard measured the writer only, and once
 five migrated GUI selectors could each be reverted with every guard still
 passing. Both were found in review, after the work was called done.
 
-FIVE WAYS THIS TOOL COULD HAVE LIED, each closed here after review found it:
+TEN WAYS THIS TOOL COULD HAVE LIED, each closed here after review found it --
+and every one of them was found by review rather than by the author, which is
+the same asymmetry the tool exists to exploit:
 
 * **A dirty control.** If the suite already fails, every reverted artifact
   collects that same failure and is reported guarded. The suite is therefore
@@ -36,6 +38,28 @@ FIVE WAYS THIS TOOL COULD HAVE LIED, each closed here after review found it:
   content came from the base BRANCH TIP, so an unrelated upstream edit could
   fail the suite and falsely certify this change's artifact. The merge base is
   resolved once and used for both.
+* **A crashed suite read as green.** Only `FAILED` lines were parsed and the
+  exit code was discarded, so a native fault, an internal error, a usage error
+  or an empty collection all meant "nothing failed" -- and in the CONTROL run
+  that false green certified every revert measured after it.
+* **Text transcoding.** `git show` was decoded with `errors="replace"` and
+  re-encoded, so a base artifact holding valid non-UTF-8 bytes became a
+  CORRUPTED mutant: the suite then failed on encoding damage rather than on the
+  reverted behaviour, and the artifact was reported guarded. Blobs are read as
+  bytes.
+* **Clobbering a concurrent writer.** The up-front porcelain check cannot see an
+  edit made after it ran, and the restore was unconditional, so another worker's
+  bytes could be destroyed in either window. The file is re-read immediately
+  before the mutation and again before the restore; a mismatch is preserved and
+  reported instead of overwritten.
+* **Losing the file's identity.** An added artifact that was a symlink or
+  carried an executable bit was restored with `write_bytes`, producing a plain
+  file with default permissions. The byte assertion still passed while the TYPE
+  was gone, and a worktree that started clean did not end clean.
+* **Inherited Git authority.** Every query ran with the caller's `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_INDEX_FILE`, grafts and replacement refs, so discovery
+  could describe a FOREIGN repository while the writes still landed here.
+  Queries are bound to this checkout with that environment stripped.
 
 USAGE
 
@@ -53,6 +77,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -69,18 +94,38 @@ def _run(args: list[str], env: dict[str, str] | None = None) -> subprocess.Compl
     return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
 
 
-def _run_bytes(args: list[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(args, capture_output=True)
+def _git_env() -> dict[str, str]:
+    """Strip inherited Git authority so a query cannot describe another repo.
+
+    `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, grafts and replacement refs
+    all redirect what `git` answers while the `Path` writes below still land in
+    the current directory. A discovery run against a FOREIGN index, or a revert
+    taken from a foreign graph, manufactures guard coverage for this tree out of
+    another one -- the same measured-through-a-layer-that-rewrites-it failure
+    this tool exists to detect, applied to the tool itself.
+    """
+
+    return {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+
+
+def _git(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return _run(["git", "-C", str(Path.cwd()), "--no-replace-objects", *args], env=_git_env())
+
+
+def _git_bytes(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(Path.cwd()), "--no-replace-objects", *args], capture_output=True, env=_git_env()
+    )
 
 
 def merge_base(base: str) -> str:
-    out = _run(["git", "merge-base", base, "HEAD"])
+    out = _git(["merge-base", base, "HEAD"])
     out.check_returncode()
     return out.stdout.strip()
 
 
 def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ...]) -> list[str]:
-    out = _run(["git", "diff", "--name-only", point, "HEAD"])
+    out = _git(["diff", "--name-only", point, "HEAD"])
     out.check_returncode()
     return sorted(
         line.strip()
@@ -90,7 +135,7 @@ def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ..
 
 
 def base_content(point: str, path: str) -> bytes | None:
-    out = _run_bytes(["git", "show", f"{point}:{path}"])
+    out = _git_bytes(["show", f"{point}:{path}"])
     return out.stdout if out.returncode == 0 else None
 
 
@@ -138,7 +183,7 @@ def main() -> int:
         print(f"no production artifacts changed against {point[:8]}; nothing to measure")
         return 0
 
-    dirty = _run(["git", "status", "--porcelain", "--", *targets]).stdout.strip()
+    dirty = _git(["status", "--porcelain", "--", *targets]).stdout.strip()
     if dirty:
         print("REFUSING: these artifacts have uncommitted changes, so a revert could not be undone safely:")
         print(dirty)
@@ -166,14 +211,24 @@ def main() -> int:
 
     unguarded: list[str] = []
     unmeasured: list[str] = []
+    clobbered: list[str] = []
     for path in targets:
         source = Path(path)
-        original = source.read_bytes() if source.exists() else None
+        # The FULL identity, not just the bytes. An added artifact that is a
+        # symlink or carries an executable bit was being restored with
+        # write_bytes, which yields a plain file with default permissions: the
+        # byte assertion still passed while the file TYPE was silently lost, and
+        # a worktree that started clean did not end clean.
+        was_symlink = source.is_symlink()
+        link_target = os.readlink(source) if was_symlink else None
+        original_mode = source.lstat().st_mode if (was_symlink or source.exists()) else None
+        original = None if was_symlink else (source.read_bytes() if source.exists() else None)
         before = base_content(point, path)
         cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
+        mutant: bytes | None = None
         try:
             if before is None:
-                if original is None:
+                if original is None and not was_symlink:
                     unmeasured.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — absent from both sides |")
                     continue
@@ -182,7 +237,15 @@ def main() -> int:
                 if original is not None and before == original:
                     print(f"| `{path}` | identical to the merge base — not measured |")
                     continue
+                # WINDOW ONE. The up-front porcelain check cannot see an edit
+                # made after it ran. Re-read immediately before writing, and
+                # refuse rather than destroy a concurrent writer's bytes.
+                if source.exists() and source.read_bytes() != original:
+                    clobbered.append(path)
+                    print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to overwrite |")
+                    continue
                 source.write_bytes(before)
+                mutant = before
             try:
                 introduced = sorted(set(failures(suites, cache)) - set(control))
             except MeasurementError as unreadable:
@@ -191,11 +254,27 @@ def main() -> int:
                 continue
         finally:
             shutil.rmtree(cache, ignore_errors=True)
-            if original is None:
+            # WINDOW TWO. Another worker may have written while pytest ran. If
+            # what is on disk is no longer the mutant we placed there, those are
+            # someone else's bytes: leave them, and say so. An unconditional
+            # restore here would erase work this tool never owned.
+            concurrent = mutant is not None and source.exists() and source.read_bytes() != mutant
+            if concurrent:
+                clobbered.append(path)
+                print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
+            elif was_symlink:
+                source.unlink(missing_ok=True)
+                os.symlink(link_target, source)
+                assert source.is_symlink() and os.readlink(source) == link_target, f"{path} lost its symlink identity"
+            elif original is None:
                 source.unlink(missing_ok=True)
             else:
                 source.write_bytes(original)
                 assert source.read_bytes() == original, f"{path} was NOT restored byte-identically"
+                if original_mode is not None:
+                    os.chmod(source, stat.S_IMODE(original_mode))
+        if concurrent:
+            continue
         if introduced:
             print(f"| `{path}` | **{len(introduced)} new** — {', '.join(introduced[:3])} |")
         else:
@@ -207,11 +286,16 @@ def main() -> int:
         print("COULD NOT BE MEASURED (this is a failure, not a pass):")
         for path in unmeasured:
             print(f"    {path}")
+    if clobbered:
+        print("ANOTHER WRITER TOUCHED THESE DURING THE RUN, so they were left as found and NOT measured.")
+        print("Their current contents are that writer's, not this tool's -- check them before trusting the tree:")
+        for path in clobbered:
+            print(f"    {path}")
     if unguarded:
         print("UNGUARDED AT THIS CHANGE'S OWN PURPOSE:")
         for path in unguarded:
             print(f"    {path}")
-    if unguarded or unmeasured:
+    if unguarded or unmeasured or clobbered:
         return 1
     print("every reverted production artifact introduced a new failure")
     return 0

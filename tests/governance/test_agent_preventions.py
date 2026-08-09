@@ -21,6 +21,7 @@ from tools.governance_contract import (
     GovernanceContractError,
     _git_blob_id,
     closure_semantics_sha256,
+    disposition_state,
     validate_publication_disposition_receipts,
     validate_registry,
 )
@@ -1145,3 +1146,43 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
 def test_all_repository_python_sources_compile_before_pytest_evidence() -> None:
     manifest = compile_python_tree(ROOT)
     assert manifest
+
+
+def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -> None:
+    """`pending_green_evidence_blocks_disposition: false` must be actionable.
+
+    The semantics mapping declares that green evidence is appended after merge by
+    a batch sweep and that its absence blocks nothing. Nothing could act on that
+    declaration while a record awaiting the sweep was indistinguishable from one
+    where the correction or its guard had never been built: both are
+    `status: open` with `green_evidence: pending`. `disposition_state` derives
+    the difference from the record itself, so a consumer can enforce the rule
+    instead of guessing which kind of `open` it is looking at.
+    """
+
+    payload = _registry()
+    records = payload["records"]
+
+    states = {record["id"]: disposition_state(record) for record in records}
+    assert set(states.values()) <= {"closed", "expired", "awaiting_green_sweep", "evidence_complete", "incomplete"}, (
+        sorted(set(states.values()))
+    )
+
+    # The distinction is real in this registry, not merely representable.
+    awaiting = [record for record in records if disposition_state(record) == "awaiting_green_sweep"]
+    assert awaiting, "no record is awaiting the post-merge sweep, so this derivation is untested by the live data"
+    for record in awaiting:
+        assert record["status"] in {"open", "reopened"}, record["id"]
+        assert record["green_evidence"] == "pending", record["id"]
+        assert record["guards"], record["id"]
+
+    # A record whose guard has not been built is NOT the same state, which is the
+    # whole point: it is the one that still holds a disposition open.
+    stripped = copy.deepcopy(next(record for record in awaiting))
+    stripped["guards"] = []
+    assert disposition_state(stripped) == "incomplete"
+
+    # And a terminal record never reports either open state.
+    for record in records:
+        if record["status"] in {"closed", "expired"}:
+            assert disposition_state(record) == record["status"], record["id"]
