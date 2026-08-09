@@ -105,6 +105,28 @@ def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path
     assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
 
 
+def test_main_restores_rename_when_old_parent_is_absent(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    old = repository / "src" / "oldpkg" / "mod.py"
+    new = repository / "src" / "mod.py"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"VALUE = 'guarded'\n")
+    _git(repository, "add", "src/oldpkg/mod.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "mv", "src/oldpkg/mod.py", "src/mod.py")
+    old.parent.rmdir()
+    _git(repository, "commit", "-qm", "rename out of removed directory")
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", lambda _suites, _cache: [])
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 1
+    assert not old.exists()
+    assert new.read_bytes() == b"VALUE = 'guarded'\n"
+
+
 def test_main_never_skips_a_mode_only_production_change_as_identical(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")

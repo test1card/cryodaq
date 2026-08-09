@@ -511,9 +511,10 @@ def main() -> int:
                     clobbered.append(target.label)
                     print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed before mutation |")
                     continue
-                new.unlink()
+                old.parent.mkdir(parents=True, exist_ok=True)
                 materialize_git_entry(old, before)
                 old_mutant = path_identity(old)
+                new.unlink()
                 new_mutant = path_identity(new)
                 try:
                     introduced = sorted(set(failures(suites, cache)) - set(control))
