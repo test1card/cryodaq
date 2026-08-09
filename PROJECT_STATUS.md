@@ -1,46 +1,46 @@
 # CryoDAQ — PROJECT_STATUS
 
 **Снимок release baseline:** 2026-07-22 *(v0.64.1)*
-**Последнее checkpoint-уточнение:** 2026-07-29
+**Последнее checkpoint-уточнение:** 2026-08-10
 **Релизная ветка:** master
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
-**Активная кампания:** см. `docs/campaigns/` — при наличии активной кампании запись ведётся там.
+**Активная кампания:** нет. Кампания качества закрыта merge-ом PR #1
+(2026-07-31); архив — `docs/campaigns/`, отложенные обязательства с
+триггерами — `docs/OBLIGATIONS.md`.
 
-## Montana checkpoint boundary — 2026-07-29
+## Qualification checkpoint — merged 2026-07-31; campaign closed
 
-The release boundary remains tag `v0.64.1`. The Montana work is a
-non-deployable software checkpoint campaign; it does not move the release
-boundary or establish release readiness, physical OFF, real-instrument,
-packaged-Windows, or laboratory acceptance.
+The release boundary remains tag `v0.64.1`. The qualification campaign
+(historically named "Montana"; verbatim records in
+`docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md`) produced a large non-deployable
+software checkpoint that was independently reviewed, approved through the
+out-of-tree approval records, and merged into `master` as PR #1 on 2026-07-31.
+The merge does not move the release boundary and does not establish release
+readiness, physical OFF, real-instrument, packaged-Windows, or laboratory
+acceptance.
 
-Cycle 1 terminated `NOT_PR_READY`, and the owner authorized Cycle 2 under the
-owner-ratified plan in `ROADMAP.md`. The current Cycle 2 judge pin is commit
-`3656654d00937230390076bc60a72b279c124aa9`, tree
-`2bd5e59f73c0326b2a740f7e8d731e390b2a511c`: exactly eight commits after
-`f5d6434d20dffae62c9f03fbc12f68b03f48351b`, with fourteen changed trust-root
-paths. Those object measurements establish the current authority and inventory;
-they do not establish P1 completion.
-
-The checkpoint claim is limited to protection against accidental or
+The checkpoint claim is unchanged and narrow: protection against accidental or
 agent-induced validator and evidence-producer weakening, enforced by a judge
 loaded from the protected default branch. It does **not** claim
-Byzantine-candidate resistance inside pytest. The cumulative guard-root and
-relay repair is present in the current judge commit but remains authored and
-not independently reviewed: it roots Git resolution in the repository under
-validation and refuses protected execution when required candidate-repository
-context is missing. No P1 review receipts and no protected hosted receipt bound
-to `3656654d00937230390076bc60a72b279c124aa9` exist yet. Local diagnostics and
-object measurements do not close those gates. Ordinary CI separately executes
-the exact-checkout guard with Git resolution; only the sealed export subrun
-skips resolution when it has no repository.
+Byzantine-candidate resistance inside pytest.
 
-The protected CI lock (requirements-protected-ci-lock.txt) is version-pinned
-without artifact hashes. It is an owner-authored, candidate-compatible snapshot
-pending independent review and hosted proof; it must not be described as
-reviewed.
+**The live disclosure of what remains open is `docs/OPEN_CELLS.md`.** The
+register is actively maintained by post-merge PRs; where this file and the
+register disagree, the register wins. Deferred directions that carry trigger
+conditions are registered in `docs/OBLIGATIONS.md`. The pre-merge Cycle-2
+narrative that stood here (dated 2026-07-29) — the judge pin, the pending P1
+receipts, the review-in-waiting framing — described the campaign before the
+merge and is superseded; it is preserved in the campaign archive rather than
+restated here. The P0–P9 phase plan in `ROADMAP.md` is likewise historical
+campaign material, not live work.
 
-Open checkpoint and deployment invariants:
+The protected CI lock (requirements-protected-ci-lock.txt) remains
+version-pinned without artifact hashes.
+
+Open checkpoint and deployment invariants (row summaries recorded at the
+2026-07-29 boundary; `docs/OPEN_CELLS.md` carries the live row text and wins on
+any disagreement):
 
 1. **OC-020 — BLOCKS-DEPLOYMENT disclosure debt, not a checkpoint blocker.**
    Mutate-execute-restore remains possible in an ordinary same-authority pytest

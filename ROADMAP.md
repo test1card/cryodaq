@@ -139,87 +139,50 @@ retention/rotation lifecycle bug is fixed.
 
 ---
 
-<!-- Authored by the independent reviewer (gpt-5.6-sol) at the owner's request,
-     2026-07-29, after the owner ratified the checkpoint threat model. It supersedes
-     the earlier campaign plan, whose stop lever was unreachable by construction:
-     P5 became available only after convergence, while every finding reopened
-     authoring. The bounded-cycle rule below exists to prevent a recurrence. -->
+## Montana PR-readiness plan (2026-07-29) — closed; archived
 
-## Montana PR-readiness and checkpoint publication — owner-ratified plan (2026-07-29)
+The owner-ratified P0-P9 plan that stood here is campaign history. It moved
+verbatim, with provenance, to `docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md`
+(section "Owner-ratified P0-P9 plan, extracted from ROADMAP.md").
+`docs/OPEN_CELLS.md` is the live disclosure register; it wins on any
+disagreement with this file.
 
-> **Campaign-local scope.** This section supersedes the 2026-07-29
-> `DO NOT MERGE` determination and blocker classification in
-> `docs/OPEN_CELLS.md` for this checkpoint only. Historical evidence is retained
-> and labelled superseded rather than deleted.
->
-> The owner’s binding threat-model decision is:
->
-> **This checkpoint protects against accidental or agent-induced validator and
-> evidence-producer weakening, enforced by a judge loaded from the protected
-> default branch. It does not claim Byzantine-candidate resistance inside
-> pytest, and must never be described as if it does.**
->
-> In particular, this checkpoint does not establish resistance to candidate
-> code deliberately attacking the same pytest process or OS account; compromise
-> of `master`, GitHub Actions, OIDC, a hosted runner, or the package index;
-> artifact immutability under a lock without `--require-hashes`; physical OFF;
-> real-instrument behavior; packaged Windows behavior; or laboratory acceptance.
+Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
+(not copied from any document):
 
-### Bounded-cycle rule
+- PR #1 is MERGED: state MERGED, merged 2026-07-31T23:37Z, merge commit
+  `bea5579e913a85042c2e63c1f07bf44300ca060a` — a fast-forward, so the merge
+  commit is the reviewed head itself.
+- Runs bound to that exact SHA: `CryoDAQ CI` (push) success, run 30673414655;
+  `CryoDAQ protected CI evidence gate` success, run 30670510573 (a
+  pull_request-event run); Docs Freshness Gate and Windows ONEDIR smoke
+  success. A later scheduled nightly at the same SHA concluded failure (run
+  30687236292); its cause is not derived here.
+- The repository owner type is `User` (personal host), so native ruleset
+  required-workflow binding is unavailable (measured 2026-08-10).
+- Branch protection on `master` returns "Branch not protected" (measured
+  2026-08-10): the required-status fallback is not currently enabled.
+- A post-fast-forward protected run with `github.workflow_sha == F` (the P9
+  probe over the freeze artifact `P5-freeze.json`): not observed among the
+  runs bound to the merged SHA; whether one executed under another object is
+  UNKNOWN.
 
-P0 and P1 are prerequisites for starting the integration cycle. The cycle
-starts when P2 begins and permits exactly one integration object and one P5
-frozen SHA.
+By the archived plan's own P9 definition those facts derive the outcome
+`MERGED_P9_OPEN`: merged on P7's exact-SHA evidence, with host migration and
+native workflow binding still open — registered as OB-007 in
+`docs/OBLIGATIONS.md`, which is the single live home of that residual. The
+campaign threat-model ruling lives on in the OC-035 and OC-036 rows of the
+register. Several register rows still carry pre-merge Cycle-2 wording; a
+separate register-truth pass owns correcting that, and their pending language
+is not current merely because this stub points at the register.
 
-The cycle terminates immediately with one of these outcomes:
+The three subsections below remain live disclosure and deliberately stay in
+this file.
 
-- **PR_READY:** P0-P8 pass for one unchanged P5 SHA.
-- **NOT_PR_READY:** any prerequisite check is red, cancelled, missing, stale, or
-  bound to another SHA; either mandatory reviewer withholds approval; a covered
-  byte or mode changes after P5; or the integration topology differs from P2.
-- **MERGED_P9_OPEN:** `master` has already been fast-forwarded at P9, but a
-  post-fast-forward check or settings verification fails.
-
-There is no correction, retry-until-green, refreeze, or “one more review”
-sub-loop in this plan. A diagnostic rerun earns no acceptance credit. After a
-terminal failure, further authoring requires a new owner-authorized bounded
-cycle. Deferred disclosure rows do not extend this cycle and do not become
-merge prerequisites merely because work on them remains possible.
-
-### Cycle 2 — why the trust root moved, and what P1 must now qualify
-
-Cycle 1 ended `NOT_PR_READY` when the hosted protected gate failed. The cause was
-not the bootstrap: **the protected evidence path could never have run.** The guard
-registry resolved red-reproduction receipts, and the Git objects they bind, against
-the location of its own module rather than the tree under validation.
-
-That made one check behave two ways. The ordinary run imports those tools from the
-sealed export, which has no `.git`, so object resolution was skipped. The protected
-run imports the *same* tools from the judge checkout, which is a repository, so
-resolution switched on and searched for the candidate's objects in the judge's
-object database, where they cannot exist — and the judge branch carries no
-`governance/` directory at all.
-
-The current Cycle 2 judge pin is commit
-`3656654d00937230390076bc60a72b279c124aa9`, tree
-`2bd5e59f73c0326b2a740f7e8d731e390b2a511c`. Its trust-root range is eight commits
-after `f5d6434d20dffae62c9f03fbc12f68b03f48351b` and changes fourteen paths. That
-range repairs the root confusion with two authorities that must not be conflated:
-`root`, the materialized tree receipts are read from, and `git_repository`, the
-candidate's real checkout used only to resolve objects. `require_git_resolution`
-is fail-closed and keyed on the protected path alone, so a missing repository
-refuses rather than silently degrading. The range also pins
-`requirements-protected-ci-lock.txt` in `_PROTECTED_PRODUCER_FILES`, bounds and
-labels the protected failure relay, and makes its Windows byte cap independent of
-newline translation.
-
-**P1 must qualify all of it.** The exact commit, tree, ancestry distance, and path
-inventory above are object measurements, not completion evidence. The range is
-authored and not independently reviewed; no P1 review receipts and no protected
-hosted receipt bound to `3656654d00937230390076bc60a72b279c124aa9` exist yet.
-The reviewer who ruled on any part of the repair's design is not thereby a
-reviewer of its implementation: P1's two reviewers must be independent of the
-authors of the eight-commit trust-root range.
+The snapshot-sequencing amendment below ALSO stays: the documentation gate
+anchors the two-artifact regeneration authority on its P3 bullet, so it is
+live regeneration policy, not history (its verbatim copy in the archive is
+the historical record).
 
 ### Amendment — snapshot sequencing (P2-P5), 2026-07-29
 
@@ -245,20 +208,6 @@ gate. That is a defect in this plan, not in the tree. The reviewer's amendment, 
 This keeps exactly one integration object, makes staged-index-last generation possible, and hands P4
 an immutable coherent object rather than one it must itself repair.
 
-### Ordered phases
-
-| Phase | Owner | Merge status | Measurable exit criteria |
-| --- | --- | --- | --- |
-| **P0 — Record the owner decision and reconcile claims** | Governance reviewer; repository owner supplies the ruling but does not sign review evidence | **Prerequisite** | Add an `[Owner]` entry to `docs/DECISIONS.md`; update `docs/OPEN_CELLS.md`, `PROJECT_STATUS.md`, and this roadmap so the earlier determination is explicitly superseded. Bind the judge to commit `3656654d00937230390076bc60a72b279c124aa9`, tree `2bd5e59f73c0326b2a740f7e8d731e390b2a511c`, eight commits after `f5d6434d20dffae62c9f03fbc12f68b03f48351b`, with fourteen changed trust-root paths. Record that the protected lock is version-pinned without artifact hashes and is owner-authored pending independent review. `tests/docs/test_docs_freshness.py` and the applicable governance consistency tests pass. No live document continues to list OC-020 as `BLOCKS-CHECKPOINT` or describes Byzantine resistance as a checkpoint guarantee. |
-| **P1 — Qualify the default-branch trust root** | Two reviewers independent of the authors of the eight-commit range ending at `3656654d00937230390076bc60a72b279c124aa9`: one depth-and-delta reviewer and one fresh-context `BREADTH` reviewer; CI/evidence owner collects hosted evidence | **Prerequisite** | Both review receipts bind exact commit `3656654d00937230390076bc60a72b279c124aa9`, exact tree `2bd5e59f73c0326b2a740f7e8d731e390b2a511c`, and the complete fourteen-path diff against merge base `f5d6434d20dffae62c9f03fbc12f68b03f48351b`. The receipts explicitly disposition the hashless protected lock and the complete cumulative trust-root repair, including the Windows relay-bound correction at the judge tip. A hosted `CryoDAQ protected CI evidence gate` run against an unchanged known-green candidate records `github.workflow_sha == 3656654d00937230390076bc60a72b279c124aa9`, eight successful `protected execution (<os>, <suite>)` jobs, eight `PROTECTED EXECUTION ACCEPTED` results, a successful `protected CI evidence gate` job, and an uploaded `cryodaq-partition-proof-<run-id>-<attempt>` artifact. Record the run ID and artifact digest. No such review or hosted receipt is asserted here; any contrary review verdict or hosted failure ends the plan before integration. |
-| **P2 — Prepare the single final integration without committing** | Integration reviewer/coordinator, not a trust-root author acting alone | **Prerequisite** | Prepare the specified merge with `--no-commit`; its eventual parents must be exactly the pre-integration Montana tip and `master@3656654d00937230390076bc60a72b279c124aa9`, and `3656654d00937230390076bc60a72b279c124aa9` must be an ancestor of the eventual `I`. Resolve the added/added workflow conflict by taking the judge workflow blob unchanged. Carry `requirements-protected-ci-lock.txt` from the judge; retain the candidate’s product `requirements-lock.txt`, since the judge copy remains byte-identical to `f5d6434d20dffae62c9f03fbc12f68b03f48351b`. The two bootstrapped judge modules remain byte-identical to the candidate copies. No other conflict resolution or cleanup enters the prepared merge. P2 remains uncommitted and does **not** create `I`. |
-| **P3 — Reconcile the workflow contract, refresh snapshots, and create `I`** | Governance-test owner plus integration reviewer/coordinator for the final staged object | **Prerequisite** | Update `tests/governance/test_protected_ci_evidence_gate.py` to require installation from `requirements-protected-ci-lock.txt`, reject installation from the product lock, require the protected lock in both immutable-object verification loops, retain the step-level `job.check_run_id` assertions, and retain the candidate-weakened-judge negative control. Stage all final P2/P3 content, update the frozen inventory rows and regenerate both `docs/architecture-montana-important.svg` and `docs/current_candidate_metrics.md` from that final staged index as specified by the amendment; do not touch or promote `docs/refactor/`. Then create the sole integration commit `I` with the exact P2 parents. The workflow blob in `I` remains the exact `3656654d00937230390076bc60a72b279c124aa9` blob. The protected-workflow governance test and `tests/test_ci_candidate_evidence.py` pass from a clean checkout of `I`. |
-| **P4 — Exact integration verification** | Verification owner, separate from P2/P3 authoring | **Prerequisite** | From a clean detached checkout of `I`, record passing results for `python scripts/check_lock_drift.py`, `python -m pytest -q tests/governance/test_protected_ci_evidence_gate.py tests/test_ci_candidate_evidence.py`, applicable prevention-registry and documentation-freshness tests, `python -m ruff check --no-cache` over the changed Python files, and `python -m ruff format --check --no-cache` over those files. Record exact commands, versions, counts, skips, and output hashes. The workflow and protected-lock blobs equal their `3656654d00937230390076bc60a72b279c124aa9` blobs; the product-lock blob equals the pre-integration candidate blob. A failure ends the cycle; P4 does not authorize a correction. |
-| **P5 — Freeze the exact integration object** | Integration reviewer/coordinator | **Prerequisite** | Set `F := I` and `T := tree(I)` without creating another commit. In an isolated clean checkout, create the ignored evidence artifact `.audit-run/montana-pr-readiness/<F>/P5-freeze.json` containing `F`, `T`, exact parents, complete Git path/mode/blob manifest, diff digest against `3656654d00937230390076bc60a72b279c124aa9`, and governing-document blob IDs. Record its SHA-256. Tracked content is clean at `I`. The existing user-owned `docs/refactor/` material is neither added nor deleted. Any later content, path, or mode change terminates this cycle rather than producing another P5 SHA. |
-| **P6 — Two independent final reviews** | Depth-and-delta reviewer plus a newly instantiated, context-independent `BREADTH` reviewer; neither may be an author of `F` | **Prerequisite** | Persist complete receipts as `.audit-run/montana-pr-readiness/<F>/P6-depth-and-delta.json` and `P6-breadth.json`, each binding `F`, `T`, the P5 manifest digest, exact reviewed range, reviewer identity/model, mandate, findings, and verdict. Both verdicts must be `approved`; disagreements must be recorded. Any P0-P2 finding or non-approval produces `NOT_PR_READY`; there is no in-cycle repair. |
-| **P7 — Run exact-SHA hosted evidence** | CI/evidence owner | **Prerequisite** | Push only `F`. The ordinary `CryoDAQ CI` run for `F` completes all eight Ubuntu/Windows × agents/core/gui/remaining jobs green without retry credit. The default-branch `CryoDAQ protected CI evidence gate` also succeeds for `F`, uses `JUDGE_SHA == 3656654d00937230390076bc60a72b279c124aa9`, produces eight protected bundles, eight accepted protected-execution messages, and `cryodaq-partition-proof-<run-id>-<attempt>`. Record both run IDs, all job conclusions, and artifact digests in the P5 evidence directory. A red occurrence of OC-039 still terminates this cycle because the required check is red; that does not reclassify OC-039 as a defect blocker, and rerunning until green is forbidden. |
-| **P8 — Issue the PR-readiness disposition** | Coordinator/integration reviewer | **Prerequisite** | Verify that the proposed PR head is exactly `F`, the base is `master@3656654d00937230390076bc60a72b279c124aa9`, the PR path/mode inventory equals the P5 manifest, both P6 receipts approve `F`, and both P7 workflows are green for `F`. Emit `montana-pr-readiness-disposition-<F>.json` with status `PR_READY`, the two review-receipt digests, run IDs, check conclusions, and all deferred rows. Only this exact SHA may be opened or marked ready. Any PR-head change produces `NOT_PR_READY`. |
-| **P9 — Exact fast-forward, repository-rule authority, and handoff** | Repository owner for the outward actions; coordinator verifies resulting state | **Publication step after PR readiness** | Fast-forward `master` from `3656654d00937230390076bc60a72b279c124aa9` to exactly `F`; no squash, replacement merge, amend, or different tree is permitted. Verify `origin/master == F`. The repository is currently personal-hosted, so its available required-status setting may be used as a fail-closed operational fallback but is not equivalent to, and must not be credited as, a native ruleset required-workflow binding: required status checks do not bind the workflow or event, and can reuse an earlier success for the same SHA when a later pull request B presents it. Migrate the repository to an organization/enterprise host that supports ruleset required workflows, bind the protected workflow for both `pull_request` and `merge_group`, and verify the rule through GitHub API/UI evidence. The required workflow must publish only its native job checks; no manually created or patched check run has admission authority. Because any rule is enabled after the requested fast-forward, state explicitly that it did not gate this fast-forward; the merge itself relied on P7’s exact-SHA check. Trigger or observe one post-fast-forward ordinary/protected run with `github.workflow_sha == F`; require the same eight protected executions and accepted partition proof. The run can prove the merged object but cannot substitute for the missing native repository-rule authority. Until host migration and native binding are verified, the result is `MERGED_P9_OPEN`; only then can P9 yield `MERGED_CHECKPOINT`. A post-fast-forward failure also yields `MERGED_P9_OPEN` and stops without rollback or further correction under this plan. |
 
 ### Open-cell disposition under this threat model
 
@@ -618,6 +567,46 @@ safety boundaries.
   concrete diagnostic decisions that the current alarm/overlay path cannot
   support.
 
+## Documentation track — ASD-STE100 conversion (owner direction, 2026-08-10)
+
+The owner requires all project documentation to use Simplified Technical
+English (ASD-STE100), via the skill installed at `docs/skills/asd-ste100/`.
+The obligation and its scope decision are OB-012 in `docs/OBLIGATIONS.md`;
+this entry is the plan for the retrofit of the EXISTING corpus, and the two
+documents reference each other so neither drifts alone.
+
+Sequencing: this is a parallel documentation track. It must not displace the
+software-side pre-lab phases (H3/H4, F35, F36) above, which set the lab date.
+New and changed English text conforms immediately (per the obligation);
+existing documents convert in the slices below, each slice one PR, started
+after the current open-PR queue drains.
+
+Slices, each merged with the remaining client-language purge of the same
+files so the same document is not rewritten twice:
+
+1. `docs/quickstart.md`, `docs/troubleshooting.md`, `docs/deployment.md`,
+   `docs/protocol.md` (~65 KB) — smallest surface, proves the method.
+2. `docs/instruments.md`, `docs/new_lab_adaptation.md`, both acceptance
+   checklists (~115 KB).
+3. `docs/operator_manual.md` (~66 KB; Russian operator strings exempt).
+4. README.md and PROJECT_STATUS.md English prose (already purged of campaign
+   language; conversion pass only).
+5. Agent-facing instruction docs (AGENTS.md, docs/ORCHESTRATION.md) — new-text
+   conformance from now; whole-document conversion last, because their
+   precision is load-bearing and meaning drift there is costliest.
+
+Honest costs, stated so this entry cannot decay into a checkbox: STE
+conversion of technical prose is slow (each slice is a real editing pass, not
+a mechanical substitution); the installed skill ships no checker, so
+conformance is writer discipline plus review until a heuristic checker (part
+of the obligations-guard package) exists — and that checker will only measure
+form, never meaning. The governing verification for every slice is therefore
+a before/after meaning-drift review by a reviewer who did not do the
+conversion: an STE-clean sentence that no longer says what the original said
+is a worse outcome than an unconverted one. Russian-language documents are
+out of scope (STE100 is an English-language standard); verbatim quotes and
+archived campaign records are never rewritten.
+
 ---
 
 ## Post-Montana engineering-quality and research roadmap
@@ -830,6 +819,10 @@ and gating on nothing but the owner's time at the stand.**
   itself remains open, with acceptance pending a second independent reviewer and
   the prevention record's `green_evidence`); the OC-039 disposition.
   Proves the PR-review-merge workflow end to end at small scale.
+<!-- phase-1-status=IN_PROGRESS : when every Phase 1 item below is merged, change
+     this token to phase-1-status=DONE. OB-002 in docs/OBLIGATIONS.md keys its
+     trigger to that exact token; do not reword it, translate it, or let an
+     STE rewrite touch it. -->
 - **Phase 1 — the descriptor spine.** The engine-loader ownership fix; then
   OC-031's registry re-key; then the OC-008/OC-030 site migrations in bounded
   batches carrying rendering evidence for every touched surface; OC-023 rides

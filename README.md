@@ -103,10 +103,12 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
 - **Latest release:** v0.64.1 (2026-07-08)
 - **Released baseline:** the latest locally available release tag is `v0.64.1`
   (2026-07-08).
-- **Active campaign:** Montana Cycle 2 is a large, unreleased software-side
-  laboratory-readiness refactor. This README does not assert a current branch or
-  candidate SHA; `PROJECT_STATUS.md` defines the live boundary. The campaign is
-  not accepted merely because its mock tests or ordinary CI pass.
+- **Qualification campaign:** the large software-side laboratory-readiness
+  refactor was merged into `master` on 2026-07-31 after independent review.
+  This README does not assert a current branch or candidate SHA;
+  `PROJECT_STATUS.md` defines the live boundary. The merge is a software
+  checkpoint only — it is not accepted merely because mock tests or ordinary
+  CI pass.
 - **Evidence boundary:** physical instrument, dummy-load, independent final-element,
   and laboratory acceptance gates remain open until the procedures in
   [`docs/lab_verification_checklist.md`](docs/lab_verification_checklist.md) are
@@ -116,13 +118,13 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
   in [`docs/MONTANA_REFACTOR_REPORT.md`](docs/MONTANA_REFACTOR_REPORT.md); the
   status document defines the current acceptance boundary.
 
-## Montana refactor: what changed
+## The laboratory-readiness refactor: what changed
 
-Montana is the unreleased laboratory-readiness refactor. Cycle 1 ended
-`NOT_PR_READY`; Cycle 2 is moving CryoDAQ toward narrower ownership, explicit
+The qualification refactor (merged 2026-07-31; campaign records in
+`docs/campaigns/`) moved CryoDAQ toward narrower ownership, explicit
 evidence, and visible failure boundaries while preserving the information-dense
 operator workflow. Several boundaries remain open below, so this is a design
-direction and partially implemented candidate, not an accepted system property.
+direction with open acceptance gates, not a finished system property.
 
 The most important changes are:
 
@@ -166,7 +168,7 @@ The most important changes are:
   procedures bind evidence to exact commits. Mock evidence never claims to be
   physical-hardware evidence.
 
-Montana is large, but its governing idea is simple: make authority narrow,
+The refactor is large, but its governing idea is simple: make authority narrow,
 state explicit, failure visible, and every acceptance claim traceable to the
 environment that actually produced it.
 
@@ -215,17 +217,17 @@ labels as substitutes for explaining behavior.
 ### Copy-paste assignment for the interviewing agent
 
 > Interview the CryoDAQ maintainer and laboratory stakeholders to produce a
-> factual, operator-centred account of the system and the Montana refactor.
+> factual, operator-centred account of the system and the laboratory-readiness refactor.
 > Establish the real experiment workflow first, then trace authority, data,
 > failure recovery, GUI truth, and acceptance evidence. Separate released
-> behavior, Montana candidate behavior, planned work, and physical claims that
+> behavior, current checkpoint behavior, planned work, and physical claims that
 > remain unverified. Challenge vague answers with concrete scenarios and ask
 > for the owning process, persisted record, operator-visible state, relevant
 > source or test, and exact evidence for every important claim. Do not treat CI,
 > simulation, mocks, screenshots, or documentation as proof of hardware
 > behavior. Do not recommend weakening fail-closed behavior or hiding operator
 > information to simplify the design. End with: (1) a plain-language system
-> summary; (2) a before/Montana comparison; (3) an authority and data-flow map;
+> summary; (2) a before/after comparison; (3) an authority and data-flow map;
 > (4) unresolved safety and operability questions; (5) open software, Windows,
 > WSL, packaging, dummy-load, and physical-lab gates; and (6) contradictions
 > between interviews, code, tests, and documentation.
@@ -238,7 +240,7 @@ personal data or raw private transcripts in the repository.
 
 Read these sources first, in order:
 
-1. This README for the product and Montana overview.
+1. This README for the product and refactor overview.
 2. [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for the exact current evidence and
    open gates.
 3. [`docs/MONTANA_REFACTOR_REPORT.md`](docs/MONTANA_REFACTOR_REPORT.md) for the
@@ -371,8 +373,9 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON commands).
 ## Implemented workflows
 
 The list below describes the active tree: released v0.64.1 workflows together
-with explicitly unreleased Montana candidate behavior. Candidate defaults and
-hardening are not release or physical-acceptance claims; see **Status** above.
+with the merged checkpoint behavior that still awaits physical acceptance.
+Checkpoint defaults and hardening are not release or physical-acceptance
+claims; see **Status** above.
 
 - **Knowledge base (RAG):** local semantic search over the experiment archive,
   vault notes, the operator log, and the `data/knowledge/` corpus
@@ -571,7 +574,7 @@ cryodaq-rag-search               # semantic search over the knowledge base
 
 ## Configuration
 
-Active configuration files in the Montana candidate:
+Active configuration files in the current checkpoint:
 
 - `config/instruments.yaml` — GPIB/serial/USB addresses, LakeShore channels,
   `chamber.volume_l` for the F13 leak rate
@@ -776,7 +779,7 @@ trail for post-hoc review.
 
 ## Known limitations
 
-These limitations apply at the current v0.64.1/Montana candidate boundary. The
+These limitations apply at the current v0.64.1/checkpoint boundary. The
 software and laboratory checks are collected as a turnkey protocol in
 `docs/lab_verification_checklist.md`.
 
