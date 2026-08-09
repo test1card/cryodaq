@@ -287,3 +287,31 @@ def test_main_refuses_stable_uncommitted_suite_inputs(tmp_path: Path, monkeypatc
     assert subject.main() == 2
     assert runs == 0
     assert "uncommitted candidate inputs" in capsys.readouterr().out
+
+
+def test_main_refuses_to_certify_multiple_independent_hunks_as_one(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_bytes(b"GUARDED = 'base'\n\n# unrelated area\n\nUNGUARDED = 'base'\n")
+    _git(repository, "add", "src/production.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_bytes(b"GUARDED = 'candidate'\n\n# unrelated area\n\nUNGUARDED = 'candidate'\n")
+    _git(repository, "commit", "-qam", "two independent production edits")
+
+    runs = 0
+
+    def only_first_edit_is_guarded(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        return [] if "GUARDED = 'candidate'" in source.read_text(encoding="utf-8") else ["test_guarded"]
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", only_first_edit_is_guarded)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 1
+    assert runs == 1
+    assert "multiple independent diff hunks" in capsys.readouterr().out

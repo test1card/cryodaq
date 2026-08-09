@@ -273,6 +273,12 @@ def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ..
     return sorted(artifacts, key=lambda artifact: artifact.label)
 
 
+def changed_hunk_count(point: str, path: str) -> int:
+    out = _git(["diff", "--unified=0", "--no-ext-diff", "--no-textconv", point, "HEAD", "--", path])
+    out.check_returncode()
+    return sum(line.startswith("@@ ") for line in out.stdout.splitlines())
+
+
 def base_content(point: str, path: str) -> bytes | None:
     """The base blob, or None when the path genuinely does not exist there.
 
@@ -500,6 +506,14 @@ def main() -> int:
             print(f"REFUSING: suite inputs drifted before mutation attribution: {drift}")
             return 2
         path = str(target.candidate_path or target.base_path)
+        if (
+            target.base_path == target.candidate_path
+            and target.candidate_path is not None
+            and changed_hunk_count(point, target.candidate_path) > 1
+        ):
+            unmeasured.append(target.label)
+            print(f"| `{target.label}` | **NOT MEASURED** — multiple independent diff hunks need separate evidence |")
+            continue
         if target.base_path != target.candidate_path:
             old = root / str(target.base_path)
             new = root / str(target.candidate_path)
