@@ -28,6 +28,7 @@ from PySide6.QtWidgets import QApplication
 
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.drivers.base import Reading
+from cryodaq.gui import theme
 from cryodaq.gui.dashboard import DashboardView
 from cryodaq.gui.dashboard import phase_aware_widget as module
 
@@ -85,6 +86,19 @@ def test_a_delayed_source_sample_arrives_already_marked_stale(app, tmp_path, mon
     assert STALE_MARK in text, (
         "a source-aged cooldown ETA was blessed as fresh when it arrived through the dashboard route"
     )
+
+
+def test_stale_metric_uses_canonical_chrome_and_shape(app, tmp_path, monkeypatch) -> None:
+    """Stale analytics pair legible text with STATUS_STALE shape/color chrome."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(_eta_reading(datetime.now(UTC) - timedelta(seconds=181.0)))
+
+    text = view._phase_widget._context_label.text()
+    assert "2ч" in text, "stale chrome hid the retained cooldown ETA"
+    assert "◇ устарело" in text, "stale analytics have no static shape/text cue"
+    assert f"border:1px solid {theme.STATUS_STALE}" in text, "stale analytics do not use canonical STATUS_STALE chrome"
 
 
 def test_configured_slow_healthy_predictor_is_not_marked_before_next_publication(app, tmp_path, monkeypatch) -> None:

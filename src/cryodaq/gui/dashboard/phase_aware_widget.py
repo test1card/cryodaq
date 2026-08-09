@@ -464,7 +464,11 @@ class PhaseAwareWidget(QWidget):
         stamped = self._cached_at.get(key)
         if stamped is None or time.monotonic() - stamped <= self._analytics_stale_after_s:
             return rendered
-        return f"{rendered} \u00b7 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u043e"
+        return (
+            f'<span style="border:1px solid {theme.STATUS_STALE}; '
+            f'border-radius:{theme.RADIUS_SM}px; padding:0 {theme.SPACE_1}px;">'
+            f"{rendered} \u00b7 ◇ \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u043e</span>"
+        )
 
     def _apply_inactive_state(self) -> None:
         self._has_active_experiment = False
