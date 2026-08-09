@@ -128,6 +128,24 @@ class GitEntry:
     content: bytes
 
 
+@dataclass(frozen=True)
+class SuiteInputs:
+    """Candidate and repository inputs whose stability makes attribution valid."""
+
+    head: str
+    index_entries: bytes
+    listed_paths: tuple[str, ...]
+    worktree: tuple[tuple[str, PathIdentity], ...]
+
+    def excluding(self, paths: set[str]) -> SuiteInputs:
+        return SuiteInputs(
+            self.head,
+            self.index_entries,
+            tuple(path for path in self.listed_paths if path not in paths),
+            tuple(item for item in self.worktree if item[0] not in paths),
+        )
+
+
 def path_identity(path: Path) -> PathIdentity:
     if path.is_symlink():
         return PathIdentity("symlink", os.readlink(path), stat.S_IMODE(path.lstat().st_mode))
@@ -252,6 +270,58 @@ class MeasurementError(RuntimeError):
     """A suite run whose result cannot be read as evidence either way."""
 
 
+class SuiteInputDrift(MeasurementError):
+    """The candidate or a possible suite input changed between observations."""
+
+
+def _suite_inputs_once(root: Path, excluded: set[str] | None = None) -> SuiteInputs:
+    excluded = excluded or set()
+    head = _git(["rev-parse", "HEAD"])
+    head.check_returncode()
+    index_entries = _git_bytes(["ls-files", "--stage", "-z"])
+    index_entries.check_returncode()
+    listed_paths = _git_bytes(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    listed_paths.check_returncode()
+    paths = tuple(os.fsdecode(raw) for raw in listed_paths.stdout.split(b"\0") if raw)
+    included = tuple(path for path in paths if path not in excluded)
+    identities = tuple((path, path_identity(root / path)) for path in included)
+    return SuiteInputs(head.stdout.strip(), index_entries.stdout, included, identities)
+
+
+def capture_suite_inputs(root: Path) -> SuiteInputs:
+    """Take a stable snapshot, refusing a repository moving while it is read."""
+
+    first = _suite_inputs_once(root)
+    second = _suite_inputs_once(root)
+    if first != second:
+        raise SuiteInputDrift("suite inputs changed while their initial identity was captured")
+    return first
+
+
+def assert_suite_inputs_unchanged(expected: SuiteInputs, root: Path, *, excluded: tuple[str, ...] = ()) -> None:
+    omitted = set(excluded)
+    first = _suite_inputs_once(root, omitted)
+    second = _suite_inputs_once(root, omitted)
+    if first != second:
+        raise SuiteInputDrift("suite inputs changed while their identity was rechecked")
+    baseline = expected.excluding(omitted)
+    if first == baseline:
+        return
+    if first.head != baseline.head:
+        detail = f"HEAD moved from {baseline.head[:8]} to {first.head[:8]}"
+    elif first.index_entries != baseline.index_entries:
+        detail = "the Git index changed"
+    elif first.listed_paths != baseline.listed_paths:
+        detail = "the tracked/untracked input inventory changed"
+    else:
+        current = dict(first.worktree)
+        detail = next(
+            (f"{path} changed" for path, identity in baseline.worktree if current.get(path) != identity),
+            "a suite input changed",
+        )
+    raise SuiteInputDrift(detail)
+
+
 def git_entry(point: str, path: str | None) -> GitEntry | None:
     if path is None:
         return None
@@ -354,6 +424,13 @@ def main() -> int:
         print(dirty)
         return 2
 
+    root = repository_root()
+    try:
+        suite_inputs = capture_suite_inputs(root)
+    except MeasurementError as unreadable:
+        print(f"REFUSING: suite input identity could not be captured: {unreadable}")
+        return 2
+
     # THE CONTROL. Without it, a suite that already fails hands the same failure
     # to every reverted artifact and every one is reported guarded.
     control_cache = Path(tempfile.mkdtemp(prefix="unguarded-control-"))
@@ -369,6 +446,11 @@ def main() -> int:
         for name in sorted(set(control))[:10]:
             print(f"    {name}")
         return 2
+    try:
+        assert_suite_inputs_unchanged(suite_inputs, root)
+    except SuiteInputDrift as drift:
+        print(f"REFUSING: suite inputs drifted after the green control: {drift}")
+        return 2
     print(f"control: green over {', '.join(suites)}")
     print()
     print("| reverted production artifact | new failures introduced by the revert |")
@@ -377,8 +459,12 @@ def main() -> int:
     unguarded: list[str] = []
     unmeasured: list[str] = []
     clobbered: list[str] = []
-    root = repository_root()
     for target in targets:
+        try:
+            assert_suite_inputs_unchanged(suite_inputs, root)
+        except SuiteInputDrift as drift:
+            print(f"REFUSING: suite inputs drifted before mutation attribution: {drift}")
+            return 2
         path = str(target.candidate_path or target.base_path)
         if target.base_path != target.candidate_path:
             old = root / str(target.base_path)
@@ -391,6 +477,7 @@ def main() -> int:
             concurrent = False
             old_mutant: PathIdentity | None = None
             new_mutant: PathIdentity | None = None
+            drift_error: SuiteInputDrift | None = None
             try:
                 if (
                     before is None
@@ -411,6 +498,10 @@ def main() -> int:
                 new_mutant = path_identity(new)
                 try:
                     introduced = sorted(set(failures(suites, cache)) - set(control))
+                    assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
+                except SuiteInputDrift as drift:
+                    drift_error = drift
+                    introduced = []
                 except MeasurementError as unreadable:
                     unmeasured.append(target.label)
                     print(f"| `{target.label}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
@@ -427,6 +518,9 @@ def main() -> int:
                 if concurrent:
                     clobbered.append(target.label)
                     print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed during the run |")
+            if drift_error is not None:
+                print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
+                return 2
             if concurrent:
                 continue
             if introduced:
@@ -441,6 +535,7 @@ def main() -> int:
         candidate = git_entry("HEAD", target.candidate_path)
         cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
         mutant: PathIdentity | None = None
+        drift_error: SuiteInputDrift | None = None
         try:
             if before is None:
                 if candidate is None or original.kind == "absent":
@@ -477,6 +572,10 @@ def main() -> int:
                 mutant = path_identity(source)
             try:
                 introduced = sorted(set(failures(suites, cache)) - set(control))
+                assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
+            except SuiteInputDrift as drift:
+                drift_error = drift
+                introduced = []
             except MeasurementError as unreadable:
                 unmeasured.append(path)
                 print(f"| `{path}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
@@ -494,6 +593,9 @@ def main() -> int:
             else:
                 restore_path(source, original)
                 assert path_identity(source) == original, f"{path} was NOT restored with its complete identity"
+        if drift_error is not None:
+            print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
+            return 2
         if concurrent:
             continue
         if introduced:

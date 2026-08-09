@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tools import unguarded_production_files as subject
 
 
@@ -108,3 +110,85 @@ def test_main_never_skips_a_mode_only_production_change_as_identical(tmp_path: P
     output = capsys.readouterr().out
     assert "identical to the merge base" not in output
     assert runs == 2 or "NOT MEASURED" in output
+
+
+@pytest.mark.parametrize("drift", ["suite_input", "head"])
+def test_main_refuses_drift_after_the_green_control(tmp_path: Path, monkeypatch, capsys, drift: str) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    source = repository / "src" / "production.py"
+    suite_input = repository / "tests" / "test_guard.py"
+    source.parent.mkdir()
+    suite_input.parent.mkdir()
+    source.write_bytes(b"VALUE = 'base'\n")
+    suite_input.write_bytes(b"def test_guard(): pass\n")
+    _git(repository, "add", "src/production.py", "tests/test_guard.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_bytes(b"VALUE = 'candidate'\n")
+    _git(repository, "commit", "-qam", "candidate")
+
+    runs = 0
+
+    def drift_after_control(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            if drift == "suite_input":
+                suite_input.write_bytes(b"def test_guard(): assert False\n")
+            else:
+                _git(repository, "commit", "--allow-empty", "-qm", "concurrent head")
+            return []
+        return ["test_guard"]
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", drift_after_control)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", "tests"],
+    )
+
+    assert subject.main() == 2
+    assert runs == 1
+    assert source.read_bytes() == b"VALUE = 'candidate'\n"
+    assert "suite inputs drifted after the green control" in capsys.readouterr().out
+
+
+def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    source = repository / "src" / "production.py"
+    suite_input = repository / "tests" / "test_guard.py"
+    source.parent.mkdir()
+    suite_input.parent.mkdir()
+    source.write_bytes(b"VALUE = 'base'\n")
+    suite_input.write_bytes(b"def test_guard(): pass\n")
+    _git(repository, "add", "src/production.py", "tests/test_guard.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_bytes(b"VALUE = 'candidate'\n")
+    _git(repository, "commit", "-qam", "candidate")
+
+    runs = 0
+
+    def drift_during_mutant(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            return []
+        suite_input.write_bytes(b"def test_guard(): assert False\n")
+        return ["test_guard"]
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", drift_during_mutant)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", "tests"],
+    )
+
+    assert subject.main() == 2
+    assert runs == 2
+    assert source.read_bytes() == b"VALUE = 'candidate'\n"
+    assert "suite inputs drifted before mutation attribution" in capsys.readouterr().out
