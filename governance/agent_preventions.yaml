@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: CHANNEL-RELOAD-HALF-APPLY-FALSE-GREEN-346
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_leaves_the_live_channel_set_untouched
+    ci_partition: core
+    red_evidence: the_prior_green_quantity_suite_constructed_fresh_managers_only_and_never_reloaded_an_already_live_manager_after_a_valid_channels_mapping_was_parsed_so_load_replaced_self_channels_before_rejecting_a_malformed_default_quantity_leaving_the_live_manager_serving_new_channels_under_the_old_quantity_declaration_while_all_registered_nodes_stayed_green_the_new_production_path_node_loads_valid_state_then_attempts_the_malformed_reload_and_requires_both_channels_and_quantity_to_remain_unchanged_2026_08_09_pending_immutable_capture
+    green_evidence: pending
   - id: OC030-COVERAGE-CLAIM-UNDERIVED-FALSE-GREEN-345
     status: open
     scope: product_contract
@@ -3261,13 +3269,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/OPEN_CELLS.md#oc-030
-    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled.
+    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled, and every ChannelManager reload that replaces the declared channel-role state serving those surfaces.
     classification: silent_channel_omission
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator.
-    invariant: 'An operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. WHAT THIS RECORD DOES NOT CLAIM: the declaration currently lives in `config/channels.yaml` and is therefore OPERATOR-owned, not DESCRIPTOR-derived. Binding it to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here, so a wrong declaration in that file still misroutes a surface - it merely does so visibly, in a file the operator owns, instead of invisibly through a letter.'
+    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator. A second confirmed path replaced the live channel set before validating default_quantity, so a rejected reload left the running manager serving new channels under the old declaration even though no configuration file described that state.
+    invariant: 'An operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. A rejected reload is atomic: the live channel set and its quantity declaration both remain unchanged. WHAT THIS RECORD DOES NOT CLAIM: the declaration currently lives in `config/channels.yaml` and is therefore OPERATOR-owned, not DESCRIPTOR-derived. Binding it to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here, so a wrong declaration in that file still misroutes a surface - it merely does so visibly, in a file the operator owns, instead of invisibly through a letter.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -3298,6 +3306,8 @@ records:
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_the_shipped_selection_is_byte_for_byte_what_spelling_selected
         ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_leaves_the_live_channel_set_untouched
+        ci_partition: core
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_manager_disagrees_with_spelling_in_both_directions
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_dashboard_buffers_only_declared_temperatures
@@ -3308,7 +3318,7 @@ records:
         ci_partition: gui
       - node: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
         ci_partition: remaining
-    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_2026_08_08_pending_immutable_capture
+    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_AND_the_confirmed_reload_ordering_defect_replaced_the_live_channel_set_before_rejecting_malformed_default_quantity_so_the_manager_served_new_channels_under_the_old_declaration_until_the_production_path_was_made_atomic_2026_08_09_pending_immutable_capture
     green_evidence: pending
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
