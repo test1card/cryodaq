@@ -96,9 +96,9 @@ def load_protected_channel_patterns(
 # Phase 2b H.1: alarms_v3.yaml integration
 # --------------------------------------------------------------------------
 #
-# The legacy ``load_protected_channel_patterns`` only knows the old top-level
-# ``alarms`` / ``interlocks`` schema (with explicit ``channel_pattern`` fields).
-# Production now uses ``alarms_v3.yaml`` with a richer schema:
+# ``load_protected_channel_patterns`` reads the top-level ``alarms`` /
+# ``interlocks`` schema, including exact descriptor-resolved interlock bindings.
+# Production also uses ``alarms_v3.yaml`` with a richer schema:
 #
 #     channel_groups:
 #       calibrated: [Т11, Т12]

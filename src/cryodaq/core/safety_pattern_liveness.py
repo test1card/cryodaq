@@ -12,11 +12,11 @@ as a misspelled CRITICAL one — so alarm references are checked at all
 severities (plane 5), with an explicit per-reference ``optional_channels``
 opt-out for hardware a given lab does not populate. The opt-out is limited to
 non-safety alarms, must be an exact list of unique channel strings, and cannot
-silence a required composite/rate-condition arm. The engine's current
-temporary lab-build policy catches
-only this diagnostic exception and continues after a CRITICAL log until the
-exact lab manifest has been validated.  Removing that narrow catch restores
-the intended fail-closed startup behavior.
+silence a required composite/rate-condition arm. The engine invokes this
+validator unwrapped during startup. Any ``SafetyPatternLivenessError``
+therefore propagates as ``SafetyConfigError``; the launcher maps that
+configuration failure to its non-restarting exit path, and acquisition does
+not boot.
 
 The planes, matchers, and the disk-synthetic-channel bypass are copied from
 the proven regression test ``tests/core/test_safety_pattern_liveness.py``
@@ -55,9 +55,9 @@ class SafetyPatternLivenessError(SafetyConfigError):
 
     Subclasses ``SafetyConfigError`` so the final fail-closed policy maps an
     uncaught instance to ``ENGINE_CONFIG_ERROR_EXIT_CODE`` (2), which the
-    launcher does not auto-restart.  The current lab-build call site catches
-    exactly this subclass temporarily and logs at CRITICAL.  The message names
-    every dead pattern with its plane and config source.
+    launcher does not auto-restart. The engine startup call site does not catch
+    this exception, so a dead safety pattern prevents acquisition from booting.
+    The message names every dead pattern with its plane and config source.
     """
 
 
@@ -642,11 +642,11 @@ def _load_interlock_conditions(
                 InterlockCondition(
                     name=entry["name"],
                     description=entry.get("description", ""),
-                channel_ids=resolve_interlock_channel_ids(
-                    entry,
-                    config_path=config_path,
-                    descriptor_catalog=descriptor_catalog,
-                ),
+                    channel_ids=resolve_interlock_channel_ids(
+                        entry,
+                        config_path=config_path,
+                        descriptor_catalog=descriptor_catalog,
+                    ),
                     threshold=float(entry.get("threshold", 0.0)),
                     comparison=entry.get("comparison", ">"),
                     action=entry.get("action", ""),

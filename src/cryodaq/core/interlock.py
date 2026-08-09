@@ -5,8 +5,8 @@
 
 Принцип работы:
   1. InterlockEngine подписывается на DataBroker и получает все Reading.
-  2. Для каждого показания проверяются все ARMED-блокировки, чей channel_pattern
-     совпадает с Reading.channel.
+  2. Для каждого показания проверяются все ARMED-блокировки, чьи объявленные
+     физические привязки разрешены в Reading.channel.
   3. При срабатывании условия: состояние → TRIPPED, вызывается action-коллбэк,
      событие записывается в лог и историю.
   4. TRIPPED-блокировка не срабатывает повторно до явного acknowledge().
@@ -129,8 +129,10 @@ class InterlockCondition:
             raise ValueError(
                 f"Блокировка '{self.name}': недопустимый оператор сравнения '{self.comparison}'. Допустимы: '>' и '<'."
             )
-        if type(self.channel_ids) is not frozenset or not self.channel_ids or any(
-            type(channel_id) is not str or not channel_id for channel_id in self.channel_ids
+        if (
+            type(self.channel_ids) is not frozenset
+            or not self.channel_ids
+            or any(type(channel_id) is not str or not channel_id for channel_id in self.channel_ids)
         ):
             raise ValueError(f"Блокировка '{self.name}': channel_ids must be a non-empty frozenset of strings")
 
