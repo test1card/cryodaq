@@ -197,7 +197,7 @@ def test_saving_channel_edits_preserves_the_declaration(tmp_path: Path) -> None:
     assert "default_quantity" in yaml.safe_load(saved.read_text(encoding="utf-8"))
 
 
-def test_the_shipped_selection_is_byte_for_byte_what_spelling_selected() -> None:
+def test_the_shipped_selection_is_byte_for_byte_what_spelling_selected(tmp_path: Path) -> None:
     """The PR's stated purpose, as an executable assertion.
 
     "Nothing an operator sees changes" was prose in the row and a claim in the
@@ -223,3 +223,17 @@ def test_the_shipped_selection_is_byte_for_byte_what_spelling_selected() -> None
         "screen is the failure behind revert 0bea0449; if a difference is intended, name it above."
     )
     assert by_declaration, "the shipped configuration selects no temperature channels at all"
+
+    control = _manager(
+        tmp_path,
+        {
+            "default_quantity": "temperature",
+            "channels": {
+                "RENAMED": {"name": "temperature", "visible": True},
+                "Т9": {"name": "pressure", "visible": True, "quantity": "pressure"},
+            },
+        },
+    )
+    assert control.get_visible_temperature_channels() == ["RENAMED"], (
+        "the shipped-only baseline cannot detect a return to spelling; this mixed declaration must"
+    )

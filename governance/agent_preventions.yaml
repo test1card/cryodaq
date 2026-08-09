@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: SHIPPED-ONLY-QUANTITY-CONTROL-FALSE-GREEN-343
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_the_shipped_selection_is_byte_for_byte_what_spelling_selected
+    ci_partition: core
+    red_evidence: restoring_is_temperature_channel_to_the_cyrillic_te_spelling_test_left_this_node_green_because_every_shipped_channel_deliberately_makes_declared_and_spelling_selection_identical_so_the_registered_guard_only_tested_the_compatibility_baseline_and_could_not_detect_the_runtime_regression_2026_08_09_pending_immutable_capture
+    green_evidence: pending
   - id: DECLARED-QUANTITY-LOST-ON-SAVE-FALSE-GREEN-341
     status: open
     scope: product_contract
