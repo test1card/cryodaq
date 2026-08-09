@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.analytics.cooldown_compare import DEFAULT_THRESHOLDS, compare
 from cryodaq.analytics.cooldown_fingerprint import (
     CooldownFingerprint,
@@ -94,7 +95,7 @@ def _load_baseline_cfg(config_path: Path | None = None) -> dict:
         path = config_path or (get_config_dir() / "plugins.yaml")
         if not path.exists():
             return {}
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
         return raw.get("cooldown_baseline", {}) or {}
     except Exception as exc:  # noqa: BLE001 — config read must never raise
         logger.error("Ошибка чтения cooldown_baseline из plugins.yaml: %s", exc)

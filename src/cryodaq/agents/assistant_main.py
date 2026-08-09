@@ -48,6 +48,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder, is_valid_sensor_health_summary
 from cryodaq.agents.assistant.live.output_router import OutputRouter
@@ -603,7 +604,7 @@ def _load_telegram_sender() -> TelegramSender | None:
     if not notifications_cfg.exists():
         return None
     try:
-        raw = yaml.safe_load(notifications_cfg.read_text(encoding="utf-8")) or {}
+        raw = yaml.load(notifications_cfg.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
         tg_cfg = raw.get("telegram", {})
         bot_token = str(tg_cfg.get("bot_token", ""))
         if not bot_token or bot_token == "YOUR_BOT_TOKEN_HERE":
@@ -626,7 +627,7 @@ def _resolve_rag_config() -> dict[str, Any] | None:
     for name in ("rag.local.yaml", "rag.yaml", "rag.yaml.example"):
         path = _CONFIG_DIR / name
         if path.exists():
-            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            raw = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
             cfg = dict(raw.get("rag", {}))
             cfg["_source"] = name
             return cfg

@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.paths import get_config_dir
 
@@ -87,7 +88,7 @@ def _selected_theme_name() -> str:
         return DEFAULT_THEME
     try:
         with SETTINGS_FILE.open(encoding="utf-8") as f:
-            loaded = yaml.safe_load(f)
+            loaded = yaml.load(f, Loader=OwnedSafeLoader)
     except Exception as exc:
         logger.warning(
             "theme: failed to parse %s: %s; using %s",
@@ -129,7 +130,7 @@ def validate_theme_pack(name: str) -> dict[str, Any]:
 
     try:
         with pack_file.open(encoding="utf-8") as f:
-            loaded = yaml.safe_load(f)
+            loaded = yaml.load(f, Loader=OwnedSafeLoader)
     except Exception as exc:
         raise ThemePackError(f"theme pack '{name}' could not be parsed") from exc
     if not isinstance(loaded, dict):
@@ -209,7 +210,7 @@ def write_theme_selection(name: str) -> None:
     if SETTINGS_FILE.exists():
         try:
             with SETTINGS_FILE.open(encoding="utf-8") as f:
-                loaded = yaml.safe_load(f)
+                loaded = yaml.load(f, Loader=OwnedSafeLoader)
             if loaded is None:
                 data = {}
             elif isinstance(loaded, dict):

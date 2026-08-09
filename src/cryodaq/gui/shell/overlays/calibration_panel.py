@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.zmq_client import ZmqCommandWorker
@@ -89,7 +90,7 @@ def _load_lakeshore_channels(config_path: Path) -> list[dict[str, Any]]:
     """Load LakeShore channels grouped by instrument from instruments.yaml."""
     try:
         with config_path.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = yaml.load(fh, Loader=OwnedSafeLoader)
         if not isinstance(raw, dict):
             return []
     except Exception:

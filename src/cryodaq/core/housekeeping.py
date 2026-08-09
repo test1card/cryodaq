@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.shutdown_settlement import (
     CancelledTaskSettlement,
@@ -49,7 +50,7 @@ def load_housekeeping_config(config_path: Path) -> tuple[dict[str, Any], Physica
         )
     snapshot = config_path.read_bytes()
     try:
-        raw = yaml.safe_load(snapshot)
+        raw = yaml.load(snapshot, Loader=OwnedSafeLoader)
     except yaml.YAMLError as exc:
         raise HousekeepingConfigError(f"housekeeping.yaml at {config_path}: YAML parse error — {exc}") from exc
     if not isinstance(raw, dict):
@@ -69,7 +70,7 @@ def load_protected_channel_patterns(
             snapshot = path.read_bytes()
         else:
             snapshot = snapshots[path]
-        raw = yaml.safe_load(snapshot) or {}
+        raw = yaml.load(snapshot, Loader=OwnedSafeLoader) or {}
         for key in ("alarms", "interlocks"):
             for item in raw.get(key, []):
                 pattern = str(item.get("channel_pattern", "")).strip()
@@ -166,7 +167,7 @@ def load_critical_channels_from_alarms_v3(config_path: Path) -> set[str]:
 
     try:
         with config_path.open(encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+            data = yaml.load(handle, Loader=OwnedSafeLoader) or {}
     except Exception as exc:
         logger.error("Failed to load alarms_v3 for throttle protection: %s", exc)
         return set()

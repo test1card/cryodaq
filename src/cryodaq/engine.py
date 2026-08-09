@@ -36,6 +36,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.analytics.leak_rate import LeakRateEstimator
 from cryodaq.analytics.plugin_loader import PluginPipeline
@@ -1197,10 +1198,10 @@ def _persist_multiline_channels_to_local_yaml(
 
     base_raw: dict[str, Any] = {}
     if base_path.exists():
-        base_raw = _yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
+        base_raw = _yaml.load(base_path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
     local_raw: dict[str, Any] = {}
     if local_path.exists():
-        local_raw = _yaml.safe_load(local_path.read_text(encoding="utf-8")) or {}
+        local_raw = _yaml.load(local_path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
 
     base_instruments = [e for e in (base_raw.get("instruments") or []) if isinstance(e, dict)]
     local_instruments = [e for e in (local_raw.get("instruments") or []) if isinstance(e, dict)]
@@ -1574,7 +1575,7 @@ def _try_activate_calibration_acquisition(
         with raw_path.open(encoding="utf-8") as fh:
             import yaml as _yaml
 
-            raw = _yaml.safe_load(fh) or {}
+            raw = _yaml.load(fh, Loader=OwnedSafeLoader) or {}
         if not raw.get("calibration_acquisition"):
             return
         custom_fields = _normalize_custom_fields_payload(cmd.get("custom_fields"))
@@ -2122,7 +2123,7 @@ def _load_drivers(
 
     try:
         with config_path.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = yaml.load(fh, Loader=OwnedSafeLoader)
     except (OSError, yaml.YAMLError) as exc:
         raise DriverRegistryError(f"{config_path}: unable to decode instrument config") from exc
 
@@ -2285,7 +2286,7 @@ def _log_physical_policy_receipt(policy: str, receipt: PhysicalPolicyReceipt) ->
 def _load_cooldown_config(path: Path) -> tuple[dict[str, Any], PhysicalPolicyReceipt]:
     """Read and parse one cooldown policy snapshot exactly once."""
     snapshot = path.read_bytes()
-    raw = yaml.safe_load(snapshot) or {}
+    raw = yaml.load(snapshot, Loader=OwnedSafeLoader) or {}
     if not isinstance(raw, dict):
         raise TypeError(f"cooldown.yaml at {path}: expected mapping, got {type(raw).__name__}")
     return raw, receipt_for_applied_policy("cooldown", path, snapshot)
@@ -6714,7 +6715,7 @@ async def _run_engine(
     event_logger = EventLogger(writer, experiment_manager, event_bus=event_bus)
 
     # --- F13: Leak rate estimator ---
-    _instruments_raw = yaml.safe_load(instruments_cfg.read_text(encoding="utf-8"))
+    _instruments_raw = yaml.load(instruments_cfg.read_text(encoding="utf-8"), Loader=OwnedSafeLoader)
     _chamber_cfg = _instruments_raw.get("chamber", {})
     _leak_cfg = _chamber_cfg.get("leak_rate", {})
     leak_rate_estimator = LeakRateEstimator(
@@ -6822,7 +6823,7 @@ async def _run_engine(
     _plugins_raw: dict[str, Any] = {}
     if _plugins_cfg_path.exists():
         with _plugins_cfg_path.open(encoding="utf-8") as fh:
-            _plugins_raw = yaml.safe_load(fh) or {}
+            _plugins_raw = yaml.load(fh, Loader=OwnedSafeLoader) or {}
     _sd_cfg = _plugins_raw.get("sensor_diagnostics", {})
     _sd_enabled = _sd_cfg.get("enabled", False)
     sensor_diag: SensorDiagnosticsEngine | None = None
@@ -7024,7 +7025,7 @@ async def _run_engine(
     if notifications_cfg.exists():
         try:
             with notifications_cfg.open(encoding="utf-8") as fh:
-                notif_raw: dict[str, Any] = yaml.safe_load(fh) or {}
+                notif_raw: dict[str, Any] = yaml.load(fh, Loader=OwnedSafeLoader) or {}
 
             tg_cfg = notif_raw.get("telegram", {})
             bot_token = str(tg_cfg.get("bot_token", ""))

@@ -41,6 +41,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.core.alarm_ack_codec import (
     is_canonical_engine_instance_id,
     validate_alarm_ack_wire_result,
@@ -91,7 +92,7 @@ def _load_api_token() -> SecretStr | None:
     if not path.exists():
         return None
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
         web = raw.get("web") or {}
         token = web.get("api_token")
     except Exception:

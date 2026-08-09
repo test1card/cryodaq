@@ -23,6 +23,7 @@ import numpy as np
 if TYPE_CHECKING:
     from cryodaq.core.event_bus import EventBus
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.analytics.base_plugin import DerivedMetric
 from cryodaq.analytics.cooldown_predictor import (
     MIN_COOLDOWN_MODEL_CURVES,
@@ -1042,7 +1043,7 @@ class CooldownService:
 
             path = get_config_dir() / "plugins.yaml"
             if path.exists():
-                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                raw = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
                 cfg = raw.get("cooldown_baseline", {}) or {}
         except Exception as exc:  # noqa: BLE001 — config read must never raise here
             logger.error("Ошибка чтения cooldown_baseline из plugins.yaml: %s", exc)

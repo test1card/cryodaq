@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.sinks.base import ExperimentExport, Sink, SinkResult
 from cryodaq.sinks.vault_sink import VaultSink
 from cryodaq.sinks.webhook_sink import WebhookSink
@@ -49,7 +50,7 @@ class SinkRegistry:
             logger.info("Sinks config not found: %s — sinks disabled", config_path)
             return
         with config_path.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh) or {}
+            raw = yaml.load(fh, Loader=OwnedSafeLoader) or {}
         sinks_cfg = raw.get("sinks", {}) or {}
 
         vault_cfg = sinks_cfg.get("vault") or {}

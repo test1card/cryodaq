@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.command_authority import (
     MUTATION_PROTOCOL_MAJOR,
@@ -528,7 +529,7 @@ class ReplayEngine:
                 logger.info("Replay predictor disabled; reason=config_missing")
                 return
             with cooldown_cfg_path.open(encoding="utf-8") as fh:
-                cd_raw = yaml.safe_load(fh) or {}
+                cd_raw = yaml.load(fh, Loader=OwnedSafeLoader) or {}
             cd_cfg: dict[str, Any] = dict(cd_raw.get("cooldown", {}))
             if not cd_cfg.get("enabled", False):
                 logger.info("cooldown.enabled=False — predictor disabled in replay")

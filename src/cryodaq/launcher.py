@@ -404,6 +404,7 @@ def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, 
 
     import yaml
 
+    from cryodaq._owned_yaml import OwnedSafeLoader
     from cryodaq.paths import get_config_dir
 
     config_dir = get_config_dir()
@@ -415,7 +416,7 @@ def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, 
             stat = agent_cfg_path.stat()
             if stat.st_size > 64 * 1024 or stat.st_mtime > time.time() + 300:
                 raise ValueError("agent config is oversized or future-dated")
-            raw = yaml.safe_load(agent_cfg_path.read_text(encoding="utf-8")) or {}
+            raw = yaml.load(agent_cfg_path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
             if not isinstance(raw, dict):
                 raise ValueError("agent config root must be a mapping")
             section = raw.get("agent", raw.get("gemma", {}))
@@ -444,7 +445,7 @@ def _assistant_runtime_decision(*, experiment_mode: bool = True) -> tuple[bool, 
             stat = reporting_path.stat()
             if stat.st_size > 64 * 1024 or stat.st_mtime > time.time() + 300:
                 raise ValueError("reporting config is oversized or future-dated")
-            raw = yaml.safe_load(reporting_path.read_text(encoding="utf-8")) or {}
+            raw = yaml.load(reporting_path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
             if not isinstance(raw, dict):
                 raise ValueError("reporting config root must be a mapping")
             reporting = raw.get("reporting", raw)

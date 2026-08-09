@@ -35,6 +35,7 @@ import yaml
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.views import analytics_widgets
@@ -98,7 +99,7 @@ def _load_layout_config() -> dict:
     if not _LAYOUT_CONFIG_PATH.exists():
         return {"phases": {}, "fallback": {"main": None, "top_right": None, "bottom_right": None}}
     with _LAYOUT_CONFIG_PATH.open(encoding="utf-8") as f:
-        return yaml.safe_load(f) or {"phases": {}, "fallback": {}}
+        return yaml.load(f, Loader=OwnedSafeLoader) or {"phases": {}, "fallback": {}}
 
 
 def _resolve_phase_key(phase: str | None, config: dict) -> str:

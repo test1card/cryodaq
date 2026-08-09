@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
 from cryodaq.core.qualification import QualificationReceipt, is_issued_qualification_receipt
 from cryodaq.core.rate_estimator import RateEstimator
@@ -321,7 +322,7 @@ class SafetyManager:
             )
 
         snapshot = path.read_bytes()
-        raw = yaml.safe_load(snapshot) or {}
+        raw = yaml.load(snapshot, Loader=OwnedSafeLoader) or {}
 
         if not isinstance(raw, dict):
             raise SafetyConfigError(f"safety.yaml at {path} is malformed (expected mapping, got {type(raw).__name__})")
