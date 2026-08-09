@@ -73,11 +73,12 @@ class QueryRouter:
         self,
         intent: QueryIntent,
         query: str,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Fetch data for a classified intent. Never raises.
 
         Returns a dict with category-specific fields. Out-of-scope and unknown
         categories return an empty dict (no data fetch needed — format LLM handles it).
+        Dispatch failures return None.
         """
         cat = intent.category
         try:
@@ -109,7 +110,7 @@ class QueryRouter:
             return {}
         except Exception as exc:
             logger.warning("QueryRouter.fetch failed for %s: %s", cat.value, exc)
-            return {}
+            return None
 
     async def _fetch_current_value(self, intent: QueryIntent) -> dict[str, Any]:
         channels = self._resolve_target_channels(intent) or []

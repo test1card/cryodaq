@@ -146,7 +146,7 @@ class AssistantQueryAgent:
         t0 = time.monotonic()
         errors: list[str] = []
         intent = None
-        data: dict[str, Any] = {}
+        data: dict[str, Any] | None = {}
         user_prompt = ""
         result: GenerationResult | None = None
         response = _FALLBACK
@@ -154,29 +154,32 @@ class AssistantQueryAgent:
         try:
             intent = await self._classifier.classify(query)
             data = await self._router.fetch(intent, query)
-            user_prompt = self._build_format_user_prompt(query, intent.category, data)
-            system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
-            # Bound the format LLM call by _format_timeout_s. Without this
-            # wrapper a hung Ollama format call (cold model load that never
-            # returns, stalled socket) hangs the whole query agent
-            # indefinitely. On timeout asyncio.TimeoutError propagates to the
-            # broad ``except Exception`` below → errors logged, response stays
-            # _FALLBACK (bounded fallback). _format_timeout_s is stored in
-            # __init__ (default 20 s).
-            result = await asyncio.wait_for(
-                self._ollama.generate(
-                    user_prompt,
-                    model=self._format_model,
-                    system=system_prompt,
-                    temperature=self._format_temperature,
-                    max_tokens=2048,
-                ),
-                timeout=self._format_timeout_s,
-            )
-            if result.truncated or not result.text.strip():
-                errors.append("format_llm_truncated_or_empty")
+            if data is None:
+                errors.append("query_context_unavailable")
             else:
-                response = result.text.strip()
+                user_prompt = self._build_format_user_prompt(query, intent.category, data)
+                system_prompt = format_with_brand(FORMAT_RESPONSE_SYSTEM, self._config.brand_name)
+                # Bound the format LLM call by _format_timeout_s. Without this
+                # wrapper a hung Ollama format call (cold model load that never
+                # returns, stalled socket) hangs the whole query agent
+                # indefinitely. On timeout asyncio.TimeoutError propagates to the
+                # broad ``except Exception`` below → errors logged, response stays
+                # _FALLBACK (bounded fallback). _format_timeout_s is stored in
+                # __init__ (default 20 s).
+                result = await asyncio.wait_for(
+                    self._ollama.generate(
+                        user_prompt,
+                        model=self._format_model,
+                        system=system_prompt,
+                        temperature=self._format_temperature,
+                        max_tokens=2048,
+                    ),
+                    timeout=self._format_timeout_s,
+                )
+                if result.truncated or not result.text.strip():
+                    errors.append("format_llm_truncated_or_empty")
+                else:
+                    response = result.text.strip()
         except Exception as exc:
             logger.warning("AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc)
             errors.append(f"unexpected: {exc}")
@@ -214,7 +217,7 @@ class AssistantQueryAgent:
             logger.warning("AssistantQueryAgent: audit log failed", exc_info=True)
             return response
 
-        if self._chart_dispatcher is not None and chat_id is not None:
+        if self._chart_dispatcher is not None and chat_id is not None and data is not None:
             self._chart_dispatcher.dispatch(intent.category if intent is not None else None, data, chat_id)
 
         return response

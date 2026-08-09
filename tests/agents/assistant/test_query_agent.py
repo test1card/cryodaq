@@ -671,6 +671,7 @@ async def test_query_agent_router_failure_is_operator_visible() -> None:
     agent = _make_agent(ollama, adapters)
     response = await agent.handle_query("Is a cooldown forecast available?")
 
+    adapters.cooldown.eta.assert_awaited_once_with()
     assert response == _FALLBACK
     assert ollama.generate.await_count == 1
     assert agent._audit.log.await_args.kwargs["errors"] == ["query_context_unavailable"]

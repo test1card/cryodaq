@@ -474,11 +474,11 @@ async def test_router_distinguishes_adapter_failure_from_authoritative_empty() -
 
 
 async def test_router_never_raises_on_adapter_exception() -> None:
-    """Router swallows adapter exceptions and returns {}."""
+    """Router catches adapter exceptions and returns the failure sentinel."""
     adapters = _make_adapters()
     adapters.cooldown.eta = AsyncMock(side_effect=RuntimeError("service down"))
 
     router = QueryRouter(adapters)
     intent = QueryIntent(category=QueryCategory.ETA_COOLDOWN)
     result = await router.fetch(intent, "ETA охлаждения?")
-    assert result == {}
+    assert result is None
