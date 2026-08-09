@@ -118,6 +118,16 @@ class PathIdentity:
     mode: int | None = None
 
 
+@dataclass(frozen=True)
+class GitEntry:
+    """The complete tree identity relevant to an executable artifact."""
+
+    mode: str
+    object_type: str
+    object_id: str
+    content: bytes
+
+
 def path_identity(path: Path) -> PathIdentity:
     if path.is_symlink():
         return PathIdentity("symlink", os.readlink(path), stat.S_IMODE(path.lstat().st_mode))
@@ -242,6 +252,61 @@ class MeasurementError(RuntimeError):
     """A suite run whose result cannot be read as evidence either way."""
 
 
+def git_entry(point: str, path: str | None) -> GitEntry | None:
+    if path is None:
+        return None
+    out = _git_bytes(["ls-tree", "-z", point, "--", path])
+    if out.returncode != 0:
+        raise MeasurementError(
+            f"{path} tree identity at {point[:8]} could not be read: "
+            f"{out.stderr.decode('utf-8', 'replace').strip()[:200]}"
+        )
+    if not out.stdout:
+        return None
+    metadata, returned_path = out.stdout.rstrip(b"\0").split(b"\t", 1)
+    mode, object_type, object_id = metadata.decode("ascii").split()
+    if os.fsdecode(returned_path) != path:
+        raise MeasurementError(f"Git returned {os.fsdecode(returned_path)!r} while reading {path!r}")
+    if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
+        raise MeasurementError(f"{path} has unsupported Git identity {mode} {object_type}")
+    content = base_content(point, path)
+    if content is None:
+        raise MeasurementError(f"{path} has a tree entry at {point[:8]} but no readable blob")
+    return GitEntry(mode, object_type, object_id, content)
+
+
+def path_matches_git_entry(path: Path, entry: GitEntry | None) -> bool:
+    if entry is None:
+        return path_identity(path).kind == "absent"
+    if entry.mode == "120000":
+        return path.is_symlink() and os.fsencode(os.readlink(path)) == entry.content
+    if path.is_symlink() or not path.is_file() or path.read_bytes() != entry.content:
+        return False
+    executable = bool(stat.S_IMODE(path.stat().st_mode) & 0o111)
+    return executable == (entry.mode == "100755")
+
+
+def materialize_git_entry(path: Path, entry: GitEntry) -> None:
+    """Put one tree entry on disk, or refuse if this host cannot represent it."""
+
+    path.unlink(missing_ok=True)
+    if entry.mode == "120000":
+        try:
+            os.symlink(os.fsdecode(entry.content), path)
+        except OSError as exc:
+            raise MeasurementError(f"{path} symlink mode cannot be represented on this host: {exc}") from exc
+    else:
+        path.write_bytes(entry.content)
+        current = stat.S_IMODE(path.stat().st_mode)
+        if entry.mode == "100755":
+            desired = current | ((current & 0o444) >> 2)
+        else:
+            desired = current & ~0o111
+        os.chmod(path, desired)
+    if not path_matches_git_entry(path, entry):
+        raise MeasurementError(f"{path} Git mode {entry.mode} cannot be represented on this host")
+
+
 def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     env = dict(os.environ, PYTHONPYCACHEPREFIX=str(cache_prefix), PYTHONDONTWRITEBYTECODE="")
     found: list[str] = []
@@ -320,13 +385,19 @@ def main() -> int:
             new = root / str(target.candidate_path)
             old_original = path_identity(old)
             new_original = path_identity(new)
-            before = base_content(point, str(target.base_path))
+            before = git_entry(point, target.base_path)
+            candidate = git_entry("HEAD", target.candidate_path)
             cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
             concurrent = False
             old_mutant: PathIdentity | None = None
             new_mutant: PathIdentity | None = None
             try:
-                if before is None or old_original.kind != "absent" or new_original.kind == "absent":
+                if (
+                    before is None
+                    or candidate is None
+                    or old_original.kind != "absent"
+                    or not path_matches_git_entry(new, candidate)
+                ):
                     unmeasured.append(target.label)
                     print(f"| `{target.label}` | **NOT MEASURED** — rename pair has an unreadable identity |")
                     continue
@@ -335,7 +406,7 @@ def main() -> int:
                     print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed before mutation |")
                     continue
                 new.unlink()
-                old.write_bytes(before)
+                materialize_git_entry(old, before)
                 old_mutant = path_identity(old)
                 new_mutant = path_identity(new)
                 try:
@@ -365,22 +436,14 @@ def main() -> int:
                 unguarded.append(target.label)
             continue
         source = root / path
-        # The FULL identity, not just the bytes. An added artifact that is a
-        # symlink or carries an executable bit was being restored with
-        # write_bytes, which yields a plain file with default permissions: the
-        # byte assertion still passed while the file TYPE was silently lost, and
-        # a worktree that started clean did not end clean.
-        was_symlink = source.is_symlink()
-        link_target = os.readlink(source) if was_symlink else None
-        original_mode = source.lstat().st_mode if (was_symlink or source.exists()) else None
-        original = None if was_symlink else (source.read_bytes() if source.exists() else None)
-        before = base_content(point, path)
+        original = path_identity(source)
+        before = git_entry(point, target.base_path)
+        candidate = git_entry("HEAD", target.candidate_path)
         cache = Path(tempfile.mkdtemp(prefix="unguarded-mutant-"))
-        mutant: bytes | None = None
-        removed = False
+        mutant: PathIdentity | None = None
         try:
             if before is None:
-                if original is None and not was_symlink:
+                if candidate is None or original.kind == "absent":
                     unmeasured.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — absent from both sides |")
                     continue
@@ -389,25 +452,29 @@ def main() -> int:
                 # post-run check below could not fire for it: another lane's
                 # newly written file could be deleted and then recreated from
                 # bytes this tool captured before that lane wrote them.
-                if original is not None and source.read_bytes() != original:
+                if not path_matches_git_entry(source, candidate) or path_identity(source) != original:
                     clobbered.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to remove |")
                     continue
                 source.unlink()  # an ADDED artifact is reverted by removing it
-                removed = True  # the mutation IS the file's absence
+                mutant = path_identity(source)
             else:
-                if original is not None and before == original:
+                if candidate is not None and before == candidate:
                     print(f"| `{path}` | identical to the merge base — not measured |")
+                    continue
+                if candidate is not None and not path_matches_git_entry(source, candidate):
+                    unmeasured.append(path)
+                    print(f"| `{path}` | **NOT MEASURED** — candidate Git identity is not present on this host |")
                     continue
                 # WINDOW ONE. The up-front porcelain check cannot see an edit
                 # made after it ran. Re-read immediately before writing, and
                 # refuse rather than destroy a concurrent writer's bytes.
-                if source.exists() and source.read_bytes() != original:
+                if path_identity(source) != original:
                     clobbered.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to overwrite |")
                     continue
-                source.write_bytes(before)
-                mutant = before
+                materialize_git_entry(source, before)
+                mutant = path_identity(source)
             try:
                 introduced = sorted(set(failures(suites, cache)) - set(control))
             except MeasurementError as unreadable:
@@ -420,24 +487,13 @@ def main() -> int:
             # what is on disk is no longer the mutant we placed there, those are
             # someone else's bytes: leave them, and say so. An unconditional
             # restore here would erase work this tool never owned.
-            if removed:
-                concurrent = source.exists()  # someone recreated it while the suite ran
-            else:
-                concurrent = mutant is not None and source.exists() and source.read_bytes() != mutant
+            concurrent = mutant is not None and path_identity(source) != mutant
             if concurrent:
                 clobbered.append(path)
                 print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
-            elif was_symlink:
-                source.unlink(missing_ok=True)
-                os.symlink(link_target, source)
-                assert source.is_symlink() and os.readlink(source) == link_target, f"{path} lost its symlink identity"
-            elif original is None:
-                source.unlink(missing_ok=True)
             else:
-                source.write_bytes(original)
-                assert source.read_bytes() == original, f"{path} was NOT restored byte-identically"
-                if original_mode is not None:
-                    os.chmod(source, stat.S_IMODE(original_mode))
+                restore_path(source, original)
+                assert path_identity(source) == original, f"{path} was NOT restored with its complete identity"
         if concurrent:
             continue
         if introduced:

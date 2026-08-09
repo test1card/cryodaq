@@ -44,10 +44,11 @@ def test_base_content_preserves_non_utf8_blob_bytes(tmp_path: Path, monkeypatch)
 
 def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path, monkeypatch) -> None:
     repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
     old = repository / "src" / "old_name.py"
     new = repository / "src" / "new_name.py"
     old.parent.mkdir()
-    old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
+    old.write_bytes(b"VALUE = 'guarded'\n")
     _git(repository, "add", "src/old_name.py")
     _git(repository, "commit", "-qm", "base")
     base = _git(repository, "rev-parse", "HEAD")
@@ -73,3 +74,37 @@ def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path
     assert observed == [(False, True), (True, False)]
     assert not old.exists()
     assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
+
+
+def test_main_never_skips_a_mode_only_production_change_as_identical(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    source = repository / "src" / "entrypoint.py"
+    source.parent.mkdir()
+    source.write_bytes(b"print('operator entry point')\n")
+    _git(repository, "add", "src/entrypoint.py")
+    _git(repository, "commit", "-qm", "non-executable base")
+    base = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "update-index", "--chmod=+x", "src/entrypoint.py")
+    _git(repository, "commit", "-qm", "make entry point executable")
+    _git(repository, "config", "core.filemode", "false")
+
+    runs = 0
+
+    def green(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        return []
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", green)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", "tests"],
+    )
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "identical to the merge base" not in output
+    assert runs == 2 or "NOT MEASURED" in output
