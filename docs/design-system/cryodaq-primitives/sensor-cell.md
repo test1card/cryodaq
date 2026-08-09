@@ -53,7 +53,13 @@ Minimum cell size: 160×80px (per `DynamicSensorGrid._MIN_CELL_WIDTH` / `_CELL_H
 
 ## Invariants
 
-1. **Channel ID uses Cyrillic Т (U+0422).** Never Latin T. (RULE-COPY-001)
+1. **Channel ID uses Cyrillic Т (U+0422).** Never Latin T. (RULE-COPY-001) This
+   is a NAMING convention for the shipped channels, and it is not a selection
+   rule: since the declared-quantity change (4.2.0) no code may infer what a
+   channel MEASURES from how it is spelled. Both hold at once — the lab names
+   channels this way, and a channel renamed away from it keeps appearing on the
+   surfaces its declaration entitles it to. An earlier reading of this invariant
+   as authority over selection is the defect OC-030 records.
 2. **Value format fixed per unit.** Temperature `{:.2f} K`, pressure `{:.2e} мбар`, voltage `{:.3f} В`. (RULE-DATA-004, RULE-COPY-006)
 3. **Tabular numbers.** FONT_MONO_VALUE with `tnum` feature. Digits don't shift width. (RULE-TYPO-003, RULE-DATA-003)
 4. **Atomic value updates.** No tween, no count-up animation. Snap. (RULE-DATA-001, RULE-DATA-009)

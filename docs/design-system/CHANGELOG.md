@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-09
+version: 4.2.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.2.0] — 2026-08-09
+
+### Changed
+
+- **Operator surfaces select channels by DECLARED quantity, not by how the
+  identifier is spelled.** `SensorCell` consumers — the dashboard grid, the
+  temperature plot, the top watch bar and the conductivity source list — no
+  longer decide that a channel is a temperature because its identifier starts
+  with Cyrillic Те. `ChannelManager` exposes `get_quantity`,
+  `is_temperature_channel`, `get_temperature_channels` and
+  `get_visible_temperature_channels`, and the declaration lives in
+  `config/channels.yaml` as a top-level `default_quantity` plus an optional
+  per-channel `quantity`. A legitimate rename no longer removes a live reading
+  from an operator screen, and a non-temperature channel spelled with that
+  letter is no longer drawn among temperatures. Recorded in
+  `governance/change-impact.md` under "Declared-quantity channel selection".
+
+  **The declaration is load-bearing and is not yet validated.** A missing or
+  misspelled `default_quantity` loads cleanly and then empties every
+  temperature surface at once, with no diagnostic. Refusal of an unsupported
+  vocabulary word ships separately on `fix/oc-030b-config-validation`; until it
+  lands, treat the field as unchecked.
+
+  This is a MINOR bump rather than a patch: the selection contract that
+  `sensor-cell.md` documents has changed, and a consumer that relied on the
+  spelling rule will now be handed a different set of channels.
 
 ## [4.1.0] — 2026-08-05
 

@@ -2938,23 +2938,48 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
     the frozen index and required to appear in the row.
     """
 
-    text = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+    # ONE SNAPSHOT FOR BOTH SIDES. An earlier version read the row from the live
+    # worktree while measuring the source files from the frozen Git index, so a
+    # stale staged row could be validated against unstaged sources -- or the
+    # reverse -- and the guard would certify a pairing that never existed as a
+    # single candidate. The candidate is what CI publishes, so the row is read
+    # from the same index the sources come from.
+    _snapshot, indexed_paths, contents = _architecture_inventory()
+    register_blob = contents.get("docs/OPEN_CELLS.md")
+    assert register_blob is not None, "docs/OPEN_CELLS.md is not in the frozen index"
+    text = register_blob.decode("utf-8")
     oc_030 = next((line for line in text.splitlines() if line.startswith("| OC-030 |")), None)
     assert oc_030 is not None, "OC-030 row is missing from the register"
 
-    _snapshot, indexed_paths, contents = _architecture_inventory()
     migrated = sorted(set(re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)`", oc_030)))
     assert migrated, "OC-030 names no migrated GUI file, so this guard would prove nothing"
 
     list_helpers = ("get_visible_temperature_channels", "get_temperature_channels")
-    predicate_only: list[str] = []
+    measured: dict[str, str] = {}
+    selects_nothing: list[str] = []
     for path in migrated:
         assert path in indexed_paths, f"OC-030 names {path}, which is not in the frozen index"
         blob = contents.get(path)
         assert blob is not None, f"no frozen-index blob for {path}"
         source = blob.decode("utf-8")
-        if not any(helper in source for helper in list_helpers) and "is_temperature_channel" in source:
-            predicate_only.append(path)
+        leaf = path.rsplit("/", 1)[-1]
+        if any(helper in source for helper in list_helpers):
+            measured[leaf] = "list"
+        elif "is_temperature_channel" in source:
+            measured[leaf] = "predicate"
+        else:
+            # THE THIRD STATE, which an earlier version of this node folded into
+            # `list` by writing the category as a ternary on predicate-only
+            # membership. A migrated file that calls NEITHER selector has left
+            # the declared-quantity contract entirely -- reverting a list site to
+            # `get_all_visible()` produces exactly that -- and it was being
+            # relabelled `list`, matching the row and keeping this guard green
+            # through the regression it exists to catch.
+            selects_nothing.append(path)
+    assert not selects_nothing, (
+        "these migrated files call neither a temperature-list helper nor `is_temperature_channel`, so they "
+        f"no longer select by declared quantity at all: {selects_nothing}"
+    )
 
     # The claim the row must not ASSERT again. The row is allowed to QUOTE it in
     # order to record that it was false -- repudiating a past claim is what this
@@ -2966,7 +2991,8 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
         window = oc_030[match.end() : match.end() + 160]
         assert "false" in window.lower(), (
             "OC-030 asserts that every migrated screen calls the visible-list helper, without marking it "
-            f"false within the same sentence. These call only the per-channel predicate: {predicate_only}"
+            "false within the same sentence. These call only the per-channel predicate: "
+            f"{sorted(leaf for leaf, kind in measured.items() if kind == 'predicate')}"
         )
 
     # BOTH CATEGORIES, COMPARED EXACTLY. An earlier version of this node only
@@ -2980,7 +3006,6 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
     # two sides must agree in both directions. `list` means the file calls a
     # list helper; `predicate` means it calls only `is_temperature_channel`.
     declared = dict(re.findall(r"`([A-Za-z0-9_]+\.py)`=(list|predicate)\b", oc_030))
-    measured = {path.rsplit("/", 1)[-1]: ("predicate" if path in predicate_only else "list") for path in migrated}
     assert declared == measured, (
         "OC-030's selector inventory disagrees with the tree. A file marked `list` calls a list helper; "
         "`predicate` means it calls only `is_temperature_channel`, so the 16-for-16 and 24-for-24 parities "
