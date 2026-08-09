@@ -9,9 +9,11 @@ MilestoneList) preserved in phase_content/ for B.10 Analytics overlay.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import UTC, datetime
 
+import yaml
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
@@ -28,14 +30,36 @@ from cryodaq.gui.dashboard.phase_content.eta_display import (
     _format_duration_ru,
 )
 from cryodaq.gui.dashboard.phase_stepper import PhaseStepper
+from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
-# How long a cached analytics value may go unrefreshed before it is rendered as
-# stale. Analytics publish on their own cadence, far slower than a reading, so
-# this is deliberately generous: it is the point past which a number is more
-# likely to be a dead producer than a slow one.
-_ANALYTICS_STALE_AFTER_S = 180.0
+# Cooldown ETA is the slowest configurable producer feeding this strip; the
+# thermal calculator rides the faster analytics batch loop. Three scheduled
+# periods tolerate jitter or one delayed publication without masking a death.
+_DEFAULT_COOLDOWN_PREDICT_INTERVAL_S = 30.0
+_STALE_INTERVAL_MULTIPLIER = 3.0
+
+
+def _configured_analytics_stale_after_s() -> float:
+    config_path = get_config_dir() / "cooldown.yaml"
+    if not config_path.is_file():
+        return _DEFAULT_COOLDOWN_PREDICT_INTERVAL_S * _STALE_INTERVAL_MULTIPLIER
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if type(raw) is not dict:
+            raise TypeError("root is not a mapping")
+        cooldown = raw.get("cooldown", {})
+        if type(cooldown) is not dict:
+            raise TypeError("cooldown is not a mapping")
+        interval_s = float(cooldown.get("predict_interval_s", _DEFAULT_COOLDOWN_PREDICT_INTERVAL_S))
+        if not math.isfinite(interval_s) or interval_s <= 0:
+            raise ValueError("predict_interval_s must be finite and positive")
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        logger.warning("analytics stale cadence unavailable from %s: %s", config_path, exc)
+        return _DEFAULT_COOLDOWN_PREDICT_INTERVAL_S * _STALE_INTERVAL_MULTIPLIER
+    return interval_s * _STALE_INTERVAL_MULTIPLIER
+
 
 _MAX_HEIGHT_PX = 55
 _BUTTON_HEIGHT_PX = 28
@@ -74,6 +98,7 @@ class PhaseAwareWidget(QWidget):
 
         self._current_phase: str | None = None
         self._phase_started_at: float | None = None
+        self._analytics_stale_after_s = _configured_analytics_stale_after_s()
         self._has_active_experiment: bool = False
         self._active_experiment_id: str | None = None
         self._mutation_enabled = True
@@ -437,7 +462,7 @@ class PhaseAwareWidget(QWidget):
         """
 
         stamped = self._cached_at.get(key)
-        if stamped is None or (time.monotonic() - stamped) <= _ANALYTICS_STALE_AFTER_S:
+        if stamped is None or time.monotonic() - stamped <= self._analytics_stale_after_s:
             return rendered
         return f"{rendered} \u00b7 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u043e"
 

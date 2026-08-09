@@ -34,8 +34,6 @@ from cryodaq.gui.dashboard import phase_aware_widget as module
 STALE_MARK = "устарело"
 
 
-
-
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -88,6 +86,22 @@ def test_a_delayed_source_sample_arrives_already_marked_stale(app, tmp_path, mon
         "a source-aged cooldown ETA was blessed as fresh when it arrived through the dashboard route"
     )
 
+
+def test_configured_slow_healthy_predictor_is_not_marked_before_next_publication(app, tmp_path, monkeypatch) -> None:
+    """A healthy 180 s producer remains current 181 s after publication."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=180.0)
+    view.on_reading(_eta_reading(datetime.now(UTC)))
+
+    _set_clock(monkeypatch, 1181.0)
+    view._phase_widget._duration_timer.timeout.emit()
+
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text, "the production dashboard route did not render the cooldown ETA"
+    assert STALE_MARK not in text, (
+        "a healthy 180 s cooldown predictor was marked stale before its next dashboard publication"
+    )
 
 
 def test_the_mark_is_per_value_not_per_widget(app, tmp_path, monkeypatch) -> None:
