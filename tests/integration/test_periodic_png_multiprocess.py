@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from cryodaq.agents.assistant.periodic_delivery import (
@@ -47,6 +48,7 @@ from cryodaq.notifications._secrets import SecretStr
 from cryodaq.periodic_config import PeriodicPngConfig, PeriodicPngConfigLoad
 from cryodaq.periodic_state import (
     PERIODIC_LEADER_LOCK,
+    PERIODIC_RENDER_LOCK,
     PeriodicArtifact,
     load_periodic_state,
     periodic_generation_dir,
@@ -293,6 +295,27 @@ def _wait_for_path(path: Path) -> None:
         raise TimeoutError(f"durable stop marker not observed: {path}")
 
 
+def _wait_for_periodic_render_child(parent_pid: int, generation_id: str) -> psutil.Process:
+    deadline = time.monotonic() + 20.0
+    expected_generation = f"--generation-id={generation_id}"
+    while time.monotonic() < deadline:
+        try:
+            children = psutil.Process(parent_pid).children(recursive=False)
+        except psutil.Error:
+            children = []
+        for child in children:
+            try:
+                command = child.cmdline()
+            except psutil.Error:
+                continue
+            module_child = command[1:4] == ["-m", "cryodaq.reporting", "periodic"]
+            frozen_child = command[1:3] == ["--mode=report-render", "periodic"]
+            if expected_generation in command and (module_child or frozen_child):
+                return child
+        time.sleep(0.01)
+    raise AssertionError("production periodic render child was not observed")
+
+
 def _cut(sequence: int) -> LiveSourceCut:
     return LiveSourceCut(
         session_id="a" * 32,
@@ -445,9 +468,22 @@ class _Telegram:
         self,
         photo: bytes,
         caption: str,
-        _context: PeriodicDeliveryContext,
+        context: PeriodicDeliveryContext,
     ) -> PeriodicDeliveryResult:
         result = await self.send_photo(photo, caption)
+        self._messages.put(
+            (
+                "delivery_context",
+                os.getpid(),
+                context.slot_id,
+                context.generation_id,
+                context.owner_token,
+                context.artifact_sha256,
+                context.artifact_size,
+                context.caption_sha256,
+                context.caption_size,
+            )
+        )
         return PeriodicDeliveryResult(
             PeriodicDeliveryOutcome.ACCEPTED,
             PeriodicDeliveryReceipt("telegram", str(result.message_id), None),
@@ -479,7 +515,7 @@ async def _run_supervisor_child(
             try:
                 _write_durable(joined_dir / "initial-leader.pid", str(os.getpid()), exclusive=True)
             except FileExistsError:
-                pass
+                _wait_for_path(joined_dir / "takeover-release")
         elif takeover_dir is None:
             messages.put(("factory", os.getpid()))
         else:
@@ -1250,6 +1286,7 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
     joined_dir = tmp_path / "joined-evidence"
     joined_dir.mkdir()
     stop_path = joined_dir / "stop"
+    takeover_release = joined_dir / "takeover-release"
     initial_path = joined_dir / "initial-leader.pid"
     messages = _SPAWN.Queue()
     contenders = [
@@ -1269,7 +1306,11 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
     started: list[multiprocessing.Process] = []
     stash: list[tuple[Any, ...]] = []
     killed: multiprocessing.Process | None = None
+    render_process: psutil.Process | None = None
+    render_suspended = False
+    render_lock_fd: int | None = None
     rendering: dict[str, Any] | None = None
+    interrupted_recovered: PeriodicRenderResult | None = None
     state: dict[str, Any] | None = None
     observed: list[tuple[Any, ...]] = []
     try:
@@ -1294,16 +1335,63 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
         assert rendering is not None, "production child never exposed staging before atomic promotion"
         assert initial_path.exists()
         initial_pid = int(initial_path.read_text(encoding="ascii"))
+        prekill_factory_pids = {int(path.read_text(encoding="ascii")) for path in joined_dir.glob("factory-*.pid")}
+        assert prekill_factory_pids == {initial_pid}
         killed = next(process for process in contenders if process.pid == initial_pid)
         assert killed.is_alive()
+
+        render_process = _wait_for_periodic_render_child(initial_pid, str(rendering["generation_id"]))
+        render_process.suspend()
+        render_suspended = True
+        interrupted_final = periodic_generation_dir(data_dir, str(rendering["generation_id"]))
+        assert not os.path.lexists(interrupted_final)
+
         killed.kill()
         _reap(killed, expected=None)
+
+        deadline = time.monotonic() + _IPC_TIMEOUT_S
+        takeover_factory_pids = prekill_factory_pids
+        while len(takeover_factory_pids) != 2 and time.monotonic() < deadline:
+            takeover_factory_pids = {int(path.read_text(encoding="ascii")) for path in joined_dir.glob("factory-*.pid")}
+            time.sleep(0.01)
+        assert takeover_factory_pids == {process.pid for process in contenders}
+
+        try:
+            render_process.resume()
+        except psutil.NoSuchProcess:
+            pass
+        render_suspended = False
+
+        deadline = time.monotonic() + 25.0
+        while render_lock_fd is None and time.monotonic() < deadline:
+            render_lock_fd = try_acquire_lock(PERIODIC_RENDER_LOCK, lock_dir=data_dir)
+            if render_lock_fd is None:
+                time.sleep(0.01)
+        assert render_lock_fd is not None, "interrupted production renderer did not settle"
+        if os.path.lexists(interrupted_final):
+            interrupted_recovered = ReportProcessRunner(data_dir, timeout_s=20.0).recover_periodic(
+                str(rendering["generation_id"]),
+                expected_slot_id=str(rendering["slot_id"]),
+                expected_owner_token=str(rendering["owner_token"]),
+            )
+            assert interrupted_recovered is not None
+        release_lock(render_lock_fd, PERIODIC_RENDER_LOCK, unlink=False, lock_dir=data_dir)
+        render_lock_fd = None
+        _write_durable(takeover_release, "continue")
 
         send = _message(messages, "send", stash=stash, timeout=25.0)
         stash.append(send)
         assert send[1] != initial_pid
         state = _wait_terminal(data_dir)
     finally:
+        if render_suspended and render_process is not None:
+            try:
+                render_process.resume()
+            except psutil.Error:
+                pass
+        if render_lock_fd is not None:
+            release_lock(render_lock_fd, PERIODIC_RENDER_LOCK, unlink=False, lock_dir=data_dir)
+        _write_durable(takeover_release, "continue")
         _write_durable(stop_path, "stop")
         for process in started:
             if process is killed or process.pid is None:
@@ -1314,12 +1402,29 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
     child_errors = [item for item in observed if item[0] == "error"]
     reads = [item for item in observed if item[0] == "authorized_read"]
     sends = [item for item in observed if item[0] == "send"]
+    contexts = [item for item in observed if item[0] == "delivery_context"]
     assert not child_errors, f"child failed: {child_errors!r}"
     assert len(reads) == 1
     assert len(sends) == 1
+    assert len(contexts) == 1
     assert reads[0][1] == sends[0][1]
+    assert sends[0][2] == "DELIVERING"
+    assert sends[0][3:5] == (reads[0][9], reads[0][8])
     assert reads[0][3] == "sha256:" + sends[0][5]
     assert reads[0][7] == sends[0][5]
+    assert contexts[0][1:7] == (
+        reads[0][1],
+        reads[0][9],
+        reads[0][8],
+        reads[0][10],
+        reads[0][3],
+        reads[0][4],
+    )
+    caption_raw = sends[0][6].encode("utf-8", errors="strict")
+    assert contexts[0][7:] == (
+        "sha256:" + hashlib.sha256(caption_raw).hexdigest(),
+        len(caption_raw),
+    )
 
     assert rendering is not None
     interrupted_final = periodic_generation_dir(data_dir, str(rendering["generation_id"]))
@@ -1329,7 +1434,11 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
     assert terminal["status"] == "SUCCEEDED"
     assert terminal["generation_id"] == reads[0][8]
     assert terminal["slot_id"] == reads[0][9]
-    assert not os.path.lexists(interrupted_final) or rendering["generation_id"] == reads[0][8]
+    if interrupted_recovered is None:
+        assert not os.path.lexists(interrupted_final)
+        assert terminal["generation_id"] != rendering["generation_id"]
+    else:
+        assert terminal["generation_id"] == interrupted_recovered.generation_id
     artifact = PeriodicArtifact(
         path=reads[0][2],
         sha256=reads[0][3],
@@ -1339,7 +1448,11 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
         mime="image/png",
     )
     delivered = read_periodic_artifact_bytes(data_dir, artifact)
+    assert artifact.path == f"periodic/generations/{reads[0][8]}/periodic.png"
+    assert artifact.size == len(delivered)
     assert hashlib.sha256(delivered).hexdigest() == reads[0][7]
+    if interrupted_recovered is not None:
+        assert artifact == interrupted_recovered.artifact
 
     factory_pids = {int(path.read_text(encoding="ascii")) for path in joined_dir.glob("factory-*.pid")}
     assert factory_pids == {process.pid for process in contenders}
@@ -1347,6 +1460,9 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
     h3_fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=data_dir)
     assert h3_fd is not None
     release_lock(h3_fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=data_dir)
+    h4_fd = try_acquire_lock(PERIODIC_RENDER_LOCK, lock_dir=data_dir)
+    assert h4_fd is not None
+    release_lock(h4_fd, PERIODIC_RENDER_LOCK, unlink=False, lock_dir=data_dir)
 
 
 @pytest.mark.timeout(30)
