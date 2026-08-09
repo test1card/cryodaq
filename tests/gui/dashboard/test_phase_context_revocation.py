@@ -141,3 +141,53 @@ def test_the_mark_is_per_value_not_per_widget(app, tmp_path, monkeypatch) -> Non
         f"expected exactly the dead feed to be marked, got {text.count(STALE_MARK)} marks in {text!r}"
     )
     assert "ETA" in text and "R" in text, "both metrics must stay visible; marking is not hiding"
+
+
+def test_a_fresh_analytics_value_is_not_marked(app, tmp_path, monkeypatch) -> None:
+    """RESTORED. A registered guard, deleted while unrelated findings were fixed.
+
+    `STALE-ANALYTICS-RENDERED-AS-CURRENT-344` names this node. Without it the
+    mark has no negative case at all, so a change that marked EVERYTHING stale
+    would satisfy every remaining node — and a mark that fires on healthy data
+    teaches an operator to ignore the mark, which is its own harm.
+    """
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(_eta_reading(datetime.now(UTC)))
+
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text, "the production dashboard route did not render the cooldown ETA"
+    assert STALE_MARK not in text, "a value that has just arrived was rendered stale"
+
+
+def test_a_value_whose_producer_died_is_marked_while_the_experiment_stays_active(app, tmp_path, monkeypatch) -> None:
+    """RESTORED, and this one guards OC-004's actual defect.
+
+    `STALE-ANALYTICS-RENDERED-AS-CURRENT-344` names it. The cached value was
+    revoked only when the EXPERIMENT changed, so a producer that died inside a
+    live experiment left its last number rendering as current for as long as the
+    operator's window stayed open. Deleting this node left the defect this PR
+    exists to fix with no guard on its own behaviour.
+
+    Time advances past the horizon while the experiment stays active and no
+    further reading arrives — the death path, as distinct from the delayed
+    arrival path the sibling node covers.
+    """
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(_eta_reading(datetime.now(UTC)))
+    assert STALE_MARK not in view._phase_widget._context_label.text(), "premise: it must start unmarked"
+
+    # The producer stops. Nothing changes except the clock, and the experiment
+    # is never switched — which is precisely the case the old code missed.
+    _set_clock(monkeypatch, 1000.0 + 3.0 * 30.0 + 1.0)
+    view._phase_widget._refresh_context_label()
+
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text, "the retained value vanished instead of being marked"
+    assert STALE_MARK in text, (
+        "a producer died inside a live experiment and its last value is still presented as current: "
+        "this is the frozen readout OC-004 names"
+    )
