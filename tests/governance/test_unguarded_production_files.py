@@ -44,6 +44,33 @@ def test_base_content_preserves_non_utf8_blob_bytes(tmp_path: Path, monkeypatch)
     assert subject.base_content(head, "src/latin1.py") == expected
 
 
+def test_repository_root_is_stable_when_invoked_from_a_subdirectory(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    nested = repository / "tools" / "nested"
+    nested.mkdir(parents=True)
+
+    monkeypatch.chdir(nested)
+
+    assert subject.repository_root().resolve() == repository.resolve()
+
+
+def test_existing_tree_entry_with_unreadable_blob_is_not_treated_as_absent(monkeypatch) -> None:
+    object_id = "0" * 40
+
+    def unreadable(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+        if args[0] == "ls-tree":
+            tree_entry = f"100644 blob {object_id}\tsrc/unreadable.py\0".encode()
+            return subprocess.CompletedProcess(args, 0, tree_entry, b"")
+        if args[:2] == ["cat-file", "-e"]:
+            return subprocess.CompletedProcess(args, 1, b"", b"missing blob")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(subject, "_git_bytes", unreadable)
+
+    with pytest.raises(subject.MeasurementError, match="tree entry.*no readable blob"):
+        subject.git_entry("0123456789abcdef", "src/unreadable.py")
+
+
 def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path, monkeypatch) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
