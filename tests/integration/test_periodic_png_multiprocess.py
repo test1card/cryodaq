@@ -49,9 +49,15 @@ from cryodaq.periodic_state import (
     PERIODIC_LEADER_LOCK,
     PeriodicArtifact,
     load_periodic_state,
+    periodic_generation_dir,
+    periodic_staging_dir,
     periodic_telegram_destination_fingerprint,
 )
-from cryodaq.report_process import PeriodicRenderResult
+from cryodaq.report_process import (
+    PeriodicRenderResult,
+    ReportProcessRunner,
+    read_periodic_artifact_bytes,
+)
 from cryodaq.storage.archive_reader import (
     BoundedReadingQueryResult,
     BoundedReadingRow,
@@ -246,6 +252,11 @@ class _Clock:
             await asyncio.sleep(0.01)
             return
         await asyncio.Event().wait()
+
+
+class _TakeoverClock(_Clock):
+    def monotonic(self) -> float:
+        return time.monotonic()
 
 
 def _write_durable(path: Path, payload: str, *, exclusive: bool = False) -> None:
@@ -456,27 +467,59 @@ async def _run_supervisor_child(
     messages: Any,
     takeover_dir: Path | None,
     stop_path: Path | None,
+    joined_dir: Path | None,
 ) -> None:
     config = _config()
-    clock = _Clock(poll=takeover_dir is not None)
+    clock = _TakeoverClock(poll=True) if joined_dir is not None else _Clock(poll=takeover_dir is not None)
 
     def coordinator_factory(observed: PeriodicPngConfig) -> PeriodicPngCoordinator:
         assert observed == config
-        if takeover_dir is None:
+        if joined_dir is not None:
+            _write_durable(joined_dir / f"factory-{os.getpid()}.pid", str(os.getpid()))
+            try:
+                _write_durable(joined_dir / "initial-leader.pid", str(os.getpid()), exclusive=True)
+            except FileExistsError:
+                pass
+        elif takeover_dir is None:
             messages.put(("factory", os.getpid()))
         else:
             _write_durable(takeover_dir / f"factory-{os.getpid()}.pid", str(os.getpid()))
+
+        def authorized_read(data_path: Path, artifact: PeriodicArtifact) -> bytes:
+            photo = read_periodic_artifact_bytes(data_path, artifact)
+            active = load_periodic_state(data_path).payload["active"]
+            assert isinstance(active, dict)
+            messages.put(
+                (
+                    "authorized_read",
+                    os.getpid(),
+                    artifact.path,
+                    artifact.sha256,
+                    artifact.size,
+                    artifact.width,
+                    artifact.height,
+                    hashlib.sha256(photo).hexdigest(),
+                    active["generation_id"],
+                    active["slot_id"],
+                    active["owner_token"],
+                )
+            )
+            return photo
+
         return PeriodicPngCoordinator(
             data_dir=data_dir,
             config=observed,
             live_sources=_ProcessLive(messages, takeover_dir),
             alarm_query=_ProcessAlarm(),
             archive_query=_Archive(),
-            runner=_Runner(data_dir, messages),
+            runner=(
+                ReportProcessRunner(data_dir, timeout_s=20.0) if joined_dir is not None else _Runner(data_dir, messages)
+            ),
             delivery=_Telegram(data_dir, messages),
             destination_fingerprint=DESTINATION_FINGERPRINT,
             expected_delivery_kind="telegram",
             clock=clock,
+            artifact_reader=(authorized_read if joined_dir is not None else read_periodic_artifact_bytes),
         )
 
     def config_loader(_config_dir: Path) -> PeriodicPngConfigLoad:
@@ -518,6 +561,7 @@ def _supervisor_child(
     messages: Any,
     takeover_dir: str | None = None,
     stop_path: str | None = None,
+    joined_dir: str | None = None,
 ) -> None:
     try:
         _run_child(
@@ -527,6 +571,7 @@ def _supervisor_child(
                 messages,
                 Path(takeover_dir) if takeover_dir is not None else None,
                 Path(stop_path) if stop_path is not None else None,
+                Path(joined_dir) if joined_dir is not None else None,
             )
         )
     except BaseException as exc:
@@ -1191,6 +1236,114 @@ def test_killed_elected_assistant_replacement_makes_one_forward_result(
     factory_pids = {int(path.read_text(encoding="ascii")) for path in takeover_dir.glob("factory-*.pid")}
     assert factory_pids == {process.pid for process in contenders}
     assert {renders[0][1], sends[0][1]} == factory_pids - {elected_pid}
+    h3_fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=data_dir)
+    assert h3_fd is not None
+    release_lock(h3_fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=data_dir)
+
+
+@pytest.mark.timeout(60)
+def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "joined-takeover"
+    data_dir.mkdir()
+    joined_dir = tmp_path / "joined-evidence"
+    joined_dir.mkdir()
+    stop_path = joined_dir / "stop"
+    initial_path = joined_dir / "initial-leader.pid"
+    messages = _SPAWN.Queue()
+    contenders = [
+        _SPAWN.Process(
+            target=_supervisor_child,
+            args=(
+                str(data_dir),
+                None,
+                messages,
+                None,
+                str(stop_path),
+                str(joined_dir),
+            ),
+        )
+        for _ in range(2)
+    ]
+    started: list[multiprocessing.Process] = []
+    stash: list[tuple[Any, ...]] = []
+    killed: multiprocessing.Process | None = None
+    rendering: dict[str, Any] | None = None
+    state: dict[str, Any] | None = None
+    observed: list[tuple[Any, ...]] = []
+    try:
+        for process in contenders:
+            process.start()
+            started.append(process)
+
+        deadline = time.monotonic() + 25.0
+        while time.monotonic() < deadline:
+            try:
+                candidate = load_periodic_state(data_dir).payload.get("active")
+            except Exception:
+                candidate = None
+            if isinstance(candidate, dict) and candidate.get("status") == "RENDERING":
+                generation = str(candidate["generation_id"])
+                staging = periodic_staging_dir(data_dir, generation)
+                final = periodic_generation_dir(data_dir, generation)
+                if staging.is_dir() and not os.path.lexists(final):
+                    rendering = dict(candidate)
+                    break
+            time.sleep(0.01)
+        assert rendering is not None, "production child never exposed staging before atomic promotion"
+        assert initial_path.exists()
+        initial_pid = int(initial_path.read_text(encoding="ascii"))
+        killed = next(process for process in contenders if process.pid == initial_pid)
+        assert killed.is_alive()
+        killed.kill()
+        _reap(killed, expected=None)
+
+        send = _message(messages, "send", stash=stash, timeout=25.0)
+        stash.append(send)
+        assert send[1] != initial_pid
+        state = _wait_terminal(data_dir)
+    finally:
+        _write_durable(stop_path, "stop")
+        for process in started:
+            if process is killed or process.pid is None:
+                continue
+            _reap(process)
+        observed = stash + _drain(messages)
+
+    child_errors = [item for item in observed if item[0] == "error"]
+    reads = [item for item in observed if item[0] == "authorized_read"]
+    sends = [item for item in observed if item[0] == "send"]
+    assert not child_errors, f"child failed: {child_errors!r}"
+    assert len(reads) == 1
+    assert len(sends) == 1
+    assert reads[0][1] == sends[0][1]
+    assert reads[0][3] == "sha256:" + sends[0][5]
+    assert reads[0][7] == sends[0][5]
+
+    assert rendering is not None
+    interrupted_final = periodic_generation_dir(data_dir, str(rendering["generation_id"]))
+
+    assert state is not None
+    terminal = state["last_terminal"]
+    assert terminal["status"] == "SUCCEEDED"
+    assert terminal["generation_id"] == reads[0][8]
+    assert terminal["slot_id"] == reads[0][9]
+    assert not os.path.lexists(interrupted_final) or rendering["generation_id"] == reads[0][8]
+    artifact = PeriodicArtifact(
+        path=reads[0][2],
+        sha256=reads[0][3],
+        size=reads[0][4],
+        width=reads[0][5],
+        height=reads[0][6],
+        mime="image/png",
+    )
+    delivered = read_periodic_artifact_bytes(data_dir, artifact)
+    assert hashlib.sha256(delivered).hexdigest() == reads[0][7]
+
+    factory_pids = {int(path.read_text(encoding="ascii")) for path in joined_dir.glob("factory-*.pid")}
+    assert factory_pids == {process.pid for process in contenders}
+    assert {reads[0][1], sends[0][1]} == factory_pids - {initial_pid}
     h3_fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=data_dir)
     assert h3_fd is not None
     release_lock(h3_fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=data_dir)
