@@ -429,6 +429,9 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         # firing on the retag is the gate working: a newly blocking row has to
         # be registered here on purpose, never absorbed quietly.
         "OC-040",
+        # OC-041 records that whole-instrument silence can leave an armed
+        # interlock unevaluated while annunciation remains available.
+        "OC-041",
     )
     derived_blocking = tuple(sorted(cell_id for cell_id, fields in rows.items() if "BLOCKS-DEPLOYMENT" in fields[9]))
     assert derived_blocking == expected_blocking, (
