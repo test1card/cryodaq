@@ -97,6 +97,16 @@ from pathlib import Path
 # measures the floor disagreed with the floor's own text. A measuring tool that
 # cannot see the artifact its rule names is the first false-green that rule
 # would have shipped.
+#
+# `plugins/` is the SAME CLASS, found the same way one round later:
+# `analytics/plugin_loader.py` loads every `.py` in that directory at runtime
+# and subscribes it to the broker, so a defect in `plugins/phase_detector.py`
+# executes during an experiment. It was invisible here for exactly the reason
+# `tsp/` was -- the default target set was still a list of two directories
+# rather than an answer to "what does the instrument read or execute". Adding
+# entries one review round at a time is treating instances; the rule is that
+# this roster tracks RUNTIME REACH, and a new runtime-loaded location belongs
+# here the day it is created.
 _DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml", ".lua")
 
 
@@ -417,7 +427,7 @@ def main() -> int:
     parser.add_argument("--suffix", action="append", default=[])
     options = parser.parse_args()
     suites = options.suite or ["tests"]
-    includes = tuple(options.include or ["src/", "config/", "tsp/"])
+    includes = tuple(options.include or ["src/", "config/", "tsp/", "plugins/"])
     suffixes = tuple(options.suffix or _DEFAULT_SUFFIXES)
 
     point = merge_base(options.base)
