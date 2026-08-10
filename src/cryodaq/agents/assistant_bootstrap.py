@@ -75,9 +75,16 @@ PERIODIC_REPORTER_FACILITIES = (
 RETIRED_PERIODIC_REPORTER_SYMBOLS = ("cryodaq.notifications.periodic_report.PeriodicReporter",)
 
 
-def validate_periodic_reporter_inventory(symbols: Iterable[str]) -> None:
-    """Reject missing, duplicate, or unregistered periodic reporter owners."""
+def validate_periodic_reporter_inventory(
+    symbols: Iterable[str],
+    *,
+    retired_references: Iterable[str],
+) -> None:
+    """Reject unregistered owners and every use of the retired reporter."""
 
+    references = tuple(sorted(retired_references))
+    if references:
+        raise RuntimeError(f"retired periodic reporter is referenced: {references!r}")
     expected = tuple(
         sorted([facility.symbol for facility in PERIODIC_REPORTER_FACILITIES] + list(RETIRED_PERIODIC_REPORTER_SYMBOLS))
     )
