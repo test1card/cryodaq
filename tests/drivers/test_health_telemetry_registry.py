@@ -372,3 +372,124 @@ async def test_repeated_registry_updates_have_bounded_resources_and_retained_mem
     assert cached is not None and len(cached.snapshots) == len(cached.source_evidence) == 1
     assert final_current - baseline_current <= 65_536, (baseline_current, final_current)
     assert peak - baseline_current <= 524_288, (baseline_current, peak)
+
+def test_registry_reader_rejects_reflective_callback_rebinding() -> None:
+    reader = _registry_reader()
+    authority = ReaderPoolHealthAuthority((reader,))
+    authority.presample(observed_time_s=10.0)
+    side_effects: list[str] = []
+
+    class Rebound:
+        def read(self, *, observed_time_s: float) -> HealthTelemetrySnapshot:
+            side_effects.append(f"vent:{observed_time_s}")
+            return HealthTelemetrySnapshot(
+                reader.descriptor,
+                2,
+                observed_time_s,
+                observed_time_s,
+                "running",
+            )
+
+    with pytest.raises((AttributeError, TypeError)):
+        object.__setattr__(reader, "_read_snapshot", Rebound().read)
+
+    authority.presample(observed_time_s=10.5)
+    receipt = authority.snapshot_for_cut(_cut(2, 10.5))
+    assert side_effects == []
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.nodes[0].node_id == "compressor.primary"
+
+
+def test_registry_reader_descriptor_projection_is_detached_from_issued_state() -> None:
+    reader = _registry_reader()
+    exposed = reader.descriptor
+
+    object.__setattr__(exposed, "device_id", "../forged-node")
+    object.__setattr__(exposed, "provenance", "forged")
+
+    assert reader.descriptor.device_id == "compressor.primary"
+    assert reader.descriptor.provenance == "driver-registry:deterministic-health-node/v1"
+    authority = ReaderPoolHealthAuthority((reader,))
+    authority.presample(observed_time_s=10.0)
+    receipt = authority.snapshot_for_cut(_cut(1, 10.0))
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert receipt.nodes[0].node_id == "compressor.primary"
+
+
+def test_registry_binding_map_cannot_promote_a_noncanonical_implementation() -> None:
+    side_effects: list[str] = []
+
+    class Rogue:
+        __slots__ = ("_descriptor",)
+
+        def __init__(self) -> None:
+            self._descriptor = HealthDeviceDescriptor("rack.health.rogue", "support_node", "rogue/v1")
+
+        @property
+        def health_descriptor(self) -> HealthDeviceDescriptor:
+            return self._descriptor
+
+        def _vent(self, observed_time_s: float) -> None:
+            side_effects.append(f"vent:{observed_time_s}")
+
+        def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot:
+            self._vent(observed_time_s)
+            return HealthTelemetrySnapshot(
+                self._descriptor,
+                1,
+                observed_time_s,
+                observed_time_s,
+                "running",
+            )
+
+    rogue = Rogue()
+    entry = health_contract._StaticHealthTelemetryAllowlistEntry(rogue.health_descriptor.device_id, type(rogue))
+    directly_issued = health_contract._issue_health_telemetry_reader(rogue, entry=entry)
+    with driver_registry._HEALTH_TELEMETRY_BINDINGS_LOCK:
+        driver_registry._HEALTH_TELEMETRY_BINDINGS[directly_issued] = driver_registry.get_health_telemetry_spec(
+            "deterministic_health_node"
+        )
+    try:
+        assert driver_registry.health_telemetry_spec_for_reader(directly_issued) is None
+        with pytest.raises(TypeError, match="registry-issued"):
+            ReaderPoolHealthAuthority((directly_issued,))
+    finally:
+        with driver_registry._HEALTH_TELEMETRY_BINDINGS_LOCK:
+            driver_registry._HEALTH_TELEMETRY_BINDINGS.pop(directly_issued, None)
+    assert side_effects == []
+
+
+def test_health_construction_revalidates_mutated_config_before_factory() -> None:
+    validated = driver_registry.validate_health_telemetry_entry(_health_configuration())
+    spec = driver_registry.get_health_telemetry_spec("deterministic_health_node")
+    original_factory = spec.factory
+    factory_calls: list[str] = []
+
+    def spy_factory(config, context):
+        factory_calls.append(config.name)
+        return original_factory(config, context)
+
+    values = dict(validated.values)
+    values["name"] = "rack.health.forged"
+    object.__setattr__(validated, "name", "rack.health.forged")
+    object.__setattr__(validated, "values", values)
+    object.__setattr__(spec, "factory", spy_factory)
+    try:
+        with pytest.raises(driver_registry.DriverRegistryError, match="changed after validation"):
+            driver_registry.construct_health_telemetry_reader(
+                validated,
+                driver_registry.DriverConstructionContext(mock=True),
+            )
+    finally:
+        object.__setattr__(spec, "factory", original_factory)
+
+    assert factory_calls == []
+
+
+def test_health_construction_rejects_context_subclasses_before_factory() -> None:
+    class ContextSubclass(driver_registry.DriverConstructionContext):
+        __slots__ = ()
+
+    validated = driver_registry.validate_health_telemetry_entry(_health_configuration())
+    with pytest.raises(driver_registry.DriverRegistryError, match="exact DriverConstructionContext"):
+        driver_registry.construct_health_telemetry_reader(validated, ContextSubclass(mock=True))

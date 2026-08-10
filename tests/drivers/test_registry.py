@@ -346,6 +346,66 @@ def test_construct_driver_rejects_forged_context_before_factory(monkeypatch: pyt
     assert factory_calls == []
 
 
+def test_construct_driver_rejects_context_subclass_before_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_calls: list[object] = []
+
+    def forbidden_factory(
+        config: ValidatedInstrumentConfig,
+        context: DriverConstructionContext,
+    ) -> InstrumentDriver:
+        factory_calls.append((config, context))
+        raise AssertionError("factory must not run for a context subtype")
+
+    spec = replace(BUILTIN_DRIVER_SPECS["thyracont_vsp63d"], factory=forbidden_factory)
+    specs = dict(BUILTIN_DRIVER_SPECS)
+    specs[spec.type_name] = spec
+    monkeypatch.setattr(registry_module, "BUILTIN_DRIVER_SPECS", MappingProxyType(specs))
+    config = validate_instrument_entry(
+        {"type": "thyracont_vsp63d", "name": "P", "resource": "COM3"}
+    )
+
+    class ContextSubclass(DriverConstructionContext):
+        __slots__ = ()
+
+    with pytest.raises(DriverRegistryError, match="exact DriverConstructionContext"):
+        construct_driver(config, ContextSubclass(mock=True))
+
+    assert factory_calls == []
+
+
+def test_construct_driver_revalidates_mutated_config_before_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_calls: list[str] = []
+    original_factory = BUILTIN_DRIVER_SPECS["thyracont_vsp63d"].factory
+
+    def spy_factory(
+        config: ValidatedInstrumentConfig,
+        context: DriverConstructionContext,
+    ) -> InstrumentDriver:
+        factory_calls.append(config.name)
+        return original_factory(config, context)  # type: ignore[return-value]
+
+    spec = replace(BUILTIN_DRIVER_SPECS["thyracont_vsp63d"], factory=spy_factory)
+    specs = dict(BUILTIN_DRIVER_SPECS)
+    specs[spec.type_name] = spec
+    monkeypatch.setattr(registry_module, "BUILTIN_DRIVER_SPECS", MappingProxyType(specs))
+    config = validate_instrument_entry(
+        {"type": "thyracont_vsp63d", "name": "P", "resource": "COM3"}
+    )
+    values = dict(config.values)
+    values["name"] = "P2"
+    object.__setattr__(config, "name", "P2")
+    object.__setattr__(config, "values", values)
+
+    with pytest.raises(DriverRegistryError, match="changed after validation"):
+        construct_driver(config, DriverConstructionContext(mock=True))
+
+    assert factory_calls == []
+
+
 def test_valid_lakeshore_config_is_normalized_and_immutable() -> None:
     config = validate_instrument_entry(
         {

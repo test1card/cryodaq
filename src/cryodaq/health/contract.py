@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import inspect
 import math
+import threading
 import unicodedata
-from dataclasses import dataclass, field
+import weakref
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import FunctionType, MethodType
 from typing import Any, Final, Protocol, runtime_checkable
@@ -69,6 +71,8 @@ def _bounded_text(value: object, *, field_name: str, maximum: int = MAX_TEXT_BYT
         raise HealthTelemetryError(f"{field_name} is not valid Unicode text") from exc
     if not encoded or len(encoded) > maximum:
         raise HealthTelemetryError(f"{field_name} must contain 1..{maximum} UTF-8 bytes")
+    if value != value.strip():
+        raise HealthTelemetryError(f"{field_name} must be nonblank and have no surrounding whitespace")
     return value
 
 
@@ -378,145 +382,233 @@ class _StaticHealthTelemetryAllowlistEntry:
 _HEALTH_READER_ISSUER_KEY: Final = object()
 
 
-class _IssuedHealthTelemetryReader:
-    """Bounded read-only projection over one exactly allowlisted implementation.
-
-    Issuance pins one exact immutable descriptor.  The candidate is an exact,
-    slot-only static type with no dynamic-attribute hooks or callable/control
-    surface across its full MRO.  The sealed reader exposes only that pinned
-    descriptor and validated snapshots; neither later candidate mutation nor a
-    reader subclass can add authority to the projection.
-    """
-
-    __slots__ = (
-        "__weakref__",
-        "_counter_values",
-        "_descriptor",
-        "_entry",
-        "_entry_token",
-        "_issuance_owner",
-        "_last_heartbeat",
-        "_last_observed",
-        "_last_revision",
-        "_metric_schema",
-        "_read_snapshot",
+def _detached_health_descriptor(value: object) -> HealthDeviceDescriptor:
+    if type(value) is not HealthDeviceDescriptor:
+        raise TypeError("descriptor must be an exact HealthDeviceDescriptor")
+    return HealthDeviceDescriptor(
+        device_id=value.device_id,
+        component_type=value.component_type,
+        provenance=value.provenance,
+        stale_after_s=value.stale_after_s,
+        disconnected_after_s=value.disconnected_after_s,
     )
 
-    def __init_subclass__(cls, **kwargs: object) -> None:
-        raise TypeError("health telemetry reader is sealed")
 
-    def __new__(cls, *args: object, **kwargs: object) -> _IssuedHealthTelemetryReader:
-        raise TypeError("health telemetry readers are factory-issued only")
+def _detached_metric_descriptor(value: object) -> HealthMetricDescriptor:
+    if type(value) is not HealthMetricDescriptor:
+        raise TypeError("metric descriptor must be an exact HealthMetricDescriptor")
+    return HealthMetricDescriptor(
+        metric_id=value.metric_id,
+        kind=value.kind,
+        unit=value.unit,
+        role=value.role,
+        display_group=value.display_group,
+    )
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise TypeError("health telemetry readers are factory-issued only")
 
-    def __setattr__(self, name: str, value: object) -> None:
-        raise TypeError("health telemetry reader state is sealed")
+def _detached_metric(value: object) -> HealthMetric:
+    if type(value) is not HealthMetric:
+        raise TypeError("metrics must contain exact HealthMetric values")
+    return HealthMetric(
+        descriptor=_detached_metric_descriptor(value.descriptor),
+        value=value.value,
+        quality=value.quality,
+        source_time_s=value.source_time_s,
+    )
 
-    def __delattr__(self, name: str) -> None:
-        raise TypeError("health telemetry reader state is sealed")
 
-    @classmethod
-    def _issue_from_allowlist(
-        cls,
-        *,
-        issuer_key: object,
-        entry: _StaticHealthTelemetryAllowlistEntry,
-        entry_token: object,
-        read_snapshot: MethodType,
-        descriptor: HealthDeviceDescriptor,
-    ) -> _IssuedHealthTelemetryReader:
-        if issuer_key is not _HEALTH_READER_ISSUER_KEY:
-            raise TypeError("health telemetry reader issuer is not authorized")
-        if type(entry) is not _StaticHealthTelemetryAllowlistEntry or entry_token is not entry._issuance_token:
-            raise TypeError("health telemetry allowlist issuance token does not match")
-        if type(read_snapshot) is not MethodType:
-            raise TypeError("read_snapshot must be an exact bound method")
-        reader = object.__new__(cls)
-        object.__setattr__(reader, "_issuance_owner", issuer_key)
-        object.__setattr__(reader, "_entry", entry)
-        object.__setattr__(reader, "_entry_token", entry_token)
-        object.__setattr__(reader, "_read_snapshot", read_snapshot)
-        object.__setattr__(reader, "_descriptor", descriptor)
-        object.__setattr__(reader, "_last_revision", 0)
-        object.__setattr__(reader, "_last_observed", -1.0)
-        object.__setattr__(reader, "_last_heartbeat", -1.0)
-        object.__setattr__(reader, "_metric_schema", None)
-        object.__setattr__(reader, "_counter_values", {})
-        return reader
+def _detached_alarm(value: object) -> HealthAlarm:
+    if type(value) is not HealthAlarm:
+        raise TypeError("alarms must contain exact HealthAlarm values")
+    return HealthAlarm(
+        alarm_id=value.alarm_id,
+        severity=value.severity,
+        active=value.active,
+        message=value.message,
+        source_time_s=value.source_time_s,
+    )
 
-    def _assert_issued(self) -> None:
+
+def _detached_snapshot(value: object) -> HealthTelemetrySnapshot:
+    """Revalidate and detach every reflectively mutable frozen value."""
+
+    if type(value) is not HealthTelemetrySnapshot:
+        raise HealthTelemetryError("health implementation returned a non-snapshot value")
+    metrics = value.metrics
+    alarms = value.alarms
+    if type(metrics) is not tuple:
+        raise TypeError("metrics must be an exact bounded tuple")
+    if type(alarms) is not tuple:
+        raise TypeError("alarms must be an exact bounded tuple")
+    if len(metrics) > MAX_METRICS_PER_DEVICE:
+        raise HealthTelemetryError(f"snapshot exceeds {MAX_METRICS_PER_DEVICE} metrics")
+    if len(alarms) > MAX_ALARMS_PER_DEVICE:
+        raise HealthTelemetryError(f"snapshot exceeds {MAX_ALARMS_PER_DEVICE} alarms")
+    return HealthTelemetrySnapshot(
+        descriptor=_detached_health_descriptor(value.descriptor),
+        revision=value.revision,
+        observed_time_s=value.observed_time_s,
+        heartbeat_time_s=value.heartbeat_time_s,
+        mode=value.mode,
+        metrics=tuple(_detached_metric(metric) for metric in metrics),
+        alarms=tuple(_detached_alarm(alarm) for alarm in alarms),
+    )
+
+
+MetricSchema = tuple[tuple[str, HealthMetricKind, str, str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuedReaderState:
+    issuance_owner: object
+    implementation_type: type[object]
+    device_id: str
+    read_snapshot: MethodType
+    descriptor: HealthDeviceDescriptor
+    lock: threading.Lock
+    last_revision: int = 0
+    last_observed: float = -1.0
+    last_heartbeat: float = -1.0
+    metric_schema: MetricSchema | None = None
+    counter_values: tuple[tuple[str, int], ...] = ()
+
+
+def _build_issued_reader_type():
+    """Keep issuance and mutable progression state outside the reader object."""
+
+    states: weakref.WeakKeyDictionary[object, _IssuedReaderState] = weakref.WeakKeyDictionary()
+    states_lock = threading.Lock()
+
+    class _IssuedHealthTelemetryReader:
+        """Sealed read-only projection over one exactly allowlisted implementation."""
+
+        __slots__ = ("__weakref__",)
+
+        def __init_subclass__(cls, **kwargs: object) -> None:
+            raise TypeError("health telemetry reader is sealed")
+
+        def __new__(cls, *args: object, **kwargs: object) -> _IssuedHealthTelemetryReader:
+            raise TypeError("health telemetry readers are factory-issued only")
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise TypeError("health telemetry readers are factory-issued only")
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise TypeError("health telemetry reader state is sealed")
+
+        def __delattr__(self, name: str) -> None:
+            raise TypeError("health telemetry reader state is sealed")
+
+        @classmethod
+        def _issue_from_allowlist(
+            cls,
+            *,
+            issuer_key: object,
+            entry: _StaticHealthTelemetryAllowlistEntry,
+            entry_token: object,
+            read_snapshot: MethodType,
+            descriptor: HealthDeviceDescriptor,
+        ) -> _IssuedHealthTelemetryReader:
+            if issuer_key is not _HEALTH_READER_ISSUER_KEY:
+                raise TypeError("health telemetry reader issuer is not authorized")
+            if type(entry) is not _StaticHealthTelemetryAllowlistEntry or entry_token is not entry._issuance_token:
+                raise TypeError("health telemetry allowlist issuance token does not match")
+            if type(read_snapshot) is not MethodType:
+                raise TypeError("read_snapshot must be an exact bound method")
+            detached_descriptor = _detached_health_descriptor(descriptor)
+            reader = object.__new__(cls)
+            state = _IssuedReaderState(
+                issuance_owner=issuer_key,
+                implementation_type=entry.implementation_type,
+                device_id=entry.device_id,
+                read_snapshot=read_snapshot,
+                descriptor=detached_descriptor,
+                lock=threading.Lock(),
+            )
+            with states_lock:
+                states[reader] = state
+            return reader
+
+        def _issued_state(self) -> _IssuedReaderState:
+            with states_lock:
+                try:
+                    state = states[self]
+                except KeyError as exc:
+                    raise TypeError("health telemetry reader was not issued") from exc
+            if state.issuance_owner is not _HEALTH_READER_ISSUER_KEY:
+                raise TypeError("health telemetry reader was not issued")
+            return state
+
+        @property
+        def grants_control_authority(self) -> bool:
+            self._issued_state()
+            return False
+
+        @property
+        def descriptor(self) -> HealthDeviceDescriptor:
+            return _detached_health_descriptor(self._issued_state().descriptor)
+
+        def snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot:
+            initial_state = self._issued_state()
+            with initial_state.lock:
+                state = self._issued_state()
+                requested = _finite_nonnegative(observed_time_s, field_name="observed_time_s")
+                value = _detached_snapshot(state.read_snapshot(observed_time_s=requested))
+                if value.descriptor != state.descriptor:
+                    raise HealthTelemetryError("snapshot descriptor does not match issued device")
+                if value.observed_time_s != requested:
+                    raise HealthTelemetryError("snapshot observed_time_s does not match the requested cut")
+                next_schema: MetricSchema = tuple(
+                    (
+                        metric.descriptor.metric_id,
+                        metric.descriptor.kind,
+                        metric.descriptor.unit,
+                        metric.descriptor.role,
+                        metric.descriptor.display_group,
+                    )
+                    for metric in value.metrics
+                )
+                if state.metric_schema is not None and next_schema != state.metric_schema:
+                    raise HealthTelemetryError("snapshot metric schema changed after the first successful cut")
+                if value.revision <= state.last_revision:
+                    raise HealthTelemetryError("snapshot revision must increase strictly")
+                if value.observed_time_s <= state.last_observed:
+                    raise HealthTelemetryError("snapshot observed_time_s must increase strictly")
+                if value.heartbeat_time_s < state.last_heartbeat:
+                    raise HealthTelemetryError("snapshot heartbeat_time_s regressed")
+                next_counters = dict(state.counter_values)
+                for metric in value.metrics:
+                    if metric.descriptor.kind is not HealthMetricKind.COUNTER:
+                        continue
+                    previous = next_counters.get(metric.descriptor.metric_id)
+                    if previous is not None and metric.value < previous:
+                        raise HealthTelemetryError(f"counter {metric.descriptor.metric_id!r} regressed")
+                    next_counters[metric.descriptor.metric_id] = metric.value  # type: ignore[assignment]
+                next_state = replace(
+                    state,
+                    last_revision=value.revision,
+                    last_observed=value.observed_time_s,
+                    last_heartbeat=value.heartbeat_time_s,
+                    metric_schema=next_schema,
+                    counter_values=tuple(sorted(next_counters.items())),
+                )
+                with states_lock:
+                    states[self] = next_state
+                return value
+
+    def matches_allowlist(reader: object, implementation_type: type[object]) -> bool:
+        if type(reader) is not _IssuedHealthTelemetryReader:
+            return False
         try:
-            owner = object.__getattribute__(self, "_issuance_owner")
-            entry = object.__getattribute__(self, "_entry")
-            entry_token = object.__getattribute__(self, "_entry_token")
-        except AttributeError as exc:
-            raise TypeError("health telemetry reader was not issued") from exc
-        if (
-            owner is not _HEALTH_READER_ISSUER_KEY
-            or type(entry) is not _StaticHealthTelemetryAllowlistEntry
-            or entry_token is not entry._issuance_token
-        ):
-            raise TypeError("health telemetry reader was not issued")
+            state = reader._issued_state()
+        except TypeError:
+            return False
+        return state.implementation_type is implementation_type and state.device_id == state.descriptor.device_id
 
-    @property
-    def grants_control_authority(self) -> bool:
-        self._assert_issued()
-        return False
+    return _IssuedHealthTelemetryReader, matches_allowlist
 
-    @property
-    def descriptor(self) -> HealthDeviceDescriptor:
-        self._assert_issued()
-        return self._descriptor
 
-    def snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot:
-        self._assert_issued()
-        requested = _finite_nonnegative(observed_time_s, field_name="observed_time_s")
-        value = self._read_snapshot(observed_time_s=requested)
-        if type(value) is not HealthTelemetrySnapshot:
-            raise HealthTelemetryError("health implementation returned a non-snapshot value")
-        if value.descriptor != self.descriptor:
-            raise HealthTelemetryError("snapshot descriptor does not match issued device")
-        if value.observed_time_s != requested:
-            raise HealthTelemetryError("snapshot observed_time_s does not match the requested cut")
-        next_schema = tuple(metric.descriptor for metric in value.metrics)
-        if self._metric_schema is not None and next_schema != self._metric_schema:
-            raise HealthTelemetryError("snapshot metric schema changed after the first successful cut")
-        if value.revision <= self._last_revision:
-            raise HealthTelemetryError("snapshot revision must increase strictly")
-        if value.observed_time_s <= self._last_observed:
-            raise HealthTelemetryError("snapshot observed_time_s must increase strictly")
-        if value.heartbeat_time_s < self._last_heartbeat:
-            raise HealthTelemetryError("snapshot heartbeat_time_s regressed")
-        next_counters = dict(self._counter_values)
-        for metric in value.metrics:
-            if metric.descriptor.kind is not HealthMetricKind.COUNTER:
-                continue
-            previous = next_counters.get(metric.descriptor.metric_id)
-            if previous is not None and metric.value < previous:
-                raise HealthTelemetryError(f"counter {metric.descriptor.metric_id!r} regressed")
-            next_counters[metric.descriptor.metric_id] = metric.value  # type: ignore[assignment]
-        object.__setattr__(self, "_last_revision", value.revision)
-        object.__setattr__(self, "_last_observed", value.observed_time_s)
-        object.__setattr__(self, "_last_heartbeat", value.heartbeat_time_s)
-        object.__setattr__(self, "_metric_schema", next_schema)
-        object.__setattr__(self, "_counter_values", next_counters)
-        return value
-
-    # These annotations document the slots initialized only by the private
-    # issuer without making a public constructor available.
-    _issuance_owner: object
-    _entry: _StaticHealthTelemetryAllowlistEntry
-    _entry_token: object
-    _read_snapshot: MethodType
-    _descriptor: HealthDeviceDescriptor
-    _last_revision: int
-    _last_observed: float
-    _last_heartbeat: float
-    _metric_schema: tuple[HealthMetricDescriptor, ...] | None
-    _counter_values: dict[str, int]
-
+_IssuedHealthTelemetryReader, _health_reader_matches_allowlist = _build_issued_reader_type()
 
 def _issue_health_telemetry_reader(
     candidate: object,

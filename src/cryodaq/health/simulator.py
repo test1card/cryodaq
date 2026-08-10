@@ -26,6 +26,37 @@ from cryodaq.health.contract import (
 MAX_SIMULATOR_FRAMES = 2**52
 MAX_DETERMINISTIC_HEALTH_NODE_FRAMES = 1_000_000
 _ORDINARY_COMPONENT_TYPES = frozenset({"compressor", "pump_station", "cryocooler", "support_node"})
+_MAX_SIMULATOR_SEED = 2**63 - 1
+
+
+def _manual_clock_time(start_time_s: float, cadence_hz: float, zero_based_index: int) -> float:
+    """Use the exact timestamp formula shared by admission and frame emission."""
+
+    return start_time_s + zero_based_index / cadence_hz
+
+
+def _validate_manual_clock_range(
+    start_time_s: float,
+    cadence_hz: float,
+    maximum_frames: int,
+) -> None:
+    """Reject ranges whose first or bounded-horizon ticks collide."""
+
+    try:
+        first = _manual_clock_time(start_time_s, cadence_hz, 0)
+        second = _manual_clock_time(start_time_s, cadence_hz, 1)
+        penultimate = _manual_clock_time(start_time_s, cadence_hz, maximum_frames - 2)
+        final = _manual_clock_time(start_time_s, cadence_hz, maximum_frames - 1)
+    except OverflowError as exc:
+        raise HealthTelemetryError(
+            "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
+        ) from exc
+    if (
+        not all(math.isfinite(value) for value in (first, second, penultimate, final))
+        or second <= first
+        or final <= penultimate
+    ):
+        raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,36 +106,29 @@ class DeterministicFleetHealthSimulator:
         cadence_hz: float = 2.0,
         start_time_s: float = 10.0,
     ) -> None:
-        if type(seed) is not int or seed < 0:
-            raise HealthTelemetryError("seed must be a non-negative integer")
+        if type(seed) is not int or not 0 <= seed <= _MAX_SIMULATOR_SEED:
+            raise HealthTelemetryError(f"seed must be an integer in [0, {_MAX_SIMULATOR_SEED}]")
         if type(device_count) is not int or not 1 <= device_count <= 1_000:
             raise HealthTelemetryError("device_count must be in [1, 1000]")
         if type(metrics_per_device) is not int or not 1 <= metrics_per_device <= 64:
             raise HealthTelemetryError("metrics_per_device must be in [1, 64]")
         if isinstance(cadence_hz, bool) or not isinstance(cadence_hz, (int, float)):
             raise TypeError("cadence_hz must be a number")
-        cadence = float(cadence_hz)
+        try:
+            cadence = float(cadence_hz)
+        except (OverflowError, ValueError) as exc:
+            raise HealthTelemetryError("cadence_hz must be a finite representable number") from exc
         if not 0 < cadence <= 2.0:
             raise HealthTelemetryError("human-readable cadence_hz must be in (0, 2]")
         if isinstance(start_time_s, bool) or not isinstance(start_time_s, (int, float)):
             raise TypeError("start_time_s must be a number")
-        start = float(start_time_s)
+        try:
+            start = float(start_time_s)
+        except (OverflowError, ValueError) as exc:
+            raise HealthTelemetryError("start_time_s must be a finite representable number") from exc
         if not math.isfinite(start) or start < 10.0:
             raise HealthTelemetryError("start_time_s must be finite and >= 10 for deterministic stale cuts")
-        try:
-            tick_s = 1.0 / cadence
-            horizon_s = start + (MAX_SIMULATOR_FRAMES - 1) * tick_s
-        except OverflowError as exc:
-            raise HealthTelemetryError(
-                "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
-            ) from exc
-        if (
-            not math.isfinite(tick_s)
-            or not math.isfinite(horizon_s)
-            or start + tick_s <= start
-            or math.ulp(horizon_s) > tick_s
-        ):
-            raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
+        _validate_manual_clock_range(start, cadence, MAX_SIMULATOR_FRAMES)
 
         self._seed = seed
         self._cadence_hz = cadence
@@ -173,7 +197,7 @@ class DeterministicFleetHealthSimulator:
         if self._revision >= MAX_SIMULATOR_FRAMES:
             raise HealthTelemetryError("simulator exhausted its bounded frame revision space")
         self._revision += 1
-        observed = self._start_time_s + (self._revision - 1) / self._cadence_hz
+        observed = _manual_clock_time(self._start_time_s, self._cadence_hz, self._revision - 1)
         devices = tuple(
             self._snapshot(device_index, descriptor, observed)
             for device_index, descriptor in enumerate(self._descriptors)
@@ -290,28 +314,21 @@ class DeterministicHealthTelemetryNode:
             raise HealthTelemetryError("component_type must be compressor, pump_station, cryocooler, or support_node")
         if isinstance(cadence_hz, bool) or not isinstance(cadence_hz, (int, float)):
             raise TypeError("cadence_hz must be a number")
-        cadence = float(cadence_hz)
+        try:
+            cadence = float(cadence_hz)
+        except (OverflowError, ValueError) as exc:
+            raise HealthTelemetryError("cadence_hz must be a finite representable number") from exc
         if not math.isfinite(cadence) or not 0 < cadence <= 2.0:
             raise HealthTelemetryError("human-readable cadence_hz must be in (0, 2]")
         if isinstance(start_time_s, bool) or not isinstance(start_time_s, (int, float)):
             raise TypeError("start_time_s must be a number")
-        start = float(start_time_s)
+        try:
+            start = float(start_time_s)
+        except (OverflowError, ValueError) as exc:
+            raise HealthTelemetryError("start_time_s must be a finite representable number") from exc
         if not math.isfinite(start) or start < 0:
             raise HealthTelemetryError("start_time_s must be finite and non-negative")
-        try:
-            tick_s = 1.0 / cadence
-            horizon_s = start + (MAX_DETERMINISTIC_HEALTH_NODE_FRAMES - 1) * tick_s
-        except OverflowError as exc:
-            raise HealthTelemetryError(
-                "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
-            ) from exc
-        if (
-            not math.isfinite(tick_s)
-            or not math.isfinite(horizon_s)
-            or start + tick_s <= start
-            or math.ulp(horizon_s) > tick_s
-        ):
-            raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
+        _validate_manual_clock_range(start, cadence, MAX_DETERMINISTIC_HEALTH_NODE_FRAMES)
         if type(heartbeat_frames) is not int or not 1 <= heartbeat_frames <= MAX_DETERMINISTIC_HEALTH_NODE_FRAMES:
             raise HealthTelemetryError("heartbeat_frames must be a positive bounded integer")
         self._descriptor = HealthDeviceDescriptor(
@@ -341,7 +358,7 @@ class DeterministicHealthTelemetryNode:
     def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot:
         if self._revision >= MAX_DETERMINISTIC_HEALTH_NODE_FRAMES:
             raise HealthTelemetryError("simulator exhausted its bounded revision space")
-        expected = self._start_time_s + self._revision / self._cadence_hz
+        expected = _manual_clock_time(self._start_time_s, self._cadence_hz, self._revision)
         if (
             isinstance(observed_time_s, bool)
             or not isinstance(observed_time_s, (int, float))

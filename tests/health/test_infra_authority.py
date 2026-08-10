@@ -37,8 +37,17 @@ def cut(generation: int = 1, when: datetime = NOW) -> CommonCut:
 class Device:
     __slots__ = ("_alarms", "_calls", "_descriptor", "_metrics", "_raise", "_revision")
 
-    def __init__(self, device_id: str = "rack.health.01", *, alarms=(), metrics=(), revision=1, raises=False):
-        self._descriptor = HealthDeviceDescriptor(device_id, "support_node", "test/v1")
+    def __init__(
+        self,
+        device_id: str = "rack.health.01",
+        *,
+        alarms=(),
+        metrics=(),
+        revision=1,
+        raises=False,
+        descriptor: HealthDeviceDescriptor | None = None,
+    ):
+        self._descriptor = descriptor or HealthDeviceDescriptor(device_id, "support_node", "test/v1")
         self._alarms = alarms
         self._metrics = metrics
         self._revision = revision
@@ -299,3 +308,84 @@ def test_simulator_is_exact_typed_and_pre_sampled() -> None:
     authority.presample()
     assert len(authority.snapshot_for_cut(cut()).nodes) == 100
     assert authority.grants_control_authority is False
+
+@pytest.mark.parametrize(
+    "changed_field",
+    (
+        "component_type",
+        "provenance",
+        "stale_after_s",
+        "disconnected_after_s",
+        "metric_unit",
+        "metric_role",
+        "metric_display_group",
+    ),
+)
+def test_authority_token_binds_complete_health_descriptor_semantics(
+    changed_field: str,
+    reader: Callable[[Device], HealthTelemetryReader],
+) -> None:
+    descriptor_values: dict[str, object] = {
+        "device_id": "rack.health.semantic",
+        "component_type": "support_node",
+        "provenance": "test/v1",
+        "stale_after_s": 1.0,
+        "disconnected_after_s": 5.0,
+    }
+    metric_values: dict[str, object] = {
+        "metric_id": "health.temperature",
+        "kind": HealthMetricKind.QUANTITY,
+        "unit": "K",
+        "role": "device_health",
+        "display_group": "Infrastructure",
+    }
+    if changed_field == "component_type":
+        descriptor_values["component_type"] = "compressor"
+    elif changed_field == "provenance":
+        descriptor_values["provenance"] = "test/v2"
+    elif changed_field == "stale_after_s":
+        descriptor_values["stale_after_s"] = 0.75
+    elif changed_field == "disconnected_after_s":
+        descriptor_values["disconnected_after_s"] = 6.0
+    elif changed_field == "metric_unit":
+        metric_values["unit"] = "Pa"
+    elif changed_field == "metric_role":
+        metric_values["role"] = "cooling_health"
+    else:
+        metric_values["display_group"] = "Cooling"
+
+    baseline_descriptor = HealthDeviceDescriptor(
+        "rack.health.semantic",
+        "support_node",
+        "test/v1",
+        1.0,
+        5.0,
+    )
+    baseline_metric_descriptor = HealthMetricDescriptor(
+        "health.temperature",
+        HealthMetricKind.QUANTITY,
+        "K",
+        "device_health",
+        "Infrastructure",
+    )
+    variant_descriptor = HealthDeviceDescriptor(**descriptor_values)  # type: ignore[arg-type]
+    variant_metric_descriptor = HealthMetricDescriptor(**metric_values)  # type: ignore[arg-type]
+    baseline = Device(
+        descriptor=baseline_descriptor,
+        metrics=(HealthMetric(baseline_metric_descriptor, 4.2, HealthQuality.OK, NOW.timestamp()),),
+    )
+    variant = Device(
+        descriptor=variant_descriptor,
+        metrics=(HealthMetric(variant_metric_descriptor, 4.2, HealthQuality.OK, NOW.timestamp()),),
+    )
+    baseline_authority = ReaderPoolHealthAuthority((reader(baseline),))
+    variant_authority = ReaderPoolHealthAuthority((reader(variant),))
+    baseline_authority.presample(observed_time_s=NOW.timestamp())
+    variant_authority.presample(observed_time_s=NOW.timestamp())
+
+    baseline_receipt = baseline_authority.snapshot_for_cut(cut())
+    variant_receipt = variant_authority.snapshot_for_cut(cut())
+
+    assert baseline_receipt.availability is variant_receipt.availability is AuthorityAvailability.AVAILABLE
+    assert baseline_receipt.nodes == variant_receipt.nodes
+    assert baseline_receipt.token != variant_receipt.token

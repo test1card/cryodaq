@@ -79,6 +79,43 @@ def test_fleet_clock_rejects_ranges_without_finite_distinct_ticks(
     with pytest.raises(HealthTelemetryError, match="finite, distinct simulator ticks"):
         DeterministicFleetHealthSimulator(cadence_hz=cadence_hz, start_time_s=start_time_s)
 
+@pytest.mark.parametrize(
+    ("cadence_hz", "start_time_s"),
+    [
+        (float.fromhex("0x1.df45bcb2bc4bbp-37"), float.fromhex("0x1.b85afc1ea6416p+86")),
+        (2.0, 2.5e15),
+    ],
+)
+def test_fleet_clock_rejects_actual_production_formula_collisions(
+    cadence_hz: float,
+    start_time_s: float,
+) -> None:
+    with pytest.raises(HealthTelemetryError, match="finite, distinct simulator ticks"):
+        DeterministicFleetHealthSimulator(cadence_hz=cadence_hz, start_time_s=start_time_s)
+
+
+@pytest.mark.parametrize("field", ["cadence_hz", "start_time_s"])
+@pytest.mark.parametrize("simulator_kind", ["fleet", "node"])
+def test_public_simulators_normalize_oversized_numeric_inputs(
+    simulator_kind: str,
+    field: str,
+) -> None:
+    kwargs: dict[str, object] = {field: 10**5000}
+    with pytest.raises(HealthTelemetryError):
+        if simulator_kind == "fleet":
+            DeterministicFleetHealthSimulator(**kwargs)
+        else:
+            DeterministicHealthTelemetryNode(
+                device_id="compressor.oversized",
+                component_type="compressor",
+                **kwargs,
+            )
+
+
+def test_fleet_simulator_normalizes_oversized_seed() -> None:
+    with pytest.raises(HealthTelemetryError, match="seed"):
+        DeterministicFleetHealthSimulator(seed=10**5000)
+
 
 def test_frames_are_aggregation_ready_and_faults_are_not_diluted() -> None:
     frame = DeterministicFleetHealthSimulator().frame()

@@ -954,3 +954,49 @@ def test_alarm_identities_remain_event_like_and_are_not_retained_by_reader() -> 
     assert first.alarms[0].alarm_id == "health.alarm.first"
     assert second.alarms[0].alarm_id == "health.alarm.replacement"
     assert not any("alarm" in slot for slot in type(reader).__slots__)
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        lambda text: HealthDeviceDescriptor("rack.health.01", "support_node", text),
+        lambda text: HealthMetricDescriptor(
+            "health.temperature",
+            HealthMetricKind.QUANTITY,
+            text,
+            "device_health",
+            "Infrastructure",
+        ),
+        lambda text: HealthMetricDescriptor(
+            "health.temperature",
+            HealthMetricKind.QUANTITY,
+            "K",
+            "device_health",
+            text,
+        ),
+        lambda text: HealthMetric(
+            _metric_descriptor(kind=HealthMetricKind.STATE),
+            text,
+            HealthQuality.OK,
+            10.0,
+        ),
+        lambda text: HealthAlarm(
+            "health.cooling",
+            HealthAlarmSeverity.WARNING,
+            True,
+            text,
+            10.0,
+        ),
+        lambda text: HealthTelemetrySnapshot(
+            HealthDeviceDescriptor("rack.health.01", "support_node", "fixture/v1"),
+            1,
+            10.0,
+            10.0,
+            text,
+        ),
+    ],
+    ids=("provenance", "unit", "display-group", "state", "alarm-message", "mode"),
+)
+@pytest.mark.parametrize("text", ["   ", " padded "])
+def test_operator_facing_semantic_text_is_nonblank_and_trimmed(builder, text: str) -> None:
+    with pytest.raises(HealthTelemetryError, match="whitespace"):
+        builder(text)
