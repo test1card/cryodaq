@@ -3,7 +3,7 @@ title: Testing Strategy
 keywords: testing, lint, token-lint, contrast-check, visual-regression, audit, automation
 applies_to: how design-system compliance is verified automatically + manually
 status: canonical
-references: governance/token-naming.md, governance/versioning.md, accessibility/contrast-matrix.md, accessibility/wcag-baseline.md, ../MACHINE_GATES.json
+references: governance/token-naming.md, governance/versioning.md, accessibility/contrast-matrix.md, accessibility/wcag-baseline.md, ../MANIFEST.md
 external_reference: UI UX Pro Max v2.5.0 validate-tokens.cjs pattern
 last_updated: 2026-08-10
 ---
@@ -17,7 +17,7 @@ How we verify that CryoDAQ code actually follows the design system. The rules an
 | Gate | Real invocation surface | What it proves |
 |---|---|---|
 | Same-slice co-versioning | `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` in the active exact checkout and standalone docs workflow | A mapped shared semantic source cannot move without its canonical spec, an advanced `VERSION`, and a matching `CHANGELOG.md` heading relative to exact `TRUSTED_BASE_SHA` |
-| Multi-theme contrast | `tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` in the `gui` candidate partition | Every declared pair is recomputed from every real `config/themes/*.yaml`; the exact failures must equal the structured exceptions in `MACHINE_GATES.json` |
+| Multi-theme contrast | `tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` in the `gui` candidate partition | Every declared pair is recomputed from every real `config/themes/*.yaml`; the exact failures must equal the structured exceptions in `MANIFEST.md` |
 | Non-color state redundancy | `tests/gui/test_theme_loader.py::test_machine_accessibility_non_color_states_match_real_runtime_contract` in the `gui` candidate partition | Production state mapping retains Russian labels, tokens, accessible labels, and distinct geometry, including the legacy warning-to-caution alias |
 
 These checks cover only mechanical evidence. Whole-shell keyboard and focus traversal, NVDA on the real Windows build, scripted operator tasks, visual judgment, and target-machine performance measurements remain human or environment-specific gates. A screenshot does not close them.
@@ -154,7 +154,7 @@ def check_channel_t(path: Path) -> list[str]:
 
 ### Contrast contract (shipped subset)
 
-`MACHINE_GATES.json` declares the exact token pairs, WCAG criterion, threshold, and per-theme exception set. The GUI test loads every real theme pack through the production validator and recomputes every ratio. A newly failing theme, a stale exception, or an exception without scope, rationale, fallback channels, and human verification fails the partition.
+`MANIFEST.md` declares the exact token pairs, WCAG criterion, threshold, and per-theme exception set. The GUI test loads every real theme pack through the production validator and recomputes every ratio. A newly failing theme, a stale exception, or an exception without scope, rationale, fallback channels, and human verification fails the partition.
 
 This is not a general AST proof of every QSS foreground/background use. Context discovery across arbitrary stylesheets remains review work until a production-path checker exists.
 

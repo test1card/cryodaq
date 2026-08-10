@@ -1297,6 +1297,20 @@ def _matches_design_patterns(path: str, patterns: list[str]) -> bool:
     return any(fnmatchcase(path, pattern) for pattern in patterns)
 
 
+_MACHINE_GATE_START = "<!-- MACHINE_GATES:BEGIN -->\n```json\n"
+_MACHINE_GATE_END = "\n```\n<!-- MACHINE_GATES:END -->"
+
+
+def _design_system_machine_gates() -> dict:
+    manifest = _read(REPO_ROOT / "docs" / "design-system" / "MANIFEST.md")
+    assert manifest.count(_MACHINE_GATE_START) == 1
+    assert manifest.count(_MACHINE_GATE_END) == 1
+    payload = manifest.split(_MACHINE_GATE_START, 1)[1].split(_MACHINE_GATE_END, 1)[0]
+    gate = json.loads(payload)
+    assert gate["schema_version"] == 1
+    return gate
+
+
 def test_design_system_governed_sources_are_coversioned() -> None:
     """F36.6: shared semantic authorities move with specs, version, and changelog."""
 
@@ -1313,8 +1327,7 @@ def test_design_system_governed_sources_are_coversioned() -> None:
     ).stdout.strip()
     assert base_commit == base_ref
 
-    gate_path = REPO_ROOT / "docs" / "design-system" / "MACHINE_GATES.json"
-    gate = json.loads(_read(gate_path))["co_versioning"]
+    gate = _design_system_machine_gates()["co_versioning"]
     assert gate["base_environment"] == "TRUSTED_BASE_SHA"
     groups = gate["groups"]
     assert {group["id"] for group in groups} == _DESIGN_SYSTEM_GATE_IDS
@@ -1418,7 +1431,6 @@ def test_canonical_design_system_artifacts_and_markdown_references_are_tracked()
         "docs/design-system/CHANGELOG.md",
         "docs/design-system/VERSION",
         "docs/design-system/GUI_MIGRATION_INVENTORY.md",
-        "docs/design-system/MACHINE_GATES.json",
         "docs/design-system/cryodaq-primitives/tray-status.md",
     }
 

@@ -6,7 +6,7 @@ enforcement: strict
 priority: critical
 last_updated: 2026-08-10
 status: canonical
-references: ../accessibility/wcag-baseline.md, ../accessibility/contrast-matrix.md, ../accessibility/keyboard-navigation.md, ../MACHINE_GATES.json
+references: ../accessibility/wcag-baseline.md, ../accessibility/contrast-matrix.md, ../accessibility/keyboard-navigation.md, ../MANIFEST.md
 ---
 
 # Accessibility Rules
@@ -103,7 +103,7 @@ form_layout.addWidget(self._submit_button)
 
 Color-only is forbidden, even if color contrast passes AA.
 
-The v4.2.0 mechanical subset binds this rule to production: `MACHINE_GATES.json` names every canonical state input, Russian label, token, and non-color shape, and `test_machine_accessibility_non_color_states_match_real_runtime_contract` compares that data with the real state mapper. Human operator recognition and NVDA output remain required evidence.
+The v4.2.0 mechanical subset binds this rule to production: `MANIFEST.md` names every canonical state input, Russian label, token, and non-color shape, and `test_machine_accessibility_non_color_states_match_real_runtime_contract` compares that data with the real state mapper. Human operator recognition and NVDA output remain required evidence.
 
 **Rationale:** ~8% of male population has red-green color blindness. CryoDAQ lab has all-male engineering team by current demographic — likely 1-2 color-blind operators at any time. A STATUS_FAULT red indicator distinguishable only by color is invisible to them.
 
@@ -168,7 +168,7 @@ status_label.setStyleSheet(f"color: {theme.STATUS_OK};")
 
 **TL;DR:** STATUS_FAULT (#c44545, 3.94:1) and STATUS_STALE (#5a5d68, 2.94:1) fail WCAG AA body contrast on the default dark background. Do not use them for body-size numeric value text.
 
-**Statement:** The ratios below are `default_cool` references vs BACKGROUND #0d0e12. The exact multi-theme cases and per-theme structured exceptions are in `MACHINE_GATES.json` and are recomputed by the GUI partition:
+**Statement:** The ratios below are `default_cool` references vs BACKGROUND #0d0e12. The exact multi-theme cases and per-theme structured exceptions are in `MANIFEST.md` and are recomputed by the GUI partition:
 
 | Token | Ratio | AA body (≥4.5) | Use for body text? |
 |---|---|---|---|

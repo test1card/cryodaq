@@ -3,7 +3,7 @@ title: WCAG Baseline
 keywords: wcag, accessibility, aa, level, conformance, baseline, target, guidelines, wcag-2-2
 applies_to: accessibility conformance target and scope across the product
 status: canonical
-references: rules/accessibility-rules.md, tokens/colors.md, patterns/state-visualization.md, contrast-matrix.md, ../MACHINE_GATES.json
+references: rules/accessibility-rules.md, tokens/colors.md, patterns/state-visualization.md, contrast-matrix.md, ../MANIFEST.md
 external_reference: WCAG 2.2 (W3C Recommendation, October 2023)
 last_updated: 2026-08-10
 ---
@@ -57,11 +57,11 @@ This table defines the product contract, not a blanket conformance verdict. “T
 | **1.3.5 Identify Input Purpose** (AA) | Target; evidence open | Form autocomplete attributes where applicable (operator login, if present) |
 | **1.4.1 Use of Color** (A) | Mechanically mapped; human scenarios open | Production state inputs are checked for Russian text, accessible names, and distinct non-color geometry; operator recognition remains a scripted human gate. |
 | **1.4.2 Audio Control** (A) | Open | Alarm beeps exist. Current dual-owner fail-loud behavior has no consolidated mute/volume surface; exact-activation acknowledgement and visible audio availability remain an explicit gate. |
-| **1.4.3 Contrast (Minimum)** (AA) | Mechanically measured subset with structured exceptions | Every declared text pair is recomputed across every real theme; exact exceptions and fallback channels live in `MACHINE_GATES.json`. This is not an exhaustive proof of every rendered QSS context. |
+| **1.4.3 Contrast (Minimum)** (AA) | Mechanically measured subset with structured exceptions | Every declared text pair is recomputed across every real theme; exact exceptions and fallback channels live in `MANIFEST.md`. This is not an exhaustive proof of every rendered QSS context. |
 | **1.4.4 Resize Text** (AA) | Partial | Qt apps support OS-level DPI scaling; manual text zoom within app is out of scope |
 | **1.4.5 Images of Text** (AA) | Target; evidence open | No images of text; all text is actual text |
 | **1.4.10 Reflow** (AA) | Partial | Desktop-only; reflow at 320px viewport not targeted |
-| **1.4.11 Non-text Contrast** (AA) | Mechanically measured subset with structured exceptions | Quiet BORDER grouping is below 3:1 in every pack; FOCUS_RING and some status chrome also miss 3:1 in named packs. Exact theme sets and redundant channels live in `MACHINE_GATES.json`; keyboard/visual verification remains open. |
+| **1.4.11 Non-text Contrast** (AA) | Mechanically measured subset with structured exceptions | Quiet BORDER grouping is below 3:1 in every pack; FOCUS_RING and some status chrome also miss 3:1 in named packs. Exact theme sets and redundant channels live in `MANIFEST.md`; keyboard/visual verification remains open. |
 | **1.4.12 Text Spacing** (AA) | Target; evidence open | Line-height 1.5 default; letter-spacing adjustable via QSS |
 | **1.4.13 Content on Hover / Focus** (AA) | Target; evidence open | Tooltips dismissible (Escape closes); persistent while hovered; not obscuring |
 

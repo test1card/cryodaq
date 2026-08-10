@@ -3,7 +3,7 @@ title: Contrast Matrix
 keywords: contrast, wcag, aa, aaa, ratios, measured, token-pairs, foreground, background, accessible-colors
 applies_to: default_cool reference ratios plus the declared all-theme mechanical subset
 status: canonical
-references: tokens/colors.md, rules/accessibility-rules.md, rules/color-rules.md, wcag-baseline.md, ../MACHINE_GATES.json
+references: tokens/colors.md, rules/accessibility-rules.md, rules/color-rules.md, wcag-baseline.md, ../MANIFEST.md
 last_updated: 2026-08-10
 ---
 
@@ -25,7 +25,7 @@ All ratios below computed against **BACKGROUND `#0d0e12`** (the canonical shell 
 
 ## All-theme mechanical subset
 
-`MACHINE_GATES.json` is the source of truth for the cases enforced across every real `config/themes/*.yaml` pack. Each case names the WCAG criterion, semantic role, foreground/background tokens, and threshold. Each allowed failure is structured data with an exact case ID, exact theme IDs, scope, rationale, fallback channels, and required human verification.
+`MANIFEST.md` is the source of truth for the cases enforced across every real `config/themes/*.yaml` pack. Each case names the WCAG criterion, semantic role, foreground/background tokens, and threshold. Each allowed failure is structured data with an exact case ID, exact theme IDs, scope, rationale, fallback channels, and required human verification.
 
 `tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` loads packs through the production validator and requires the measured failure set to equal that data exactly. A new failing pack or stale exception fails the GUI partition. This mechanical subset does not prove keyboard focus perception, operator recognition, NVDA output, or unlisted rendered token contexts; those remain separate evidence.
 

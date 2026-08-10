@@ -3,7 +3,7 @@ title: Versioning
 keywords: versioning, semver, breaking-change, major, minor, patch, release, changelog
 applies_to: how design-system releases are numbered and what changes go into each
 status: canonical
-references: governance/deprecation-policy.md, governance/contribution.md, governance/testing-strategy.md, ../MACHINE_GATES.json
+references: governance/deprecation-policy.md, governance/contribution.md, governance/testing-strategy.md, ../MANIFEST.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
 last_updated: 2026-08-10
 ---
@@ -25,16 +25,15 @@ Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
 - Top of `docs/design-system/README.md`
-- `docs/design-system/MANIFEST.md`
+- `docs/design-system/MANIFEST.md` (including the governed-source and mechanical-accessibility JSON block)
 - `docs/design-system/CHANGELOG.md` — human-readable release notes
-- `docs/design-system/MACHINE_GATES.json` — governed-source map and mechanical accessibility evidence
 - `docs/design-system/GUI_MIGRATION_INVENTORY.md`
 - `docs/design-system/cryodaq-primitives/tray-status.md`
 - Tagged in git as `design-system-vX.Y.Z` (e.g., `design-system-v1.0.1`)
 
 ## Same-slice co-versioning
 
-`VERSION` remains the only version number; F36.6 does not introduce a parallel scheme. `MACHINE_GATES.json` maps only shared semantic authorities: token definitions, theme packs/loaders, reusable design-system components, canonical state mappers, and the two root-owned product patterns. Ordinary panel/view consumers stay under the roadmap-wide GUI review gate and do not force a design-system release for every local edit.
+`VERSION` remains the only version number; F36.6 does not introduce a parallel scheme. The machine-gate JSON block in `MANIFEST.md` maps only shared semantic authorities: token definitions, theme packs/loaders, reusable design-system components, canonical state mappers, and the two root-owned product patterns. Ordinary panel/view consumers stay under the roadmap-wide GUI review gate and do not force a design-system release for every local edit.
 
 When a mapped source or canonical contract changes relative to the exact 40-character `TRUSTED_BASE_SHA`, the same slice must:
 

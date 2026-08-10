@@ -3,7 +3,7 @@ title: Governance Rules
 keywords: rules, governance, token-naming, versioning, deprecation, RULE-GOV
 applies_to: meta-rules about how the design system itself evolves
 status: canonical
-references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md, governance/testing-strategy.md, ../MACHINE_GATES.json
+references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md, governance/testing-strategy.md, ../MANIFEST.md
 last_updated: 2026-08-10
 ---
 
@@ -74,7 +74,7 @@ test, and revise/revert trigger.
 
 A change to a mapped shared token, theme pack, reusable design-system component, canonical state mapper, or root-owned design-system pattern MUST update its canonical specification, advance the existing design-system `VERSION`, and add the matching `CHANGELOG.md` entry in the same immutable-base slice.
 
-**Canonical source:** `governance/versioning.md`; the deliberately narrow source/specification map is data in `MACHINE_GATES.json`. Ordinary panel and view consumers remain governed by the roadmap-wide GUI review gate without forcing a design-system release for every local implementation edit.
+**Canonical source:** `governance/versioning.md`; the deliberately narrow source/specification map is data in `MANIFEST.md`. Ordinary panel and view consumers remain governed by the roadmap-wide GUI review gate without forcing a design-system release for every local implementation edit.
 
 **Enforcement:** `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` compares the real candidate checkout with exact `TRUSTED_BASE_SHA`; a missing base, missing mapped specification, non-advancing version, or absent current changelog heading fails closed.
 

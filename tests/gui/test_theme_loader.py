@@ -20,7 +20,9 @@ import yaml
 from cryodaq.gui import _theme_loader as loader
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_MACHINE_GATES = _REPO_ROOT / "docs" / "design-system" / "MACHINE_GATES.json"
+_MANIFEST = _REPO_ROOT / "docs" / "design-system" / "MANIFEST.md"
+_MACHINE_GATE_START = "<!-- MACHINE_GATES:BEGIN -->\n```json\n"
+_MACHINE_GATE_END = "\n```\n<!-- MACHINE_GATES:END -->"
 
 
 @pytest.fixture
@@ -460,7 +462,13 @@ def _contrast_ratio(fg: str, bg: str) -> float:
 
 
 def _mechanical_accessibility_contract() -> dict:
-    return json.loads(_MACHINE_GATES.read_text(encoding="utf-8"))["mechanical_accessibility"]
+    manifest = _MANIFEST.read_text(encoding="utf-8")
+    assert manifest.count(_MACHINE_GATE_START) == 1
+    assert manifest.count(_MACHINE_GATE_END) == 1
+    payload = manifest.split(_MACHINE_GATE_START, 1)[1].split(_MACHINE_GATE_END, 1)[0]
+    gate = json.loads(payload)
+    assert gate["schema_version"] == 1
+    return gate["mechanical_accessibility"]
 
 
 def test_machine_accessibility_contrast_contract_matches_all_real_themes(real_themes_dir):

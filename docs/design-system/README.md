@@ -101,8 +101,7 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 ```
 docs/design-system/
 ├── README.md                        # this file
-├── MANIFEST.md                      # exact corpus inventory and encoded decisions
-├── MACHINE_GATES.json               # executable co-versioning and accessibility data
+├── MANIFEST.md                      # corpus inventory, decisions, and machine-gate data
 ├── GUI_MIGRATION_INVENTORY.md       # auditable v3 surface migration backlog
 ├── CHANGELOG.md                     # design-system release history
 ├── VERSION                          # authoritative version marker

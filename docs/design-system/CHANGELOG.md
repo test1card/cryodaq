@@ -17,7 +17,7 @@ the design-system-specific definitions of "breaking" from
 
 ### Added
 
-- `MACHINE_GATES.json` — one machine-readable contract for the narrow shared
+- `MANIFEST.md` — one machine-readable contract for the narrow shared
   semantic source surface, its corresponding specification families, WCAG 2.2
   contrast cases, exact per-theme exceptions, and canonical non-color states.
 - Exact-checkout F36.6 enforcement in
