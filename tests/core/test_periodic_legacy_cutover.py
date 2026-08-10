@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -47,6 +48,7 @@ from cryodaq.storage.archive_reader import (
 )
 
 ENGINE = Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "engine.py"
+CRYODAQ_SOURCE = ENGINE.parent
 DESTINATION_FINGERPRINT = periodic_telegram_destination_fingerprint(-100123)
 
 
@@ -96,6 +98,74 @@ def _config() -> PeriodicPngConfig:
 
 def _engine_tree() -> ast.Module:
     return ast.parse(ENGINE.read_text(encoding="utf-8"))
+
+
+def _has_recurring_loop(node: ast.AST) -> bool:
+    return any(isinstance(child, ast.While) for child in ast.walk(node))
+
+
+def _is_periodic_reporter_owner(node: ast.AST) -> bool:
+    if isinstance(node, ast.AsyncFunctionDef):
+        return "periodic" in node.name.lower() and _has_recurring_loop(node)
+    if not isinstance(node, ast.ClassDef):
+        return False
+    name = node.name.lower()
+    return "periodic" in name and ("reporter" in name or "supervisor" in name) and _has_recurring_loop(node)
+
+
+def _periodic_reporter_symbols(source_root: Path) -> tuple[str, ...]:
+    if not source_root.is_dir():
+        raise RuntimeError(f"CryoDAQ source tree is missing: {source_root}")
+    paths = sorted(source_root.rglob("*.py"))
+    if not paths:
+        raise RuntimeError(f"CryoDAQ source tree contains no Python files: {source_root}")
+    symbols: list[str] = []
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        module = ".".join(path.relative_to(source_root.parent).with_suffix("").parts)
+        symbols.extend(f"{module}.{node.name}" for node in ast.walk(tree) if _is_periodic_reporter_owner(node))
+    return tuple(sorted(symbols))
+
+
+def test_periodic_reporter_inventory_binds_the_two_real_facilities() -> None:
+    from cryodaq.agents.assistant_bootstrap import (
+        PERIODIC_REPORTER_FACILITIES,
+        validate_periodic_reporter_inventory,
+    )
+    from cryodaq.agents.assistant_main import _periodic_report_tick
+
+    real_symbols = {
+        f"{PeriodicPngSupervisor.__module__}.{PeriodicPngSupervisor.__qualname__}",
+        f"{_periodic_report_tick.__module__}.{_periodic_report_tick.__qualname__}",
+    }
+    assert real_symbols == {facility.symbol for facility in PERIODIC_REPORTER_FACILITIES}
+    assert {
+        facility.output_family for facility in PERIODIC_REPORTER_FACILITIES if facility.cross_process_single_owner
+    } == {"png_artifact"}
+    validate_periodic_reporter_inventory(_periodic_reporter_symbols(CRYODAQ_SOURCE))
+
+
+def test_periodic_reporter_inventory_rejects_a_third_reporter(tmp_path: Path) -> None:
+    from cryodaq.agents.assistant_bootstrap import validate_periodic_reporter_inventory
+
+    scratch_source = tmp_path / "src" / "cryodaq"
+    shutil.copytree(CRYODAQ_SOURCE, scratch_source)
+    decoy = scratch_source / "agents" / "assistant" / "decoy_periodic_reporter.py"
+    decoy.write_text(
+        "import asyncio\n\n"
+        "class DecoyPeriodicReporter:\n"
+        "    async def run(self):\n"
+        "        while True:\n"
+        "            await asyncio.sleep(60)\n"
+        "            await self._send_report()\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="DecoyPeriodicReporter"):
+        validate_periodic_reporter_inventory(_periodic_reporter_symbols(scratch_source))
+
+    decoy.unlink()
+    validate_periodic_reporter_inventory(_periodic_reporter_symbols(scratch_source))
 
 
 def _notifications(*, enabled: bool) -> str:

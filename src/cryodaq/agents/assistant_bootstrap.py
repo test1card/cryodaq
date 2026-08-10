@@ -16,7 +16,7 @@ import signal
 import stat as stat_module
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -41,6 +41,49 @@ DEFAULT_PUB_ADDR = "tcp://127.0.0.1:5555"
 DEFAULT_ASSISTANT_CMD_ADDR = "tcp://127.0.0.1:5557"
 _CONFIG_MAX_BYTES = 64 * 1024
 _FUTURE_SKEW_S = 300.0
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodicReporterFacility:
+    """One top-level, time-triggered operator-report facility."""
+
+    symbol: str
+    output_family: str
+    ownership_scope: str
+    cross_process_single_owner: bool
+
+
+# This is the executable ownership boundary for scheduled operator reports.
+# Internal PNG workers and terminal experiment-report reconciliation are parts
+# of these/runtime-adjacent facilities, not additional periodic reporters.
+PERIODIC_REPORTER_FACILITIES = (
+    PeriodicReporterFacility(
+        symbol="cryodaq.agents.assistant.periodic_png.PeriodicPngSupervisor",
+        output_family="png_artifact",
+        ownership_scope="data_directory_kernel_election",
+        cross_process_single_owner=True,
+    ),
+    PeriodicReporterFacility(
+        symbol="cryodaq.agents.assistant_main._periodic_report_tick",
+        output_family="llm_narrative_text",
+        ownership_scope="assistant_process_local",
+        cross_process_single_owner=False,
+    ),
+)
+
+# Kept importable only as dead characterization during the H3 cutover.
+RETIRED_PERIODIC_REPORTER_SYMBOLS = ("cryodaq.notifications.periodic_report.PeriodicReporter",)
+
+
+def validate_periodic_reporter_inventory(symbols: Iterable[str]) -> None:
+    """Reject missing, duplicate, or unregistered periodic reporter owners."""
+
+    expected = tuple(
+        sorted([facility.symbol for facility in PERIODIC_REPORTER_FACILITIES] + list(RETIRED_PERIODIC_REPORTER_SYMBOLS))
+    )
+    observed = tuple(sorted(symbols))
+    if observed != expected:
+        raise RuntimeError(f"periodic reporter inventory mismatch: expected={expected!r}, observed={observed!r}")
 
 
 def _consume_soak_periodic_session(*, periodic_allowed: bool) -> Any | None:
