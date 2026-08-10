@@ -9522,6 +9522,7 @@ class SQLiteWriter:
         unfiltered_remaining = unfiltered_limit
 
         result: dict[str, list[tuple[float, float]]] = {}
+        descriptor_rows: dict[str, list[Any | None]] = {}
         db_files = sorted(self._data_dir.glob("data_????-??-??.db"))
 
         # Filter DB files by date range if possible
@@ -9573,14 +9574,14 @@ class SQLiteWriter:
                         has_descriptor_hash = "descriptor_hash" in columns
                         if has_descriptor_hash:
                             verify_descriptor_storage(conn)
-                            descriptor_rows = conn.execute(
+                            descriptor_hash_rows = conn.execute(
                                 "SELECT DISTINCT descriptor_hash FROM readings "
                                 "WHERE descriptor_hash IS NOT NULL LIMIT ?",
                                 (MAX_ARCHIVE_DESCRIPTORS + 1,),
                             ).fetchall()
-                            if len(descriptor_rows) > MAX_ARCHIVE_DESCRIPTORS:
+                            if len(descriptor_hash_rows) > MAX_ARCHIVE_DESCRIPTORS:
                                 raise ValueError("historical descriptor catalog exceeds bounds")
-                            referenced = {row[0] for row in descriptor_rows}
+                            referenced = {row[0] for row in descriptor_hash_rows}
                             if any(type(value) is not str for value in referenced):
                                 raise ValueError("historical descriptor hash is not text")
                             if referenced:
@@ -9605,9 +9606,10 @@ class SQLiteWriter:
                         time_params.append(to_ts)
 
                     def _collect(query: str, params: list[Any]) -> int:
-                        pending: list[tuple[str, float, float]] = []
+                        pending: list[tuple[str, float, float, Any | None]] = []
                         for row in conn.execute(query, params):
                             ch = row["channel"]
+                            descriptor: Any | None = None
                             if _descriptor_catalog is not None:
                                 descriptor_hash = row["descriptor_hash"]
                                 if descriptor_hash is None:
@@ -9622,13 +9624,6 @@ class SQLiteWriter:
                                         or descriptor.unit != row["unit"]
                                     ):
                                         raise ValueError("historical descriptor disagrees with reading")
-                                assert _descriptor_identities is not None
-                                _merge_history_descriptor(
-                                    _descriptor_catalog,
-                                    _descriptor_identities,
-                                    ch,
-                                    descriptor,
-                                )
                             # NaN-доктрина: mask sentinel / error / legacy ±inf at
                             # the read boundary — the GUI-reconnect history feed
                             # must not surface a non-physical number.
@@ -9637,14 +9632,17 @@ class SQLiteWriter:
                                     ch,
                                     float(row["timestamp"]),
                                     decode(float(row["value"]), row["status"]),
+                                    descriptor,
                                 )
                             )
                         # Keep each bounded file/channel query atomic. A malformed
                         # later row must not retain a partial prefix without also
                         # consuming its deficit, which could multiply memory by
                         # the number of retained daily files.
-                        for ch, timestamp, value in pending:
+                        for ch, timestamp, value, descriptor in pending:
                             result.setdefault(ch, []).append((timestamp, value))
+                            if _descriptor_catalog is not None:
+                                descriptor_rows.setdefault(ch, []).append(descriptor)
                         return len(pending)
 
                     if channels:
@@ -9877,15 +9875,9 @@ class SQLiteWriter:
                                 )
                             for row in accepted:
                                 value = float("nan") if row.value is None else row.value
-                                if _descriptor_catalog is not None and row.descriptor is not None:
-                                    assert _descriptor_identities is not None
-                                    _merge_history_descriptor(
-                                        _descriptor_catalog,
-                                        _descriptor_identities,
-                                        row.channel,
-                                        row.descriptor,
-                                    )
                                 result.setdefault(row.channel, []).append((row.timestamp, value))
+                                if _descriptor_catalog is not None:
+                                    descriptor_rows.setdefault(row.channel, []).append(row.descriptor)
                             cold_rows_remaining -= len(accepted)
                             if deficits is not None:
                                 assert channel is not None
@@ -9917,21 +9909,42 @@ class SQLiteWriter:
             # public result cannot exceed the trust boundary even when the
             # archive contributes the remaining rows.
             newest = sorted(
-                ((timestamp, channel, value) for channel, points in result.items() for timestamp, value in points),
+                (
+                    (timestamp, channel, value, descriptor)
+                    for channel, points in result.items()
+                    for (timestamp, value), descriptor in zip(
+                        points, descriptor_rows.get(channel, [None] * len(points))
+                    )
+                ),
                 key=lambda item: (item[0], item[1]),
                 reverse=True,
             )[:unfiltered_limit]
             result = {}
-            for timestamp, channel, value in newest:
+            descriptor_rows = {}
+            for timestamp, channel, value, descriptor in newest:
                 result.setdefault(channel, []).append((timestamp, value))
+                if _descriptor_catalog is not None:
+                    descriptor_rows.setdefault(channel, []).append(descriptor)
 
         # Sort ASC and truncate to limit_per_channel (keep latest). Rows arrive
         # newest-first and possibly interleaved across daily DB files.
         for ch in result:
-            result[ch].sort(key=lambda p: p[0])
+            paired = list(zip(result[ch], descriptor_rows.get(ch, [None] * len(result[ch]))))
+            paired.sort(key=lambda item: item[0][0])
             retained_cap = channel_caps.get(ch, 0) if channel_caps is not None else limit_per_channel
-            if len(result[ch]) > retained_cap:
-                result[ch] = result[ch][-retained_cap:]
+            paired = paired[-retained_cap:]
+            result[ch] = [point for point, _descriptor in paired]
+            if _descriptor_catalog is not None:
+                descriptor_rows[ch] = [descriptor for _point, descriptor in paired]
+                assert _descriptor_identities is not None
+                for _point, descriptor in paired:
+                    if descriptor is not None:
+                        _merge_history_descriptor(
+                            _descriptor_catalog,
+                            _descriptor_identities,
+                            ch,
+                            descriptor,
+                        )
 
         if _descriptor_catalog is not None:
             for channel in set(_descriptor_catalog).difference(result):
