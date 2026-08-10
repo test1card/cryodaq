@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from cryodaq import operator_snapshot as _protocol
+from cryodaq.channels.descriptors import ChannelDescriptorV1, ChannelQuantity
+from cryodaq.core.operator_log import AttentionHistoryPage
 from cryodaq.operator_snapshot import *  # noqa: F403
 from cryodaq.operator_snapshot import (
     MAX_LIVE_SOURCES_PER_SESSION,
     STATE_PRECEDENCE,
+    AttentionItem,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownSample,
     DataIntegritySummary,
     ExperimentOperatingState,
     InfrastructureNodeHealth,
@@ -23,18 +28,342 @@ from cryodaq.operator_snapshot import (
     ReadinessTruth,
     RecordingTruth,
     SafetyLifecycle,
+    SnapshotCut,
     SnapshotMode,
+    SummaryStatus,
     SupportBundleSummary,
     _OperatorSummary,
 )
 
 __all__ = [
     *_protocol.__all__,
+    "CooldownMission",
+    "CooldownMissionGap",
+    "CooldownMissionPoint",
     "OperatorSnapshotStore",
+    "build_cooldown_mission",
+    "dump_cooldown_mission",
 ]
 
 _TRANSPORT_DISCONNECTED = "transport_disconnected"
 _SNAPSHOT_STALE = "snapshot_stale"
+_COOLDOWN_MISSION_SCHEMA = "cryodaq.cooldown-mission-evidence"
+_COOLDOWN_MISSION_VERSION = 1
+
+
+def _mission_number(
+    value: object,
+    *,
+    field_name: str,
+    non_negative: bool,
+) -> float:
+    if type(value) not in {int, float}:
+        raise ValueError(f"{field_name} must be finite")
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field_name} must be finite") from exc
+    if not math.isfinite(normalized) or (non_negative and normalized < 0):
+        raise ValueError(f"{field_name} must be finite")
+    return normalized
+
+
+@dataclass(frozen=True, slots=True)
+class CooldownMissionPoint:
+    """One observed sample with comparison truth from an exact reference time."""
+
+    sample: CooldownSample
+    reference_temperature_k: float | None
+    deviation_k: float | None
+    comparison_missing_reason: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.sample) is not CooldownSample:
+            raise TypeError("sample must be an exact CooldownSample")
+        if self.reference_temperature_k is None:
+            if self.deviation_k is not None or self.comparison_missing_reason not in {
+                "no_reference",
+                "no_exact_reference_sample",
+            }:
+                raise ValueError("missing comparison must carry one explicit reason")
+            return
+        reference = _mission_number(
+            self.reference_temperature_k,
+            field_name="reference_temperature_k",
+            non_negative=True,
+        )
+        deviation = _mission_number(
+            self.deviation_k,
+            field_name="deviation_k",
+            non_negative=False,
+        )
+        if self.comparison_missing_reason is not None or deviation != self.sample.temperature_k - reference:
+            raise ValueError("available comparison must carry its exact deviation")
+        object.__setattr__(self, "reference_temperature_k", reference)
+        object.__setattr__(self, "deviation_k", deviation)
+
+
+@dataclass(frozen=True, slots=True)
+class CooldownMissionGap:
+    """Explicit absence between two real samples; it never carries a value."""
+
+    after_elapsed_s: float
+    before_elapsed_s: float
+    missing_reason: str = "cadence_gap"
+
+    def __post_init__(self) -> None:
+        after = _mission_number(
+            self.after_elapsed_s,
+            field_name="after_elapsed_s",
+            non_negative=True,
+        )
+        before = _mission_number(
+            self.before_elapsed_s,
+            field_name="before_elapsed_s",
+            non_negative=True,
+        )
+        if before <= after:
+            raise ValueError("cooldown mission gap must span increasing elapsed time")
+        if self.missing_reason != "cadence_gap":
+            raise ValueError("cooldown mission gap reason must be cadence_gap")
+        object.__setattr__(self, "after_elapsed_s", after)
+        object.__setattr__(self, "before_elapsed_s", before)
+
+
+@dataclass(frozen=True, slots=True)
+class CooldownMission:
+    """One immutable observational cooldown decision projection."""
+
+    cut: SnapshotCut
+    cooldown_status: SummaryStatus
+    attention_status: SummaryStatus
+    experiment_id: str
+    trajectory_channel_id: str
+    phase: str | None
+    phase_missing_reason: str | None
+    expected_cadence_s: float
+    trajectory: tuple[CooldownMissionPoint | CooldownMissionGap, ...]
+    trajectory_missing_reason: str | None
+    relevant_attention: tuple[AttentionItem, ...]
+    recent_history: AttentionHistoryPage
+    reference_id: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.cut) is not SnapshotCut:
+            raise TypeError("cut must be an exact SnapshotCut")
+        if type(self.cooldown_status) is not SummaryStatus:
+            raise TypeError("cooldown_status must be an exact SummaryStatus")
+        if type(self.attention_status) is not SummaryStatus:
+            raise TypeError("attention_status must be an exact SummaryStatus")
+        for field_name in ("experiment_id", "trajectory_channel_id"):
+            value = getattr(self, field_name)
+            if type(value) is not str or not value:
+                raise ValueError(f"{field_name} must be stable non-empty text")
+        if self.cut.experiment_id != self.experiment_id:
+            raise ValueError("mission experiment_id must match its coherent cut")
+        if (self.phase is None) != (self.phase_missing_reason == "no_phase"):
+            raise ValueError("mission phase absence must be explicit")
+        cadence = _mission_number(
+            self.expected_cadence_s,
+            field_name="expected_cadence_s",
+            non_negative=True,
+        )
+        if cadence == 0:
+            raise ValueError("expected_cadence_s must be positive")
+        object.__setattr__(self, "expected_cadence_s", cadence)
+        if type(self.trajectory) is not tuple or any(
+            type(item) not in {CooldownMissionPoint, CooldownMissionGap} for item in self.trajectory
+        ):
+            raise TypeError("trajectory must be a tuple of exact mission entries")
+        if (not self.trajectory) != (self.trajectory_missing_reason == "no_samples"):
+            raise ValueError("trajectory absence must be explicit")
+        points = tuple(item for item in self.trajectory if type(item) is CooldownMissionPoint)
+        if any(later.sample.elapsed_s <= earlier.sample.elapsed_s for earlier, later in zip(points, points[1:])):
+            raise ValueError("mission samples must remain strictly ordered")
+        for index, entry in enumerate(self.trajectory):
+            if type(entry) is CooldownMissionPoint:
+                continue
+            if (
+                index == 0
+                or index == len(self.trajectory) - 1
+                or type(self.trajectory[index - 1]) is not CooldownMissionPoint
+                or type(self.trajectory[index + 1]) is not CooldownMissionPoint
+                or entry.after_elapsed_s != self.trajectory[index - 1].sample.elapsed_s
+                or entry.before_elapsed_s != self.trajectory[index + 1].sample.elapsed_s
+                or entry.before_elapsed_s - entry.after_elapsed_s <= cadence
+            ):
+                raise ValueError("mission gap must bind adjacent real samples")
+        if type(self.relevant_attention) is not tuple or any(
+            type(item) is not AttentionItem for item in self.relevant_attention
+        ):
+            raise TypeError("relevant_attention must contain exact AttentionItem values")
+        if type(self.recent_history) is not AttentionHistoryPage:
+            raise TypeError("recent_history must be an exact AttentionHistoryPage")
+        if any(item.experiment_id != self.experiment_id for item in self.recent_history.items):
+            raise ValueError("attention history experiment identity is inconsistent")
+
+
+def build_cooldown_mission(
+    snapshot: OperatorSnapshot,
+    attention_history: AttentionHistoryPage,
+    *,
+    trajectory_channel: ChannelDescriptorV1,
+    expected_cadence_s: float,
+) -> CooldownMission:
+    """Project one coherent cut plus durable annotations without new authority."""
+
+    if type(snapshot) is not OperatorSnapshot:
+        raise TypeError("snapshot must be an exact OperatorSnapshot")
+    if type(attention_history) is not AttentionHistoryPage:
+        raise TypeError("attention_history must be an exact AttentionHistoryPage")
+    if type(trajectory_channel) is not ChannelDescriptorV1:
+        raise TypeError("trajectory_channel must be an exact ChannelDescriptorV1")
+    if trajectory_channel.quantity is not ChannelQuantity.TEMPERATURE or trajectory_channel.unit != "K":
+        raise ValueError("trajectory_channel must describe temperature in K")
+    experiment_id = snapshot.experiment.experiment_id
+    if experiment_id is None or experiment_id != snapshot.cut.experiment_id:
+        raise ValueError("cooldown mission requires one active stable experiment")
+    if any(item.experiment_id != experiment_id for item in attention_history.items):
+        raise ValueError("attention history belongs to a different experiment")
+    cadence = _mission_number(
+        expected_cadence_s,
+        field_name="expected_cadence_s",
+        non_negative=True,
+    )
+    if cadence == 0:
+        raise ValueError("expected_cadence_s must be positive")
+
+    reference = {sample.elapsed_s: sample.temperature_k for sample in snapshot.cooldown_history.reference_samples}
+    trajectory: list[CooldownMissionPoint | CooldownMissionGap] = []
+    previous: CooldownSample | None = None
+    for sample in snapshot.cooldown_history.samples:
+        if previous is not None and sample.elapsed_s - previous.elapsed_s > cadence:
+            trajectory.append(
+                CooldownMissionGap(
+                    after_elapsed_s=previous.elapsed_s,
+                    before_elapsed_s=sample.elapsed_s,
+                )
+            )
+        reference_temperature = reference.get(sample.elapsed_s)
+        if reference_temperature is None:
+            missing_reason = (
+                "no_reference" if snapshot.cooldown_history.reference_id is None else "no_exact_reference_sample"
+            )
+            deviation = None
+        else:
+            missing_reason = None
+            deviation = sample.temperature_k - reference_temperature
+        trajectory.append(
+            CooldownMissionPoint(
+                sample=sample,
+                reference_temperature_k=reference_temperature,
+                deviation_k=deviation,
+                comparison_missing_reason=missing_reason,
+            )
+        )
+        previous = sample
+
+    return CooldownMission(
+        cut=snapshot.cut,
+        cooldown_status=snapshot.cooldown_history.status,
+        attention_status=snapshot.attention.status,
+        experiment_id=experiment_id,
+        trajectory_channel_id=trajectory_channel.channel_id,
+        phase=snapshot.experiment.phase,
+        phase_missing_reason=("no_phase" if snapshot.experiment.phase is None else None),
+        expected_cadence_s=cadence,
+        trajectory=tuple(trajectory),
+        trajectory_missing_reason=("no_samples" if not snapshot.cooldown_history.samples else None),
+        relevant_attention=snapshot.attention.items,
+        recent_history=attention_history,
+        reference_id=snapshot.cooldown_history.reference_id,
+    )
+
+
+def _mission_status_payload(status: SummaryStatus) -> dict[str, object]:
+    return {
+        "state": status.state.value,
+        "source_age_s": status.source_age_s,
+        "transport_age_s": status.transport_age_s,
+        "reason_codes": list(status.reason_codes),
+        "operator_text": status.operator_text,
+        "transport_reason_codes": list(status.transport_reason_codes),
+    }
+
+
+def dump_cooldown_mission(mission: CooldownMission) -> str:
+    """Export deterministic observational evidence with stable identities."""
+
+    if type(mission) is not CooldownMission:
+        raise TypeError("mission must be an exact CooldownMission")
+    trajectory: list[dict[str, object]] = []
+    for entry in mission.trajectory:
+        if type(entry) is CooldownMissionGap:
+            trajectory.append(
+                {
+                    "kind": "missing",
+                    "after_elapsed_s": entry.after_elapsed_s,
+                    "before_elapsed_s": entry.before_elapsed_s,
+                    "missing_reason": entry.missing_reason,
+                }
+            )
+        else:
+            trajectory.append(
+                {
+                    "kind": "sample",
+                    "elapsed_s": entry.sample.elapsed_s,
+                    "temperature_k": entry.sample.temperature_k,
+                    "reference_temperature_k": entry.reference_temperature_k,
+                    "deviation_k": entry.deviation_k,
+                    "comparison_missing_reason": entry.comparison_missing_reason,
+                }
+            )
+    payload = {
+        "schema": _COOLDOWN_MISSION_SCHEMA,
+        "version": _COOLDOWN_MISSION_VERSION,
+        "cut": {
+            "revision": mission.cut.revision,
+            "observed_at": mission.cut.observed_at.isoformat(),
+            "received_at": mission.cut.received_at.isoformat(),
+            "source": mission.cut.source,
+            "mode": mission.cut.mode.value,
+            "experiment_id": mission.cut.experiment_id,
+            "producer_id": mission.cut.producer_id,
+        },
+        "experiment_id": mission.experiment_id,
+        "trajectory_channel_id": mission.trajectory_channel_id,
+        "phase": mission.phase,
+        "phase_missing_reason": mission.phase_missing_reason,
+        "expected_cadence_s": mission.expected_cadence_s,
+        "cooldown_status": _mission_status_payload(mission.cooldown_status),
+        "attention_status": _mission_status_payload(mission.attention_status),
+        "reference_id": mission.reference_id,
+        "trajectory": trajectory,
+        "trajectory_missing_reason": mission.trajectory_missing_reason,
+        "relevant_attention": [
+            {
+                "attention_id": item.attention_id,
+                "state": item.state.value,
+                "title": item.title,
+                "detail": item.detail,
+                "observed_at": item.observed_at.isoformat(),
+                "transport_reason_codes": list(item.transport_reason_codes),
+            }
+            for item in mission.relevant_attention
+        ],
+        "recent_history": {
+            "truncated_before": mission.recent_history.truncated_before,
+            "global_rejected_attempts_after_capacity": (mission.recent_history.rejected_after_capacity),
+            "items": [item.to_payload() for item in mission.recent_history.items],
+        },
+    }
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 class OperatorSnapshotStore:

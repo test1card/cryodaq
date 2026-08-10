@@ -6,6 +6,18 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from cryodaq.channels.descriptors import (
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.core.operator_log import (
+    AttentionHistoryPage,
+    dump_attention_history_item,
+    load_attention_history_item,
+    new_attention_incident,
+)
 from cryodaq.gui.state import operator_view_models as view_models
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.operator_snapshot import (
@@ -228,6 +240,236 @@ def _snapshot(
 def _recut(snapshot: OperatorSnapshot, **changes: object) -> OperatorSnapshot:
     cut = replace(snapshot.cut, **changes)
     return OperatorSnapshot(cut, *(replace(summary, cut=cut) for summary in snapshot.summaries()))
+
+
+def _mission_descriptor(**changes: object) -> ChannelDescriptorV1:
+    values: dict[str, object] = {
+        "schema_version": 1,
+        "channel_id": "sensor.main",
+        "instrument_id": "reference-thermometer",
+        "source_key": "input.1.temperature",
+        "quantity": ChannelQuantity.TEMPERATURE,
+        "unit": "K",
+        "role": ChannelRole.PRIMARY_MEASUREMENT,
+        "safety_class": ChannelSafetyClass.OBSERVATIONAL,
+        "display_group": "Cryostat",
+        "display_name": "Main cooldown sensor",
+        "visible_by_default": True,
+        "display_order": 1,
+        "descriptor_revision": 1,
+    }
+    values.update(changes)
+    return ChannelDescriptorV1(**values)  # type: ignore[arg-type]
+
+
+def _attention_history(
+    *,
+    experiment_id: str = "exp-7",
+) -> AttentionHistoryPage:
+    item = new_attention_incident(
+        timestamp=datetime(2026, 7, 11, 1, 1, tzinfo=UTC),
+        experiment_id=experiment_id,
+        alarm_id="cooldown-deviation",
+        level="WARNING",
+        message="Cooldown trajectory deviated from reference",
+        channel_ids=("sensor.main",),
+    )
+    return AttentionHistoryPage(
+        items=(item,),
+        truncated_before=False,
+    )
+
+
+def _build_cooldown_mission(
+    snapshot: OperatorSnapshot,
+    history: AttentionHistoryPage,
+    *,
+    descriptor: ChannelDescriptorV1 | None = None,
+    expected_cadence_s: float = 60,
+):
+    builder = getattr(view_models, "build_cooldown_mission", None)
+    assert callable(builder), "production cooldown mission builder is missing"
+    return builder(
+        snapshot,
+        history,
+        trajectory_channel=descriptor or _mission_descriptor(),
+        expected_cadence_s=expected_cadence_s,
+    )
+
+
+def _dump_cooldown_mission(mission: object) -> str:
+    exporter = getattr(view_models, "dump_cooldown_mission", None)
+    assert callable(exporter), "production cooldown mission exporter is missing"
+    return exporter(mission)
+
+
+def _with_cooldown_history(
+    snapshot: OperatorSnapshot,
+    *,
+    samples: tuple[CooldownSample, ...],
+    reference_id: str | None,
+    reference_samples: tuple[CooldownSample, ...],
+) -> OperatorSnapshot:
+    return replace(
+        snapshot,
+        cooldown_history=replace(
+            snapshot.cooldown_history,
+            samples=samples,
+            reference_id=reference_id,
+            reference_samples=reference_samples,
+        ),
+    )
+
+
+def test_cooldown_mission_marks_cadence_gap_without_interpolation() -> None:
+    snapshot = _with_cooldown_history(
+        _snapshot(),
+        samples=(
+            CooldownSample(0, 300),
+            CooldownSample(60, 250),
+            CooldownSample(180, 190),
+        ),
+        reference_id="reference-a",
+        reference_samples=(
+            CooldownSample(0, 300),
+            CooldownSample(60, 245),
+            CooldownSample(180, 185),
+        ),
+    )
+    mission = _build_cooldown_mission(
+        snapshot,
+        _attention_history(),
+        expected_cadence_s=60,
+    )
+
+    assert len(mission.trajectory) == 4
+    gap = mission.trajectory[2]
+    assert gap.after_elapsed_s == 60
+    assert gap.before_elapsed_s == 180
+    assert gap.missing_reason == "cadence_gap"
+    assert tuple(entry.sample.temperature_k for entry in mission.trajectory if hasattr(entry, "sample")) == (
+        300,
+        250,
+        190,
+    )
+    encoded = json.loads(_dump_cooldown_mission(mission))
+    assert encoded["trajectory"][2] == {
+        "after_elapsed_s": 60.0,
+        "before_elapsed_s": 180.0,
+        "kind": "missing",
+        "missing_reason": "cadence_gap",
+    }
+    assert "temperature_k" not in encoded["trajectory"][2]
+
+    empty = _with_cooldown_history(
+        _snapshot(),
+        samples=(),
+        reference_id=None,
+        reference_samples=(),
+    )
+    missing = _build_cooldown_mission(empty, _attention_history())
+    assert missing.trajectory == ()
+    assert missing.trajectory_missing_reason == "no_samples"
+
+
+def test_cooldown_mission_compares_only_exact_reference_points() -> None:
+    snapshot = _with_cooldown_history(
+        _snapshot(),
+        samples=(
+            CooldownSample(0, 300),
+            CooldownSample(60, 250),
+            CooldownSample(120, 220),
+        ),
+        reference_id="reference-a",
+        reference_samples=(
+            CooldownSample(0, 299),
+            CooldownSample(60, 245),
+            CooldownSample(180, 180),
+        ),
+    )
+
+    mission = _build_cooldown_mission(snapshot, _attention_history())
+    points = tuple(entry for entry in mission.trajectory if hasattr(entry, "sample"))
+
+    assert tuple(point.deviation_k for point in points[:2]) == (1, 5)
+    assert points[2].reference_temperature_k is None
+    assert points[2].deviation_k is None
+    assert points[2].comparison_missing_reason == "no_exact_reference_sample"
+
+
+def test_cooldown_mission_unifies_cut_phase_attention_and_durable_history() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    history = _attention_history()
+
+    mission = _build_cooldown_mission(snapshot, history)
+
+    assert mission.cut == snapshot.cut
+    assert mission.experiment_id == "exp-7"
+    assert mission.phase == "cooldown"
+    assert mission.phase_missing_reason is None
+    assert mission.cooldown_status == snapshot.cooldown_history.status
+    assert mission.attention_status == snapshot.attention.status
+    assert mission.relevant_attention == snapshot.attention.items
+    assert mission.recent_history == history
+
+    no_phase_snapshot = replace(
+        snapshot,
+        experiment=replace(snapshot.experiment, phase=None),
+    )
+    no_phase = _build_cooldown_mission(no_phase_snapshot, history)
+    assert no_phase.phase is None
+    assert no_phase.phase_missing_reason == "no_phase"
+
+    with pytest.raises(ValueError, match="experiment"):
+        _build_cooldown_mission(
+            snapshot,
+            _attention_history(experiment_id="different-experiment"),
+        )
+
+
+def test_cooldown_mission_export_uses_stable_ids_across_descriptor_rename() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    history = _attention_history()
+    original = _mission_descriptor()
+    renamed = replace(
+        original,
+        descriptor_revision=2,
+        display_name="Renamed cooldown sensor",
+    )
+
+    first = _build_cooldown_mission(snapshot, history, descriptor=original)
+    second = _build_cooldown_mission(snapshot, history, descriptor=renamed)
+    first_wire = _dump_cooldown_mission(first)
+    second_wire = _dump_cooldown_mission(second)
+
+    assert first == second
+    assert first_wire == second_wire
+    payload = json.loads(first_wire)
+    assert payload["experiment_id"] == "exp-7"
+    assert payload["trajectory_channel_id"] == "sensor.main"
+    assert original.display_name not in first_wire
+    assert renamed.display_name not in first_wire
+    assert "display_name" not in first_wire
+
+
+def test_cooldown_mission_replay_round_trip_is_deterministic() -> None:
+    snapshot = _snapshot(
+        state=OperatorPresentationState.WARNING,
+        mode=SnapshotMode.REPLAY,
+    )
+    history = _attention_history()
+    replayed_snapshot = load_operator_snapshot(dump_operator_snapshot(snapshot))
+    replayed_history = AttentionHistoryPage(
+        items=tuple(load_attention_history_item(dump_attention_history_item(item)) for item in history.items),
+        truncated_before=history.truncated_before,
+        rejected_after_capacity=history.rejected_after_capacity,
+    )
+
+    first = _build_cooldown_mission(snapshot, history)
+    second = _build_cooldown_mission(replayed_snapshot, replayed_history)
+
+    assert second == first
+    assert _dump_cooldown_mission(second) == _dump_cooldown_mission(first)
 
 
 def test_presentation_vocabulary_is_exact_design_system_contract() -> None:
