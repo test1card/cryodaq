@@ -1271,7 +1271,7 @@ def test_cli_distinguishes_defined_but_unactivated_profiles(
     class PlatformOnly:
         @staticmethod
         def require_platform() -> None:
-            return None
+            pytest.fail("an unactivated long profile must be refused before platform activation")
 
         def __init__(self) -> None:
             pytest.fail("an unactivated long profile must not construct the short-profile runner")
