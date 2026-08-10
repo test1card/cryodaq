@@ -90,6 +90,7 @@ class AlarmCanonicalSnapshot:
     """One synchronous revision, minimal active mapping, and canonical token."""
 
     state_revision: int
+    activation_sequence: int
     active: dict[str, dict[str, Any]]
     state_token: str
 
@@ -855,6 +856,7 @@ class AlarmStateManager:
             token = "sha256:" + hashlib.sha256(canonical).hexdigest()
             return AlarmCanonicalSnapshot(
                 state_revision=self._state_revision,
+                activation_sequence=self._activation_sequence,
                 active=active,
                 state_token=token,
             )

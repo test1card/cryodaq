@@ -9758,6 +9758,41 @@ class SQLiteWriter:
             raise AttentionHistoryCapacityError("attention history capacity exhausted; saturation is durably marked")
         return item
 
+    def _read_attention_activation_sequence_sync(self) -> int:
+        conn = self._open_control_db()
+        try:
+            conn.execute("BEGIN")
+            self._verify_attention_history_storage(conn)
+            rows = conn.execute(
+                "SELECT payload FROM attention_history WHERE kind = 'incident' ORDER BY sequence"
+            ).fetchall()
+            activation_ids: list[int] = []
+            for row in rows:
+                if type(row) is not tuple or len(row) != 1:
+                    raise RuntimeError("attention activation identity row is invalid")
+                item = load_attention_history_item(row[0])
+                if item.activation_id is not None:
+                    activation_ids.append(item.activation_id)
+            if len(activation_ids) != len(set(activation_ids)):
+                raise RuntimeError("attention activation identity collision")
+            contiguous = 0
+            for activation_id in sorted(activation_ids):
+                if activation_id != contiguous + 1:
+                    break
+                contiguous = activation_id
+            conn.commit()
+            return contiguous
+        except (ValueError, RuntimeError):
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise RuntimeError("attention activation identity read failed") from None
+        finally:
+            conn.close()
+
     def _read_attention_history_sync(
         self,
         *,
@@ -9865,6 +9900,7 @@ class SQLiteWriter:
             level=event.payload.get("level"),
             message=event.payload.get("message"),
             channel_ids=tuple(channels),
+            activation_id=event.payload.get("activation_id"),
         )
         identity_payload = item.to_payload()
         del identity_payload["event_id"]
@@ -9888,6 +9924,17 @@ class SQLiteWriter:
             ),
             read=False,
             name="sqlite_attention_history_append",
+        )
+        return await self._await_owned_task(owner)
+
+    async def get_attention_activation_sequence(self) -> int:
+        """Return the highest contiguous owner-issued activation made durable."""
+
+        owner = self._owned_executor_task(
+            self._read_executor,
+            self._read_attention_activation_sequence_sync,
+            read=True,
+            name="sqlite_attention_activation_sequence_read",
         )
         return await self._await_owned_task(owner)
 

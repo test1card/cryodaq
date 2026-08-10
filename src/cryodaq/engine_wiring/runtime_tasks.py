@@ -15,7 +15,7 @@ from collections import deque
 from datetime import UTC, datetime
 from typing import Any
 
-from cryodaq.core.alarm_v2 import tick_alarm
+from cryodaq.core.alarm_v2 import AlarmEvent, tick_alarm
 from cryodaq.core.event_bus import EngineEvent
 from cryodaq.drivers.base import Reading
 from cryodaq.storage.cold_rotation import seconds_until_next
@@ -24,6 +24,31 @@ logger = logging.getLogger("cryodaq.engine")
 
 
 # ─────────────────────── Alarm-v2 feed + ring buffer ──────────────────────
+
+
+def _canonical_alarm_fired_event(
+    event: AlarmEvent,
+    experiment_id: str | None,
+) -> EngineEvent:
+    """Detach one owner-issued activation without resampling its evidence."""
+
+    if type(event) is not AlarmEvent:
+        raise TypeError("canonical alarm publication requires an exact AlarmEvent")
+    if type(event.activation_id) is not int or event.activation_id <= 0:
+        raise ValueError("canonical alarm publication requires an owner-issued activation identity")
+    return EngineEvent(
+        event_type="alarm_fired",
+        timestamp=datetime.fromtimestamp(event.triggered_at, UTC),
+        payload={
+            "alarm_id": event.alarm_id,
+            "level": event.level,
+            "message": event.message,
+            "channels": list(event.channels),
+            "values": dict(event.values),
+            "activation_id": event.activation_id,
+        },
+        experiment_id=experiment_id,
+    )
 
 
 async def _alarm_v2_feed_loop(
@@ -227,42 +252,35 @@ async def _alarm_v2_tick_configs(
         return
     for alarm_cfg in configs:
         try:
+            # Capture the experiment identity before the canonical mutation;
+            # publication must not resample it after an await.
+            experiment_id = experiment_manager.active_experiment_id
             # Phase-filter -> evaluate -> process. Shared with tests via
             # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
             # by the real production logic. Out-of-phase returns
             # (None, None) after clearing, so nothing dispatches below.
-            event, transition = tick_alarm(alarm_cfg, current_phase, evaluator, state_mgr)
-            if transition == "TRIGGERED" and event is not None:
+            _evaluated, transition = tick_alarm(alarm_cfg, current_phase, evaluator, state_mgr)
+            if transition == "TRIGGERED":
+                canonical = state_mgr.get_active().get(alarm_cfg.alarm_id)
+                if type(canonical) is not AlarmEvent:
+                    raise RuntimeError("triggered alarm has no canonical activation")
                 # GUI polls via alarm_v2_status command; optionally notify via Telegram
                 if "telegram" in alarm_cfg.notify and telegram_bot is not None:
-                    msg = f"⚠ [{event.level}] {event.alarm_id}\n{event.message}"
+                    msg = f"\N{WARNING SIGN} [{canonical.level}] {canonical.alarm_id}\n{canonical.message}"
                     t = asyncio.create_task(
                         telegram_bot._send_to_all(msg),
                         name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
                     )
                     alarm_dispatch_tasks.add(t)
                     t.add_done_callback(alarm_dispatch_tasks.discard)
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_fired",
-                        timestamp=datetime.now(UTC),
-                        payload={
-                            "alarm_id": event.alarm_id,
-                            "level": event.level,
-                            "message": event.message,
-                            "channels": event.channels,
-                            "values": event.values,
-                        },
-                        experiment_id=experiment_manager.active_experiment_id,
-                    )
-                )
+                await event_bus.publish(_canonical_alarm_fired_event(canonical, experiment_id))
             elif transition == "CLEARED":
                 await event_bus.publish(
                     EngineEvent(
                         event_type="alarm_cleared",
                         timestamp=datetime.now(UTC),
                         payload={"alarm_id": alarm_cfg.alarm_id},
-                        experiment_id=experiment_manager.active_experiment_id,
+                        experiment_id=experiment_id,
                     )
                 )
         except Exception as exc:
@@ -355,6 +373,7 @@ async def sensor_diag_tick(
     while True:
         await asyncio.sleep(interval)
         try:
+            experiment_id = experiment_manager.active_experiment_id
             new_events = sensor_diag.update()
             if _notify_telegram and telegram_bot is not None and new_events:
                 aggregation_threshold = sd_cfg.get("aggregation_threshold", 3)
@@ -367,19 +386,15 @@ async def sensor_diag_tick(
                     alarm_dispatch_tasks.add(t)
                     t.add_done_callback(alarm_dispatch_tasks.discard)
             for _sd_ev in new_events:
+                canonical_event = _canonical_alarm_fired_event(_sd_ev, experiment_id)
+                await event_bus.publish(canonical_event)
                 if _sd_ev.level.upper() == "CRITICAL":
                     await event_bus.publish(
                         EngineEvent(
                             event_type="sensor_anomaly_critical",
-                            timestamp=datetime.now(UTC),
-                            payload={
-                                "alarm_id": _sd_ev.alarm_id,
-                                "level": _sd_ev.level,
-                                "channels": _sd_ev.channels,
-                                "values": _sd_ev.values,
-                                "message": _sd_ev.message,
-                            },
-                            experiment_id=experiment_manager.active_experiment_id,
+                            timestamp=canonical_event.timestamp,
+                            payload=dict(canonical_event.payload),
+                            experiment_id=experiment_id,
                         )
                     )
         except Exception as exc:
@@ -470,6 +485,7 @@ async def cooldown_alarm_tick_loop(
     _last_triggered_id = "cooldown_alarm"
     while True:
         await asyncio.sleep(interval)
+        experiment_id = experiment_manager.active_experiment_id
         try:
             transition = await cooldown_alarm.tick()
         except Exception as exc:
@@ -488,27 +504,14 @@ async def cooldown_alarm_tick_loop(
                     )
                     alarm_dispatch_tasks.add(_pt)
                     _pt.add_done_callback(alarm_dispatch_tasks.discard)
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_fired",
-                        timestamp=datetime.now(UTC),
-                        payload={
-                            "alarm_id": _ev.alarm_id,
-                            "level": _ev.level,
-                            "message": _ev.message,
-                            "channels": _ev.channels,
-                            "values": _ev.values,
-                        },
-                        experiment_id=experiment_manager.active_experiment_id,
-                    )
-                )
+                await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
         elif transition == "CLEARED":
             await event_bus.publish(
                 EngineEvent(
                     event_type="alarm_cleared",
                     timestamp=datetime.now(UTC),
                     payload={"alarm_id": _last_triggered_id},
-                    experiment_id=experiment_manager.active_experiment_id,
+                    experiment_id=experiment_id,
                 )
             )
 
@@ -527,6 +530,7 @@ async def vacuum_guard_tick_loop(
     interval = float(vacuum_cfg.get("eval_interval_s", 30))
     while True:
         await asyncio.sleep(interval)
+        experiment_id = experiment_manager.active_experiment_id
         try:
             transition = await vacuum_guard.tick()
         except Exception as exc:
@@ -543,27 +547,14 @@ async def vacuum_guard_tick_loop(
                     )
                     alarm_dispatch_tasks.add(_pt)
                     _pt.add_done_callback(alarm_dispatch_tasks.discard)
-                await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_fired",
-                        timestamp=datetime.now(UTC),
-                        payload={
-                            "alarm_id": _ev.alarm_id,
-                            "level": _ev.level,
-                            "message": _ev.message,
-                            "channels": _ev.channels,
-                            "values": _ev.values,
-                        },
-                        experiment_id=experiment_manager.active_experiment_id,
-                    )
-                )
+                await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
         elif transition == "CLEARED":
             await event_bus.publish(
                 EngineEvent(
                     event_type="alarm_cleared",
                     timestamp=datetime.now(UTC),
                     payload={"alarm_id": "vacuum_guard"},
-                    experiment_id=experiment_manager.active_experiment_id,
+                    experiment_id=experiment_id,
                 )
             )
 

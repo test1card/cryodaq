@@ -222,6 +222,28 @@ async def test_complete_snapshot_has_one_cut_eight_detached_summaries_and_stable
 
 
 @pytest.mark.asyncio
+async def test_missing_attention_history_keeps_canonical_critical_visible() -> None:
+    def degraded_attention(cut: CommonCut) -> AlarmAttentionReceipt:
+        return AlarmAttentionReceipt(
+            **_base(cut),
+            alarms=(AlarmEvidence("temperature_high", "CRITICAL", cut.observed_at, False),),
+            history_revision=None,
+        )
+
+    composer = _composer(
+        _Allocator([SnapshotRevision(43, NOW + timedelta(seconds=2))]),
+        attention=degraded_attention,
+    )
+    snapshot = await composer.compose(NOW)
+
+    assert tuple(item.detail for item in snapshot.attention.items) == ("temperature_high",)
+    assert snapshot.attention.items[0].state is OperatorPresentationState.FAULT
+    assert snapshot.attention.state is OperatorPresentationState.FAULT
+    assert snapshot.attention.history_revision is None
+    assert "attention_history_unavailable" in snapshot.attention.reason_codes
+
+
+@pytest.mark.asyncio
 async def test_all_authorities_are_sampled_synchronously_before_one_allocation() -> None:
     events: list[str] = []
 

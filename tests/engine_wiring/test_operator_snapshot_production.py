@@ -488,6 +488,7 @@ async def test_cancelled_attention_acknowledgement_retry_is_one_durable_annotati
         await writer.stop()
         await asyncio.get_running_loop().shutdown_default_executor()
 
+
 async def test_attention_persistence_failure_preserves_alarm_fanout_and_latches_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -499,6 +500,23 @@ async def test_attention_persistence_failure_preserves_alarm_fanout_and_latches_
     event_bus = EventBus()
     event_bus.retain_required_observer("durable_attention_history", history_feed.persist_event)
     subscriber = await event_bus.subscribe("operator")
+    alarm_owner = AlarmStateManager()
+    alarm_at = datetime.now(UTC)
+    assert (
+        alarm_owner.process(
+            "alarm.persistence",
+            AlarmEvent(
+                alarm_id="alarm.persistence",
+                level="CRITICAL",
+                message="Persistence failed",
+                triggered_at=alarm_at.timestamp(),
+                channels=["probe.1"],
+                values={"probe.1": 9.5},
+            ),
+            {},
+        )
+        == "TRIGGERED"
+    )
 
     async def reject_append(_event: object) -> object:
         raise OSError("control database unavailable")
@@ -516,16 +534,107 @@ async def test_attention_persistence_failure_preserves_alarm_fanout_and_latches_
 
     assert subscriber.get_nowait().payload["alarm_id"] == "alarm.persistence"
     assert history_feed.current_revision is None
-    receipt = LiveAlarmAttentionAuthority(AlarmStateManager(), history_feed).snapshot_for_cut(
+    receipt = LiveAlarmAttentionAuthority(alarm_owner, history_feed).snapshot_for_cut(
         CommonCut(1, f"cut-v1:1:{'a' * 64}", datetime.now(UTC))
     )
-    assert receipt.availability is AuthorityAvailability.UNAVAILABLE
-    assert receipt.unavailable_reason == "attention_authority_unavailable"
+    assert receipt.availability is AuthorityAvailability.AVAILABLE
+    assert [(alarm.alarm_id, alarm.level) for alarm in receipt.alarms] == [("alarm.persistence", "CRITICAL")]
+    assert receipt.history_revision is None
 
     event_bus.release_required_observer("durable_attention_history")
     history_feed.stop()
     await writer.stop()
     await asyncio.get_running_loop().shutdown_default_executor()
+
+
+async def test_alarm_cut_is_history_incomplete_until_owner_activations_are_contiguous(
+    tmp_path: Path,
+) -> None:
+    writer = _writer(tmp_path / "attention-activation-cut")
+    await writer.start_immediate()
+    history_feed = DurableAttentionHistoryFeed(writer)
+    await history_feed.start()
+    event_bus = EventBus()
+    event_bus.retain_required_observer("durable_attention_history", history_feed.persist_event)
+    alarm_owner = AlarmStateManager()
+    first_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    second_at = first_at + timedelta(seconds=1)
+    for alarm_id, level, observed_at in (
+        ("alarm.first", "WARNING", first_at),
+        ("alarm.second", "CRITICAL", second_at),
+    ):
+        assert (
+            alarm_owner.process(
+                alarm_id,
+                AlarmEvent(
+                    alarm_id=alarm_id,
+                    level=level,
+                    message=f"{alarm_id} active",
+                    triggered_at=observed_at.timestamp(),
+                    channels=["probe.1"],
+                    values={"probe.1": 9.5},
+                ),
+                {},
+            )
+            == "TRIGGERED"
+        )
+    active = alarm_owner.get_active()
+    authority = LiveAlarmAttentionAuthority(alarm_owner, history_feed)
+
+    def receipt(revision: int):
+        return authority.snapshot_for_cut(
+            CommonCut(revision, f"cut-v1:{revision}:{'a' * 64}", second_at + timedelta(seconds=1))
+        )
+
+    try:
+        before = receipt(1)
+        assert before.availability is AuthorityAvailability.AVAILABLE
+        assert tuple(alarm.alarm_id for alarm in before.alarms) == (
+            "alarm.first",
+            "alarm.second",
+        )
+        assert before.history_revision is None
+
+        second = active["alarm.second"]
+        await event_bus.publish(
+            EngineEvent(
+                "alarm_fired",
+                second_at,
+                {
+                    "alarm_id": second.alarm_id,
+                    "level": second.level,
+                    "message": second.message,
+                    "channels": second.channels,
+                    "activation_id": second.activation_id,
+                },
+                "experiment-activation-cut",
+            )
+        )
+        assert receipt(2).history_revision is None
+
+        first = active["alarm.first"]
+        await event_bus.publish(
+            EngineEvent(
+                "alarm_fired",
+                first_at,
+                {
+                    "alarm_id": first.alarm_id,
+                    "level": first.level,
+                    "message": first.message,
+                    "channels": first.channels,
+                    "activation_id": first.activation_id,
+                },
+                "experiment-activation-cut",
+            )
+        )
+        complete = receipt(3)
+        assert complete.history_revision == 2
+        assert tuple(alarm.level for alarm in complete.alarms) == ("WARNING", "CRITICAL")
+    finally:
+        event_bus.release_required_observer("durable_attention_history")
+        history_feed.stop()
+        await writer.stop()
+        await asyncio.get_running_loop().shutdown_default_executor()
 
 
 async def test_alarm_dispatch_timeline_acknowledgement_and_restart_use_live_owners(tmp_path: Path) -> None:
@@ -555,15 +664,21 @@ async def test_alarm_dispatch_timeline_acknowledgement_and_restart_use_live_owne
         == "TRIGGERED"
     )
 
-    await _dispatch_alarm_notification(
-        event_bus,
-        set(),
-        alarm_id="alarm.hot",
-        level="CRITICAL",
-        message="Temperature high",
-        experiment_id="experiment-stable-7",
-        channel="probe.1",
-        value=9.5,
+    canonical_alarm = alarm_owner.get_active()["alarm.hot"]
+    await event_bus.publish(
+        EngineEvent(
+            "alarm_fired",
+            alarm_at,
+            {
+                "alarm_id": canonical_alarm.alarm_id,
+                "level": canonical_alarm.level,
+                "message": canonical_alarm.message,
+                "channels": canonical_alarm.channels,
+                "values": canonical_alarm.values,
+                "activation_id": canonical_alarm.activation_id,
+            },
+            "experiment-stable-7",
+        )
     )
     incident_page = await writer.get_attention_history(
         experiment_id="experiment-stable-7",

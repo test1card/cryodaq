@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 ATTENTION_HISTORY_ITEM_SCHEMA = "cryodaq.attention-history-item"
-ATTENTION_HISTORY_ITEM_VERSION = 1
+ATTENTION_HISTORY_ITEM_VERSION = 2
 ATTENTION_HISTORY_MAX_ITEMS = 1000
 ATTENTION_HISTORY_MAX_ITEM_BYTES = 16 * 1024
 _ATTENTION_HISTORY_ID_BYTES = 128
@@ -74,6 +74,7 @@ class AttentionHistoryItem:
     level: str
     message: str
     channel_ids: tuple[str, ...]
+    activation_id: int | None = None
     annotation_of: str | None = None
     actor: str = ""
     note: str = ""
@@ -123,6 +124,8 @@ class AttentionHistoryItem:
         if len(channels) != len(set(channels)):
             raise ValueError("channel_ids must be unique")
         object.__setattr__(self, "channel_ids", channels)
+        if self.activation_id is not None and (type(self.activation_id) is not int or self.activation_id <= 0):
+            raise ValueError("activation_id must be a positive exact integer when present")
         object.__setattr__(
             self,
             "actor",
@@ -147,6 +150,8 @@ class AttentionHistoryItem:
             if self.annotation_of is not None or self.actor or self.note:
                 raise ValueError("incident cannot carry annotation fields")
         else:
+            if self.activation_id is not None:
+                raise ValueError("annotations cannot carry canonical activation identity")
             object.__setattr__(
                 self,
                 "annotation_of",
@@ -168,6 +173,7 @@ class AttentionHistoryItem:
             "level": self.level,
             "message": self.message,
             "channel_ids": list(self.channel_ids),
+            "activation_id": self.activation_id,
             "annotation_of": self.annotation_of,
             "actor": self.actor,
             "note": self.note,
@@ -251,6 +257,7 @@ def new_attention_incident(
     level: str,
     message: str,
     channel_ids: tuple[str, ...],
+    activation_id: int | None = None,
 ) -> AttentionHistoryItem:
     return AttentionHistoryItem(
         event_id=uuid4().hex,
@@ -261,6 +268,7 @@ def new_attention_incident(
         level=level,
         message=message,
         channel_ids=channel_ids,
+        activation_id=activation_id,
     )
 
 
@@ -373,6 +381,7 @@ def load_attention_history_item(payload: str) -> AttentionHistoryItem:
             "level",
             "message",
             "channel_ids",
+            "activation_id",
             "annotation_of",
             "actor",
             "note",
@@ -394,6 +403,7 @@ def load_attention_history_item(payload: str) -> AttentionHistoryItem:
             level=raw["level"],
             message=raw["message"],
             channel_ids=tuple(channels),
+            activation_id=raw["activation_id"],
             annotation_of=raw["annotation_of"],
             actor=raw["actor"],
             note=raw["note"],

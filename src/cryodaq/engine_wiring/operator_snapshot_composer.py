@@ -333,9 +333,19 @@ class OperatorSnapshotComposer:
                 for item in receipts.attention.attention
             )
             attention_state = _max_state(
-                tuple(item.state for item in attention_items), empty=OperatorPresentationState.OK
+                tuple(item.state for item in attention_items),
+                empty=(
+                    OperatorPresentationState.CAUTION
+                    if receipts.attention.history_revision is None
+                    else OperatorPresentationState.OK
+                ),
             )
-            attention_reasons = () if not attention_items else ("operator_attention_required",)
+            reasons: list[str] = []
+            if attention_items:
+                reasons.append("operator_attention_required")
+            if receipts.attention.history_revision is None:
+                reasons.append("attention_history_unavailable")
+            attention_reasons = tuple(reasons)
         else:
             attention_state = OperatorPresentationState.CAUTION
             attention_reasons = (receipts.attention.unavailable_reason,)  # type: ignore[arg-type]

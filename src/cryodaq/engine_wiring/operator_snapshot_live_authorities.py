@@ -123,7 +123,15 @@ def _generation_id(value: object) -> str:
 class DurableAttentionHistoryFeed:
     """Persist alarm incidents before EventBus fanout and retain one revision."""
 
-    __slots__ = ("__writer", "__lock", "__started", "__pending", "__revision", "__failure_latched")
+    __slots__ = (
+        "__writer",
+        "__lock",
+        "__started",
+        "__pending",
+        "__revision",
+        "__activation_sequence",
+        "__failure_latched",
+    )
 
     def __init__(self, writer: SQLiteWriter) -> None:
         if type(writer) is not SQLiteWriter:
@@ -133,6 +141,7 @@ class DurableAttentionHistoryFeed:
         self.__started = False
         self.__pending = 0
         self.__revision: int | None = None
+        self.__activation_sequence: int | None = None
         self.__failure_latched = False
 
     async def start(self) -> None:
@@ -142,8 +151,10 @@ class DurableAttentionHistoryFeed:
             experiment_id=_NO_ACTIVE_EXPERIMENT_ID,
             limit=1,
         )
+        activation_sequence = await self.__writer.get_attention_activation_sequence()
         self.__revision = page.through_revision
-        self.__failure_latched = False
+        self.__activation_sequence = activation_sequence
+        self.__failure_latched = page.capacity_exhausted_at is not None
         self.__started = True
 
     def stop(self) -> None:
@@ -151,6 +162,7 @@ class DurableAttentionHistoryFeed:
             raise RuntimeError("durable attention history feed still owns pending persistence")
         self.__started = False
         self.__revision = None
+        self.__activation_sequence = None
         self.__failure_latched = False
 
     @property
@@ -158,6 +170,12 @@ class DurableAttentionHistoryFeed:
         if not self.__started or self.__pending or self.__failure_latched:
             return None
         return self.__revision
+
+    @property
+    def durable_activation_sequence(self) -> int | None:
+        if not self.__started or self.__pending or self.__failure_latched:
+            return None
+        return self.__activation_sequence
 
     async def persist_event(self, event: EngineEvent) -> None:
         """Settle exact alarm persistence through cancellation before returning."""
@@ -253,12 +271,17 @@ class DurableAttentionHistoryFeed:
                     experiment_id=event.experiment_id or _NO_ACTIVE_EXPERIMENT_ID,
                     limit=1,
                 )
+                activation_sequence = await self.__writer.get_attention_activation_sequence()
                 revision = page.through_revision
                 if self.__revision is not None and revision < self.__revision:
                     raise RuntimeError("durable attention history revision regressed")
+                if self.__activation_sequence is not None and activation_sequence < self.__activation_sequence:
+                    raise RuntimeError("durable attention activation sequence regressed")
                 self.__revision = revision
+                self.__activation_sequence = activation_sequence
             except BaseException:
                 self.__revision = None
+                self.__activation_sequence = None
                 self.__failure_latched = True
                 raise
             if failure is not None:
@@ -296,6 +319,7 @@ class DurableAttentionHistoryFeed:
                 self.__revision = revision
             except BaseException:
                 self.__revision = None
+                self.__activation_sequence = None
                 self.__failure_latched = True
                 raise
             if failure is not None:
@@ -307,12 +331,13 @@ class DurableAttentionHistoryFeed:
 
 
 class LiveAlarmAttentionAuthority:
-    """Project the exact canonical alarm cut at the durable history revision."""
+    """Project canonical alarms while binding durable history as an orthogonal cut."""
 
     __slots__ = (
         "__owner",
         "__history_feed",
         "__last_state_revision",
+        "__last_activation_sequence",
         "__last_history_revision",
         "__last_payload",
         "__receipt_revision",
@@ -330,6 +355,7 @@ class LiveAlarmAttentionAuthority:
         self.__owner = owner
         self.__history_feed = history_feed
         self.__last_state_revision = 0
+        self.__last_activation_sequence = 0
         self.__last_history_revision = 0
         self.__last_payload: str | None = None
         self.__receipt_revision = 0
@@ -340,13 +366,22 @@ class LiveAlarmAttentionAuthority:
             if type(snapshot) is not AlarmCanonicalSnapshot:
                 raise TypeError("wrong canonical alarm snapshot type")
             state_revision = _exact_revision(snapshot.state_revision)
-            history_revision = self.__history_feed.current_revision
-            if history_revision is None:
-                raise ValueError("durable attention history cut is unavailable")
-            history_revision = _exact_revision(history_revision)
+            activation_sequence = _exact_revision(snapshot.activation_sequence)
             _exact_text(snapshot.state_token)
-            if state_revision < self.__last_state_revision or history_revision < self.__last_history_revision:
-                raise ValueError("alarm or attention history revision regressed")
+            if state_revision < self.__last_state_revision or activation_sequence < self.__last_activation_sequence:
+                raise ValueError("canonical alarm revision regressed")
+
+            history_revision = self.__history_feed.current_revision
+            durable_activation_sequence = self.__history_feed.durable_activation_sequence
+            if history_revision is not None:
+                history_revision = _exact_revision(history_revision)
+            if durable_activation_sequence is not None:
+                durable_activation_sequence = _exact_revision(durable_activation_sequence)
+            if history_revision is None or durable_activation_sequence != activation_sequence:
+                history_revision = None
+            elif history_revision < self.__last_history_revision:
+                raise ValueError("durable attention history revision regressed")
+
             if type(snapshot.active) is not dict:
                 raise TypeError("canonical active alarm mapping is invalid")
             alarms: list[AlarmEvidence] = []
@@ -369,7 +404,12 @@ class LiveAlarmAttentionAuthority:
                     )
                 )
             payload = json.dumps(
-                [state_revision, snapshot.state_token, history_revision],
+                [
+                    state_revision,
+                    snapshot.state_token,
+                    activation_sequence,
+                    history_revision,
+                ],
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
@@ -392,7 +432,9 @@ class LiveAlarmAttentionAuthority:
         except Exception:
             return AlarmAttentionReceipt(**_unavailable(cut, "attention_authority_unavailable"))
         self.__last_state_revision = state_revision
-        self.__last_history_revision = history_revision
+        self.__last_activation_sequence = activation_sequence
+        if history_revision is not None:
+            self.__last_history_revision = history_revision
         self.__last_payload = payload
         self.__receipt_revision = receipt_revision
         return receipt

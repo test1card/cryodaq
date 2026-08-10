@@ -542,7 +542,7 @@ class _Engine:
         self._queue: asyncio.Queue[Reading] = asyncio.Queue()
         self._publisher: ZMQPublisher | None = None
         self._server: ZMQCommandServer | None = None
-        self._snapshot = AlarmCanonicalSnapshot(1, {}, _EMPTY_TOKEN)
+        self._snapshot = AlarmCanonicalSnapshot(1, 0, {}, _EMPTY_TOKEN)
 
     async def _handler(self, command: dict[str, Any]) -> dict[str, Any]:
         publisher = self._publisher
