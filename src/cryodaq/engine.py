@@ -2478,9 +2478,7 @@ def _interlock_dead_channel_recovery_handler(
         reading.channel,
     )
     channel_suffix = f":{reading.channel}"
-    keys_to_clear = {
-        key for key in context.dead_channel_alarm_sent if key.endswith(channel_suffix)
-    }
+    keys_to_clear = {key for key in context.dead_channel_alarm_sent if key.endswith(channel_suffix)}
     context.dead_channel_alarm_sent.difference_update(keys_to_clear)
 
 
