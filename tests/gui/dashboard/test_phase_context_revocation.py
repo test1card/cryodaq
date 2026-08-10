@@ -31,7 +31,7 @@ from cryodaq.core import zmq_subprocess as subprocess_module
 from cryodaq.core.channel_manager import ChannelManager
 from cryodaq.core.zmq_bridge import _pack_reading
 from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, _decode_reading_frames
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui import zmq_client as client_module
 from cryodaq.gui.dashboard import DashboardView
@@ -293,3 +293,34 @@ def test_a_value_whose_producer_died_is_marked_while_the_experiment_stays_active
         "a producer died inside a live experiment and its last value is still presented as current: "
         "this is the frozen readout OC-004 names"
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "status"),
+    [(float("nan"), ChannelStatus.OK), (1.0, ChannelStatus.SENSOR_ERROR), (1.0, ChannelStatus.TIMEOUT)],
+)
+def test_unusable_analytics_reading_does_not_refresh_freshness(
+    app, tmp_path, monkeypatch, value: float, status: ChannelStatus
+) -> None:
+    """The dashboard must use Reading.is_usable as its authoritative gate."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    view.on_reading(_eta_reading(datetime.now(UTC), value=2.0))
+    view.on_reading(
+        Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="cooldown_predictor",
+            channel="analytics/cooldown_predictor/cooldown_eta",
+            value=value,
+            unit="h",
+            status=status,
+            metadata={"producer_interval_s": 30.0, "source_age_s": 0.0},
+        )
+    )
+
+    _set_clock(monkeypatch, 1091.0)
+    view._phase_widget._duration_timer.timeout.emit()
+    text = view._phase_widget._context_label.text()
+    assert "2ч" in text, "the last usable ETA should remain visible"
+    assert STALE_MARK in text, f"unusable {status.value} reading refreshed a live freshness stamp"

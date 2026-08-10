@@ -723,7 +723,6 @@ class PluginPipeline:
                             | {
                                 "source": "analytics",
                                 "plugin_id": plugin_id,
-                                "producer_interval_s": self._batch_interval_s,
                             },
                         )
                         await self._broker.publish(reading)

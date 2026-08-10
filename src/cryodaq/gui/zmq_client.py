@@ -264,20 +264,25 @@ def _metadata_with_transport_age(d: dict[str, Any]) -> object:
         public.pop("source_age_s", None)
         return public
 
-    queue_age_s = time.monotonic() - float(received_s)
-    total_age_s = float(source_age_s) + queue_age_s
+    wall_clock = getattr(time, "time", None)
+    received_at = float(d.get("timestamp", float("nan")))
+    queue_age_s: float | None = None
+    if callable(wall_clock) and math.isfinite(received_at):
+        total_age_s = float(wall_clock()) - received_at
+    else:
+        queue_age_s = time.monotonic() - float(received_s)
+        total_age_s = float(source_age_s) + queue_age_s
     if (
         not math.isfinite(float(source_age_s))
         or float(source_age_s) < 0
-        or not math.isfinite(queue_age_s)
-        or queue_age_s < 0
         or not math.isfinite(total_age_s)
+        or total_age_s < 0
+        or (queue_age_s is not None and (not math.isfinite(queue_age_s) or queue_age_s < 0))
     ):
         public.pop("source_age_s", None)
     else:
         public["source_age_s"] = total_age_s
     return public
-
 
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
     """Reconstruct a Reading from a plain dict (received via mp.Queue)."""

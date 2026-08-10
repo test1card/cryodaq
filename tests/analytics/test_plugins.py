@@ -195,7 +195,6 @@ async def test_derived_metric_published_to_broker(tmp_path: Path):
     assert reading.unit == "arb"
     assert reading.metadata.get("source") == "analytics"
     assert reading.metadata.get("plugin_id") == "simple_plugin"
-    assert reading.metadata.get("producer_interval_s") == 0.05
 
 
 # ---------------------------------------------------------------------------

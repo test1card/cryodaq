@@ -397,6 +397,8 @@ class PhaseAwareWidget(QWidget):
 
     def on_reading(self, reading) -> None:
         """Route analytics readings to cached values for inline context."""
+        if not reading.is_usable():
+            return
         channel = reading.channel
         value = reading.value
         if not isinstance(value, (int, float)):

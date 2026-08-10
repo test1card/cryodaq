@@ -748,7 +748,6 @@ class CooldownService:
             "cooldown_start_ts": self._detector.cooldown_start_ts or 0,
             "T_cold": T_cold,
             "T_warm": T_warm,
-            "producer_interval_s": self._predict_interval_s,
         }
         self._last_prediction = metadata  # cache for F30 query agent
         # v0.55.3 — keep the raw dataclass so expected_value() can
