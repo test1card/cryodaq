@@ -159,35 +159,38 @@ def test_set_alarm_summary_updates_label() -> None:
     bar._stale_timer.stop()
     bar.set_alarm_summary(0, "NONE")
     assert bar._alarms_label.text() == "Тревоги: 0", f"Zero alarms text wrong: {bar._alarms_label.text()!r}"
+    assert bar._alarms_label.accessibleName() == bar._alarms_label.text()
     assert theme.TEXT_MUTED in bar._alarms_label.styleSheet(), (
         f"Zero alarms must use TEXT_MUTED: {bar._alarms_label.styleSheet()!r}"
     )
     bar.set_alarm_summary(3, "CRITICAL")
     # Text: "Тревоги: 3 активны" (3 → plural "активны")
-    assert bar._alarms_label.text() == "Тревоги: 3 активны", f"Three alarms text wrong: {bar._alarms_label.text()!r}"
+    assert bar._alarms_label.text() == "Тревоги: 3 активны · КРИТ", (
+        f"Three alarms text wrong: {bar._alarms_label.text()!r}"
+    )
     assert theme.STATUS_FAULT in bar._alarms_label.styleSheet(), (
         f"Nonzero alarms must use STATUS_FAULT: {bar._alarms_label.styleSheet()!r}"
     )
 
 
 @pytest.mark.parametrize(
-    ("level", "color"),
+    ("level", "marker", "color"),
     [
-        ("INFO", theme.STATUS_INFO),
-        ("CAUTION", theme.STATUS_CAUTION),
-        ("CRITICAL", theme.STATUS_FAULT),
-        ("UNKNOWN", theme.STATUS_FAULT),
+        ("INFO", "ИНФО", theme.STATUS_INFO),
+        ("CAUTION", "ВНИМАНИЕ", theme.STATUS_CAUTION),
+        ("CRITICAL", "КРИТ", theme.STATUS_FAULT),
+        ("UNKNOWN", "НЕИЗВ", theme.STATUS_FAULT),
     ],
 )
-def test_alarm_summary_uses_worst_severity(level: str, color: str) -> None:
+def test_alarm_summary_uses_worst_severity(level: str, marker: str, color: str) -> None:
     bar = _make_bar()
     bar.set_alarm_summary(1, level)
     assert bar._alarm_count == 1
-    assert (
-        bar._alarms_label.text()
-        == "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: 1 \u0430\u043a\u0442\u0438\u0432\u043d\u0430"
-    )
-    assert color in bar._alarms_label.styleSheet()
+    assert bar._alarms_label.text() == f"Тревоги: 1 активна · {marker}"
+    style = bar._alarms_label.styleSheet()
+    assert f"border-left: 2px solid {color}" in style
+    assert theme.FOREGROUND in style
+    assert theme.TEXT_MUTED not in style
 
 
 def test_alarm_count_starts_and_returns_unavailable() -> None:
@@ -198,6 +201,7 @@ def test_alarm_count_starts_and_returns_unavailable() -> None:
     bar.set_alarm_available(False)
     assert bar._alarm_count is None
     assert "\u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445" in bar._alarms_label.text().lower()
+    assert bar._alarms_label.accessibleName() == bar._alarms_label.text()
 
 
 # --- B.6 Mode badge tests ---
@@ -627,15 +631,50 @@ def test_raw_experiment_handler_payload_without_transport_proto_is_not_authorita
     try:
         bar._on_experiment_result(accepted)
         last_known_text = bar._last_experiment_full_text
-        last_known_display = bar._exp_label.text()
 
         bar._on_experiment_result(raw_handler_payload)
 
         assert emitted == [accepted]
         assert bar._last_experiment_full_text == last_known_text
-        assert bar._exp_label.text() == last_known_display
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert last_known_text in bar._exp_label.accessibleDescription()
         assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
         assert bar._app_mode is None
+    finally:
+        _dispose_bar(bar)
+
+
+def test_unavailable_experiment_status_has_persistent_visible_text_cue() -> None:
+    """Unavailable status cannot rely on colour and a hover tooltip alone."""
+    bar = _make_bar()
+    accepted = _live_experiment_status(name="last-known experiment")
+    try:
+        bar._on_experiment_result(accepted)
+        bar._on_experiment_result({"ok": True})
+
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert "Статус недоступен" in bar._exp_label.accessibleDescription()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        assert "last-known experiment" in document.toPlainText()
+    finally:
+        _dispose_bar(bar)
+
+
+def test_experiment_status_cold_start_does_not_manufacture_retained_evidence() -> None:
+    """Before one accepted cut, unavailable means there are no retained data."""
+    bar = _make_bar()
+    try:
+        bar.set_engine_state(False)
+
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert "принятых данных нет" in bar._exp_label.accessibleDescription().lower()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        tooltip = document.toPlainText()
+        assert "Принятых данных нет" in tooltip
+        assert "Последние принятые данные" not in tooltip
+        assert "Нет активного эксперимента" not in tooltip
     finally:
         _dispose_bar(bar)
 
@@ -646,7 +685,6 @@ def test_experiment_status_decoder_retains_last_identity_but_revokes_invalid_aut
     bar.experiment_status_received.connect(emitted.append)
     valid = _live_experiment_status(name="known experiment")
     bar._on_experiment_result(valid)
-    last_known_text = bar._exp_label.text()
     last_known_full_text = bar._last_experiment_full_text
 
     wrong_proto = copy.deepcopy(valid)
@@ -659,7 +697,8 @@ def test_experiment_status_decoder_retains_last_identity_but_revokes_invalid_aut
     unknown_phase["current_phase"] = "made_up_phase"
     for invalid in ({"ok": True}, wrong_proto, extra_key, nonprintable_name, unknown_phase):
         bar._on_experiment_result(invalid)
-        assert bar._exp_label.text() == last_known_text
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert last_known_full_text in bar._exp_label.accessibleDescription()
         assert bar._last_experiment_full_text == last_known_full_text
         assert bar._exp_label.textFormat() == Qt.TextFormat.PlainText
         assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()

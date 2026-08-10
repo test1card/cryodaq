@@ -641,7 +641,7 @@ class TopWatchBar(QWidget):
         self._replay_authority: ReplayStatusAuthority | None = None
         self._live_status_generation = 0
         self._engine_alive: bool | None = None
-        self._last_experiment_full_text = "\u25cb Нет активного эксперимента"
+        self._last_experiment_full_text = ""
 
         self._build_ui()
         self._build_persistent_context()
@@ -695,9 +695,12 @@ class TopWatchBar(QWidget):
         layout.addWidget(self._make_zone_sep())
 
         # Zone 2: experiment + phase + elapsed (clickable) + time window echo
-        self._exp_label = _ClickableLabel(self._last_experiment_full_text)
+        initial_experiment_text = "Статус недоступен · принятых данных нет"
+        self._exp_label = _ClickableLabel(initial_experiment_text)
         self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
-        self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        self._exp_label.setAccessibleDescription(initial_experiment_text)
+        self._exp_label.setStyleSheet(f"color: {theme.STATUS_CAUTION};")
+        self._exp_label.setToolTip(plain_text_tooltip("Статус эксперимента недоступен", "Принятых данных нет"))
         self._exp_label.setMaximumWidth(220)
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
         layout.addWidget(self._exp_label, stretch=1)
@@ -760,18 +763,25 @@ class TopWatchBar(QWidget):
         elided = metrics.elidedText(full_text, Qt.TextElideMode.ElideRight, max_w)
         self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
         self._exp_label.setText(elided)
+        self._exp_label.setAccessibleDescription(full_text)
         self._exp_label.setToolTip(plain_text_tooltip(full_text))
 
     def _mark_experiment_status_unavailable(self) -> None:
-        """Retain last evidence while visibly revoking current authority."""
+        """Retain accepted evidence while visibly revoking current authority."""
 
+        if self._last_experiment_full_text:
+            visible = safe_plain_text(f"Статус недоступен · {self._last_experiment_full_text}")
+            evidence_detail = f"Последние принятые данные: {self._last_experiment_full_text}"
+        else:
+            visible = "Статус недоступен · принятых данных нет"
+            evidence_detail = "Принятых данных нет"
+        metrics = self._exp_label.fontMetrics()
+        elided = metrics.elidedText(visible, Qt.TextElideMode.ElideRight, self._exp_label.maximumWidth())
+        self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._exp_label.setText(elided)
+        self._exp_label.setAccessibleDescription(visible)
         self._exp_label.setStyleSheet(f"color: {theme.STATUS_CAUTION};")
-        self._exp_label.setToolTip(
-            plain_text_tooltip(
-                "Статус эксперимента недоступен",
-                f"Последние принятые данные: {self._last_experiment_full_text}",
-            )
-        )
+        self._exp_label.setToolTip(plain_text_tooltip("Статус эксперимента недоступен", evidence_detail))
         self._update_mode_badge(None)
 
     def _build_persistent_context(self) -> None:
@@ -1544,17 +1554,22 @@ class TopWatchBar(QWidget):
         self._alarm_count = max(0, int(n))
         if self._alarm_count == 0:
             self._alarms_label.setText("Тревоги: 0")
+            self._alarms_label.setAccessibleName(self._alarms_label.text())
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
             verb = ru_plural(self._alarm_count, "активна", "активны", "активны")
-            self._alarms_label.setText(f"Тревоги: {self._alarm_count} {verb}")
-            color = {
-                "INFO": theme.STATUS_INFO,
-                "CAUTION": theme.STATUS_CAUTION,
-                "CRITICAL": theme.STATUS_FAULT,
-                "UNKNOWN": theme.STATUS_FAULT,
-            }.get(str(worst_level).upper(), theme.STATUS_FAULT)
-            self._alarms_label.setStyleSheet(f"color: {color};")
+            marker, color = {
+                "INFO": ("ИНФО", theme.STATUS_INFO),
+                "CAUTION": ("ВНИМАНИЕ", theme.STATUS_CAUTION),
+                "CRITICAL": ("КРИТ", theme.STATUS_FAULT),
+                "UNKNOWN": ("НЕИЗВ", theme.STATUS_FAULT),
+            }.get(str(worst_level).upper(), ("НЕИЗВ", theme.STATUS_FAULT))
+            text = f"Тревоги: {self._alarm_count} {verb} · {marker}"
+            self._alarms_label.setText(text)
+            self._alarms_label.setAccessibleName(text)
+            self._alarms_label.setStyleSheet(
+                f"color: {theme.FOREGROUND}; border-left: 2px solid {color}; padding-left: {theme.SPACE_1}px;"
+            )
 
     def set_alarm_available(self, available: bool) -> None:
         if available:
@@ -1563,4 +1578,5 @@ class TopWatchBar(QWidget):
         self._alarms_label.setText(
             "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
         )
+        self._alarms_label.setAccessibleName(self._alarms_label.text())
         self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
