@@ -137,6 +137,15 @@ def _has_async_owner_lifecycle(node: ast.AST) -> bool:
     )
 
 
+def _is_open_ended_loop(node: ast.AST) -> bool:
+    return isinstance(node, ast.While) and (
+        isinstance(node.test, ast.Constant)
+        and node.test.value is True
+        or isinstance(node.test, ast.UnaryOp)
+        and isinstance(node.test.op, ast.Not)
+    )
+
+
 def _is_periodic_reporter_owner(node: ast.AST) -> bool:
     if not isinstance(node, (ast.ClassDef, ast.AsyncFunctionDef)):
         return False
@@ -144,10 +153,10 @@ def _is_periodic_reporter_owner(node: ast.AST) -> bool:
         return False
     name = node.name.lower()
     schedule_named = any(token in name for token in _SCHEDULE_NAME_TOKENS)
-    has_loop = any(isinstance(child, ast.While) for child in ast.walk(node))
+    has_open_loop = any(_is_open_ended_loop(child) for child in ast.walk(node))
     has_timer = _has_call_token(node, _TIMER_CALL_TOKENS)
     has_named_delay = schedule_named and _has_call_token(node, _DELAY_CALL_TOKENS)
-    if not (has_loop or has_timer or has_named_delay):
+    if not (has_open_loop or has_timer or has_named_delay):
         return False
     return any(token in name for token in _REPORT_NAME_TOKENS) or ("periodic" in name and "supervisor" in name)
 
@@ -269,8 +278,11 @@ def test_periodic_reporter_inventory_rejects_third_reporters_and_legacy_reactiva
         "async def report_loop(tick):\n"
         "    while True:\n"
         "        await tick.wait()\n\n"
-        "async def render_report():\n"
-        "    await asyncio.sleep(0)\n",
+        "async def render_report_after_delay():\n"
+        "    await asyncio.sleep(0)\n\n"
+        "async def render_report(chunks, write_chunk):\n"
+        "    while chunks:\n"
+        "        await write_chunk(chunks.pop())\n",
         encoding="utf-8",
     )
 
@@ -281,6 +293,7 @@ def test_periodic_reporter_inventory_rejects_third_reporters_and_legacy_reactiva
         )
     assert "ScheduledReportDispatcher" in str(unexpected.value)
     assert ".report_loop" in str(unexpected.value)
+    assert ".render_report_after_delay" not in str(unexpected.value)
     assert ".render_report" not in str(unexpected.value)
 
     decoy.unlink()
