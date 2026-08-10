@@ -353,6 +353,17 @@ def test_warm_stone_pack_remains_available(real_themes_dir):
     assert set(loader.REQUIRED_TOKENS).issubset(pack)
 
 
+def test_persisted_warm_stone_selection_resolves(monkeypatch, tmp_path):
+    settings_file = tmp_path / "settings.local.yaml"
+    settings_file.write_text("theme: warm_stone\n", encoding="utf-8")
+    monkeypatch.setattr(loader, "SETTINGS_FILE", settings_file)
+
+    theme_id, pack = loader.resolve_theme()
+
+    assert theme_id == "warm_stone"
+    assert pack == loader.validate_theme_pack("warm_stone")
+
+
 def test_all_bundled_packs_load_cleanly(real_themes_dir):
     """Every shipped *.yaml in config/themes/ must pass validation
     without triggering the fallback path."""
