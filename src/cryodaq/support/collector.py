@@ -188,10 +188,16 @@ def _collect_health(
         if type(plant) is not PlantHealthSummary or type(infrastructure) is not InfrastructureNodeHealth:
             _mark_unavailable("health", "source_invalid", unavailable)
             return
-        items = ((item.subsystem_id, item.state, item.reason_codes, plant) for item in plant.subsystems)
+        items = (
+            (item.subsystem_id, item.state, item.transport_reason_codes or item.reason_codes, plant)
+            for item in plant.subsystems
+        )
         items = itertools.chain(
             items,
-            ((item.node_id, item.state, item.reason_codes, infrastructure) for item in infrastructure.nodes),
+            (
+                (item.node_id, item.state, item.transport_reason_codes or item.reason_codes, infrastructure)
+                for item in infrastructure.nodes
+            ),
         )
         bounded = tuple(itertools.islice(items, _MAX_HEALTH_RECORDS + 1))
     except Exception as exc:
@@ -211,17 +217,32 @@ def _collect_health(
     try:
         pending: list[EvidenceRecord] = []
         for source_id, state, reason_codes, summary in bounded:
-            authoritative_state = max((state, summary.state), key=STATE_PRECEDENCE.__getitem__)
             payload: dict[str, object] = {
                 "source_id": _safe_identifier(source_id),
-                "state": _safe_identifier(authoritative_state.value),
+                "state": _safe_identifier(state.value),
             }
-            reasons = reason_codes or summary.reason_codes
-            if reasons:
-                payload["reason_code"] = _safe_identifier(reasons[0])
+            if reason_codes:
+                payload["reason_code"] = _safe_identifier(reason_codes[0])
             payload["observed_at"] = _utc_iso(summary.observed_at)
             payload["revision"] = summary.revision
             pending.append(EvidenceRecord.from_payload("health", payload))
+        for summary_id, summary in (
+            ("plant-health-summary", plant),
+            ("infrastructure-summary", infrastructure),
+        ):
+            child_states = tuple(state for _, state, _, owner in bounded if owner is summary)
+            max_child_state = max(child_states, key=STATE_PRECEDENCE.__getitem__, default=OperatorPresentationState.OK)
+            if STATE_PRECEDENCE[summary.state] > STATE_PRECEDENCE[max_child_state]:
+                summary_payload: dict[str, object] = {
+                    "source_id": summary_id,
+                    "state": _safe_identifier(summary.state.value),
+                    "observed_at": _utc_iso(summary.observed_at),
+                    "revision": summary.revision,
+                }
+                summary_reasons = summary.transport_reason_codes or summary.reason_codes
+                if summary_reasons:
+                    summary_payload["reason_code"] = _safe_identifier(summary_reasons[0])
+                pending.append(EvidenceRecord.from_payload("health", summary_payload))
         records.extend(pending)
     except Exception as exc:
         _log_failure("health", exc)
@@ -254,19 +275,35 @@ def _collect_attention(
     try:
         pending: list[EvidenceRecord] = []
         for item in items:
-            authoritative_state = max((item.state, attention.state), key=STATE_PRECEDENCE.__getitem__)
-            state = _safe_identifier(authoritative_state.value)
+            state = _safe_identifier(item.state.value)
             payload: dict[str, object] = {
                 "attention_id": _safe_identifier(item.attention_id),
                 "severity": _SEVERITY_FROM_STATE.get(state, "warning"),
                 "state": state,
                 "observed_at": _utc_iso(item.observed_at),
             }
-            reasons = item.transport_reason_codes or attention.reason_codes
-            if reasons:
-                payload["reason_code"] = _safe_identifier(reasons[0])
+            if item.transport_reason_codes:
+                payload["reason_code"] = _safe_identifier(item.transport_reason_codes[0])
             payload["revision"] = attention.revision
             pending.append(EvidenceRecord.from_payload("attention", payload))
+        max_item_state = max(
+            (item.state for item in items),
+            key=STATE_PRECEDENCE.__getitem__,
+            default=OperatorPresentationState.OK,
+        )
+        if STATE_PRECEDENCE[attention.state] > STATE_PRECEDENCE[max_item_state]:
+            summary_state = _safe_identifier(attention.state.value)
+            summary_payload: dict[str, object] = {
+                "attention_id": "attention-summary",
+                "severity": _SEVERITY_FROM_STATE.get(summary_state, "warning"),
+                "state": summary_state,
+                "observed_at": _utc_iso(attention.observed_at),
+                "revision": attention.revision,
+            }
+            summary_reasons = attention.transport_reason_codes or attention.reason_codes
+            if summary_reasons:
+                summary_payload["reason_code"] = _safe_identifier(summary_reasons[0])
+            pending.append(EvidenceRecord.from_payload("attention", summary_payload))
         records.extend(pending)
     except Exception as exc:
         _log_failure("attention", exc)

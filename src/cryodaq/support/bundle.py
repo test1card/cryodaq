@@ -58,6 +58,7 @@ _SECRET_KEYS: Final = frozenset(
         "authorization",
         "bearer_token",
         "client_secret",
+        "contact",
         "cookie",
         "credential",
         "credentials",
@@ -72,11 +73,13 @@ _SECRET_KEYS: Final = frozenset(
 )
 _PRIVATE_KEYS: Final = frozenset(
     {
+        "author",
         "email",
         "full_name",
         "operator",
         "operator_id",
         "operator_name",
+        "person",
         "phone",
         "user_name",
         "user_id",
@@ -104,6 +107,15 @@ _BIDI_OR_INVISIBLE: Final = frozenset(
         "\ufeff",
     }
 )
+_PATH_CONFUSABLE_TRANSLATION: Final = str.maketrans(
+    {
+        "\u2044": "/",
+        "\u2215": "/",
+        "\u29f8": "/",
+        "\u2216": "\\",
+        "\u29f5": "\\",
+    }
+)
 _ABSOLUTE_PATH_PATTERNS: Final = (
     re.compile(r"/[\s\S]*"),
     re.compile(r"(?i)/(?:home|users)/[\s\S]*"),
@@ -125,16 +137,22 @@ _URL_CREDENTIAL_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\
 _EMAIL_RE: Final = re.compile(
     r"(?i)(?<![A-Z0-9._%+-])[A-Z0-9._%+-]{1,64}@[A-Z0-9](?:[A-Z0-9.-]{0,251}[A-Z0-9])?(?![A-Z0-9.-])"
 )
-_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[A-Z][a-z]{1,63}(?: [A-Z][a-z]{1,63}){1,3}(?!\w)")
-_PRIVATE_NAME_ONLY_RE: Final = re.compile(r"[^\W\d_]{2,64}(?: [^\W\d_]{2,64}){1,3}\Z")
+_UNICODE_EMAIL_RE: Final = re.compile(r"[^\s@]{1,64}@[^\s@]{1,255}")
+_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}){1,3}(?!\w)")
+_PRIVATE_NAME_ONLY_RE: Final = re.compile(r"[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}){1,3}\Z")
 _PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
 _DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
+_DOTTED_PHONE_RE: Final = re.compile(r"\d{3}\.\d{3}\.\d{4}\Z")
 _SERIALIZED_BLOB_RE: Final = re.compile(r"(?:\{[\s\S]*\}|\[[\s\S]*\])")
+_KNOWN_CREDENTIAL_RE: Final = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
 _PATH_TRAVERSAL_RE: Final = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _PRIVATE_IDENTIFIER_SEGMENTS: Final = frozenset(
     {"author", "contact", "email", "operator", "person", "phone", "user", "username"}
 )
-_PRIVATE_IDENTIFIER_FIELDS: Final = frozenset({"attention_id", "event_id", "source_id"})
+_PRIVATE_IDENTIFIER_FIELDS: Final = frozenset(
+    {"attention_id", "bundle_id", "component", "config_id", "event_id", "source_id"}
+)
+_DOTTED_PRIVATE_IDENTIFIER_RE: Final = re.compile(r"(?i)[a-z]{2,64}\.[a-z]{2,64}\Z")
 _OPAQUE_TOKEN_RE: Final = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/=_-])")
 _SECRET_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _SECRET_KEYS)
 _PRIVATE_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _PRIVATE_KEYS)
@@ -226,8 +244,10 @@ def _identifier(value: object, *, field: str) -> str:
     value = _safe_text(value, allow_uuid=True)
     if field in _PRIVATE_IDENTIFIER_FIELDS:
         segments = frozenset(part for part in re.split(r"[._-]+", value.casefold()) if part)
-        if segments.intersection(_PRIVATE_IDENTIFIER_SEGMENTS):
-            raise ValueError(f"{field} contains private-data-shaped identifier")
+        if (len(segments) > 1 and segments.intersection(_PRIVATE_IDENTIFIER_SEGMENTS)) or (
+            _DOTTED_PRIVATE_IDENTIFIER_RE.fullmatch(value) is not None
+        ):
+            return "redacted-private"
     if _ID_RE.fullmatch(value) is None:
         raise ValueError(f"{field} contains unsupported characters")
     return value
@@ -265,7 +285,7 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
     normalized = unicodedata.normalize("NFC", value)
     security_normalized = "".join(
         char
-        for char in unicodedata.normalize("NFKC", normalized)
+        for char in unicodedata.normalize("NFKC", normalized).translate(_PATH_CONFUSABLE_TRANSLATION)
         if char not in _BIDI_OR_INVISIBLE and unicodedata.category(char) not in {"Cc", "Cf"}
     )
     stripped_security = security_normalized.strip()
@@ -277,6 +297,7 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
         _SECRET_ASSIGNMENT_RE.search(security_normalized)
         or _contains_sensitive_assignment(security_normalized)
         or _BEARER_RE.search(security_normalized)
+        or _KNOWN_CREDENTIAL_RE.search(security_normalized)
         or _URL_CREDENTIAL_RE.search(security_normalized)
         or "-----BEGIN " in security_normalized.upper()
     ):
@@ -300,17 +321,22 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
     for pattern in _ABSOLUTE_PATH_PATTERNS:
         security_screened = pattern.sub("<redacted:path>", security_screened)
     if security_screened != security_normalized:
-        normalized = security_screened
+        normalized = "<redacted:path>"
     stripped = normalized.lstrip()
     if stripped.startswith(("=", "+", "-", "@")):
         prefix_len = len(normalized) - len(stripped)
         normalized = normalized[:prefix_len] + "<formula>" + stripped[1:]
     screened_stripped = security_screened.strip()
     phone_match = _PHONE_RE.search(security_screened)
-    if _EMAIL_RE.search(security_screened) or (
-        phone_match is not None and _DOTTED_NUMERIC_VERSION_RE.fullmatch(screened_stripped) is None
-    ):
+    if _EMAIL_RE.search(security_screened) or _UNICODE_EMAIL_RE.search(security_screened):
         raise ValueError("private-data-shaped text is not permitted")
+    if phone_match is not None:
+        if _DOTTED_PHONE_RE.fullmatch(screened_stripped) is not None:
+            return "<redacted:private>"
+        if _DOTTED_NUMERIC_VERSION_RE.fullmatch(screened_stripped) is None:
+            raise ValueError("private-data-shaped text is not permitted")
+    if security_screened != security_normalized:
+        return "<redacted:path>"
     if _PRIVATE_NAME_RE.search(security_screened) or _PRIVATE_NAME_ONLY_RE.fullmatch(screened_stripped):
         return "<redacted:private>"
     for candidate in _OPAQUE_TOKEN_RE.findall(security_screened):
@@ -778,7 +804,7 @@ class SupportBundle:
     manifest_sha256: str
 
     def __post_init__(self) -> None:
-        _identifier(self.bundle_id, field="bundle_id")
+        object.__setattr__(self, "bundle_id", _identifier(self.bundle_id, field="bundle_id"))
         BundleCapture._exact_tuple(self.artifacts, BundleArtifact, "artifacts", 2)
         if len(self.artifacts) != 2 or tuple(item.logical_path for item in self.artifacts) != (
             "manifest.json",

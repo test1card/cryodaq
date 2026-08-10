@@ -155,6 +155,24 @@ def _snapshot(
     )
 
 
+def _with_unchecked_health(snapshot: OperatorSnapshot, subsystems: object) -> OperatorSnapshot:
+    summary = PlantHealthSummary.__new__(PlantHealthSummary)
+    object.__setattr__(summary, "cut", snapshot.cut)
+    object.__setattr__(summary, "status", snapshot.plant_health.status)
+    object.__setattr__(summary, "subsystems", subsystems)
+    object.__setattr__(snapshot, "plant_health", summary)
+    return snapshot
+
+
+def _with_unchecked_attention(snapshot: OperatorSnapshot, items: object) -> OperatorSnapshot:
+    summary = AttentionQueue.__new__(AttentionQueue)
+    object.__setattr__(summary, "cut", snapshot.cut)
+    object.__setattr__(summary, "status", snapshot.attention.status)
+    object.__setattr__(summary, "items", items)
+    object.__setattr__(snapshot, "attention", summary)
+    return snapshot
+
+
 def _minimal_capture(**overrides: object) -> BundleCapture:
     """Return the smallest valid BundleCapture for parametrized tests."""
     defaults: dict[str, object] = dict(
@@ -364,6 +382,26 @@ def test_name_like_private_scalar_is_redacted_without_erasing_version(value: str
     assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
 
 
+@pytest.mark.parametrize(
+    "value",
+    (
+        "driver build by alice smith",
+        "driver build by \u0410\u043b\u0438\u0441\u0430 \u0418\u0432\u0430\u043d\u043e\u0432\u0430",
+        "555.867.5309",
+    ),
+)
+def test_embedded_name_and_dotted_phone_are_redacted(value: str) -> None:
+    assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
+
+
+@pytest.mark.parametrize(
+    "value", ("\u0430\u043b\u0438\u0441\u0430@\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444", "contact=alice")
+)
+def test_unicode_email_and_private_contact_assignment_are_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="private|secret"):
+        SoftwareVersion("driver-pack", value)
+
+
 @pytest.mark.parametrize("value", ("10.0.26100", "2026.08.10"))
 def test_numeric_versions_are_not_misclassified_as_private_phone_data(value: str) -> None:
     assert SoftwareVersion("driver-pack", value).version == value
@@ -389,9 +427,29 @@ def test_collector_keeps_safe_versions_when_name_like_value_is_redacted() -> Non
     assert versions["platform"] == "<redacted:private>"
 
 
-def test_identifier_valued_private_role_is_rejected() -> None:
-    with pytest.raises(ValueError, match="private"):
-        EvidenceRecord.from_payload("health", {"source_id": "alice.operator", "state": "ok"})
+@pytest.mark.parametrize("value", ("alice.operator", "alice.smith"))
+def test_identifier_valued_private_role_is_rejected(value: str) -> None:
+    record = EvidenceRecord.from_payload("health", {"source_id": value, "state": "ok"})
+
+    assert json.loads(record.payload_json)["source_id"] == "redacted-private"
+
+
+def test_private_identifiers_are_redacted_across_bundle_schema_surfaces() -> None:
+    capture = _minimal_capture(
+        bundle_id="alice.operator",
+        versions=(SoftwareVersion("alice.operator", "1.0"),),
+        config_fingerprints=(
+            ConfigFingerprint("alice.operator", "alarms.public.v1", "redacted_public_projection", _HASH),
+        ),
+    )
+    bundle = build_support_bundle(capture)
+    evidence = _evidence(bundle)
+
+    assert bundle.bundle_id == "redacted-private"
+    assert evidence["bundle_id"] == "redacted-private"
+    assert evidence["versions"][0]["component"] == "redacted-private"
+    assert evidence["config_fingerprints"][0]["config_id"] == "redacted-private"
+    assert "alice" not in b"".join(artifact.content for artifact in bundle.artifacts).decode().casefold()
 
 
 def test_redaction_category_embedded_absolute_user_path_is_removed() -> None:
@@ -468,6 +526,8 @@ def test_redaction_category_glued_spaced_user_paths_leave_no_suffix(value: str) 
         "prefix/opt/cryodaq/alice/run.log",
         "prefix\uff0fhome\uff0falice\uff0fprivate.txt",
         "prefixD\uff1a\uff3cUsers\uff3calice\uff3cprivate.txt",
+        "prefix\u2215home\u2215alice\u2215private.txt",
+        "prefix\u2044home\u2044alice\u2044private.txt",
         "prefix/ho\u200bme/alice/private.txt",
     ),
 )
@@ -483,6 +543,7 @@ def test_redaction_category_hostile_generic_and_confusable_paths_are_removed(val
     "value",
     (
         "prefixBearer abcdefghijklmnop",
+        "prefixAKIAIOSFODNN7EXAMPLE",
         'prefix {"contact":"unrecognized-private-value"}',
     ),
 )
@@ -809,16 +870,52 @@ def test_collector_preserves_authoritative_summary_severity() -> None:
     )
 
     evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
-    health = next(
-        record["payload"]
+    health = {
+        record["payload"]["source_id"]: record["payload"]
         for record in evidence["records"]
-        if record["kind"] == "health" and record["payload"]["source_id"] == "plant"
-    )
-    attention = next(record["payload"] for record in evidence["records"] if record["kind"] == "attention")
+        if record["kind"] == "health"
+    }
+    attention = {
+        record["payload"]["attention_id"]: record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == "attention"
+    }
 
-    assert health["state"] == "fault"
-    assert attention["state"] == "fault"
-    assert attention["severity"] == "fault"
+    assert health["plant"]["state"] == "caution"
+    assert health["plant-health-summary"]["state"] == "fault"
+    assert attention["alarm-vacuum"]["state"] == "caution"
+    assert attention["alarm-vacuum"]["severity"] == "caution"
+    assert attention["attention-summary"]["state"] == "fault"
+    assert attention["attention-summary"]["severity"] == "fault"
+
+
+def test_collector_does_not_copy_aggregate_fault_to_healthy_items() -> None:
+    health_items = (
+        PlantHealthItem("healthy", "Healthy", OperatorPresentationState.OK, ()),
+        PlantHealthItem("faulted", "Faulted", OperatorPresentationState.FAULT, ("sensor_fault",)),
+    )
+    attention_items = (
+        AttentionItem("caution-item", OperatorPresentationState.CAUTION, "Caution", "Inspect", _OBS, ()),
+        AttentionItem("fault-item", OperatorPresentationState.FAULT, "Fault", "Respond", _OBS, ()),
+    )
+    snapshot = _snapshot(attention_items=attention_items, health_items=health_items)
+
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    health = {
+        record["payload"]["source_id"]: record["payload"]["state"]
+        for record in evidence["records"]
+        if record["kind"] == "health"
+    }
+    attention = {
+        record["payload"]["attention_id"]: record["payload"]["state"]
+        for record in evidence["records"]
+        if record["kind"] == "attention"
+    }
+
+    assert health["healthy"] == "ok"
+    assert health["faulted"] == "fault"
+    assert attention["caution-item"] == "caution"
+    assert attention["fault-item"] == "fault"
 
 
 def test_degraded_engine_partial_snapshot_failure_marks_section_unavailable() -> None:
@@ -980,46 +1077,38 @@ def test_collector_rolls_back_partial_health_iteration_and_preserves_other_secti
 
 
 def test_collector_all_health_items_fail_marks_health_unavailable() -> None:
-    """If every health item raises, health is marked unavailable (not silently zero records)."""
+    """An invalid item on an exact health summary makes the whole section unavailable."""
+    bad_item = PlantHealthItem.__new__(PlantHealthItem)
+    object.__setattr__(bad_item, "subsystem_id", None)
+    object.__setattr__(bad_item, "display_name", "bad")
+    object.__setattr__(bad_item, "state", OperatorPresentationState.OK)
+    object.__setattr__(bad_item, "reason_codes", ())
+    object.__setattr__(bad_item, "transport_reason_codes", ())
+    snapshot = _with_unchecked_health(_snapshot(), (bad_item,))
 
-    # Use a MagicMock with items that each raise.
-    def bad_subsystems():
-        yield MagicMock(subsystem_id=None)  # _safe_identifier(None) will raise
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = bad_subsystems()
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
-
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
-    bundle = build_support_bundle(capture)
-    ev = _evidence(bundle)
-
-    assert "health" in ev["unavailable_fields"], (
-        "health must be marked unavailable when all items are dropped — not silently zero records"
-    )
-    assert not any(r["kind"] == "health" for r in ev["records"])
+    assert reasons["health"] == "source_invalid"
+    assert not any(record["kind"] == "health" for record in evidence["records"])
 
 
 def test_collector_all_attention_items_fail_marks_attention_unavailable() -> None:
-    """If every attention item raises, attention is marked unavailable (not silently zero records)."""
+    """An invalid item on an exact attention summary makes the whole section unavailable."""
+    bad_item = AttentionItem.__new__(AttentionItem)
+    object.__setattr__(bad_item, "attention_id", None)
+    object.__setattr__(bad_item, "state", OperatorPresentationState.OK)
+    object.__setattr__(bad_item, "title", "bad")
+    object.__setattr__(bad_item, "detail", "bad")
+    object.__setattr__(bad_item, "observed_at", _OBS)
+    object.__setattr__(bad_item, "transport_reason_codes", ())
+    snapshot = _with_unchecked_attention(_snapshot(), (bad_item,))
 
-    def bad_items():
-        yield MagicMock(attention_id=None)  # _safe_identifier(None) will raise
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = []
-    mock_snap.attention.items = bad_items()
-    mock_snap.data_integrity.storage.value = "available"
-
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
-    bundle = build_support_bundle(capture)
-    ev = _evidence(bundle)
-
-    assert "attention" in ev["unavailable_fields"], (
-        "attention must be marked unavailable when all items are dropped — not silently zero records"
-    )
-    assert not any(r["kind"] == "attention" for r in ev["records"])
+    assert reasons["attention"] == "source_invalid"
+    assert not any(record["kind"] == "attention" for record in evidence["records"])
 
 
 # ---------------------------------------------------------------------------
@@ -1203,12 +1292,9 @@ def test_failclosed_item_serialization_failure_after_valid_items_whole_section_u
     object.__setattr__(bad_item, "reason_codes", ())
     object.__setattr__(bad_item, "transport_reason_codes", ())
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = [valid_item, bad_item]
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
+    snapshot = _with_unchecked_health(_snapshot(), (valid_item, bad_item))
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
@@ -1236,12 +1322,9 @@ def test_failclosed_unicode_non_ascii_identifier_section_unavailable() -> None:
     object.__setattr__(bad_item, "reason_codes", ())
     object.__setattr__(bad_item, "transport_reason_codes", ())
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = [bad_item]
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
+    snapshot = _with_unchecked_health(_snapshot(), (bad_item,))
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
@@ -1305,12 +1388,9 @@ def test_failclosed_section_is_either_complete_or_unavailable_never_partial() ->
     object.__setattr__(bad_item, "reason_codes", ())
     object.__setattr__(bad_item, "transport_reason_codes", ())
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = [valid_item, bad_item]
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
+    snapshot = _with_unchecked_health(_snapshot(), (valid_item, bad_item))
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
