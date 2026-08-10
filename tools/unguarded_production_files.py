@@ -25,7 +25,13 @@ the same asymmetry the tool exists to exploit:
 * **Configuration invisible.** Requiring a `.py` suffix meant `--include
   config/` selected nothing, so interlock thresholds, channel patterns and
   shutdown actions -- production by the severity floor's own definition --
-  could never be measured. Suffixes are declared, not assumed.
+  could never be measured. A declared suffix roster only moved the problem: the
+  web dashboard under `src/cryodaq/web/static/` is served live and has no source
+  suffix, so a change confined to it still selected NOTHING and the tool reported
+  success. Discovery is now bounded by RUNTIME ROOT, not by suffix: every changed
+  tracked file outside the explicit non-production top-levels is a target. What
+  this costs is a larger discovery set, and an artifact that cannot be diffed is
+  reported `NOT MEASURED` as an undiffable binary rather than skipped in silence.
 * **Added files skipped.** A new module has no base content to revert to, so
   it was skipped while the run still exited 0. An added artifact is now
   measured by REMOVING it, and a target that cannot be measured fails the run.
@@ -85,7 +91,10 @@ USAGE
     python -m tools.unguarded_production_files --base origin/master \\
         --suite tests/gui --include src/ --include config/
 
-`--include` and `--suffix` add to the runtime defaults; they never remove them.
+`--include` adds to the runtime defaults; it never removes them. `--suffix` is
+accepted for compatibility with older invocations and NO LONGER AFFECTS
+DISCOVERY: a suffix roster cannot describe the shipped/served surface, so it
+could only ever hide a runtime artifact.
 
 Each artifact is restored from the ORIGINAL bytes read before mutation, and the
 restore is verified byte-for-byte. It refuses to run against a dirty tree for
@@ -136,7 +145,13 @@ from tools.ci_active_checkout_runner import (
 # add it. Defaults therefore derive every top-level Git tree except the
 # categories the severity floor explicitly calls non-production. A new root is
 # measured on the commit that introduces it, without changing this tool.
-_DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml", ".lua")
+# Runtime roots are deliberately bounded by ``default_runtime_includes``.  Within
+# those roots every changed tracked file is an artifact: package data such as the
+# web dashboard may be HTML, SVG, or binary and a suffix roster cannot define the
+# application's complete shipped/served surface.  Keep this compatibility name
+# for callers that still pass the historical suffix tuple; it is no longer a
+# discovery gate.
+_DEFAULT_SUFFIXES: tuple[str, ...] = ()
 _NON_RUNTIME_TOP_LEVELS = frozenset({".github", "build_scripts", "docs", "governance", "scripts", "tests", "tools"})
 _PYTEST_TIMEOUT_SECONDS = 120
 _RECOVERY_NAME = ".audit-unguarded-production-recovery.json"
@@ -358,6 +373,17 @@ def default_runtime_includes(*points: str) -> tuple[str, ...]:
 
 
 def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ...]) -> list[ChangedArtifact]:
+    """Return every changed tracked file under the bounded runtime roots.
+
+    ``includes`` is derived from the Git trees and excludes only explicitly
+    non-runtime top-level categories.  No suffix filter is safe here: the
+    application serves HTML/static assets and ships arbitrary package data,
+    including resources with no conventional source suffix.  ``suffixes`` is
+    retained for API/CLI compatibility with older callers, but cannot remove a
+    runtime artifact from discovery.
+    """
+
+    del suffixes
     out = _git(["diff", "--name-status", "-z", "--find-renames", point, "HEAD"])
     out.check_returncode()
     fields = out.stdout.split("\0")
@@ -377,9 +403,7 @@ def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ..
             index += 1
             kind = status[:1]
             artifact = ChangedArtifact(None if kind == "A" else path, None if kind == "D" else path)
-        if any(
-            path.endswith(suffixes) and any(path.startswith(prefix) for prefix in includes) for path in artifact.paths
-        ):
+        if any(any(path.startswith(prefix) for prefix in includes) for path in artifact.paths):
             artifacts.append(artifact)
     return sorted(artifacts, key=lambda artifact: artifact.label)
 
@@ -486,6 +510,18 @@ def git_entry(point: str, path: str | None) -> GitEntry | None:
     if content is None:
         raise MeasurementError(f"{path} has a tree entry at {point[:8]} but no readable blob")
     return GitEntry(mode, object_type, object_id, content)
+
+
+def _is_binary_content(content: bytes) -> bool:
+    """Classify content that has no meaningful text diff for this tool."""
+
+    if b"\x00" in content:
+        return True
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 def path_matches_git_entry(path: Path, entry: GitEntry | None) -> bool:
@@ -676,6 +712,14 @@ def recover_pending(root: Path) -> bool:
     return True
 
 
+def _failed_node_id(line: str) -> str:
+    """Extract pytest's complete node ID while excluding only its message."""
+
+    body = line.removeprefix("FAILED ").strip()
+    node_id, separator, _message = body.partition(" - ")
+    return node_id.strip() if separator else body
+
+
 def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     env = dict(os.environ, PYTHONPYCACHEPREFIX=str(cache_prefix), PYTHONDONTWRITEBYTECODE="")
     found: list[str] = []
@@ -696,7 +740,7 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
             raise MeasurementError(f"pytest over {suite!r} exceeded {_PYTEST_TIMEOUT_SECONDS} seconds") from exc
         stdout = str(run.stdout or "")
         stderr = str(run.stderr or "")
-        parsed = [line.split("::")[-1].strip() for line in stdout.splitlines() if line.startswith("FAILED")]
+        parsed = [_failed_node_id(line) for line in stdout.splitlines() if line.startswith("FAILED")]
         # A CRASHED suite prints no `FAILED` lines, so parsing stdout alone
         # reads a native fault, an internal error, a usage error or an empty
         # collection as "nothing failed" -- and in the CONTROL run that is a
@@ -733,7 +777,12 @@ def main() -> int:
     parser.add_argument("--base", default="origin/master")
     parser.add_argument("--suite", action="append", default=[])
     parser.add_argument("--include", action="append", default=[])
-    parser.add_argument("--suffix", action="append", default=[])
+    parser.add_argument(
+        "--suffix",
+        action="append",
+        default=[],
+        help="accepted for compatibility; discovery is bounded by runtime root, so this no longer filters",
+    )
     options = parser.parse_args()
     suites = options.suite or ["tests"]
     suffixes = tuple(dict.fromkeys((*_DEFAULT_SUFFIXES, *options.suffix)))
@@ -809,10 +858,16 @@ def main() -> int:
         candidate = git_entry("HEAD", target.candidate_path)
         if before is None or candidate is None or before.content != candidate.content:
             unmeasured.append(target.label)
-            print(
-                f"| `{target.label}` | **NOT MEASURED** - content changes may contain multiple independent edits; "
-                "whole-file reversion cannot attribute them separately |"
+            binary = any(_is_binary_content(entry.content) for entry in (before, candidate) if entry is not None)
+            reason = (
+                "undiffable binary runtime artifact; whole-file reversion cannot attribute its contents"
+                if binary
+                else (
+                    "content changes may contain multiple independent edits; "
+                    "whole-file reversion cannot attribute them separately"
+                )
             )
+            print(f"| `{target.label}` | **NOT MEASURED** - {reason} |")
             continue
         if target.base_path != target.candidate_path:
             old = root / str(target.base_path)

@@ -376,6 +376,44 @@ def test_main_refuses_to_certify_an_added_multi_behavior_artifact(tmp_path: Path
     assert "content changes may contain multiple independent edits" in capsys.readouterr().out
 
 
+def test_runtime_artifact_without_source_suffix_is_selected(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base_file = repository / "src" / "cryodaq" / "web" / "static" / "index.html"
+    base_file.parent.mkdir(parents=True)
+    base_file.write_bytes(b"<html>base</html>\n")
+    _git(repository, "add", "src/cryodaq/web/static/index.html")
+    _git(repository, "commit", "-qm", "base dashboard")
+    base = _git(repository, "rev-parse", "HEAD")
+    base_file.write_bytes(b"<html>candidate</html>\n")
+    _git(repository, "add", "src/cryodaq/web/static/index.html")
+    _git(repository, "commit", "-qm", "change dashboard")
+
+    monkeypatch.chdir(repository)
+    includes = subject.default_runtime_includes(base, "HEAD")
+    selected = subject.changed_files(base, includes, subject._DEFAULT_SUFFIXES)
+
+    assert [artifact.label for artifact in selected] == ["src/cryodaq/web/static/index.html"]
+
+
+def test_failures_keep_distinct_full_node_ids_for_identical_messages(monkeypatch, tmp_path: Path) -> None:
+    output = "\n".join(
+        [
+            "FAILED tests/a.py::test_guard - AssertionError: same",
+            "FAILED tests/b.py::test_guard - AssertionError: same",
+        ]
+    )
+    monkeypatch.setattr(
+        subject,
+        "_run_candidate_process",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, output, ""),
+    )
+
+    assert subject.failures(["tests"], tmp_path / "cache") == [
+        "tests/a.py::test_guard",
+        "tests/b.py::test_guard",
+    ]
+
+
 def test_default_roster_derives_a_new_runtime_root_from_git_trees(tmp_path: Path, monkeypatch) -> None:
     repository = _repository(tmp_path / "candidate")
     marker = repository / "README"
