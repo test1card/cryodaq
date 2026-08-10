@@ -12,11 +12,11 @@ as a misspelled CRITICAL one — so alarm references are checked at all
 severities (plane 5), with an explicit per-reference ``optional_channels``
 opt-out for hardware a given lab does not populate. The opt-out is limited to
 non-safety alarms, must be an exact list of unique channel strings, and cannot
-silence a required composite/rate-condition arm. The engine's current
-temporary lab-build policy catches
-only this diagnostic exception and continues after a CRITICAL log until the
-exact lab manifest has been validated.  Removing that narrow catch restores
-the intended fail-closed startup behavior.
+silence a required composite/rate-condition arm. The engine invokes this
+validator unwrapped during startup. Any ``SafetyPatternLivenessError``
+therefore propagates as ``SafetyConfigError``; the launcher maps that
+configuration failure to its non-restarting exit path, and acquisition does
+not boot.
 
 The planes, matchers, and the disk-synthetic-channel bypass are copied from
 the proven regression test ``tests/core/test_safety_pattern_liveness.py``
@@ -41,7 +41,7 @@ import yaml
 
 from cryodaq.channels.descriptors import ChannelRole, ChannelSafetyClass
 from cryodaq.core.housekeeping import _extract_channel_refs
-from cryodaq.core.interlock import InterlockCondition
+from cryodaq.core.interlock import InterlockCondition, resolve_interlock_channel_bindings
 from cryodaq.core.safety_manager import SafetyConfigError
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel
 
@@ -55,9 +55,9 @@ class SafetyPatternLivenessError(SafetyConfigError):
 
     Subclasses ``SafetyConfigError`` so the final fail-closed policy maps an
     uncaught instance to ``ENGINE_CONFIG_ERROR_EXIT_CODE`` (2), which the
-    launcher does not auto-restart.  The current lab-build call site catches
-    exactly this subclass temporarily and logs at CRITICAL.  The message names
-    every dead pattern with its plane and config source.
+    launcher does not auto-restart. The engine startup call site does not catch
+    this exception, so a dead safety pattern prevents acquisition from booting.
+    The message names every dead pattern with its plane and config source.
     """
 
 
@@ -439,6 +439,7 @@ def _resolve_adaptive_patterns_to_raw(
     canonical_ids: list[str],
     raw_labels: list[str],
     patterns: Collection[str],
+    raw_patterns: Collection[str] = (),
 ) -> tuple[list[str], list[_DeadPattern]]:
     """Expand canonical AdaptiveThrottle expressions to exact raw labels.
 
@@ -466,6 +467,36 @@ def _resolve_adaptive_patterns_to_raw(
 
     resolved: list[str] = []
     dead: list[_DeadPattern] = []
+
+    # Interlock bindings are resolved to raw labels before this function is
+    # called. Keep that provenance separate from canonical alarm references:
+    # one namespace may legally contain a spelling from the other namespace.
+    for ref in sorted(set(raw_patterns)):
+        if ref in _THROTTLE_BYPASS_PATTERNS:
+            resolved.append(ref)
+            continue
+        try:
+            compiled = re.compile(ref)
+        except re.error:
+            dead.append(
+                _DeadPattern(
+                    pattern=ref,
+                    plane="raw AdaptiveThrottle expression",
+                    source="AdaptiveThrottle raw protected patterns",
+                )
+            )
+            continue
+        if any(compiled.fullmatch(label) for label in raw_labels):
+            resolved.append(ref)
+            continue
+        dead.append(
+            _DeadPattern(
+                pattern=ref,
+                plane="raw AdaptiveThrottle expression",
+                source="AdaptiveThrottle raw protected patterns",
+            )
+        )
+
     for ref in sorted(set(patterns)):
         if ref in _THROTTLE_BYPASS_PATTERNS:
             resolved.append(ref)
@@ -483,6 +514,11 @@ def _resolve_adaptive_patterns_to_raw(
             continue
         canonical_matches = [channel_id for channel_id in canonical_ids if compiled.fullmatch(channel_id)]
         if not canonical_matches:
+            # Backward-compatible validation for callers that already pass a
+            # raw-plane expression without the explicit provenance argument.
+            if any(compiled.fullmatch(label) for label in raw_labels):
+                resolved.append(ref)
+                continue
             dead.append(
                 _DeadPattern(
                     pattern=ref,
@@ -503,7 +539,7 @@ def _resolve_adaptive_patterns_to_raw(
                 )
                 continue
             resolved.append(rf"^{re.escape(raw_matches[0])}$")
-    return resolved, dead
+    return sorted(set(resolved)), dead
 
 
 def _resolve_keithley_heartbeats(
@@ -618,17 +654,14 @@ def _resolve_keithley_heartbeats(
     return {channel: frozenset(identities) for channel, identities in resolved.items()}, dead
 
 
-def _load_interlock_conditions(config_path: Path) -> list[InterlockCondition]:
+def _load_interlock_conditions(
+    config_path: Path,
+    descriptor_catalog: LiveChannelDescriptorCatalog,
+) -> list[InterlockCondition]:
     """Parse interlocks.yaml into InterlockConditions.
 
-    Mirrors the production ``InterlockEngine.load_config`` entry construction
-    (src/cryodaq/core/interlock.py:309-319). ``InterlockCondition.__post_init__``
-    compiles + validates the pattern identically, and ``matches_channel()`` is
-    the production matcher (``_pattern.match``) — reusing it here avoids
-    hand-duplicating regex semantics. ``InterlockEngine`` itself cannot be
-    reused as the loader here because ``add_condition`` rejects every action
-    not present in the engine's actions dict; the validator needs only the
-    compiled patterns, not action dispatch.
+    Mirrors the production ``InterlockEngine.load_config`` binding resolution.
+    The validator needs only the resolved conditions, not action dispatch.
     """
     with config_path.open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle) or {}
@@ -638,18 +671,24 @@ def _load_interlock_conditions(config_path: Path) -> list[InterlockCondition]:
         if not isinstance(entry, dict):
             continue
         try:
+            channel_bindings = resolve_interlock_channel_bindings(
+                entry,
+                config_path=config_path,
+                descriptor_catalog=descriptor_catalog,
+            )
             conditions.append(
                 InterlockCondition(
                     name=entry["name"],
                     description=entry.get("description", ""),
-                    channel_pattern=entry["channel_pattern"],
+                    channel_ids=frozenset(binding.channel_id for binding in channel_bindings),
                     threshold=float(entry.get("threshold", 0.0)),
                     comparison=entry.get("comparison", ">"),
                     action=entry.get("action", ""),
+                    channel_bindings=channel_bindings,
                     cooldown_s=float(entry.get("cooldown_s", 0.0)),
                 )
             )
-        except (KeyError, ValueError, TypeError, re.error):
+        except (KeyError, ValueError, TypeError):
             # A structurally-invalid interlock is OUT OF SCOPE for this
             # liveness diagnostic. InterlockEngine.load_config later raises
             # InterlockConfigError on the same entry before acquisition starts
@@ -666,6 +705,7 @@ def validate_safety_pattern_liveness(
     interlocks_config_path: Path,
     safety_manager: SafetyManager,
     adaptive_throttle_patterns: Collection[str],
+    adaptive_throttle_raw_patterns: Collection[str] = (),
     alarms_config_path: Path | None = None,
 ) -> list[str]:
     """Raise if any CRITICAL/safety channel-pattern is dead against the
@@ -737,13 +777,13 @@ def validate_safety_pattern_liveness(
 
     dead: list[_DeadPattern] = []
 
-    # Plane 1: interlocks (CANONICAL, .match). All interlocks are safety.
-    for condition in _load_interlock_conditions(interlocks_config_path):
+    # Plane 1: interlocks (exact canonical IDs resolved from physical bindings).
+    for condition in _load_interlock_conditions(interlocks_config_path, descriptor_catalog):
         if not any(condition.matches_channel(cid) for cid in canonical_ids):
             dead.append(
                 _DeadPattern(
-                    pattern=condition.channel_pattern,
-                    plane="canonical (InterlockEngine post-bind channel_id, .match)",
+                    pattern=", ".join(sorted(condition.channel_ids)),
+                    plane="canonical (InterlockEngine exact declared binding)",
                     source=f"{interlocks_config_path.name} (interlock {condition.name!r})",
                 )
             )
@@ -806,6 +846,7 @@ def validate_safety_pattern_liveness(
         canonical_ids=canonical_ids,
         raw_labels=raw_labels,
         patterns=adaptive_throttle_patterns,
+        raw_patterns=adaptive_throttle_raw_patterns,
     )
     dead.extend(adaptive_dead)
 
