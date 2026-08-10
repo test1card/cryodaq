@@ -199,11 +199,12 @@ def test_usable_recovery_rearms_idle_dead_channel_alarm_episode() -> None:
         channel = "LS218_1/T1"
 
     key = f"{Condition.name}:{Reading.channel}"
+    sibling_key = f"detector_warmup:{Reading.channel}"
     safety = SafetyProbe()
     context = _InterlockHandlerContext(
         safety_manager=safety,
         alarm_dispatch_tasks=set(),
-        dead_channel_alarm_sent={key},
+        dead_channel_alarm_sent={key, sibling_key},
     )
 
     _interlock_dead_channel_recovery_handler(Condition(), Reading(), context=context)
@@ -211,6 +212,7 @@ def test_usable_recovery_rearms_idle_dead_channel_alarm_episode() -> None:
     assert safety.recovered == [(Condition.name, Reading.channel)]
     assert context.dead_channel_alarm_sent == set()
     assert _should_dispatch_dead_channel_alarm(key, False, context.dead_channel_alarm_sent) is True
+    assert _should_dispatch_dead_channel_alarm(sibling_key, False, context.dead_channel_alarm_sent) is True
 
 
 if __name__ == "__main__":

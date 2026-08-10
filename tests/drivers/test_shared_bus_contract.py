@@ -668,6 +668,9 @@ async def test_cancellation_resistant_read_terminalizes_bus_without_peer_overlap
             self.active = 0
             self.max_active = 0
 
+        def failure_readings(self) -> list[Reading]:
+            return [Reading.now("CH", float("nan"), "K", instrument_id=self.name)]
+
         async def read_channels(self) -> list[Reading]:
             self.reads += 1
             self.active += 1
@@ -684,7 +687,16 @@ async def test_cancellation_resistant_read_terminalizes_bus_without_peer_overlap
 
     resistant = _ResistantReadDriver()
     peer = _CountedDriver("peer")
-    scheduler = Scheduler(DataBroker(), drain_timeout_s=0.01)
+    failed_poll_reports: list[tuple[str, str]] = []
+
+    async def report_failed_poll(instrument_name: str, reason: str) -> None:
+        failed_poll_reports.append((instrument_name, reason))
+
+    scheduler = Scheduler(
+        DataBroker(),
+        drain_timeout_s=0.01,
+        failed_poll_persistence_handler=report_failed_poll,
+    )
     scheduler.add(
         InstrumentConfig(
             resistant,
@@ -715,6 +727,9 @@ async def test_cancellation_resistant_read_terminalizes_bus_without_peer_overlap
     assert shared_task is not None and shared_task.done()
     assert descriptor.bus_id in scheduler._terminal_bus_authority
     assert resistant.reads == resistant.max_active == resistant.active == 1
+    assert failed_poll_reports == [
+        ("resistant-reader", "failed-poll samples could not obtain persistence-backed publication authority")
+    ]
     assert peer.reads == 0
 
     with pytest.raises(RuntimeError, match="instrument shutdown incomplete.*resistant-read-bus still pending"):

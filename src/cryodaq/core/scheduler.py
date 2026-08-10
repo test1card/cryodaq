@@ -1184,6 +1184,7 @@ class Scheduler:
                         label=f"read {driver.name}",
                     )
                     if readings is None:
+                        await self._publish_failed_poll_readings(state)
                         if reviewed and reviewed_read_started:
                             binding = self._reviewed_binding(state)
                             generation = state.reviewed_source_generation
@@ -1249,6 +1250,7 @@ class Scheduler:
                             completion_is_success=True,
                         )
                         if recovered is None:
+                            await self._publish_failed_poll_readings(state)
                             return
                         if not recovered:
                             logger.warning("Device recovery failed for '%s'", driver.name)
@@ -1284,6 +1286,8 @@ class Scheduler:
                         label="interface clear",
                     )
                     if ifc_result is None:
+                        for state in states:
+                            await self._publish_failed_poll_readings(state)
                         return
                     ifc_succeeded = ifc_result
                     if ifc_succeeded:
@@ -1297,6 +1301,8 @@ class Scheduler:
                         label="reopen",
                     )
                     if reopened is None:
+                        for state in states:
+                            await self._publish_failed_poll_readings(state)
                         return
                     if reopened:
                         for state in states:

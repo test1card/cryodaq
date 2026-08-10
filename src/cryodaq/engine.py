@@ -2477,7 +2477,11 @@ def _interlock_dead_channel_recovery_handler(
         condition.name,
         reading.channel,
     )
-    context.dead_channel_alarm_sent.discard(f"{condition.name}:{reading.channel}")
+    channel_suffix = f":{reading.channel}"
+    keys_to_clear = {
+        key for key in context.dead_channel_alarm_sent if key.endswith(channel_suffix)
+    }
+    context.dead_channel_alarm_sent.difference_update(keys_to_clear)
 
 
 async def _multiline_burst_auto_stop(

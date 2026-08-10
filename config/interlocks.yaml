@@ -69,6 +69,7 @@ interlocks:
 #   • транзиент (одиночный blip) → CRITICAL-лог + alarm-v2, БЕЗ trip;
 #   • персистентность (≥ min_samples подряд И ≥ min_duration_s) при активном
 #     источнике (safety-состояние RUNNING) → эскалация в SafetyManager (FAULT).
+# Mature dead interlock channels remain RUN/READY blockers while idle until usable persisted recovery.
 # Обоснование: Т1–Т10 защищены ТОЛЬКО интерлоками (critical_channels — лишь
 # Т11/Т12). Устойчиво мёртвый датчик на нагреваемой зоне — fail-open без этого.
 nonusable_escalation:
