@@ -109,6 +109,8 @@ class DynamicSensorGrid(QWidget):
         self._cells: dict[str, SensorCell] = {}
         self._identity_issues: dict[str, IdentityStatus] = {}
         self._pending_readings: dict[str, _PendingCellCut] = {}
+        self._transport_invalidated = False
+        self._accepted_after_transport_loss: set[str] = set()
         self._build_ui()
         self._rebuild_cells()
         self._channel_mgr.on_change(self._on_channels_changed)
@@ -170,6 +172,9 @@ class DynamicSensorGrid(QWidget):
         for ch_id in visible_ids:
             cell = SensorCell(ch_id, self._channel_mgr, self._buffer, self)
             cell.set_read_only(self._read_only)
+            if self._transport_invalidated and ch_id not in self._accepted_after_transport_loss:
+                cell.refresh_from_buffer()
+                cell.invalidate_transport()
             cell.rename_requested.connect(self.rename_requested)
             cell.hide_requested.connect(self.hide_requested)
             cell.show_on_plot_requested.connect(self.show_on_plot_requested)
@@ -253,10 +258,20 @@ class DynamicSensorGrid(QWidget):
         if identity_changed:
             self._refresh_identity_banner()
 
+    def invalidate_transport(self) -> None:
+        """Render accepted pending evidence, then mark every value last-known."""
+        self.refresh()
+        self._transport_invalidated = True
+        self._accepted_after_transport_loss.clear()
+        for cell in self._cells.values():
+            cell.invalidate_transport()
+
     def dispatch_reading(self, reading: Reading, identity_status: IdentityStatus) -> None:
         """Cache only the latest presentation cut for the next <=2 Hz tick."""
         short_id = reading.channel.split(" ")[0]
         if short_id in self._cells:
+            if self._transport_invalidated:
+                self._accepted_after_transport_loss.add(short_id)
             sample = _fail_closed_sample((reading, identity_status))
             pending = self._pending_readings.get(short_id)
             if pending is None:

@@ -85,6 +85,7 @@ class SensorCell(QFrame):
         self._source_status: ChannelStatus | None = None
         self._source_identity = IdentityStatus.LEGACY_ABSENT
         self._data_stale = True
+        self._transport_disconnected = False
         self._read_only = False
         self._is_renaming = False
         self._rename_edit: QLineEdit | None = None
@@ -124,12 +125,7 @@ class SensorCell(QFrame):
         value_row.setSpacing(theme.SPACE_1)
 
         self._value_widget = QLabel("\u2014")  # em dash
-        self._value_widget.setStyleSheet(
-            f"color: {theme.TEXT_PRIMARY}; "
-            f"font-family: '{theme.FONT_MONO}'; "
-            f"font-size: {theme.FONT_MONO_VALUE_SIZE}px; "
-            f"font-weight: {theme.FONT_MONO_VALUE_WEIGHT};"
-        )
+        self._apply_value_style(disconnected=False)
         value_row.addWidget(self._value_widget)
 
         self._unit_widget = QLabel("")
@@ -189,6 +185,27 @@ class SensorCell(QFrame):
             f"}}"
         )
 
+    def _apply_disconnected_style(self) -> None:
+        """Keep last-known evidence visible without presenting it as current."""
+        # DESIGN: RULE-A11Y-002 — text plus dashed shape; never colour alone.
+        self.setStyleSheet(
+            f"#sensorCell {{ "
+            f"background-color: {theme.SURFACE_CARD}; "
+            f"border: 2px dashed {theme.STATUS_STALE}; "
+            f"border-radius: {theme.RADIUS_MD}px; "
+            f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
+            f"}}"
+        )
+
+    def _apply_value_style(self, *, disconnected: bool) -> None:
+        color = theme.TEXT_DISABLED if disconnected else theme.TEXT_PRIMARY
+        self._value_widget.setStyleSheet(
+            f"color: {color}; "
+            f"font-family: '{theme.FONT_MONO}'; "
+            f"font-size: {theme.FONT_MONO_VALUE_SIZE}px; "
+            f"font-weight: {theme.FONT_MONO_VALUE_WEIGHT};"
+        )
+
     def _apply_identity_state(self, *, stale: bool) -> None:
         """Render descriptor identity and freshness without hiding either axis."""
         if self._source_identity is IdentityStatus.REFUSED:
@@ -207,6 +224,21 @@ class SensorCell(QFrame):
     # Value updates
     # ------------------------------------------------------------------
 
+    def invalidate_transport(self) -> None:
+        """Latch last-known presentation until a new producer sample arrives."""
+        self._transport_disconnected = True
+        self._data_stale = True
+        self._last_status = None
+        self._apply_disconnected_style()
+        self._apply_value_style(disconnected=True)
+        text = (
+            "Нет связи · данных нет"
+            if self._value_widget.text() == "\u2014"
+            else "Нет связи · последнее известное значение"
+        )
+        self._status_hint_widget.setText(text)
+        self.setAccessibleDescription(text)
+
     def update_value(
         self,
         reading: Reading,
@@ -218,6 +250,8 @@ class SensorCell(QFrame):
         if not reading.channel.startswith(self._channel_id):
             return
 
+        self._transport_disconnected = False
+        self._apply_value_style(disconnected=False)
         value = reading.value
         if isinstance(value, (int, float)) and not math.isnan(value):
             if abs(value) >= 1000 or (abs(value) < 0.01 and value != 0):
@@ -265,6 +299,8 @@ class SensorCell(QFrame):
         This path tracks staleness by data age; full status comes
         through the update_value() push path.
         """
+        if self._transport_disconnected:
+            return
         last = self._buffer.get_last(self._channel_id)
         if last is None:
             if not self._data_stale:

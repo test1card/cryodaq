@@ -538,6 +538,216 @@ def test_on_reading_temperature_stores_short_id(app):
     assert last[1] == 77.5
 
 
+def test_dashboard_disconnect_keeps_sensor_value_explicitly_last_known_until_new_sample(app):
+    """Disconnect quarantines raw measurement presentation until new evidence."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui import theme
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    manager = ChannelManager()
+    view = DashboardView(manager)
+    view.set_connected(True)
+    view.on_reading(
+        Reading(
+            channel="Т1 Криостат верх",
+            value=4.2,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view.on_reading(
+        Reading(
+            channel="vacuum/pressure",
+            value=1.2e-5,
+            unit="mbar",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="vacuum_gauge",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+    cell = view._sensor_grid._cells["Т1"]
+    assert cell._status_hint_widget.text() == "Норма"
+    accepted_temperature = view._buffer_store.get_last("Т1")
+    accepted_pressure = view._buffer_store.get_last("vacuum/pressure")
+    assert accepted_temperature is not None
+    assert accepted_pressure is not None
+    assert view._temp_plot._buffer is view._buffer_store
+    assert view._pressure_plot._buffer is view._buffer_store
+
+    view.set_connected(False)
+
+    assert cell._value_widget.text() == "4.20"
+    assert cell._status_hint_widget.text() == "Нет связи · последнее известное значение"
+    assert "dashed" in cell.styleSheet()
+    assert theme.TEXT_DISABLED in cell._value_widget.styleSheet()
+
+    manager._notify()
+    rebuilt_cell = view._sensor_grid._cells["Т1"]
+    assert rebuilt_cell is not cell
+    view._sensor_grid.refresh()
+    assert rebuilt_cell._value_widget.text() == "4.20"
+    assert rebuilt_cell._status_hint_widget.text() == "Нет связи · последнее известное значение"
+    assert "dashed" in rebuilt_cell.styleSheet()
+    assert theme.TEXT_DISABLED in rebuilt_cell._value_widget.styleSheet()
+
+    view.on_reading(
+        Reading(
+            channel="Т1 Криостат верх",
+            value=3.9,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view.on_reading(
+        Reading(
+            channel="vacuum/pressure",
+            value=9.9e-4,
+            unit="mbar",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="vacuum_gauge",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+    assert rebuilt_cell._value_widget.text() == "4.20"
+    assert rebuilt_cell._status_hint_widget.text() == "Нет связи · последнее известное значение"
+    assert "dashed" in rebuilt_cell.styleSheet()
+    assert theme.TEXT_DISABLED in rebuilt_cell._value_widget.styleSheet()
+    assert view._buffer_store.get_last("Т1") == accepted_temperature
+    assert view._buffer_store.get_last("vacuum/pressure") == accepted_pressure
+
+    view.set_connected(True)
+    view._sensor_grid.refresh()
+    assert rebuilt_cell._status_hint_widget.text() == "Нет связи · последнее известное значение"
+    assert "dashed" in rebuilt_cell.styleSheet()
+    assert theme.TEXT_DISABLED in rebuilt_cell._value_widget.styleSheet()
+
+    view.on_reading(
+        Reading(
+            channel="Т1 Криостат верх",
+            value=4.1,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+
+    assert rebuilt_cell._value_widget.text() == "4.10"
+    assert rebuilt_cell._status_hint_widget.text() == "Норма"
+    assert "dashed" not in rebuilt_cell.styleSheet()
+    assert theme.TEXT_DISABLED not in rebuilt_cell._value_widget.styleSheet()
+
+
+def test_dashboard_first_explicit_disconnect_rejects_cold_start_reading(app):
+    """The production shell's initial False call establishes a closed generation."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    view = DashboardView(ChannelManager())
+    view.set_connected(False)
+    assert view._connection_generation == 1
+
+    view.on_reading(
+        Reading(
+            channel="Т1 Криостат верх",
+            value=8.8,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+
+    cell = view._sensor_grid._cells["Т1"]
+    assert view._buffer_store.get_last("Т1") is None
+    assert cell._value_widget.text() == "—"
+    assert cell._status_hint_widget.text() == "Нет связи · данных нет"
+    assert "dashed" in cell.styleSheet()
+
+
+def test_dashboard_producer_retirement_invalidates_gen_zero_startup_evidence(app):
+    """Explicit producer turnover revokes even pre-status startup evidence."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    view = DashboardView(ChannelManager())
+    view.on_reading(
+        Reading(
+            channel="Т1 Криостат верх",
+            value=6.6,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+    cell = view._sensor_grid._cells["Т1"]
+    accepted = view._buffer_store.get_last("Т1")
+    assert cell._status_hint_widget.text() == "Норма"
+    assert accepted is not None
+
+    view.invalidate_operator_snapshot_producer()
+
+    assert view._connection_generation == 1
+    assert cell._value_widget.text() == "6.60"
+    assert cell._status_hint_widget.text() == "Нет связи · последнее известное значение"
+    assert "dashed" in cell.styleSheet()
+
+    view.on_reading(
+        Reading(
+            channel="Т1 Криостат верх",
+            value=7.7,
+            unit="K",
+            timestamp=datetime.now(UTC),
+            status=ChannelStatus.OK,
+            instrument_id="lakeshore_218s",
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+    assert view._buffer_store.get_last("Т1") == accepted
+    assert cell._value_widget.text() == "6.60"
+    assert cell._status_hint_widget.text() == "Нет связи · последнее известное значение"
+
+
+def test_dashboard_disconnect_revokes_mutations_before_passive_rendering(app, monkeypatch):
+    """A sensor-rendering failure cannot retain mutation authority."""
+    view = DashboardView(ChannelManager())
+    view.set_connected(True)
+    view.set_operator_snapshot(_operator_snapshot(experiment_id="exp-1", revision=1))
+    assert view._phase_widget._create_btn.isEnabled()
+    assert view._quick_log._send_btn.isEnabled()
+
+    def fail_passive_rendering() -> None:
+        raise RuntimeError("sensor rendering failed")
+
+    monkeypatch.setattr(view._sensor_grid, "invalidate_transport", fail_passive_rendering)
+    with pytest.raises(RuntimeError, match="sensor rendering failed"):
+        view.set_connected(False)
+
+    assert view._connected is False
+    assert view._authority_valid is False
+    assert not view._phase_widget._create_btn.isEnabled()
+    assert not view._quick_log._send_btn.isEnabled()
+    assert view._sensor_grid._read_only is True
+
+
 def test_coalescing_preserves_every_sample_in_full_rate_buffer(app):
     from datetime import datetime
 

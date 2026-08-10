@@ -261,12 +261,14 @@ class DashboardView(QScrollArea):
             return
         timestamp_epoch = reading.timestamp.timestamp()
 
+        accepts_measurement = self._connected or self._connection_generation == 0
         if channel.startswith("\u0422"):  # cyrillic Т
             short_id = channel.split(" ")[0]
-            self._buffer_store.append(short_id, timestamp_epoch, float(value))
-            if self._sensor_grid is not None:
-                self._sensor_grid.dispatch_reading(reading, identity_status)
-        elif channel.endswith("/pressure"):
+            if accepts_measurement:
+                self._buffer_store.append(short_id, timestamp_epoch, float(value))
+                if self._sensor_grid is not None:
+                    self._sensor_grid.dispatch_reading(reading, identity_status)
+        elif channel.endswith("/pressure") and accepts_measurement:
             self._buffer_store.append(channel, timestamp_epoch, float(value))
 
         # B.5.5: route analytics readings to phase widget
@@ -283,7 +285,7 @@ class DashboardView(QScrollArea):
 
     def set_connected(self, connected: bool) -> None:
         connected = bool(connected)
-        if connected == self._connected:
+        if connected == self._connected and self._connection_generation > 0:
             return
         self._connected = connected
         self._connection_generation += 1
@@ -313,6 +315,8 @@ class DashboardView(QScrollArea):
             else:
                 self._quick_log.set_read_stale("Связь с Engine потеряна; показаны последние подтверждённые данные")
         self._update_mutation_authority()
+        if not connected and self._sensor_grid is not None:
+            self._sensor_grid.invalidate_transport()
         if connected:
             self._poll_log_entries()
             self._start_phase_reconciliation()
@@ -333,6 +337,8 @@ class DashboardView(QScrollArea):
         self._authority_revision = None
         self._authority_snapshot = None
         self._update_mutation_authority()
+        if self._sensor_grid is not None:
+            self._sensor_grid.invalidate_transport()
 
     def _update_mutation_authority(self) -> None:
         mutable = self._connected and not self._read_only and self._authority_valid
