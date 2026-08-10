@@ -14,7 +14,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import FunctionType, MethodType
-from typing import Final, Protocol, runtime_checkable
+from typing import Any, Final, Protocol, runtime_checkable
 
 MAX_METRICS_PER_DEVICE: Final = 64
 MAX_ALARMS_PER_DEVICE: Final = 32
@@ -544,3 +544,13 @@ def _issue_health_telemetry_reader(
         read_snapshot=method,
         descriptor=descriptor,
     )
+
+
+def __getattr__(name: str) -> Any:
+    if name == "HealthTelemetryDevice":
+        from cryodaq import health as health_package
+
+        protocol = health_package.HealthTelemetryDevice
+        globals()[name] = protocol
+        return protocol
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -5,7 +5,20 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from cryodaq.health.contract import HealthFreshness, HealthTelemetryError
-from cryodaq.health.simulator import DeterministicFleetHealthSimulator
+from cryodaq.health.simulator import DeterministicFleetHealthSimulator, DeterministicHealthTelemetryNode
+
+
+def test_deterministic_health_node_defaults_construct_and_emit() -> None:
+    node = DeterministicHealthTelemetryNode(
+        device_id="compressor.primary",
+        component_type="compressor",
+    )
+
+    snapshot = node.read_health_snapshot(observed_time_s=10.0)
+
+    assert snapshot.revision == 1
+    assert snapshot.descriptor is node.health_descriptor
+    assert snapshot.freshness is HealthFreshness.FRESH
 
 
 def test_default_fleet_is_stable_100_devices_2000_metrics_at_two_hz() -> None:

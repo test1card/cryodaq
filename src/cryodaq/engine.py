@@ -2130,6 +2130,11 @@ def _load_drivers(
         raise DriverRegistryError(f"{config_path}: root config must be a mapping")
     if any(not isinstance(key, str) for key in raw):
         raise DriverRegistryError(f"{config_path}: root config keys must be strings")
+    if "health_nodes" in raw:
+        raise DriverRegistryError(
+            f"{config_path}: health_nodes is not supported by the production engine; "
+            "infrastructure health remains explicitly unavailable"
+        )
 
     try:
         context = DriverConstructionContext.from_root_config(

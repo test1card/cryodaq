@@ -294,6 +294,24 @@ def _identity_normalizer(values: dict[str, object], _path: str) -> dict[str, obj
     return values
 
 
+def _deterministic_health_normalizer(values: dict[str, object], path: str) -> dict[str, object]:
+    cadence = float(values["cadence_hz"])
+    if cadence <= 0:
+        raise DriverRegistryError(f"{path}.cadence_hz must be > 0")
+    stale_after_s = float(values["stale_after_s"])
+    if stale_after_s <= 0:
+        raise DriverRegistryError(f"{path}.stale_after_s must be > 0")
+    disconnected_after_s = float(values["disconnected_after_s"])
+    if disconnected_after_s <= stale_after_s:
+        raise DriverRegistryError(f"{path}.disconnected_after_s must be greater than stale_after_s")
+    start = float(values["start_time_s"])
+    tick_s = 1.0 / cadence
+    horizon_s = start + (MAX_DETERMINISTIC_HEALTH_NODE_FRAMES - 1) * tick_s
+    if not math.isfinite(horizon_s) or start + tick_s <= start or math.ulp(horizon_s) > tick_s:
+        raise DriverRegistryError(f"{path}.start_time_s must yield finite, distinct cadence ticks")
+    return values
+
+
 def _lakeshore_normalizer(values: dict[str, object], path: str) -> dict[str, object]:
     resource = values.get("resource")
     if not isinstance(resource, str) or re.fullmatch(r"GPIB[0-9]+::[0-9]+::INSTR", resource, re.IGNORECASE) is None:
@@ -558,7 +576,7 @@ _PASSIVE_SPECS = {
                 maximum=86_400.0,
             ),
         },
-        normalizer=_identity_normalizer,
+        normalizer=_deterministic_health_normalizer,
         factory=_construct_deterministic_health_node,
         implementation_type=DeterministicHealthTelemetryNode,
     ),
@@ -711,7 +729,8 @@ def construct_health_telemetry_reader(
         implementation_type=implementation_type,
     )
     reader = _issue_health_telemetry_reader(candidate, entry=entry)
-    _register_health_telemetry_reader(reader, spec)
+    with _HEALTH_TELEMETRY_BINDINGS_LOCK:
+        _HEALTH_TELEMETRY_BINDINGS[reader] = spec
     return reader
 
 
@@ -965,27 +984,6 @@ _HEALTH_TELEMETRY_BINDINGS: weakref.WeakKeyDictionary[_IssuedHealthTelemetryRead
     weakref.WeakKeyDictionary()
 )
 _HEALTH_TELEMETRY_BINDINGS_LOCK = threading.Lock()
-
-
-def _register_health_telemetry_reader(reader: HealthTelemetryReader, spec: DriverSpec) -> None:
-    if type(reader) is not _IssuedHealthTelemetryReader:
-        raise DriverRegistryError("health telemetry registry requires an exact issued reader")
-    canonical = get_health_telemetry_spec(spec.type_name)
-    if spec is not canonical:
-        raise DriverRegistryError("health telemetry reader spec is not canonical")
-    implementation_type = spec.implementation_type
-    entry = object.__getattribute__(reader, "_entry")
-    read_snapshot = object.__getattribute__(reader, "_read_snapshot")
-    if (
-        implementation_type is None
-        or type(entry) is not _StaticHealthTelemetryAllowlistEntry
-        or entry.implementation_type is not implementation_type
-        or type(read_snapshot.__self__) is not implementation_type
-    ):
-        raise DriverRegistryError("health telemetry reader implementation does not match its canonical spec")
-    reader.descriptor
-    with _HEALTH_TELEMETRY_BINDINGS_LOCK:
-        _HEALTH_TELEMETRY_BINDINGS[reader] = spec
 
 
 def health_telemetry_spec_for_reader(reader: object) -> DriverSpec | None:

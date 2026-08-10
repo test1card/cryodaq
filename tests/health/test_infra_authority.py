@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
@@ -17,17 +19,12 @@ from cryodaq.health.contract import (
     HealthMetricDescriptor,
     HealthMetricKind,
     HealthQuality,
+    HealthTelemetryReader,
     HealthTelemetrySnapshot,
-)
-from cryodaq.health.contract import (
-    _issue_health_telemetry_reader as issue_health_telemetry_reader,
-)
-from cryodaq.health.contract import (
-    _StaticHealthTelemetryAllowlistEntry as StaticHealthTelemetryAllowlistEntry,
 )
 from cryodaq.health.infra_authority import ReaderPoolHealthAuthority, SimulatorHealthAuthority
 from cryodaq.health.simulator import DeterministicFleetHealthSimulator
-from cryodaq.operator_snapshot import OperatorPresentationState
+from cryodaq.operator_snapshot import MAX_FLEET_DEVICES, OperatorPresentationState
 
 NOW = datetime(2026, 7, 14, tzinfo=UTC)
 
@@ -90,18 +87,34 @@ _TEST_HEALTH_SPEC = driver_registry.DriverSpec(
 )
 
 
-@pytest.fixture(autouse=True)
-def _canonical_test_health_spec(monkeypatch: pytest.MonkeyPatch):
+@pytest.fixture
+def reader(monkeypatch: pytest.MonkeyPatch) -> Callable[[Device], HealthTelemetryReader]:
+    pending: list[Device] = []
+
+    def factory(config: object, context: object) -> Device:
+        assert isinstance(config, driver_registry.ValidatedInstrumentConfig)
+        assert isinstance(context, driver_registry.DriverConstructionContext)
+        assert context.mock is True
+        device = pending.pop(0)
+        assert device.health_descriptor.device_id == config.name
+        return device
+
+    spec = replace(_TEST_HEALTH_SPEC, factory=factory)
     specs = dict(driver_registry.BUILTIN_DRIVER_SPECS)
-    specs[_TEST_HEALTH_SPEC.type_name] = _TEST_HEALTH_SPEC
+    specs[spec.type_name] = spec
     monkeypatch.setattr(driver_registry, "BUILTIN_DRIVER_SPECS", MappingProxyType(specs))
 
+    def issue(device: Device) -> HealthTelemetryReader:
+        pending.append(device)
+        validated = driver_registry.validate_health_telemetry_entry(
+            {"type": spec.type_name, "name": device.health_descriptor.device_id}
+        )
+        return driver_registry.construct_health_telemetry_reader(
+            validated,
+            driver_registry.DriverConstructionContext(mock=True),
+        )
 
-def reader(device: Device):
-    entry = StaticHealthTelemetryAllowlistEntry(device.health_descriptor.device_id, type(device))
-    issued = issue_health_telemetry_reader(device, entry=entry)
-    driver_registry._register_health_telemetry_reader(issued, _TEST_HEALTH_SPEC)
-    return issued
+    return issue
 
 
 def metric(quality: HealthQuality):
@@ -115,6 +128,36 @@ def alarm(severity: HealthAlarmSeverity):
     return HealthAlarm("health.cooling", severity, True, "Cooling degraded", NOW.timestamp())
 
 
+def test_reader_pool_rejects_non_tuple_without_calling_untrusted_container_methods() -> None:
+    class OverproducingSequence(Sequence[object]):
+        def __init__(self) -> None:
+            self.len_calls = 0
+            self.iter_calls = 0
+
+        def __len__(self) -> int:
+            self.len_calls += 1
+            return 1
+
+        def __getitem__(self, index: int) -> object:
+            if 0 <= index < MAX_FLEET_DEVICES + 100:
+                return object()
+            raise IndexError(index)
+
+        def __iter__(self):
+            self.iter_calls += 1
+            for _index in range(MAX_FLEET_DEVICES + 100):
+                yield object()
+
+    source = OverproducingSequence()
+    with pytest.raises(TypeError, match="exact bounded tuple"):
+        ReaderPoolHealthAuthority(source)  # type: ignore[arg-type]
+    assert source.len_calls == 0
+    assert source.iter_calls == 0
+
+    with pytest.raises(ValueError, match="MAX_FLEET_DEVICES"):
+        ReaderPoolHealthAuthority((object(),) * (MAX_FLEET_DEVICES + 1))  # type: ignore[arg-type]
+
+
 def test_unissued_structural_reader_is_rejected() -> None:
     class ForgedReader:
         grants_control_authority = False
@@ -124,12 +167,12 @@ def test_unissued_structural_reader_is_rejected() -> None:
             raise AssertionError("must not be sampled")
 
     with pytest.raises(TypeError, match="registry-issued"):
-        ReaderPoolHealthAuthority([ForgedReader()])
+        ReaderPoolHealthAuthority((ForgedReader(),))
 
 
-def test_snapshot_cut_never_polls_and_presample_exception_is_unavailable() -> None:
+def test_snapshot_cut_never_polls_and_presample_exception_is_unavailable(reader) -> None:
     device = Device(raises=True)
-    authority = ReaderPoolHealthAuthority([reader(device)])
+    authority = ReaderPoolHealthAuthority((reader(device),))
     initial = authority.snapshot_for_cut(cut())
     assert device._calls == 0
     authority.presample(observed_time_s=NOW.timestamp())
@@ -150,8 +193,8 @@ def test_snapshot_cut_never_polls_and_presample_exception_is_unavailable() -> No
         (HealthAlarmSeverity.FAULT, OperatorPresentationState.FAULT),
     ],
 )
-def test_alarm_severity_is_not_downgraded(severity, expected) -> None:
-    authority = ReaderPoolHealthAuthority([reader(Device(alarms=(alarm(severity),)))])
+def test_alarm_severity_is_not_downgraded(severity, expected, reader) -> None:
+    authority = ReaderPoolHealthAuthority((reader(Device(alarms=(alarm(severity),))),))
     authority.presample(observed_time_s=NOW.timestamp())
     node = authority.snapshot_for_cut(cut()).nodes[0]
     assert node.state is expected
@@ -166,15 +209,15 @@ def test_alarm_severity_is_not_downgraded(severity, expected) -> None:
         (HealthQuality.UNKNOWN, OperatorPresentationState.STALE),
     ],
 )
-def test_metric_quality_is_conservative(quality, expected) -> None:
-    authority = ReaderPoolHealthAuthority([reader(Device(metrics=(metric(quality),)))])
+def test_metric_quality_is_conservative(quality, expected, reader) -> None:
+    authority = ReaderPoolHealthAuthority((reader(Device(metrics=(metric(quality),))),))
     authority.presample(observed_time_s=NOW.timestamp())
     assert authority.snapshot_for_cut(cut()).nodes[0].state is expected
 
 
-def test_cached_freshness_ages_at_cut_without_polling() -> None:
+def test_cached_freshness_ages_at_cut_without_polling(reader) -> None:
     device = Device()
-    authority = ReaderPoolHealthAuthority([reader(device)])
+    authority = ReaderPoolHealthAuthority((reader(device),))
     authority.presample(observed_time_s=NOW.timestamp())
 
     fresh = authority.snapshot_for_cut(cut())
@@ -190,14 +233,19 @@ def test_cached_freshness_ages_at_cut_without_polling() -> None:
     assert len({fresh.token, stale.token, disconnected.token}) == 3
 
 
-def test_duplicate_reader_identity_is_rejected() -> None:
+def test_duplicate_reader_identity_is_rejected(reader) -> None:
     with pytest.raises(ValueError, match="duplicate device identities"):
-        ReaderPoolHealthAuthority([reader(Device()), reader(Device())])
+        ReaderPoolHealthAuthority(
+            (
+                reader(Device()),
+                reader(Device()),
+            )
+        )
 
 
-def test_token_binds_cut_and_source_revision() -> None:
+def test_token_binds_cut_and_source_revision(reader) -> None:
     device = Device()
-    authority = ReaderPoolHealthAuthority([reader(device)])
+    authority = ReaderPoolHealthAuthority((reader(device),))
     authority.presample(observed_time_s=NOW.timestamp())
     first = authority.snapshot_for_cut(cut())
     other_cut = authority.snapshot_for_cut(cut(2, NOW + timedelta(seconds=1)))
@@ -208,8 +256,8 @@ def test_token_binds_cut_and_source_revision() -> None:
     assert (first.revision, next_source.revision) == (1, 2)
 
 
-def test_source_revision_replay_invalidates_cached_authority() -> None:
-    authority = ReaderPoolHealthAuthority([reader(Device())])
+def test_source_revision_replay_invalidates_cached_authority(reader) -> None:
+    authority = ReaderPoolHealthAuthority((reader(Device()),))
     authority.presample(observed_time_s=NOW.timestamp())
     assert authority.snapshot_for_cut(cut()).availability is AuthorityAvailability.AVAILABLE
     authority.presample(observed_time_s=(NOW + timedelta(seconds=1)).timestamp())

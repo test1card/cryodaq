@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import subprocess
+import sys
 import tracemalloc
 from datetime import UTC, datetime
 from typing import get_type_hints
@@ -15,25 +17,31 @@ import cryodaq.health.contract as health_contract
 from cryodaq.engine_wiring.operator_snapshot_authorities import AuthorityAvailability, CommonCut
 from cryodaq.health.contract import HealthDeviceDescriptor, HealthTelemetrySnapshot
 from cryodaq.health.infra_authority import ReaderPoolHealthAuthority
+from cryodaq.health.simulator import DeterministicHealthTelemetryNode
 from cryodaq.operator_snapshot import OperatorPresentationState
 
 _FORBIDDEN_COMMAND_TOKENS = ("start", "stop", "reset", "vent", "purge", "set", "remediate")
 
 
-def _registry_reader(*, heartbeat_frames: int = 4, **overrides: object):
-    factory = getattr(driver_registry, "construct_health_telemetry_reader", None)
-    assert callable(factory), "driver registry must construct allowlisted health telemetry readers"
+def _health_configuration(**overrides: object) -> dict[str, object]:
     configuration: dict[str, object] = {
         "type": "deterministic_health_node",
         "name": "compressor.primary",
         "component_type": "compressor",
         "cadence_hz": 2.0,
         "start_time_s": 10.0,
-        "heartbeat_frames": heartbeat_frames,
+        "heartbeat_frames": 4,
         "stale_after_s": 0.5,
         "disconnected_after_s": 1.0,
     }
     configuration.update(overrides)
+    return configuration
+
+
+def _registry_reader(*, heartbeat_frames: int = 4, **overrides: object):
+    factory = getattr(driver_registry, "construct_health_telemetry_reader", None)
+    assert callable(factory), "driver registry must construct allowlisted health telemetry readers"
+    configuration = _health_configuration(heartbeat_frames=heartbeat_frames, **overrides)
     validated = driver_registry.validate_health_telemetry_entry(configuration, path="health_nodes[0]")
     context = driver_registry.DriverConstructionContext(mock=True)
     return factory(validated, context)
@@ -56,6 +64,35 @@ def test_health_protocol_lives_with_driver_capabilities_and_is_snapshot_only() -
     snapshot_hints = get_type_hints(protocol.read_health_snapshot)
     assert descriptor_hints["return"].__name__ == "HealthDeviceDescriptor"
     assert snapshot_hints["return"].__name__ == "HealthTelemetrySnapshot"
+    assert getattr(health_contract, "HealthTelemetryDevice", None) is protocol
+
+
+@pytest.mark.parametrize("contract_first", [True, False])
+def test_health_protocol_compatibility_alias_is_cycle_safe_in_fresh_process(contract_first: bool) -> None:
+    first_import = (
+        "import cryodaq.health.contract as health_contract\n"
+        "contract_protocol = health_contract.HealthTelemetryDevice\n"
+        "from cryodaq.drivers.contracts import HealthTelemetryDevice as driver_protocol\n"
+        if contract_first
+        else "from cryodaq.drivers.contracts import HealthTelemetryDevice as driver_protocol\n"
+        "import cryodaq.health.contract as health_contract\n"
+        "contract_protocol = health_contract.HealthTelemetryDevice\n"
+    )
+    script = (
+        first_import
+        + "from cryodaq.health import HealthTelemetryDevice as package_protocol\n"
+        + "assert contract_protocol is driver_protocol is package_protocol\n"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_health_simulator_is_an_exact_static_driver_registry_allowlist_entry() -> None:
@@ -109,11 +146,8 @@ def test_unregistered_snapshot_implementation_cannot_execute_hidden_remediation(
         type(rogue),
     )
     directly_issued = health_contract._issue_health_telemetry_reader(rogue, entry=entry)
-    canonical = driver_registry.get_driver_spec("deterministic_health_node")
     assert driver_registry.health_telemetry_spec_for_reader(directly_issued) is None
-    with pytest.raises(driver_registry.DriverRegistryError, match="implementation"):
-        driver_registry._register_health_telemetry_reader(directly_issued, canonical)
-    assert driver_registry.health_telemetry_spec_for_reader(directly_issued) is None
+    assert not hasattr(driver_registry, "_register_health_telemetry_reader")
     with pytest.raises(TypeError, match="registry-issued"):
         ReaderPoolHealthAuthority((directly_issued,))
     assert rogue._commanded is False, "unregistered health sampling executed hidden remediation"
@@ -121,6 +155,23 @@ def test_unregistered_snapshot_implementation_cannot_execute_hidden_remediation(
     assert not hasattr(health_package, "issue_health_telemetry_reader")
     assert not hasattr(health_contract, "StaticHealthTelemetryAllowlistEntry")
     assert not hasattr(health_contract, "issue_health_telemetry_reader")
+
+
+def test_registry_has_no_callable_provenance_minting_seam() -> None:
+    node = DeterministicHealthTelemetryNode(
+        device_id="compressor.direct",
+        component_type="compressor",
+        heartbeat_frames=4,
+    )
+    entry = health_contract._StaticHealthTelemetryAllowlistEntry(node.health_descriptor.device_id, type(node))
+    directly_issued = health_contract._issue_health_telemetry_reader(node, entry=entry)
+
+    assert driver_registry.health_telemetry_spec_for_reader(directly_issued) is None
+    assert not hasattr(driver_registry, "_register_health_telemetry_reader"), (
+        "canonical registry provenance must be minted only inside validated construction"
+    )
+    with pytest.raises(TypeError, match="registry-issued"):
+        ReaderPoolHealthAuthority((directly_issued,))
 
 
 def test_registry_reader_cannot_be_coerced_into_command_capability() -> None:
@@ -176,8 +227,32 @@ def test_registry_rejects_faster_than_two_hz() -> None:
 
 @pytest.mark.parametrize("start_time_s", [1e308, float(2**52 - 1024)])
 def test_registry_rejects_clock_ranges_that_collapse_distinct_cadence_ticks(start_time_s: float) -> None:
-    with pytest.raises(ValueError, match="start_time_s"):
-        _registry_reader(start_time_s=start_time_s)
+    with pytest.raises(driver_registry.DriverRegistryError, match=r"health_nodes\[0\]\.start_time_s"):
+        driver_registry.validate_health_telemetry_entry(
+            _health_configuration(start_time_s=start_time_s),
+            path="health_nodes[0]",
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"cadence_hz": 0.0}, "cadence_hz"),
+        ({"cadence_hz": -1.0}, "cadence_hz"),
+        ({"stale_after_s": 0.0}, "stale_after_s"),
+        ({"stale_after_s": 1.0, "disconnected_after_s": 1.0}, "disconnected_after_s"),
+        ({"stale_after_s": 2.0, "disconnected_after_s": 1.0}, "disconnected_after_s"),
+    ],
+)
+def test_health_validation_rejects_invalid_semantics_before_construction(
+    overrides: dict[str, object],
+    field: str,
+) -> None:
+    with pytest.raises(driver_registry.DriverRegistryError, match=rf"health_nodes\[0\]\.{field}"):
+        driver_registry.validate_health_telemetry_entry(
+            _health_configuration(**overrides),
+            path="health_nodes[0]",
+        )
 
 
 def test_registry_rejects_unknown_health_type() -> None:
@@ -212,47 +287,49 @@ def test_silent_node_projects_explicit_disconnected_instead_of_healthy() -> None
 
 @pytest.mark.asyncio
 async def test_repeated_registry_updates_have_bounded_resources_and_retained_memory() -> None:
+    from PySide6.QtWidgets import QApplication
+
+    application = QApplication.instance() or QApplication([])
     reader = _registry_reader(heartbeat_frames=20_000)
+    authority = ReaderPoolHealthAuthority((reader,))
     receipt_count = len(driver_registry._HEALTH_TELEMETRY_BINDINGS)
     before_tasks = set(asyncio.all_tasks())
-    try:
-        from PySide6.QtWidgets import QApplication
-    except ImportError:  # pragma: no cover - core-only developer environments
-        application = None
-        before_widgets = 0
-    else:
-        application = QApplication.instance()
-        before_widgets = 0 if application is None else len(application.allWidgets())
+    before_queues = sum(isinstance(value, asyncio.Queue) for value in gc.get_objects())
+    before_widgets = len(application.allWidgets())
+
     for index in range(128):
-        reader.snapshot(observed_time_s=10.0 + index * 0.5)
+        observed = 10.0 + index * 0.5
+        authority.presample(observed_time_s=observed)
+        receipt = authority.snapshot_for_cut(_cut(index + 1, observed))
+        assert receipt.availability is AuthorityAvailability.AVAILABLE
+
     gc.collect()
     tracemalloc.start()
     baseline_current, _baseline_peak = tracemalloc.get_traced_memory()
     tracemalloc.reset_peak()
-    snapshot = None
+    receipt = None
     for index in range(128, 10_128):
-        snapshot = reader.snapshot(observed_time_s=10.0 + index * 0.5)
-    del snapshot
+        observed = 10.0 + index * 0.5
+        authority.presample(observed_time_s=observed)
+        receipt = authority.snapshot_for_cut(_cut(index + 1, observed))
+    assert receipt is not None and len(receipt.nodes) == 1
+    del receipt
     gc.collect()
     final_current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    after_widgets = 0 if application is None else len(application.allWidgets())
-    retained_slots = {
-        slot: object.__getattribute__(reader, slot)
-        for slot in type(reader).__slots__
-        if slot not in {"_entry", "_read_snapshot"}
-    }
-    read_snapshot = object.__getattribute__(reader, "_read_snapshot")
-    node = read_snapshot.__self__
-    retained_node_slots = {slot: object.__getattribute__(node, slot) for slot in type(node).__slots__}
-    retained_values = (*retained_slots.values(), *retained_node_slots.values())
+
+    after_queues = sum(isinstance(value, asyncio.Queue) for value in gc.get_objects())
+    after_widgets = len(application.allWidgets())
+    cached = object.__getattribute__(authority, "_cached")
+    retained_readers = object.__getattribute__(authority, "_readers")
+    retained_sources = object.__getattribute__(authority, "_last_sources")
+
     assert set(asyncio.all_tasks()) == before_tasks
-    assert len(driver_registry._HEALTH_TELEMETRY_BINDINGS) == receipt_count
+    assert after_queues == before_queues
     assert after_widgets == before_widgets
-    assert not any(isinstance(value, (asyncio.Queue, asyncio.Task)) for value in retained_values)
-    assert len(retained_slots["_metric_schema"]) == 1
-    assert retained_slots["_counter_values"] == {}
-    assert len(retained_node_slots) == 7
-    assert not any(isinstance(value, (dict, list, set)) for value in retained_node_slots.values())
-    assert final_current - baseline_current <= 32_768
-    assert peak - baseline_current <= 131_072
+    assert len(driver_registry._HEALTH_TELEMETRY_BINDINGS) == receipt_count
+    assert len(retained_readers) == 1
+    assert len(retained_sources) == 1
+    assert cached is not None and len(cached.snapshots) == len(cached.source_evidence) == 1
+    assert final_current - baseline_current <= 65_536, (baseline_current, final_current)
+    assert peak - baseline_current <= 524_288, (baseline_current, peak)

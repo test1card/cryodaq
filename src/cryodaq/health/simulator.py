@@ -268,7 +268,7 @@ class DeterministicHealthTelemetryNode:
         component_type: str,
         cadence_hz: float = 2.0,
         start_time_s: float = 10.0,
-        heartbeat_frames: int = MAX_SIMULATOR_FRAMES,
+        heartbeat_frames: int = MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
         stale_after_s: float = 1.0,
         disconnected_after_s: float = 5.0,
     ) -> None:
