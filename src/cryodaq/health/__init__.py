@@ -18,8 +18,6 @@ from cryodaq.health.contract import (
     HealthTelemetryError,
     HealthTelemetryReader,
     HealthTelemetrySnapshot,
-    StaticHealthTelemetryAllowlistEntry,
-    issue_health_telemetry_reader,
 )
 from cryodaq.health.simulator import (
     DeterministicFleetHealthSimulator,
@@ -45,9 +43,7 @@ __all__ = [
     "HealthTelemetryError",
     "HealthTelemetryReader",
     "HealthTelemetrySnapshot",
-    "StaticHealthTelemetryAllowlistEntry",
     "estimate_fleet_frame_payload_bytes",
-    "issue_health_telemetry_reader",
 ]
 
 

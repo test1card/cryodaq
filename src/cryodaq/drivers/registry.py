@@ -36,10 +36,14 @@ from cryodaq.drivers.contracts import (
 )
 from cryodaq.health.contract import (
     HealthTelemetryReader,
-    StaticHealthTelemetryAllowlistEntry,
-    issue_health_telemetry_reader,
+    _issue_health_telemetry_reader,
+    _IssuedHealthTelemetryReader,
+    _StaticHealthTelemetryAllowlistEntry,
 )
-from cryodaq.health.simulator import DeterministicHealthTelemetryNode
+from cryodaq.health.simulator import (
+    MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
+    DeterministicHealthTelemetryNode,
+)
 
 DRIVER_REGISTRY_COMPAT_VERSION: Final = 1
 logger = logging.getLogger(__name__)
@@ -221,7 +225,7 @@ class ValidatedInstrumentConfig:
 
 
 ConfigNormalizer = Callable[[dict[str, object], str], dict[str, object]]
-DriverFactory = Callable[[ValidatedInstrumentConfig, DriverConstructionContext], InstrumentDriver]
+DriverFactory = Callable[[ValidatedInstrumentConfig, DriverConstructionContext], object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +241,7 @@ class DriverSpec:
     normalizer: ConfigNormalizer
     factory: DriverFactory
     reviewed_source_binding: ReviewedSourceBinding | None = None
+    implementation_type: type[object] | None = None
 
     def __post_init__(self) -> None:
         capabilities = frozenset(self.capabilities)
@@ -253,6 +258,22 @@ class DriverSpec:
             DriverCapability.CONTROLLED_SOURCE,
             DriverCapability.VERIFIED_OFF_SOURCE,
         }
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE in capabilities:
+            if (
+                capabilities != frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE})
+                or self.authority is not DriverAuthority.PASSIVE_EXTENSION
+                or self.reviewed_source_binding is not None
+            ):
+                raise ValueError("health telemetry must be an authority-free passive extension")
+            implementation_type = self.implementation_type
+            if type(implementation_type) is not type:
+                raise TypeError("health telemetry requires an exact implementation_type")
+            if self.module != implementation_type.__module__ or self.class_name != implementation_type.__name__:
+                raise ValueError("health telemetry module/class must match the exact implementation_type")
+            _StaticHealthTelemetryAllowlistEntry(self.type_name, implementation_type)
+            return
+        if self.implementation_type is not None:
+            raise ValueError("implementation_type is reserved for health telemetry")
         if self.authority in {
             DriverAuthority.PASSIVE_MEASUREMENT,
             DriverAuthority.PASSIVE_EXTENSION,
@@ -267,42 +288,6 @@ class DriverSpec:
             raise ValueError("reviewed source requires a binding from the reviewed-source roster")
         if binding.driver_type != self.type_name:
             raise ValueError("reviewed source requires a roster binding for its own driver type")
-
-
-@dataclass(frozen=True, slots=True)
-class HealthTelemetryDriverSpec:
-    """Exact passive implementation admitted by the built-in driver registry."""
-
-    type_name: str
-    module: str
-    class_name: str
-    authority: DriverAuthority
-    capabilities: frozenset[DriverCapability]
-    implementation_type: type[object]
-
-    def __post_init__(self) -> None:
-        _bounded_identifier(self.type_name, label="HealthTelemetryDriverSpec.type_name")
-        if self.authority is not DriverAuthority.PASSIVE_EXTENSION:
-            raise ValueError("health telemetry must use passive-extension authority")
-        capabilities = frozenset(self.capabilities)
-        expected = frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE})
-        if capabilities != expected:
-            raise ValueError("health telemetry must declare only HEALTH_TELEMETRY_DEVICE capability")
-        object.__setattr__(self, "capabilities", capabilities)
-        if type(self.implementation_type) is not type:
-            raise TypeError("health telemetry implementation_type must be an exact class")
-        if self.module != self.implementation_type.__module__:
-            raise ValueError("health telemetry module must match the exact implementation class")
-        if self.class_name != self.implementation_type.__name__:
-            raise ValueError("health telemetry class_name must match the exact implementation class")
-        StaticHealthTelemetryAllowlistEntry(
-            device_id=self.type_name,
-            implementation_type=self.implementation_type,
-        )
-
-    @property
-    def grants_control_authority(self) -> bool:
-        return False
 
 
 def _identity_normalizer(values: dict[str, object], _path: str) -> dict[str, object]:
@@ -407,6 +392,24 @@ def _construct_asc_reference_tcp(
         read_timeout_s=float(values["read_timeout_s"]),
         close_timeout_s=float(values["close_timeout_s"]),
         max_frame_bytes=int(values["max_frame_bytes"]),
+    )
+
+
+def _construct_deterministic_health_node(
+    config: ValidatedInstrumentConfig,
+    context: DriverConstructionContext,
+) -> object:
+    if not context.mock:
+        raise DriverRegistryError("deterministic health telemetry is simulation-only")
+    values = config.values
+    return DeterministicHealthTelemetryNode(
+        device_id=config.name,
+        component_type=str(values["component_type"]),
+        cadence_hz=float(values["cadence_hz"]),
+        start_time_s=float(values["start_time_s"]),
+        heartbeat_frames=int(values["heartbeat_frames"]),
+        stale_after_s=float(values["stale_after_s"]),
+        disconnected_after_s=float(values["disconnected_after_s"]),
     )
 
 
@@ -525,6 +528,40 @@ _PASSIVE_SPECS = {
         normalizer=_identity_normalizer,
         factory=_construct_asc_reference_tcp,
     ),
+    "deterministic_health_node": DriverSpec(
+        type_name="deterministic_health_node",
+        module="cryodaq.health.simulator",
+        class_name="DeterministicHealthTelemetryNode",
+        authority=DriverAuthority.PASSIVE_EXTENSION,
+        capabilities=frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE}),
+        config_fields={
+            "type": ConfigField(ValueKind.STRING, required=True, setup_visible=False),
+            "name": ConfigField(ValueKind.STRING, required=True),
+            "component_type": ConfigField(
+                ValueKind.STRING,
+                required=True,
+                choices=("compressor", "pump_station", "cryocooler", "support_node"),
+            ),
+            "cadence_hz": ConfigField(ValueKind.NUMBER, default=2.0, maximum=2.0),
+            "start_time_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.0),
+            "heartbeat_frames": ConfigField(
+                ValueKind.INTEGER,
+                default=MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
+                minimum=1,
+                maximum=MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
+            ),
+            "stale_after_s": ConfigField(ValueKind.NUMBER, default=1.0, minimum=0.0, maximum=3_600.0),
+            "disconnected_after_s": ConfigField(
+                ValueKind.NUMBER,
+                default=5.0,
+                minimum=0.0,
+                maximum=86_400.0,
+            ),
+        },
+        normalizer=_identity_normalizer,
+        factory=_construct_deterministic_health_node,
+        implementation_type=DeterministicHealthTelemetryNode,
+    ),
 }
 
 _SOURCE_SPECS = {
@@ -560,18 +597,6 @@ REVIEWED_SOURCE_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
 )
 BUILTIN_DRIVER_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
     {spec.type_name: spec for spec in _CANONICAL_DRIVER_SPECS}
-)
-BUILTIN_HEALTH_TELEMETRY_SPECS: Final[Mapping[str, HealthTelemetryDriverSpec]] = MappingProxyType(
-    {
-        "deterministic_health_node": HealthTelemetryDriverSpec(
-            type_name="deterministic_health_node",
-            module="cryodaq.health.simulator",
-            class_name="DeterministicHealthTelemetryNode",
-            authority=DriverAuthority.PASSIVE_EXTENSION,
-            capabilities=frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE}),
-            implementation_type=DeterministicHealthTelemetryNode,
-        )
-    }
 )
 del _PASSIVE_SPECS, _SOURCE_SPECS
 ALLOWLISTED_DRIVER_MODULES: Final[tuple[str, ...]] = tuple(
@@ -632,32 +657,46 @@ def get_driver_spec(type_name: object) -> DriverSpec:
         raise UnknownDriverTypeError(f"unknown instrument type {type_name!r}") from exc
 
 
-def get_health_telemetry_spec(type_name: object) -> HealthTelemetryDriverSpec:
-    """Resolve one exact built-in passive health implementation or fail visibly."""
+def get_health_telemetry_spec(type_name: object) -> DriverSpec:
+    """Resolve one health capability from the canonical built-in registry."""
 
-    if type(type_name) is not str or not type_name:
-        raise UnknownDriverTypeError("health telemetry type must be a non-empty string")
     try:
-        return BUILTIN_HEALTH_TELEMETRY_SPECS[type_name]
-    except KeyError as exc:
+        spec = get_driver_spec(type_name)
+    except UnknownDriverTypeError as exc:
         raise UnknownDriverTypeError(f"unknown health telemetry type {type_name!r}") from exc
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE not in spec.capabilities:
+        raise UnknownDriverTypeError(f"registered type {type_name!r} is not health telemetry")
+    return spec
 
 
 def construct_health_telemetry_reader(
-    type_name: object,
-    **configuration: object,
+    config: ValidatedInstrumentConfig,
+    context: DriverConstructionContext,
 ) -> HealthTelemetryReader:
-    """Construct and seal one exact allowlisted passive health implementation."""
+    """Construct from canonical validation and bind the exact reader identity."""
 
-    spec = get_health_telemetry_spec(type_name)
-    candidate = spec.implementation_type(**configuration)
-    if type(candidate) is not spec.implementation_type:
-        raise DriverRegistryError("health telemetry constructor returned a non-exact implementation")
-    entry = StaticHealthTelemetryAllowlistEntry(
-        device_id=candidate.health_descriptor.device_id,  # type: ignore[attr-defined]
-        implementation_type=spec.implementation_type,
+    if (
+        not isinstance(config, ValidatedInstrumentConfig)
+        or getattr(config, "_provenance", None) is not _VALIDATION_PROVENANCE
+    ):
+        raise DriverRegistryError("construct_health_telemetry_reader requires validated configuration")
+    if not isinstance(context, DriverConstructionContext):
+        raise DriverRegistryError("construct_health_telemetry_reader requires a DriverConstructionContext")
+    spec = get_health_telemetry_spec(config.spec.type_name)
+    if config.spec is not spec:
+        raise DriverRegistryError("validated health config does not reference a canonical registry spec")
+    candidate = spec.factory(config, context)
+    implementation_type = spec.implementation_type
+    if implementation_type is None or type(candidate) is not implementation_type:
+        raise DriverRegistryError("health telemetry factory returned a non-exact implementation")
+    descriptor = candidate.health_descriptor  # type: ignore[attr-defined]
+    entry = _StaticHealthTelemetryAllowlistEntry(
+        device_id=descriptor.device_id,
+        implementation_type=implementation_type,
     )
-    return issue_health_telemetry_reader(candidate, entry=entry)
+    reader = _issue_health_telemetry_reader(candidate, entry=entry)
+    _register_health_telemetry_reader(reader, spec)
+    return reader
 
 
 def _validate_number(
@@ -872,6 +911,8 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
     canonical = get_driver_spec(config.spec.type_name)
     if config.spec is not canonical:
         raise DriverRegistryError("validated config does not reference a canonical registry spec")
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE in canonical.capabilities:
+        raise DriverRegistryError("health telemetry must use construct_health_telemetry_reader")
     driver = canonical.factory(config, context)
     if not isinstance(driver, InstrumentDriver):
         raise DriverRegistryError(f"factory for {canonical.type_name!r} returned an invalid driver")
@@ -884,6 +925,36 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
 _GPIB_RESOURCE = re.compile(r"^(GPIB[0-9]+)::[0-9]+::INSTR$", re.IGNORECASE)
 _RUNTIME_BINDINGS: weakref.WeakKeyDictionary[InstrumentDriver, DriverRuntimeBinding] = weakref.WeakKeyDictionary()
 _RUNTIME_BINDINGS_LOCK = threading.Lock()
+_HEALTH_TELEMETRY_BINDINGS: weakref.WeakKeyDictionary[_IssuedHealthTelemetryReader, DriverSpec] = (
+    weakref.WeakKeyDictionary()
+)
+_HEALTH_TELEMETRY_BINDINGS_LOCK = threading.Lock()
+
+
+def _register_health_telemetry_reader(reader: HealthTelemetryReader, spec: DriverSpec) -> None:
+    if type(reader) is not _IssuedHealthTelemetryReader:
+        raise DriverRegistryError("health telemetry registry requires an exact issued reader")
+    canonical = get_health_telemetry_spec(spec.type_name)
+    if spec is not canonical:
+        raise DriverRegistryError("health telemetry reader spec is not canonical")
+    with _HEALTH_TELEMETRY_BINDINGS_LOCK:
+        _HEALTH_TELEMETRY_BINDINGS[reader] = spec
+
+
+def health_telemetry_spec_for_reader(reader: object) -> DriverSpec | None:
+    """Return canonical provenance for an exact registry-constructed reader."""
+
+    if type(reader) is not _IssuedHealthTelemetryReader:
+        return None
+    with _HEALTH_TELEMETRY_BINDINGS_LOCK:
+        spec = _HEALTH_TELEMETRY_BINDINGS.get(reader)
+    if spec is None:
+        return None
+    try:
+        canonical = get_health_telemetry_spec(spec.type_name)
+    except UnknownDriverTypeError:
+        return None
+    return spec if spec is canonical else None
 
 
 def _runtime_binding(

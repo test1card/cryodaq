@@ -53,6 +53,7 @@ def test_registry_is_exact_static_allowlist() -> None:
         "thyracont_vsp63d",
         "etalon_multiline",
         "asc_reference_tcp",
+        "deterministic_health_node",
     }
     assert ALLOWLISTED_DRIVER_MODULES == tuple(sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values()))
 

@@ -24,6 +24,7 @@ from cryodaq.health.contract import (
 )
 
 MAX_SIMULATOR_FRAMES = 2**63 - 1
+MAX_DETERMINISTIC_HEALTH_NODE_FRAMES = 1_000_000
 _ORDINARY_COMPONENT_TYPES = frozenset({"compressor", "pump_station", "cryocooler", "support_node"})
 
 
@@ -283,7 +284,16 @@ class DeterministicHealthTelemetryNode:
         start = float(start_time_s)
         if not math.isfinite(start) or start < 0:
             raise HealthTelemetryError("start_time_s must be finite and non-negative")
-        if type(heartbeat_frames) is not int or not 1 <= heartbeat_frames <= MAX_SIMULATOR_FRAMES:
+        try:
+            tick_s = 1.0 / cadence
+            horizon_s = start + (MAX_DETERMINISTIC_HEALTH_NODE_FRAMES - 1) * tick_s
+        except OverflowError as exc:
+            raise HealthTelemetryError(
+                "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
+            ) from exc
+        if not math.isfinite(tick_s) or not math.isfinite(horizon_s) or start + tick_s <= start:
+            raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
+        if type(heartbeat_frames) is not int or not 1 <= heartbeat_frames <= MAX_DETERMINISTIC_HEALTH_NODE_FRAMES:
             raise HealthTelemetryError("heartbeat_frames must be a positive bounded integer")
         self._descriptor = HealthDeviceDescriptor(
             device_id=device_id,
@@ -310,7 +320,7 @@ class DeterministicHealthTelemetryNode:
         return self._descriptor
 
     def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot:
-        if self._revision >= MAX_SIMULATOR_FRAMES:
+        if self._revision >= MAX_DETERMINISTIC_HEALTH_NODE_FRAMES:
             raise HealthTelemetryError("simulator exhausted its bounded revision space")
         expected = self._start_time_s + self._revision / self._cadence_hz
         if (

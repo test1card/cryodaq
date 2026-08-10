@@ -242,9 +242,11 @@ class ReaderPoolHealthAuthority(_CachedHealthAuthority):
         readers_tuple = tuple(readers)
         if len(readers_tuple) != len(readers):
             raise ValueError("reader pool changed during construction")
+        from cryodaq.drivers.registry import health_telemetry_spec_for_reader
+
         for reader in readers_tuple:
-            if type(reader) is not _IssuedHealthTelemetryReader:
-                raise TypeError("each reader must be factory-issued by issue_health_telemetry_reader")
+            if type(reader) is not _IssuedHealthTelemetryReader or health_telemetry_spec_for_reader(reader) is None:
+                raise TypeError("each reader must be registry-issued by the canonical built-in driver registry")
             # These accessors re-check the issuer key and per-entry issuance token.
             if reader.grants_control_authority:
                 raise ValueError("health reader must not grant control authority")

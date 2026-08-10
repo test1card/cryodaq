@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 
 import pytest
 
+import cryodaq.drivers.registry as driver_registry
 from cryodaq.engine_wiring.operator_snapshot_authorities import AuthorityAvailability, CommonCut
 from cryodaq.health.contract import (
     HealthAlarm,
@@ -16,8 +18,12 @@ from cryodaq.health.contract import (
     HealthMetricKind,
     HealthQuality,
     HealthTelemetrySnapshot,
-    StaticHealthTelemetryAllowlistEntry,
-    issue_health_telemetry_reader,
+)
+from cryodaq.health.contract import (
+    _issue_health_telemetry_reader as issue_health_telemetry_reader,
+)
+from cryodaq.health.contract import (
+    _StaticHealthTelemetryAllowlistEntry as StaticHealthTelemetryAllowlistEntry,
 )
 from cryodaq.health.infra_authority import ReaderPoolHealthAuthority, SimulatorHealthAuthority
 from cryodaq.health.simulator import DeterministicFleetHealthSimulator
@@ -60,9 +66,42 @@ class Device:
         )
 
 
+def _test_normalizer(values: dict[str, object], _path: str) -> dict[str, object]:
+    return values
+
+
+def _unused_test_factory(config: object, context: object) -> object:
+    raise AssertionError((config, context))
+
+
+_TEST_HEALTH_SPEC = driver_registry.DriverSpec(
+    type_name="test_health_device",
+    module=Device.__module__,
+    class_name=Device.__name__,
+    authority=driver_registry.DriverAuthority.PASSIVE_EXTENSION,
+    capabilities=frozenset({driver_registry.DriverCapability.HEALTH_TELEMETRY_DEVICE}),
+    config_fields={
+        "type": driver_registry.ConfigField(driver_registry.ValueKind.STRING, required=True),
+        "name": driver_registry.ConfigField(driver_registry.ValueKind.STRING, required=True),
+    },
+    normalizer=_test_normalizer,
+    factory=_unused_test_factory,
+    implementation_type=Device,
+)
+
+
+@pytest.fixture(autouse=True)
+def _canonical_test_health_spec(monkeypatch: pytest.MonkeyPatch):
+    specs = dict(driver_registry.BUILTIN_DRIVER_SPECS)
+    specs[_TEST_HEALTH_SPEC.type_name] = _TEST_HEALTH_SPEC
+    monkeypatch.setattr(driver_registry, "BUILTIN_DRIVER_SPECS", MappingProxyType(specs))
+
+
 def reader(device: Device):
     entry = StaticHealthTelemetryAllowlistEntry(device.health_descriptor.device_id, type(device))
-    return issue_health_telemetry_reader(device, entry=entry)
+    issued = issue_health_telemetry_reader(device, entry=entry)
+    driver_registry._register_health_telemetry_reader(issued, _TEST_HEALTH_SPEC)
+    return issued
 
 
 def metric(quality: HealthQuality):
@@ -84,7 +123,7 @@ def test_unissued_structural_reader_is_rejected() -> None:
         def snapshot(self, *, observed_time_s: float):
             raise AssertionError("must not be sampled")
 
-    with pytest.raises(TypeError, match="factory-issued"):
+    with pytest.raises(TypeError, match="registry-issued"):
         ReaderPoolHealthAuthority([ForgedReader()])
 
 

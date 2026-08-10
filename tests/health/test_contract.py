@@ -20,8 +20,12 @@ from cryodaq.health.contract import (
     HealthTelemetryError,
     HealthTelemetryReader,
     HealthTelemetrySnapshot,
-    StaticHealthTelemetryAllowlistEntry,
-    issue_health_telemetry_reader,
+)
+from cryodaq.health.contract import (
+    _issue_health_telemetry_reader as issue_health_telemetry_reader,
+)
+from cryodaq.health.contract import (
+    _StaticHealthTelemetryAllowlistEntry as StaticHealthTelemetryAllowlistEntry,
 )
 
 
@@ -464,9 +468,7 @@ def test_reader_is_not_publicly_exported_and_package_surface_is_exact() -> None:
         "HealthTelemetryError",
         "HealthTelemetryReader",
         "HealthTelemetrySnapshot",
-        "StaticHealthTelemetryAllowlistEntry",
         "estimate_fleet_frame_payload_bytes",
-        "issue_health_telemetry_reader",
     }
 
 

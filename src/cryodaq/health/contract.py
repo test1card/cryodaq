@@ -2,8 +2,8 @@
 
 This module deliberately has no imports from drivers, the engine, scheduling,
 storage, the GUI, or safety code.  Structural conformance never grants device
-authority: a caller must issue an exact implementation through an explicit
-static allowlist entry, and the returned reader exposes snapshots only.
+authority: only the canonical driver registry may issue a reader accepted by
+the infrastructure authority, and that reader exposes snapshots only.
 """
 
 from __future__ import annotations
@@ -344,8 +344,8 @@ def _validate_implementation_type(implementation_type: type[object]) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class StaticHealthTelemetryAllowlistEntry:
-    """One exact, caller-owned issuance entry; no global registry is provided."""
+class _StaticHealthTelemetryAllowlistEntry:
+    """Internal exact-type validation receipt; it conveys no registry authority."""
 
     device_id: str
     implementation_type: type[object]
@@ -379,6 +379,7 @@ class _IssuedHealthTelemetryReader:
     """
 
     __slots__ = (
+        "__weakref__",
         "_counter_values",
         "_descriptor",
         "_entry",
@@ -411,14 +412,14 @@ class _IssuedHealthTelemetryReader:
         cls,
         *,
         issuer_key: object,
-        entry: StaticHealthTelemetryAllowlistEntry,
+        entry: _StaticHealthTelemetryAllowlistEntry,
         entry_token: object,
         read_snapshot: MethodType,
         descriptor: HealthDeviceDescriptor,
     ) -> _IssuedHealthTelemetryReader:
         if issuer_key is not _HEALTH_READER_ISSUER_KEY:
             raise TypeError("health telemetry reader issuer is not authorized")
-        if type(entry) is not StaticHealthTelemetryAllowlistEntry or entry_token is not entry._issuance_token:
+        if type(entry) is not _StaticHealthTelemetryAllowlistEntry or entry_token is not entry._issuance_token:
             raise TypeError("health telemetry allowlist issuance token does not match")
         if type(read_snapshot) is not MethodType:
             raise TypeError("read_snapshot must be an exact bound method")
@@ -444,7 +445,7 @@ class _IssuedHealthTelemetryReader:
             raise TypeError("health telemetry reader was not issued") from exc
         if (
             owner is not _HEALTH_READER_ISSUER_KEY
-            or type(entry) is not StaticHealthTelemetryAllowlistEntry
+            or type(entry) is not _StaticHealthTelemetryAllowlistEntry
             or entry_token is not entry._issuance_token
         ):
             raise TypeError("health telemetry reader was not issued")
@@ -496,7 +497,7 @@ class _IssuedHealthTelemetryReader:
     # These annotations document the slots initialized only by the private
     # issuer without making a public constructor available.
     _issuance_owner: object
-    _entry: StaticHealthTelemetryAllowlistEntry
+    _entry: _StaticHealthTelemetryAllowlistEntry
     _entry_token: object
     _read_snapshot: MethodType
     _descriptor: HealthDeviceDescriptor
@@ -507,12 +508,12 @@ class _IssuedHealthTelemetryReader:
     _counter_values: dict[str, int]
 
 
-def issue_health_telemetry_reader(
+def _issue_health_telemetry_reader(
     candidate: object,
     *,
-    entry: StaticHealthTelemetryAllowlistEntry,
+    entry: _StaticHealthTelemetryAllowlistEntry,
 ) -> HealthTelemetryReader:
-    """Issue one snapshot-only reader for an exact static allowlist match."""
+    """Internal wrapper seam; only a registry identity receipt permits polling."""
 
     if type(candidate) is not entry.implementation_type:
         raise HealthTelemetryError("health implementation type is not the exact allowlisted class")

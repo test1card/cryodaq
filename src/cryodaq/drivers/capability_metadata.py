@@ -112,6 +112,11 @@ _BUILTIN_DRIVER_METADATA_ROWS: Final = (
         capabilities=frozenset({DriverCapability.PASSIVE_SENSOR}),
     ),
     DriverTypeMetadata(
+        type_name="deterministic_health_node",
+        authority=DriverAuthority.PASSIVE_EXTENSION,
+        capabilities=frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE}),
+    ),
+    DriverTypeMetadata(
         type_name="keithley_2604b",
         authority=DriverAuthority.REVIEWED_SOURCE,
         capabilities=frozenset(
