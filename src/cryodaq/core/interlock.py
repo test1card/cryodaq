@@ -18,7 +18,7 @@ import asyncio
 import logging
 import math
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -276,6 +276,7 @@ class InterlockEngine:
         trip_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
         alarm_publisher: Any | None = None,
         dead_channel_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
+        dead_channel_recovery_handler: Callable[[InterlockCondition, Reading], Any] | None = None,
     ) -> None:
         """Initialize.
 
@@ -305,12 +306,17 @@ class InterlockEngine:
             ``on_interlock_dead_channel`` which gates the fault on the active
             source lifecycle (RUN_PERMITTED or RUNNING) — SafetyManager remains
             the sole authority.
+        dead_channel_recovery_handler:
+            Optional async/sync callback invoked only after a usable reading is
+            observed for the same canonical protected channel. A callback error
+            leaves the debounce window intact so recovery fails closed.
         """
         self._broker = broker
         self._actions = actions
         self._trip_handler = trip_handler
         self._alarm_publisher = alarm_publisher
         self._dead_channel_handler = dead_channel_handler
+        self._dead_channel_recovery_handler = dead_channel_recovery_handler
         self._interlocks: dict[str, _InterlockRecord] = {}
         self._events: deque[InterlockEvent] = deque(maxlen=_MAX_EVENTS)
         self._queue: asyncio.Queue[PublishedReading] | None = None
@@ -340,6 +346,7 @@ class InterlockEngine:
         *,
         snapshot: bytes | None = None,
         descriptor_catalog: Any | None = None,
+        poll_intervals_s_by_instrument: Mapping[str, float] | None = None,
     ) -> PhysicalPolicyReceipt:
         """Загрузить блокировки из YAML-файла.
 
@@ -415,7 +422,11 @@ class InterlockEngine:
                     f"interlocks.yaml at {config_path}: invalid interlock entry — {type(exc).__name__}: {exc}"
                 ) from exc
 
-        self._load_nonusable_escalation(raw, config_path)
+        self._load_nonusable_escalation(
+            raw,
+            config_path,
+            poll_intervals_s_by_instrument=poll_intervals_s_by_instrument,
+        )
 
         logger.info(
             "Конфигурация блокировок загружена из '%s': %d блокировок.",
@@ -424,12 +435,14 @@ class InterlockEngine:
         )
         return receipt_for_applied_policy("interlocks", config_path, snapshot)
 
-    def _load_nonusable_escalation(self, raw: dict[str, Any], config_path: Path) -> None:
-        """Parse the optional P2-5 ``nonusable_escalation`` block fail-closed.
-
-        Absent → keep defaults (10 s / 5 samples). Present but malformed →
-        raise ``InterlockConfigError`` (strict types, positive finite values).
-        """
+    def _load_nonusable_escalation(
+        self,
+        raw: dict[str, Any],
+        config_path: Path,
+        *,
+        poll_intervals_s_by_instrument: Mapping[str, float] | None,
+    ) -> None:
+        """Parse and cadence-bound the optional failed-sample escalation."""
         block = raw.get("nonusable_escalation")
         if block is None:
             return
@@ -438,19 +451,63 @@ class InterlockEngine:
                 f"interlocks.yaml at {config_path}: 'nonusable_escalation' must be a "
                 f"mapping, got {type(block).__name__}"
             )
-        try:
-            min_duration_s = float(block.get("min_duration_s", _DEFAULT_NONUSABLE_MIN_DURATION_S))
-            min_samples = int(block.get("min_samples", _DEFAULT_NONUSABLE_MIN_SAMPLES))
-        except (ValueError, TypeError) as exc:
+
+        duration_value = block.get("min_duration_s", _DEFAULT_NONUSABLE_MIN_DURATION_S)
+        samples_value = block.get("min_samples", _DEFAULT_NONUSABLE_MIN_SAMPLES)
+        if type(duration_value) not in (int, float) or type(samples_value) is not int:
             raise InterlockConfigError(
-                f"interlocks.yaml at {config_path}: invalid nonusable_escalation value — {type(exc).__name__}: {exc}"
-            ) from exc
+                f"interlocks.yaml at {config_path}: nonusable_escalation requires an exact numeric "
+                "min_duration_s and exact integer min_samples"
+            )
+        min_duration_s = float(duration_value)
+        min_samples = samples_value
         if not math.isfinite(min_duration_s) or min_duration_s <= 0 or min_samples <= 0:
             raise InterlockConfigError(
                 f"interlocks.yaml at {config_path}: nonusable_escalation requires "
                 f"positive finite min_duration_s and positive min_samples "
                 f"(got min_duration_s={min_duration_s}, min_samples={min_samples})"
             )
+        if min_samples > _DEFAULT_NONUSABLE_MIN_SAMPLES:
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: nonusable_escalation min_samples={min_samples} "
+                f"exceeds the reviewed maximum {_DEFAULT_NONUSABLE_MIN_SAMPLES}"
+            )
+        if not isinstance(poll_intervals_s_by_instrument, Mapping):
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: nonusable_escalation requires configured poll intervals "
+                "for every protected instrument"
+            )
+
+        protected_instruments = {
+            binding.instrument_id
+            for record in self._interlocks.values()
+            for binding in record.condition.channel_bindings
+        }
+        if not protected_instruments:
+            raise InterlockConfigError(
+                f"interlocks.yaml at {config_path}: nonusable_escalation has no protected instrument bindings"
+            )
+        for instrument_id in sorted(protected_instruments):
+            cadence_value = poll_intervals_s_by_instrument.get(instrument_id)
+            if type(cadence_value) not in (int, float):
+                raise InterlockConfigError(
+                    f"interlocks.yaml at {config_path}: missing exact poll interval for protected instrument "
+                    f"{instrument_id!r}"
+                )
+            cadence_s = float(cadence_value)
+            if not math.isfinite(cadence_s) or cadence_s <= 0:
+                raise InterlockConfigError(
+                    f"interlocks.yaml at {config_path}: protected instrument {instrument_id!r} has invalid "
+                    f"poll interval {cadence_value!r}"
+                )
+            max_duration_s = cadence_s * min_samples
+            if min_duration_s > max_duration_s:
+                raise InterlockConfigError(
+                    f"interlocks.yaml at {config_path}: nonusable_escalation min_duration_s={min_duration_s} "
+                    f"exceeds {instrument_id!r} cadence bound {max_duration_s} "
+                    f"({cadence_s}s * {min_samples} samples)"
+                )
+
         self._nonusable_min_duration_s = min_duration_s
         self._nonusable_min_samples = min_samples
 
@@ -574,7 +631,7 @@ class InterlockEngine:
         # сработало бы как реальное превышение).
         if matching:
             if reading.is_usable():
-                self._nonusable_windows.pop(reading.channel, None)
+                await self._handle_usable(reading, matching[0].condition)
             elif math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
                 # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
                 # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
@@ -609,6 +666,25 @@ class InterlockEngine:
                     and (datetime.now(UTC) - record.last_trip_time).total_seconds() < condition.cooldown_s
                 )
                 await self._trip(record, reading, suppress_notification=in_cooldown)
+
+    async def _handle_usable(self, reading: Reading, condition: InterlockCondition) -> None:
+        """Clear dead-channel state only after recovery authority accepts this sample."""
+        handler = self._dead_channel_recovery_handler
+        if handler is not None:
+            try:
+                result = handler(condition, reading)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                logger.critical(
+                    "dead_channel_recovery_handler failed for interlock '%s' channel '%s': %s",
+                    condition.name,
+                    reading.channel,
+                    exc,
+                    exc_info=True,
+                )
+                return
+        self._nonusable_windows.pop(reading.channel, None)
 
     async def _handle_nonusable(self, reading: Reading, condition: InterlockCondition) -> None:
         """Обработать непригодное показание на interlock-защищённом канале (P2-5).

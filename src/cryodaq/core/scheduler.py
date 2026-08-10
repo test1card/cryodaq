@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -42,6 +43,29 @@ READ_TIMEOUT_S = 10.0
 _STANDALONE_INITIAL_BACKOFF_S = 30.0
 _STANDALONE_MAX_BACKOFF_S = 300.0
 _DISCONNECT_TIMEOUT_S = 5.0
+
+
+def _receipt_reading_matches(committed: object, admitted: Reading) -> bool:
+    """Compare a receipt payload exactly, treating paired NaNs as one value."""
+    if type(committed) is not Reading:
+        return False
+    restored = replace(committed, channel=admitted.channel)
+
+    def same_number(left: float | None, right: float | None) -> bool:
+        return left == right or (
+            isinstance(left, float) and isinstance(right, float) and math.isnan(left) and math.isnan(right)
+        )
+
+    return (
+        restored.timestamp == admitted.timestamp
+        and restored.instrument_id == admitted.instrument_id
+        and restored.channel == admitted.channel
+        and same_number(restored.value, admitted.value)
+        and restored.unit == admitted.unit
+        and restored.status is admitted.status
+        and same_number(restored.raw, admitted.raw)
+        and restored.metadata == admitted.metadata
+    )
 
 
 class ReviewedSourceSettlementIncomplete(RuntimeError):
@@ -185,6 +209,7 @@ class Scheduler:
         persistence_commit_observer: Callable[[object], None] | None = None,
         persistence_rejection_observer: Callable[[int, str], None] | None = None,
         persistence_ambiguity_observer: Callable[[], None] | None = None,
+        failed_poll_persistence_handler: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
@@ -204,6 +229,8 @@ class Scheduler:
         self._persistence_commit_observer = persistence_commit_observer
         self._persistence_rejection_observer = persistence_rejection_observer
         self._persistence_ambiguity_observer = persistence_ambiguity_observer
+        self._failed_poll_persistence_handler = failed_poll_persistence_handler
+        self._failed_poll_persistence_reported: set[str] = set()
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
         self._shared_bus_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1280,7 +1307,37 @@ class Scheduler:
         """Publish fixed-inventory failed-poll samples without transport I/O."""
         readings = state.config.driver.failure_readings()
         if readings:
-            await self._process_readings(state, readings, successful_poll=False)
+            name = state.config.driver.name
+            try:
+                delivered = await self._process_readings(state, readings, successful_poll=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._report_failed_poll_persistence(
+                    name,
+                    f"failed-poll pipeline raised {type(exc).__name__}",
+                )
+                raise
+            if not delivered:
+                await self._report_failed_poll_persistence(
+                    name,
+                    "failed-poll samples could not obtain persistence-backed publication authority",
+                )
+
+    async def _report_failed_poll_persistence(self, instrument_name: str, reason: str) -> None:
+        """Latch once when an instrument-silence sample cannot reach interlocks."""
+        if instrument_name in self._failed_poll_persistence_reported:
+            return
+        handler = self._failed_poll_persistence_handler
+        if handler is None:
+            logger.critical(
+                "Failed-poll evidence for '%s' was not published and no safety handler is wired: %s",
+                instrument_name,
+                reason,
+            )
+            return
+        await handler(f"{instrument_name}: {reason}")
+        self._failed_poll_persistence_reported.add(instrument_name)
 
     async def _process_readings(
         self,
@@ -1288,7 +1345,7 @@ class Scheduler:
         readings: list[Any],
         *,
         successful_poll: bool = True,
-    ) -> None:
+    ) -> bool:
         """Persist, calibrate, and publish readings — shared by both loop types."""
         driver = state.config.driver
         name = driver.name
@@ -1301,7 +1358,7 @@ class Scheduler:
         # recovers and the operator acknowledges, polling resumes cleanly)
         # without spamming CRITICAL logs.
         if self._sqlite_writer is not None and getattr(self._sqlite_writer, "is_disk_full", False):
-            return
+            return False
 
         persisted_readings = list(readings)
         if self._adaptive_throttle is not None:
@@ -1318,7 +1375,7 @@ class Scheduler:
                     name,
                 )
                 self._missing_persistence_reported = True
-            return
+            return False
 
         # Step 1a: If calibration acquisition active, read SRDG BEFORE persisting
         # so KRDG+SRDG can be written atomically in one transaction (H.10).
@@ -1382,21 +1439,14 @@ class Scheduler:
                         raise
                     if receipt is None:
                         self._observe_persistence_rejection(len(combined), "descriptor_commit_refused")
-                        return
+                        return False
                     entries = self._sqlite_writer.entries_from_commit(receipt)
                     if len(entries) != len(combined):
                         self._observe_persistence_ambiguity()
                         raise RuntimeError("commit receipt cardinality disagrees with persisted batch")
                     for admitted, entry in zip(combined, entries, strict=True):
                         committed = entry.reading
-                        if (
-                            type(committed) is not Reading
-                            or replace(
-                                committed,
-                                channel=admitted.channel,
-                            )
-                            != admitted
-                        ):
+                        if not _receipt_reading_matches(committed, admitted):
                             self._observe_persistence_ambiguity()
                             raise RuntimeError("commit receipt payload disagrees with the admitted batch")
                     committed_publish_readings = [entry.reading for entry in entries[: len(persisted_readings)]]
@@ -1412,17 +1462,17 @@ class Scheduler:
                 )
                 state.consecutive_errors += 1
                 state.total_errors += 1
-                return
+                return False
 
             # If write_immediate silently absorbed a disk-full error
             if getattr(self._sqlite_writer, "is_disk_full", False):
-                return
+                return False
 
             # A sustained locked/busy failure or disk-full fault returns False
             # after the writer has retained/retried transient contention.
             # Keep the result local to this call and refuse publication.
             if not persisted:
-                return
+                return False
             persistence_authoritative = True
 
         # Step 1c: Notify calibration acquisition (no longer writes — already persisted)
@@ -1438,6 +1488,10 @@ class Scheduler:
             )
         if self._safety_broker is not None:
             await self._safety_broker.publish_batch(readings)
+        delivered = bool(committed_publish_readings)
+        if delivered:
+            self._failed_poll_persistence_reported.discard(name)
+        return delivered
 
     def _observe_persistence_commit(self, receipt: object) -> None:
         observer = self._persistence_commit_observer
@@ -1489,6 +1543,15 @@ class Scheduler:
         Приборы с одним явным bus descriptor группируются в последовательный
         task. Все остальные — каждый в своём task.
         """
+        if (
+            self._safety_broker is not None
+            and self._sqlite_writer is not None
+            and getattr(self._sqlite_writer, "descriptor_authoritative", False) is True
+            and self._failed_poll_persistence_handler is None
+        ):
+            raise RuntimeError(
+                "descriptor-authoritative dual-broker scheduling requires a failed-poll persistence safety handler"
+            )
         self._running = True
 
         shared_groups: dict[str, list[_InstrumentState]] = {}

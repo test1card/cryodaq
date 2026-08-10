@@ -5,8 +5,8 @@ Semantics under test:
   channel → CRITICAL log + alarm-v2 event, NO trip.
 - Persistent non-usable (≥min_duration_s AND ≥min_samples consecutive) while
   the source lifecycle is RUN_PERMITTED or RUNNING → SafetyManager FAULT_LATCHED.
-- Outside the active source lifecycle → log/alarm only, never fault.
-- A usable reading resets the debounce window.
+- Outside the active source lifecycle → no fault, but RUN stays blocked.
+- A usable reading clears the blocker and resets the debounce window.
 - Non-usability is the doctrine predicate (is_usable), not a float check:
   finite value + error status still counts as non-usable.
 """
@@ -66,6 +66,7 @@ def _make_engine(
     *,
     publisher=None,
     handler=None,
+    recovery_handler=None,
     min_samples: int = 5,
     min_duration_s: float = 10.0,
 ) -> InterlockEngine:
@@ -74,6 +75,7 @@ def _make_engine(
         actions={"emergency_off": _noop},
         alarm_publisher=publisher,
         dead_channel_handler=handler,
+        dead_channel_recovery_handler=recovery_handler,
     )
     engine.add_condition(
         InterlockCondition(
@@ -190,6 +192,8 @@ async def test_persistent_nonusable_faults_via_real_safety_manager() -> None:
 async def test_dead_channel_no_fault_outside_active_source_lifecycle() -> None:
     broker = SafetyBroker()
     mgr = SafetyManager(broker, keithley_driver=None, mock=True)
+    mgr._config.require_keithley_for_run = False
+    mgr._config.critical_channels = []
     await mgr.start()
     try:
         assert mgr.state == SafetyState.SAFE_OFF
@@ -197,6 +201,10 @@ async def test_dead_channel_no_fault_outside_active_source_lifecycle() -> None:
         assert mgr.state == SafetyState.SAFE_OFF, (
             "dead interlock channel while source lifecycle is inactive must not fault"
         )
+        result = await mgr.request_run(0.5, 40.0, 1.0)
+        assert result["ok"] is False
+        assert _CHANNEL_ID in result["error"]
+        assert "mature_dead_interlock_channel" in {blocker.code for blocker in mgr.snapshot_operator_safety().blockers}
     finally:
         await mgr.stop()
 
@@ -277,51 +285,62 @@ async def test_usable_threshold_breach_still_trips() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_escalated_flag_not_leaked_outside_active_source_lifecycle() -> None:
-    """A window reaching threshold outside the active source lifecycle must
-    not stay marked escalated. Otherwise the still-dead channel never faults
-    once RUN_PERMITTED/RUNNING begins (until a usable reading resets it) — a
-    fail-open session leak. Fail-closed: escalated stays False, and the first
-    non-usable sample after the active source lifecycle begins latches FAULT.
-    """
+async def test_mature_idle_dead_channel_survives_ack_until_usable_recovery() -> None:
+    """A mature canonical blocker survives acknowledgment and clears on evidence."""
     broker = SafetyBroker()
     mgr = SafetyManager(broker, keithley_driver=None, mock=True)
     mgr._config.require_keithley_for_run = False
     mgr._config.critical_channels = []
+    mgr._config.cooldown_before_rearm_s = 0.0
     await mgr.start()
     try:
 
         async def handler(condition, reading):
             return await mgr.on_interlock_dead_channel(condition.name, reading.channel, value=reading.value)
 
-        engine = _make_engine(handler=handler, min_samples=5, min_duration_s=10.0)
+        async def recovery_handler(condition, reading):
+            mgr.on_interlock_channel_recovered(condition.name, reading.channel)
 
-        # Escalation threshold reached while SAFE_OFF → declined, must NOT latch.
-        assert mgr.state == SafetyState.SAFE_OFF
+        engine = _make_engine(
+            handler=handler,
+            recovery_handler=recovery_handler,
+            min_samples=5,
+            min_duration_s=10.0,
+        )
+
+        # Threshold maturity while SAFE_OFF does not fault, but it does revoke
+        # RUN authority until a usable canonical sample reaches InterlockEngine.
         for off in (0.0, 3.0, 6.0, 9.0, 12.0):
             await engine._process_reading(_reading(value=float("nan"), offset_s=off))
-        assert mgr.state == SafetyState.SAFE_OFF, "must not fault while the source lifecycle is inactive"
-        window = engine._nonusable_windows[_CHANNEL_ID]
-        assert window.escalated is False, (
-            "declined inactive-lifecycle escalation must NOT mark the window "
-            "escalated — otherwise the dead channel never re-escalates"
-        )
+        assert mgr.state == SafetyState.SAFE_OFF
+        assert engine._nonusable_windows[_CHANNEL_ID].escalated is False
+        blocked = await mgr.request_run(0.5, 40.0, 1.0)
+        assert blocked["ok"] is False
+        assert _CHANNEL_ID in blocked["error"]
 
-        # Transition to RUNNING.
-        await broker.publish(Reading.now("Т1 верх", 4.5, "K", instrument_id="t"))
-        await asyncio.sleep(1.5)
-        res = await mgr.request_run(0.5, 40.0, 1.0)
-        assert res["ok"] is True
+        # A separate acknowledged fault must not erase sensor-death evidence.
+        await mgr.latch_fault("synthetic acknowledgment control", "test")
+        acknowledged = await mgr.acknowledge_fault("operator control")
+        assert acknowledged["ok"] is True
+        assert "mature_dead_interlock_channel" in {blocker.code for blocker in mgr.snapshot_operator_safety().blockers}
+
+        # Only a usable reading through the production InterlockEngine path
+        # clears both the manager-owned blocker and the debounce window.
+        await engine._process_reading(_reading(value=42.0, offset_s=15.0, status=ChannelStatus.OK))
+        assert _CHANNEL_ID not in engine._nonusable_windows
+        assert "mature_dead_interlock_channel" not in {
+            blocker.code for blocker in mgr.snapshot_operator_safety().blockers
+        }
+        await mgr._run_checks()
+        run_result = await mgr.request_run(0.5, 40.0, 1.0)
+        assert run_result["ok"] is True
         assert mgr.state == SafetyState.RUNNING
 
-        # ONE more non-usable sample on the still-dead channel must fault now.
-        await engine._process_reading(_reading(value=float("nan"), offset_s=15.0))
-        assert mgr.state == SafetyState.FAULT_LATCHED, (
-            "first non-usable sample after RUNNING begins must fault (fail-closed)"
-        )
-        assert engine._nonusable_windows[_CHANNEL_ID].escalated is True, (
-            "once the fault is latched the window must be marked escalated"
-        )
+        # A new mature window while RUNNING still latches the fault.
+        for off in (18.0, 21.0, 24.0, 27.0, 30.0):
+            await engine._process_reading(_reading(value=float("nan"), offset_s=off))
+        assert mgr.state == SafetyState.FAULT_LATCHED
+        assert engine._nonusable_windows[_CHANNEL_ID].escalated is True
     finally:
         await mgr.stop()
 

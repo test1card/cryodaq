@@ -206,6 +206,12 @@ class LakeShore218S(InstrumentDriver):
         not a second transport operation. Scheduler persists and publishes the
         samples through its ordinary path, so interlocks see GPIB failure as
         non-usable measurements instead of silence.
+
+        For ``LS218_2`` the roster intentionally includes the mandatory T11/T12
+        critical inputs. One whole-poll TIMEOUT therefore remains direct
+        SafetyBroker evidence and latches the stronger critical-input fault
+        without waiting for InterlockEngine's multi-sample debounce. Suppressing
+        those two genuine sensor failures would weaken the existing safety policy.
         """
         return [
             Reading.now(
