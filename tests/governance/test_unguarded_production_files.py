@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -31,6 +32,30 @@ def _repository(path: Path) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _disposable_state_is_test_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subject.tempfile, "tempdir", str(tmp_path))
+
+
+def _candidate_rename(
+    repository: Path,
+    old_relative: str = "src/before.py",
+    new_relative: str = "src/after.py",
+) -> tuple[str, Path, Path]:
+    _git(repository, "config", "core.autocrlf", "false")
+    old = repository / old_relative
+    new = repository / new_relative
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"VALUE = 'guarded'\n")
+    _git(repository, "add", old_relative)
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    new.parent.mkdir(parents=True, exist_ok=True)
+    _git(repository, "mv", old_relative, new_relative)
+    _git(repository, "commit", "-qm", "candidate rename")
+    return base, old, new
+
+
 def test_base_content_preserves_non_utf8_blob_bytes(tmp_path: Path, monkeypatch) -> None:
     repository = _repository(tmp_path / "candidate")
     source = repository / "src" / "latin1.py"
@@ -57,26 +82,33 @@ def test_repository_root_is_stable_when_invoked_from_a_subdirectory(tmp_path: Pa
     assert subject.repository_root().resolve() == repository.resolve()
 
 
-def test_restore_path_never_chmods_through_a_symlink(tmp_path: Path, monkeypatch) -> None:
-    restored = tmp_path / "link.py"
-    chmod_calls: list[tuple[Path, int, bool]] = []
+def test_disposable_exact_rename_never_writes_the_source_checkout(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, old, new = _candidate_rename(repository)
+    head = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+    before = subject.git_entry(base, "src/before.py")
+    candidate = subject.git_entry(head, "src/after.py")
+    assert before is not None and candidate is not None
 
-    monkeypatch.setattr(subject.os, "symlink", lambda _target, _path: None)
+    with subject.disposable_checkout(
+        repository,
+        head,
+        reverse_rename=("src/before.py", "src/after.py", before, candidate),
+    ) as checkout:
+        assert (checkout / "src" / "before.py").read_bytes() == b"VALUE = 'guarded'\n"
+        assert not (checkout / "src" / "after.py").exists()
+        assert not old.exists()
+        assert new.read_bytes() == b"VALUE = 'guarded'\n"
 
-    def chmod(path: Path, mode: int, *, follow_symlinks: bool = True) -> None:
-        chmod_calls.append((path, mode, follow_symlinks))
-
-    monkeypatch.setattr(subject.os, "chmod", chmod)
-
-    subject.restore_path(restored, subject.PathIdentity("symlink", "target.py", 0o777))
-
-    assert chmod_calls == [(restored, 0o777, False)]
+    assert not old.exists()
+    assert new.read_bytes() == b"VALUE = 'guarded'\n"
 
 
 def test_existing_tree_entry_with_unreadable_blob_is_not_treated_as_absent(monkeypatch) -> None:
     object_id = "0" * 40
 
-    def unreadable(args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    def unreadable(_root: Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
         if args[0] == "ls-tree":
             tree_entry = f"100644 blob {object_id}\tsrc/unreadable.py\0".encode()
             return subprocess.CompletedProcess(args, 0, tree_entry, b"")
@@ -84,7 +116,7 @@ def test_existing_tree_entry_with_unreadable_blob_is_not_treated_as_absent(monke
             return subprocess.CompletedProcess(args, 1, b"", b"missing blob")
         raise AssertionError(args)
 
-    monkeypatch.setattr(subject, "_git_bytes", unreadable)
+    monkeypatch.setattr(subject, "_git_bytes_at", unreadable)
 
     with pytest.raises(subject.MeasurementError, match="tree entry.*no readable blob"):
         subject.git_entry("0123456789abcdef", "src/unreadable.py")
@@ -105,8 +137,9 @@ def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path
 
     observed: list[tuple[bool, bool]] = []
 
-    def observe_pair(_suites: list[str], _cache: Path) -> list[str]:
-        state = (old.exists(), new.exists())
+    def observe_pair(_suites: list[str], _cache: Path, **kwargs) -> list[str]:
+        checkout = Path(kwargs["root"])
+        state = ((checkout / "src" / "old_name.py").exists(), (checkout / "src" / "new_name.py").exists())
         observed.append(state)
         return [] if state in {(False, True), (True, False)} else ["test_imports_production_module"]
 
@@ -124,7 +157,7 @@ def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path
     assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
 
 
-def test_main_refuses_rename_when_old_parent_is_absent(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_main_isolates_rename_when_old_parent_is_absent(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     old = repository / "src" / "oldpkg" / "mod.py"
     new = repository / "src" / "mod.py"
@@ -138,7 +171,7 @@ def test_main_refuses_rename_when_old_parent_is_absent(tmp_path: Path, monkeypat
     _git(repository, "commit", "-qm", "rename out of removed directory")
     runs = 0
 
-    def green(_suites: list[str], _cache: Path) -> list[str]:
+    def green(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
         nonlocal runs
         runs += 1
         return []
@@ -148,11 +181,11 @@ def test_main_refuses_rename_when_old_parent_is_absent(tmp_path: Path, monkeypat
     monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
 
     assert subject.main() == 1
-    assert runs == 1
+    assert runs == 3
     assert not old.parent.exists()
     assert not old.exists()
     assert new.read_bytes() == b"VALUE = 'guarded'\n"
-    assert "rename source parent is absent" in capsys.readouterr().out
+    assert "UNGUARDED AT THIS CHANGE'S OWN PURPOSE" in capsys.readouterr().out
 
 
 def test_main_never_skips_a_mode_only_production_change_as_identical(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -170,7 +203,7 @@ def test_main_never_skips_a_mode_only_production_change_as_identical(tmp_path: P
 
     runs = 0
 
-    def green(_suites: list[str], _cache: Path) -> list[str]:
+    def green(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
         nonlocal runs
         runs += 1
         return []
@@ -207,7 +240,7 @@ def test_main_refuses_drift_after_the_green_control(tmp_path: Path, monkeypatch,
 
     runs = 0
 
-    def drift_after_control(_suites: list[str], _cache: Path) -> list[str]:
+    def drift_after_control(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
         nonlocal runs
         runs += 1
         if runs == 1:
@@ -229,7 +262,7 @@ def test_main_refuses_drift_after_the_green_control(tmp_path: Path, monkeypatch,
     assert subject.main() == 2
     assert runs == 1
     assert source.read_bytes() == b"VALUE = 'candidate'\n"
-    assert "suite inputs drifted after the green control" in capsys.readouterr().out
+    assert "source inputs drifted after the green control" in capsys.readouterr().out
 
 
 def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -250,7 +283,7 @@ def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_pat
 
     runs = 0
 
-    def drift_during_mutant(_suites: list[str], _cache: Path) -> list[str]:
+    def drift_during_mutant(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
         nonlocal runs
         runs += 1
         if runs == 1:
@@ -270,7 +303,7 @@ def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_pat
     assert runs == 3
     assert not old.exists()
     assert new.read_bytes() == b"VALUE = 'candidate'\n"
-    assert "suite inputs drifted before mutation attribution" in capsys.readouterr().out
+    assert "suite inputs drifted during mutation attribution" in capsys.readouterr().out
 
 
 def test_main_refuses_stable_uncommitted_suite_inputs(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -289,7 +322,7 @@ def test_main_refuses_stable_uncommitted_suite_inputs(tmp_path: Path, monkeypatc
 
     runs = 0
 
-    def covered_only_by_untracked_test(_suites: list[str], _cache: Path) -> list[str]:
+    def covered_only_by_untracked_test(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
         nonlocal runs
         runs += 1
         return [] if source.read_bytes() == b"VALUE = 'candidate'\n" else ["test_guard"]
@@ -317,7 +350,7 @@ def test_main_refuses_to_certify_multiple_independent_edits_as_one(tmp_path: Pat
 
     runs = 0
 
-    def only_first_edit_is_guarded(_suites: list[str], _cache: Path) -> list[str]:
+    def only_first_edit_is_guarded(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
         nonlocal runs
         runs += 1
         return [] if "GUARDED = 'candidate'" in source.read_text(encoding="utf-8") else ["test_guarded"]
@@ -346,7 +379,7 @@ def test_main_refuses_to_certify_an_added_multi_behavior_artifact(tmp_path: Path
     _git(repository, "commit", "-qm", "add two production behaviors")
     runs = 0
 
-    def green(_suites: list[str], _cache: Path) -> list[str]:
+    def green(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
         nonlocal runs
         runs += 1
         return []
@@ -377,18 +410,37 @@ def test_default_roster_derives_a_new_runtime_root_from_git_trees(tmp_path: Path
     monkeypatch.chdir(repository)
 
     includes = subject.default_runtime_includes(base, "HEAD")
-    selected = {
-        path for artifact in subject.changed_files(base, includes, subject._DEFAULT_SUFFIXES) for path in artifact.paths
-    }
+    selected = {path for artifact in subject.changed_files(base, "HEAD", includes) for path in artifact.paths}
     assert "firmware/" in includes
     assert runtime_path in selected
 
     without_new_root = tuple(root for root in includes if root != "firmware/")
     without_paths = {
-        path
-        for artifact in subject.changed_files(base, without_new_root, subject._DEFAULT_SUFFIXES)
-        for path in artifact.paths
+        path for artifact in subject.changed_files(base, "HEAD", without_new_root) for path in artifact.paths
     }
+    assert runtime_path not in without_paths
+
+
+def test_default_roster_derives_a_new_top_level_runtime_file(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    marker = repository / "README"
+    marker.write_text("base\n", encoding="utf-8")
+    _git(repository, "add", "README")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    runtime_path = "controller.lua"
+    (repository / runtime_path).write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    _git(repository, "add", runtime_path)
+    _git(repository, "commit", "-qm", "add top-level runtime code")
+    monkeypatch.chdir(repository)
+
+    includes = subject.default_runtime_includes(base, "HEAD")
+    selected = {path for artifact in subject.changed_files(base, "HEAD", includes) for path in artifact.paths}
+    assert runtime_path in includes
+    assert runtime_path in selected
+
+    without_file = tuple(root for root in includes if root != runtime_path)
+    without_paths = {path for artifact in subject.changed_files(base, "HEAD", without_file) for path in artifact.paths}
     assert runtime_path not in without_paths
 
 
@@ -398,7 +450,7 @@ def test_main_filters_are_additive_and_reconfirm_mutant_red_then_candidate_green
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
     old = repository / "firmware" / "watchdog.lua"
-    new = repository / "firmware" / "watchdog_v2.lua"
+
     old.parent.mkdir()
     old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
     _git(repository, "add", "firmware/watchdog.lua")
@@ -408,8 +460,12 @@ def test_main_filters_are_additive_and_reconfirm_mutant_red_then_candidate_green
     _git(repository, "commit", "-qm", "rename runtime watchdog")
     observed: list[tuple[bool, bool]] = []
 
-    def guard(_suites: list[str], _cache: Path) -> list[str]:
-        state = (old.exists(), new.exists())
+    def guard(_suites: list[str], _cache: Path, **kwargs) -> list[str]:
+        checkout = Path(kwargs["root"])
+        state = (
+            (checkout / "firmware" / "watchdog.lua").exists(),
+            (checkout / "firmware" / "watchdog_v2.lua").exists(),
+        )
         observed.append(state)
         return [] if state == (False, True) else ["test_runtime_guard"]
 
@@ -426,8 +482,6 @@ def test_main_filters_are_additive_and_reconfirm_mutant_red_then_candidate_green
             "tests",
             "--include",
             "src/",
-            "--suffix",
-            ".py",
         ],
     )
 
@@ -451,27 +505,29 @@ def test_main_does_not_certify_a_failure_that_remains_red_after_restore(tmp_path
     results = iter(([], ["test_timing_sensitive"], ["test_timing_sensitive"], ["test_timing_sensitive"]))
 
     monkeypatch.chdir(repository)
-    monkeypatch.setattr(subject, "failures", lambda _suites, _cache: next(results))
+    monkeypatch.setattr(subject, "failures", lambda _suites, _cache, **_kwargs: next(results))
     monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
 
     assert subject.main() == 1
     assert not old.exists()
     assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
-    assert "restored candidate was not green" in capsys.readouterr().out
+    assert "fresh candidate confirmation was not green" in capsys.readouterr().out
 
 
 def test_failures_times_out_a_hanging_pytest_process(tmp_path: Path, monkeypatch) -> None:
-    hanging = tmp_path / "test_hangs.py"
+    hanging = tmp_path / "tests" / "test_hangs.py"
+    hanging.parent.mkdir()
     hanging.write_text("import time\n\ndef test_hangs():\n    time.sleep(60)\n", encoding="utf-8")
     monkeypatch.setattr(subject, "_PYTEST_TIMEOUT_SECONDS", 0.2)
 
     with pytest.raises(subject.MeasurementError, match="exceeded 0.2 seconds"):
-        subject.failures([str(hanging)], tmp_path / "cache")
+        subject.failures(["tests/test_hangs.py"], tmp_path / "run", root=tmp_path, source_root=tmp_path)
 
 
 def test_failures_settles_the_entire_pytest_process_tree_on_timeout(tmp_path: Path, monkeypatch) -> None:
     pid_path = tmp_path / "pytest-grandchild.pid"
-    hanging = tmp_path / "test_process_tree.py"
+    hanging = tmp_path / "tests" / "test_process_tree.py"
+    hanging.parent.mkdir()
     hanging.write_text(
         "import pathlib, subprocess, sys, time\n\n"
         "def test_hangs_after_spawning_a_child():\n"
@@ -483,7 +539,7 @@ def test_failures_settles_the_entire_pytest_process_tree_on_timeout(tmp_path: Pa
     monkeypatch.setattr(subject, "_PYTEST_TIMEOUT_SECONDS", 10.0)
 
     with pytest.raises(subject.MeasurementError, match="exceeded 10.0 seconds"):
-        subject.failures([str(hanging)], tmp_path / "cache")
+        subject.failures(["tests/test_process_tree.py"], tmp_path / "run", root=tmp_path, source_root=tmp_path)
 
     assert pid_path.exists(), "the real pytest test did not reach its child-process boundary"
     grandchild_pid = int(pid_path.read_text(encoding="ascii"))
@@ -498,190 +554,445 @@ def test_failures_settles_the_entire_pytest_process_tree_on_timeout(tmp_path: Pa
     assert not survived, "pytest grandchild survived the measurement timeout"
 
 
-def test_next_main_invocation_recovers_an_interrupted_mutation(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_disposable_state_is_external_same_volume_and_removed(tmp_path: Path, monkeypatch) -> None:
     repository = _repository(tmp_path / "candidate")
-    _git(repository, "config", "core.autocrlf", "false")
-    source = repository / "src" / "production.py"
-    source.parent.mkdir()
-    source.write_text("VALUE = 'base'\n", encoding="utf-8")
-    _git(repository, "add", "src/production.py")
-    _git(repository, "commit", "-qm", "base")
-    base = _git(repository, "rev-parse", "HEAD")
-    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
-    _git(repository, "commit", "-qam", "candidate")
+    base, old, new = _candidate_rename(repository)
+    head = _git(repository, "rev-parse", "HEAD")
     monkeypatch.chdir(repository)
-    original = subject.path_identity(source)
-    mutant = subject.git_entry(base, "src/production.py")
-    subject.arm_recovery(repository, (("src/production.py", original, mutant),))
-    journal = subject._recovery_path(repository)
-    assert journal.exists()
-    assert not journal.resolve().is_relative_to(repository.resolve())
-    assert os.stat(journal).st_dev == os.stat(repository).st_dev
-    assert not (repository / subject._RECOVERY_NAME).exists()
-    assert mutant is not None
-    subject.materialize_git_entry(repository, source, mutant)
+    before = subject.git_entry(base, "src/before.py")
+    candidate = subject.git_entry(head, "src/after.py")
+    assert before is not None and candidate is not None
 
-    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", "HEAD"])
+    with subject.disposable_checkout(
+        repository,
+        head,
+        reverse_rename=("src/before.py", "src/after.py", before, candidate),
+    ) as checkout:
+        state = checkout.parent
+        assert not state.resolve().is_relative_to(repository.resolve())
+        assert os.stat(state).st_dev == os.stat(repository).st_dev
+        assert not old.exists()
+        assert new.read_bytes() == b"VALUE = 'guarded'\n"
+        assert (checkout / "src" / "before.py").read_bytes() == b"VALUE = 'guarded'\n"
+        assert not (checkout / "src" / "after.py").exists()
 
-    assert subject.main() == 0
-    assert source.read_text(encoding="utf-8") == "VALUE = 'candidate'\n"
-    assert not journal.exists()
-    assert not (repository / subject._RECOVERY_NAME).exists()
-    assert "recovered the candidate from an interrupted mutation" in capsys.readouterr().out
-
-
-def test_recovery_never_overwrites_bytes_written_after_the_mutant(tmp_path: Path) -> None:
-    repository = tmp_path / "candidate"
-    repository.mkdir()
-    source = repository / "src" / "production.py"
-    source.parent.mkdir()
-    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
-    original = subject.path_identity(source)
-    mutant = subject.GitEntry("100644", "blob", "0" * 40, b"VALUE = 'base'\n")
-    subject.arm_recovery(repository, (("src/production.py", original, mutant),))
-    source.write_text("VALUE = 'another writer'\n", encoding="utf-8")
-
-    with pytest.raises(subject.MeasurementError, match="neither the recorded candidate nor mutant"):
-        subject.recover_pending(repository)
-
-    journal = subject._recovery_path(repository)
-    assert source.read_text(encoding="utf-8") == "VALUE = 'another writer'\n"
-    assert journal.exists()
-    assert not journal.resolve().is_relative_to(repository.resolve())
-    assert not (repository / subject._RECOVERY_NAME).exists()
-    subject.clear_recovery(repository)
+    assert not state.exists()
+    assert not old.exists()
+    assert new.read_bytes() == b"VALUE = 'guarded'\n"
 
 
-def test_recovery_journal_is_not_visible_to_the_measured_suite(tmp_path: Path, monkeypatch) -> None:
+def test_interrupted_partial_mutant_write_cannot_touch_the_source_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repository = _repository(tmp_path / "candidate")
-    _git(repository, "config", "core.autocrlf", "false")
-    old = repository / "src" / "before.py"
-    new = repository / "src" / "after.py"
-    old.parent.mkdir()
-    old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
-    _git(repository, "add", "src/before.py")
-    _git(repository, "commit", "-qm", "base")
-    base = _git(repository, "rev-parse", "HEAD")
-    _git(repository, "mv", "src/before.py", "src/after.py")
-    _git(repository, "commit", "-qm", "candidate rename")
+    base, old, new = _candidate_rename(repository)
+    head = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+    before = subject.git_entry(base, "src/before.py")
+    candidate = subject.git_entry(head, "src/after.py")
+    assert before is not None and candidate is not None
+    attempted_paths: list[Path] = []
+
+    def interrupt_atomic_rename(source: Path, destination: Path) -> None:
+        attempted_paths.extend((Path(source), Path(destination)))
+        raise RuntimeError("simulated interruption at atomic disposable rename")
+
+    monkeypatch.setattr(subject.os, "replace", interrupt_atomic_rename)
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        with subject.disposable_checkout(
+            repository,
+            head,
+            reverse_rename=("src/before.py", "src/after.py", before, candidate),
+        ):
+            raise AssertionError("interrupted mutation yielded a checkout")
+
+    assert attempted_paths
+    assert all(not path.resolve(strict=False).is_relative_to(repository.resolve()) for path in attempted_paths)
+    assert not old.exists()
+    assert new.read_bytes() == b"VALUE = 'guarded'\n"
+
+
+def test_disposable_state_is_not_visible_inside_the_measured_checkout(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, old, new = _candidate_rename(repository)
     runs = 0
 
-    def detect_checkout_journal(_suites: list[str], _cache: Path) -> list[str]:
+    def detect_state(_suites: list[str], _cache: Path, **kwargs) -> list[str]:
         nonlocal runs
         runs += 1
-        return ["test_checkout_has_no_measurement_state"] if (repository / subject._RECOVERY_NAME).exists() else []
+        checkout = Path(kwargs["root"])
+        visible = (checkout / subject._STATE_DIRECTORY_NAME).exists() or (
+            repository / subject._STATE_DIRECTORY_NAME
+        ).exists()
+        return ["test_checkout_has_no_measurement_state"] if visible else []
 
     monkeypatch.chdir(repository)
-    monkeypatch.setattr(subject, "failures", detect_checkout_journal)
+    monkeypatch.setattr(subject, "failures", detect_state)
     monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
 
     assert subject.main() == 1
     assert runs == 3
     assert not old.exists()
-    assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
-    assert not (repository / subject._RECOVERY_NAME).exists()
-    assert not subject._recovery_path(repository).exists()
+    assert new.read_bytes() == b"VALUE = 'guarded'\n"
+    assert not (repository / subject._STATE_DIRECTORY_NAME).exists()
 
 
-def test_mutant_materialization_is_crash_atomic_and_external(tmp_path: Path, monkeypatch) -> None:
-    repository = tmp_path / "candidate"
-    target = repository / "src" / "production.py"
-    target.parent.mkdir(parents=True)
-    target.write_bytes(b"CANDIDATE-CONTENT\n")
-    entry = subject.GitEntry("100644", "blob", "0" * 40, b"BASE-CONTENT\n")
-    staging_paths: list[Path] = []
+@pytest.mark.parametrize(
+    "unsafe",
+    [r"..\outside\sentinel.py", "../outside/sentinel.py", "C:/outside/sentinel.py", r"\\host\share\file.py"],
+)
+def test_repository_path_validation_rejects_windows_and_posix_escapes(tmp_path: Path, unsafe: str) -> None:
+    outside = tmp_path / "outside" / "sentinel.py"
+    outside.parent.mkdir()
+    outside.write_bytes(b"EXTERNAL\n")
 
-    def interrupt_staging(staging: Path, staged_entry: subject.GitEntry) -> None:
-        staging_paths.append(staging)
-        assert not staging.resolve().is_relative_to(repository.resolve())
-        assert os.stat(staging.parent).st_dev == os.stat(repository).st_dev
-        staging.write_bytes(staged_entry.content[:5])
-        raise RuntimeError("simulated interruption during mutant staging")
+    with pytest.raises(subject.MeasurementError, match="unsafe repository path"):
+        subject._safe_relative(unsafe)
 
-    monkeypatch.setattr(subject, "_materialize_git_entry", interrupt_staging)
-
-    with pytest.raises(RuntimeError, match="simulated interruption"):
-        subject.materialize_git_entry(repository, target, entry)
-
-    assert target.read_bytes() == b"CANDIDATE-CONTENT\n"
-    assert len(staging_paths) == 1
-    assert not staging_paths[0].exists()
+    assert outside.read_bytes() == b"EXTERNAL\n"
 
 
-def test_atomic_restore_replaces_only_from_complete_external_staging(tmp_path: Path, monkeypatch) -> None:
-    repository = tmp_path / "candidate"
-    target = repository / "src" / "production.py"
-    target.parent.mkdir(parents=True)
-    target.write_bytes(b"MUTANT\n")
-    original = subject.PathIdentity("file", b"CANDIDATE\n", 0o644)
-    real_replace = subject.os.replace
-    staging_paths: list[Path] = []
-
-    def inspect_replace(staging: Path, destination: Path) -> None:
-        staging = Path(staging)
-        staging_paths.append(staging)
-        assert destination == target
-        assert staging.read_bytes() == b"CANDIDATE\n"
-        assert not staging.resolve().is_relative_to(repository.resolve())
-        assert os.stat(staging).st_dev == os.stat(repository).st_dev
-        real_replace(staging, destination)
-
-    monkeypatch.setattr(subject.os, "replace", inspect_replace)
-
-    subject.restore_path_atomically(repository, target, original)
-
-    assert target.read_bytes() == b"CANDIDATE\n"
-    assert len(staging_paths) == 1
-    assert not staging_paths[0].exists()
-
-
-def test_unverified_process_tree_blocks_restore_and_automatic_recovery(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_unsettled_mutant_preserves_only_external_disposable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
     repository = _repository(tmp_path / "candidate")
-    _git(repository, "config", "core.autocrlf", "false")
-    old = repository / "src" / "before.py"
-    new = repository / "src" / "after.py"
-    old.parent.mkdir()
-    old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
-    _git(repository, "add", "src/before.py")
-    _git(repository, "commit", "-qm", "base")
-    base = _git(repository, "rev-parse", "HEAD")
-    _git(repository, "mv", "src/before.py", "src/after.py")
-    _git(repository, "commit", "-qm", "candidate rename")
-    process_runs = 0
+    base, old, new = _candidate_rename(repository)
+    calls = 0
 
-    def lose_settlement(command, **_kwargs):
-        nonlocal process_runs
-        process_runs += 1
-        if process_runs == 1:
-            return subprocess.CompletedProcess(command, 0, "", "")
-        raise subject.CandidateProcessUnsettledError("simulated unverified descendant")
+    def lose_settlement(_suites: list[str], _cache: Path, **_kwargs) -> list[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return []
+        raise subject.UnsettledProcessTree("simulated unverified descendant")
 
     monkeypatch.chdir(repository)
-    monkeypatch.setattr(subject, "_run_candidate_process", lose_settlement)
+    monkeypatch.setattr(subject, "failures", lose_settlement)
     monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
-    journal = subject._recovery_path(repository)
 
-    try:
-        assert subject.main() == 2
-        first_output = capsys.readouterr().out
-        assert process_runs == 2
-        assert old.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
-        assert not new.exists()
-        assert journal.exists()
-        assert '"restore_blocked"' in journal.read_text(encoding="utf-8")
-        assert "mutant and blocked recovery journal were left intact" in first_output
+    assert subject.main() == 2
+    output = capsys.readouterr().out
+    state_root = subject._state_directory(repository)
+    preserved = list(state_root.glob("measurement-*"))
+    assert calls == 2
+    assert preserved and all((path / "checkout").exists() for path in preserved)
+    assert "mutant process tree did not settle" in output
+    assert "disposable checkout preserved at" in output
+    assert not old.exists()
+    assert new.read_bytes() == b"VALUE = 'guarded'\n"
 
-        monkeypatch.setattr(
-            subject,
-            "_run_candidate_process",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("blocked recovery must precede pytest")),
-        )
-        assert subject.main() == 2
-        second_output = capsys.readouterr().out
-        assert "automatic recovery is blocked after an unverified process tree" in second_output
-        assert old.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
-        assert not new.exists()
-    finally:
-        subject.clear_recovery(repository)
-        old.unlink(missing_ok=True)
-        new.write_text("VALUE = 'guarded'\n", encoding="utf-8")
+    for path in preserved:
+        resolved = path.resolve(strict=True)
+        assert resolved.parent == state_root.resolve(strict=True)
+        subject._remove_disposable_state(resolved, repository)
+    for cache in tmp_path.glob("unguarded-run-*"):
+        resolved = cache.resolve(strict=True)
+        assert resolved.parent == tmp_path.resolve(strict=True)
+        shutil.rmtree(resolved)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows checkouts may materialize Git symlinks as regular files")
+def test_disposable_exact_rename_preserves_a_real_symlink_identity(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    target = repository / "src" / "target.py"
+    old = repository / "src" / "before.py"
+    new = repository / "src" / "after.py"
+    target.parent.mkdir()
+    target.write_text("VALUE = True\n", encoding="utf-8")
+    os.symlink("target.py", old)
+    _git(repository, "add", "src/target.py", "src/before.py")
+    _git(repository, "commit", "-qm", "base symlink")
+    base = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "mv", "src/before.py", "src/after.py")
+    _git(repository, "commit", "-qm", "rename symlink")
+    head = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+    before = subject.git_entry(base, "src/before.py")
+    candidate = subject.git_entry(head, "src/after.py")
+    assert before is not None and candidate is not None and before.mode == "120000"
+
+    with subject.disposable_checkout(
+        repository,
+        head,
+        reverse_rename=("src/before.py", "src/after.py", before, candidate),
+    ) as checkout:
+        link = checkout / "src" / "before.py"
+        assert link.is_symlink()
+        assert os.readlink(link) == "target.py"
+        assert not (checkout / "src" / "after.py").exists()
+
+    assert not old.exists()
+    assert new.is_symlink()
+    assert os.readlink(new) == "target.py"
+
+
+def _commit_real_rename_guard(repository: Path) -> Path:
+    tests = repository / "tests"
+    tests.mkdir(exist_ok=True)
+    guard = tests / "test_guard.py"
+    guard.write_text(
+        "from pathlib import Path\n\n"
+        "def test_candidate_name_exists():\n"
+        "    root = Path(__file__).resolve().parents[1]\n"
+        "    assert not (root / 'src' / 'before.py').exists()\n"
+        "    assert (root / 'src' / 'after.py').is_file()\n",
+        encoding="utf-8",
+    )
+    (tests / "test_smoke.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    _git(repository, "add", "tests/test_guard.py", "tests/test_smoke.py")
+    _git(repository, "commit", "-qm", "guard candidate rename")
+    return guard
+
+
+def _commit_measurement_only_suite(repository: Path, name: str, body: str) -> str:
+    relative = f"tests/{name}.py"
+    path = repository / relative
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    _git(repository, "add", relative)
+    _git(repository, "commit", "-qm", f"add {name}")
+    return relative
+
+
+def test_main_refuses_a_clean_head_advance_after_candidate_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    guard = _commit_real_rename_guard(repository)
+    original_roster = subject.default_runtime_includes
+    advanced = False
+
+    def advance_head_after_snapshot(*points: str) -> tuple[str, ...]:
+        nonlocal advanced
+        if not advanced:
+            advanced = True
+            guard.unlink()
+            _git(repository, "add", "-u")
+            _git(repository, "commit", "-qm", "remove the only rename guard")
+        return original_roster(*points)
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "default_runtime_includes", advance_head_after_snapshot)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 2
+    output = capsys.readouterr().out
+    assert "source inputs drifted during candidate discovery" in output
+    assert "HEAD moved" in output
+    assert not guard.exists()
+    assert _git(repository, "status", "--porcelain=v1") == ""
+
+
+def test_main_refuses_a_stable_dirty_guard_deleted_after_the_old_porcelain_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    guard = _commit_real_rename_guard(repository)
+    original_capture = subject.capture_suite_inputs
+    deleted = False
+
+    def delete_guard_before_snapshot(root: Path) -> subject.SuiteInputs:
+        nonlocal deleted
+        if root.resolve() == repository.resolve() and not deleted:
+            deleted = True
+            guard.unlink()
+        return original_capture(root)
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "capture_suite_inputs", delete_guard_before_snapshot)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 2
+    output = capsys.readouterr().out
+    assert "uncommitted candidate inputs cannot be attributed to HEAD" in output
+    assert not guard.exists()
+    assert "tests/test_guard.py" in _git(repository, "status", "--porcelain=v1")
+
+
+def test_main_does_not_expose_mutant_phase_through_the_pycache_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_phase_neutral",
+        "import os\n\ndef test_not_labelled_mutant():\n    assert 'mutant' not in os.environ['PYTHONPYCACHEPREFIX']\n",
+    )
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", suite],
+    )
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+def test_main_keeps_control_and_mutant_git_status_equally_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_clean_checkout",
+        "import subprocess\n\n"
+        "def test_checkout_is_clean():\n"
+        "    run = subprocess.run(['git', 'status', '--porcelain'], check=True, capture_output=True, text=True)\n"
+        "    assert run.stdout == ''\n",
+    )
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", suite],
+    )
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+def test_main_strips_source_and_protected_authority_from_real_pytest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_candidate_authority",
+        "import os\n"
+        "import subprocess\n"
+        "from pathlib import Path\n\n"
+        "def test_candidate_has_no_source_authority():\n"
+        "    for key in ('GITHUB_TOKEN', 'GITHUB_WORKSPACE', 'GIT_DIR', 'OLDPWD'):\n"
+        "        assert key not in os.environ\n"
+        "    assert Path(os.environ['PWD']).resolve() == Path.cwd().resolve()\n"
+        "    remote = subprocess.run(['git', 'remote'], check=True, capture_output=True, text=True)\n"
+        "    assert remote.stdout == ''\n",
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "protected")
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(repository))
+    monkeypatch.setenv("GIT_DIR", str(repository / ".git"))
+    monkeypatch.setenv("PWD", str(repository))
+    monkeypatch.setenv("OLDPWD", str(repository))
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", suite],
+    )
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+@pytest.mark.parametrize(
+    "selector",
+    (
+        "../tests",
+        "-p",
+        "src/cryodaq",
+        "tests/../src",
+        "tests\\test_escape.py",
+        "C:/outside/test_escape.py",
+    ),
+)
+def test_failures_rejects_unconfined_or_option_like_suite_selectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selector: str
+) -> None:
+    checkout = tmp_path / "checkout"
+    (checkout / "tests").mkdir(parents=True)
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+
+    def must_not_launch(*_args, **_kwargs):
+        raise AssertionError("unconfined selector reached the pytest process")
+
+    monkeypatch.setattr(subject, "_run_candidate_process", must_not_launch)
+
+    with pytest.raises(subject.MeasurementError, match="pytest suite selector|unsafe repository path"):
+        subject.failures([selector], run_root, root=checkout, source_root=checkout)
+
+
+def test_changed_files_selects_runtime_assets_without_a_suffix_allowlist(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    marker = repository / "README"
+    marker.write_text("base\n", encoding="utf-8")
+    _git(repository, "add", "README")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    runtime_asset = repository / "src" / "cryodaq" / "web" / "static" / "operator-display.html"
+    runtime_asset.parent.mkdir(parents=True)
+    runtime_asset.write_text("<output>measurement</output>\n", encoding="utf-8")
+    _git(repository, "add", runtime_asset.relative_to(repository).as_posix())
+    _git(repository, "commit", "-qm", "add runtime display asset")
+    head = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+
+    includes = subject.default_runtime_includes(base, head)
+    selected = {path for artifact in subject.changed_files(base, head, includes) for path in artifact.paths}
+
+    assert runtime_asset.relative_to(repository).as_posix() in selected
+
+
+def test_disposable_checkout_rejects_clean_filter_transformed_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    (repository / ".gitattributes").write_text("payload.txt text eol=crlf\n", encoding="utf-8")
+    (repository / "payload.txt").write_bytes(b"candidate\n")
+    _git(repository, "add", ".gitattributes", "payload.txt")
+    _git(repository, "commit", "-qm", "add checkout transform")
+    head = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+
+    with pytest.raises(subject.MeasurementError, match="raw blob identity"):
+        with subject.disposable_checkout(repository, head):
+            raise AssertionError("transformed checkout was accepted")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating directory symlinks is not portable on Windows")
+def test_checkout_path_rejects_a_real_symlink_parent(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    outside = tmp_path / "outside"
+    checkout.mkdir()
+    outside.mkdir()
+    os.symlink(outside, checkout / "linked", target_is_directory=True)
+
+    with pytest.raises(subject.MeasurementError, match="parent is a link or junction"):
+        subject._checkout_path(checkout, "linked/production.py")
+
+
+def test_concurrent_source_target_writer_is_preserved_and_refuses_attribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, candidate = _candidate_rename(repository)
+    calls = 0
+
+    def write_source_during_mutant(_suites: list[str], _run_root: Path, **_kwargs) -> list[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            candidate.write_bytes(b"VALUE = 'concurrent writer'\n")
+        return [] if calls == 1 else ["test_candidate_name_exists"]
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", write_source_during_mutant)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 2
+    assert candidate.read_bytes() == b"VALUE = 'concurrent writer'\n"
+    assert "suite inputs drifted during mutation attribution" in capsys.readouterr().out

@@ -22,13 +22,13 @@ the same asymmetry the tool exists to exploit:
   run FIRST, unmutated, and only failures NEW relative to that control count.
   A control that is not green fails the run closed rather than manufacturing
   coverage.
-* **Configuration invisible.** Requiring a `.py` suffix meant `--include
-  config/` selected nothing, so interlock thresholds, channel patterns and
-  shutdown actions -- production by the severity floor's own definition --
-  could never be measured. Suffixes are declared, not assumed.
+* **Configuration and assets invisible.** Requiring a known suffix meant
+  configuration, firmware, served HTML, icons, and fonts could disappear from
+  measurement. Every tracked artifact below a derived runtime root is eligible;
+  there is no second suffix allowlist.
 * **Added files skipped.** A new module has no base content to revert to, so
-  it was skipped while the run still exited 0. An added artifact is now
-  measured by REMOVING it, and a target that cannot be measured fails the run.
+  it was skipped while the run still exited 0. Added/deleted content cannot be
+  isolated honestly and is now reported NOT MEASURED with a nonzero result.
 * **Stale bytecode.** A revert and a restore of equal length inside one
   filesystem-timestamp second can leave a `.pyc` compiled from the reverted
   bytes, which a later process then executes while the source shows the
@@ -47,15 +47,14 @@ the same asymmetry the tool exists to exploit:
   CORRUPTED mutant: the suite then failed on encoding damage rather than on the
   reverted behaviour, and the artifact was reported guarded. Blobs are read as
   bytes.
-* **Clobbering a concurrent writer.** The up-front porcelain check cannot see an
-  edit made after it ran, and the restore was unconditional, so another worker's
-  bytes could be destroyed in either window. The file is re-read immediately
-  before the mutation and again before the restore; a mismatch is preserved and
-  reported instead of overwritten.
-* **Losing the file's identity.** An added artifact that was a symlink or
-  carried an executable bit was restored with `write_bytes`, producing a plain
-  file with default permissions. The byte assertion still passed while the TYPE
-  was gone, and a worktree that started clean did not end clean.
+* **Clobbering a concurrent writer.** The up-front porcelain check could not see
+  a later edit, and an unconditional restore destroyed another worker's bytes.
+  The source checkout is now read-only and revalidated around every disposable
+  run; no mutant or confirmation operation targets a source path.
+* **Losing the file's identity.** A byte-only restore erased symlink and mode
+  identity while its content assertion passed. Disposable checkouts come from
+  Git, exact renames move the entry itself, and its complete Git identity is
+  verified before pytest runs.
 * **Inherited Git authority.** Every query ran with the caller's `GIT_DIR`,
   `GIT_WORK_TREE`, `GIT_INDEX_FILE`, grafts and replacement refs, so discovery
   could describe a FOREIGN repository while the writes still landed here.
@@ -63,54 +62,72 @@ the same asymmetry the tool exists to exploit:
 * **A custom filter erased runtime artifacts.** `--include src/` replaced rather
   than extended the default roster, silently dropping runtime roots. Default
   roots now derive from both Git trees by excluding only the severity floor's
-  explicit non-production categories; custom includes and suffixes are additive.
+  explicit non-production categories; custom includes are additive.
 * **One artifact concealed independent edits.** Whole-file reversion cannot
   attribute separate behaviours within a file, so every content change refuses
   certification; only identity-only changes can be measured honestly.
-* **Transaction state changed the measured checkout.** Recovery intent and all
-  staging objects live outside the checkout on the same filesystem volume.
+* **Transaction state changed the measured checkout.** The measured source
+  checkout is never mutated. Control, mutant, and confirmation runs use verified
+  disposable
+  local Git checkouts under external same-volume state.
 * **A hanging mutant stranded descendants.** Timed pytest runs execute inside a
-  Windows Job or Linux subreaper boundary, and restoration begins only after the
-  entire process tree is verified settled.
-* **A killed write could truncate the candidate.** Both mutant and restore
-  identities are fully materialized in external same-volume staging, then
-  exposed through one atomic replacement.
-* **A mutation created persistent structure.** A rename whose former parent no
-  longer exists is refused instead of creating a directory recovery did not own.
+  Windows Job or Linux subreaper boundary, and disposable-state cleanup begins
+  only after the entire process tree is verified settled.
+* **A killed write could truncate the candidate.** Content and mode changes are
+  refused. An exact-entry rename is reversed only inside a disposable checkout
+  with an atomic filesystem rename, then committed into a clean synthetic
+  snapshot before pytest can run.
+* **A mutation created persistent structure.** A former parent is created only
+  inside the disposable checkout; the source tree never gains directories or
+  recovery artifacts.
+* **Measurement scaffolding looked like production.** Dirty/staged mutant Git
+  state and phase-labelled cache paths could make unrelated tests red. Every
+  phase now runs from a clean deterministic synthetic commit and uses the same
+  neutral external-state path shape.
+* **A clean checkout hid transformed bytes.** Git filters can materialize bytes
+  that differ from the tree while porcelain remains clean. Every tracked raw
+  blob and supported mode is verified before candidate code runs.
+* **Candidate code retained judge authority.** Protected CI channels, inherited
+  Git redirection, source-path environment values, clone origins, and
+  unconfined pytest selectors could escape the disposable boundary. They are
+  stripped or rejected before launch.
 * **One flaky red counted as coverage.** A mutant failure must repeat exactly,
-  then the same node must disappear on the restored candidate in this invocation.
+  then the same node must disappear in a fresh candidate checkout in this
+  invocation.
 
 USAGE
 
     python -m tools.unguarded_production_files --base origin/master \\
         --suite tests/gui --include src/ --include config/
 
-`--include` and `--suffix` add to the runtime defaults; they never remove them.
+--include adds to the derived runtime defaults; it never removes them.
 
-Each artifact is restored from the ORIGINAL bytes read before mutation, and the
-restore is verified byte-for-byte. It refuses to run against a dirty tree for
-the artifacts it would touch, because a revert it cannot undo is worse than a
-measurement it never took.
+The measured source checkout is read-only. Only an exact-entry rename is
+measured in a disposable verified clean snapshot; content, add/delete, and mode
+changes fail closed.
+The tool refuses uncommitted inputs because they cannot be reproduced in that
+checkout or attributed to HEAD.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
-import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from tools.ci_active_checkout_runner import (
     CandidateProcessSettlementError,
     CandidateProcessUnsettledError,
+    _checkout_environment,
     _run_candidate_process,
 )
 
@@ -136,10 +153,9 @@ from tools.ci_active_checkout_runner import (
 # add it. Defaults therefore derive every top-level Git tree except the
 # categories the severity floor explicitly calls non-production. A new root is
 # measured on the commit that introduces it, without changing this tool.
-_DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml", ".lua")
+# Every tracked artifact below a derived runtime root is eligible; runtime-loaded assets have no safe suffix allowlist.
 _NON_RUNTIME_TOP_LEVELS = frozenset({".github", "build_scripts", "docs", "governance", "scripts", "tests", "tools"})
 _PYTEST_TIMEOUT_SECONDS = 120
-_RECOVERY_NAME = ".audit-unguarded-production-recovery.json"
 _STATE_DIRECTORY_NAME = "cryodaq-unguarded-production-files"
 
 
@@ -186,6 +202,7 @@ class SuiteInputs:
 
     head: str
     index_entries: bytes
+    porcelain: bytes
     listed_paths: tuple[str, ...]
     worktree: tuple[tuple[str, PathIdentity], ...]
 
@@ -193,6 +210,7 @@ class SuiteInputs:
         return SuiteInputs(
             self.head,
             self.index_entries,
+            self.porcelain,
             tuple(path for path in self.listed_paths if path not in paths),
             tuple(item for item in self.worktree if item[0] not in paths),
         )
@@ -208,31 +226,8 @@ def path_identity(path: Path) -> PathIdentity:
     return PathIdentity("file", path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
 
 
-def restore_path(path: Path, identity: PathIdentity) -> None:
-    path.unlink(missing_ok=True)
-    if identity.kind == "absent":
-        return
-    if identity.kind == "symlink":
-        os.symlink(str(identity.payload), path)
-    elif identity.kind == "file":
-        path.write_bytes(bytes(identity.payload))
-    else:  # pragma: no cover - construction is private and exhaustive
-        raise AssertionError(f"unknown path identity {identity.kind!r}")
-    if identity.mode is None:
-        return
-    if identity.kind != "symlink":
-        os.chmod(path, identity.mode)
-        return
-    try:
-        os.chmod(path, identity.mode, follow_symlinks=False)
-    except NotImplementedError:
-        lchmod = getattr(os, "lchmod", None)
-        if lchmod is not None:
-            lchmod(path, identity.mode)
-
-
 def _state_directory(root: Path) -> Path:
-    """Return stable, same-volume transaction state outside the measured checkout."""
+    """Return same-volume disposable state outside the read-only candidate checkout."""
 
     canonical_root = root.resolve(strict=True)
     temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
@@ -240,31 +235,14 @@ def _state_directory(root: Path) -> Path:
         raise MeasurementError("temporary state root is inside the measured checkout")
     if os.stat(temporary_root).st_dev != os.stat(canonical_root).st_dev:
         raise MeasurementError("temporary state root is not on the measured checkout volume")
-    identity = hashlib.sha256(os.fsencode(os.path.normcase(str(canonical_root)))).hexdigest()
-    state = temporary_root / _STATE_DIRECTORY_NAME / identity
+    state = temporary_root / _STATE_DIRECTORY_NAME
     state.mkdir(parents=True, exist_ok=True)
     state = state.resolve(strict=True)
     if state.is_relative_to(canonical_root):
-        raise MeasurementError("transaction state resolved inside the measured checkout")
+        raise MeasurementError("disposable state resolved inside the measured checkout")
     if os.stat(state).st_dev != os.stat(canonical_root).st_dev:
-        raise MeasurementError("transaction state resolved onto another volume")
+        raise MeasurementError("disposable state resolved onto another volume")
     return state
-
-
-def restore_path_atomically(root: Path, path: Path, identity: PathIdentity) -> None:
-    """Restore through a same-volume replacement so a killed writer cannot truncate the target."""
-
-    if identity.kind == "absent":
-        path.unlink(missing_ok=True)
-        return
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-restore-", dir=_state_directory(root))
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        restore_path(temporary, identity)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _run(
@@ -319,31 +297,60 @@ def _git_bytes(args: list[str]) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-def merge_base(base: str) -> str:
-    out = _git(["merge-base", base, "HEAD"])
+def _git_at(root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    return _run(["git", "-C", str(root), "--no-replace-objects", *args], env=_git_env())
+
+
+def _git_bytes_at(root: Path, args: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(root), "--no-replace-objects", *args],
+        capture_output=True,
+        env=_git_env(),
+    )
+
+
+def merge_base(base: str, head: str) -> str:
+    out = _git(["merge-base", base, head])
     out.check_returncode()
     return out.stdout.strip()
 
 
 def default_runtime_includes(*points: str) -> tuple[str, ...]:
-    """Derive runtime-root candidates from immutable Git trees, fail-closed by exclusion."""
+    """Derive top-level runtime candidates from immutable Git trees."""
 
     roots: set[str] = set()
     for point in points:
-        out = _git(["ls-tree", "-d", "--name-only", "-z", point])
+        out = _git(["ls-tree", "-z", point])
         out.check_returncode()
-        for name in out.stdout.split("\0"):
-            if not name:
+        for record in out.stdout.split("\0"):
+            if not record:
                 continue
+            metadata, name = record.split("\t", 1)
+            _mode, object_type, _object_id = metadata.split()
             if "/" in name or name in {".", ".."}:
-                raise MeasurementError(f"Git returned a non-top-level runtime-root candidate: {name!r}")
-            if name not in _NON_RUNTIME_TOP_LEVELS:
+                raise MeasurementError(f"Git returned a non-top-level runtime candidate: {name!r}")
+            if name in _NON_RUNTIME_TOP_LEVELS:
+                continue
+            if object_type == "tree":
                 roots.add(f"{name}/")
+            elif object_type == "blob":
+                roots.add(name)
+            else:
+                raise MeasurementError(f"Git returned unsupported top-level object type {object_type!r} for {name}")
     return tuple(sorted(roots))
 
 
-def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ...]) -> list[ChangedArtifact]:
-    out = _git(["diff", "--name-status", "-z", "--find-renames", point, "HEAD"])
+def _path_is_included(path: str, prefix: str) -> bool:
+    normalized = prefix.rstrip("/")
+    return bool(normalized) and (path == normalized or path.startswith(normalized + "/"))
+
+
+def changed_files(
+    point: str,
+    candidate: str,
+    includes: tuple[str, ...],
+) -> list[ChangedArtifact]:
+    out = _git(["diff", "--name-status", "-z", "--find-renames", point, candidate])
     out.check_returncode()
     fields = out.stdout.split("\0")
     if fields and not fields[-1]:
@@ -362,32 +369,28 @@ def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ..
             index += 1
             kind = status[:1]
             artifact = ChangedArtifact(None if kind == "A" else path, None if kind == "D" else path)
-        if any(
-            path.endswith(suffixes) and any(path.startswith(prefix) for prefix in includes) for path in artifact.paths
-        ):
+        if any(any(_path_is_included(path, prefix) for prefix in includes) for path in artifact.paths):
             artifacts.append(artifact)
     return sorted(artifacts, key=lambda artifact: artifact.label)
 
 
-def base_content(point: str, path: str) -> bytes | None:
-    """The base blob, or None when the path genuinely does not exist there.
+def base_content_at(root: Path, point: str, path: str) -> bytes | None:
+    """Return one exact blob, distinguishing absence from an unreadable object."""
 
-    Any OTHER failure -- a missing object in a partial checkout, a corrupt
-    object, a permission error -- used to return None too, and None means
-    "added" further down, so the artifact was measured by DELETING it. An
-    unreadable base is not an added file; it is an unmeasurable one.
-    """
-
-    out = _git_bytes(["cat-file", "-e", f"{point}:{path}"])
+    out = _git_bytes_at(root, ["cat-file", "-e", f"{point}:{path}"])
     if out.returncode != 0:
         return None
-    blob = _git_bytes(["show", f"{point}:{path}"])
+    blob = _git_bytes_at(root, ["show", f"{point}:{path}"])
     if blob.returncode != 0:
         raise MeasurementError(
             f"{path} exists at {point[:8]} but its blob could not be read: "
             f"{blob.stderr.decode('utf-8', 'replace').strip()[:200]}"
         )
     return blob.stdout
+
+
+def base_content(point: str, path: str) -> bytes | None:
+    return base_content_at(repository_root(), point, path)
 
 
 class MeasurementError(RuntimeError):
@@ -404,16 +407,16 @@ class SuiteInputDrift(MeasurementError):
 
 def _suite_inputs_once(root: Path, excluded: set[str] | None = None) -> SuiteInputs:
     excluded = excluded or set()
-    head = _git(["rev-parse", "HEAD"])
-    head.check_returncode()
-    index_entries = _git_bytes(["ls-files", "--stage", "-z"])
-    index_entries.check_returncode()
-    listed_paths = _git_bytes(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
-    listed_paths.check_returncode()
+    head = _git_at(root, ["rev-parse", "HEAD"])
+    index_entries = _git_bytes_at(root, ["ls-files", "--stage", "-z"])
+    listed_paths = _git_bytes_at(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
     paths = tuple(os.fsdecode(raw) for raw in listed_paths.stdout.split(b"\0") if raw)
     included = tuple(path for path in paths if path not in excluded)
     identities = tuple((path, path_identity(root / path)) for path in included)
-    return SuiteInputs(head.stdout.strip(), index_entries.stdout, included, identities)
+    porcelain = _git_bytes_at(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+    if any(run.returncode != 0 for run in (head, index_entries, listed_paths, porcelain)):
+        raise SuiteInputDrift("repository inputs became unreadable while their identity was captured")
+    return SuiteInputs(head.stdout.strip(), index_entries.stdout, porcelain.stdout, included, identities)
 
 
 def capture_suite_inputs(root: Path) -> SuiteInputs:
@@ -439,6 +442,8 @@ def assert_suite_inputs_unchanged(expected: SuiteInputs, root: Path, *, excluded
         detail = f"HEAD moved from {baseline.head[:8]} to {first.head[:8]}"
     elif first.index_entries != baseline.index_entries:
         detail = "the Git index changed"
+    elif first.porcelain != baseline.porcelain:
+        detail = "the Git worktree/index cleanliness changed"
     elif first.listed_paths != baseline.listed_paths:
         detail = "the tracked/untracked input inventory changed"
     else:
@@ -450,10 +455,10 @@ def assert_suite_inputs_unchanged(expected: SuiteInputs, root: Path, *, excluded
     raise SuiteInputDrift(detail)
 
 
-def git_entry(point: str, path: str | None) -> GitEntry | None:
+def git_entry_at(root: Path, point: str, path: str | None) -> GitEntry | None:
     if path is None:
         return None
-    out = _git_bytes(["ls-tree", "-z", point, "--", path])
+    out = _git_bytes_at(root, ["ls-tree", "-z", point, "--", path])
     if out.returncode != 0:
         raise MeasurementError(
             f"{path} tree identity at {point[:8]} could not be read: "
@@ -467,10 +472,14 @@ def git_entry(point: str, path: str | None) -> GitEntry | None:
         raise MeasurementError(f"Git returned {os.fsdecode(returned_path)!r} while reading {path!r}")
     if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
         raise MeasurementError(f"{path} has unsupported Git identity {mode} {object_type}")
-    content = base_content(point, path)
+    content = base_content_at(root, point, path)
     if content is None:
         raise MeasurementError(f"{path} has a tree entry at {point[:8]} but no readable blob")
     return GitEntry(mode, object_type, object_id, content)
+
+
+def git_entry(point: str, path: str | None) -> GitEntry | None:
+    return git_entry_at(repository_root(), point, path)
 
 
 def path_matches_git_entry(path: Path, entry: GitEntry | None) -> bool:
@@ -484,192 +493,383 @@ def path_matches_git_entry(path: Path, entry: GitEntry | None) -> bool:
     return executable == (entry.mode == "100755")
 
 
-def _materialize_git_entry(path: Path, entry: GitEntry) -> None:
-    """Put one tree entry on disk, or refuse if this host cannot represent it."""
+def _git_blob_id(payload: bytes, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    digest.update(f"blob {len(payload)}\0".encode("ascii"))
+    digest.update(payload)
+    return digest.hexdigest()
 
-    path.unlink(missing_ok=True)
-    if entry.mode == "120000":
-        try:
-            os.symlink(os.fsdecode(entry.content), path)
-        except OSError as exc:
-            raise MeasurementError(f"{path} symlink mode cannot be represented on this host: {exc}") from exc
-    else:
-        path.write_bytes(entry.content)
-        current = stat.S_IMODE(path.stat().st_mode)
-        if entry.mode == "100755":
-            desired = current | ((current & 0o444) >> 2)
+
+def assert_checkout_matches_tree(root: Path, revision: str) -> None:
+    """Prove every materialized tracked entry has the tree's raw bytes and mode."""
+
+    object_format = _git_at(root, ["rev-parse", "--show-object-format"])
+    listing = _git_bytes_at(root, ["ls-tree", "-r", "-z", revision])
+    if object_format.returncode != 0 or listing.returncode != 0:
+        raise MeasurementError("disposable checkout tree identity could not be read")
+    algorithm = object_format.stdout.strip()
+    try:
+        hashlib.new(algorithm)
+    except ValueError as exc:
+        raise MeasurementError(f"unsupported Git object format {algorithm!r}") from exc
+
+    for record in listing.stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_relative = record.split(b"\t", 1)
+        mode, object_type, object_id = metadata.decode("ascii").split()
+        relative = _safe_relative(os.fsdecode(raw_relative))
+        if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise MeasurementError(f"tracked entry {relative!r} has unsupported checkout identity {mode} {object_type}")
+        path = _checkout_path(root, relative)
+        if mode == "120000":
+            if not path.is_symlink():
+                raise MeasurementError(f"tracked symlink {relative!r} was not materialized as a symlink")
+            payload = os.fsencode(os.readlink(path))
         else:
-            desired = current & ~0o111
-        os.chmod(path, desired)
-    if not path_matches_git_entry(path, entry):
-        raise MeasurementError(f"{path} Git mode {entry.mode} cannot be represented on this host")
+            if path.is_symlink() or not path.is_file():
+                raise MeasurementError(f"tracked file {relative!r} was not materialized as a regular file")
+            payload = path.read_bytes()
+            if os.name != "nt":
+                executable = bool(stat.S_IMODE(path.stat().st_mode) & 0o111)
+                if executable != (mode == "100755"):
+                    raise MeasurementError(f"tracked file {relative!r} has the wrong executable mode")
+        if _git_blob_id(payload, algorithm) != object_id:
+            raise MeasurementError(f"tracked file {relative!r} does not have its Git tree's raw blob identity")
 
 
-def materialize_git_entry(root: Path, path: Path, entry: GitEntry) -> None:
-    """Atomically replace one candidate path from external same-volume staging."""
-
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-mutant-", dir=_state_directory(root))
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        _materialize_git_entry(temporary, entry)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    if not path_matches_git_entry(path, entry):
-        raise MeasurementError(f"{path} Git mode {entry.mode} cannot be represented on this host")
-
-
-def _identity_json(identity: PathIdentity) -> dict[str, object]:
-    payload: object = identity.payload
-    if isinstance(payload, bytes):
-        payload = {"bytes": base64.b64encode(payload).decode("ascii")}
-    return {"kind": identity.kind, "payload": payload, "mode": identity.mode}
-
-
-def _identity_from_json(payload: object) -> PathIdentity:
-    if not isinstance(payload, dict) or payload.get("kind") not in {"absent", "file", "symlink"}:
-        raise ValueError("invalid original path identity")
-    value = payload.get("payload")
-    if isinstance(value, dict) and set(value) == {"bytes"}:
-        value = base64.b64decode(str(value["bytes"]), validate=True)
-    mode = payload.get("mode")
-    if mode is not None and not isinstance(mode, int):
-        raise ValueError("invalid original path mode")
-    return PathIdentity(str(payload["kind"]), value, mode)
-
-
-def _entry_json(entry: GitEntry | None) -> dict[str, str] | None:
-    if entry is None:
-        return None
-    return {
-        "mode": entry.mode,
-        "object_type": entry.object_type,
-        "object_id": entry.object_id,
-        "content": base64.b64encode(entry.content).decode("ascii"),
-    }
-
-
-def _entry_from_json(payload: object) -> GitEntry | None:
-    if payload is None:
-        return None
-    if not isinstance(payload, dict) or set(payload) != {"mode", "object_type", "object_id", "content"}:
-        raise ValueError("invalid mutant Git identity")
-    return GitEntry(
-        str(payload["mode"]),
-        str(payload["object_type"]),
-        str(payload["object_id"]),
-        base64.b64decode(str(payload["content"]), validate=True),
+def _synthetic_commit_environment() -> dict[str, str]:
+    environment = _git_env()
+    environment.update(
+        {
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+            "GIT_AUTHOR_EMAIL": "measurement@example.invalid",
+            "GIT_AUTHOR_NAME": "CryoDAQ measurement",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+            "GIT_COMMITTER_EMAIL": "measurement@example.invalid",
+            "GIT_COMMITTER_NAME": "CryoDAQ measurement",
+        }
     )
+    return environment
 
 
-def _recovery_path(root: Path) -> Path:
-    return _state_directory(root) / _RECOVERY_NAME
+def _materialize_clean_snapshot(
+    checkout: Path,
+    revision: str,
+    reverse_rename: tuple[str, str, GitEntry, GitEntry] | None,
+) -> str:
+    """Normalize candidate and mutant alike to clean, deterministic synthetic commits."""
+
+    candidate_tree = _git_at(checkout, ["rev-parse", f"{revision}^{{tree}}"])
+    if candidate_tree.returncode != 0:
+        raise MeasurementError("candidate tree could not be resolved in the disposable checkout")
+    assert_checkout_matches_tree(checkout, revision)
+
+    old_relative: str | None = None
+    new_relative: str | None = None
+    before: GitEntry | None = None
+    candidate: GitEntry | None = None
+    if reverse_rename is not None:
+        old_relative, new_relative, before, candidate = reverse_rename
+        old_relative = _safe_relative(old_relative)
+        new_relative = _safe_relative(new_relative)
+        if before != candidate or old_relative == new_relative:
+            raise MeasurementError("disposable mutation is not an exact-entry rename")
+        old = _checkout_path(checkout, old_relative)
+        new = _checkout_path(checkout, new_relative)
+        if old.exists() or old.is_symlink() or not path_matches_git_entry(new, candidate):
+            raise MeasurementError("disposable candidate rename pair has an unexpected identity")
+        old.parent.mkdir(parents=True, exist_ok=True)
+        old = _checkout_path(checkout, old_relative)
+        os.replace(new, old)
+        if not path_matches_git_entry(old, before) or new.exists() or new.is_symlink():
+            raise MeasurementError("atomic disposable rename did not produce the requested mutant")
+        _run_measurement_command(("git", "update-index", "--force-remove", "--", new_relative), root=checkout)
+        _run_measurement_command(
+            (
+                "git",
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"{before.mode},{before.object_id},{old_relative}",
+            ),
+            root=checkout,
+        )
+
+    tree = _run_measurement_command(("git", "write-tree"), root=checkout).stdout.strip()
+    if reverse_rename is None:
+        if tree != candidate_tree.stdout.strip():
+            raise MeasurementError("clean candidate snapshot changed the candidate tree")
+    else:
+        difference = _git_at(
+            checkout,
+            ["diff", "--cached", "--name-status", "-z", "--find-renames=100%", revision, "--"],
+        )
+        expected = f"R100\0{new_relative}\0{old_relative}\0"
+        if difference.returncode != 0 or difference.stdout != expected:
+            raise MeasurementError("synthetic mutant tree differs by more than the exact reverse rename")
+
+    commit = _run_measurement_command(
+        ("git", "commit-tree", tree, "-p", revision, "-m", "CryoDAQ phase-neutral measurement snapshot"),
+        root=checkout,
+        environment=_synthetic_commit_environment(),
+    ).stdout.strip()
+    _run_measurement_command(("git", "reset", "--hard", "--quiet", commit), root=checkout)
+    observed_head = _git_at(checkout, ["rev-parse", "HEAD"])
+    status = _git_at(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
+    if observed_head.returncode != 0 or observed_head.stdout.strip() != commit:
+        raise MeasurementError("synthetic measurement snapshot did not become HEAD")
+    if status.returncode != 0 or status.stdout:
+        raise MeasurementError("synthetic measurement snapshot is not index/worktree clean")
+    assert_checkout_matches_tree(checkout, commit)
+    if reverse_rename is not None:
+        assert old_relative is not None and new_relative is not None and before is not None
+        old = _checkout_path(checkout, old_relative)
+        new = _checkout_path(checkout, new_relative)
+        if not path_matches_git_entry(old, before) or new.exists() or new.is_symlink():
+            raise MeasurementError("clean synthetic mutant lost the exact reverse rename")
+    return commit
 
 
-def _write_recovery_payload(journal: Path, payload: dict[str, object]) -> None:
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f"{_RECOVERY_NAME}.", suffix=".tmp", dir=journal.parent)
-    temporary = Path(temporary_name)
+def _safe_relative(value: object) -> str:
+    relative = str(value)
+    posix = PurePosixPath(relative)
+    windows = PureWindowsPath(relative)
+    if (
+        not relative
+        or "\0" in relative
+        or "\\" in relative
+        or posix.is_absolute()
+        or not posix.parts
+        or ".." in posix.parts
+        or posix.as_posix() != relative
+        or windows.is_absolute()
+        or bool(windows.drive)
+        or bool(windows.root)
+    ):
+        raise MeasurementError(f"unsafe repository path {relative!r}")
+    return relative
+
+
+def _checkout_path(root: Path, relative: str) -> Path:
+    parsed = PurePosixPath(_safe_relative(relative))
+    path = root.joinpath(*parsed.parts)
+    canonical_root = root.resolve(strict=True)
+    current = root
+    for part in parsed.parts[:-1]:
+        current /= part
+        if not current.exists():
+            continue
+        observed = current.lstat()
+        junction = getattr(current, "is_junction", None)
+        if current.is_symlink() or (junction is not None and junction()):
+            raise MeasurementError(f"disposable-checkout parent is a link or junction: {current}")
+        if not stat.S_ISDIR(observed.st_mode) or not current.resolve(strict=True).is_relative_to(canonical_root):
+            raise MeasurementError(f"disposable-checkout parent escapes its root: {current}")
+    return path
+
+
+def _run_measurement_command(
+    args: tuple[str, ...],
+    *,
+    root: Path,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(payload, stream, sort_keys=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, journal)
+        run = _run_candidate_process(
+            args,
+            root=root,
+            environment=environment if environment is not None else _git_env(),
+            capture_output=True,
+            timeout=_PYTEST_TIMEOUT_SECONDS,
+        )
+    except CandidateProcessUnsettledError as exc:
+        raise UnsettledProcessTree(f"measurement command process tree did not settle: {exc}") from exc
+    except CandidateProcessSettlementError as exc:
+        raise MeasurementError(f"measurement command boundary failed safely: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise MeasurementError(f"measurement command exceeded {_PYTEST_TIMEOUT_SECONDS} seconds: {args[0]}") from exc
+    if run.returncode != 0:
+        tail = "\n".join((str(run.stdout or "") + str(run.stderr or "")).splitlines()[-15:])
+        raise MeasurementError(f"measurement command exited {run.returncode}: {' '.join(args[:3])}\n{tail}")
+    return run
+
+
+def _scrub_clone_source_metadata(checkout: Path, source: Path) -> None:
+    """Remove clone metadata that would disclose or redirect into the measured source."""
+
+    _run_measurement_command(("git", "remote", "remove", "origin"), root=checkout)
+    git_directory = checkout / ".git"
+    alternates = git_directory / "objects" / "info" / "alternates"
+    if alternates.exists() and alternates.read_bytes().strip():
+        raise MeasurementError("disposable checkout unexpectedly borrows source Git objects")
+    try:
+        shutil.rmtree(git_directory / "logs", ignore_errors=False)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise MeasurementError("disposable checkout clone reflogs could not be scrubbed") from exc
+    for name in ("FETCH_HEAD", "ORIG_HEAD"):
+        try:
+            (git_directory / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise MeasurementError(f"disposable checkout {name} could not be scrubbed") from exc
+
+    remotes = _git_at(checkout, ["remote"])
+    remote_urls = _git_at(checkout, ["config", "--local", "--get-regexp", r"^remote\..*\.url$"])
+    if remotes.returncode != 0 or remotes.stdout.strip():
+        raise MeasurementError("disposable checkout retained a source remote")
+    if remote_urls.returncode not in {0, 1} or remote_urls.stdout.strip():
+        raise MeasurementError("disposable checkout retained a source remote URL")
+    config = (git_directory / "config").read_text(encoding="utf-8", errors="replace").casefold()
+    source_spellings = {str(source).casefold(), source.as_posix().casefold()}
+    if any(spelling and spelling in config for spelling in source_spellings):
+        raise MeasurementError("disposable checkout configuration still discloses the measured source")
+
+
+def _remove_disposable_state(state: Path, source: Path) -> None:
+    expected_parent = _state_directory(source).resolve(strict=True)
+    junction = getattr(state, "is_junction", None)
+    if state.is_symlink() or (junction is not None and junction()):
+        raise MeasurementError(f"refusing to clean linked disposable state at {state}")
+    canonical = state.resolve(strict=True)
+    if canonical.parent != expected_parent or not canonical.name.startswith("measurement-"):
+        raise MeasurementError(f"refusing to clean unbound disposable state at {canonical}")
+
+    def make_writable_and_retry(function: object, path: str, _error: object) -> None:
+        os.chmod(path, stat.S_IWRITE)
+        function(path)  # type: ignore[operator]
+
+    shutil.rmtree(canonical, onerror=make_writable_and_retry)
+
+
+@contextmanager
+def disposable_checkout(
+    source: Path,
+    revision: str,
+    *,
+    reverse_rename: tuple[str, str, GitEntry, GitEntry] | None = None,
+) -> Iterator[Path]:
+    """Yield a verified local checkout and never write the measured source tree."""
+
+    source = source.resolve(strict=True)
+    state = Path(tempfile.mkdtemp(prefix="measurement-", dir=_state_directory(source))).resolve(strict=True)
+    checkout = state / "checkout"
+    preserve = False
+    try:
+        _run_measurement_command(
+            (
+                "git",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                "--no-checkout",
+                str(source),
+                str(checkout),
+            ),
+            root=state,
+        )
+        _run_measurement_command(("git", "checkout", "--quiet", "--detach", revision), root=checkout)
+        observed_head = _git_at(checkout, ["rev-parse", "HEAD"])
+        if observed_head.returncode != 0 or observed_head.stdout.strip() != revision:
+            raise MeasurementError("disposable checkout did not bind the requested candidate commit")
+        status = _git_at(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
+        if status.returncode != 0 or status.stdout.strip():
+            raise MeasurementError("fresh disposable candidate checkout is not clean")
+
+        _scrub_clone_source_metadata(checkout, source)
+        _materialize_clean_snapshot(checkout, revision, reverse_rename)
+        yield checkout
+    except UnsettledProcessTree as unsettled:
+        preserve = True
+        raise UnsettledProcessTree(f"{unsettled}; disposable checkout preserved at {state}") from unsettled
     finally:
-        temporary.unlink(missing_ok=True)
+        if not preserve:
+            try:
+                _remove_disposable_state(state, source)
+            except OSError as exc:
+                raise MeasurementError(f"disposable checkout cleanup failed and was left at {state}: {exc}") from exc
 
 
-def arm_recovery(root: Path, records: tuple[tuple[str, PathIdentity, GitEntry | None], ...]) -> None:
-    """Persist restore intent before changing any candidate path."""
-
-    journal = _recovery_path(root)
-    if journal.exists():
-        raise MeasurementError(f"pending recovery journal already exists at {journal}")
-    payload: dict[str, object] = {
-        "version": 1,
-        "paths": [
-            {"path": path, "original": _identity_json(original), "mutant": _entry_json(mutant)}
-            for path, original, mutant in records
-        ],
-    }
-    _write_recovery_payload(journal, payload)
-
-
-def block_recovery(root: Path, reason: str) -> None:
-    """Persist that automatic restore is unsafe after an unverified process settlement."""
-
-    journal = _recovery_path(root)
-    try:
-        payload = json.loads(journal.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("paths"), list):
-            raise ValueError("invalid recovery journal schema")
-    except (OSError, TypeError, ValueError) as exc:
-        raise MeasurementError(f"recovery journal could not be blocked safely: {exc}") from exc
-    payload["restore_blocked"] = reason.splitlines()[0]
-    _write_recovery_payload(journal, payload)
+def _validated_suite_selector(root: Path, selector: str) -> str:
+    if not selector or any(character in selector for character in "\0\r\n"):
+        raise MeasurementError(f"unsafe pytest suite selector {selector!r}")
+    path_text, separator, node = selector.partition("::")
+    relative = _safe_relative(path_text)
+    if relative != "tests" and not relative.startswith("tests/"):
+        raise MeasurementError(f"pytest suite selector escapes tests/: {selector!r}")
+    target = _checkout_path(root, relative)
+    junction = getattr(target, "is_junction", None)
+    if (
+        not target.exists()
+        or target.is_symlink()
+        or (junction is not None and junction())
+        or not target.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+    ):
+        raise MeasurementError(f"pytest suite selector is not a confined checkout path: {selector!r}")
+    if separator and not node:
+        raise MeasurementError(f"pytest suite selector has an empty node: {selector!r}")
+    return selector
 
 
-def clear_recovery(root: Path) -> None:
-    _recovery_path(root).unlink(missing_ok=True)
+def _measurement_environment(source_root: Path, checkout_root: Path, run_root: Path) -> dict[str, str]:
+    environment = _checkout_environment(checkout_root)
+    for key in tuple(environment):
+        if key.startswith("GIT_"):
+            environment.pop(key)
+    for key in ("GITHUB_WORKSPACE", "INIT_CWD", "OLDPWD", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
+        environment.pop(key, None)
+
+    source_spellings = {str(source_root).casefold(), source_root.as_posix().casefold()}
+    for key in ("PYTHONPATH", "PWD"):
+        value = environment.get(key, "")
+        if any(spelling and spelling in value.casefold() for spelling in source_spellings):
+            environment.pop(key, None)
+
+    runtime = run_root / "runtime"
+    temporary = run_root / "tmp"
+    cache = run_root / "cache"
+    pycache = run_root / "pycache"
+    for path in (runtime, temporary, cache, pycache):
+        path.mkdir(parents=True, exist_ok=True)
+    environment.update(
+        {
+            "COVERAGE_FILE": str(cache / ".coverage"),
+            "CRYODAQ_STATE_ROOT": str(runtime),
+            "MPLCONFIGDIR": str(cache / "matplotlib"),
+            "NUMBA_CACHE_DIR": str(cache / "numba"),
+            "PWD": str(checkout_root),
+            "PYTHONPYCACHEPREFIX": str(pycache),
+            "TEMP": str(temporary),
+            "TMP": str(temporary),
+            "TMPDIR": str(temporary),
+            "XDG_CACHE_HOME": str(cache / "xdg"),
+        }
+    )
+    environment.pop("PYTHONDONTWRITEBYTECODE", None)
+    return environment
 
 
-def recover_pending(root: Path) -> bool:
-    """Restore an interrupted mutation, but never overwrite unknown bytes."""
-
-    journal = _recovery_path(root)
-    if not journal.exists():
-        return False
-    try:
-        payload = json.loads(journal.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("paths"), list):
-            raise ValueError("invalid recovery journal schema")
-        restore_blocked = payload.get("restore_blocked")
-        if restore_blocked is not None:
-            if not isinstance(restore_blocked, str) or not restore_blocked:
-                raise ValueError("invalid blocked-recovery reason")
-            raise MeasurementError(f"automatic recovery is blocked after an unverified process tree: {restore_blocked}")
-        records: list[tuple[Path, PathIdentity, GitEntry | None]] = []
-        for record in payload["paths"]:
-            if not isinstance(record, dict) or set(record) != {"path", "original", "mutant"}:
-                raise ValueError("invalid recovery path record")
-            relative = str(record["path"])
-            parsed = PurePosixPath(relative)
-            if parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != relative:
-                raise ValueError(f"unsafe recovery path {relative!r}")
-            path = root.joinpath(*parsed.parts)
-            if not path.parent.resolve().is_relative_to(root.resolve()):
-                raise ValueError(f"recovery parent escapes the worktree: {relative!r}")
-            records.append((path, _identity_from_json(record["original"]), _entry_from_json(record["mutant"])))
-    except (OSError, TypeError, ValueError) as exc:
-        raise MeasurementError(f"pending recovery journal is unreadable: {exc}") from exc
-
-    states: list[tuple[Path, PathIdentity, bool]] = []
-    for path, original, mutant in records:
-        current = path_identity(path)
-        is_original = current == original
-        is_mutant = path_matches_git_entry(path, mutant)
-        if not (is_original or is_mutant):
-            raise MeasurementError(f"{path} matches neither the recorded candidate nor mutant; left untouched")
-        states.append((path, original, is_original))
-    for path, original, is_original in states:
-        if not is_original:
-            restore_path_atomically(root, path, original)
-        if path_identity(path) != original:
-            raise MeasurementError(f"{path} could not be restored from the recovery journal")
-    journal.unlink()
-    return True
-
-
-def failures(suites: list[str], cache_prefix: Path) -> list[str]:
-    env = dict(os.environ, PYTHONPYCACHEPREFIX=str(cache_prefix), PYTHONDONTWRITEBYTECODE="")
+def failures(
+    suites: list[str],
+    run_root: Path,
+    *,
+    root: Path | None = None,
+    source_root: Path | None = None,
+) -> list[str]:
+    root = (root or repository_root()).resolve(strict=True)
+    source_root = (source_root or root).resolve(strict=True)
+    environment = _measurement_environment(source_root, root, run_root)
     found: list[str] = []
-    for suite in suites:
+    for raw_suite in suites:
+        suite = _validated_suite_selector(root, raw_suite)
         try:
             run = _run_candidate_process(
                 (sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"),
-                root=repository_root(),
-                environment=env,
+                root=root,
+                environment=environment,
                 capture_output=True,
                 timeout=_PYTEST_TIMEOUT_SECONDS,
             )
@@ -682,14 +882,6 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
         stdout = str(run.stdout or "")
         stderr = str(run.stderr or "")
         parsed = [line.split("::")[-1].strip() for line in stdout.splitlines() if line.startswith("FAILED")]
-        # A CRASHED suite prints no `FAILED` lines, so parsing stdout alone
-        # reads a native fault, an internal error, a usage error or an empty
-        # collection as "nothing failed" -- and in the CONTROL run that is a
-        # false green which certifies every revert that follows it. pytest
-        # exits 0 for all-passed and 1 for tests-failed; everything else (2
-        # interrupted, 3 internal, 4 usage, 5 nothing collected) means the
-        # measurement did not happen. An exit of 1 with no parsable FAILED
-        # line is the same situation wearing the expected exit code.
         if run.returncode not in (0, 1) or (run.returncode == 1 and not parsed):
             tail = "\n".join((stdout + stderr).splitlines()[-15:])
             raise MeasurementError(f"pytest over {suite!r} exited {run.returncode} with no readable result:\n{tail}")
@@ -697,71 +889,80 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     return found
 
 
-def fresh_failures(suites: list[str], prefix: str) -> list[str]:
-    cache = Path(tempfile.mkdtemp(prefix=prefix))
+def fresh_failures(
+    suites: list[str],
+    *,
+    root: Path | None = None,
+    source_root: Path | None = None,
+) -> list[str]:
+    run_root = Path(tempfile.mkdtemp(prefix="unguarded-run-"))
+    preserve = False
     try:
-        return failures(suites, cache)
+        return failures(suites, run_root, root=root, source_root=source_root)
+    except UnsettledProcessTree as unsettled:
+        preserve = True
+        raise UnsettledProcessTree(f"{unsettled}; phase-neutral pytest state preserved at {run_root}") from unsettled
     finally:
-        shutil.rmtree(cache, ignore_errors=True)
+        if not preserve:
+            try:
+                shutil.rmtree(run_root)
+            except OSError as exc:
+                raise MeasurementError(f"pytest state cleanup failed at {run_root}: {exc}") from exc
 
 
-def repeated_mutant_failures(suites: list[str]) -> list[str]:
-    first = sorted(set(fresh_failures(suites, "unguarded-mutant-")))
-    second = sorted(set(fresh_failures(suites, "unguarded-mutant-repeat-")))
+def repeated_mutant_failures(
+    suites: list[str],
+    *,
+    root: Path,
+    source_root: Path,
+    inputs: SuiteInputs,
+) -> list[str]:
+    first = sorted(set(fresh_failures(suites, root=root, source_root=source_root)))
+    assert_suite_inputs_unchanged(inputs, root)
+    second = sorted(set(fresh_failures(suites, root=root, source_root=source_root)))
+    assert_suite_inputs_unchanged(inputs, root)
     if first != second:
         raise MeasurementError("mutant failures did not repeat exactly on the second run")
     return first
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", default="origin/master")
-    parser.add_argument("--suite", action="append", default=[])
-    parser.add_argument("--include", action="append", default=[])
-    parser.add_argument("--suffix", action="append", default=[])
-    options = parser.parse_args()
-    suites = options.suite or ["tests"]
-    suffixes = tuple(dict.fromkeys((*_DEFAULT_SUFFIXES, *options.suffix)))
-
-    root = repository_root()
+def _measure(options: argparse.Namespace, root: Path) -> int:
     try:
-        recovered = recover_pending(root)
-    except MeasurementError as unreadable:
-        print(f"REFUSING: an interrupted mutation could not be recovered safely: {unreadable}")
+        source_inputs = capture_suite_inputs(root)
+    except SuiteInputDrift as drift:
+        print(f"REFUSING: source inputs were unstable during candidate capture: {drift}")
         return 2
-    if recovered:
-        print("recovered the candidate from an interrupted mutation before measuring")
+    if source_inputs.porcelain:
+        print("REFUSING: uncommitted candidate inputs cannot be attributed to HEAD:")
+        print(source_inputs.porcelain.decode("utf-8", "replace").replace("\0", "\n").rstrip())
+        return 2
 
-    point = merge_base(options.base)
-    includes = tuple(dict.fromkeys((*default_runtime_includes(point, "HEAD"), *options.include)))
-    targets = changed_files(point, includes, suffixes)
+    head = source_inputs.head
+    point = merge_base(options.base, head)
+    suites = options.suite or ["tests"]
+    includes = tuple(dict.fromkeys((*default_runtime_includes(point, head), *options.include)))
+    targets = changed_files(point, head, includes)
+    try:
+        assert_suite_inputs_unchanged(source_inputs, root)
+    except SuiteInputDrift as drift:
+        print(f"REFUSING: source inputs drifted during candidate discovery: {drift}")
+        return 2
     if not targets:
         print(f"no production artifacts changed against {point[:8]}; nothing to measure")
         return 0
 
-    target_paths = tuple(dict.fromkeys(path for target in targets for path in target.paths))
-    dirty = _git(["status", "--porcelain", "--", *target_paths]).stdout.strip()
-    if dirty:
-        print("REFUSING: these artifacts have uncommitted changes, so a revert could not be undone safely:")
-        print(dirty)
-        return 2
-
-    uncommitted = _git(["status", "--porcelain=v1", "--untracked-files=all"]).stdout.strip()
-    if uncommitted:
-        print("REFUSING: uncommitted candidate inputs cannot be attributed to HEAD:")
-        print(uncommitted)
-        return 2
-
     try:
-        suite_inputs = capture_suite_inputs(root)
-    except MeasurementError as unreadable:
-        print(f"REFUSING: suite input identity could not be captured: {unreadable}")
+        with disposable_checkout(root, head) as control_root:
+            control_inputs = capture_suite_inputs(control_root)
+            control = fresh_failures(
+                suites,
+                root=control_root,
+                source_root=root,
+            )
+            assert_suite_inputs_unchanged(control_inputs, control_root)
+    except UnsettledProcessTree as unsettled:
+        print(f"REFUSING: control process tree did not settle: {unsettled}")
         return 2
-
-    # THE CONTROL. Without it, a suite that already fails hands the same failure
-    # to every reverted artifact and every one is reported guarded.
-    try:
-        control = fresh_failures(suites, "unguarded-control-")
     except MeasurementError as unreadable:
         print(f"REFUSING: the control run produced no readable result, so nothing can be attributed:\n{unreadable}")
         return 2
@@ -771,27 +972,26 @@ def main() -> int:
             print(f"    {name}")
         return 2
     try:
-        assert_suite_inputs_unchanged(suite_inputs, root)
+        assert_suite_inputs_unchanged(source_inputs, root)
     except SuiteInputDrift as drift:
-        print(f"REFUSING: suite inputs drifted after the green control: {drift}")
+        print(f"REFUSING: source inputs drifted after the green control: {drift}")
         return 2
-    print(f"control: green over {', '.join(suites)}")
+
+    print(f"control: green over {', '.join(suites)} in a disposable checkout")
     print()
     print("| reverted production artifact | new failures introduced by the revert |")
     print("|---|---|")
 
     unguarded: list[str] = []
     unmeasured: list[str] = []
-    clobbered: list[str] = []
     for target in targets:
         try:
-            assert_suite_inputs_unchanged(suite_inputs, root)
+            assert_suite_inputs_unchanged(source_inputs, root)
         except SuiteInputDrift as drift:
-            print(f"REFUSING: suite inputs drifted before mutation attribution: {drift}")
+            print(f"REFUSING: source inputs drifted before mutation attribution: {drift}")
             return 2
-        path = str(target.candidate_path or target.base_path)
-        before = git_entry(point, target.base_path)
-        candidate = git_entry("HEAD", target.candidate_path)
+        before = git_entry_at(root, point, target.base_path)
+        candidate = git_entry_at(root, head, target.candidate_path)
         if before is None or candidate is None or before.content != candidate.content:
             unmeasured.append(target.label)
             print(
@@ -799,224 +999,100 @@ def main() -> int:
                 "whole-file reversion cannot attribute them separately |"
             )
             continue
-        if target.base_path != target.candidate_path:
-            old = root / str(target.base_path)
-            new = root / str(target.candidate_path)
-            old_original = path_identity(old)
-            new_original = path_identity(new)
-            concurrent = False
-            armed = False
-            old_mutant: PathIdentity | None = None
-            new_mutant: PathIdentity | None = None
-            drift_error: SuiteInputDrift | None = None
-            unsettled_error: UnsettledProcessTree | None = None
-            try:
-                if (
-                    before is None
-                    or candidate is None
-                    or old_original.kind != "absent"
-                    or not path_matches_git_entry(new, candidate)
-                ):
-                    unmeasured.append(target.label)
-                    print(f"| `{target.label}` | **NOT MEASURED** — rename pair has an unreadable identity |")
-                    continue
-                if not old.parent.is_dir() or not old.parent.resolve().is_relative_to(root.resolve()):
-                    unmeasured.append(target.label)
-                    print(
-                        f"| `{target.label}` | **NOT MEASURED** - rename source parent is absent or outside checkout |"
-                    )
-                    continue
-                if path_identity(old) != old_original or path_identity(new) != new_original:
-                    clobbered.append(target.label)
-                    print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed before mutation |")
-                    continue
-                arm_recovery(
-                    root,
-                    (
-                        (str(target.base_path), old_original, before),
-                        (str(target.candidate_path), new_original, None),
-                    ),
-                )
-                armed = True
-                materialize_git_entry(root, old, before)
-                old_mutant = path_identity(old)
-                new.unlink()
-                new_mutant = path_identity(new)
-                try:
-                    introduced = sorted(set(repeated_mutant_failures(suites)) - set(control))
-                    assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
-                except UnsettledProcessTree as unsettled:
-                    unsettled_error = unsettled
-                    introduced = []
-                except SuiteInputDrift as drift:
-                    drift_error = drift
-                    introduced = []
-                except MeasurementError as unreadable:
-                    unmeasured.append(target.label)
-                    print(f"| `{target.label}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
-                    continue
-            finally:
-                if unsettled_error is not None:
-                    if armed:
-                        block_recovery(root, str(unsettled_error))
-                else:
-                    old_unchanged = old_mutant is not None and path_identity(old) == old_mutant
-                    new_unchanged = new_mutant is not None and path_identity(new) == new_mutant
-                    concurrent = old_mutant is not None and not (old_unchanged and new_unchanged)
-                    if old_unchanged:
-                        restore_path_atomically(root, old, old_original)
-                    if new_unchanged:
-                        restore_path_atomically(root, new, new_original)
-                    if concurrent:
-                        clobbered.append(target.label)
-                        print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed during the run |")
-                    if armed and (
-                        concurrent or (path_identity(old) == old_original and path_identity(new) == new_original)
-                    ):
-                        clear_recovery(root)
-            if unsettled_error is not None:
-                print(f"REFUSING: {unsettled_error}; the mutant and blocked recovery journal were left intact")
-                return 2
-            if drift_error is not None:
-                print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
-                return 2
-            if concurrent:
-                continue
-            if introduced:
-                try:
-                    restored = fresh_failures(suites, "unguarded-restored-")
-                    assert_suite_inputs_unchanged(suite_inputs, root)
-                except MeasurementError as unreadable:
-                    unmeasured.append(target.label)
-                    print(f"| `{target.label}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
-                    continue
-                if restored:
-                    unmeasured.append(target.label)
-                    print(f"| `{target.label}` | **NOT MEASURED** — restored candidate was not green |")
-                    continue
-                print(f"| `{target.label}` | **{len(introduced)} new** — {', '.join(introduced[:3])} |")
-            else:
-                print(f"| `{target.label}` | **0 new — UNGUARDED** |")
-                unguarded.append(target.label)
+        if before != candidate or target.base_path == target.candidate_path:
+            unmeasured.append(target.label)
+            print(
+                f"| `{target.label}` | **NOT MEASURED** - only an exact-entry rename can be isolated "
+                "without writing the source checkout |"
+            )
             continue
-        source = root / path
-        original = path_identity(source)
-        armed = False
-        mutant: PathIdentity | None = None
-        drift_error: SuiteInputDrift | None = None
-        unsettled_error: UnsettledProcessTree | None = None
+
+        old_relative = _safe_relative(str(target.base_path))
+        new_relative = _safe_relative(str(target.candidate_path))
         try:
-            if before is None:
-                if candidate is None or original.kind == "absent":
-                    unmeasured.append(path)
-                    print(f"| `{path}` | **NOT MEASURED** — absent from both sides |")
-                    continue
-                # Window one applies here too. An added artifact took this
-                # branch without the reread and left `mutant` None, so the
-                # post-run check below could not fire for it: another lane's
-                # newly written file could be deleted and then recreated from
-                # bytes this tool captured before that lane wrote them.
-                if not path_matches_git_entry(source, candidate) or path_identity(source) != original:
-                    clobbered.append(path)
-                    print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to remove |")
-                    continue
-                arm_recovery(root, ((path, original, None),))
-                armed = True
-                source.unlink()  # an ADDED artifact is reverted by removing it
-                mutant = path_identity(source)
-            else:
-                if candidate is not None and before == candidate:
-                    print(f"| `{path}` | identical to the merge base — not measured |")
-                    continue
-                if candidate is not None and not path_matches_git_entry(source, candidate):
-                    unmeasured.append(path)
-                    print(f"| `{path}` | **NOT MEASURED** — candidate Git identity is not present on this host |")
-                    continue
-                # WINDOW ONE. The up-front porcelain check cannot see an edit
-                # made after it ran. Re-read immediately before writing, and
-                # refuse rather than destroy a concurrent writer's bytes.
-                if path_identity(source) != original:
-                    clobbered.append(path)
-                    print(f"| `{path}` | **NOT MEASURED** — changed on disk before mutation; refusing to overwrite |")
-                    continue
-                arm_recovery(root, ((path, original, before),))
-                armed = True
-                materialize_git_entry(root, source, before)
-                mutant = path_identity(source)
-            try:
-                introduced = sorted(set(repeated_mutant_failures(suites)) - set(control))
-                assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
-            except UnsettledProcessTree as unsettled:
-                unsettled_error = unsettled
-                introduced = []
-            except SuiteInputDrift as drift:
-                drift_error = drift
-                introduced = []
-            except MeasurementError as unreadable:
-                unmeasured.append(path)
-                print(f"| `{path}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
-                continue
-        finally:
-            if unsettled_error is not None:
-                if armed:
-                    block_recovery(root, str(unsettled_error))
-            else:
-                # WINDOW TWO. Another worker may have written while pytest ran. If
-                # what is on disk is no longer the mutant we placed there, those are
-                # someone else's bytes: leave them, and say so. An unconditional
-                # restore here would erase work this tool never owned.
-                concurrent = mutant is not None and path_identity(source) != mutant
-                if concurrent:
-                    clobbered.append(path)
-                    print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
-                else:
-                    restore_path_atomically(root, source, original)
-                    assert path_identity(source) == original, f"{path} was NOT restored with its complete identity"
-                if armed and (concurrent or path_identity(source) == original):
-                    clear_recovery(root)
-        if unsettled_error is not None:
-            print(f"REFUSING: {unsettled_error}; the mutant and blocked recovery journal were left intact")
+            with disposable_checkout(
+                root,
+                head,
+                reverse_rename=(old_relative, new_relative, before, candidate),
+            ) as mutant_root:
+                mutant_inputs = capture_suite_inputs(mutant_root)
+                mutant_failures = repeated_mutant_failures(
+                    suites,
+                    root=mutant_root,
+                    source_root=root,
+                    inputs=mutant_inputs,
+                )
+            assert_suite_inputs_unchanged(source_inputs, root)
+        except UnsettledProcessTree as unsettled:
+            print(f"REFUSING: mutant process tree did not settle: {unsettled}")
             return 2
-        if drift_error is not None:
-            print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
+        except SuiteInputDrift as drift:
+            print(f"REFUSING: suite inputs drifted during mutation attribution: {drift}")
             return 2
-        if concurrent:
+        except MeasurementError as unreadable:
+            unmeasured.append(target.label)
+            print(f"| `{target.label}` | **NOT MEASURED** - {str(unreadable).splitlines()[0]} |")
             continue
+
+        introduced = sorted(set(mutant_failures) - set(control))
         if introduced:
             try:
-                restored = fresh_failures(suites, "unguarded-restored-")
-                assert_suite_inputs_unchanged(suite_inputs, root)
+                with disposable_checkout(root, head) as confirmation_root:
+                    confirmation_inputs = capture_suite_inputs(confirmation_root)
+                    restored = fresh_failures(
+                        suites,
+                        root=confirmation_root,
+                        source_root=root,
+                    )
+                    assert_suite_inputs_unchanged(confirmation_inputs, confirmation_root)
+                assert_suite_inputs_unchanged(source_inputs, root)
+            except UnsettledProcessTree as unsettled:
+                print(f"REFUSING: confirmation process tree did not settle: {unsettled}")
+                return 2
+            except SuiteInputDrift as drift:
+                print(f"REFUSING: source or confirmation inputs drifted: {drift}")
+                return 2
             except MeasurementError as unreadable:
-                unmeasured.append(path)
-                print(f"| `{path}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
+                unmeasured.append(target.label)
+                print(f"| `{target.label}` | **NOT MEASURED** - {str(unreadable).splitlines()[0]} |")
                 continue
             if restored:
-                unmeasured.append(path)
-                print(f"| `{path}` | **NOT MEASURED** — restored candidate was not green |")
+                unmeasured.append(target.label)
+                print(f"| `{target.label}` | **NOT MEASURED** - fresh candidate confirmation was not green |")
                 continue
-            print(f"| `{path}` | **{len(introduced)} new** — {', '.join(introduced[:3])} |")
+            print(f"| `{target.label}` | **{len(introduced)} new** - {', '.join(introduced[:3])} |")
         else:
-            print(f"| `{path}` | **0 new — UNGUARDED** |")
-            unguarded.append(path)
+            print(f"| `{target.label}` | **0 new - UNGUARDED** |")
+            unguarded.append(target.label)
 
     print()
     if unmeasured:
         print("COULD NOT BE MEASURED (this is a failure, not a pass):")
         for path in unmeasured:
             print(f"    {path}")
-    if clobbered:
-        print("ANOTHER WRITER TOUCHED THESE DURING THE RUN, so they were left as found and NOT measured.")
-        print("Their current contents are that writer's, not this tool's -- check them before trusting the tree:")
-        for path in clobbered:
-            print(f"    {path}")
     if unguarded:
         print("UNGUARDED AT THIS CHANGE'S OWN PURPOSE:")
         for path in unguarded:
             print(f"    {path}")
-    if unguarded or unmeasured or clobbered:
+    if unguarded or unmeasured:
         return 1
-    print("every reverted production artifact introduced a new failure")
+    print("every isolated production artifact introduced a new failure")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base", default="origin/master")
+    parser.add_argument("--suite", action="append", default=[])
+    parser.add_argument("--include", action="append", default=[])
+    options = parser.parse_args()
+
+    root = repository_root().resolve(strict=True)
+    try:
+        return _measure(options, root)
+    except MeasurementError as unsafe:
+        print(f"REFUSING: production-file measurement did not complete safely: {unsafe}")
+        return 2
 
 
 if __name__ == "__main__":
