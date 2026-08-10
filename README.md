@@ -103,10 +103,12 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
 - **Latest release:** v0.64.1 (2026-07-08)
 - **Released baseline:** the latest locally available release tag is `v0.64.1`
   (2026-07-08).
-- **Active campaign:** Montana Cycle 2 is a large, unreleased software-side
-  laboratory-readiness refactor. This README does not assert a current branch or
-  candidate SHA; `PROJECT_STATUS.md` defines the live boundary. The campaign is
-  not accepted merely because its mock tests or ordinary CI pass.
+- **Qualification campaign:** the large software-side laboratory-readiness
+  refactor was merged into `master` on 2026-07-31 after independent review.
+  This README does not assert a current branch or candidate SHA;
+  `PROJECT_STATUS.md` defines the live boundary. The merge is a software
+  checkpoint only — it is not accepted merely because mock tests or ordinary
+  CI pass.
 - **Evidence boundary:** physical instrument, dummy-load, independent final-element,
   and laboratory acceptance gates remain open until the procedures in
   [`docs/lab_verification_checklist.md`](docs/lab_verification_checklist.md) are
@@ -116,13 +118,13 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
   in [`docs/MONTANA_REFACTOR_REPORT.md`](docs/MONTANA_REFACTOR_REPORT.md); the
   status document defines the current acceptance boundary.
 
-## Montana refactor: what changed
+## The laboratory-readiness refactor: what changed
 
-Montana is the unreleased laboratory-readiness refactor. Cycle 1 ended
-`NOT_PR_READY`; Cycle 2 is moving CryoDAQ toward narrower ownership, explicit
+The qualification refactor (merged 2026-07-31; campaign records in
+`docs/campaigns/`) moved CryoDAQ toward narrower ownership, explicit
 evidence, and visible failure boundaries while preserving the information-dense
 operator workflow. Several boundaries remain open below, so this is a design
-direction and partially implemented candidate, not an accepted system property.
+direction with open acceptance gates, not a finished system property.
 
 The most important changes are:
 
@@ -166,44 +168,36 @@ The most important changes are:
   procedures bind evidence to exact commits. Mock evidence never claims to be
   physical-hardware evidence.
 
-Montana is large, but its governing idea is simple: make authority narrow,
+The refactor is large, but its governing idea is simple: make authority narrow,
 state explicit, failure visible, and every acceptance claim traceable to the
 environment that actually produced it.
 
 ### Current acceptance boundary
 
-Historical checkpoint: commit
+The refactor merged into `master` on 2026-07-31 after independent review. The
+merge is a software checkpoint, not acceptance: it establishes no release
+readiness, physical-OFF proof, real-instrument, packaged-Windows, or
+laboratory-acceptance claim. `PROJECT_STATUS.md` defines the live boundary;
+`docs/OPEN_CELLS.md` is the live software-defect disclosure; deferred
+directions with trigger conditions are registered in `docs/OBLIGATIONS.md`.
+
+Historical checkpoint note: commit
 `503c8bf8d884654256ede4f08a9e44ab7b382242` is associated with reported
-eight-job GitHub Actions run `29662599972`. That evidence covers only that
-commit. The current working tree is large and dirty and has no immutable
-candidate SHA or covering CI result; current remote and pull-request state must
-be checked on GitHub.
+eight-job GitHub Actions run `29662599972`; that evidence covers only that
+commit.
 
-The latest review of the local SafetyManager shutdown/HOLD work is **REJECTED**:
-settlement tasks are not yet bounded and one terminal safety-child outcome can
-be consumed again. Local passing tests do not override that finding; the slice
-must be corrected, re-frozen, re-tested, and pass both mandatory reviews.
+A pre-merge review record stood in this section — a dirty-tree status, a
+**REJECTED** verdict on a then-local SafetyManager shutdown/HOLD slice, and a
+pre-merge work list. It described the pre-merge candidate, not the merged
+tree, and is superseded here; the text remains in this file's own pre-merge
+git history, and the current status of every such item is read from
+`docs/OPEN_CELLS.md`, never from this README.
 
-The remaining software work is explicit: quarantine USBTMC after ambiguous
-exchanges; seal and validate safety configuration transactionally; bind safety
-patterns to exact channel descriptors; coalesce shutdown-HOLD settlement and
-contain monitor/writer death; preserve operator-log identity through hot/cold
-rotation, REST, replay, reports, and the assistant; remove write ownership and
-mutation credentials from the observational assistant; finish shared GUI
-freshness/provenance/lifecycle truth; decide conductivity freshness behavior;
-and reconcile protocol, architecture, report metrics, and SVG maps. The
-Keithley/transport focused checks must be rerun and recorded against the eventual
-frozen candidate; no moving-worktree result closes physical gates.
-
-After those engineering gates close, one frozen commit must still pass native
-Windows and WSL partitions, lock/static/package/source-install checks, the
-sealed short soak, Windows ONEDIR, fresh eight-job hosted CI, a fresh-context
-review, and the coordinating agent's separate line-by-line review. External
-model review is additive, not a prerequisite for opening the PR. Physical
-instrument, dummy-load, host-death, independent final-element, long-duration
-soak, and laboratory operator acceptance remain separate and open until their
-prescribed evidence is recorded. The future 100+ sensor / 4K projector and
-semantic-zoom view is deferred and does not block ordinary lab readiness.
+Physical instrument, dummy-load, host-death, independent final-element,
+long-duration soak, and laboratory operator acceptance remain separate and
+open until their prescribed evidence is recorded. The future 100+ sensor / 4K
+projector and semantic-zoom view is deferred and does not block ordinary lab
+readiness.
 
 ## Interview guide for another agent
 
@@ -215,17 +209,17 @@ labels as substitutes for explaining behavior.
 ### Copy-paste assignment for the interviewing agent
 
 > Interview the CryoDAQ maintainer and laboratory stakeholders to produce a
-> factual, operator-centred account of the system and the Montana refactor.
+> factual, operator-centred account of the system and the laboratory-readiness refactor.
 > Establish the real experiment workflow first, then trace authority, data,
 > failure recovery, GUI truth, and acceptance evidence. Separate released
-> behavior, Montana candidate behavior, planned work, and physical claims that
+> behavior, current checkpoint behavior, planned work, and physical claims that
 > remain unverified. Challenge vague answers with concrete scenarios and ask
 > for the owning process, persisted record, operator-visible state, relevant
 > source or test, and exact evidence for every important claim. Do not treat CI,
 > simulation, mocks, screenshots, or documentation as proof of hardware
 > behavior. Do not recommend weakening fail-closed behavior or hiding operator
 > information to simplify the design. End with: (1) a plain-language system
-> summary; (2) a before/Montana comparison; (3) an authority and data-flow map;
+> summary; (2) a before/after comparison; (3) an authority and data-flow map;
 > (4) unresolved safety and operability questions; (5) open software, Windows,
 > WSL, packaging, dummy-load, and physical-lab gates; and (6) contradictions
 > between interviews, code, tests, and documentation.
@@ -238,7 +232,7 @@ personal data or raw private transcripts in the repository.
 
 Read these sources first, in order:
 
-1. This README for the product and Montana overview.
+1. This README for the product and refactor overview.
 2. [`PROJECT_STATUS.md`](PROJECT_STATUS.md) for the exact current evidence and
    open gates.
 3. [`docs/MONTANA_REFACTOR_REPORT.md`](docs/MONTANA_REFACTOR_REPORT.md) for the
@@ -371,8 +365,9 @@ IPC: ZeroMQ PUB/SUB `:5555` (msgpack) + REP/REQ `:5556` (JSON commands).
 ## Implemented workflows
 
 The list below describes the active tree: released v0.64.1 workflows together
-with explicitly unreleased Montana candidate behavior. Candidate defaults and
-hardening are not release or physical-acceptance claims; see **Status** above.
+with the merged checkpoint behavior that still awaits physical acceptance.
+Checkpoint defaults and hardening are not release or physical-acceptance
+claims; see **Status** above.
 
 - **Knowledge base (RAG):** local semantic search over the experiment archive,
   vault notes, the operator log, and the `data/knowledge/` corpus
@@ -571,7 +566,7 @@ cryodaq-rag-search               # semantic search over the knowledge base
 
 ## Configuration
 
-Active configuration files in the Montana candidate:
+Active configuration files in the current checkpoint:
 
 - `config/instruments.yaml` — GPIB/serial/USB addresses, LakeShore channels,
   `chamber.volume_l` for the F13 leak rate
@@ -778,7 +773,7 @@ trail for post-hoc review.
 
 ## Known limitations
 
-These limitations apply at the current v0.64.1/Montana candidate boundary. The
+These limitations apply at the current v0.64.1/checkpoint boundary. The
 software and laboratory checks are collected as a turnkey protocol in
 `docs/lab_verification_checklist.md`.
 
@@ -848,9 +843,9 @@ someone who knows how the whole thing is wired.
 
 When one agent writes the code and then writes its own guard, in one sitting,
 from one mental model, the guard inherits the code's blind spots. It passes, it
-reads as coverage, and it cannot catch the defect it names. During the montana
-review this happened **five separate times**, each caught by an independent
-reviewer rather than by the guard:
+reads as coverage, and it cannot catch the defect it names. During the
+qualification-campaign review this happened **five separate times**, each
+caught by an independent reviewer rather than by the guard:
 
 - a summariser guard fed itself tidy synthetic input, so four successive
   versions of its parser shipped broken;
@@ -878,7 +873,8 @@ Two corollaries worth stating plainly:
    that really runs it. In-process and structural tests cannot see a
    transport-level break.
 2. **Documenting a trap is not preventing a trap.** Every hazard hit during the
-   montana review was already written down somewhere in this repository. The
+   qualification-campaign review was already written down somewhere in this
+   repository. The
    goal is not more prose telling an agent what to avoid; it is a governing
    layer that makes the failure unreachable.
 
