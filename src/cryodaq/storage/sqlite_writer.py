@@ -686,7 +686,9 @@ _ALARM_ACK_INCARNATION_ID_BYTES = 32
 _ALARM_ACK_ABORT_DISPOSITION_SCHEMA = "alarm_ack_abort_disposition_v1"
 _SQLITE_MAX_ROWID = 2**63 - 1
 _ATTENTION_HISTORY_CONTINUITY_NAME = "attention_history.continuity"
-_ATTENTION_HISTORY_CONTINUITY_BYTES = b"cryodaq.attention-history-continuity.v1\n"
+_ATTENTION_HISTORY_CONTINUITY_LEGACY_BYTES = b"cryodaq.attention-history-continuity.v1\n"
+_ATTENTION_HISTORY_CONTINUITY_VERSION = 2
+_ATTENTION_HISTORY_CONTINUITY_MAX_BYTES = 1024
 
 
 def _parse_timestamp(raw) -> datetime:
@@ -2667,60 +2669,198 @@ class SQLiteWriter:
     def _control_db_path(self) -> Path:
         return self._data_dir / "control.db"
 
-    def _attention_history_continuity_present(self) -> bool:
+    @staticmethod
+    def _decode_attention_history_continuity(raw: bytes) -> dict[str, object]:
+        if raw == _ATTENTION_HISTORY_CONTINUITY_LEGACY_BYTES:
+            return {"version": 1, "state": "legacy"}
+        if not raw or len(raw) > _ATTENTION_HISTORY_CONTINUITY_MAX_BYTES:
+            raise RuntimeError("attention history continuity authority is invalid")
+
+        def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            decoded: dict[str, object] = {}
+            for key, value in pairs:
+                if key in decoded:
+                    raise ValueError("duplicate continuity key")
+                decoded[key] = value
+            return decoded
+
+        try:
+            decoded = json.loads(
+                raw,
+                object_pairs_hook=reject_duplicates,
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+            )
+        except (TypeError, ValueError, UnicodeError):
+            raise RuntimeError("attention history continuity authority is invalid") from None
+        if type(decoded) is not dict or decoded.get("version") != _ATTENTION_HISTORY_CONTINUITY_VERSION:
+            raise RuntimeError("attention history continuity authority is invalid")
+        state = decoded.get("state")
+        if state == "clean":
+            if set(decoded) != {"version", "state", "revision"}:
+                raise RuntimeError("attention history continuity authority is invalid")
+            revision = decoded.get("revision")
+            if type(revision) is not int or revision < 0 or revision > _SQLITE_MAX_ROWID:
+                raise RuntimeError("attention history continuity authority is invalid")
+        elif state == "pending":
+            if set(decoded) != {
+                "version",
+                "state",
+                "base_revision",
+                "event_id",
+                "payload_sha256",
+            }:
+                raise RuntimeError("attention history continuity authority is invalid")
+            base_revision = decoded.get("base_revision")
+            event_id = decoded.get("event_id")
+            payload_sha256 = decoded.get("payload_sha256")
+            if (
+                type(base_revision) is not int
+                or base_revision < 0
+                or base_revision >= _SQLITE_MAX_ROWID
+                or type(event_id) is not str
+                or len(event_id) != 32
+                or any(character not in "0123456789abcdef" for character in event_id)
+                or type(payload_sha256) is not str
+                or len(payload_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in payload_sha256)
+            ):
+                raise RuntimeError("attention history continuity authority is invalid")
+        else:
+            raise RuntimeError("attention history continuity authority is invalid")
+        return decoded
+
+    def _read_attention_history_continuity(self) -> dict[str, object] | None:
         path = self._data_dir / _ATTENTION_HISTORY_CONTINUITY_NAME
         try:
             _control_path_identity(path, directory=False)
         except FileNotFoundError:
-            return False
+            return None
         try:
             raw = (
                 read_secure_relative_bytes(
                     self._data_dir,
                     _ATTENTION_HISTORY_CONTINUITY_NAME,
-                    max_bytes=len(_ATTENTION_HISTORY_CONTINUITY_BYTES) + 1,
+                    max_bytes=_ATTENTION_HISTORY_CONTINUITY_MAX_BYTES,
                 )
                 if os.name == "nt"
                 else path.read_bytes()
             )
         except (OSError, SecureRelativeReadError):
             raise RuntimeError("attention history continuity authority is unavailable") from None
-        if raw != _ATTENTION_HISTORY_CONTINUITY_BYTES:
-            raise RuntimeError("attention history continuity authority is invalid")
+        decoded = self._decode_attention_history_continuity(raw)
         _control_path_identity(path, directory=False)
-        return True
+        return decoded
 
-    def _ensure_attention_history_continuity(self) -> None:
-        if self._attention_history_continuity_present():
-            return
+    def _write_attention_history_continuity(self, state: dict[str, object]) -> None:
+        try:
+            payload = (
+                json.dumps(
+                    state,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("ascii")
+                + b"\n"
+            )
+        except (TypeError, ValueError, UnicodeError):
+            raise RuntimeError("attention history continuity authority is invalid") from None
+        if self._decode_attention_history_continuity(payload) != state:
+            raise RuntimeError("attention history continuity authority is invalid")
         path = self._data_dir / _ATTENTION_HISTORY_CONTINUITY_NAME
+        temporary = self._data_dir / (
+            f".{_ATTENTION_HISTORY_CONTINUITY_NAME}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+        )
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor: int | None = None
         try:
-            descriptor = os.open(path, flags, 0o600)
+            _control_path_identity(self._data_dir, directory=True)
+            descriptor = os.open(temporary, flags, 0o600)
             offset = 0
-            while offset < len(_ATTENTION_HISTORY_CONTINUITY_BYTES):
-                written = os.write(descriptor, _ATTENTION_HISTORY_CONTINUITY_BYTES[offset:])
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
                 if written <= 0:
                     raise OSError("attention history continuity write made no progress")
                 offset += written
             os.fsync(descriptor)
-        except FileExistsError:
-            if not self._attention_history_continuity_present():
-                raise RuntimeError("attention history continuity authority is unavailable") from None
-            return
+            os.close(descriptor)
+            descriptor = None
+            os.replace(temporary, path)
+            if os.name != "nt":
+                directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+                directory_descriptor = os.open(self._data_dir, directory_flags)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
         except OSError:
             raise RuntimeError("attention history continuity authority is unavailable") from None
         finally:
             if descriptor is not None:
-                try:
+                with contextlib.suppress(OSError):
                     os.close(descriptor)
-                except OSError:
-                    raise RuntimeError("attention history continuity authority settlement failed") from None
-        if not self._attention_history_continuity_present():
+            with contextlib.suppress(FileNotFoundError, OSError):
+                temporary.unlink()
+        if self._read_attention_history_continuity() != state:
             raise RuntimeError("attention history continuity authority was not established")
+
+    def _reconcile_attention_history_continuity(
+        self,
+        conn: sqlite3.Connection | _OwnedControlConnection,
+        state: dict[str, object] | None,
+        *,
+        storage_created: bool,
+    ) -> dict[str, object] | None:
+        status = conn.execute(
+            "SELECT current_revision, capacity_exhausted_revision FROM attention_history_status WHERE singleton = 1"
+        ).fetchone()
+        if (
+            type(status) is not tuple
+            or len(status) != 2
+            or type(status[0]) is not int
+            or (status[1] is not None and type(status[1]) is not int)
+        ):
+            raise RuntimeError("attention history continuity database state is invalid")
+        current_revision, capacity_revision = status
+        clean = {
+            "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+            "state": "clean",
+            "revision": current_revision,
+        }
+        if storage_created:
+            if state is not None or current_revision != 0:
+                raise RuntimeError("attention history continuity bootstrap is invalid")
+            return clean
+        if state is None:
+            raise RuntimeError("attention history continuity loss detected")
+        if state.get("state") == "legacy":
+            return clean
+        if state.get("state") == "clean":
+            if state.get("revision") != current_revision:
+                raise RuntimeError("attention history continuity rollback detected")
+            return None
+        base_revision = state.get("base_revision")
+        if current_revision == base_revision:
+            raise RuntimeError("attention history continuity has an incomplete append")
+        if current_revision != base_revision + 1:
+            raise RuntimeError("attention history continuity revision is invalid")
+        if capacity_revision == current_revision:
+            return clean
+        row = conn.execute(
+            "SELECT event_id, payload FROM attention_history WHERE sequence = ? AND history_revision = ?",
+            (current_revision, current_revision),
+        ).fetchone()
+        if (
+            type(row) is not tuple
+            or len(row) != 2
+            or row[0] != state.get("event_id")
+            or type(row[1]) is not str
+            or hashlib.sha256(row[1].encode("utf-8")).hexdigest() != state.get("payload_sha256")
+        ):
+            raise RuntimeError("attention history continuity committed append is invalid")
+        return clean
 
     @classmethod
     def _alarm_ack_schema_catalog(
@@ -3480,7 +3620,7 @@ class SQLiteWriter:
             activation_locked = False
             owned_connection.execute("PRAGMA synchronous=FULL;")
             owned_connection.execute("PRAGMA busy_timeout=250;")
-            attention_continuity_present = self._attention_history_continuity_present()
+            attention_continuity = self._read_attention_history_continuity()
             owned_connection.execute("BEGIN IMMEDIATE")
             self._migrate_legacy_alarm_ack_storage(owned_connection)
             owned_connection.execute(SCHEMA_ALARM_ACK_OUTBOX)
@@ -3501,9 +3641,14 @@ class SQLiteWriter:
                 owned_connection,
                 allow_transactional_trigger_challenge=True,
             )
-            self._initialize_attention_history_storage(
+            attention_storage_created = self._initialize_attention_history_storage(
                 owned_connection,
-                continuity_present=attention_continuity_present,
+                continuity_present=attention_continuity is not None,
+            )
+            continuity_update = self._reconcile_attention_history_continuity(
+                owned_connection,
+                attention_continuity,
+                storage_created=attention_storage_created,
             )
             if _operator_log_monotonic() >= deadline:
                 expired[0] = True
@@ -3513,7 +3658,8 @@ class SQLiteWriter:
                     f"{_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S:.3f}s budget"
                 )
             owned_connection.commit()
-            self._ensure_attention_history_continuity()
+            if continuity_update is not None:
+                self._write_attention_history_continuity(continuity_update)
             raw_connection.set_progress_handler(None, 0)
             owned_connection.validate_authority()
             return owned_connection
@@ -6830,7 +6976,7 @@ class SQLiteWriter:
         conn: sqlite3.Connection | _OwnedControlConnection,
         *,
         continuity_present: bool,
-    ) -> None:
+    ) -> bool:
         object_names = (
             "attention_history",
             "attention_history_status",
@@ -6875,7 +7021,7 @@ class SQLiteWriter:
             if marker != ("attention_history", 7) or inserted != (1, 0, 0, None, None):
                 raise RuntimeError("attention history initial status was not created exactly")
             cls._verify_attention_history_storage(conn)
-            return
+            return True
         if (
             type(rows) is not list
             or len(rows) != len(expected)
@@ -6904,6 +7050,7 @@ class SQLiteWriter:
         if marker != [("attention_history", 7)] or type(status) is not list or len(status) != 1:
             raise RuntimeError("attention history established storage is incomplete")
         cls._verify_attention_history_storage(conn)
+        return False
 
     @classmethod
     def _verify_attention_history_storage(
@@ -9613,7 +9760,9 @@ class SQLiteWriter:
             raise TypeError("attention history requires an exact item")
         payload = dump_attention_history_item(item)
         timestamp_value = self._attention_history_time_text(item.timestamp)
+        payload_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         admitted = False
+        continuity_update: dict[str, object] | None = None
         conn = self._open_control_db()
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -9699,6 +9848,20 @@ class SQLiteWriter:
                 if status_before[1:] == (count_row[0], None, None):
                     if count_row[0] >= _SQLITE_MAX_ROWID:
                         raise RuntimeError("attention history revision bound is exhausted")
+                    self._write_attention_history_continuity(
+                        {
+                            "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                            "state": "pending",
+                            "base_revision": count_row[0],
+                            "event_id": item.event_id,
+                            "payload_sha256": payload_sha256,
+                        }
+                    )
+                    continuity_update = {
+                        "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                        "state": "clean",
+                        "revision": count_row[0] + 1,
+                    }
                     before_changes = conn.total_changes
                     status_after = conn.execute(
                         "UPDATE attention_history_status SET "
@@ -9732,6 +9895,20 @@ class SQLiteWriter:
                 else:
                     self._attention_history_time_from_text(status_before[3])
             else:
+                self._write_attention_history_continuity(
+                    {
+                        "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                        "state": "pending",
+                        "base_revision": count_row[0],
+                        "event_id": item.event_id,
+                        "payload_sha256": payload_sha256,
+                    }
+                )
+                continuity_update = {
+                    "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                    "state": "clean",
+                    "revision": count_row[0] + 1,
+                }
                 before_changes = conn.total_changes
                 inserted = conn.execute(
                     "INSERT INTO attention_history "
@@ -9786,6 +9963,8 @@ class SQLiteWriter:
                 admitted = True
             self._verify_attention_history_storage(conn)
             conn.commit()
+            if continuity_update is not None:
+                self._write_attention_history_continuity(continuity_update)
         except (TypeError, ValueError, RuntimeError):
             with contextlib.suppress(sqlite3.Error, RuntimeError):
                 conn.rollback()

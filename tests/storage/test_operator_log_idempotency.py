@@ -233,6 +233,160 @@ async def test_attention_history_detects_control_database_loss(
         await restarted.stop()
 
 
+async def test_attention_history_restart_rejects_older_valid_database_rollback(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(alarm_id="first"))
+    finally:
+        await writer.stop()
+
+    older_path = tmp_path / "older-control.db"
+    source = sqlite3.connect(tmp_path / "control.db")
+    older = sqlite3.connect(older_path)
+    try:
+        source.backup(older)
+    finally:
+        older.close()
+        source.close()
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(
+            _attention_event(
+                alarm_id="second",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+    finally:
+        await writer.stop()
+
+    older = sqlite3.connect(older_path)
+    authority = sqlite3.connect(tmp_path / "control.db")
+    try:
+        older.backup(authority)
+    finally:
+        authority.close()
+        older.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="continuity|rollback"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_failed_append_remains_explicit_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.get_attention_history(experiment_id="exp-stable-7", limit=1)
+    real_commit = sqlite_writer_module._OwnedControlConnection.commit
+    injected = False
+
+    def fail_attention_commit(connection) -> None:  # noqa: ANN001
+        nonlocal injected
+        revision = connection._connection.execute(
+            "SELECT current_revision FROM attention_history_status WHERE singleton = 1"
+        ).fetchone()
+        if not injected and revision == (1,):
+            injected = True
+            raise RuntimeError("injected precommit attention failure")
+        real_commit(connection)
+
+    monkeypatch.setattr(
+        sqlite_writer_module._OwnedControlConnection,
+        "commit",
+        fail_attention_commit,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="injected precommit attention failure"):
+            await writer.append_attention_event(_attention_event())
+    finally:
+        monkeypatch.setattr(
+            sqlite_writer_module._OwnedControlConnection,
+            "commit",
+            real_commit,
+        )
+        await writer.stop()
+    assert injected is True
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="continuity|incomplete append"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=1,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_postcommit_unknown_reconciles_exact_event_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.get_attention_history(experiment_id="exp-stable-7", limit=1)
+    real_commit = sqlite_writer_module._OwnedControlConnection.commit
+    injected = False
+
+    def fail_after_attention_commit(connection) -> None:  # noqa: ANN001
+        nonlocal injected
+        revision = connection._connection.execute(
+            "SELECT current_revision FROM attention_history_status WHERE singleton = 1"
+        ).fetchone()
+        if not injected and revision == (1,):
+            injected = True
+            connection.validate_authority()
+            connection._connection.commit()
+            raise RuntimeError("injected postcommit attention uncertainty")
+        real_commit(connection)
+
+    monkeypatch.setattr(
+        sqlite_writer_module._OwnedControlConnection,
+        "commit",
+        fail_after_attention_commit,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="injected postcommit attention uncertainty"):
+            await writer.append_attention_event(_attention_event())
+    finally:
+        monkeypatch.setattr(
+            sqlite_writer_module._OwnedControlConnection,
+            "commit",
+            real_commit,
+        )
+        await writer.stop()
+    assert injected is True
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        page = await restarted.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await restarted.stop()
+    assert len(page.items) == 1
+    assert page.through_revision == 1
+    continuity = json.loads((tmp_path / "attention_history.continuity").read_text(encoding="ascii"))
+    assert continuity == {"revision": 1, "state": "clean", "version": 2}
+
+
 async def test_attention_history_capacity_is_fail_closed_durable_and_explicit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
