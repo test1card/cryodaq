@@ -160,13 +160,23 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
 
 # A RECORDED measurement, not a re-derivable one: the number of C2 challenges
 # whose fingerprint the registry rejects on the declared minimum interpreter.
-# Measured 2026-08-05 by importing the sweep under Python 3.12 and counting
-# through `_registry_errors` -- an earlier attempt grepped pytest output and
-# reported 55, which was a truncation artifact of the measurement rather than a
-# property of the sweep. This guard runs on ONE interpreter and cannot measure
-# another; pinning the figure here means the row and the constant have to move
-# together, and moving them requires re-running the sweep on that interpreter.
-_RECORDED_MINIMUM_INTERPRETER_ERRORS = 110
+# RE-MEASURED 2026-08-09 on the OC-023 tree: 108 errors over 134 challenges.
+# The previous 110-over-135 pair was taken before this branch registered the
+# interlock-binding sites, and BOTH halves had drifted -- the numerator is not
+# reusable across a changed sweep any more than the denominator is.
+#
+# The command, recorded because the last window failed to take this measurement
+# at all and wrongly reported the interpreter as absent: `py -3.12` cannot see
+# vendor-tagged registrations, so it answers "no suitable runtime" while
+# `py -0` lists Astral/CPython3.12.13. Use:
+#     uv run --no-project --python 3.12 --with pytest --with pyyaml python -B <probe>
+# where the probe imports tests/test_c2_repo_wide_spelling_sweep.py and counts
+# `_sites` / `_registry_errors`. Measured the same way: 3.13 and 3.14 give 0.
+#
+# This guard runs on ONE interpreter and cannot measure another; pinning the
+# figure here means the row and the constant move together, and moving them
+# requires re-running the sweep on that interpreter.
+_RECORDED_MINIMUM_INTERPRETER_ERRORS = 108
 
 
 @cache
