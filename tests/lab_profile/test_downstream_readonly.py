@@ -75,7 +75,7 @@ ALLOWED_CRYODAQ_IMPORTS: dict[str, frozenset[str]] = {
     # that silently widened the boundary.  test_every_symbol_allowance_is_load_bearing
     # now fails if any entry here stops being required.
     "cryodaq.drivers.capability_metadata": frozenset(
-        {"BUILTIN_DRIVER_METADATA", "DriverAuthority", "DriverCapability"}
+        {"INSTRUMENT_DRIVER_METADATA", "DriverAuthority", "DriverCapability"}
     ),
 }
 REFLECTION_MODULES = ("inspect", "gc", "builtins")
@@ -638,7 +638,7 @@ def test_import_guard_rejects_authority_bearing_symbols(hostile: str) -> None:
 @pytest.mark.parametrize(
     "allowed",
     (
-        "from cryodaq.drivers.capability_metadata import BUILTIN_DRIVER_METADATA",
+        "from cryodaq.drivers.capability_metadata import INSTRUMENT_DRIVER_METADATA",
         "from cryodaq.drivers.capability_metadata import DriverAuthority, DriverCapability",
         "import os\nimport sys",
         # ``raise SystemExit(0)`` is what __main__.py actually does.  Under a
@@ -723,6 +723,23 @@ def test_driver_metadata_projection_is_inert_and_exact() -> None:
         assert metadata.capabilities == spec.capabilities
         for authority_bearing in ("factory", "normalizer", "module", "class_name", "config_fields"):
             assert not hasattr(metadata, authority_bearing), authority_bearing
+
+
+def test_instrument_driver_metadata_projection_is_inert_and_exact() -> None:
+    from cryodaq.drivers.registry import INSTRUMENT_DRIVER_METADATA, INSTRUMENT_DRIVER_SPECS
+
+    assert set(INSTRUMENT_DRIVER_METADATA) == set(INSTRUMENT_DRIVER_SPECS)
+    assert "deterministic_health_node" not in INSTRUMENT_DRIVER_METADATA
+    for type_name, metadata in INSTRUMENT_DRIVER_METADATA.items():
+        spec = INSTRUMENT_DRIVER_SPECS[type_name]
+        assert metadata.type_name == spec.type_name
+        assert metadata.authority is spec.authority
+        assert metadata.capabilities == spec.capabilities
+        for authority_bearing in ("factory", "normalizer", "module", "class_name", "config_fields"):
+            assert not hasattr(metadata, authority_bearing), authority_bearing
+
+    with pytest.raises(TypeError):
+        INSTRUMENT_DRIVER_METADATA["evil"] = next(iter(INSTRUMENT_DRIVER_METADATA.values()))  # type: ignore[index]
 
 
 def _incumbent_snapshot() -> tuple[object, dict[str, str]]:
@@ -2472,7 +2489,7 @@ def test_actuation_boundary_survives_a_fully_compromised_parser(tmp_path: Path) 
     That residual is accepted, because an attacker who can execute arbitrary
     Python in the operator's process does not need YAML to do harm.  What must
     NOT depend on the parser is the actuation boundary, and it does not:
-    ``schema.py`` re-derives instrument authority from BUILTIN_DRIVER_METADATA
+    ``schema.py`` re-derives instrument authority from INSTRUMENT_DRIVER_METADATA
     rather than trusting the parsed document.
 
     So this asserts the boundary under TOTAL parser compromise -- the strongest

@@ -17,28 +17,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 from pathlib import Path
 
 import numpy as np
 import pytest
 import zmq
 import zmq.asyncio
-
-
-def _free_tcp_addr() -> str:
-    """Return a tcp://127.0.0.1:<port> on an OS-assigned free port."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", 0))
-        return f"tcp://127.0.0.1:{s.getsockname()[1]}"
-    finally:
-        s.close()
-
-
-_TEST_PUB = _free_tcp_addr()
-_TEST_CMD = _free_tcp_addr()
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -219,6 +203,7 @@ async def test_replay_engine_starts_cooldown_service_when_model_present(
     tmp_path: Path,
     isolated_config_dir: Path,
     predictor_model_dir: Path,
+    start_replay_engine,
 ) -> None:
     """With a model and enabled cooldown.yaml, CooldownService is wired and
     the replay channel override rewrites cold/warm names to Т12/Т11."""
@@ -233,8 +218,15 @@ async def test_replay_engine_starts_cooldown_service_when_model_present(
     curve = tmp_path / "curve.json"
     _write_curve_json(curve)
 
-    engine = ReplayEngine(curve, speed=0.0, pub_addr=_TEST_PUB, cmd_addr=_TEST_CMD)
-    await engine.start()
+    engine, _endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            curve,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
+    )
     try:
         assert engine._cooldown_service is not None, "CooldownService should be wired when model + yaml are present"
         assert engine._cooldown_service._channel_cold == "Т12", (
@@ -258,6 +250,7 @@ async def test_replay_engine_starts_cooldown_service_when_model_present(
 async def test_replay_engine_starts_without_predictor_when_model_missing(
     tmp_path: Path,
     isolated_config_dir: Path,
+    start_replay_engine,
 ) -> None:
     """Best-effort guard: without a predictor model file, the engine still
     completes start() and only the predictor stays disabled."""
@@ -268,8 +261,15 @@ async def test_replay_engine_starts_without_predictor_when_model_missing(
     curve = tmp_path / "curve.json"
     _write_curve_json(curve)
 
-    engine = ReplayEngine(curve, speed=0.0, pub_addr=_TEST_PUB, cmd_addr=_TEST_CMD)
-    await engine.start()
+    engine, _endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            curve,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
+    )
     try:
         assert engine._cooldown_service is None, "Predictor must not start without a model file"
         assert engine._broker is not None
@@ -288,6 +288,7 @@ async def test_replay_engine_publishes_derived_metrics_through_pub(
     tmp_path: Path,
     isolated_config_dir: Path,
     predictor_model_dir: Path,
+    start_replay_engine,
 ) -> None:
     """Source emits Т12/Т11 → broker → CooldownService → broker → ZMQPublisher.
 
@@ -304,13 +305,20 @@ async def test_replay_engine_publishes_derived_metrics_through_pub(
     curve = tmp_path / "curve.json"
     _write_curve_json(curve)
 
-    engine = ReplayEngine(curve, speed=0.0, pub_addr=_TEST_PUB, cmd_addr=_TEST_CMD)
-    await engine.start()
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            curve,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
+    )
 
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.LINGER, 0)
-    sub.connect(_TEST_PUB)
+    sub.connect(endpoints.pub_addr)
     sub.subscribe(b"readings")
 
     # Deterministic slow-joiner barrier (replaces a fixed asyncio.sleep): publish
