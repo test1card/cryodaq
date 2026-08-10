@@ -681,28 +681,98 @@ class MainWindowV2(QMainWindow):
             self._instrument_panel.on_descriptor_reading(qualified.reading, view)
 
     def invalidate_descriptor_transport(self) -> None:
-        """Advance the store generation after a bridge death/restart.
+        """Retire every GUI consumer anchored to the outgoing bridge."""
+        failures: list[Exception] = []
 
-        Call this whenever the bridge is known to have died or restarted so
-        that stale legacy-absent readings arriving in the new session cannot
-        silently restore authoritative identity status.
-        """
+        def attempt(callback: Callable[[], None]) -> None:
+            try:
+                callback()
+            except Exception as exc:
+                failures.append(exc)
+
+        unavailable_reason = (
+            "\u0421\u0442\u0430\u0442\u0443\u0441 "
+            "\u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430 "
+            "\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d: "
+            "\u043d\u0435\u0442 \u0441\u0432\u044f\u0437\u0438 \u0441 Engine"
+        )
+        if hasattr(self, "_latest_experiment_status"):
+            self._latest_experiment_status = None
+        if hasattr(self, "_analytics_last_exp_id"):
+            self._analytics_last_exp_id = None
+        analytics_snapshot = getattr(self, "_analytics_snapshot", None)
+        if isinstance(analytics_snapshot, dict):
+            analytics_snapshot.pop("set_experiment_status", None)
+        if hasattr(self, "_last_reading_time"):
+            self._last_reading_time = 0.0
+        if hasattr(self, "_rate_count"):
+            self._rate_count = 0
+        if getattr(self, "_bottom_bar", None) is not None:
+            attempt(lambda: self._invalidate_safety_authority(unavailable_reason, disconnected=True))
+
+        overview = getattr(self, "_overview_panel", None)
+        if overview is not None:
+            attempt(lambda: overview.on_experiment_status({}))
+            phase_widget = getattr(overview, "_phase_widget", None)
+            if phase_widget is not None:
+                attempt(lambda: phase_widget.set_operation_state("unknown", unavailable_reason))
+                attempt(lambda: phase_widget.set_mutation_enabled(False))
+
+        experiment_overlay = getattr(self, "_experiment_overlay", None)
+        if experiment_overlay is not None:
+            attempt(lambda: experiment_overlay.set_connected(False))
+            attempt(lambda: experiment_overlay.set_templates([]))
+            attempt(lambda: experiment_overlay.set_experiment(None, []))
+
+        operator_log_panel = getattr(self, "_operator_log_panel", None)
+        if operator_log_panel is not None:
+            attempt(lambda: operator_log_panel.set_connected(False))
+            attempt(lambda: operator_log_panel.set_current_experiment(None))
+
+        analytics_view = getattr(self, "_analytics_view", None)
+        if analytics_view is not None:
+            attempt(lambda: analytics_view.set_experiment_status(None))
+            attempt(lambda: analytics_view.set_phase(None))
+
         descriptor_store = getattr(self, "_descriptor_store", None)
         if descriptor_store is not None:
-            descriptor_store.invalidate_transport()
+            attempt(descriptor_store.invalidate_transport)
         annunciation_controller = getattr(self, "_annunciation_controller", None)
         if annunciation_controller is not None:
-            annunciation_controller.invalidate_transport()
+            attempt(annunciation_controller.invalidate_transport)
         top_bar = getattr(self, "_top_bar", None)
-        if self._replay_mode and top_bar is not None:
-            top_bar.invalidate_replay_authority()
+        if top_bar is not None:
+            attempt(top_bar.invalidate_engine_producer)
+            if self._replay_mode:
+                attempt(top_bar.invalidate_replay_authority)
+
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup(
+                "multiple GUI bridge authority invalidations failed",
+                failures,
+            )
 
     def invalidate_engine_producer(self) -> None:
         """Retire every GUI consumer anchored to the outgoing engine."""
+        failures: list[Exception] = []
+        for invalidate in (
+            self.invalidate_descriptor_transport,
+            self._overview_panel.invalidate_operator_snapshot_producer,
+        ):
+            try:
+                invalidate()
+            except Exception as exc:
+                failures.append(exc)
 
-        self._top_bar.invalidate_engine_producer()
-        self.invalidate_descriptor_transport()
-        self._overview_panel.invalidate_operator_snapshot_producer()
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup(
+                "multiple GUI engine authority invalidations failed",
+                failures,
+            )
 
     def bind_replay_authority(
         self,
@@ -1466,6 +1536,7 @@ class MainWindowV2(QMainWindow):
         self._overview_panel.on_experiment_status(status)
         # Forward to overlay if it exists and is visible
         if self._experiment_overlay is not None:
+            self._experiment_overlay.set_templates(status.get("templates", []))
             exp = status.get("active_experiment")
             if exp is not None:
                 # Inject top-level fields into experiment dict for overlay

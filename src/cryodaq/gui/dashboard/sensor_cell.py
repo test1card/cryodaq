@@ -185,13 +185,26 @@ class SensorCell(QFrame):
             f"}}"
         )
 
-    def _apply_disconnected_style(self) -> None:
-        """Keep last-known evidence visible without presenting it as current."""
+    def _apply_disconnected_style(
+        self,
+        *,
+        retained_status: ChannelStatus | None = None,
+    ) -> None:
+        """Show connectivity loss while retaining abnormal historical evidence."""
         # DESIGN: RULE-A11Y-002 — text plus dashed shape; never colour alone.
+        if retained_status is None:
+            retained_status = self._last_status if self._last_status is not None else self._source_status
+        accent_color: str | None = None
+        if self._source_status is not None and self._source_identity is IdentityStatus.REFUSED:
+            accent_color = theme.STATUS_FAULT
+        elif retained_status is not None and retained_status is not ChannelStatus.OK:
+            accent_color = _STATUS_COLORS.get(retained_status, theme.STATUS_STALE)
+        accent = f"border-left: 4px solid {accent_color}; " if accent_color is not None else ""
         self.setStyleSheet(
             f"#sensorCell {{ "
             f"background-color: {theme.SURFACE_CARD}; "
             f"border: 2px dashed {theme.STATUS_STALE}; "
+            f"{accent}"
             f"border-radius: {theme.RADIUS_MD}px; "
             f"padding: {theme.SPACE_1}px {theme.SPACE_2}px; "
             f"}}"
@@ -224,20 +237,50 @@ class SensorCell(QFrame):
     # Value updates
     # ------------------------------------------------------------------
 
-    def invalidate_transport(self) -> None:
-        """Latch last-known presentation until a new producer sample arrives."""
+    def invalidate_transport(
+        self,
+        *,
+        retained_status: ChannelStatus | None = None,
+    ) -> None:
+        """Latch accepted evidence as explicitly historical until a new sample."""
         self._transport_disconnected = True
         self._data_stale = True
-        self._last_status = None
-        self._apply_disconnected_style()
+        self._apply_disconnected_style(retained_status=retained_status)
         self._apply_value_style(disconnected=True)
-        text = (
-            "Нет связи · данных нет"
-            if self._value_widget.text() == "\u2014"
-            else "Нет связи · последнее известное значение"
-        )
+        parts = [
+            (
+                "Нет связи · данных нет"
+                if self._value_widget.text() == "—"
+                else "Нет связи · последнее известное значение"
+            )
+        ]
+        if retained_status is None:
+            retained_status = self._last_status if self._last_status is not None else self._source_status
+        if retained_status is not None and retained_status is not ChannelStatus.OK:
+            parts.append(f"последний принятый статус: {_STATUS_LABELS.get(retained_status, 'Нет данных')}")
+        if self._source_status is not None:
+            if self._source_identity is IdentityStatus.REFUSED:
+                parts.append("последняя идентификация: описание канала отклонено")
+            elif self._source_identity is IdentityStatus.LEGACY_ABSENT:
+                parts.append("последняя идентификация: описание канала отсутствует")
+        text = " · ".join(parts)
         self._status_hint_widget.setText(text)
         self.setAccessibleDescription(text)
+
+    def restore_last_accepted_presentation(
+        self,
+        reading: Reading,
+        identity_status: IdentityStatus,
+        *,
+        interval_status: ChannelStatus,
+    ) -> None:
+        """Rehydrate one backend-derived cut before marking it historical."""
+        self.update_value(
+            reading,
+            identity_status,
+            interval_status=interval_status,
+        )
+        self._last_status = interval_status
 
     def update_value(
         self,

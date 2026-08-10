@@ -4927,22 +4927,54 @@ class LauncherWindow(QMainWindow):
 
     def _invalidate_descriptor_transport(self) -> None:
         """Invalidate bridge transport without retiring backend producer identity."""
-        self._invalidate_launcher_status_authority()
+        failures: list[Exception] = []
+
+        def attempt(callback: Callable[[], None]) -> None:
+            try:
+                callback()
+            except Exception as exc:
+                failures.append(exc)
+
+        attempt(self._invalidate_launcher_status_authority)
         if self._main_window is not None:
-            self._main_window.invalidate_descriptor_transport()
+            attempt(self._main_window.invalidate_descriptor_transport)
         snapshot_ingress = getattr(self, "_snapshot_ingress", None)
         if snapshot_ingress is not None:
-            snapshot_ingress.invalidate_transport()
+            attempt(snapshot_ingress.invalidate_transport)
+
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup(
+                "multiple launcher bridge authority invalidations failed",
+                failures,
+            )
 
     def _invalidate_engine_producer(self) -> None:
         """Retire descriptor and snapshot authority for one engine turnover."""
-        self._invalidate_launcher_status_authority()
-        self._reset_periodic_reporting_unknown()
+        failures: list[Exception] = []
+
+        def attempt(callback: Callable[[], None]) -> None:
+            try:
+                callback()
+            except Exception as exc:
+                failures.append(exc)
+
+        attempt(self._invalidate_launcher_status_authority)
+        attempt(self._reset_periodic_reporting_unknown)
         if self._main_window is not None:
-            self._main_window.invalidate_engine_producer()
+            attempt(self._main_window.invalidate_engine_producer)
         snapshot_ingress = getattr(self, "_snapshot_ingress", None)
         if snapshot_ingress is not None:
-            snapshot_ingress.invalidate_producer()
+            attempt(snapshot_ingress.invalidate_producer)
+
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup(
+                "multiple launcher engine authority invalidations failed",
+                failures,
+            )
 
     def _publish_replay_ui_authority(self) -> None:
         """Bind TopWatch to the exact verified replay and bridge generation."""

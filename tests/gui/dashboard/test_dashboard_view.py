@@ -650,6 +650,134 @@ def test_dashboard_disconnect_keeps_sensor_value_explicitly_last_known_until_new
     assert theme.TEXT_DISABLED not in rebuilt_cell._value_widget.styleSheet()
 
 
+def test_dashboard_disconnect_preserves_last_interval_fault_as_historical_evidence(app):
+    """Connectivity loss keeps abnormal backend evidence, explicitly historical."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui import theme
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    manager = ChannelManager()
+    view = DashboardView(manager)
+    for value, status in (
+        (77.0, ChannelStatus.OK),
+        (500.0, ChannelStatus.OVERRANGE),
+        (78.0, ChannelStatus.OK),
+    ):
+        view.on_reading(
+            Reading.now(
+                channel="Т1",
+                value=value,
+                unit="K",
+                instrument_id="lakeshore_218s",
+                status=status,
+            ),
+            IdentityStatus.AUTHORITATIVE,
+        )
+    view._sensor_grid.refresh()
+    cell = view._sensor_grid._cells["Т1"]
+    assert cell._status_hint_widget.text() == "Перегрузка (за интервал)"
+
+    view.set_connected(False)
+
+    def assert_historical_fault(rendered_cell) -> None:
+        text = rendered_cell._status_hint_widget.text()
+        assert rendered_cell._value_widget.text() == "78.00"
+        assert "Нет связи" in text
+        assert "последний принятый статус: Перегрузка" in text
+        assert "Норма" not in text
+        assert rendered_cell.accessibleDescription() == text
+        assert "dashed" in rendered_cell.styleSheet()
+        assert f"border-left: 4px solid {theme.STATUS_FAULT}" in rendered_cell.styleSheet()
+        assert theme.TEXT_DISABLED in rendered_cell._value_widget.styleSheet()
+
+    assert_historical_fault(cell)
+
+    manager._notify()
+    rebuilt_cell = view._sensor_grid._cells["Т1"]
+    assert rebuilt_cell is not cell
+    assert_historical_fault(rebuilt_cell)
+
+    view.set_connected(True)
+    assert_historical_fault(rebuilt_cell)
+
+    view.on_reading(
+        Reading.now(
+            channel="Т1",
+            value=79.0,
+            unit="K",
+            instrument_id="lakeshore_218s",
+            status=ChannelStatus.OK,
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+
+    assert rebuilt_cell._value_widget.text() == "79.00"
+    assert rebuilt_cell._status_hint_widget.text() == "Норма"
+    assert "dashed" not in rebuilt_cell.styleSheet()
+    assert "последний" not in rebuilt_cell.accessibleDescription().lower()
+
+
+def test_dashboard_disconnect_preserves_refused_identity_across_rebuild(app):
+    """A refused descriptor remains visible as historical evidence offline."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    manager = ChannelManager()
+    view = DashboardView(manager)
+    view.on_reading(
+        Reading.now(
+            channel="Т1",
+            value=4.2,
+            unit="K",
+            instrument_id="lakeshore_218s",
+            status=ChannelStatus.OK,
+        ),
+        IdentityStatus.REFUSED,
+    )
+    view._sensor_grid.refresh()
+    view.set_connected(False)
+
+    def assert_historical_refusal(rendered_cell) -> None:
+        text = rendered_cell._status_hint_widget.text()
+        assert "Нет связи" in text
+        assert "последняя идентификация: описание канала отклонено" in text
+        assert "Норма" not in text
+        assert rendered_cell.accessibleDescription() == text
+        assert "dashed" in rendered_cell.styleSheet()
+
+    cell = view._sensor_grid._cells["Т1"]
+    assert_historical_refusal(cell)
+    assert "Нет связи" in view._sensor_grid._identity_banner.text()
+    assert "последняя идентификация" in view._sensor_grid._identity_banner.text().lower()
+    assert view._sensor_grid._identity_banner.accessibleName() == view._sensor_grid._identity_banner.text()
+
+    manager._notify()
+    rebuilt_cell = view._sensor_grid._cells["Т1"]
+    assert rebuilt_cell is not cell
+    assert_historical_refusal(rebuilt_cell)
+    assert "Нет связи" in view._sensor_grid._identity_banner.text()
+    assert "последняя идентификация" in view._sensor_grid._identity_banner.text().lower()
+
+    view.set_connected(True)
+    assert_historical_refusal(rebuilt_cell)
+
+    view.on_reading(
+        Reading.now(
+            channel="Т1",
+            value=4.1,
+            unit="K",
+            instrument_id="lakeshore_218s",
+            status=ChannelStatus.OK,
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+
+    assert rebuilt_cell._status_hint_widget.text() == "Норма"
+    assert not view._sensor_grid._identity_banner.isVisible()
+
+
 def test_dashboard_first_explicit_disconnect_rejects_cold_start_reading(app):
     """The production shell's initial False call establishes a closed generation."""
     from cryodaq.drivers.base import ChannelStatus
@@ -1278,3 +1406,163 @@ def test_dashboard_ignores_phase_reply_after_experiment_context_changes(app, mon
     assert view._phase_widget._current_phase == "preparation"
     assert view._phase_context is None
     assert _DeferredWorker.instances == []
+
+
+@pytest.mark.parametrize(
+    ("identity_name", "stale_seconds", "identity_tail"),
+    [
+        ("REFUSED", 0, "\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e"),
+        ("LEGACY_ABSENT", 0, "\u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442"),
+        ("AUTHORITATIVE", 60, None),
+    ],
+)
+def test_dashboard_disconnect_keeps_interval_fault_across_identity_and_stale_axes(
+    app,
+    identity_name: str,
+    stale_seconds: int,
+    identity_tail: str | None,
+) -> None:
+    """One accepted cut cannot lose its worst interval status on disconnect."""
+    from datetime import timedelta
+
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui import theme
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    manager = ChannelManager()
+    view = DashboardView(manager)
+    now = datetime.now(UTC)
+    final_identity = IdentityStatus[identity_name]
+    samples = (
+        (77.0, ChannelStatus.OK, IdentityStatus.AUTHORITATIVE, now),
+        (500.0, ChannelStatus.OVERRANGE, IdentityStatus.AUTHORITATIVE, now),
+        (78.0, ChannelStatus.OK, final_identity, now - timedelta(seconds=stale_seconds)),
+    )
+    for value, status, identity, timestamp in samples:
+        view.on_reading(
+            Reading(
+                channel="\u04221",
+                value=value,
+                unit="K",
+                timestamp=timestamp,
+                status=status,
+                instrument_id="lakeshore_218s",
+            ),
+            identity,
+        )
+    view._sensor_grid.refresh()
+    assert view._sensor_grid._last_presentations["\u04221"][2] is ChannelStatus.OVERRANGE
+
+    view.set_connected(False)
+    cell = view._sensor_grid._cells["\u04221"]
+    direct_text = cell._status_hint_widget.text()
+    expected_fault = (
+        "\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 "
+        "\u043f\u0440\u0438\u043d\u044f\u0442\u044b\u0439 "
+        "\u0441\u0442\u0430\u0442\u0443\u0441: "
+        "\u041f\u0435\u0440\u0435\u0433\u0440\u0443\u0437\u043a\u0430"
+    )
+    assert "\u041d\u0435\u0442 \u0441\u0432\u044f\u0437\u0438" in direct_text
+    assert expected_fault in direct_text
+    if identity_tail is not None:
+        assert identity_tail in direct_text
+    assert cell.accessibleDescription() == direct_text
+    assert "dashed" in cell.styleSheet()
+    assert f"border-left: 4px solid {theme.STATUS_FAULT}" in cell.styleSheet()
+
+    manager._notify()
+    rebuilt = view._sensor_grid._cells["\u04221"]
+    assert rebuilt is not cell
+    assert rebuilt._status_hint_widget.text() == direct_text
+    assert rebuilt.accessibleDescription() == direct_text
+    assert "dashed" in rebuilt.styleSheet()
+    assert f"border-left: 4px solid {theme.STATUS_FAULT}" in rebuilt.styleSheet()
+
+
+def test_dashboard_identity_banner_separates_historical_and_current_refusals(app) -> None:
+    """Partial recovery must not label a fresh refusal as disconnected history."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    manager = ChannelManager()
+    view = DashboardView(manager)
+    for channel in ("\u04221", "\u04222"):
+        view.on_reading(
+            Reading.now(
+                channel=channel,
+                value=4.2,
+                unit="K",
+                instrument_id="lakeshore_218s",
+                status=ChannelStatus.OK,
+            ),
+            IdentityStatus.REFUSED,
+        )
+    view._sensor_grid.refresh()
+    view.set_connected(False)
+    view.set_connected(True)
+    view.on_reading(
+        Reading.now(
+            channel="\u04222",
+            value=4.1,
+            unit="K",
+            instrument_id="lakeshore_218s",
+            status=ChannelStatus.OK,
+        ),
+        IdentityStatus.REFUSED,
+    )
+    view._sensor_grid.refresh()
+
+    assert view._sensor_grid._accepted_after_transport_loss == {"\u04222"}
+    historical = (
+        "\u041d\u0435\u0442 \u0441\u0432\u044f\u0437\u0438 \u00b7 "
+        "\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044f\u044f "
+        "\u0438\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0446\u0438\u044f: "
+        "\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u0430\u043d\u0430\u043b\u0430 "
+        "\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e (1)"
+    )
+    current = (
+        "\u0414\u0430\u043d\u043d\u044b\u0435 \u043d\u0435 "
+        "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u044b: "
+        "\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u0430\u043d\u0430\u043b\u0430 "
+        "\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e (1)"
+    )
+    expected = f"{historical}; {current}"
+    banner = view._sensor_grid._identity_banner
+    assert banner.text() == expected
+    assert banner.accessibleName() == expected
+    assert "dashed" in banner.styleSheet()
+
+
+def test_dashboard_hiding_channel_prunes_transport_receipts(app) -> None:
+    """Visibility changes bound retained presentations and recovery receipts."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    manager = ChannelManager()
+    view = DashboardView(manager)
+    view.set_connected(False)
+    view.set_connected(True)
+    for channel in ("\u04221", "\u04222"):
+        view.on_reading(
+            Reading.now(
+                channel=channel,
+                value=4.2,
+                unit="K",
+                instrument_id="lakeshore_218s",
+                status=ChannelStatus.OK,
+            ),
+            IdentityStatus.AUTHORITATIVE,
+        )
+    view._sensor_grid.refresh()
+    assert {"\u04221", "\u04222"} <= set(view._sensor_grid._last_presentations)
+    assert {"\u04221", "\u04222"} <= view._sensor_grid._accepted_after_transport_loss
+
+    manager.set_visible("\u04222", False)
+    manager._notify()
+
+    assert "\u04221" in view._sensor_grid._cells
+    assert "\u04221" in view._sensor_grid._last_presentations
+    assert "\u04221" in view._sensor_grid._accepted_after_transport_loss
+    assert "\u04222" not in view._sensor_grid._cells
+    assert "\u04222" not in view._sensor_grid._last_presentations
+    assert "\u04222" not in view._sensor_grid._accepted_after_transport_loss

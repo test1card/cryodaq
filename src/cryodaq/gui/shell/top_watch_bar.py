@@ -16,6 +16,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
@@ -677,6 +678,7 @@ class TopWatchBar(QWidget):
         # One in-flight worker per poll stream — skip tick if previous
         # request still running (Finding 2, Block A.9).
         self._experiment_worker = None
+        self._experiment_request_token = 0
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1135,16 +1137,24 @@ class TopWatchBar(QWidget):
         if self._engine_alive is not True:
             self._mark_experiment_status_unavailable()
             return
+        if self._expected_app_mode_domain == "replay" and self._replay_authority is None:
+            self._mark_experiment_status_unavailable()
+            return
         if self._experiment_worker is not None and not self._experiment_worker.isFinished():
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
         expected_live_generation = self._live_status_generation if self._expected_app_mode_domain == "live" else None
+        self._experiment_request_token += 1
+        expected_request_token = self._experiment_request_token
         self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
         self._experiment_worker.finished.connect(
-            lambda result, replay=expected_replay_authority, live=expected_live_generation: self._on_experiment_result(
-                result, replay, live
+            partial(
+                self._on_experiment_result,
+                expected_replay_authority=expected_replay_authority,
+                expected_live_generation=expected_live_generation,
+                expected_request_token=expected_request_token,
             )
         )
         self._experiment_worker.start()
@@ -1154,7 +1164,21 @@ class TopWatchBar(QWidget):
         result: dict,
         expected_replay_authority: ReplayStatusAuthority | None = None,
         expected_live_generation: int | None = None,
+        expected_request_token: int | None = None,
     ) -> None:
+        if expected_request_token is not None and expected_request_token != self._experiment_request_token:
+            return
+        if expected_live_generation is not None and (
+            self._expected_app_mode_domain != "live"
+            or self._engine_alive is not True
+            or expected_live_generation != self._live_status_generation
+        ):
+            return
+        if expected_replay_authority is not None and (
+            self._expected_app_mode_domain != "replay" or expected_replay_authority != self._replay_authority
+        ):
+            return
+
         accepted = decode_experiment_status(result)
         if accepted is None:
             self._mark_experiment_status_unavailable()
@@ -1164,10 +1188,7 @@ class TopWatchBar(QWidget):
         if accepted_domain != self._expected_app_mode_domain:
             self._mark_experiment_status_unavailable()
             return
-        if accepted_domain == "live" and expected_live_generation is not None:
-            if self._engine_alive is not True or expected_live_generation != self._live_status_generation:
-                self._mark_experiment_status_unavailable()
-                return
+
         if self._expected_app_mode_domain == "replay":
             current_authority = self._replay_authority
             if (

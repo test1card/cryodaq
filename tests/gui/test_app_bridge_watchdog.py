@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from cryodaq.gui import app as gui_app
 
 
@@ -125,3 +127,72 @@ def test_latched_bridge_watchdog_never_reports_healthy() -> None:
     # stale/lying heartbeat), the watchdog's own view must stay fail-closed.
     bridge.is_healthy.return_value = True
     assert watchdog.is_healthy(bridge) is False
+
+
+def test_bridge_watchdog_attempts_window_cut_when_snapshot_cut_fails() -> None:
+    """A failed passive cut cannot skip independent GUI authority retirement."""
+    calls: list[str] = []
+    failure = RuntimeError("snapshot retirement failed")
+    bridge = _make_dead_bridge(start_error=None)
+    window = MagicMock()
+    snapshot_ingress = MagicMock()
+
+    def fail_snapshot() -> None:
+        calls.append("snapshot")
+        raise failure
+
+    snapshot_ingress.invalidate_transport.side_effect = fail_snapshot
+    window.invalidate_descriptor_transport.side_effect = lambda: calls.append("window")
+    watchdog = gui_app._BridgeWatchdog()
+
+    with pytest.raises(RuntimeError, match="snapshot retirement failed") as captured:
+        watchdog._restart(
+            bridge,
+            window,
+            snapshot_ingress,
+            shutdown_first=False,
+        )
+
+    assert captured.value is failure
+    assert calls == ["snapshot", "window"]
+    bridge.shutdown.assert_not_called()
+    bridge.start.assert_not_called()
+
+
+def test_bridge_watchdog_groups_two_cut_failures_before_replacement() -> None:
+    """Every invalidation error survives and no replacement work begins."""
+    calls: list[str] = []
+    snapshot_failure = RuntimeError("snapshot retirement failed")
+    window_failure = ValueError("window retirement failed")
+    bridge = _make_dead_bridge(start_error=None)
+    window = MagicMock()
+    snapshot_ingress = MagicMock()
+
+    def fail_snapshot() -> None:
+        calls.append("snapshot")
+        raise snapshot_failure
+
+    def fail_window() -> None:
+        calls.append("window")
+        raise window_failure
+
+    snapshot_ingress.invalidate_transport.side_effect = fail_snapshot
+    window.invalidate_descriptor_transport.side_effect = fail_window
+    watchdog = gui_app._BridgeWatchdog()
+
+    with pytest.raises(
+        ExceptionGroup,
+        match="multiple standalone GUI authority invalidations failed",
+    ) as captured:
+        watchdog._restart(
+            bridge,
+            window,
+            snapshot_ingress,
+            shutdown_first=True,
+        )
+
+    assert calls == ["snapshot", "window"]
+    assert captured.value.exceptions[0] is snapshot_failure
+    assert captured.value.exceptions[1] is window_failure
+    bridge.shutdown.assert_not_called()
+    bridge.start.assert_not_called()

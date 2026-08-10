@@ -272,14 +272,28 @@ def test_detected_owned_engine_exit_reaps_handle_preserves_hold_and_blocks_resta
 
 
 def test_descriptor_invalidation_helper_preserves_gui_thread_error() -> None:
+    calls: list[str] = []
+    failure = RuntimeError("wrong thread")
     window = MagicMock()
-    window.invalidate_descriptor_transport.side_effect = RuntimeError("wrong thread")
-    launcher = _bind_launcher_methods(
-        SimpleNamespace(_main_window=window),
-        "_invalidate_launcher_status_authority",
+    ingress = MagicMock()
+
+    def fail_window() -> None:
+        calls.append("window")
+        raise failure
+
+    window.invalidate_descriptor_transport.side_effect = fail_window
+    ingress.invalidate_transport.side_effect = lambda: calls.append("snapshot")
+    launcher = SimpleNamespace(
+        _main_window=window,
+        _snapshot_ingress=ingress,
+        _invalidate_launcher_status_authority=lambda: calls.append("launcher"),
     )
-    with pytest.raises(RuntimeError, match="wrong thread"):
+
+    with pytest.raises(RuntimeError, match="wrong thread") as captured:
         LauncherWindow._invalidate_descriptor_transport(launcher)
+
+    assert captured.value is failure
+    assert calls == ["launcher", "window", "snapshot"]
 
 
 def test_bridge_invalidation_preserves_snapshot_producer_identity() -> None:
@@ -295,6 +309,32 @@ def test_bridge_invalidation_preserves_snapshot_producer_identity() -> None:
     window.invalidate_descriptor_transport.assert_called_once_with()
     ingress.invalidate_transport.assert_called_once_with()
     ingress.invalidate_producer.assert_not_called()
+
+
+def test_engine_invalidation_attempts_snapshot_after_main_window_failure() -> None:
+    calls: list[str] = []
+    failure = RuntimeError("main window retirement failed")
+    window = MagicMock()
+    ingress = MagicMock()
+
+    def fail_window() -> None:
+        calls.append("window")
+        raise failure
+
+    window.invalidate_engine_producer.side_effect = fail_window
+    ingress.invalidate_producer.side_effect = lambda: calls.append("snapshot")
+    launcher = SimpleNamespace(
+        _main_window=window,
+        _snapshot_ingress=ingress,
+        _invalidate_launcher_status_authority=lambda: calls.append("launcher"),
+        _reset_periodic_reporting_unknown=lambda: calls.append("periodic"),
+    )
+
+    with pytest.raises(RuntimeError, match="main window retirement failed") as captured:
+        LauncherWindow._invalidate_engine_producer(launcher)
+
+    assert captured.value is failure
+    assert calls == ["launcher", "periodic", "window", "snapshot"]
 
 
 def test_engine_invalidation_retires_snapshot_producer_identity() -> None:
@@ -455,3 +495,114 @@ def test_current_malformed_annunciation_reply_cannot_infer_zero_alarms(
         assert launcher._last_alarm_count == 0
     else:
         assert launcher._last_alarm_count is None
+
+
+def test_bridge_watchdog_invalidation_group_blocks_replacement() -> None:
+    """Launcher preserves every cut failure and enters HOLD before replacement."""
+    calls: list[str] = []
+    launcher_failure = RuntimeError("launcher status retirement failed")
+    window_failure = ValueError("main window retirement failed")
+    window = MagicMock()
+    ingress = MagicMock()
+
+    def fail_launcher() -> None:
+        calls.append("launcher")
+        raise launcher_failure
+
+    def fail_window() -> None:
+        calls.append("window")
+        raise window_failure
+
+    window.invalidate_descriptor_transport.side_effect = fail_window
+    ingress.invalidate_transport.side_effect = lambda: calls.append("snapshot")
+    bridge = _Bridge(calls)
+    launcher = _bind_launcher_methods(
+        SimpleNamespace(
+            _bridge=bridge,
+            _main_window=window,
+            _snapshot_ingress=ingress,
+            _invalidate_launcher_status_authority=fail_launcher,
+            _bridge_restart_hold=False,
+            _bridge_restart_fault=False,
+            _bridge_watchdog_generation=4,
+        ),
+        "_invalidate_descriptor_transport",
+    )
+
+    with patch.object(LauncherWindow, "_latch_engine_restart_hold") as hold:
+        replaced = LauncherWindow._replace_bridge_from_watchdog(launcher, reason="test")
+
+    assert replaced is False
+    assert calls == ["launcher", "window", "snapshot"]
+    assert bridge.restarts == 3
+    assert bridge.alive is True
+    assert launcher._bridge_restart_hold is True
+    assert launcher._bridge_restart_fault is True
+    failure = hold.call_args.kwargs["failure"]
+    assert isinstance(failure, ExceptionGroup)
+    assert str(failure).startswith("multiple launcher bridge authority invalidations failed")
+    assert failure.exceptions[0] is launcher_failure
+    assert failure.exceptions[1] is window_failure
+    assert hold.call_args.kwargs["phase"] == "bridge-watchdog-authority-invalidation"
+    assert hold.call_args.kwargs["unsettled"] == ("bridge",)
+    assert "shutdown" not in calls
+    assert "start" not in calls
+
+
+def test_manual_restart_groups_two_engine_cut_failures_and_starts_nothing() -> None:
+    """Manual recovery cannot discard invalidation failures or start a successor."""
+    calls: list[str] = []
+    launcher_failure = RuntimeError("launcher status retirement failed")
+    window_failure = ValueError("main window retirement failed")
+    window = MagicMock()
+    ingress = MagicMock()
+
+    def fail_launcher() -> None:
+        calls.append("launcher")
+        raise launcher_failure
+
+    def fail_window() -> None:
+        calls.append("window")
+        raise window_failure
+
+    window.invalidate_engine_producer.side_effect = fail_window
+    ingress.invalidate_producer.side_effect = lambda: calls.append("snapshot")
+    bridge = MagicMock()
+    stop_engine = MagicMock()
+    start_engine = MagicMock()
+    launcher = _bind_launcher_methods(
+        SimpleNamespace(
+            _shutdown_requested=False,
+            _engine_unsettled_incarnation=None,
+            _restart_giving_up=True,
+            _restart_attempts=2,
+            _config_error_modal_shown=True,
+            _restart_pending=True,
+            _restart_generation=3,
+            _invalidate_launcher_status_authority=fail_launcher,
+            _reset_periodic_reporting_unknown=lambda: calls.append("periodic"),
+            _main_window=window,
+            _snapshot_ingress=ingress,
+            _bridge=bridge,
+            _stop_engine=stop_engine,
+            _start_engine=start_engine,
+            _data_timer=MagicMock(),
+            _health_timer=MagicMock(),
+        ),
+        "_invalidate_engine_producer",
+    )
+
+    with patch.object(LauncherWindow, "_latch_engine_restart_hold") as hold:
+        LauncherWindow._restart_engine(launcher)
+
+    assert calls == ["launcher", "periodic", "window", "snapshot"]
+    failure = hold.call_args.kwargs["failure"]
+    assert isinstance(failure, ExceptionGroup)
+    assert str(failure).startswith("multiple launcher engine authority invalidations failed")
+    assert failure.exceptions[0] is launcher_failure
+    assert failure.exceptions[1] is window_failure
+    assert hold.call_args.kwargs["phase"] == "producer-invalidation"
+    stop_engine.assert_not_called()
+    start_engine.assert_not_called()
+    bridge.shutdown.assert_not_called()
+    bridge.start.assert_not_called()

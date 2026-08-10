@@ -25,6 +25,7 @@ from cryodaq.gui.state.descriptor_store import IdentityStatus
 logger = logging.getLogger(__name__)
 
 _QualifiedReading = tuple[Reading, IdentityStatus]
+_AcceptedPresentation = tuple[Reading, IdentityStatus, ChannelStatus]
 _STATUS_EVIDENCE_RANK = {
     ChannelStatus.OK: 0,
     ChannelStatus.TIMEOUT: 1,
@@ -109,6 +110,7 @@ class DynamicSensorGrid(QWidget):
         self._cells: dict[str, SensorCell] = {}
         self._identity_issues: dict[str, IdentityStatus] = {}
         self._pending_readings: dict[str, _PendingCellCut] = {}
+        self._last_presentations: dict[str, _AcceptedPresentation] = {}
         self._transport_invalidated = False
         self._accepted_after_transport_loss: set[str] = set()
         self._build_ui()
@@ -153,34 +155,54 @@ class DynamicSensorGrid(QWidget):
     # ------------------------------------------------------------------
 
     def _rebuild_cells(self) -> None:
-        """Remove all existing cells and create fresh ones from
-        current visible channel set."""
+        """Rebuild cells without discarding accepted presentation evidence."""
+        if self._cells:
+            self.refresh()
         for cell in self._cells.values():
             self._grid_layout.removeWidget(cell)
             cell.deleteLater()
         self._cells.clear()
         self._identity_issues.clear()
         self._pending_readings.clear()
-        self._refresh_identity_banner()
 
         visible_ids = [
             ch
             for ch in self._channel_mgr.get_all_visible()
-            if ch.startswith("\u0422")  # cyrillic Т
+            if ch.startswith("Т")  # cyrillic Т
         ]
+        visible_set = set(visible_ids)
+        self._last_presentations = {
+            channel: presentation
+            for channel, presentation in self._last_presentations.items()
+            if channel in visible_set
+        }
+        self._accepted_after_transport_loss.intersection_update(visible_set)
 
         for ch_id in visible_ids:
             cell = SensorCell(ch_id, self._channel_mgr, self._buffer, self)
             cell.set_read_only(self._read_only)
-            if self._transport_invalidated and ch_id not in self._accepted_after_transport_loss:
+            presentation = self._last_presentations.get(ch_id)
+            if presentation is not None:
+                reading, identity_status, interval_status = presentation
+                cell.restore_last_accepted_presentation(
+                    reading,
+                    identity_status,
+                    interval_status=interval_status,
+                )
+                if identity_status is not IdentityStatus.AUTHORITATIVE:
+                    self._identity_issues[ch_id] = identity_status
+            elif self._transport_invalidated and ch_id not in self._accepted_after_transport_loss:
                 cell.refresh_from_buffer()
-                cell.invalidate_transport()
+            if self._transport_invalidated and ch_id not in self._accepted_after_transport_loss:
+                retained_status = presentation[2] if presentation is not None else None
+                cell.invalidate_transport(retained_status=retained_status)
             cell.rename_requested.connect(self.rename_requested)
             cell.hide_requested.connect(self.hide_requested)
             cell.show_on_plot_requested.connect(self.show_on_plot_requested)
             cell.history_requested.connect(self.history_requested)
             self._cells[ch_id] = cell
 
+        self._refresh_identity_banner()
         self._relayout_cells()
 
     def _relayout_cells(self) -> None:
@@ -234,21 +256,38 @@ class DynamicSensorGrid(QWidget):
     # Refresh / dispatch
     # ------------------------------------------------------------------
 
-    def refresh(self) -> None:
-        """Render one latest-value cut and refresh idle-cell staleness."""
+    def refresh(self, *, refresh_idle: bool = True) -> None:
+        """Render one latest-value cut and optionally advance idle presentation."""
         pending, self._pending_readings = self._pending_readings, {}
         identity_changed = False
         for short_id, cell in self._cells.items():
             queued = pending.get(short_id)
             if queued is None:
-                cell.refresh_from_buffer()
+                if refresh_idle:
+                    cell.refresh_from_buffer()
+                    presentation = self._last_presentations.get(short_id)
+                    if presentation is not None and (
+                        not self._transport_invalidated or short_id in self._accepted_after_transport_loss
+                    ):
+                        reading, identity_status, _interval_status = presentation
+                        self._last_presentations[short_id] = (
+                            reading,
+                            identity_status,
+                            reading.status,
+                        )
                 continue
 
             reading, identity_status = queued.last
+            interval_status = queued.status_evidence[0].status
             cell.update_value(
                 reading,
                 identity_status,
-                interval_status=queued.status_evidence[0].status,
+                interval_status=interval_status,
+            )
+            self._last_presentations[short_id] = (
+                reading,
+                identity_status,
+                interval_status,
             )
             identity_changed = True
             if identity_status is IdentityStatus.AUTHORITATIVE:
@@ -260,11 +299,14 @@ class DynamicSensorGrid(QWidget):
 
     def invalidate_transport(self) -> None:
         """Render accepted pending evidence, then mark every value last-known."""
-        self.refresh()
+        self.refresh(refresh_idle=False)
         self._transport_invalidated = True
         self._accepted_after_transport_loss.clear()
-        for cell in self._cells.values():
-            cell.invalidate_transport()
+        for short_id, cell in self._cells.items():
+            presentation = self._last_presentations.get(short_id)
+            retained_status = presentation[2] if presentation is not None else None
+            cell.invalidate_transport(retained_status=retained_status)
+        self._refresh_identity_banner()
 
     def dispatch_reading(self, reading: Reading, identity_status: IdentityStatus) -> None:
         """Cache only the latest presentation cut for the next <=2 Hz tick."""
@@ -285,20 +327,65 @@ class DynamicSensorGrid(QWidget):
                 pending.add(sample)
 
     def _refresh_identity_banner(self) -> None:
-        refused = sum(status is IdentityStatus.REFUSED for status in self._identity_issues.values())
-        if refused:
-            text = f"Данные не подтверждены: описание канала отклонено ({refused})"
-            color = theme.STATUS_FAULT
-        elif self._identity_issues:
-            text = f"Данные не подтверждены: описание канала отсутствует ({len(self._identity_issues)})"
-            color = theme.STATUS_STALE
-        else:
+        historical_issues = {
+            channel: status
+            for channel, status in self._identity_issues.items()
+            if self._transport_invalidated and channel not in self._accepted_after_transport_loss
+        }
+        current_issues = {
+            channel: status for channel, status in self._identity_issues.items() if channel not in historical_issues
+        }
+        summaries: list[str] = []
+
+        def append_summaries(
+            issues: dict[str, IdentityStatus],
+            *,
+            historical: bool,
+        ) -> None:
+            if not issues:
+                return
+            prefix = (
+                "\u041d\u0435\u0442 \u0441\u0432\u044f\u0437\u0438 \u00b7 "
+                "\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044f\u044f "
+                "\u0438\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0446\u0438\u044f"
+                if historical
+                else (
+                    "\u0414\u0430\u043d\u043d\u044b\u0435 \u043d\u0435 "
+                    "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u044b"
+                )
+            )
+            refused = sum(status is IdentityStatus.REFUSED for status in issues.values())
+            absent = sum(status is IdentityStatus.LEGACY_ABSENT for status in issues.values())
+            if refused:
+                summaries.append(
+                    f"{prefix}: \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 "
+                    "\u043a\u0430\u043d\u0430\u043b\u0430 "
+                    f"\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e ({refused})"
+                )
+            if absent:
+                summaries.append(
+                    f"{prefix}: \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 "
+                    "\u043a\u0430\u043d\u0430\u043b\u0430 "
+                    f"\u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 ({absent})"
+                )
+
+        append_summaries(historical_issues, historical=True)
+        append_summaries(current_issues, historical=False)
+        if not summaries:
             self._identity_banner.setVisible(False)
             return
+
+        text = "; ".join(summaries)
+        has_refusal = any(status is IdentityStatus.REFUSED for status in self._identity_issues.values())
+        color = theme.STATUS_FAULT if has_refusal else theme.STATUS_STALE
+        connectivity_border = f"border: 1px dashed {theme.STATUS_STALE}; " if historical_issues else ""
         self._identity_banner.setText(text)
         self._identity_banner.setAccessibleName(text)
         self._identity_banner.setStyleSheet(
-            f"color: {theme.FOREGROUND}; border-left: 2px solid {color}; padding: {theme.SPACE_2}px;"
+            f"color: {theme.FOREGROUND}; "
+            f"{connectivity_border}"
+            f"border-left: 2px solid {color}; "
+            f"padding: {theme.SPACE_2}px;"
         )
         self._identity_banner.setVisible(True)
 
