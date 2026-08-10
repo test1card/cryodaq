@@ -62,6 +62,7 @@ _PUBLIC_EVENT_TAGS = frozenset(
         "accepted",
         "alarm",
         "auto",
+        "channel",
         "critical",
         "debug",
         "denied",
@@ -80,12 +81,15 @@ _PUBLIC_EVENT_TAGS = frozenset(
         "safety_audio_ack",
         "safety_fault",
         "settled",
+        "smua",
+        "smub",
         "success",
         "warning",
     }
 )
 _AUDIT_OUTCOMES = frozenset({"accepted", "denied", "failed", "pending", "settled", "success"})
 _LOG_LEVELS = frozenset({"critical", "debug", "error", "fault", "info", "warning"})
+_LOG_LEVEL_ALIASES = {"safety_fault": "fault"}
 
 _SEVERITY_FROM_STATE = {
     "caution": "caution",
@@ -398,15 +402,36 @@ def _collect_recent_entries(
                 or any(type(tag) is not str for tag in entry.tags)
             ):
                 raise TypeError("recent evidence source and tags must be exact strings")
-            if entry.source not in _PUBLIC_EVENT_SOURCE_CODES or any(
-                tag not in _PUBLIC_EVENT_TAGS for tag in entry.tags
-            ):
-                raise ValueError("recent evidence source or tags are not in the public projection allowlist")
+            if entry.source not in _PUBLIC_EVENT_SOURCE_CODES:
+                raise ValueError("recent evidence source is not in the public projection allowlist")
+            if any(not tag or len(tag.encode("utf-8")) > 128 for tag in entry.tags):
+                raise ValueError("recent evidence tags exceed the public projection bounds")
+            unknown_tags = tuple(tag for tag in entry.tags if tag not in _PUBLIC_EVENT_TAGS)
+            if unknown_tags:
+                if not (
+                    kind == "log"
+                    and entry.source == "machine"
+                    and "safety_fault" in entry.tags
+                    and len(set(unknown_tags)) == 1
+                ):
+                    raise ValueError("recent evidence tags are not in the public projection allowlist")
+                projected_tags = tuple("channel" if tag in unknown_tags else tag for tag in entry.tags)
+            else:
+                projected_tags = entry.tags
             observed_at = _utc_iso(entry.timestamp)
-            public_tags = tuple(sorted(set(entry.tags)))
-            semantic_values = tuple(
-                tag for tag in public_tags if tag in (_AUDIT_OUTCOMES if kind == "audit" else _LOG_LEVELS)
-            )
+            public_tags = tuple(sorted(set(projected_tags)))
+            if kind == "audit":
+                semantic_values = tuple(tag for tag in public_tags if tag in _AUDIT_OUTCOMES)
+            else:
+                semantic_values = tuple(
+                    sorted(
+                        {
+                            _LOG_LEVEL_ALIASES.get(tag, tag)
+                            for tag in public_tags
+                            if tag in _LOG_LEVELS or tag in _LOG_LEVEL_ALIASES
+                        }
+                    )
+                )
             if len(semantic_values) > 1:
                 raise ValueError("recent evidence has conflicting public semantic tags")
             source_code = _PUBLIC_EVENT_SOURCE_CODES[entry.source]

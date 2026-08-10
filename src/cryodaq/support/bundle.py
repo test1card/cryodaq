@@ -152,7 +152,7 @@ _EMAIL_RE: Final = re.compile(
 _UNICODE_EMAIL_RE: Final = re.compile(r"[^\s@]{1,64}@[^\s@]{1,255}")
 _PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}){1,3}(?!\w)")
 _PRIVATE_NAME_ONLY_RE: Final = re.compile(r"[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}){1,3}\Z")
-_DELIMITED_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:-+[^\W\d_]{2,64}){2,}(?!\w)")
+_DELIMITED_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:[-_.]+[^\W\d_]{2,64}){1,}(?!\w)")
 _PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
 _DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
 _DOTTED_PHONE_RE: Final = re.compile(r"(?:\+?\d{1,3}\.)?\d{3}\.\d{3}\.\d{4}\Z")
@@ -214,8 +214,11 @@ _PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS: Final = frozenset(
         "locked",
         "log",
         "loss",
+        "machine",
         "main",
         "manual",
+        "smua",
+        "smub",
         "monitor",
         "node",
         "operator",
@@ -419,6 +422,17 @@ _ENUM_RECORD_FIELDS: Final = {
     "state": frozenset({"caution", "disconnected", "fault", "ok", "stale", "unavailable", "warning"}),
     "storage": frozenset({"available", "unavailable", "unknown"}),
 }
+_STATE_RANK: Final = {
+    "ok": 0,
+    "stale": 1,
+    "disconnected": 2,
+    "unavailable": 2,
+    "caution": 3,
+    "warning": 4,
+    "fault": 5,
+}
+_ATTENTION_SEVERITY_BY_STATE: Final = {"caution": "caution", "fault": "fault"}
+
 _COUNT_RECORD_FIELDS: Final = frozenset(
     {
         "revision",
@@ -520,7 +534,7 @@ def _safe_text(
         if char not in _BIDI_OR_INVISIBLE and unicodedata.category(char) not in {"Cc", "Cf"}
     )
     was_percent_decoded = False
-    for _ in range(2):
+    for _ in range(MAX_DEPTH):
         decoded = unquote(security_normalized)
         if decoded == security_normalized:
             break
@@ -530,6 +544,8 @@ def _safe_text(
             for char in unicodedata.normalize("NFKC", decoded).translate(_PATH_CONFUSABLE_TRANSLATION)
             if char not in _BIDI_OR_INVISIBLE and unicodedata.category(char) not in {"Cc", "Cf"}
         )
+    if unquote(security_normalized) != security_normalized:
+        raise ValueError("percent encoding nesting exceeds the safe limit")
     stripped_security = security_normalized.strip()
     if was_percent_decoded and any(pattern.search(security_normalized) for pattern in _ABSOLUTE_PATH_PATTERNS):
         raise ValueError("percent-encoded absolute path text is not permitted")
@@ -582,7 +598,7 @@ def _safe_text(
     if security_screened != security_normalized:
         return "<redacted:path>"
     if not allow_identifier and _DELIMITED_PRIVATE_NAME_RE.search(security_screened):
-        raise ValueError("hyphen-delimited private-data-shaped text is not permitted")
+        raise ValueError("delimited private-data-shaped text is not permitted")
     if not allow_identifier and (
         _PRIVATE_NAME_RE.search(security_screened) or _PRIVATE_NAME_ONLY_RE.fullmatch(screened_stripped)
     ):
@@ -679,7 +695,7 @@ def _redact(
                 raise ValueError("secret-bearing keys are not permitted")
             if raw_signature in _PRIVATE_KEY_SIGNATURES:
                 raise ValueError("private-data keys are not permitted")
-            safe_key = _safe_text(item_key)
+            safe_key = _safe_text(item_key, allow_identifier=True)
             if not safe_key or len(safe_key.encode("utf-8")) > 128:
                 raise ValueError("payload mapping key is invalid")
             signature = _secret_key_signature(safe_key)
@@ -689,7 +705,7 @@ def _redact(
             seen_signatures.add(signature)
             budget.charge(input_bytes=0, output_bytes=len(safe_key.encode("utf-8")), nodes=0)
         for item_key in sorted(exact_keys, key=lambda candidate: unicodedata.normalize("NFC", candidate)):
-            safe_key = _safe_text(item_key)
+            safe_key = _safe_text(item_key, allow_identifier=True)
             result[safe_key] = _redact(value[item_key], depth=depth + 1, key=safe_key, budget=budget)
         return result
     raise TypeError("payload values must be exact JSON scalars, lists, or dictionaries")
@@ -729,6 +745,10 @@ def _validate_snapshot_relationships(kind: str, payload: dict[str, object]) -> N
             raise ValueError(f"{field} replay snapshot identity contradicts snapshot mode")
     if mode == "live" and payload["observed_at"] > payload["received_at"]:
         raise ValueError("live snapshot observed_at must not exceed received_at")
+    if kind == "attention":
+        expected_severity = _ATTENTION_SEVERITY_BY_STATE.get(payload["state"], "warning")
+        if payload["severity"] != expected_severity:
+            raise ValueError("attention severity contradicts its state")
     if kind == "integrity":
         state = payload["state"]
         storage = payload["storage"]
@@ -933,13 +953,31 @@ class BundleCapture:
         record_identities = tuple((kind, payload[identity_fields[kind]]) for kind, payload in decoded_records)
         if len(set(record_identities)) != len(record_identities):
             raise ValueError("record identities must be unique within each evidence kind")
-        summary_cuts = {
+        snapshot_cuts = {
             tuple(payload[field] for field in _SNAPSHOT_CUT_FIELDS)
             for kind, payload in decoded_records
-            if kind in _SNAPSHOT_RECORD_KINDS and payload["record_role"] == "summary"
+            if kind in _SNAPSHOT_RECORD_KINDS
         }
-        if len(summary_cuts) > 1:
-            raise ValueError("snapshot summaries do not share one coherent snapshot cut")
+        if len(snapshot_cuts) > 1:
+            raise ValueError("snapshot records do not share one coherent snapshot cut")
+        for snapshot_kind, summary_label in (("health", "health summaries"), ("attention", "attention summary")):
+            summary_states = tuple(
+                payload["state"]
+                for kind, payload in decoded_records
+                if kind == snapshot_kind and payload["record_role"] == "summary"
+            )
+            child_states = tuple(
+                payload["state"]
+                for kind, payload in decoded_records
+                if kind == snapshot_kind and payload["record_role"] == "child"
+            )
+            if (
+                summary_states
+                and child_states
+                and max(_STATE_RANK[state] for state in summary_states)
+                < max(_STATE_RANK[state] for state in child_states)
+            ):
+                raise ValueError(f"{summary_label} understate child evidence")
         if tuple(sorted(set(self.unavailable_fields))) != self.unavailable_fields:
             raise ValueError("unavailable_fields must be sorted and unique")
         if any(item not in _UNAVAILABLE_FIELDS for item in self.unavailable_fields):

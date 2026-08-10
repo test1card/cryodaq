@@ -2203,3 +2203,165 @@ def test_bundle_capture_rejects_snapshot_records_from_mixed_cuts() -> None:
 
     with pytest.raises(ValueError, match="coherent snapshot cut"):
         _minimal_capture(records=(health, integrity))
+
+
+@pytest.mark.parametrize(
+    "hostile_version",
+    (
+        "password%25253Dhunter2",
+        "password.old=hunter2",
+        "api_key.value=hunter2",
+        r"C%25253A%25255CUsers%25255CAlice%25255Csecret.txt",
+        "Alice-Smith",
+        "Alice_Smith",
+        "Alice.Smith",
+    ),
+)
+def test_nested_encoding_and_simple_private_names_never_reach_sealed_versions(
+    hostile_version: str,
+) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": hostile_version})
+
+    assert hostile_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"]
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected_event_code"),
+    (
+        (("safety_fault",), "log.machine.safety_fault"),
+        (("safety_fault", "smua"), "log.machine.safety_fault.smua"),
+        (("safety_fault", "smub"), "log.machine.safety_fault.smub"),
+    ),
+)
+def test_real_safety_fault_log_preserves_public_fault_semantics(
+    tags: tuple[str, ...],
+    expected_event_code: str,
+) -> None:
+    entry = OperatorLogEntry(7, _OBS, None, "safety_manager", "machine", "FAULT", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+    assert records[0]["payload"]["event_code"] == expected_event_code
+    assert records[0]["payload"]["level"] == "fault"
+
+
+@pytest.mark.parametrize("mixed_mode", (False, True))
+def test_bundle_capture_rejects_child_record_from_a_different_snapshot_cut(mixed_mode: bool) -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary_fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **summary_fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "ok", **summary_fields},
+    )
+    child_fields = _snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id)
+    child_fields.update(
+        revision=2,
+        observed_at="2026-07-14T11:58:00.000000Z",
+        received_at="2026-07-14T11:58:01.000000Z",
+    )
+    if mixed_mode:
+        replay_id = "replay/operator-v1/" + "a" * 32 + "/" + "b" * 32 + "/0000000000000001"
+        child_fields.update(
+            snapshot_mode="replay",
+            snapshot_source_id=replay_id,
+            snapshot_producer_id=replay_id,
+        )
+    child = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "safety_fsm", "state": "fault", **child_fields},
+    )
+
+    with pytest.raises(ValueError, match="coherent snapshot cut"):
+        _minimal_capture(records=(plant, infrastructure, child))
+
+
+@pytest.mark.parametrize(
+    "channel_tag",
+    (
+        "Keithley_1/smua/power",
+        "Keithley_1/smub/power",
+    ),
+)
+def test_real_safety_fault_channel_tag_is_projected_without_leaking_identifier(channel_tag: str) -> None:
+    entry = OperatorLogEntry(8, _OBS, None, "safety_manager", "machine", "FAULT", ("safety_fault", channel_tag))
+
+    evidence, sealed = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+    assert records[0]["payload"]["event_code"] == "log.machine.channel.safety_fault"
+    assert records[0]["payload"]["level"] == "fault"
+    assert channel_tag.encode() not in sealed
+
+
+def test_attention_record_rejects_severity_that_contradicts_state() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+
+    with pytest.raises(ValueError, match="severity"):
+        EvidenceRecord.from_payload(
+            "attention",
+            {
+                "attention_id": "alarm:" + "c" * 32,
+                "state": "fault",
+                "severity": "caution",
+                **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+            },
+        )
+
+
+def test_attention_summary_cannot_understate_a_child() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "attention-summary",
+            "state": "ok",
+            "severity": "warning",
+            **_snapshot_record_fields(source_id=live_id, producer_id=live_id),
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "alarm:" + "c" * 32,
+            "state": "fault",
+            "severity": "fault",
+            **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+        },
+    )
+
+    with pytest.raises(ValueError, match="attention summary"):
+        _minimal_capture(records=(summary, child))
+
+
+def test_health_summaries_cannot_collectively_understate_a_child() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "ok", **fields},
+    )
+    child = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "sensor-1",
+            "state": "fault",
+            **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+        },
+    )
+
+    with pytest.raises(ValueError, match="health summaries"):
+        _minimal_capture(records=(plant, infrastructure, child))
