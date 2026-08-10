@@ -101,6 +101,138 @@ async def test_attention_history_survives_writer_restart_with_explicit_bound(
     assert complete.items[0].channel_ids == ("temperature.cold-stage",)
 
 
+async def test_attention_history_empty_query_retains_requested_experiment_identity(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        page = await writer.get_attention_history(
+            experiment_id="different-experiment",
+            limit=10,
+        )
+    finally:
+        await writer.stop()
+
+    assert page.items == ()
+    assert getattr(page, "experiment_id", None) == "different-experiment"
+
+
+async def test_attention_history_page_binds_each_item_to_its_storage_revision(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(alarm_id="first"))
+        await writer.append_attention_event(
+            _attention_event(
+                alarm_id="second",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+        page = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    assert getattr(page, "item_revisions", None) == (1, 2)
+    with pytest.raises(ValueError, match="revision"):
+        replace(page, through_revision=1)
+
+
+async def test_attention_history_identical_event_retry_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    event = _attention_event()
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        first = await writer.append_attention_event(event)
+        second = await writer.append_attention_event(event)
+        page = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    assert second == first
+    assert page.through_revision == 1
+    assert page.items == (first,)
+
+
+async def test_attention_history_cancelled_append_retry_reconciles_one_incident(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    entered = threading.Event()
+    released = threading.Event()
+    settled = threading.Event()
+    real_append = writer._append_attention_history_item_sync
+
+    def blocked_append(item: object, *, require_persisted_incident: bool):
+        entered.set()
+        assert released.wait(timeout=5)
+        try:
+            return real_append(
+                item,
+                require_persisted_incident=require_persisted_incident,
+            )
+        finally:
+            settled.set()
+
+    monkeypatch.setattr(writer, "_append_attention_history_item_sync", blocked_append)
+    event = _attention_event()
+    caller = asyncio.create_task(writer.append_attention_event(event))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        released.set()
+        assert await asyncio.to_thread(settled.wait, 5)
+
+        retried = await writer.append_attention_event(event)
+        page = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        released.set()
+        await writer.stop()
+
+    assert page.items == (retried,)
+    assert page.through_revision == 1
+
+
+async def test_attention_history_detects_control_database_loss(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event())
+    finally:
+        await writer.stop()
+
+    (tmp_path / "control.db").unlink()
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="continuity|loss"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=1,
+            )
+    finally:
+        await restarted.stop()
+
+
 async def test_attention_history_capacity_is_fail_closed_durable_and_explicit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

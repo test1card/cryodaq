@@ -178,6 +178,8 @@ class AttentionHistoryPage:
     """Chronological bounded view bound to one durable history revision."""
 
     items: tuple[AttentionHistoryItem, ...]
+    item_revisions: tuple[int, ...]
+    experiment_id: str
     truncated_before: bool
     through_revision: int
     as_of: datetime | None
@@ -188,12 +190,32 @@ class AttentionHistoryPage:
             raise TypeError("items must contain exact AttentionHistoryItem values")
         if len(self.items) > ATTENTION_HISTORY_MAX_ITEMS:
             raise ValueError(f"attention history page cannot exceed {ATTENTION_HISTORY_MAX_ITEMS} items")
+        if (
+            type(self.item_revisions) is not tuple
+            or len(self.item_revisions) != len(self.items)
+            or any(type(revision) is not int or revision <= 0 for revision in self.item_revisions)
+            or len(self.item_revisions) != len(set(self.item_revisions))
+        ):
+            raise ValueError("item_revisions must uniquely bind every item to a positive revision")
+        object.__setattr__(
+            self,
+            "experiment_id",
+            _attention_text(
+                self.experiment_id,
+                field_name="experiment_id",
+                maximum=_ATTENTION_HISTORY_ID_BYTES,
+            ),
+        )
+        if any(item.experiment_id != self.experiment_id for item in self.items):
+            raise ValueError("attention history items must match the queried experiment")
         if type(self.truncated_before) is not bool:
             raise TypeError("truncated_before must be a boolean")
         if type(self.through_revision) is not int or self.through_revision < 0:
             raise ValueError("through_revision must be a non-negative integer")
         if self.items and self.through_revision == 0:
             raise ValueError("non-empty attention history requires a positive revision")
+        if any(revision > self.through_revision for revision in self.item_revisions):
+            raise ValueError("attention history item revision exceeds its page cut")
         if self.as_of is not None:
             object.__setattr__(
                 self,

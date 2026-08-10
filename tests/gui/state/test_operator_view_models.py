@@ -281,6 +281,8 @@ def _attention_history(
     )
     return AttentionHistoryPage(
         items=(item,),
+        item_revisions=(1,),
+        experiment_id=experiment_id,
         truncated_before=False,
         through_revision=1,
         as_of=datetime(2026, 7, 11, 1, 2, tzinfo=UTC),
@@ -471,6 +473,8 @@ def test_cooldown_mission_rejects_history_not_bound_to_its_cut() -> None:
     )
     unbound = AttentionHistoryPage(
         items=(future,),
+        item_revisions=(1,),
+        experiment_id="exp-7",
         truncated_before=False,
         through_revision=1,
         as_of=None,
@@ -582,6 +586,8 @@ def test_cooldown_mission_replay_round_trip_is_deterministic() -> None:
     replayed_snapshot = load_operator_snapshot(dump_operator_snapshot(snapshot))
     replayed_history = AttentionHistoryPage(
         items=tuple(load_attention_history_item(dump_attention_history_item(item)) for item in history.items),
+        item_revisions=history.item_revisions,
+        experiment_id=history.experiment_id,
         truncated_before=history.truncated_before,
         through_revision=history.through_revision,
         as_of=history.as_of,

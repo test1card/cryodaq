@@ -683,6 +683,8 @@ _ALARM_ACK_MAX_ABORT_CODE_BYTES = max(len(code.encode("utf-8")) for code in _ALA
 _ALARM_ACK_INCARNATION_ID_BYTES = 32
 _ALARM_ACK_ABORT_DISPOSITION_SCHEMA = "alarm_ack_abort_disposition_v1"
 _SQLITE_MAX_ROWID = 2**63 - 1
+_ATTENTION_HISTORY_CONTINUITY_NAME = "attention_history.continuity"
+_ATTENTION_HISTORY_CONTINUITY_BYTES = b"cryodaq.attention-history-continuity.v1\n"
 
 
 def _parse_timestamp(raw) -> datetime:
@@ -2663,6 +2665,61 @@ class SQLiteWriter:
     def _control_db_path(self) -> Path:
         return self._data_dir / "control.db"
 
+    def _attention_history_continuity_present(self) -> bool:
+        path = self._data_dir / _ATTENTION_HISTORY_CONTINUITY_NAME
+        try:
+            _control_path_identity(path, directory=False)
+        except FileNotFoundError:
+            return False
+        try:
+            raw = (
+                read_secure_relative_bytes(
+                    self._data_dir,
+                    _ATTENTION_HISTORY_CONTINUITY_NAME,
+                    max_bytes=len(_ATTENTION_HISTORY_CONTINUITY_BYTES) + 1,
+                )
+                if os.name == "nt"
+                else path.read_bytes()
+            )
+        except (OSError, SecureRelativeReadError):
+            raise RuntimeError("attention history continuity authority is unavailable") from None
+        if raw != _ATTENTION_HISTORY_CONTINUITY_BYTES:
+            raise RuntimeError("attention history continuity authority is invalid")
+        _control_path_identity(path, directory=False)
+        return True
+
+    def _ensure_attention_history_continuity(self) -> None:
+        if self._attention_history_continuity_present():
+            return
+        path = self._data_dir / _ATTENTION_HISTORY_CONTINUITY_NAME
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(path, flags, 0o600)
+            offset = 0
+            while offset < len(_ATTENTION_HISTORY_CONTINUITY_BYTES):
+                written = os.write(descriptor, _ATTENTION_HISTORY_CONTINUITY_BYTES[offset:])
+                if written <= 0:
+                    raise OSError("attention history continuity write made no progress")
+                offset += written
+            os.fsync(descriptor)
+        except FileExistsError:
+            if not self._attention_history_continuity_present():
+                raise RuntimeError("attention history continuity authority is unavailable") from None
+            return
+        except OSError:
+            raise RuntimeError("attention history continuity authority is unavailable") from None
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    raise RuntimeError("attention history continuity authority settlement failed") from None
+        if not self._attention_history_continuity_present():
+            raise RuntimeError("attention history continuity authority was not established")
+
     @classmethod
     def _alarm_ack_schema_catalog(
         cls,
@@ -3421,6 +3478,7 @@ class SQLiteWriter:
             activation_locked = False
             owned_connection.execute("PRAGMA synchronous=FULL;")
             owned_connection.execute("PRAGMA busy_timeout=250;")
+            attention_continuity_present = self._attention_history_continuity_present()
             owned_connection.execute("BEGIN IMMEDIATE")
             self._migrate_legacy_alarm_ack_storage(owned_connection)
             owned_connection.execute(SCHEMA_ALARM_ACK_OUTBOX)
@@ -3441,7 +3499,10 @@ class SQLiteWriter:
                 owned_connection,
                 allow_transactional_trigger_challenge=True,
             )
-            self._initialize_attention_history_storage(owned_connection)
+            self._initialize_attention_history_storage(
+                owned_connection,
+                continuity_present=attention_continuity_present,
+            )
             if _operator_log_monotonic() >= deadline:
                 expired[0] = True
                 raise RuntimeError(
@@ -3450,6 +3511,7 @@ class SQLiteWriter:
                     f"{_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S:.3f}s budget"
                 )
             owned_connection.commit()
+            self._ensure_attention_history_continuity()
             raw_connection.set_progress_handler(None, 0)
             owned_connection.validate_authority()
             return owned_connection
@@ -6764,6 +6826,8 @@ class SQLiteWriter:
     def _initialize_attention_history_storage(
         cls,
         conn: sqlite3.Connection | _OwnedControlConnection,
+        *,
+        continuity_present: bool,
     ) -> None:
         object_names = (
             "attention_history",
@@ -6787,6 +6851,8 @@ class SQLiteWriter:
             ),
         }
         if not rows and marker_object is None:
+            if continuity_present:
+                raise RuntimeError("attention history continuity loss detected")
             conn.execute(SCHEMA_CONTROL_FEATURE_MARKERS)
             conn.execute(SCHEMA_ATTENTION_HISTORY)
             conn.execute(INDEX_ATTENTION_HISTORY_EXPERIMENT)
@@ -9537,6 +9603,25 @@ class SQLiteWriter:
         try:
             conn.execute("BEGIN IMMEDIATE")
             self._verify_attention_history_storage(conn)
+            existing_raw = conn.execute(
+                "SELECT sequence, history_revision, event_id, timestamp, "
+                "experiment_id, kind, annotation_of, payload "
+                "FROM attention_history WHERE event_id = ?",
+                (item.event_id,),
+            ).fetchone()
+            if existing_raw is not None:
+                if (
+                    type(existing_raw) is not tuple
+                    or len(existing_raw) != 8
+                    or type(existing_raw[0]) is not int
+                    or existing_raw[0] != existing_raw[1]
+                ):
+                    raise RuntimeError("attention history retry identity is invalid")
+                existing = self._attention_history_item_from_row(existing_raw[2:])
+                if existing != item:
+                    raise RuntimeError("attention history event identity collision")
+                conn.commit()
+                return existing
             if require_persisted_incident:
                 parent_raw = conn.execute(
                     "SELECT event_id, timestamp, experiment_id, kind, "
@@ -9704,7 +9789,7 @@ class SQLiteWriter:
                 raise ValueError("attention history revision is unavailable")
             if as_of is None:
                 rows = conn.execute(
-                    "SELECT event_id, timestamp, experiment_id, kind, "
+                    "SELECT sequence, event_id, timestamp, experiment_id, kind, "
                     "annotation_of, payload FROM attention_history "
                     "WHERE experiment_id = ? AND sequence <= ? "
                     "ORDER BY timestamp DESC, event_id DESC LIMIT ?",
@@ -9712,7 +9797,7 @@ class SQLiteWriter:
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT event_id, timestamp, experiment_id, kind, "
+                    "SELECT sequence, event_id, timestamp, experiment_id, kind, "
                     "annotation_of, payload FROM attention_history "
                     "WHERE experiment_id = ? AND sequence <= ? "
                     "AND timestamp <= ? "
@@ -9726,7 +9811,13 @@ class SQLiteWriter:
                 ).fetchall()
             if type(rows) is not list or len(rows) > limit + 1:
                 raise RuntimeError("attention history read authority is invalid")
-            items = [self._attention_history_item_from_row(row) for row in rows[:limit]]
+            selected = [
+                (row[0], self._attention_history_item_from_row(row[1:]))
+                for row in rows[:limit]
+                if type(row) is tuple and len(row) == 7
+            ]
+            if len(selected) != min(len(rows), limit):
+                raise RuntimeError("attention history read authority is invalid")
             capacity_exhausted_at = None
             if status[2] is not None and status[2] <= selected_revision:
                 capacity_exhausted_at = self._attention_history_time_from_text(status[3])
@@ -9741,9 +9832,11 @@ class SQLiteWriter:
             raise RuntimeError("attention history read failed") from None
         finally:
             conn.close()
-        items.reverse()
+        selected.reverse()
         return AttentionHistoryPage(
-            items=tuple(items),
+            items=tuple(item for _revision, item in selected),
+            item_revisions=tuple(revision for revision, _item in selected),
+            experiment_id=experiment_id,
             truncated_before=len(rows) > limit,
             through_revision=selected_revision,
             as_of=as_of,
@@ -9772,6 +9865,19 @@ class SQLiteWriter:
             level=event.payload.get("level"),
             message=event.payload.get("message"),
             channel_ids=tuple(channels),
+        )
+        identity_payload = item.to_payload()
+        del identity_payload["event_id"]
+        canonical_identity = json.dumps(
+            identity_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        item = replace(
+            item,
+            event_id=hashlib.sha256(canonical_identity).hexdigest()[:32],
         )
         owner = self._owned_executor_task(
             self._executor,
