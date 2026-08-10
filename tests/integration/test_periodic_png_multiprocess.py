@@ -13,7 +13,7 @@ import zlib
 from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psutil
 import pytest
@@ -379,42 +379,94 @@ def _require_periodic_render_process(process: psutil.Process, generation_id: str
     assert expected_generation in command and (module_child or frozen_child)
 
 
-def _reap_observed_process(process: psutil.Process) -> None:
+def _observed_process_is_settled(process: psutil.Process) -> bool:
+    """True only when the process is gone, or a zombie awaiting collection.
+
+    A re-parented process that init has not collected yet IS dead, but
+    ``psutil.wait()`` polls ``pid_exists()`` for a non-child and keeps seeing it,
+    so a wait alone would time out on a corpse.
+    """
+
     try:
-        if process.status() == psutil.STATUS_ZOMBIE:
-            return
+        return process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def _reap_observed_process(process: psutil.Process) -> None:
+    """Leave no observed renderer alive when the test ends.
+
+    ``ChildProcessError`` means only that THIS caller has no child with that
+    PID. Once the renderer's supervisor is killed the renderer is re-parented,
+    so that is permanently true of a process that may still be running, holding
+    ``PERIODIC_RENDER_LOCK`` and writing artifacts. Every path that sees it
+    therefore re-checks liveness instead of reporting the process reaped; only
+    ``NoSuchProcess`` and a zombie status are evidence of death.
+    """
+
+    if _observed_process_is_settled(process):
+        return
+    try:
         process.wait(timeout=_PROCESS_TIMEOUT_S)
         return
-    except (psutil.NoSuchProcess, ChildProcessError):
+    except psutil.NoSuchProcess:
         return
-    except psutil.TimeoutExpired:
+    except (psutil.TimeoutExpired, ChildProcessError):
         pass
+    if _observed_process_is_settled(process):
+        return
     try:
         process.kill()
-    except (psutil.NoSuchProcess, ChildProcessError):
+    except psutil.NoSuchProcess:
         return
     deadline = time.monotonic() + _PROCESS_TIMEOUT_S
     while True:
+        if _observed_process_is_settled(process):
+            return
         try:
-            # A re-parented process that init has not collected yet is a zombie:
-            # it is dead, but psutil.wait() polls pid_exists() for a non-child
-            # and keeps seeing it.  The pre-kill branch above already treats
-            # that state as reaped; the post-kill branch must too, or a slow
-            # runner turns teardown into a test failure.
-            if process.status() == psutil.STATUS_ZOMBIE:
-                return
             process.wait(timeout=max(0.0, deadline - time.monotonic()))
             return
-        except (psutil.NoSuchProcess, ChildProcessError):
+        except psutil.NoSuchProcess:
             return
-        except psutil.TimeoutExpired:
+        except (psutil.TimeoutExpired, ChildProcessError):
             if time.monotonic() >= deadline:
                 break
+            time.sleep(0.01)
     try:
         status = process.status()
     except psutil.Error as error:  # pragma: no cover - diagnostic only
         status = f"<unreadable: {error!r}>"
     raise AssertionError(f"observed process {process.pid} survived kill() for {_PROCESS_TIMEOUT_S}s; status={status!r}")
+
+
+class _LiveNonChildProcess:
+    """A process that is alive but is no longer this caller's child.
+
+    ``wait()`` raises ``ChildProcessError`` exactly as ``waitpid`` does for a PID
+    the caller does not own -- which is what the orphaned renderer becomes the
+    moment its supervisor is killed -- while the process keeps running.
+    """
+
+    def __init__(self) -> None:
+        self.pid = -1
+        self.killed = False
+
+    def status(self) -> str:
+        return psutil.STATUS_ZOMBIE if self.killed else psutil.STATUS_RUNNING
+
+    def wait(self, timeout: float | None = None) -> int:
+        raise ChildProcessError("no child processes")
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_reaping_a_live_non_child_process_kills_it_instead_of_reporting_it_reaped() -> None:
+    """ChildProcessError is not evidence that the renderer terminated."""
+
+    process = _LiveNonChildProcess()
+    _reap_observed_process(cast(psutil.Process, process))
+    assert process.killed, "a live non-child renderer must be killed, not reported reaped"
 
 
 def _cut(sequence: int) -> LiveSourceCut:

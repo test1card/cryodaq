@@ -169,6 +169,46 @@ def test_execution_requires_complete_exact_six_result(payload: bytes, exit_code:
         )
 
 
+@pytest.mark.parametrize(
+    ("parser", "prefix"),
+    [
+        ("_parse_exact_collection", "exact-six collection execution failed"),
+        ("_validate_exact_execution", "exact-six execution failed"),
+    ],
+)
+def test_nonzero_child_exit_reports_the_code_and_both_streams(parser: str, prefix: str) -> None:
+    """A blind "nonzero" message hid a real child failure and cost two rounds of guessing.
+
+    Asserting only that ``_RunnerFoundationError`` is raised would stay green if the
+    diagnosis were dropped again, so the exit code, BOTH streams and the bound are
+    each required here.
+    """
+
+    stdout = b"z" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + 64)
+    stderr = b"stderr-marker"
+    with pytest.raises(runner._RunnerFoundationError) as excinfo:
+        getattr(runner, parser)(
+            stdout_evidence=_evidence(stdout),
+            stdout=stdout,
+            stderr_evidence=_evidence(stderr),
+            stderr=stderr,
+            exit_code=3,
+        )
+    message = str(excinfo.value)
+    assert message.startswith(prefix)
+    assert "exit code 3" in message
+    assert "stderr-marker" in message, "the stderr stream must survive into the diagnosis"
+    assert "...[truncated]" in message
+    assert "z" * runner._DIAGNOSTIC_OUTPUT_LIMIT in message
+    assert "z" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + 1) not in message, "the 4096-character bound must hold"
+
+
+def test_child_failure_message_names_an_empty_stream_instead_of_omitting_it() -> None:
+    message = runner._child_failure_message(2, b"", b"")
+    assert "exit code 2" in message
+    assert message.count("<empty>") == 2, "a silent stream must read as empty, not as absent"
+
+
 def test_exact_execution_parser_accepts_only_complete_bound_bytes() -> None:
     payload = b"....... [100%]\n7 passed in 1.20s\n"
     runner._validate_exact_execution(
