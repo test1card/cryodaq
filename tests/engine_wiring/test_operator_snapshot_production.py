@@ -791,3 +791,92 @@ def test_engine_requires_durable_attention_before_alarm_fanout_and_live_snapshot
     history_stop = engine_source.index('"durable_attention_history_feed"', observer_cutover)
     terminal_dependencies = engine_source.index('"terminal_dependencies"', history_stop)
     assert dispatch_drain < observer_cutover < history_stop < terminal_dependencies
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_transition_timeline_restarts_without_duplicate_incident(tmp_path: Path) -> None:
+    data_root = tmp_path / "diagnostic-attention"
+    writer = _writer(data_root)
+    await writer.start_immediate()
+    history_feed = DurableAttentionHistoryFeed(writer)
+    await history_feed.start()
+    event_bus = EventBus()
+    event_bus.retain_required_observer("durable_attention_history", history_feed.persist_event)
+    alarm_at = datetime(2026, 8, 10, 3, 0, tzinfo=UTC)
+    events = (
+        EngineEvent(
+            "alarm_fired",
+            alarm_at,
+            {
+                "alarm_id": "diag:probe.1",
+                "level": "WARNING",
+                "message": "Sensor warning",
+                "channels": ["probe.1"],
+                "values": {"probe.1": 301.0},
+                "activation_id": 1,
+                "audit_revision": 1,
+            },
+            "experiment-stable-diagnostic",
+        ),
+        EngineEvent(
+            "alarm_severity_changed",
+            alarm_at + timedelta(seconds=1),
+            {
+                "alarm_id": "diag:probe.1",
+                "level": "CRITICAL",
+                "message": "Sensor critical",
+                "channels": ["probe.1"],
+                "values": {"probe.1": 901.0},
+                "activation_id": 1,
+                "audit_revision": 2,
+            },
+            "experiment-renamed-display",
+        ),
+        EngineEvent(
+            "alarm_cleared",
+            alarm_at + timedelta(seconds=2),
+            {
+                "alarm_id": "diag:probe.1",
+                "activation_id": 1,
+                "audit_revision": 3,
+            },
+            "experiment-renamed-display",
+        ),
+    )
+    for event in events:
+        await event_bus.publish(event)
+
+    page = await writer.get_attention_history(
+        experiment_id="experiment-stable-diagnostic",
+        limit=10,
+    )
+    assert [item.kind for item in page.items] == [
+        "incident",
+        "severity_change",
+        "resolution",
+    ]
+    assert sum(item.kind == "incident" for item in page.items) == 1
+    assert all(item.experiment_id == "experiment-stable-diagnostic" for item in page.items)
+    assert page.items[1].annotation_of == page.items[0].event_id
+    assert page.items[2].annotation_of == page.items[0].event_id
+
+    for event in events:
+        await event_bus.publish(event)
+    replayed_once = await writer.get_attention_history(
+        experiment_id="experiment-stable-diagnostic",
+        limit=10,
+    )
+    assert replayed_once == page
+    event_bus.release_required_observer("durable_attention_history")
+    history_feed.stop()
+    await writer.stop()
+
+    restarted = _writer(data_root)
+    await restarted.start_immediate()
+    replayed_after_restart = await restarted.get_attention_history(
+        experiment_id="experiment-stable-diagnostic",
+        limit=10,
+    )
+    assert replayed_after_restart == page
+    await restarted.stop()
+    await asyncio.get_running_loop().shutdown_default_executor()

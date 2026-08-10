@@ -748,7 +748,10 @@ def test_attention_codec_rejects_boolean_schema_version() -> None:
         channel_ids=("temperature.cold-stage",),
     )
     payload = operator_log_module.dump_attention_history_item(item)
-    mutant = payload.replace('"version":1', '"version":true')
+    mutant = payload.replace(
+        f'"version":{operator_log_module.ATTENTION_HISTORY_ITEM_VERSION}',
+        '"version":true',
+    )
     assert mutant != payload
     with pytest.raises(ValueError, match="attention history item is invalid"):
         operator_log_module.load_attention_history_item(mutant)

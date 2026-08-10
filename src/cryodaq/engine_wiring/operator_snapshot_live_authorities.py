@@ -182,7 +182,7 @@ class DurableAttentionHistoryFeed:
 
         if type(event) is not EngineEvent:
             raise TypeError("attention persistence requires an exact EngineEvent")
-        if event.event_type not in {"alarm_fired", "alarm_cleared"}:
+        if event.event_type not in {"alarm_fired", "alarm_severity_changed", "alarm_cleared"}:
             return
         if not self.__started:
             raise RuntimeError("durable attention history feed is not started")
@@ -266,6 +266,8 @@ class DurableAttentionHistoryFeed:
             try:
                 if event.event_type == "alarm_fired":
                     persisted = await self.__writer.append_attention_event(event)
+                elif event.event_type == "alarm_severity_changed":
+                    persisted = await self.__writer.change_attention_severity_event(event)
                 else:
                     persisted = await self.__writer.resolve_attention_event(event)
             except BaseException as exc:  # retain failure through revision refresh

@@ -76,6 +76,9 @@ class AlarmEvent:
     # This distinguishes a held alarm with a broken evaluator from a normally
     # evaluated active hazard on operator-facing surfaces.
     evaluator_error: bool = False
+    transition: Literal["TRIGGERED", "SEVERITY_UPGRADED", "CLEARED"] = "TRIGGERED"
+    transition_at: float = 0.0
+    audit_revision: int = 0
 
 
 class AlarmSnapshotUnavailableError(RuntimeError):
@@ -118,6 +121,9 @@ def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
         acknowledgement_request_id=event.acknowledgement_request_id,
         activation_id=event.activation_id,
         evaluator_error=event.evaluator_error,
+        transition=event.transition,
+        transition_at=event.transition_at,
+        audit_revision=event.audit_revision,
     )
 
 
@@ -917,14 +923,18 @@ class AlarmStateManager:
             # operator notifications for the same physical anomaly. SEVERITY_UPGRADED
             # history entry provides the audit trail.
             if level == "CRITICAL" and existing.level == "WARNING":
+                transition_at = time.time()
                 existing.level = level
                 existing.message = f"Sensor anomaly sustained {age_seconds:.0f}s: {channel_id}"
                 self._mark_active_mutation()
+                existing.transition = "SEVERITY_UPGRADED"
+                existing.transition_at = transition_at
+                existing.audit_revision = self._state_revision
                 self._history.append(
                     {
                         "alarm_id": alarm_id,
                         "transition": "SEVERITY_UPGRADED",
-                        "at": time.time(),
+                        "at": transition_at,
                         "level": level,
                         "message": existing.message,
                     }
@@ -949,6 +959,9 @@ class AlarmStateManager:
         event.activation_id = self._activation_sequence
         self._active[alarm_id] = event
         self._mark_active_mutation()
+        event.transition = "TRIGGERED"
+        event.transition_at = event.triggered_at
+        event.audit_revision = self._state_revision
         self._history.append(
             {
                 "alarm_id": alarm_id,
@@ -966,26 +979,29 @@ class AlarmStateManager:
         )
         return _copy_alarm_event(event)
 
-    def clear_diagnostic_alarm(self, channel_id: str) -> None:
-        """Clear diagnostic alarm for channel when anomaly resolves.
+    def clear_diagnostic_alarm(self, channel_id: str) -> AlarmEvent | None:
+        """Clear a diagnostic alarm and return detached canonical evidence."""
 
-        Called by SensorDiagnosticsEngine when channel status returns to ok.
-        No-op if no active diagnostic alarm for this channel.
-        """
         alarm_id = f"diag:{channel_id}"
         if alarm_id not in self._active:
-            return
-        self._active.pop(alarm_id)
+            return None
+        transition_at = time.time()
+        old_event = self._active.pop(alarm_id)
         self._mark_active_mutation()
+        cleared = _copy_alarm_event(old_event)
+        cleared.transition = "CLEARED"
+        cleared.transition_at = transition_at
+        cleared.audit_revision = self._state_revision
         self._history.append(
             {
                 "alarm_id": alarm_id,
                 "transition": "CLEARED",
-                "at": time.time(),
-                "level": "INFO",
+                "at": transition_at,
+                "level": old_event.level,
             }
         )
         logger.info("DIAGNOSTIC ALARM CLEARED: %s", alarm_id)
+        return cleared
 
     def acknowledge(
         self,

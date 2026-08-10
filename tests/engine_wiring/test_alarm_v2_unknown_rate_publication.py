@@ -261,3 +261,77 @@ async def test_diagnostic_activation_also_enters_canonical_attention_stream() ->
     assert durable_event.timestamp == datetime.fromtimestamp(canonical.triggered_at, UTC)
     assert durable_event.payload.get("activation_id") == canonical.activation_id == 1
     assert published.get_nowait().event_type == "sensor_anomaly_critical"
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_transition_kinds_do_not_create_duplicate_incidents() -> None:
+    triggered = AlarmEvent(
+        alarm_id="diag:T12",
+        level="WARNING",
+        message="warning",
+        triggered_at=1_700_000_000.0,
+        channels=[_CHANNEL],
+        values={_CHANNEL: 301.0},
+        activation_id=7,
+    )
+    triggered.transition = "TRIGGERED"
+    triggered.transition_at = triggered.triggered_at
+    triggered.audit_revision = 11
+    upgraded = AlarmEvent(
+        alarm_id="diag:T12",
+        level="CRITICAL",
+        message="critical",
+        triggered_at=triggered.triggered_at,
+        channels=[_CHANNEL],
+        values={_CHANNEL: 901.0},
+        activation_id=7,
+    )
+    upgraded.transition = "SEVERITY_UPGRADED"
+    upgraded.transition_at = triggered.triggered_at + 1.0
+    upgraded.audit_revision = 12
+    cleared = AlarmEvent(
+        alarm_id="diag:T12",
+        level="CRITICAL",
+        message="critical",
+        triggered_at=triggered.triggered_at,
+        channels=[_CHANNEL],
+        values={_CHANNEL: 901.0},
+        activation_id=7,
+    )
+    cleared.transition = "CLEARED"
+    cleared.transition_at = triggered.triggered_at + 2.0
+    cleared.audit_revision = 13
+
+    class _Diagnostics:
+        calls = 0
+
+        def update(self) -> list[AlarmEvent]:
+            self.calls += 1
+            if self.calls > 1:
+                raise asyncio.CancelledError
+            return [triggered, upgraded, cleared]
+
+    event_bus = EventBus()
+    published = await event_bus.subscribe("diagnostic-transition-publication")
+    with pytest.raises(asyncio.CancelledError):
+        await sensor_diag_tick(
+            sensor_diag=_Diagnostics(),
+            sd_cfg={"update_interval_s": 0},
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=SimpleNamespace(active_experiment_id="experiment-origin"),
+        )
+
+    emitted = []
+    while not published.empty():
+        emitted.append(published.get_nowait())
+    assert [event.event_type for event in emitted] == [
+        "alarm_fired",
+        "alarm_severity_changed",
+        "sensor_anomaly_critical",
+        "alarm_cleared",
+    ]
+    assert [event.payload.get("activation_id") for event in emitted] == [7, 7, 7, 7]
+    assert emitted[1].payload.get("audit_revision") == 12
+    assert emitted[-1].timestamp == datetime.fromtimestamp(cleared.transition_at, UTC)

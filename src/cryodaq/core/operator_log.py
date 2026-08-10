@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 ATTENTION_HISTORY_ITEM_SCHEMA = "cryodaq.attention-history-item"
-ATTENTION_HISTORY_ITEM_VERSION = 3
+ATTENTION_HISTORY_ITEM_VERSION = 4
 ATTENTION_HISTORY_MAX_ITEMS = 1000
 ATTENTION_HISTORY_MAX_ITEM_BYTES = 16 * 1024
 _ATTENTION_HISTORY_ID_BYTES = 128
@@ -85,8 +85,8 @@ class AttentionHistoryItem:
             "event_id",
             _attention_event_id(self.event_id, field_name="event_id"),
         )
-        if self.kind not in {"incident", "acknowledgement", "resolution"}:
-            raise ValueError("kind must be incident, acknowledgement, or resolution")
+        if self.kind not in {"incident", "acknowledgement", "severity_change", "resolution"}:
+            raise ValueError("kind must be incident, acknowledgement, severity_change, or resolution")
         object.__setattr__(
             self,
             "timestamp",
@@ -162,8 +162,8 @@ class AttentionHistoryItem:
             )
             if self.kind == "acknowledgement" and not self.actor:
                 raise ValueError("acknowledgement requires actor identity")
-            if self.kind == "resolution" and (self.actor or self.note):
-                raise ValueError("resolution cannot carry operator annotation fields")
+            if self.kind in {"severity_change", "resolution"} and (self.actor or self.note):
+                raise ValueError("alarm transitions cannot carry operator annotation fields")
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -326,6 +326,36 @@ def new_attention_acknowledgement(
     return _with_deterministic_annotation_identity(
         provisional,
         operation="acknowledgement",
+    )
+
+
+def new_attention_severity_change(
+    incident: AttentionHistoryItem,
+    *,
+    timestamp: datetime,
+    level: str,
+    message: str,
+) -> AttentionHistoryItem:
+    if type(incident) is not AttentionHistoryItem or incident.kind != "incident":
+        raise ValueError("attention severity change requires an exact incident")
+    if _attention_time(timestamp, field_name="timestamp") < incident.timestamp:
+        raise ValueError("attention severity change cannot predate its incident")
+    if incident.level != "WARNING" or level != "CRITICAL":
+        raise ValueError("attention severity change must be WARNING to CRITICAL")
+    provisional = AttentionHistoryItem(
+        event_id="0" * 32,
+        kind="severity_change",
+        timestamp=timestamp,
+        experiment_id=incident.experiment_id,
+        alarm_id=incident.alarm_id,
+        level=level,
+        message=message,
+        channel_ids=incident.channel_ids,
+        annotation_of=incident.event_id,
+    )
+    return _with_deterministic_annotation_identity(
+        provisional,
+        operation="severity_change",
     )
 
 

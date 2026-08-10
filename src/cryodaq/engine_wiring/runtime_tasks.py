@@ -63,12 +63,45 @@ def _canonical_alarm_cleared_event(
         raise TypeError("canonical alarm resolution requires an exact AlarmEvent")
     if type(event.activation_id) is not int or event.activation_id <= 0:
         raise ValueError("canonical alarm resolution requires an owner-issued activation identity")
+    payload = {
+        "alarm_id": event.alarm_id,
+        "activation_id": event.activation_id,
+    }
+    if event.audit_revision > 0:
+        payload["audit_revision"] = event.audit_revision
     return EngineEvent(
         event_type="alarm_cleared",
         timestamp=timestamp,
+        payload=payload,
+        experiment_id=experiment_id,
+    )
+
+
+def _canonical_alarm_severity_changed_event(
+    event: AlarmEvent,
+    experiment_id: str | None,
+) -> EngineEvent:
+    """Publish one owner-issued severity transition without a second incident."""
+
+    if type(event) is not AlarmEvent or event.transition != "SEVERITY_UPGRADED":
+        raise TypeError("canonical severity change requires exact owner evidence")
+    if type(event.activation_id) is not int or event.activation_id <= 0:
+        raise ValueError("canonical severity change requires an owner-issued activation identity")
+    if type(event.transition_at) not in (int, float) or event.transition_at <= 0:
+        raise ValueError("canonical severity change requires its owner-issued transition time")
+    if type(event.audit_revision) is not int or event.audit_revision <= 0:
+        raise ValueError("canonical severity change requires its owner-issued audit revision")
+    return EngineEvent(
+        event_type="alarm_severity_changed",
+        timestamp=datetime.fromtimestamp(event.transition_at, UTC),
         payload={
             "alarm_id": event.alarm_id,
+            "level": event.level,
+            "message": event.message,
+            "channels": list(event.channels),
+            "values": dict(event.values),
             "activation_id": event.activation_id,
+            "audit_revision": event.audit_revision,
         },
         experiment_id=experiment_id,
     )
@@ -398,10 +431,13 @@ async def sensor_diag_tick(
         try:
             experiment_id = experiment_manager.active_experiment_id
             new_events = sensor_diag.update()
-            if _notify_telegram and telegram_bot is not None and new_events:
+            notifiable_events = [
+                event for event in new_events if getattr(event, "transition", "TRIGGERED") != "CLEARED"
+            ]
+            if _notify_telegram and telegram_bot is not None and notifiable_events:
                 aggregation_threshold = sd_cfg.get("aggregation_threshold", 3)
                 # F20 aggregation handled by _format_diag_telegram_messages.
-                for _tg_name, _tg_msg in _format_diag_telegram_messages(new_events, aggregation_threshold):
+                for _tg_name, _tg_msg in _format_diag_telegram_messages(notifiable_events, aggregation_threshold):
                     t = asyncio.create_task(
                         telegram_bot._send_to_all(_tg_msg),
                         name=_tg_name,
@@ -409,9 +445,21 @@ async def sensor_diag_tick(
                     alarm_dispatch_tasks.add(t)
                     t.add_done_callback(alarm_dispatch_tasks.discard)
             for _sd_ev in new_events:
-                canonical_event = _canonical_alarm_fired_event(_sd_ev, experiment_id)
+                transition = getattr(_sd_ev, "transition", "TRIGGERED")
+                if transition == "TRIGGERED":
+                    canonical_event = _canonical_alarm_fired_event(_sd_ev, experiment_id)
+                elif transition == "SEVERITY_UPGRADED":
+                    canonical_event = _canonical_alarm_severity_changed_event(_sd_ev, experiment_id)
+                elif transition == "CLEARED":
+                    canonical_event = _canonical_alarm_cleared_event(
+                        _sd_ev,
+                        experiment_id,
+                        timestamp=datetime.fromtimestamp(_sd_ev.transition_at, UTC),
+                    )
+                else:
+                    raise ValueError("diagnostic alarm transition is unsupported")
                 await event_bus.publish(canonical_event)
-                if _sd_ev.level.upper() == "CRITICAL":
+                if transition != "CLEARED" and _sd_ev.level.upper() == "CRITICAL":
                     await event_bus.publish(
                         EngineEvent(
                             event_type="sensor_anomaly_critical",
