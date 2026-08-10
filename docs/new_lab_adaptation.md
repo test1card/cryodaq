@@ -111,9 +111,11 @@ Edit `config/instruments.local.yaml` (copied from
 `config/instruments.local.yaml.example`). Each entry needs at minimum `type`
 and `name`; the rest is per-type.
 
-The driver registry is a **closed allowlist** — there is no plugin discovery,
-no entry-point scan, no module-name lookup
-([[ref:src/cryodaq/drivers/registry.py::BUILTIN_DRIVER_SPECS]]). The built-in types today are:
+Generic instrument configuration uses the closed, instrument-only
+`INSTRUMENT_DRIVER_SPECS` partition: there is no plugin discovery, entry-point
+scan, or module-name lookup
+([[ref:src/cryodaq/drivers/registry.py::INSTRUMENT_DRIVER_SPECS]]). The instrument
+types accepted in `instruments*.yaml` today are:
 
 | `type` | Class | Trust |
 |---|---|---|
@@ -123,10 +125,15 @@ no entry-point scan, no module-name lookup
 | `asc_reference_tcp` | `ASCReferenceTCP` | passive extension |
 | `keithley_2604b` | `Keithley2604B` | reviewed source (hazardous) |
 
-An unknown `type` fails startup with `UnknownDriverTypeError`
-([[ref:src/cryodaq/drivers/registry.py::get_driver_spec]]). If your hardware is not on this
-list you need a **new driver**, which is production code in
-`src/cryodaq/drivers/` and outside the config-level adaptation this document
+An unknown type, or a registered capability outside the instrument-only
+partition, fails instrument startup with `UnknownDriverTypeError`
+([[ref:src/cryodaq/drivers/registry.py::get_instrument_driver_spec]]).
+`deterministic_health_node` is an allowlisted simulation capability, not an
+instrument entry. There is no supported production health-node configuration
+or engine-wiring path; do not place health telemetry entries in
+`instruments*.yaml` or treat a `health_nodes` key as loaded. If your hardware is
+not on the instrument list you need a **new driver**, which is production code
+in `src/cryodaq/drivers/` and outside the config-level adaptation this document
 describes. A passive sensor driver is ordinary work. An actuator that can put
 energy into the cryostat is **not currently supported at all** — read §8
 before spending any effort on it.

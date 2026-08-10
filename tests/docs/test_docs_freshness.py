@@ -3080,3 +3080,14 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
         "and 24-for-24 parities "
         f"do not cover it. declared={declared}, measured={measured}"
     )
+
+
+def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_claim() -> None:
+    text = (REPO_ROOT / "docs" / "new_lab_adaptation.md").read_text(encoding="utf-8")
+    section = text.split("## 2. Declare your instruments", 1)[1].split("## 3.", 1)[0]
+
+    assert "::INSTRUMENT_DRIVER_SPECS" in section
+    assert "::get_instrument_driver_spec" in section
+    assert "no supported production health-node configuration" in section
+    assert "::BUILTIN_DRIVER_SPECS" not in section
+    assert "::get_driver_spec" not in section
