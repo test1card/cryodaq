@@ -2,7 +2,7 @@
 
 A lab profile describes an ADAPTING laboratory — a fork running CryoDAQ on
 different cryogenic hardware.  It derives capabilities only from the
-registered driver specifications (``BUILTIN_DRIVER_METADATA``), it cannot
+registered driver specifications (``INSTRUMENT_DRIVER_METADATA``), it cannot
 represent actuation, and it grants no driver, source, or control authority.
 Nothing in the engine consumes it in v1.  See ``docs/lab_profile.md``.
 """

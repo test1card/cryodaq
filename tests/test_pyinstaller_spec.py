@@ -450,6 +450,10 @@ def test_broad_collection_excludes_all_driver_namespaces_before_allowlist_additi
     assert not _driver_filter_accepts("cryodaq.drivers.instruments.rogue_source")
     assert not _driver_filter_accepts("cryodaq.drivers.passive_extensions")
     assert not _driver_filter_accepts("cryodaq.drivers.passive_extensions.rogue_driver")
+    assert all(not _driver_filter_accepts(module) for module in driver_registry.ALLOWLISTED_DRIVER_MODULES)
+    assert not _driver_filter_accepts("cryodaq.health.simulator.future_driver")
+    assert _driver_filter_accepts("cryodaq.health.contract")
+    assert _driver_filter_accepts("cryodaq.health.infra_authority")
     assert _driver_filter_accepts("cryodaq.engine")
     assert _driver_filter_accepts("cryodaq.drivers.registry")
 

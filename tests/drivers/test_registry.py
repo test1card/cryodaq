@@ -15,6 +15,7 @@ from cryodaq.drivers.registry import (
     ALLOWLISTED_DRIVER_MODULES,
     BUILTIN_DRIVER_SPECS,
     DRIVER_REGISTRY_COMPAT_VERSION,
+    INSTRUMENT_DRIVER_SPECS,
     KEITHLEY_2604B_SOURCE_BINDING,
     PASSIVE_DRIVER_SPECS,
     REVIEWED_SOURCE_SPECS,
@@ -32,6 +33,7 @@ from cryodaq.drivers.registry import (
     construct_driver,
     get_driver_spec,
     runtime_binding_for_driver,
+    validate_health_telemetry_entry,
     validate_instrument_entries,
     validate_instrument_entry,
 )
@@ -53,6 +55,7 @@ def test_registry_is_exact_static_allowlist() -> None:
         "thyracont_vsp63d",
         "etalon_multiline",
         "asc_reference_tcp",
+        "deterministic_health_node",
     }
     assert ALLOWLISTED_DRIVER_MODULES == tuple(sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values()))
 
@@ -159,6 +162,33 @@ def test_reviewed_source_rejects_equal_but_unreviewed_binding_copy() -> None:
 def test_unknown_type_fails_visibly() -> None:
     with pytest.raises(UnknownDriverTypeError, match="unknown instrument type 'plugin.module'"):
         get_driver_spec("plugin.module")
+
+
+def test_health_capability_uses_canonical_registry_but_not_instrument_partition() -> None:
+    assert "deterministic_health_node" in BUILTIN_DRIVER_SPECS
+    assert "deterministic_health_node" not in INSTRUMENT_DRIVER_SPECS
+    assert set(INSTRUMENT_DRIVER_SPECS) == {
+        type_name
+        for type_name, spec in BUILTIN_DRIVER_SPECS.items()
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE not in spec.capabilities
+    }
+    assert all(
+        INSTRUMENT_DRIVER_SPECS[type_name] is BUILTIN_DRIVER_SPECS[type_name] for type_name in INSTRUMENT_DRIVER_SPECS
+    )
+    with pytest.raises(TypeError):
+        INSTRUMENT_DRIVER_SPECS["evil"] = BUILTIN_DRIVER_SPECS["lakeshore_218s"]  # type: ignore[index]
+
+    entry = {
+        "type": "deterministic_health_node",
+        "name": "compressor.primary",
+        "component_type": "compressor",
+    }
+    with pytest.raises(UnknownDriverTypeError, match="not an instrument driver"):
+        validate_instrument_entry(entry)
+    validated = validate_health_telemetry_entry(entry)
+    assert validated.spec is get_driver_spec("deterministic_health_node")
+    with pytest.raises(UnknownDriverTypeError, match="not an instrument driver"):
+        construct_driver(validated, DriverConstructionContext(mock=True))
 
 
 @pytest.mark.parametrize("type_name", ["lakeshore_218s", "keithley_2604b"])
@@ -280,6 +310,40 @@ def test_construct_driver_rejects_object_without_provenance() -> None:
     forged = object.__new__(ValidatedInstrumentConfig)
     with pytest.raises(DriverRegistryError, match="requires output from"):
         construct_driver(forged, DriverConstructionContext(mock=True))
+
+
+def test_construct_driver_rejects_forged_context_before_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    factory_calls: list[object] = []
+
+    def forbidden_factory(
+        config: ValidatedInstrumentConfig,
+        context: DriverConstructionContext,
+    ) -> InstrumentDriver:
+        factory_calls.append((config, context.mock))
+        raise AssertionError("factory must not run for an invalid construction context")
+
+    spec = replace(BUILTIN_DRIVER_SPECS["thyracont_vsp63d"], factory=forbidden_factory)
+    specs = dict(BUILTIN_DRIVER_SPECS)
+    specs[spec.type_name] = spec
+    monkeypatch.setattr(registry_module, "BUILTIN_DRIVER_SPECS", MappingProxyType(specs))
+    config = validate_instrument_entry(
+        {
+            "type": "thyracont_vsp63d",
+            "name": "P",
+            "resource": "COM3",
+        }
+    )
+    context = object.__new__(DriverConstructionContext)
+    object.__setattr__(context, "mock", "not-a-bool")
+
+    with pytest.raises(DriverRegistryError, match="exact boolean"):
+        construct_driver(config, context)
+
+    missing_mock = object.__new__(DriverConstructionContext)
+    with pytest.raises(DriverRegistryError, match="exact boolean"):
+        construct_driver(config, missing_mock)
+
+    assert factory_calls == []
 
 
 def test_valid_lakeshore_config_is_normalized_and_immutable() -> None:
