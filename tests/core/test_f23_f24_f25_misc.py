@@ -92,7 +92,7 @@ def test_interlock_acknowledge_re_arms_tripped_interlock() -> None:
     cond = InterlockCondition(
         name="overheat",
         description="T too high",
-        channel_pattern=r"T\d+",
+        channel_ids=frozenset({"T1"}),
         threshold=300.0,
         comparison=">",
         action="emergency_off",
@@ -123,7 +123,7 @@ def test_interlock_acknowledge_idempotent_on_already_armed() -> None:
     cond = InterlockCondition(
         name="test",
         description="test",
-        channel_pattern=r"T\d+",
+        channel_ids=frozenset({"T1"}),
         threshold=300.0,
         comparison=">",
         action="emergency_off",
