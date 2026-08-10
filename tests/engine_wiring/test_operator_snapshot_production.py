@@ -716,6 +716,31 @@ async def test_alarm_dispatch_timeline_acknowledgement_and_restart_use_live_owne
     assert receipt.history_revision == timeline.through_revision
     assert [(alarm.alarm_id, alarm.acknowledged) for alarm in receipt.alarms] == [("alarm.hot", False)]
 
+    assert alarm_owner.process("alarm.hot", None, {}) == "CLEARED"
+    resolved_at = acknowledgement.timestamp + timedelta(microseconds=1)
+    await event_bus.publish(
+        EngineEvent(
+            "alarm_cleared",
+            resolved_at,
+            {
+                "alarm_id": canonical_alarm.alarm_id,
+                "activation_id": canonical_alarm.activation_id,
+            },
+            "experiment-stable-7",
+        )
+    )
+    resolved_timeline = await writer.get_attention_history(
+        experiment_id="experiment-stable-7",
+        limit=10,
+    )
+    assert [item.kind for item in resolved_timeline.items] == [
+        "incident",
+        "acknowledgement",
+        "resolution",
+    ]
+    assert resolved_timeline.items[-1].annotation_of == incident_page.items[0].event_id
+    assert history_feed.current_revision == resolved_timeline.through_revision == 3
+
     event_bus.release_required_observer("durable_attention_history")
     history_feed.stop()
     await writer.stop()
@@ -726,7 +751,7 @@ async def test_alarm_dispatch_timeline_acknowledgement_and_restart_use_live_owne
         experiment_id="experiment-stable-7",
         limit=10,
     )
-    assert replayed == timeline
+    assert replayed == resolved_timeline
     await restarted.stop()
     await asyncio.get_running_loop().shutdown_default_executor()
 

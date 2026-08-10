@@ -53,6 +53,7 @@ from cryodaq.core.operator_log import (
     load_attention_history_item,
     new_attention_acknowledgement,
     new_attention_incident,
+    new_attention_resolution,
     normalize_operator_log_tags,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -357,7 +358,7 @@ CREATE TABLE IF NOT EXISTS attention_history (
             length(CAST(experiment_id AS BLOB)) BETWEEN 1 AND 128
         ),
     kind          TEXT    NOT NULL
-        CHECK (kind IN ('incident', 'acknowledgement')),
+        CHECK (kind IN ('incident', 'acknowledgement', 'resolution')),
     annotation_of TEXT
         CHECK (
             annotation_of IS NULL
@@ -372,7 +373,7 @@ CREATE TABLE IF NOT EXISTS attention_history (
         ),
     CHECK (
         (kind = 'incident' AND annotation_of IS NULL)
-        OR (kind = 'acknowledgement' AND annotation_of IS NOT NULL)
+        OR (kind IN ('acknowledgement', 'resolution') AND annotation_of IS NOT NULL)
     )
 );
 """
@@ -434,7 +435,7 @@ CREATE TABLE IF NOT EXISTS control_feature_markers (
     schema_version INTEGER NOT NULL
         CHECK (
             typeof(schema_version) = 'integer'
-            AND schema_version = 5
+            AND schema_version = 6
         )
 );
 """
@@ -6859,7 +6860,7 @@ class SQLiteWriter:
             conn.execute(SCHEMA_ATTENTION_HISTORY_STATUS)
             marker = conn.execute(
                 "INSERT INTO control_feature_markers "
-                "(feature_id, schema_version) VALUES ('attention_history', 5) "
+                "(feature_id, schema_version) VALUES ('attention_history', 6) "
                 "RETURNING feature_id, schema_version"
             ).fetchone()
             inserted = conn.execute(
@@ -6870,7 +6871,7 @@ class SQLiteWriter:
                 "RETURNING singleton, admitted_total, current_revision, "
                 "capacity_exhausted_revision, capacity_exhausted_at"
             ).fetchone()
-            if marker != ("attention_history", 5) or inserted != (1, 0, 0, None, None):
+            if marker != ("attention_history", 6) or inserted != (1, 0, 0, None, None):
                 raise RuntimeError("attention history initial status was not created exactly")
             cls._verify_attention_history_storage(conn)
             return
@@ -6899,7 +6900,7 @@ class SQLiteWriter:
             "capacity_exhausted_revision, "
             "capacity_exhausted_at FROM attention_history_status LIMIT 2"
         ).fetchall()
-        if marker != [("attention_history", 5)] or type(status) is not list or len(status) != 1:
+        if marker != [("attention_history", 6)] or type(status) is not list or len(status) != 1:
             raise RuntimeError("attention history established storage is incomplete")
         cls._verify_attention_history_storage(conn)
 
@@ -7015,7 +7016,7 @@ class SQLiteWriter:
         retained = tuple((row[0], cls._attention_history_item_from_row(row[2:])) for row in retained_rows)
         by_event_id = {item.event_id: (revision, item) for revision, item in retained}
         for revision, item in retained:
-            if item.kind != "acknowledgement":
+            if item.kind == "incident":
                 continue
             parent_entry = by_event_id.get(item.annotation_of)
             if (
@@ -9629,7 +9630,7 @@ class SQLiteWriter:
                     (item.annotation_of,),
                 ).fetchone()
                 if parent_raw is None:
-                    raise ValueError("attention acknowledgement requires a persisted incident")
+                    raise ValueError("attention annotation requires a persisted incident")
                 parent = self._attention_history_item_from_row(parent_raw)
                 if (
                     parent.kind != "incident"
@@ -9641,7 +9642,15 @@ class SQLiteWriter:
                     or parent.channel_ids != item.channel_ids
                     or parent.timestamp > item.timestamp
                 ):
-                    raise ValueError("attention acknowledgement requires its persisted incident")
+                    raise ValueError("attention annotation requires its persisted incident")
+                if item.kind == "resolution":
+                    existing_resolution = conn.execute(
+                        "SELECT event_id FROM attention_history "
+                        "WHERE kind = 'resolution' AND annotation_of = ? LIMIT 2",
+                        (item.annotation_of,),
+                    ).fetchall()
+                    if existing_resolution:
+                        raise ValueError("attention incident already has a durable resolution")
             count_row = conn.execute("SELECT COUNT(*) FROM attention_history").fetchone()
             if type(count_row) is not tuple or len(count_row) != 1 or type(count_row[0]) is not int:
                 raise RuntimeError("attention history retained row count is invalid")
@@ -9757,6 +9766,43 @@ class SQLiteWriter:
         if not admitted:
             raise AttentionHistoryCapacityError("attention history capacity exhausted; saturation is durably marked")
         return item
+
+    def _resolve_attention_event_sync(self, event: EngineEvent) -> AttentionHistoryItem:
+        activation_id = event.payload.get("activation_id")
+        alarm_id = event.payload.get("alarm_id")
+        conn = self._open_control_db()
+        try:
+            conn.execute("BEGIN")
+            self._verify_attention_history_storage(conn)
+            rows = conn.execute(
+                "SELECT payload FROM attention_history WHERE kind = 'incident' ORDER BY sequence"
+            ).fetchall()
+            matches: list[AttentionHistoryItem] = []
+            for row in rows:
+                if type(row) is not tuple or len(row) != 1:
+                    raise RuntimeError("attention incident lookup row is invalid")
+                incident = load_attention_history_item(row[0])
+                if incident.activation_id == activation_id:
+                    matches.append(incident)
+            if len(matches) != 1 or matches[0].alarm_id != alarm_id:
+                raise ValueError("attention resolution requires one persisted canonical activation")
+            incident = matches[0]
+            conn.commit()
+        except (ValueError, RuntimeError):
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise RuntimeError("attention incident lookup failed") from None
+        finally:
+            conn.close()
+        resolution = new_attention_resolution(incident, timestamp=event.timestamp)
+        return self._append_attention_history_item_sync(
+            resolution,
+            require_persisted_incident=True,
+        )
 
     def _read_attention_activation_sequence_sync(self) -> int:
         conn = self._open_control_db()
@@ -9924,6 +9970,27 @@ class SQLiteWriter:
             ),
             read=False,
             name="sqlite_attention_history_append",
+        )
+        return await self._await_owned_task(owner)
+
+    async def resolve_attention_event(self, event: EngineEvent) -> AttentionHistoryItem:
+        """Append one canonical clear as an immutable incident resolution."""
+
+        if type(event) is not EngineEvent or event.event_type != "alarm_cleared":
+            raise ValueError("attention resolution accepts an exact alarm_cleared EngineEvent")
+        if type(event.payload) is not dict:
+            raise ValueError("attention resolution payload must be a mapping")
+        activation_id = event.payload.get("activation_id")
+        alarm_id = event.payload.get("alarm_id")
+        if type(activation_id) is not int or activation_id <= 0:
+            raise ValueError("attention resolution requires a canonical activation identity")
+        if type(alarm_id) is not str or not alarm_id:
+            raise ValueError("attention resolution requires a canonical alarm identity")
+        owner = self._owned_executor_task(
+            self._executor,
+            partial(self._resolve_attention_event_sync, event),
+            read=False,
+            name="sqlite_attention_resolution_append",
         )
         return await self._await_owned_task(owner)
 

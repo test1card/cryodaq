@@ -51,6 +51,29 @@ def _canonical_alarm_fired_event(
     )
 
 
+def _canonical_alarm_cleared_event(
+    event: AlarmEvent,
+    experiment_id: str | None,
+    *,
+    timestamp: datetime,
+) -> EngineEvent:
+    """Bind a clear transition to the exact originating activation."""
+
+    if type(event) is not AlarmEvent:
+        raise TypeError("canonical alarm resolution requires an exact AlarmEvent")
+    if type(event.activation_id) is not int or event.activation_id <= 0:
+        raise ValueError("canonical alarm resolution requires an owner-issued activation identity")
+    return EngineEvent(
+        event_type="alarm_cleared",
+        timestamp=timestamp,
+        payload={
+            "alarm_id": event.alarm_id,
+            "activation_id": event.activation_id,
+        },
+        experiment_id=experiment_id,
+    )
+
+
 async def _alarm_v2_feed_loop(
     queue: asyncio.Queue[Reading],
     state_tracker: Any,
@@ -255,6 +278,7 @@ async def _alarm_v2_tick_configs(
             # Capture the experiment identity before the canonical mutation;
             # publication must not resample it after an await.
             experiment_id = experiment_manager.active_experiment_id
+            active_before = state_mgr.get_active().get(alarm_cfg.alarm_id)
             # Phase-filter -> evaluate -> process. Shared with tests via
             # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
             # by the real production logic. Out-of-phase returns
@@ -276,11 +300,10 @@ async def _alarm_v2_tick_configs(
                 await event_bus.publish(_canonical_alarm_fired_event(canonical, experiment_id))
             elif transition == "CLEARED":
                 await event_bus.publish(
-                    EngineEvent(
-                        event_type="alarm_cleared",
+                    _canonical_alarm_cleared_event(
+                        active_before,
+                        experiment_id,
                         timestamp=datetime.now(UTC),
-                        payload={"alarm_id": alarm_cfg.alarm_id},
-                        experiment_id=experiment_id,
                     )
                 )
         except Exception as exc:
@@ -486,6 +509,7 @@ async def cooldown_alarm_tick_loop(
     while True:
         await asyncio.sleep(interval)
         experiment_id = experiment_manager.active_experiment_id
+        active_before = state_mgr.get_active()
         try:
             transition = await cooldown_alarm.tick()
         except Exception as exc:
@@ -507,11 +531,10 @@ async def cooldown_alarm_tick_loop(
                 await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
         elif transition == "CLEARED":
             await event_bus.publish(
-                EngineEvent(
-                    event_type="alarm_cleared",
+                _canonical_alarm_cleared_event(
+                    active_before.get(_last_triggered_id),
+                    experiment_id,
                     timestamp=datetime.now(UTC),
-                    payload={"alarm_id": _last_triggered_id},
-                    experiment_id=experiment_id,
                 )
             )
 
@@ -531,6 +554,7 @@ async def vacuum_guard_tick_loop(
     while True:
         await asyncio.sleep(interval)
         experiment_id = experiment_manager.active_experiment_id
+        active_before = state_mgr.get_active().get("vacuum_guard")
         try:
             transition = await vacuum_guard.tick()
         except Exception as exc:
@@ -550,11 +574,10 @@ async def vacuum_guard_tick_loop(
                 await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
         elif transition == "CLEARED":
             await event_bus.publish(
-                EngineEvent(
-                    event_type="alarm_cleared",
+                _canonical_alarm_cleared_event(
+                    active_before,
+                    experiment_id,
                     timestamp=datetime.now(UTC),
-                    payload={"alarm_id": "vacuum_guard"},
-                    experiment_id=experiment_id,
                 )
             )
 

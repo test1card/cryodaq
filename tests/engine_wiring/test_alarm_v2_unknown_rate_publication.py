@@ -162,6 +162,21 @@ async def test_alarm_v2_publication_uses_canonical_activation_time_and_identity(
     assert engine_event.payload.get("activation_id") == canonical.activation_id == 1
     assert engine_event.payload["channels"] == canonical.channels
 
+    evaluator.evaluate = lambda *_args, **_kwargs: None
+    await _alarm_v2_tick_configs(
+        configs=[config],
+        phase_provider=SimpleNamespace(get_current_phase=lambda: None),
+        evaluator=evaluator,
+        state_mgr=state_mgr,
+        telegram_bot=None,
+        alarm_dispatch_tasks=set(),
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="experiment-stable-11"),
+    )
+    cleared = published.get_nowait()
+    assert cleared.event_type == "alarm_cleared"
+    assert cleared.payload.get("activation_id") == canonical.activation_id
+
 
 @pytest.mark.asyncio
 async def test_physical_alarm_publication_captures_pre_tick_experiment_and_canonical_event() -> None:

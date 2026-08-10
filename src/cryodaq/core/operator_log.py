@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 ATTENTION_HISTORY_ITEM_SCHEMA = "cryodaq.attention-history-item"
-ATTENTION_HISTORY_ITEM_VERSION = 2
+ATTENTION_HISTORY_ITEM_VERSION = 3
 ATTENTION_HISTORY_MAX_ITEMS = 1000
 ATTENTION_HISTORY_MAX_ITEM_BYTES = 16 * 1024
 _ATTENTION_HISTORY_ID_BYTES = 128
@@ -85,8 +85,8 @@ class AttentionHistoryItem:
             "event_id",
             _attention_event_id(self.event_id, field_name="event_id"),
         )
-        if self.kind not in {"incident", "acknowledgement"}:
-            raise ValueError("kind must be incident or acknowledgement")
+        if self.kind not in {"incident", "acknowledgement", "resolution"}:
+            raise ValueError("kind must be incident, acknowledgement, or resolution")
         object.__setattr__(
             self,
             "timestamp",
@@ -160,8 +160,10 @@ class AttentionHistoryItem:
                     field_name="annotation_of",
                 ),
             )
-            if not self.actor:
+            if self.kind == "acknowledgement" and not self.actor:
                 raise ValueError("acknowledgement requires actor identity")
+            if self.kind == "resolution" and (self.actor or self.note):
+                raise ValueError("resolution cannot carry operator annotation fields")
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -272,6 +274,31 @@ def new_attention_incident(
     )
 
 
+def _with_deterministic_annotation_identity(
+    provisional: AttentionHistoryItem,
+    *,
+    operation: str,
+) -> AttentionHistoryItem:
+    identity_payload = provisional.to_payload()
+    del identity_payload["event_id"]
+    canonical_identity = json.dumps(
+        {
+            "schema": ATTENTION_HISTORY_ITEM_SCHEMA,
+            "version": ATTENTION_HISTORY_ITEM_VERSION,
+            "operation": operation,
+            "item": identity_payload,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return replace(
+        provisional,
+        event_id=sha256(canonical_identity).hexdigest()[:32],
+    )
+
+
 def new_attention_acknowledgement(
     incident: AttentionHistoryItem,
     *,
@@ -296,23 +323,35 @@ def new_attention_acknowledgement(
         actor=actor,
         note=note,
     )
-    identity_payload = provisional.to_payload()
-    del identity_payload["event_id"]
-    canonical_identity = json.dumps(
-        {
-            "schema": ATTENTION_HISTORY_ITEM_SCHEMA,
-            "version": ATTENTION_HISTORY_ITEM_VERSION,
-            "operation": "acknowledgement",
-            "item": identity_payload,
-        },
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return replace(
+    return _with_deterministic_annotation_identity(
         provisional,
-        event_id=sha256(canonical_identity).hexdigest()[:32],
+        operation="acknowledgement",
+    )
+
+
+def new_attention_resolution(
+    incident: AttentionHistoryItem,
+    *,
+    timestamp: datetime,
+) -> AttentionHistoryItem:
+    if type(incident) is not AttentionHistoryItem or incident.kind != "incident":
+        raise ValueError("attention resolution requires an exact incident")
+    if _attention_time(timestamp, field_name="timestamp") < incident.timestamp:
+        raise ValueError("attention resolution cannot predate its incident")
+    provisional = AttentionHistoryItem(
+        event_id="0" * 32,
+        kind="resolution",
+        timestamp=timestamp,
+        experiment_id=incident.experiment_id,
+        alarm_id=incident.alarm_id,
+        level=incident.level,
+        message=incident.message,
+        channel_ids=incident.channel_ids,
+        annotation_of=incident.event_id,
+    )
+    return _with_deterministic_annotation_identity(
+        provisional,
+        operation="resolution",
     )
 
 
