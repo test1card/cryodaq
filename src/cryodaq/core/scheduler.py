@@ -230,7 +230,6 @@ class Scheduler:
         self._persistence_rejection_observer = persistence_rejection_observer
         self._persistence_ambiguity_observer = persistence_ambiguity_observer
         self._failed_poll_persistence_handler = failed_poll_persistence_handler
-        self._failed_poll_persistence_reported: set[str] = set()
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
         self._shared_bus_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1325,9 +1324,7 @@ class Scheduler:
                 )
 
     async def _report_failed_poll_persistence(self, instrument_name: str, reason: str) -> None:
-        """Latch once when an instrument-silence sample cannot reach interlocks."""
-        if instrument_name in self._failed_poll_persistence_reported:
-            return
+        """Fault whenever an instrument-silence sample cannot reach interlocks."""
         handler = self._failed_poll_persistence_handler
         if handler is None:
             logger.critical(
@@ -1337,7 +1334,6 @@ class Scheduler:
             )
             return
         await handler(f"{instrument_name}: {reason}")
-        self._failed_poll_persistence_reported.add(instrument_name)
 
     async def _process_readings(
         self,
@@ -1488,10 +1484,7 @@ class Scheduler:
             )
         if self._safety_broker is not None:
             await self._safety_broker.publish_batch(readings)
-        delivered = bool(committed_publish_readings)
-        if delivered:
-            self._failed_poll_persistence_reported.discard(name)
-        return delivered
+        return bool(committed_publish_readings)
 
     def _observe_persistence_commit(self, receipt: object) -> None:
         observer = self._persistence_commit_observer

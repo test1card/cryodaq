@@ -429,14 +429,28 @@ async def test_failed_poll_persistence_failure_latches_safety(
     safety = SafetyManager(safety_broker, keithley_driver=None, mock=True)
     safety._config.require_keithley_for_run = False
     safety._config.critical_channels = []
+    safety._config.cooldown_before_rearm_s = 0.0
     await safety.start()
+
+    failure_report_count = 0
+    allow_reassertion = asyncio.Event()
+    second_failure_reported = asyncio.Event()
+
+    async def handle_failed_poll_persistence(reason: str) -> None:
+        nonlocal failure_report_count
+        failure_report_count += 1
+        if failure_report_count > 1:
+            await allow_reassertion.wait()
+        await safety.on_persistence_failure(reason)
+        if failure_report_count > 1:
+            second_failure_reported.set()
 
     driver = FailingTemperatureDriver()
     scheduler = Scheduler(
         broker,
         safety_broker=safety_broker,
         sqlite_writer=writer,
-        failed_poll_persistence_handler=safety.on_persistence_failure,
+        failed_poll_persistence_handler=handle_failed_poll_persistence,
     )
     scheduler.add(
         InstrumentConfig(
@@ -455,6 +469,23 @@ async def test_failed_poll_persistence_failure_latches_safety(
         assert data_probe.empty(), "rejected failed-poll evidence must not bypass persistence into DataBroker"
         assert safety_probe.empty(), "rejected failed-poll evidence must not bypass persistence into SafetyBroker"
         assert "failed-poll" in safety.fault_reason
+
+        acknowledged = await safety.acknowledge_fault("persistent failed-poll persistence failure")
+        assert acknowledged == {"ok": True, "state": SafetyState.MANUAL_RECOVERY.value}
+        allow_reassertion.set()
+        await asyncio.wait_for(second_failure_reported.wait(), timeout=2.0)
+        await asyncio.wait_for(
+            _wait_for_safety_state(safety, SafetyState.FAULT_LATCHED),
+            timeout=2.0,
+        )
+
+        blocked = await safety.request_run(0.5, 40.0, 1.0)
+        assert blocked["ok"] is False
+        assert blocked["state"] == SafetyState.FAULT_LATCHED.value
+        assert failure_report_count >= 2
+        assert driver.failure_reading_calls >= 2
+        assert data_probe.empty()
+        assert safety_probe.empty()
     finally:
         await scheduler.stop()
         await safety.stop()
