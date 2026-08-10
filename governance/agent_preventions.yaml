@@ -104,6 +104,46 @@ false_green_pairs:
     ci_partition: core
     red_evidence: the_first_descriptor_carry_guard_wrote_only_a_declared_row_with_a_non_null_descriptor_hash_so_the_history_reader_unconditionally_resolved_the_referenced_hash_set_and_all_registered_nodes_stayed_green_when_a_migrated_database_contained_only_pre_descriptor_rows_an_empty_referenced_set_was_treated_as_a_malformed_catalog_and_the_existing_best_effort_file_boundary_dropped_the_entire_day_the_exact_production_path_node_writes_a_legacy_row_migrates_its_real_database_then_requires_descriptor_bearing_history_to_return_that_row_as_legacy_unknown_2026_08_10_pending_immutable_capture
     green_evidence: pending
+  - id: HISTORY-DESCRIPTOR-WIRE-BOUND-FALSE-GREEN-352
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_production_history_maximum_fits_wire_with_worst_case_finite_points
+    ci_partition: core
+    red_evidence: the_first_descriptor_carry_slice_kept_the_old_80305_row_limit_derived_for_data_only_replies_and_returned_a_full_metadata_mapping_for_every_descriptor_so_the_registered_max_reply_node_still_drove_only_data_and_stayed_green_while_a_real_history_reply_with_sixty_four_worst_case_channel_keys_exceeded_the_exact_four_MiB_production_encoder_limit_and_raised_ValueError_the_exact_node_now_includes_the_compact_persisted_quantity_catalog_and_proves_the_78375_row_boundary_while_the_existing_plus_one_node_proves_the_next_row_is_refused_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-UNFILTERED-CHANNEL-CAP-FALSE-GREEN-353
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_unfiltered_descriptor_history_enforces_channel_cap
+    ci_partition: core
+    red_evidence: the_input_validator_bounded_an_explicit_channels_filter_to_sixty_four_but_channels_None_bypassed_that_boundary_and_the_descriptor_bearing_reader_returned_sixty_five_distinct_hot_channels_while_every_registered_history_node_stayed_green_the_exact_public_reader_node_writes_sixty_five_real_channels_and_requires_the_newest_deterministic_sixty_four_only_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-DESCRIPTOR-AUTHORITY-FAILURE-FALSE-GREEN-354
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_descriptor_history_refuses_an_unverifiable_hot_catalog
+    ci_partition: core
+    red_evidence: the_descriptor_bearing_reader_reused_the_data_only_best_effort_file_boundary_so_a_hot_database_with_a_persisted_descriptor_hash_but_no_verifiable_descriptor_catalog_was_logged_and_silently_returned_as_empty_or_partial_history_instead_of_refusing_the_false_archive_while_all_registered_nodes_stayed_green_the_exact_public_reader_node_constructs_that_real_storage_shape_and_requires_ChannelDescriptorStorageError_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-MIXED-LEGACY-PROMOTION-FALSE-GREEN-355
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_mixed_legacy_and_declared_history_remains_unknown
+    ci_partition: core
+    red_evidence: the_first_catalog_merge_allowed_a_later_declared_row_for_the_same_raw_channel_to_overwrite_legacy_unknown_so_a_mixed_pre_descriptor_and_descriptor_backed_history_was_presented_as_entirely_temperature_even_though_the_earlier_rows_could_not_be_attributed_and_every_registered_node_stayed_green_the_exact_public_reader_node_writes_both_eras_for_one_channel_and_requires_legacy_unknown_to_dominate_the_aggregate_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-COLD-DESCRIPTOR-WIRING-FALSE-GREEN-356
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_read_readings_history_unions_cold_archive
+    ci_partition: core
+    red_evidence: the_existing_hot_and_cold_union_node_created_cold_rows_without_a_descriptor_sidecar_and_asserted_only_numeric_data_so removing_or_corrupting_the_cold_descriptor_merge_could_not_make_it_red_the_strengthened_exact_wrapper_node_writes_a_real_descriptor_backed_Parquet_archive_and_sidecar_then_requires_its_persisted_temperature_quantity_in_the_returned_catalog_2026_08_10_pending_immutable_capture
+    green_evidence: pending
   - id: OC030-COVERAGE-CLAIM-UNDERIVED-FALSE-GREEN-345
     status: open
     scope: product_contract
@@ -3309,13 +3349,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/OPEN_CELLS.md#oc-030
-    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled, every archived-history surface that can consult mutable live channel classification, and every ChannelManager reload that replaces the declared channel-role state, accepted configuration path, or both.
+    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled, every descriptor-bearing hot or cold archived-history read and command reply that can consult mutable live classification or misstate persisted descriptor authority, and every ChannelManager reload that replaces the declared channel-role state, accepted configuration path, or both.
     classification: silent_channel_omission
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator. A second confirmed path replaced the live channel set before validating default_quantity, so a rejected reload left the running manager serving new channels under the old declaration even though no configuration file described that state, and a third adopted the rejected path despite preserving the served values. The archived analytics summary then consulted that mutable live manager, so reclassifying a still-present channel in today's configuration reordered and could truncate yesterday's recorded history. The first descriptor-carry implementation also treated a migrated day containing only pre-descriptor rows as a malformed empty catalog and dropped that day's history.
-    invariant: 'A live operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. An archived-history surface ranks from the descriptor catalog persisted with the returned readings and never from the live ChannelManager; a missing or legacy descriptor remains unknown rather than being guessed from current configuration or spelling. A rejected reload is atomic: the live channel set, its quantity declaration, and the selected `_config_path` all remain unchanged. WHAT THIS RECORD DOES NOT CLAIM: live-screen declarations currently live in `config/channels.yaml` and are therefore OPERATOR-owned, not descriptor-derived. Binding those live selectors to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here.'
+    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator. A second confirmed path replaced the live channel set before validating default_quantity, so a rejected reload left the running manager serving new channels under the old declaration even though no configuration file described that state, and a third adopted the rejected path despite preserving the served values. The archived analytics summary then consulted that mutable live manager, so reclassifying a still-present channel in today's configuration reordered and could truncate yesterday's recorded history. The first descriptor-carry implementation also treated a migrated day containing only pre-descriptor rows as a malformed empty catalog and dropped that day's history. Its first reply projection could exceed the four-MiB command boundary, channels=None could return more than sixty-four distinct channels, hot descriptor verification failure was swallowed as an empty or partial success, a later declared row could promote unverifiable legacy rows for the same channel, and the cold descriptor merge had no guard that actually supplied a descriptor sidecar.
+    invariant: 'A live operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. An archived-history surface ranks from the persisted quantity catalog returned with those exact hot and cold readings and never from the live ChannelManager. That catalog is a compact channel-to-quantity projection, not full descriptor metadata; a missing descriptor or any legacy row for a returned channel makes that channel legacy_unknown rather than being guessed from a later declaration, current configuration, or spelling. A referenced descriptor catalog that cannot be verified refuses the descriptor-bearing history command instead of returning empty or partial success. Whether or not the caller supplies a channel filter, the returned history has at most sixty-four distinct channels and 78375 rows, and its worst-case finite production reply fits the exact four-MiB transport boundary while the next row is refused. A rejected reload is atomic: the live channel set, its quantity declaration, and the selected `_config_path` all remain unchanged. WHAT THIS RECORD DOES NOT CLAIM: live-screen declarations currently live in `config/channels.yaml` and are therefore OPERATOR-owned, not descriptor-derived. Binding those live selectors to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here.'
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -3352,6 +3392,16 @@ records:
         ci_partition: core
       - node: tests/core/test_readings_history.py::test_descriptor_history_keeps_migrated_legacy_rows_unknown
         ci_partition: core
+      - node: tests/core/test_readings_history.py::test_unfiltered_descriptor_history_enforces_channel_cap
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_descriptor_history_refuses_an_unverifiable_hot_catalog
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_mixed_legacy_and_declared_history_remains_unknown
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_read_readings_history_unions_cold_archive
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_production_history_maximum_fits_wire_with_worst_case_finite_points
+        ci_partition: core
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_manager_disagrees_with_spelling_in_both_directions
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_dashboard_buffers_only_declared_temperatures
@@ -3366,7 +3416,7 @@ records:
         ci_partition: gui
       - node: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
         ci_partition: remaining
-    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_AND_the_confirmed_reload_ordering_defect_replaced_the_live_channel_set_before_rejecting_malformed_default_quantity_so_the_manager_served_new_channels_under_the_old_declaration_until_the_production_path_was_made_atomic_2026_08_09_pending_immutable_capture_AND_restoring_the_analytics_widget_live_manager_lookup_made_the_same_archived_result_drop_ZZ_ARCHIVED_TEMPERATURE_after_only_the_live_quantity_changed_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture_AND_unconditionally_resolving_an_empty_persisted_descriptor_reference_set_dropped_a_real_migrated_legacy_day_and_turned_the_exact_storage_node_red_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture
+    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_AND_the_confirmed_reload_ordering_defect_replaced_the_live_channel_set_before_rejecting_malformed_default_quantity_so_the_manager_served_new_channels_under_the_old_declaration_until_the_production_path_was_made_atomic_2026_08_09_pending_immutable_capture_AND_restoring_the_analytics_widget_live_manager_lookup_made_the_same_archived_result_drop_ZZ_ARCHIVED_TEMPERATURE_after_only_the_live_quantity_changed_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture_AND_unconditionally_resolving_an_empty_persisted_descriptor_reference_set_dropped_a_real_migrated_legacy_day_and_turned_the_exact_storage_node_red_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture_AND_the_first_descriptor_projection_made_seven_exact_production_path_nodes_red_for_wire_overflow_full_metadata_projection_unfiltered_sixty_five_channel_output_swallowed_hot_catalog_failure_mixed_legacy_promotion_and_unexercised_cold_descriptor_wiring_before_the_compact_fail_closed_bounded_projection_turned_all_seven_green_2026_08_10_pending_immutable_capture
     green_evidence: pending
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
