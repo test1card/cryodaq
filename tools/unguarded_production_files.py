@@ -295,18 +295,33 @@ def _git_env() -> dict[str, str]:
     return {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
 
 
+def _marker_repository_root(start: Path) -> Path:
+    """Find a copied candidate tree when Git metadata is not present."""
+
+    marker = Path("tools") / "unguarded_production_files.py"
+    for candidate in (start, *start.parents):
+        if (candidate / marker).is_file() and (candidate / "src").is_dir():
+            return candidate
+    raise MeasurementError(f"could not resolve a candidate tree from {start}")
+
+
 def repository_root() -> Path:
-    """The one directory every relative path in this module resolves against.
+    """Resolve the candidate root, preferring Git and requiring a real marker otherwise.
 
     `git diff --name-only` emits names relative to the REPOSITORY ROOT, while
     `Path(name)` resolves against the current working directory. Invoked from a
     subdirectory the two disagree, and the tool would then revert a path that
     does not exist -- or, worse, one that does and is not the artifact Git named.
+    Hosted CI exports a candidate tree without `.git`, so the tool marker and
+    `src` directory provide the bounded fallback for that environment.
     """
 
     out = _run(["git", "rev-parse", "--show-toplevel"], env=_git_env())
-    out.check_returncode()
-    return Path(out.stdout.strip())
+    if out.returncode == 0:
+        return Path(out.stdout.strip())
+    if out.returncode != 128:
+        out.check_returncode()
+    return _marker_repository_root(Path.cwd())
 
 
 def _git(args: list[str]) -> subprocess.CompletedProcess[str]:

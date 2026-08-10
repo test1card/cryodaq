@@ -57,6 +57,21 @@ def test_repository_root_is_stable_when_invoked_from_a_subdirectory(tmp_path: Pa
     assert subject.repository_root().resolve() == repository.resolve()
 
 
+def test_repository_root_falls_back_to_candidate_marker(tmp_path: Path, monkeypatch) -> None:
+    repository = tmp_path / "candidate"
+    (repository / "tools").mkdir(parents=True)
+    (repository / "src").mkdir()
+    (repository / "tools" / "unguarded_production_files.py").write_text("", encoding="utf-8")
+
+    def missing_git(args: list[str], env=None):
+        return subprocess.CompletedProcess(args, 128, "", "not a git repository")
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "_run", missing_git)
+
+    assert subject.repository_root() == repository
+
+
 def test_restore_path_never_chmods_through_a_symlink(tmp_path: Path, monkeypatch) -> None:
     restored = tmp_path / "link.py"
     chmod_calls: list[tuple[Path, int, bool]] = []
