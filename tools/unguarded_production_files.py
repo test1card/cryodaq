@@ -115,14 +115,13 @@ from pathlib import Path, PurePosixPath
 # `plugins/` is the SAME CLASS, found the same way one round later:
 # `analytics/plugin_loader.py` loads every `.py` in that directory at runtime
 # and subscribes it to the broker, so a defect in `plugins/phase_detector.py`
-# executes during an experiment. It was invisible here for exactly the reason
-# `tsp/` was -- the default target set was still a list of two directories
-# rather than an answer to "what does the instrument read or execute". Adding
-# entries one review round at a time is treating instances; the rule is that
-# this roster tracks RUNTIME REACH, and a new runtime-loaded location belongs
-# here the day it is created.
+# executes during an experiment. An allowlist cannot enforce that lesson: the
+# next top-level runtime root would be invisible until somebody remembered to
+# add it. Defaults therefore derive every top-level Git tree except the
+# categories the severity floor explicitly calls non-production. A new root is
+# measured on the commit that introduces it, without changing this tool.
 _DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml", ".lua")
-_DEFAULT_INCLUDES = ("src/", "config/", "tsp/", "plugins/")
+_NON_RUNTIME_TOP_LEVELS = frozenset({".github", "build_scripts", "docs", "governance", "scripts", "tests", "tools"})
 _PYTEST_TIMEOUT_SECONDS = 120
 _RECOVERY_NAME = ".audit-unguarded-production-recovery.json"
 
@@ -290,6 +289,23 @@ def merge_base(base: str) -> str:
     return out.stdout.strip()
 
 
+def default_runtime_includes(*points: str) -> tuple[str, ...]:
+    """Derive runtime-root candidates from immutable Git trees, fail-closed by exclusion."""
+
+    roots: set[str] = set()
+    for point in points:
+        out = _git(["ls-tree", "-d", "--name-only", "-z", point])
+        out.check_returncode()
+        for name in out.stdout.split("\0"):
+            if not name:
+                continue
+            if "/" in name or name in {".", ".."}:
+                raise MeasurementError(f"Git returned a non-top-level runtime-root candidate: {name!r}")
+            if name not in _NON_RUNTIME_TOP_LEVELS:
+                roots.add(f"{name}/")
+    return tuple(sorted(roots))
+
+
 def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ...]) -> list[ChangedArtifact]:
     out = _git(["diff", "--name-status", "-z", "--find-renames", point, "HEAD"])
     out.check_returncode()
@@ -315,12 +331,6 @@ def changed_files(point: str, includes: tuple[str, ...], suffixes: tuple[str, ..
         ):
             artifacts.append(artifact)
     return sorted(artifacts, key=lambda artifact: artifact.label)
-
-
-def changed_hunk_count(point: str, path: str) -> int:
-    out = _git(["diff", "--unified=0", "--no-ext-diff", "--no-textconv", point, "HEAD", "--", path])
-    out.check_returncode()
-    return sum(line.startswith("@@ ") for line in out.stdout.splitlines())
 
 
 def base_content(point: str, path: str) -> bytes | None:
@@ -621,7 +631,6 @@ def main() -> int:
     parser.add_argument("--suffix", action="append", default=[])
     options = parser.parse_args()
     suites = options.suite or ["tests"]
-    includes = tuple(dict.fromkeys((*_DEFAULT_INCLUDES, *options.include)))
     suffixes = tuple(dict.fromkeys((*_DEFAULT_SUFFIXES, *options.suffix)))
 
     root = repository_root()
@@ -634,6 +643,7 @@ def main() -> int:
         print("recovered the candidate from an interrupted mutation before measuring")
 
     point = merge_base(options.base)
+    includes = tuple(dict.fromkeys((*default_runtime_includes(point, "HEAD"), *options.include)))
     targets = changed_files(point, includes, suffixes)
     if not targets:
         print(f"no production artifacts changed against {point[:8]}; nothing to measure")
@@ -690,21 +700,20 @@ def main() -> int:
             print(f"REFUSING: suite inputs drifted before mutation attribution: {drift}")
             return 2
         path = str(target.candidate_path or target.base_path)
-        if (
-            target.base_path == target.candidate_path
-            and target.candidate_path is not None
-            and changed_hunk_count(point, target.candidate_path) > 1
-        ):
+        before = git_entry(point, target.base_path)
+        candidate = git_entry("HEAD", target.candidate_path)
+        if before is None or candidate is None or before.content != candidate.content:
             unmeasured.append(target.label)
-            print(f"| `{target.label}` | **NOT MEASURED** — multiple independent diff hunks need separate evidence |")
+            print(
+                f"| `{target.label}` | **NOT MEASURED** - content changes may contain multiple independent edits; "
+                "whole-file reversion cannot attribute them separately |"
+            )
             continue
         if target.base_path != target.candidate_path:
             old = root / str(target.base_path)
             new = root / str(target.candidate_path)
             old_original = path_identity(old)
             new_original = path_identity(new)
-            before = git_entry(point, target.base_path)
-            candidate = git_entry("HEAD", target.candidate_path)
             concurrent = False
             armed = False
             old_mutant: PathIdentity | None = None
@@ -786,8 +795,6 @@ def main() -> int:
             continue
         source = root / path
         original = path_identity(source)
-        before = git_entry(point, target.base_path)
-        candidate = git_entry("HEAD", target.candidate_path)
         armed = False
         mutant: PathIdentity | None = None
         drift_error: SuiteInputDrift | None = None

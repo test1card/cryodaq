@@ -223,17 +223,18 @@ def test_main_refuses_drift_after_the_green_control(tmp_path: Path, monkeypatch,
 def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
-    source = repository / "src" / "production.py"
+    old = repository / "src" / "production_old.py"
+    new = repository / "src" / "production.py"
     suite_input = repository / "tests" / "test_guard.py"
-    source.parent.mkdir()
+    old.parent.mkdir()
     suite_input.parent.mkdir()
-    source.write_bytes(b"VALUE = 'base'\n")
+    old.write_bytes(b"VALUE = 'candidate'\n")
     suite_input.write_bytes(b"def test_guard(): pass\n")
-    _git(repository, "add", "src/production.py", "tests/test_guard.py")
+    _git(repository, "add", "src/production_old.py", "tests/test_guard.py")
     _git(repository, "commit", "-qm", "base")
     base = _git(repository, "rev-parse", "HEAD")
-    source.write_bytes(b"VALUE = 'candidate'\n")
-    _git(repository, "commit", "-qam", "candidate")
+    _git(repository, "mv", "src/production_old.py", "src/production.py")
+    _git(repository, "commit", "-qm", "candidate rename")
 
     runs = 0
 
@@ -255,7 +256,8 @@ def test_main_refuses_suite_input_drift_before_accepting_a_mutant_result(tmp_pat
 
     assert subject.main() == 2
     assert runs == 3
-    assert source.read_bytes() == b"VALUE = 'candidate'\n"
+    assert not old.exists()
+    assert new.read_bytes() == b"VALUE = 'candidate'\n"
     assert "suite inputs drifted before mutation attribution" in capsys.readouterr().out
 
 
@@ -289,17 +291,17 @@ def test_main_refuses_stable_uncommitted_suite_inputs(tmp_path: Path, monkeypatc
     assert "uncommitted candidate inputs" in capsys.readouterr().out
 
 
-def test_main_refuses_to_certify_multiple_independent_hunks_as_one(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_main_refuses_to_certify_multiple_independent_edits_as_one(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
     source = repository / "src" / "production.py"
     source.parent.mkdir()
-    source.write_bytes(b"GUARDED = 'base'\n\n# unrelated area\n\nUNGUARDED = 'base'\n")
+    source.write_bytes(b"GUARDED = 'base'\nUNGUARDED = 'base'\n")
     _git(repository, "add", "src/production.py")
     _git(repository, "commit", "-qm", "base")
     base = _git(repository, "rev-parse", "HEAD")
-    source.write_bytes(b"GUARDED = 'candidate'\n\n# unrelated area\n\nUNGUARDED = 'candidate'\n")
-    _git(repository, "commit", "-qam", "two independent production edits")
+    source.write_bytes(b"GUARDED = 'candidate'\nUNGUARDED = 'candidate'\n")
+    _git(repository, "commit", "-qam", "two adjacent independent production edits")
 
     runs = 0
 
@@ -314,57 +316,90 @@ def test_main_refuses_to_certify_multiple_independent_hunks_as_one(tmp_path: Pat
 
     assert subject.main() == 1
     assert runs == 1
-    assert "multiple independent diff hunks" in capsys.readouterr().out
+    assert "content changes may contain multiple independent edits" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(
-    ("runtime_path", "excluded_root"),
-    (("tsp/watchdog.lua", "tsp/"), ("plugins/runtime.py", "plugins/")),
-)
-def test_default_roster_selects_every_runtime_root_and_fails_when_one_is_removed(
-    tmp_path: Path, monkeypatch, runtime_path: str, excluded_root: str
-) -> None:
+def test_main_refuses_to_certify_an_added_multi_behavior_artifact(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
-    source = repository / runtime_path
-    source.parent.mkdir()
-    source.write_text("VALUE = 'base'\n", encoding="utf-8")
-    _git(repository, "add", runtime_path)
+    _git(repository, "config", "core.autocrlf", "false")
+    marker = repository / "README"
+    marker.write_text("base\n", encoding="utf-8")
+    _git(repository, "add", "README")
     _git(repository, "commit", "-qm", "base")
     base = _git(repository, "rev-parse", "HEAD")
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_bytes(b"GUARDED = True\nUNGUARDED = True\n")
+    _git(repository, "add", "src/production.py")
+    _git(repository, "commit", "-qm", "add two production behaviors")
+    runs = 0
+
+    def green(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        return []
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", green)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 1
+    assert runs == 1
+    assert source.read_bytes() == b"GUARDED = True\nUNGUARDED = True\n"
+    assert "content changes may contain multiple independent edits" in capsys.readouterr().out
+
+
+def test_default_roster_derives_a_new_runtime_root_from_git_trees(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    marker = repository / "README"
+    marker.write_text("base\n", encoding="utf-8")
+    _git(repository, "add", "README")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    runtime_path = "firmware/controller.lua"
+    source = repository / runtime_path
+    source.parent.mkdir()
     source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
-    _git(repository, "commit", "-qam", "candidate")
+    _git(repository, "add", runtime_path)
+    _git(repository, "commit", "-qm", "add a new runtime root")
     monkeypatch.chdir(repository)
 
-    def assert_selected(includes: tuple[str, ...]) -> None:
-        labels = {artifact.label for artifact in subject.changed_files(base, includes, subject._DEFAULT_SUFFIXES)}
-        assert runtime_path in labels
+    includes = subject.default_runtime_includes(base, "HEAD")
+    selected = {
+        path for artifact in subject.changed_files(base, includes, subject._DEFAULT_SUFFIXES) for path in artifact.paths
+    }
+    assert "firmware/" in includes
+    assert runtime_path in selected
 
-    assert_selected(subject._DEFAULT_INCLUDES)
-    without_root = tuple(root for root in subject._DEFAULT_INCLUDES if root != excluded_root)
-    with pytest.raises(AssertionError):
-        assert_selected(without_root)
+    without_new_root = tuple(root for root in includes if root != "firmware/")
+    without_paths = {
+        path
+        for artifact in subject.changed_files(base, without_new_root, subject._DEFAULT_SUFFIXES)
+        for path in artifact.paths
+    }
+    assert runtime_path not in without_paths
 
 
-@pytest.mark.parametrize("runtime_path", ("tsp/watchdog.lua", "plugins/runtime.py"))
 def test_main_filters_are_additive_and_reconfirm_mutant_red_then_candidate_green(
-    tmp_path: Path, monkeypatch, capsys, runtime_path: str
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
-    source = repository / runtime_path
-    source.parent.mkdir()
-    source.write_text("VALUE = 'base'\n", encoding="utf-8")
-    _git(repository, "add", runtime_path)
+    old = repository / "firmware" / "watchdog.lua"
+    new = repository / "firmware" / "watchdog_v2.lua"
+    old.parent.mkdir()
+    old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
+    _git(repository, "add", "firmware/watchdog.lua")
     _git(repository, "commit", "-qm", "base")
     base = _git(repository, "rev-parse", "HEAD")
-    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
-    _git(repository, "commit", "-qam", "candidate")
-    observed: list[str] = []
+    _git(repository, "mv", "firmware/watchdog.lua", "firmware/watchdog_v2.lua")
+    _git(repository, "commit", "-qm", "rename runtime watchdog")
+    observed: list[tuple[bool, bool]] = []
 
     def guard(_suites: list[str], _cache: Path) -> list[str]:
-        value = source.read_text(encoding="utf-8")
-        observed.append(value)
-        return [] if "candidate" in value else ["test_runtime_guard"]
+        state = (old.exists(), new.exists())
+        observed.append(state)
+        return [] if state == (False, True) else ["test_runtime_guard"]
 
     monkeypatch.chdir(repository)
     monkeypatch.setattr(subject, "failures", guard)
@@ -385,21 +420,22 @@ def test_main_filters_are_additive_and_reconfirm_mutant_red_then_candidate_green
     )
 
     assert subject.main() == 0
-    assert observed == ["VALUE = 'candidate'\n", "VALUE = 'base'\n", "VALUE = 'base'\n", "VALUE = 'candidate'\n"]
-    assert runtime_path in capsys.readouterr().out
+    assert observed == [(False, True), (True, False), (True, False), (False, True)]
+    assert "firmware/watchdog.lua -> firmware/watchdog_v2.lua" in capsys.readouterr().out
 
 
 def test_main_does_not_certify_a_failure_that_remains_red_after_restore(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
-    source = repository / "src" / "production.py"
-    source.parent.mkdir()
-    source.write_text("VALUE = 'base'\n", encoding="utf-8")
-    _git(repository, "add", "src/production.py")
+    old = repository / "src" / "production_old.py"
+    new = repository / "src" / "production.py"
+    old.parent.mkdir()
+    old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
+    _git(repository, "add", "src/production_old.py")
     _git(repository, "commit", "-qm", "base")
     base = _git(repository, "rev-parse", "HEAD")
-    source.write_text("VALUE = 'candidate'\n", encoding="utf-8")
-    _git(repository, "commit", "-qam", "candidate")
+    _git(repository, "mv", "src/production_old.py", "src/production.py")
+    _git(repository, "commit", "-qm", "candidate rename")
     results = iter(([], ["test_timing_sensitive"], ["test_timing_sensitive"], ["test_timing_sensitive"]))
 
     monkeypatch.chdir(repository)
@@ -407,7 +443,8 @@ def test_main_does_not_certify_a_failure_that_remains_red_after_restore(tmp_path
     monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
 
     assert subject.main() == 1
-    assert source.read_text(encoding="utf-8") == "VALUE = 'candidate'\n"
+    assert not old.exists()
+    assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
     assert "restored candidate was not green" in capsys.readouterr().out
 
 
