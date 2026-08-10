@@ -598,6 +598,13 @@ REVIEWED_SOURCE_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
 BUILTIN_DRIVER_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
     {spec.type_name: spec for spec in _CANONICAL_DRIVER_SPECS}
 )
+INSTRUMENT_DRIVER_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
+    {
+        type_name: spec
+        for type_name, spec in BUILTIN_DRIVER_SPECS.items()
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE not in spec.capabilities
+    }
+)
 del _PASSIVE_SPECS, _SOURCE_SPECS
 ALLOWLISTED_DRIVER_MODULES: Final[tuple[str, ...]] = tuple(
     sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values())
@@ -655,6 +662,15 @@ def get_driver_spec(type_name: object) -> DriverSpec:
         return BUILTIN_DRIVER_SPECS[type_name]
     except KeyError as exc:
         raise UnknownDriverTypeError(f"unknown instrument type {type_name!r}") from exc
+
+
+def get_instrument_driver_spec(type_name: object) -> DriverSpec:
+    """Resolve one generic instrument while excluding other capability classes."""
+
+    spec = get_driver_spec(type_name)
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
+        raise UnknownDriverTypeError(f"registered type {type_name!r} is not an instrument driver")
+    return spec
 
 
 def get_health_telemetry_spec(type_name: object) -> DriverSpec:
@@ -849,15 +865,20 @@ def _validate_instrument_identity(name: object, *, path: str) -> str:
     return stable_name
 
 
-def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") -> ValidatedInstrumentConfig:
-    """Validate and normalize one complete instrument entry."""
+def _validate_registry_entry(
+    entry: object,
+    *,
+    path: str,
+    resolve_spec: Callable[[object], DriverSpec],
+) -> ValidatedInstrumentConfig:
+    """Validate one complete entry against a capability-specific resolver."""
 
     if not isinstance(entry, Mapping):
         raise DriverRegistryError(f"{path} must be a mapping")
     if any(not isinstance(key, str) for key in entry):
         raise DriverRegistryError(f"{path} keys must be strings")
     try:
-        spec = get_driver_spec(entry.get("type"))
+        spec = resolve_spec(entry.get("type"))
     except UnknownDriverTypeError as exc:
         raise UnknownDriverTypeError(f"{path}.type: {exc}") from exc
     unknown = sorted(set(entry) - set(spec.config_fields))
@@ -878,8 +899,23 @@ def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") ->
     assert isinstance(name, str)
     stable_name = _validate_instrument_identity(name, path=f"{path}.name")
     values["name"] = stable_name
-    name = stable_name
-    return ValidatedInstrumentConfig._from_validated(spec=spec, name=name, values=values)
+    return ValidatedInstrumentConfig._from_validated(spec=spec, name=stable_name, values=values)
+
+
+def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") -> ValidatedInstrumentConfig:
+    """Validate and normalize one generic instrument entry."""
+
+    return _validate_registry_entry(entry, path=path, resolve_spec=get_instrument_driver_spec)
+
+
+def validate_health_telemetry_entry(
+    entry: object,
+    *,
+    path: str = "health_nodes[0]",
+) -> ValidatedInstrumentConfig:
+    """Validate and normalize one allowlisted health telemetry entry."""
+
+    return _validate_registry_entry(entry, path=path, resolve_spec=get_health_telemetry_spec)
 
 
 def validate_instrument_entries(entries: object) -> tuple[ValidatedInstrumentConfig, ...]:
@@ -908,7 +944,7 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
         raise DriverRegistryError("construct_driver requires output from validate_instrument_entry")
     if not isinstance(context, DriverConstructionContext):
         raise DriverRegistryError("construct_driver requires a DriverConstructionContext")
-    canonical = get_driver_spec(config.spec.type_name)
+    canonical = get_instrument_driver_spec(config.spec.type_name)
     if config.spec is not canonical:
         raise DriverRegistryError("validated config does not reference a canonical registry spec")
     if DriverCapability.HEALTH_TELEMETRY_DEVICE in canonical.capabilities:
@@ -937,6 +973,17 @@ def _register_health_telemetry_reader(reader: HealthTelemetryReader, spec: Drive
     canonical = get_health_telemetry_spec(spec.type_name)
     if spec is not canonical:
         raise DriverRegistryError("health telemetry reader spec is not canonical")
+    implementation_type = spec.implementation_type
+    entry = object.__getattribute__(reader, "_entry")
+    read_snapshot = object.__getattribute__(reader, "_read_snapshot")
+    if (
+        implementation_type is None
+        or type(entry) is not _StaticHealthTelemetryAllowlistEntry
+        or entry.implementation_type is not implementation_type
+        or type(read_snapshot.__self__) is not implementation_type
+    ):
+        raise DriverRegistryError("health telemetry reader implementation does not match its canonical spec")
+    reader.descriptor
     with _HEALTH_TELEMETRY_BINDINGS_LOCK:
         _HEALTH_TELEMETRY_BINDINGS[reader] = spec
 

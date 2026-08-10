@@ -475,8 +475,8 @@ class _IssuedHealthTelemetryReader:
             raise HealthTelemetryError("snapshot metric schema changed after the first successful cut")
         if value.revision <= self._last_revision:
             raise HealthTelemetryError("snapshot revision must increase strictly")
-        if value.observed_time_s < self._last_observed:
-            raise HealthTelemetryError("snapshot observed_time_s regressed")
+        if value.observed_time_s <= self._last_observed:
+            raise HealthTelemetryError("snapshot observed_time_s must increase strictly")
         if value.heartbeat_time_s < self._last_heartbeat:
             raise HealthTelemetryError("snapshot heartbeat_time_s regressed")
         next_counters = dict(self._counter_values)

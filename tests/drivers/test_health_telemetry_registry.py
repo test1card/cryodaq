@@ -34,7 +34,7 @@ def _registry_reader(*, heartbeat_frames: int = 4, **overrides: object):
         "disconnected_after_s": 1.0,
     }
     configuration.update(overrides)
-    validated = driver_registry.validate_instrument_entry(configuration, path="health_nodes[0]")
+    validated = driver_registry.validate_health_telemetry_entry(configuration, path="health_nodes[0]")
     context = driver_registry.DriverConstructionContext(mock=True)
     return factory(validated, context)
 
@@ -109,6 +109,10 @@ def test_unregistered_snapshot_implementation_cannot_execute_hidden_remediation(
         type(rogue),
     )
     directly_issued = health_contract._issue_health_telemetry_reader(rogue, entry=entry)
+    canonical = driver_registry.get_driver_spec("deterministic_health_node")
+    assert driver_registry.health_telemetry_spec_for_reader(directly_issued) is None
+    with pytest.raises(driver_registry.DriverRegistryError, match="implementation"):
+        driver_registry._register_health_telemetry_reader(directly_issued, canonical)
     assert driver_registry.health_telemetry_spec_for_reader(directly_issued) is None
     with pytest.raises(TypeError, match="registry-issued"):
         ReaderPoolHealthAuthority((directly_issued,))
@@ -170,16 +174,17 @@ def test_registry_rejects_faster_than_two_hz() -> None:
         _registry_reader(name="compressor.too_fast", cadence_hz=2.0001)
 
 
-def test_registry_rejects_clock_ranges_that_collapse_distinct_cadence_ticks() -> None:
+@pytest.mark.parametrize("start_time_s", [1e308, float(2**52 - 1024)])
+def test_registry_rejects_clock_ranges_that_collapse_distinct_cadence_ticks(start_time_s: float) -> None:
     with pytest.raises(ValueError, match="start_time_s"):
-        _registry_reader(start_time_s=1e308)
+        _registry_reader(start_time_s=start_time_s)
 
 
 def test_registry_rejects_unknown_health_type() -> None:
     factory = getattr(driver_registry, "construct_health_telemetry_reader", None)
     assert callable(factory), "driver registry must construct allowlisted health telemetry readers"
-    with pytest.raises(driver_registry.UnknownDriverTypeError, match="unknown instrument type"):
-        driver_registry.validate_instrument_entry(
+    with pytest.raises(driver_registry.UnknownDriverTypeError, match="unknown health telemetry type"):
+        driver_registry.validate_health_telemetry_entry(
             {"type": "plugin.health", "name": "compressor.unknown"},
             path="health_nodes[0]",
         )

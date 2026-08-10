@@ -15,6 +15,7 @@ from cryodaq.drivers.registry import (
     ALLOWLISTED_DRIVER_MODULES,
     BUILTIN_DRIVER_SPECS,
     DRIVER_REGISTRY_COMPAT_VERSION,
+    INSTRUMENT_DRIVER_SPECS,
     KEITHLEY_2604B_SOURCE_BINDING,
     PASSIVE_DRIVER_SPECS,
     REVIEWED_SOURCE_SPECS,
@@ -32,6 +33,7 @@ from cryodaq.drivers.registry import (
     construct_driver,
     get_driver_spec,
     runtime_binding_for_driver,
+    validate_health_telemetry_entry,
     validate_instrument_entries,
     validate_instrument_entry,
 )
@@ -160,6 +162,33 @@ def test_reviewed_source_rejects_equal_but_unreviewed_binding_copy() -> None:
 def test_unknown_type_fails_visibly() -> None:
     with pytest.raises(UnknownDriverTypeError, match="unknown instrument type 'plugin.module'"):
         get_driver_spec("plugin.module")
+
+
+def test_health_capability_uses_canonical_registry_but_not_instrument_partition() -> None:
+    assert "deterministic_health_node" in BUILTIN_DRIVER_SPECS
+    assert "deterministic_health_node" not in INSTRUMENT_DRIVER_SPECS
+    assert set(INSTRUMENT_DRIVER_SPECS) == {
+        type_name
+        for type_name, spec in BUILTIN_DRIVER_SPECS.items()
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE not in spec.capabilities
+    }
+    assert all(
+        INSTRUMENT_DRIVER_SPECS[type_name] is BUILTIN_DRIVER_SPECS[type_name] for type_name in INSTRUMENT_DRIVER_SPECS
+    )
+    with pytest.raises(TypeError):
+        INSTRUMENT_DRIVER_SPECS["evil"] = BUILTIN_DRIVER_SPECS["lakeshore_218s"]  # type: ignore[index]
+
+    entry = {
+        "type": "deterministic_health_node",
+        "name": "compressor.primary",
+        "component_type": "compressor",
+    }
+    with pytest.raises(UnknownDriverTypeError, match="not an instrument driver"):
+        validate_instrument_entry(entry)
+    validated = validate_health_telemetry_entry(entry)
+    assert validated.spec is get_driver_spec("deterministic_health_node")
+    with pytest.raises(UnknownDriverTypeError, match="not an instrument driver"):
+        construct_driver(validated, DriverConstructionContext(mock=True))
 
 
 @pytest.mark.parametrize("type_name", ["lakeshore_218s", "keithley_2604b"])

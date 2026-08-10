@@ -557,11 +557,14 @@ def test_issued_reader_rejects_revision_time_heartbeat_and_counter_regressions()
     reader = _issue(device)
     reader.snapshot(observed_time_s=10.0)
 
+    device._revision = 1
+    with pytest.raises(HealthTelemetryError, match="observed_time_s must increase strictly"):
+        reader.snapshot(observed_time_s=10.0)
     device._revision = -1
     with pytest.raises(HealthTelemetryError, match="revision"):
         reader.snapshot(observed_time_s=10.5)
     device._revision = 1
-    with pytest.raises(HealthTelemetryError, match="observed_time_s regressed"):
+    with pytest.raises(HealthTelemetryError, match="observed_time_s must increase strictly"):
         reader.snapshot(observed_time_s=9.0)
     device._revision = 2
     device._heartbeat_offset = 2.0

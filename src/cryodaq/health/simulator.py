@@ -291,7 +291,12 @@ class DeterministicHealthTelemetryNode:
             raise HealthTelemetryError(
                 "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
             ) from exc
-        if not math.isfinite(tick_s) or not math.isfinite(horizon_s) or start + tick_s <= start:
+        if (
+            not math.isfinite(tick_s)
+            or not math.isfinite(horizon_s)
+            or start + tick_s <= start
+            or math.ulp(horizon_s) > tick_s
+        ):
             raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
         if type(heartbeat_frames) is not int or not 1 <= heartbeat_frames <= MAX_DETERMINISTIC_HEALTH_NODE_FRAMES:
             raise HealthTelemetryError("heartbeat_frames must be a positive bounded integer")
