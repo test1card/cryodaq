@@ -1,7 +1,8 @@
 # CryoDAQ Architecture
 
 **Released baseline:** v0.64.1
-**Document scope:** active Montana candidate architecture on `feat/montana-phase-a`
+**Document scope:** the merged checkpoint architecture (merged into `master`
+2026-07-31; campaign records in `docs/campaigns/`)
 **Date:** 2026-07-17
 
 ---
