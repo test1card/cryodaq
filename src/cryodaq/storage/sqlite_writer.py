@@ -376,17 +376,35 @@ ON attention_history (experiment_id, timestamp DESC, event_id DESC);
 
 SCHEMA_ATTENTION_HISTORY_STATUS = """
 CREATE TABLE IF NOT EXISTS attention_history_status (
-    singleton               INTEGER PRIMARY KEY CHECK (singleton = 1),
-    admitted_total          INTEGER NOT NULL
+    singleton                    INTEGER PRIMARY KEY CHECK (singleton = 1),
+    admitted_total               INTEGER NOT NULL
         CHECK (
             typeof(admitted_total) = 'integer'
             AND admitted_total >= 0
         ),
-    rejected_after_capacity INTEGER NOT NULL
+    capacity_exhausted_revision  INTEGER
         CHECK (
-            typeof(rejected_after_capacity) = 'integer'
-            AND rejected_after_capacity >= 0
+            capacity_exhausted_revision IS NULL
+            OR (
+                typeof(capacity_exhausted_revision) = 'integer'
+                AND capacity_exhausted_revision > 0
+            )
+        ),
+    capacity_exhausted_at        REAL
+        CHECK (
+            capacity_exhausted_at IS NULL
+            OR typeof(capacity_exhausted_at) IN ('integer', 'real')
+        ),
+    CHECK (
+        (
+            capacity_exhausted_revision IS NULL
+            AND capacity_exhausted_at IS NULL
         )
+        OR (
+            capacity_exhausted_revision = admitted_total + 1
+            AND capacity_exhausted_at IS NOT NULL
+        )
+    )
 );
 """
 
@@ -397,7 +415,7 @@ CREATE TABLE IF NOT EXISTS control_feature_markers (
     schema_version INTEGER NOT NULL
         CHECK (
             typeof(schema_version) = 'integer'
-            AND schema_version = 1
+            AND schema_version = 2
         )
 );
 """
@@ -6756,16 +6774,17 @@ class SQLiteWriter:
             conn.execute(SCHEMA_ATTENTION_HISTORY_STATUS)
             marker = conn.execute(
                 "INSERT INTO control_feature_markers "
-                "(feature_id, schema_version) VALUES ('attention_history', 1) "
+                "(feature_id, schema_version) VALUES ('attention_history', 2) "
                 "RETURNING feature_id, schema_version"
             ).fetchone()
             inserted = conn.execute(
                 "INSERT INTO attention_history_status "
-                "(singleton, admitted_total, rejected_after_capacity) "
-                "VALUES (1, 0, 0) RETURNING singleton, admitted_total, "
-                "rejected_after_capacity"
+                "(singleton, admitted_total, capacity_exhausted_revision, "
+                "capacity_exhausted_at) VALUES (1, 0, NULL, NULL) "
+                "RETURNING singleton, admitted_total, "
+                "capacity_exhausted_revision, capacity_exhausted_at"
             ).fetchone()
-            if marker != ("attention_history", 1) or inserted != (1, 0, 0):
+            if marker != ("attention_history", 2) or inserted != (1, 0, None, None):
                 raise RuntimeError("attention history initial status was not created exactly")
             cls._verify_attention_history_storage(conn)
             return
@@ -6790,9 +6809,10 @@ class SQLiteWriter:
             raise RuntimeError("attention history established storage is incomplete")
         marker = conn.execute("SELECT feature_id, schema_version FROM control_feature_markers LIMIT 2").fetchall()
         status = conn.execute(
-            "SELECT singleton, admitted_total, rejected_after_capacity FROM attention_history_status LIMIT 2"
+            "SELECT singleton, admitted_total, capacity_exhausted_revision, "
+            "capacity_exhausted_at FROM attention_history_status LIMIT 2"
         ).fetchall()
-        if marker != [("attention_history", 1)] or type(status) is not list or len(status) != 1:
+        if marker != [("attention_history", 2)] or type(status) is not list or len(status) != 1:
             raise RuntimeError("attention history established storage is incomplete")
         cls._verify_attention_history_storage(conn)
 
@@ -6848,17 +6868,30 @@ class SQLiteWriter:
             if trigger is not None:
                 raise RuntimeError("attention history trigger authority is invalid")
         status_rows = conn.execute(
-            "SELECT singleton, admitted_total, rejected_after_capacity FROM attention_history_status LIMIT 2"
+            "SELECT singleton, admitted_total, capacity_exhausted_revision, "
+            "capacity_exhausted_at FROM attention_history_status LIMIT 2"
         ).fetchall()
         if (
             type(status_rows) is not list
             or len(status_rows) != 1
             or type(status_rows[0]) is not tuple
+            or len(status_rows[0]) != 4
             or status_rows[0][0] != 1
             or type(status_rows[0][1]) is not int
             or status_rows[0][1] < 0
-            or type(status_rows[0][2]) is not int
-            or status_rows[0][2] < 0
+        ):
+            raise RuntimeError("attention history status authority is invalid")
+        capacity_revision = status_rows[0][2]
+        capacity_at = status_rows[0][3]
+        if capacity_revision is None:
+            if capacity_at is not None:
+                raise RuntimeError("attention history status authority is invalid")
+        elif (
+            type(capacity_revision) is not int
+            or capacity_revision != status_rows[0][1] + 1
+            or capacity_revision > _SQLITE_MAX_ROWID
+            or type(capacity_at) not in {int, float}
+            or not math.isfinite(capacity_at)
         ):
             raise RuntimeError("attention history status authority is invalid")
         count = conn.execute("SELECT COUNT(*) FROM attention_history").fetchone()
@@ -6871,14 +6904,21 @@ class SQLiteWriter:
             raise RuntimeError("attention history retained row bound is invalid")
         if count[0] != status_rows[0][1]:
             raise RuntimeError("attention history admitted row total is invalid")
+        if capacity_revision is not None and count[0] != ATTENTION_HISTORY_MAX_ITEMS:
+            raise RuntimeError("attention history capacity marker is invalid")
         retained_rows = conn.execute(
-            "SELECT event_id, timestamp, experiment_id, kind, annotation_of, "
+            "SELECT sequence, event_id, timestamp, experiment_id, kind, annotation_of, "
             "payload FROM attention_history ORDER BY sequence LIMIT ?",
             (ATTENTION_HISTORY_MAX_ITEMS + 1,),
         ).fetchall()
         if type(retained_rows) is not list or len(retained_rows) != count[0]:
             raise RuntimeError("attention history retained row set is invalid")
-        retained = tuple(cls._attention_history_item_from_row(row) for row in retained_rows)
+        if any(
+            type(row) is not tuple or len(row) != 7 or row[0] != expected_sequence
+            for expected_sequence, row in enumerate(retained_rows, start=1)
+        ):
+            raise RuntimeError("attention history revision sequence is invalid")
+        retained = tuple(cls._attention_history_item_from_row(row[1:]) for row in retained_rows)
         by_event_id = {item.event_id: item for item in retained}
         for item in retained:
             if item.kind != "acknowledgement":
@@ -9474,23 +9514,36 @@ class SQLiteWriter:
                 raise RuntimeError("attention history retained row count is invalid")
             if count_row[0] >= ATTENTION_HISTORY_MAX_ITEMS:
                 status_before = conn.execute(
-                    "SELECT rejected_after_capacity FROM attention_history_status WHERE singleton = 1"
+                    "SELECT admitted_total, capacity_exhausted_revision, "
+                    "capacity_exhausted_at FROM attention_history_status "
+                    "WHERE singleton = 1"
                 ).fetchone()
-                if (
-                    type(status_before) is not tuple
-                    or len(status_before) != 1
-                    or type(status_before[0]) is not int
-                    or status_before[0] >= _SQLITE_MAX_ROWID
+                if type(status_before) is not tuple or len(status_before) != 3 or status_before[0] != count_row[0]:
+                    raise RuntimeError("attention history status authority is invalid")
+                if status_before[1:] == (None, None):
+                    if count_row[0] >= _SQLITE_MAX_ROWID:
+                        raise RuntimeError("attention history revision bound is exhausted")
+                    before_changes = conn.total_changes
+                    status_after = conn.execute(
+                        "UPDATE attention_history_status SET "
+                        "capacity_exhausted_revision = admitted_total + 1, "
+                        "capacity_exhausted_at = ? "
+                        "WHERE singleton = 1 "
+                        "AND capacity_exhausted_revision IS NULL "
+                        "AND capacity_exhausted_at IS NULL "
+                        "RETURNING capacity_exhausted_revision, "
+                        "capacity_exhausted_at",
+                        (timestamp_value,),
+                    ).fetchone()
+                    if status_after != (count_row[0] + 1, timestamp_value) or conn.total_changes - before_changes != 1:
+                        raise RuntimeError("attention history capacity marker was not durable")
+                elif (
+                    type(status_before[1]) is not int
+                    or status_before[1] != count_row[0] + 1
+                    or type(status_before[2]) not in {int, float}
+                    or not math.isfinite(status_before[2])
                 ):
-                    raise RuntimeError("attention history status counter is invalid")
-                before_changes = conn.total_changes
-                status_after = conn.execute(
-                    "UPDATE attention_history_status SET "
-                    "rejected_after_capacity = rejected_after_capacity + 1 "
-                    "WHERE singleton = 1 RETURNING rejected_after_capacity"
-                ).fetchone()
-                if status_after != (status_before[0] + 1,) or conn.total_changes - before_changes != 1:
-                    raise RuntimeError("attention history capacity rejection was not durable")
+                    raise RuntimeError("attention history capacity marker is invalid")
             else:
                 before_changes = conn.total_changes
                 inserted = conn.execute(
@@ -9519,7 +9572,7 @@ class SQLiteWriter:
                     type(inserted) is not tuple
                     or len(inserted) != 7
                     or type(inserted[0]) is not int
-                    or not 1 <= inserted[0] <= _SQLITE_MAX_ROWID
+                    or inserted[0] != count_row[0] + 1
                     or inserted[1:] != expected
                     or conn.total_changes - before_changes != 1
                 ):
@@ -9555,9 +9608,7 @@ class SQLiteWriter:
         finally:
             conn.close()
         if not admitted:
-            raise AttentionHistoryCapacityError(
-                "attention history capacity exhausted; the rejected addition was durably counted"
-            )
+            raise AttentionHistoryCapacityError("attention history capacity exhausted; saturation is durably marked")
         return item
 
     def _read_attention_history_sync(
@@ -9565,29 +9616,61 @@ class SQLiteWriter:
         *,
         experiment_id: str,
         limit: int,
+        as_of: datetime | None,
+        through_revision: int | None,
     ) -> AttentionHistoryPage:
         conn = self._open_control_db()
         try:
             conn.execute("BEGIN")
             self._verify_attention_history_storage(conn)
             status = conn.execute(
-                "SELECT rejected_after_capacity FROM attention_history_status WHERE singleton = 1"
+                "SELECT admitted_total, capacity_exhausted_revision, "
+                "capacity_exhausted_at FROM attention_history_status "
+                "WHERE singleton = 1"
             ).fetchone()
-            rows = conn.execute(
-                "SELECT event_id, timestamp, experiment_id, kind, annotation_of, "
-                "payload FROM attention_history WHERE experiment_id = ? "
-                "ORDER BY timestamp DESC, event_id DESC LIMIT ?",
-                (experiment_id, limit + 1),
-            ).fetchall()
+            if type(status) is not tuple or len(status) != 3 or type(status[0]) is not int:
+                raise RuntimeError("attention history read authority is invalid")
+            current_revision = status[1] if status[1] is not None else status[0]
+            selected_revision = current_revision if through_revision is None else through_revision
             if (
-                type(status) is not tuple
-                or len(status) != 1
-                or type(status[0]) is not int
-                or type(rows) is not list
-                or len(rows) > limit + 1
+                type(current_revision) is not int
+                or type(selected_revision) is not int
+                or selected_revision < 0
+                or selected_revision > current_revision
             ):
+                raise ValueError("attention history revision is unavailable")
+            if as_of is None:
+                rows = conn.execute(
+                    "SELECT event_id, timestamp, experiment_id, kind, "
+                    "annotation_of, payload FROM attention_history "
+                    "WHERE experiment_id = ? AND sequence <= ? "
+                    "ORDER BY timestamp DESC, event_id DESC LIMIT ?",
+                    (experiment_id, selected_revision, limit + 1),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT event_id, timestamp, experiment_id, kind, "
+                    "annotation_of, payload FROM attention_history "
+                    "WHERE experiment_id = ? AND sequence <= ? "
+                    "AND timestamp <= ? "
+                    "ORDER BY timestamp DESC, event_id DESC LIMIT ?",
+                    (
+                        experiment_id,
+                        selected_revision,
+                        as_of.timestamp(),
+                        limit + 1,
+                    ),
+                ).fetchall()
+            if type(rows) is not list or len(rows) > limit + 1:
                 raise RuntimeError("attention history read authority is invalid")
             items = [self._attention_history_item_from_row(row) for row in rows[:limit]]
+            capacity_exhausted_at = None
+            if (
+                status[1] is not None
+                and status[1] <= selected_revision
+                and (as_of is None or (type(status[2]) in {int, float} and status[2] <= as_of.timestamp()))
+            ):
+                capacity_exhausted_at = datetime.fromtimestamp(status[2], UTC)
             conn.commit()
         except (ValueError, RuntimeError):
             with contextlib.suppress(sqlite3.Error, RuntimeError):
@@ -9603,7 +9686,9 @@ class SQLiteWriter:
         return AttentionHistoryPage(
             items=tuple(items),
             truncated_before=len(rows) > limit,
-            rejected_after_capacity=status[0],
+            through_revision=selected_revision,
+            as_of=as_of,
+            capacity_exhausted_at=capacity_exhausted_at,
         )
 
     async def append_attention_event(
@@ -9646,8 +9731,10 @@ class SQLiteWriter:
         *,
         experiment_id: str,
         limit: int = 100,
+        as_of: datetime | None = None,
+        through_revision: int | None = None,
     ) -> AttentionHistoryPage:
-        """Read a bounded newest window and explicit global rejection count."""
+        """Read a bounded window at one durable revision and optional UTC cut."""
 
         if type(experiment_id) is not str or not experiment_id:
             raise ValueError("attention history requires a stable experiment_id")
@@ -9655,12 +9742,20 @@ class SQLiteWriter:
             raise ValueError("attention history limit must be a positive integer")
         if limit > ATTENTION_HISTORY_MAX_ITEMS:
             raise ValueError(f"attention history limit cannot exceed {ATTENTION_HISTORY_MAX_ITEMS}")
+        if as_of is not None:
+            if type(as_of) is not datetime or as_of.tzinfo is None or as_of.utcoffset() is None:
+                raise ValueError("attention history as_of must be an exact timezone-aware datetime")
+            as_of = as_of.astimezone(UTC)
+        if through_revision is not None and (type(through_revision) is not int or through_revision < 0):
+            raise ValueError("through_revision must be a non-negative integer")
         owner = self._owned_executor_task(
             self._read_executor,
             partial(
                 self._read_attention_history_sync,
                 experiment_id=experiment_id,
                 limit=limit,
+                as_of=as_of,
+                through_revision=through_revision,
             ),
             read=True,
             name="sqlite_attention_history_read",

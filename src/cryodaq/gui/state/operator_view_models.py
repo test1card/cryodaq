@@ -250,7 +250,7 @@ class CooldownMission:
             raise TypeError("recent_history must be an exact AttentionHistoryPage")
         if any(item.experiment_id != self.experiment_id for item in self.recent_history.items):
             raise ValueError("attention history experiment identity is inconsistent")
-        if any(item.timestamp > self.cut.observed_at for item in self.recent_history.items):
+        if self.recent_history.as_of != self.cut.observed_at:
             raise ValueError("attention history is not bound to the mission cut")
 
 
@@ -409,7 +409,13 @@ def dump_cooldown_mission(mission: CooldownMission) -> str:
         ],
         "recent_history": {
             "truncated_before": mission.recent_history.truncated_before,
-            "global_rejected_attempts_after_capacity": (mission.recent_history.rejected_after_capacity),
+            "through_revision": mission.recent_history.through_revision,
+            "as_of": (None if mission.recent_history.as_of is None else mission.recent_history.as_of.isoformat()),
+            "global_capacity_exhausted_at": (
+                None
+                if mission.recent_history.capacity_exhausted_at is None
+                else mission.recent_history.capacity_exhausted_at.isoformat()
+            ),
             "items": [item.to_payload() for item in mission.recent_history.items],
         },
     }

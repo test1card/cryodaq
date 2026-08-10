@@ -3,6 +3,7 @@ import json
 import pickle
 from dataclasses import FrozenInstanceError, fields, replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from cryodaq.channels.descriptors import (
     ChannelRole,
     ChannelSafetyClass,
 )
+from cryodaq.core.event_bus import EngineEvent
 from cryodaq.core.operator_log import (
     AttentionHistoryPage,
     dump_attention_history_item,
@@ -52,6 +54,8 @@ from cryodaq.operator_snapshot import (
     encode_operator_snapshot,
     load_operator_snapshot,
 )
+from cryodaq.storage import sqlite_writer as sqlite_writer_module
+from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 SUMMARY_TYPES = (
     ReadinessSummary,
@@ -278,6 +282,8 @@ def _attention_history(
     return AttentionHistoryPage(
         items=(item,),
         truncated_before=False,
+        through_revision=1,
+        as_of=datetime(2026, 7, 11, 1, 2, tzinfo=UTC),
     )
 
 
@@ -463,7 +469,12 @@ def test_cooldown_mission_rejects_history_not_bound_to_its_cut() -> None:
         message="This incident postdates the mission cut",
         channel_ids=("sensor.main",),
     )
-    unbound = AttentionHistoryPage(items=(future,), truncated_before=False)
+    unbound = AttentionHistoryPage(
+        items=(future,),
+        truncated_before=False,
+        through_revision=1,
+        as_of=None,
+    )
 
     with pytest.raises(ValueError, match="history.*cut"):
         _build_cooldown_mission(snapshot, unbound)
@@ -572,7 +583,9 @@ def test_cooldown_mission_replay_round_trip_is_deterministic() -> None:
     replayed_history = AttentionHistoryPage(
         items=tuple(load_attention_history_item(dump_attention_history_item(item)) for item in history.items),
         truncated_before=history.truncated_before,
-        rejected_after_capacity=history.rejected_after_capacity,
+        through_revision=history.through_revision,
+        as_of=history.as_of,
+        capacity_exhausted_at=history.capacity_exhausted_at,
     )
 
     first = _build_cooldown_mission(snapshot, history)
@@ -580,6 +593,74 @@ def test_cooldown_mission_replay_round_trip_is_deterministic() -> None:
 
     assert second == first
     assert _dump_cooldown_mission(second) == _dump_cooldown_mission(first)
+
+
+async def test_cooldown_mission_restart_replay_uses_same_history_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlite_writer_module, "ATTENTION_HISTORY_MAX_ITEMS", 2)
+    snapshot = _snapshot(
+        state=OperatorPresentationState.WARNING,
+        mode=SnapshotMode.REPLAY,
+    )
+    first_event = EngineEvent(
+        event_type="alarm_fired",
+        timestamp=snapshot.cut.observed_at - timedelta(seconds=1),
+        payload={
+            "alarm_id": "before-cut",
+            "level": "WARNING",
+            "message": "Incident before the replay cut",
+            "channels": ["sensor.main"],
+        },
+        experiment_id="exp-7",
+    )
+    future_event = replace(
+        first_event,
+        timestamp=snapshot.cut.observed_at + timedelta(seconds=1),
+        payload={**first_event.payload, "alarm_id": "after-cut"},
+    )
+    rejected_event = replace(
+        first_event,
+        timestamp=snapshot.cut.observed_at + timedelta(seconds=2),
+        payload={**first_event.payload, "alarm_id": "capacity-rejection"},
+    )
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(first_event)
+        before = await writer.get_attention_history(
+            experiment_id="exp-7",
+            limit=2,
+            as_of=snapshot.cut.observed_at,
+        )
+        first_mission = _build_cooldown_mission(snapshot, before)
+        await writer.append_attention_event(future_event)
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(rejected_event)
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        replayed = await restarted.get_attention_history(
+            experiment_id="exp-7",
+            limit=2,
+            as_of=snapshot.cut.observed_at,
+            through_revision=before.through_revision,
+        )
+    finally:
+        await restarted.stop()
+
+    replayed_snapshot = load_operator_snapshot(dump_operator_snapshot(snapshot))
+    second_mission = _build_cooldown_mission(replayed_snapshot, replayed)
+    assert replayed == before
+    assert tuple(item.alarm_id for item in replayed.items) == ("before-cut",)
+    assert replayed.capacity_exhausted_at is None
+    assert second_mission == first_mission
+    assert _dump_cooldown_mission(second_mission) == _dump_cooldown_mission(first_mission)
 
 
 def test_presentation_vocabulary_is_exact_design_system_contract() -> None:

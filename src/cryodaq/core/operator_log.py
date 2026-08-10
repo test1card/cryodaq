@@ -15,7 +15,7 @@ _ATTENTION_HISTORY_TEXT_BYTES = 4096
 
 
 class AttentionHistoryCapacityError(RuntimeError):
-    """Raised after a rejected addition has been durably counted."""
+    """Raised after capacity exhaustion has been durably marked."""
 
 
 def _attention_text(
@@ -175,11 +175,13 @@ class AttentionHistoryItem:
 
 @dataclass(frozen=True, slots=True)
 class AttentionHistoryPage:
-    """Chronological bounded view with explicit rejected-addition evidence."""
+    """Chronological bounded view bound to one durable history revision."""
 
     items: tuple[AttentionHistoryItem, ...]
     truncated_before: bool
-    rejected_after_capacity: int = 0
+    through_revision: int
+    as_of: datetime | None
+    capacity_exhausted_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if type(self.items) is not tuple or any(type(item) is not AttentionHistoryItem for item in self.items):
@@ -188,10 +190,34 @@ class AttentionHistoryPage:
             raise ValueError(f"attention history page cannot exceed {ATTENTION_HISTORY_MAX_ITEMS} items")
         if type(self.truncated_before) is not bool:
             raise TypeError("truncated_before must be a boolean")
-        if type(self.rejected_after_capacity) is not int or self.rejected_after_capacity < 0:
-            raise ValueError("rejected_after_capacity must be a non-negative integer")
+        if type(self.through_revision) is not int or self.through_revision < 0:
+            raise ValueError("through_revision must be a non-negative integer")
+        if self.items and self.through_revision == 0:
+            raise ValueError("non-empty attention history requires a positive revision")
+        if self.as_of is not None:
+            object.__setattr__(
+                self,
+                "as_of",
+                _attention_time(self.as_of, field_name="as_of"),
+            )
+        if self.capacity_exhausted_at is not None:
+            object.__setattr__(
+                self,
+                "capacity_exhausted_at",
+                _attention_time(
+                    self.capacity_exhausted_at,
+                    field_name="capacity_exhausted_at",
+                ),
+            )
+            if self.through_revision == 0:
+                raise ValueError("capacity exhaustion requires a positive revision")
         if any(later.timestamp < earlier.timestamp for earlier, later in zip(self.items, self.items[1:])):
             raise ValueError("attention history must be chronological")
+        if self.as_of is not None and (
+            any(item.timestamp > self.as_of for item in self.items)
+            or (self.capacity_exhausted_at is not None and self.capacity_exhausted_at > self.as_of)
+        ):
+            raise ValueError("attention history page contains evidence after as_of")
         event_ids = tuple(item.event_id for item in self.items)
         if len(event_ids) != len(set(event_ids)):
             raise ValueError("attention history event ids must be unique")

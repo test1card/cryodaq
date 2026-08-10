@@ -122,6 +122,13 @@ async def test_attention_history_capacity_is_fail_closed_durable_and_explicit(
                     timestamp=datetime(2026, 8, 10, 12, 2, tzinfo=UTC),
                 )
             )
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="fourth",
+                    timestamp=datetime(2026, 8, 10, 12, 3, tzinfo=UTC),
+                )
+            )
         before = await writer.get_attention_history(
             experiment_id="exp-stable-7",
             limit=2,
@@ -141,7 +148,8 @@ async def test_attention_history_capacity_is_fail_closed_durable_and_explicit(
 
     assert before == after
     assert after.truncated_before is False
-    assert after.rejected_after_capacity == 1
+    assert after.through_revision == 3
+    assert after.capacity_exhausted_at == datetime(2026, 8, 10, 12, 2, tzinfo=UTC)
     assert tuple(item.alarm_id for item in after.items) == (
         first.alarm_id,
         "second",
