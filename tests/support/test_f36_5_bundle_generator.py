@@ -2126,3 +2126,42 @@ def test_dishonest_version_mapping_is_bounded_and_fails_only_versions_closed() -
     assert versions.consumed == collector_module.MAX_VERSIONS + 1
     assert reasons["versions"] == "source_invalid"
     assert any(record["kind"] == "log" for record in evidence["records"])
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "record_role",
+        "snapshot_mode",
+        "snapshot_source_id",
+        "snapshot_producer_id",
+        "observed_at",
+        "received_at",
+        "revision",
+        "source_age_us",
+        "transport_age_us",
+        "storage",
+    ),
+)
+def test_integrity_schema_requires_every_snapshot_truth_field(missing_field: str) -> None:
+    payload = _complete_integrity_provenance()
+    del payload[missing_field]
+
+    with pytest.raises(ValueError, match=missing_field):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_bundle_capture_rejects_snapshot_records_from_mixed_cuts() -> None:
+    integrity_payload = _complete_integrity_provenance()
+    health_payload = {key: value for key, value in integrity_payload.items() if key != "storage"}
+    health_payload.update(source_id="plant-health-summary", state="caution")
+    health_payload.update(
+        revision=2,
+        observed_at="2026-07-14T11:58:00.000000Z",
+        received_at="2026-07-14T11:58:01.000000Z",
+    )
+    health = EvidenceRecord.from_payload("health", health_payload)
+    integrity = EvidenceRecord.from_payload("integrity", integrity_payload)
+
+    with pytest.raises(ValueError, match="coherent snapshot cut"):
+        _minimal_capture(records=(health, integrity))
