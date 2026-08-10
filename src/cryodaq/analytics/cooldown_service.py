@@ -269,9 +269,17 @@ class CooldownService:
         # Latest T values for detector
         self._last_T_cold: float | None = None
         self._last_T_warm: float | None = None
-        self._last_required_input_monotonic: dict[str, float] = {}
+        # Source cadence remains keyed by Reading.timestamp for channel
+        # discovery. Freshness uses arrival cadence separately because replay
+        # deliberately decouples those clocks.
+        self._last_required_input_monotonic: dict[str, float | None] = {}
+        self._last_required_input_arrival_monotonic: dict[str, float] = {}
         self._last_required_input_timestamp: dict[str, float] = {}
         self._required_input_intervals: dict[str, deque[float]] = {
+            self._channel_cold: deque(maxlen=5),
+            self._channel_warm: deque(maxlen=5),
+        }
+        self._required_input_arrival_intervals: dict[str, deque[float]] = {
             self._channel_cold: deque(maxlen=5),
             self._channel_warm: deque(maxlen=5),
         }
@@ -644,13 +652,46 @@ class CooldownService:
                     continue
 
                 if reading.channel in (self._channel_cold, self._channel_warm):
+                    arrival_monotonic = time.monotonic()
                     previous_timestamp = self._last_required_input_timestamp.get(reading.channel)
-                    if previous_timestamp is not None:
-                        interval_s = reading_ts - previous_timestamp
-                        if interval_s > 0:
-                            self._required_input_intervals[reading.channel].append(interval_s)
+                    previous_arrival = self._last_required_input_arrival_monotonic.get(reading.channel)
+                    source_interval = reading_ts - previous_timestamp if previous_timestamp is not None else None
+                    arrival_interval = arrival_monotonic - previous_arrival if previous_arrival is not None else None
+                    source_cadence = self._required_input_intervals[reading.channel]
+                    arrival_cadence = self._required_input_arrival_intervals[reading.channel]
+                    source_outage = (
+                        source_interval is not None
+                        and source_interval > 0.0
+                        and bool(source_cadence)
+                        and source_interval > 3.0 * float(np.median(source_cadence))
+                    )
+                    arrival_outage = (
+                        arrival_interval is not None
+                        and arrival_interval > 0.0
+                        and bool(arrival_cadence)
+                        and arrival_interval > 3.0 * float(np.median(arrival_cadence))
+                    )
+                    # A gap that is already an outage in either clock domain
+                    # is not evidence of normal cadence. Keep the resumed
+                    # sample as the new baseline, then accept the next normal
+                    # interval.
+                    if not source_outage and not arrival_outage:
+                        if source_interval is not None and source_interval > 0.0:
+                            source_cadence.append(source_interval)
+                        if arrival_interval is not None and arrival_interval > 0.0:
+                            arrival_cadence.append(arrival_interval)
                     self._last_required_input_timestamp[reading.channel] = reading_ts
-                    self._last_required_input_monotonic[reading.channel] = time.monotonic()
+                    self._last_required_input_arrival_monotonic[reading.channel] = arrival_monotonic
+
+                    # Reading.timestamp is wall-clock/source time; convert its
+                    # observed age into the monotonic domain before storing the
+                    # anchor. If the clocks cannot be compared, None is a
+                    # fail-closed freshness state rather than a fresh stamp.
+                    source_age_s = time.time() - reading_ts
+                    if math.isfinite(source_age_s) and source_age_s >= 0.0:
+                        self._last_required_input_monotonic[reading.channel] = arrival_monotonic - source_age_s
+                    else:
+                        self._last_required_input_monotonic[reading.channel] = None
 
                 if reading.channel == self._channel_cold:
                     self._last_T_cold = reading.value
@@ -711,8 +752,11 @@ class CooldownService:
             ),
         }
         freshness_horizons_s = {
-            channel: 3.0 * float(np.median(self._required_input_intervals[channel]))
-            if self._required_input_intervals[channel]
+            # Compare monotonic age with arrival cadence. Source cadence is
+            # retained for discovery, but replay speed makes it incomparable
+            # with wall-clock time used by this freshness check.
+            channel: 3.0 * float(np.median(self._required_input_arrival_intervals[channel]))
+            if self._required_input_arrival_intervals[channel]
             else None
             for channel in required_channels
         }

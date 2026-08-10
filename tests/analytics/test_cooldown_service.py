@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,7 +89,7 @@ def _cooldown_readings(
     """
     import time as _time
 
-    t0 = _time.time()
+    t0 = _time.time() - (n - 1) * dt_s
     readings = []
     for i in range(n):
         t_abs = t0 + i * dt_s
@@ -841,11 +842,14 @@ async def test_predict_publishes_derived_metric(tmp_path: Path, model_in_tmp: Pa
 
     try:
         # Publish sustained cooling to trigger COOLING state and first prediction
-        readings_cold = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold")
-        readings_warm = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm")
+        readings_cold = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=0.02, channel="T_cold")
+        readings_warm = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=0.02, channel="T_warm")
         for r_c, r_w in zip(readings_cold, readings_warm):
+            r_c = replace(r_c, timestamp=datetime.now(UTC))
+            r_w = replace(r_w, timestamp=datetime.now(UTC))
             await broker.publish(r_c)
             await broker.publish(r_w)
+            await asyncio.sleep(0.02)
 
         # Wait for at least one prediction to be published
         try:
@@ -874,7 +878,7 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
     GUI needs future_t, future_T_cold_mean etc. for rendering the prediction
     curve.  These are stored as JSON-serialisable lists in reading.metadata.
     """
-    from cryodaq.analytics.cooldown_service import CooldownService
+    from cryodaq.analytics.cooldown_service import CooldownPhase, CooldownService
 
     broker = DataBroker()
     cfg = _make_config(
@@ -899,18 +903,28 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
 
     service = CooldownService(broker, cfg, model_in_tmp)
     await service.start()
+    service._detector._phase = CooldownPhase.COOLING
 
     try:
-        readings_cold = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=10.0, channel="T_cold")
-        readings_warm = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=10.0, channel="T_warm")
+        readings_cold = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-15.0, dt_s=0.02, channel="T_cold")
+        readings_warm = _cooldown_readings(n=60, T_start=295.0, rate_K_per_h=-8.0, dt_s=0.02, channel="T_warm")
         for r_c, r_w in zip(readings_cold, readings_warm):
+            r_c = replace(r_c, timestamp=datetime.now(UTC))
+            r_w = replace(r_w, timestamp=datetime.now(UTC))
             await broker.publish(r_c)
             await broker.publish(r_w)
+            await asyncio.sleep(0.02)
 
-        try:
-            reading = await asyncio.wait_for(results_queue.get(), timeout=2.0)
-        except TimeoutError:
-            pytest.fail("No prediction metric within 2s")
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while True:
+            try:
+                reading = await asyncio.wait_for(results_queue.get(), timeout=2.0)
+            except TimeoutError:
+                pytest.fail("No prediction metric within 2s")
+            if reading.metadata.get("cooldown_active") is True:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                pytest.fail("No active-cooldown prediction metric within 2s")
 
         meta = reading.metadata
         # Scalar prediction fields
@@ -959,32 +973,161 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
         await broker.unsubscribe("test_meta")
 
 
-async def test_prediction_withholds_when_sensor_silence_exceeds_sensor_cadence(
-    tmp_path: Path,
-) -> None:
-    """A fast sensor going silent is stale before three prediction ticks."""
+async def test_outage_gap_is_not_used_as_cadence(tmp_path: Path) -> None:
+    """A source gap after a known cadence must not inflate freshness."""
     import time
+    from datetime import timedelta
 
     from cryodaq.analytics.cooldown_service import CooldownService
 
     broker = DataBroker()
-    cfg = _make_config(tmp_path, predict_interval_s=30.0)
-    service = CooldownService(broker, cfg, Path(cfg["model_dir"]))
-    service._model = object()
-    service._last_T_cold = 10.0
-    service._last_T_warm = 20.0
-    service._last_required_input_monotonic = {
-        service._channel_cold: time.monotonic() - 0.4,
-        service._channel_warm: time.monotonic() - 0.4,
-    }
+    service = CooldownService(broker, _make_config(tmp_path), tmp_path / "model")
+    await service.start()
+    try:
+        base = datetime.now(UTC)
+        for channel in (service._channel_cold, service._channel_warm):
+            for offset in (0.0, 2.0, 602.0):
+                await broker.publish(_reading(channel, 10.0, base + timedelta(seconds=offset)))
+                await asyncio.sleep(0)
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            any(
+                len(service._required_input_intervals[channel]) < 1
+                for channel in (service._channel_cold, service._channel_warm)
+            )
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.to_thread(time.sleep, 0.01)
+
+        for channel in (service._channel_cold, service._channel_warm):
+            assert list(service._required_input_intervals[channel]) == pytest.approx([2.0])
+    finally:
+        await service.stop()
+
+
+async def test_backlog_preserves_sample_age_in_freshness_anchor(tmp_path: Path) -> None:
+    """Draining old queued readings must not make them appear newly received."""
+    import time
+    from datetime import timedelta
+
+    from cryodaq.analytics.cooldown_service import CooldownService
+
+    broker = DataBroker()
+    service = CooldownService(broker, _make_config(tmp_path), tmp_path / "model")
+    await service.start()
+    consume = service._consume_task
+    assert consume is not None
+    consume.cancel()
+    await asyncio.gather(consume, return_exceptions=True)
+
+    old = datetime.now(UTC) - timedelta(seconds=120)
     for channel in (service._channel_cold, service._channel_warm):
-        service._required_input_intervals[channel].append(0.1)
+        for offset in (0.0, 1.0):
+            await broker.publish(_reading(channel, 10.0, old + timedelta(seconds=offset)))
 
-    with patch("cryodaq.analytics.cooldown_service.predict") as predict_mock:
-        await service._do_predict()
+    service._consume_task = asyncio.create_task(service._consume_loop())
+    try:
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            any(
+                service._last_required_input_monotonic.get(channel) is None
+                for channel in (service._channel_cold, service._channel_warm)
+            )
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.to_thread(time.sleep, 0.01)
 
-    assert predict_mock.call_count == 0
-    assert 3.0 * 0.1 < 3.0 * service._predict_interval_s
+        now = time.monotonic()
+        for channel in (service._channel_cold, service._channel_warm):
+            anchor = service._last_required_input_monotonic[channel]
+            assert now - anchor > 100.0
+    finally:
+        await service.stop()
+
+
+async def test_slow_replay_uses_arrival_clock_for_freshness(tmp_path: Path) -> None:
+    """A healthy speed=0.1 replay remains publishable between source samples."""
+    from cryodaq.analytics.cooldown_service import CooldownService
+    from cryodaq.replay_engine.sources import CurveReplay
+
+    broker = DataBroker()
+    service = CooldownService(broker, _make_config(tmp_path), tmp_path / "model")
+    results = await broker.subscribe(
+        "slow_replay_result",
+        filter_fn=lambda reading: reading.channel.startswith("analytics/cooldown_predictor"),
+    )
+    await service.start()
+    service._model = object()
+    curve = CurveReplay(
+        {
+            "t_hours": [0.0, 0.2 / 3600.0],
+            "T_cold": [10.0, 9.9],
+            "T_warm": [20.0, 19.9],
+        },
+        speed=0.1,
+        cold_channel=service._channel_cold,
+        warm_channel=service._channel_warm,
+    )
+    try:
+        await curve.run(broker.publish)
+        await asyncio.sleep(1.0)
+        with patch(
+            "cryodaq.analytics.cooldown_service.predict",
+            return_value=SimpleNamespace(
+                t_remaining_hours=1.0,
+                t_remaining_low_68=0.9,
+                t_remaining_high_68=1.1,
+                progress=0.5,
+                phase="cooling",
+                n_references=1,
+                future_t=None,
+            ),
+        ):
+            await service._do_predict()
+        await asyncio.wait_for(results.get(), timeout=0.5)
+    finally:
+        await service.stop()
+        await broker.unsubscribe("slow_replay_result")
+
+
+async def test_prediction_cadence_is_discovered_through_broker_subscription(
+    tmp_path: Path,
+) -> None:
+    """Production subscription derives each channel's source cadence."""
+    import time
+    from datetime import timedelta
+
+    from cryodaq.analytics.cooldown_service import CooldownService
+
+    broker = DataBroker()
+    service = CooldownService(broker, _make_config(tmp_path), tmp_path / "model")
+    await service.start()
+    service._model = object()
+    base = datetime.now(UTC)
+    try:
+        for channel, interval in (
+            (service._channel_cold, 2.0),
+            (service._channel_warm, 20.0),
+        ):
+            for offset in (0.0, interval):
+                await broker.publish(_reading(channel, 10.0, base + timedelta(seconds=offset)))
+                await asyncio.sleep(0)
+
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            any(
+                len(service._required_input_intervals[channel]) < 1
+                for channel in (service._channel_cold, service._channel_warm)
+            )
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.to_thread(time.sleep, 0.01)
+
+        assert list(service._required_input_intervals[service._channel_cold]) == pytest.approx([2.0])
+        assert list(service._required_input_intervals[service._channel_warm]) == pytest.approx([20.0])
+    finally:
+        await service.stop()
 
 
 async def test_prediction_withholds_when_captured_inputs_stale_after_fresh_readings(
@@ -1008,6 +1151,7 @@ async def test_prediction_withholds_when_captured_inputs_stale_after_fresh_readi
     }
     for channel in (service._channel_cold, service._channel_warm):
         service._required_input_intervals[channel].append(0.01)
+        service._required_input_arrival_intervals[channel].append(0.01)
     started = threading.Event()
     release = threading.Event()
 
@@ -1066,6 +1210,7 @@ async def test_prediction_withholds_when_inputs_stale_during_executor(
     }
     for channel in (service._channel_cold, service._channel_warm):
         service._required_input_intervals[channel].append(0.01)
+        service._required_input_arrival_intervals[channel].append(0.01)
     started = threading.Event()
     release = threading.Event()
 
