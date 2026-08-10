@@ -1,6 +1,6 @@
 """Stage 3 tests: replay_engine package — source dispatch + ZMQ integration.
 
-Uses isolated test ports (15555/15556) to avoid conflicts with a running engine.
+Uses per-test OS-assigned ports to avoid conflicts with a running engine.
 All async tests use asyncio_mode=auto (pyproject.toml).
 """
 
@@ -1006,6 +1006,90 @@ async def _stop_engine(engine, source_task) -> None:
         await source_task
     except asyncio.CancelledError:
         pass
+
+
+@pytest.mark.asyncio
+async def test_replay_port_fixture_retries_exact_generated_collision(
+    tmp_path: Path,
+    start_replay_engine,
+) -> None:
+    import socket
+
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    source = tmp_path / "curve.json"
+    _write_curve_json(source)
+    attempts = 0
+
+    class OccupyFirstGeneratedEndpoint:
+        def __init__(self, engine, address: str) -> None:
+            self._engine = engine
+            self._address = address
+
+        async def start(self) -> None:
+            host, port = self._address.rsplit(":", 1)
+            holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                holder.bind((host.rsplit("//", 1)[1], int(port)))
+                holder.listen()
+                await self._engine.start()
+            finally:
+                holder.close()
+
+    def factory(ports):
+        nonlocal attempts
+        attempts += 1
+        engine = ReplayEngine(
+            source,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
+        if attempts == 1:
+            return OccupyFirstGeneratedEndpoint(engine, ports.pub_addr)
+        return engine
+
+    engine, _endpoints = await start_replay_engine(factory)
+    try:
+        assert attempts == 2
+    finally:
+        await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_replay_port_fixture_does_not_retry_unrelated_eaddrinuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start_replay_engine,
+) -> None:
+    from cryodaq.replay_engine import server as replay_server
+
+    source = tmp_path / "curve.json"
+    _write_curve_json(source)
+    attempts = 0
+
+    def _bind_with_retry(*_args, **_kwargs):
+        raise zmq.ZMQError(zmq.EADDRINUSE)
+
+    monkeypatch.setattr(replay_server, "resolve_source", _bind_with_retry)
+
+    def factory(ports):
+        nonlocal attempts
+        attempts += 1
+        return replay_server.ReplayEngine(
+            source,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
+
+    with pytest.raises(RuntimeError, match="replay startup failed") as exc_info:
+        await start_replay_engine(factory)
+
+    assert attempts == 1
+    assert isinstance(exc_info.value.__context__, zmq.ZMQError)
 
 
 @pytest.mark.asyncio

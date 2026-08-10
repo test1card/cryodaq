@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 import zmq
 
+from cryodaq.core.zmq_bridge import _bind_with_retry as _production_bind_with_retry
+
 _REPLAY_PORT_ATTEMPTS = 5
 
 
@@ -41,6 +43,7 @@ def _reserved_replay_tcp_endpoints() -> Iterator[ReplayTcpEndpoints]:
     try:
         for listener in listeners:
             listener.bind(("127.0.0.1", 0))
+            listener.listen()
         addresses = tuple(f"tcp://127.0.0.1:{listener.getsockname()[1]}" for listener in listeners)
         yield ReplayTcpEndpoints(*addresses)
     finally:
@@ -75,7 +78,11 @@ def _retryable_generated_port_collision(
 
     traceback = cause.__traceback__
     while traceback is not None:
-        if traceback.tb_frame.f_code.co_name == "_bind_with_retry":
+        frame = traceback.tb_frame
+        if (
+            frame.f_code is _production_bind_with_retry.__code__
+            and frame.f_locals.get("address") in endpoints.addresses
+        ):
             return True
         traceback = traceback.tb_next
     return False
