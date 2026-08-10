@@ -13,6 +13,17 @@ from build_scripts import windows_onedir_smoke as smoke
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "windows-onedir-smoke.yml"
+EXPECTED_SMOKE_CELL_NAMES = (
+    "frozen_driver_imports",
+    "gui_startup_offscreen",
+    "report_render_unicode",
+    "windows_job_timeout",
+    "assistant_h2_agent_off",
+    "assistant_h2_agent_missing",
+    "assistant_replay_exact_off",
+    "assistant_h3_only_allowed_idle",
+    "assistant_h3_only_restart_lock_release",
+)
 
 
 def test_workflow_builds_and_executes_real_windows_onedir() -> None:
@@ -56,6 +67,69 @@ def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:
 
     assert 'return [str(executable), "--mode=verify-frozen-drivers"]' in source
     assert "_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir)" in source
+
+
+def test_run_smoke_executes_frozen_driver_cell_as_required_production_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "CryoDAQ.exe").write_bytes(b"test placeholder")
+    calls: list[str] = []
+
+    def frozen(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("frozen_driver_imports")
+        return {"name": "frozen_driver_imports", "status": "PASS"}
+
+    def gui(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("gui_startup_offscreen")
+        return {"name": "gui_startup_offscreen", "status": "PASS"}
+
+    def timeout(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("windows_job_timeout")
+        return {"name": "windows_job_timeout", "status": "PASS"}
+
+    def named(*_args: object, name: str, **_kwargs: object) -> dict[str, str]:
+        calls.append(name)
+        return {"name": name, "status": "PASS"}
+
+    def ignore_config(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def inventory(*_args: object, **_kwargs: object) -> dict[str, int]:
+        return {"schema": 1}
+
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke, "_run_frozen_driver_import_cell", frozen)
+    monkeypatch.setattr(smoke, "_run_gui_startup_cell", gui)
+    monkeypatch.setattr(smoke, "_run_report_cell", named)
+    monkeypatch.setattr(smoke, "_run_job_timeout_cell", timeout)
+    monkeypatch.setattr(smoke, "_run_assistant_cell", named)
+    monkeypatch.setattr(smoke, "_write_periodic_config", ignore_config)
+    monkeypatch.setattr(smoke, "_artifact_inventory", inventory)
+
+    evidence_dir = tmp_path / "success-evidence"
+    assert smoke.run_smoke(dist_dir, evidence_dir) == 0
+    result = json.loads((evidence_dir / "smoke-result.json").read_text(encoding="utf-8"))
+    assert calls == list(EXPECTED_SMOKE_CELL_NAMES)
+    assert [cell["name"] for cell in result["cells"]] == list(EXPECTED_SMOKE_CELL_NAMES)
+    assert result["status"] == "PASS"
+
+    calls.clear()
+
+    def fail_frozen(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls.append("frozen_driver_imports")
+        raise RuntimeError("FROZEN_DRIVER_REQUIRED_CONTROL")
+
+    monkeypatch.setattr(smoke, "_run_frozen_driver_import_cell", fail_frozen)
+    failure_dir = tmp_path / "failure-evidence"
+    assert smoke.run_smoke(dist_dir, failure_dir) == 1
+    failure = json.loads((failure_dir / "smoke-result.json").read_text(encoding="utf-8"))
+    assert calls == ["frozen_driver_imports"]
+    assert failure["status"] == "FAIL"
+    assert "FROZEN_DRIVER_REQUIRED_CONTROL" in failure["reason"]
+    assert failure["cells"] == []
 
 
 def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
@@ -388,7 +462,9 @@ def test_report_evidence_rejects_malformed_result_report(tmp_path: Path) -> None
         smoke.validate_report_evidence(tmp_path, "exp-1", generation)
 
 
-def test_smoke_summary_fails_closed_on_status_or_roster_mismatch() -> None:
+def test_smoke_summary_fails_closed_on_status_or_roster_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert smoke.smoke_summary([{"name": "pending", "status": "NOT_RUN"}]) == (
         "FAIL",
         "REQUIRED_CELLS_NOT_RUN",
@@ -398,11 +474,13 @@ def test_smoke_summary_fails_closed_on_status_or_roster_mismatch() -> None:
         "INVALID_CELL_STATUS",
     )
 
-    valid_cells = [{"name": name, "status": "PASS"} for name in smoke._REQUIRED_SMOKE_CELLS]
+    expected_names = EXPECTED_SMOKE_CELL_NAMES
+
+    assert smoke._REQUIRED_SMOKE_CELLS == expected_names
+    valid_cells = [{"name": name, "status": "PASS"} for name in expected_names]
     assert smoke.smoke_summary(valid_cells) == ("PASS", None)
 
     missing_driver_cell = [cell for cell in valid_cells if cell["name"] != "frozen_driver_imports"]
-
     assert smoke.smoke_summary(missing_driver_cell) == (
         "FAIL",
         "REQUIRED_CELL_ROSTER_MISMATCH",
@@ -410,7 +488,15 @@ def test_smoke_summary_fails_closed_on_status_or_roster_mismatch() -> None:
     duplicated_cell = [*valid_cells, dict(valid_cells[0])]
     assert smoke.smoke_summary(duplicated_cell) == (
         "FAIL",
-        "REQUIRED_CELL_ROSTER_MISMATCH",
+        "DUPLICATE_CELL_NAME",
+    )
+
+    duplicate_required = (expected_names[0], expected_names[0], *expected_names[2:])
+    monkeypatch.setattr(smoke, "_REQUIRED_SMOKE_CELLS", duplicate_required)
+    matching_duplicate_cells = [{"name": name, "status": "PASS"} for name in duplicate_required]
+    assert smoke.smoke_summary(matching_duplicate_cells) == (
+        "FAIL",
+        "INVALID_REQUIRED_CELL_ROSTER",
     )
 
 

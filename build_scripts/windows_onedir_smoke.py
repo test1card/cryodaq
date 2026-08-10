@@ -906,7 +906,15 @@ def smoke_summary(cells: list[dict[str, Any]]) -> tuple[str, str | None]:
         return "FAIL", "REQUIRED_CELLS_NOT_RUN"
     if not cells or any(status != "PASS" for status in statuses):
         return "FAIL", "INVALID_CELL_STATUS"
+    if any(type(name) is not str or not name for name in _REQUIRED_SMOKE_CELLS) or len(_REQUIRED_SMOKE_CELLS) != len(
+        set(_REQUIRED_SMOKE_CELLS)
+    ):
+        return "FAIL", "INVALID_REQUIRED_CELL_ROSTER"
     cell_names = tuple(cell.get("name") for cell in cells)
+    if any(type(name) is not str or not name for name in cell_names):
+        return "FAIL", "INVALID_CELL_NAME"
+    if len(cell_names) != len(set(cell_names)):
+        return "FAIL", "DUPLICATE_CELL_NAME"
     if cell_names != _REQUIRED_SMOKE_CELLS:
         return "FAIL", "REQUIRED_CELL_ROSTER_MISMATCH"
     return "PASS", None
