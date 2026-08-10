@@ -918,7 +918,9 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             recorded.setdefault(match.group(1), []).append(int(match.group(2)))
         return recorded
 
-    def assert_current(candidate: str, candidate_paths: list[str], candidate_contents: dict[str, bytes]) -> None:
+    def assert_current(
+        candidate: str, candidate_paths: list[str], candidate_contents: dict[str, bytes]
+    ) -> tuple[int, int]:
         rows = _open_cell_rows(candidate)
         oc_012 = " | ".join(rows["OC-012"])
         oc_030 = " | ".join(rows["OC-030"])
@@ -993,12 +995,16 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             "OC-030 closure gate must name the exact live locator count",
             total_locators,
         )
+        return len(governance_modules), inventory_size
 
-    assert_current(text, tracked, contents)
+    governance_module_count, inventory_size = assert_current(text, tracked, contents)
     for old, replacement in (
         ("All 6 tracked workflows", "All 4 tracked workflows"),
-        ("all 18 tracked governance-test modules", "all 12 tracked governance-test modules"),
-        ("The exact 34-path", "The exact 33-path"),
+        (
+            f"all {governance_module_count} tracked governance-test modules",
+            f"all {governance_module_count - 1} tracked governance-test modules",
+        ),
+        (f"The exact {inventory_size}-path", f"The exact {inventory_size - 1}-path"),
         (
             "all 10 tracked workflow-referenced CI/governance runner modules",
             "all 9 tracked workflow-referenced CI/governance runner modules",
@@ -5183,3 +5189,14 @@ def test_architecture_generation_rolls_back_published_outputs_when_a_later_repla
         generator.generate()
     assert all((output / name).read_bytes() == b"original" for name in names)
     assert not metrics_path.exists()
+
+
+def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_claim() -> None:
+    text = (REPO_ROOT / "docs" / "new_lab_adaptation.md").read_text(encoding="utf-8")
+    section = text.split("## 2. Declare your instruments", 1)[1].split("## 3.", 1)[0]
+
+    assert "::INSTRUMENT_DRIVER_SPECS" in section
+    assert "::get_instrument_driver_spec" in section
+    assert "no supported production health-node configuration" in section
+    assert "::BUILTIN_DRIVER_SPECS" not in section
+    assert "::get_driver_spec" not in section
