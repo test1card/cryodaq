@@ -2561,6 +2561,40 @@ def test_design_system_legacy_v1_coversion_migrates_to_bootstrap(legacy_commit: 
     assert migrated == _F366_BOOTSTRAP_CONTRACT
 
 
+def test_only_the_pinned_bootstrap_base_may_omit_the_machine_gate() -> None:
+    """The gate-less exemption must hold for exactly ONE immutable commit.
+
+    The positive path is covered above. Its refusal was not: an assertion whose
+    failing direction is never exercised can be widened to a second SHA, or to a
+    truthy fallback, with every test still green. `d05856ec^` is a real commit
+    that predates the machine gate, so it reaches the same branch and must be
+    rejected purely because it is not the pinned one.
+    """
+
+    pre_gate_base = subprocess.run(
+        ["git", "rev-parse", f"{_F366_BOOTSTRAP_SHA}^"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert len(pre_gate_base) == 40 and pre_gate_base != _F366_BOOTSTRAP_SHA
+    pre_gate_manifest = _git_file_at(pre_gate_base, "docs/design-system/MANIFEST.md")
+    pre_gate_gate = (
+        None
+        if pre_gate_manifest is None
+        else _parse_design_system_machine_gates(pre_gate_manifest, label="pre-gate", required=False)
+    )
+    assert pre_gate_gate is None, "the control commit must genuinely lack the machine gate, or it proves nothing"
+
+    with pytest.raises(AssertionError, match="only the immutable F36.6 bootstrap base"):
+        _trusted_coversion_contract(
+            pre_gate_base,
+            available_sources=set(),
+            candidate_tracked=set(),
+        )
+
+
 @pytest.mark.parametrize(
     ("source_path", "required_spec", "wrong_spec"),
     (
