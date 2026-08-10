@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Final
+from urllib.parse import unquote
 
 SCHEMA_VERSION: Final = 2
 _SCHEMA_V1_REJECTION: Final = (
@@ -39,7 +40,7 @@ _ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
 _LIVE_SNAPSHOT_ID_RE = re.compile(r"engine/operator-snapshot-v1/[0-9a-f]{32}\Z")
 _REPLAY_SNAPSHOT_ID_RE = re.compile(r"replay/operator-v1/[0-9a-f]{32}/[0-9a-f]{32}/[0-9a-f]{16}\Z")
 _ALARM_ID_RE = re.compile(r"alarm:[0-9a-f]{32}\Z")
-_PUBLIC_TECHNICAL_SEGMENT_RE = re.compile(r"(?:\d+|[fv]\d+|[0-9a-f]{8,64}|\d{8}t\d{12}z)\Z")
+_PUBLIC_TECHNICAL_SEGMENT_RE = re.compile(r"(?:\d+|[fv]\d+|\d{8}t\d{12}z)\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _UUID_RE = re.compile(r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _PUBLIC_PROJECTION_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\.public\.v[1-9][0-9]*\Z")
@@ -73,6 +74,7 @@ _SECRET_KEYS: Final = frozenset(
         "password",
         "passwd",
         "private_key",
+        "pwd",
         "refresh_token",
         "secret",
         "session_id",
@@ -89,6 +91,7 @@ _PRIVATE_KEYS: Final = frozenset(
         "operator_name",
         "person",
         "phone",
+        "user",
         "user_name",
         "user_id",
         "username",
@@ -149,6 +152,7 @@ _EMAIL_RE: Final = re.compile(
 _UNICODE_EMAIL_RE: Final = re.compile(r"[^\s@]{1,64}@[^\s@]{1,255}")
 _PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}){1,3}(?!\w)")
 _PRIVATE_NAME_ONLY_RE: Final = re.compile(r"[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}){1,3}\Z")
+_DELIMITED_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:-+[^\W\d_]{2,64}){2,}(?!\w)")
 _PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
 _DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
 _DOTTED_PHONE_RE: Final = re.compile(r"(?:\+?\d{1,3}\.)?\d{3}\.\d{3}\.\d{4}\Z")
@@ -160,73 +164,95 @@ _PRIVATE_IDENTIFIER_SEGMENTS: Final = frozenset(
 )
 _PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS: Final = frozenset(
     {
+        "ack",
         "alarm",
         "alarms",
         "attention",
         "attn",
         "audit",
+        "audio",
         "authoritative",
         "authority",
+        "auto",
         "battery",
         "bundle",
         "calendar",
         "caution",
         "channel",
         "channels",
+        "command",
         "component",
         "config",
         "core",
-        "cryodaq",
         "credentials",
+        "critical",
+        "cryodaq",
+        "dashboard",
         "data",
         "database",
         "disconnected",
         "driver",
         "engine",
         "entry",
+        "event",
         "experiment",
         "failed",
         "fault",
+        "fsm",
+        "gui",
         "health",
         "healthy",
         "infrastructure",
+        "inputs",
         "instruments",
         "integrity",
-        "item",
         "invalid",
+        "item",
+        "keithley",
         "kernel",
+        "leak",
         "locked",
         "log",
         "loss",
         "main",
+        "manual",
+        "monitor",
         "node",
         "operator",
         "pack",
+        "persistence",
+        "phase",
         "plant",
         "platform",
         "plugin",
         "probe",
         "producer",
         "python",
+        "rate",
         "record",
-        "requested",
         "redacted",
         "replay",
+        "requested",
+        "rest",
+        "reviewed",
         "run",
         "safety",
         "sensor",
+        "snapshot",
         "source",
+        "stale",
         "started",
         "stopped",
-        "snapshot",
-        "stale",
         "store",
         "subsystem",
         "summary",
         "support",
+        "telegram",
         "test",
         "token",
+        "transition",
         "transport",
+        "type",
         "unavailable",
         "unknown",
         "ups",
@@ -234,6 +260,7 @@ _PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS: Final = frozenset(
         "version",
         "warning",
         "worker",
+        "zmq",
     }
 )
 _PRIVATE_IDENTIFIER_FIELDS: Final = frozenset(
@@ -254,10 +281,37 @@ _PRIVATE_IDENTIFIER_FIELDS: Final = frozenset(
 _OPAQUE_TOKEN_RE: Final = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/=_-])")
 _SECRET_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _SECRET_KEYS)
 _PRIVATE_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _PRIVATE_KEYS)
+_SNAPSHOT_RECORD_KINDS: Final = frozenset({"health", "attention", "integrity"})
+_SNAPSHOT_REQUIRED_FIELDS: Final = frozenset(
+    {
+        "observed_at",
+        "received_at",
+        "record_role",
+        "revision",
+        "snapshot_mode",
+        "snapshot_producer_id",
+        "snapshot_source_id",
+        "source_age_us",
+        "transport_age_us",
+    }
+)
+_SNAPSHOT_CUT_FIELDS: Final = (
+    "snapshot_mode",
+    "snapshot_source_id",
+    "snapshot_producer_id",
+    "observed_at",
+    "received_at",
+    "revision",
+)
+_SUMMARY_IDENTITIES: Final = {
+    "health": frozenset({"infrastructure-summary", "plant-health-summary"}),
+    "attention": frozenset({"attention-summary"}),
+    "integrity": frozenset({"data-integrity"}),
+}
 
 _RECORD_SCHEMAS: Final = {
     "health": {
-        "required": frozenset({"source_id", "state"}),
+        "required": frozenset({"source_id", "state"}) | _SNAPSHOT_REQUIRED_FIELDS,
         "allowed": frozenset(
             {
                 "source_id",
@@ -278,7 +332,7 @@ _RECORD_SCHEMAS: Final = {
         ),
     },
     "attention": {
-        "required": frozenset({"attention_id", "state", "severity"}),
+        "required": frozenset({"attention_id", "state", "severity"}) | _SNAPSHOT_REQUIRED_FIELDS,
         "allowed": frozenset(
             {
                 "attention_id",
@@ -310,7 +364,7 @@ _RECORD_SCHEMAS: Final = {
         ),
     },
     "integrity": {
-        "required": frozenset({"source_id", "state"}),
+        "required": frozenset({"source_id", "state", "storage"}) | _SNAPSHOT_REQUIRED_FIELDS,
         "allowed": frozenset(
             {
                 "source_id",
@@ -404,7 +458,7 @@ def _identifier(value: object, *, field: str) -> str:
         return value
     if field == "attention_id" and _ALARM_ID_RE.fullmatch(value) is not None:
         return value
-    value = _safe_text(value, allow_uuid=True)
+    value = _safe_text(value, allow_uuid=True, allow_identifier=True)
     if _ID_RE.fullmatch(value) is None:
         raise ValueError(f"{field} contains unsupported characters")
     if field in _PRIVATE_IDENTIFIER_FIELDS:
@@ -439,16 +493,22 @@ def _contains_sensitive_assignment(value: str) -> bool:
     for index, match in enumerate(re.finditer(r"[:=]\s*\S+", value)):
         if index >= MAX_CONTAINER_ITEMS:
             return True
-        prefix = value[max(0, match.start() - 64) : match.start()]
+        prefix = value[: match.start()]
         if any(ord(char) > 127 and char.isalpha() for char in prefix):
             return True
-        for start in range(len(prefix)):
-            if _secret_key_signature(prefix[start:].strip()) in sensitive:
-                return True
+        signature = _secret_key_signature(prefix)
+        if any(signature.endswith(candidate) for candidate in sensitive):
+            return True
     return False
 
 
-def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = False) -> str:
+def _safe_text(
+    value: str,
+    *,
+    allow_sha256: bool = False,
+    allow_uuid: bool = False,
+    allow_identifier: bool = False,
+) -> str:
     if type(value) is not str:
         raise TypeError("text must be exact str")
     if len(value.encode("utf-8")) > MAX_STRING_BYTES:
@@ -459,7 +519,20 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
         for char in unicodedata.normalize("NFKC", normalized).translate(_PATH_CONFUSABLE_TRANSLATION)
         if char not in _BIDI_OR_INVISIBLE and unicodedata.category(char) not in {"Cc", "Cf"}
     )
+    was_percent_decoded = False
+    for _ in range(2):
+        decoded = unquote(security_normalized)
+        if decoded == security_normalized:
+            break
+        was_percent_decoded = True
+        security_normalized = "".join(
+            char
+            for char in unicodedata.normalize("NFKC", decoded).translate(_PATH_CONFUSABLE_TRANSLATION)
+            if char not in _BIDI_OR_INVISIBLE and unicodedata.category(char) not in {"Cc", "Cf"}
+        )
     stripped_security = security_normalized.strip()
+    if was_percent_decoded and any(pattern.search(security_normalized) for pattern in _ABSOLUTE_PATH_PATTERNS):
+        raise ValueError("percent-encoded absolute path text is not permitted")
     if _SERIALIZED_BLOB_RE.search(stripped_security):
         raise ValueError("serialized blob text is not permitted")
     if _PATH_TRAVERSAL_RE.search(security_normalized):
@@ -508,7 +581,11 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
             raise ValueError("private-data-shaped text is not permitted")
     if security_screened != security_normalized:
         return "<redacted:path>"
-    if _PRIVATE_NAME_RE.search(security_screened) or _PRIVATE_NAME_ONLY_RE.fullmatch(screened_stripped):
+    if not allow_identifier and _DELIMITED_PRIVATE_NAME_RE.search(security_screened):
+        raise ValueError("hyphen-delimited private-data-shaped text is not permitted")
+    if not allow_identifier and (
+        _PRIVATE_NAME_RE.search(security_screened) or _PRIVATE_NAME_ONLY_RE.fullmatch(screened_stripped)
+    ):
         return "<redacted:private>"
     for candidate in _OPAQUE_TOKEN_RE.findall(security_screened):
         if not (
@@ -630,6 +707,37 @@ def _record_timestamp(value: object, *, field: str) -> str:
     return value
 
 
+def _validate_snapshot_relationships(kind: str, payload: dict[str, object]) -> None:
+    if kind not in _SNAPSHOT_RECORD_KINDS:
+        return
+    role = payload["record_role"]
+    mode = payload["snapshot_mode"]
+    identity_field = "attention_id" if kind == "attention" else "source_id"
+    identity = payload[identity_field]
+    summary_identities = _SUMMARY_IDENTITIES[kind]
+    if role == "summary" and identity not in summary_identities:
+        raise ValueError(f"{kind} summary has a non-canonical identity")
+    if role == "child" and identity in summary_identities:
+        raise ValueError(f"{kind} child uses a reserved summary identity")
+    if kind == "integrity" and role != "summary":
+        raise ValueError("integrity evidence must have summary record_role")
+    for field in ("snapshot_source_id", "snapshot_producer_id"):
+        source_id = payload[field]
+        if _LIVE_SNAPSHOT_ID_RE.fullmatch(source_id) is not None and mode != "live":
+            raise ValueError(f"{field} live snapshot identity contradicts snapshot mode")
+        if _REPLAY_SNAPSHOT_ID_RE.fullmatch(source_id) is not None and mode != "replay":
+            raise ValueError(f"{field} replay snapshot identity contradicts snapshot mode")
+    if mode == "live" and payload["observed_at"] > payload["received_at"]:
+        raise ValueError("live snapshot observed_at must not exceed received_at")
+    if kind == "integrity":
+        state = payload["state"]
+        storage = payload["storage"]
+        if state == "ok" and storage != "available":
+            raise ValueError("ok integrity state requires available storage")
+        if state in {"stale", "disconnected"} and storage != "unknown":
+            raise ValueError("stale/disconnected integrity state requires unknown storage")
+
+
 def _validated_record_payload(kind: str, payload: object) -> dict[str, object]:
     if type(payload) is not dict:
         raise TypeError("payload must be exact dict")
@@ -640,6 +748,8 @@ def _validated_record_payload(kind: str, payload: object) -> dict[str, object]:
     missing = schema["required"] - keys
     unsupported = keys - schema["allowed"]
     if missing:
+        if kind in _SNAPSHOT_RECORD_KINDS and missing.intersection(_SNAPSHOT_REQUIRED_FIELDS):
+            raise ValueError(f"{kind} snapshot provenance is missing required fields: {sorted(missing)}")
         raise ValueError(f"{kind} record is missing required fields: {sorted(missing)}")
     if unsupported:
         raise ValueError(f"{kind} record has unsupported fields: {sorted(unsupported)}")
@@ -664,6 +774,7 @@ def _validated_record_payload(kind: str, payload: object) -> dict[str, object]:
             validated[field] = value
         else:  # pragma: no cover - schema and validators are kept exhaustive together
             raise AssertionError(f"missing validator for record field {field}")
+    _validate_snapshot_relationships(kind, validated)
     return validated
 
 
@@ -818,22 +929,21 @@ class BundleCapture:
             "log": "event_id",
             "integrity": "source_id",
         }
-        record_identities = tuple(
-            (item.kind, json.loads(item.payload_json)[identity_fields[item.kind]]) for item in self.records
-        )
+        decoded_records = tuple((item.kind, json.loads(item.payload_json)) for item in self.records)
+        record_identities = tuple((kind, payload[identity_fields[kind]]) for kind, payload in decoded_records)
         if len(set(record_identities)) != len(record_identities):
             raise ValueError("record identities must be unique within each evidence kind")
+        summary_cuts = {
+            tuple(payload[field] for field in _SNAPSHOT_CUT_FIELDS)
+            for kind, payload in decoded_records
+            if kind in _SNAPSHOT_RECORD_KINDS and payload["record_role"] == "summary"
+        }
+        if len(summary_cuts) > 1:
+            raise ValueError("snapshot summaries do not share one coherent snapshot cut")
         if tuple(sorted(set(self.unavailable_fields))) != self.unavailable_fields:
             raise ValueError("unavailable_fields must be sorted and unique")
         if any(item not in _UNAVAILABLE_FIELDS for item in self.unavailable_fields):
             raise ValueError("unavailable_fields contains an unsupported field")
-        record_kinds = {item.kind for item in self.records}
-        if record_kinds.intersection(self.unavailable_fields):
-            raise ValueError("unavailable evidence kinds cannot also contain records")
-        if "versions" in self.unavailable_fields and self.versions:
-            raise ValueError("unavailable versions must not contain version evidence")
-        if "config_fingerprints" in self.unavailable_fields and self.config_fingerprints:
-            raise ValueError("unavailable config_fingerprints must not contain fingerprint evidence")
         if tuple(sorted(self.unavailable_sources, key=lambda item: item.source)) != self.unavailable_sources:
             raise ValueError("unavailable_sources must be sorted and unique by source")
         unavailable_source_names = tuple(item.source for item in self.unavailable_sources)
@@ -841,6 +951,27 @@ class BundleCapture:
             raise ValueError("unavailable_sources must be sorted and unique by source")
         if unavailable_source_names != self.unavailable_fields:
             raise ValueError("every unavailable field must have exactly one reason-coded source entry")
+        record_kinds = {item.kind for item in self.records}
+        if record_kinds.intersection(self.unavailable_fields):
+            raise ValueError("unavailable evidence kinds cannot also contain records")
+        if "versions" in self.unavailable_fields and self.versions:
+            raise ValueError("unavailable versions must not contain version evidence")
+        if "versions" not in self.unavailable_fields and not self.versions:
+            raise ValueError("available versions must contain version evidence")
+        if "config_fingerprints" in self.unavailable_fields and self.config_fingerprints:
+            raise ValueError("unavailable config_fingerprints must not contain fingerprint evidence")
+        if "config_fingerprints" not in self.unavailable_fields and not self.config_fingerprints:
+            raise ValueError("available config_fingerprints must contain fingerprint evidence")
+        for kind, expected_identities in _SUMMARY_IDENTITIES.items():
+            if kind in self.unavailable_fields:
+                continue
+            actual_identities = {
+                payload[identity_fields[kind]]
+                for record_kind, payload in decoded_records
+                if record_kind == kind and payload["record_role"] == "summary"
+            }
+            if actual_identities != expected_identities:
+                raise ValueError(f"available {kind} evidence must contain its canonical snapshot summaries")
 
     @staticmethod
     def _exact_tuple(value: object, item_type: type, field: str, limit: int) -> None:

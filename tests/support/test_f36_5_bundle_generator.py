@@ -185,12 +185,41 @@ def _minimal_capture(**overrides: object) -> BundleCapture:
         unavailable_fields=(),
     )
     defaults.update(overrides)
+    if "unavailable_fields" not in overrides:
+        records = defaults["records"]
+        assert type(records) is tuple
+        record_kinds = {record.kind for record in records}
+        unavailable = tuple(sorted({"attention", "health", "integrity"} - record_kinds))
+        defaults["unavailable_fields"] = unavailable
+        defaults["unavailable_sources"] = tuple(
+            UnavailableSource(source, "source_not_provided") for source in unavailable
+        )
     return BundleCapture(**defaults)  # type: ignore[arg-type]
 
 
 def _evidence(bundle) -> dict[str, object]:
     artifact = next(a for a in bundle.artifacts if a.logical_path == "evidence.json")
     return json.loads(artifact.content)
+
+
+def _snapshot_record_fields(
+    *,
+    role: str = "summary",
+    mode: str = "live",
+    source_id: str = "engine-v1",
+    producer_id: str = "engine-v1",
+) -> dict[str, object]:
+    return {
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+        "received_at": "2026-07-14T11:59:01.000000Z",
+        "record_role": role,
+        "revision": 1,
+        "snapshot_mode": mode,
+        "snapshot_producer_id": producer_id,
+        "snapshot_source_id": source_id,
+        "source_age_us": 0,
+        "transport_age_us": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +459,10 @@ def test_collector_keeps_safe_versions_when_name_like_value_is_redacted() -> Non
 
 @pytest.mark.parametrize("value", ("alice.operator", "alice.smith"))
 def test_identifier_valued_private_role_is_rejected(value: str) -> None:
-    record = EvidenceRecord.from_payload("health", {"source_id": value, "state": "ok"})
+    record = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": value, "state": "ok", **_snapshot_record_fields(role="child")},
+    )
 
     assert json.loads(record.payload_json)["source_id"] == "redacted-private"
 
@@ -573,20 +605,8 @@ def test_redaction_category_nested_credentials_are_rejected() -> None:
 def test_manifest_stability_identical_inputs_produce_byte_identical_manifest() -> None:
     """Identical BundleCapture instances must produce byte-identical manifests."""
     record = EvidenceRecord.from_payload("log", {"event_id": "log-1", "event_code": "worker.started", "level": "info"})
-    capture_a = BundleCapture(
-        bundle_id=_BUNDLE_ID,
-        created_at=_NOW,
-        versions=(SoftwareVersion("cryodaq", "0.64.1"),),
-        config_fingerprints=(ConfigFingerprint("alarms", "alarms.public.v1", "redacted_public_projection", _HASH),),
-        records=(record,),
-    )
-    capture_b = BundleCapture(
-        bundle_id=_BUNDLE_ID,
-        created_at=_NOW,
-        versions=(SoftwareVersion("cryodaq", "0.64.1"),),
-        config_fingerprints=(ConfigFingerprint("alarms", "alarms.public.v1", "redacted_public_projection", _HASH),),
-        records=(record,),
-    )
+    capture_a = _minimal_capture(records=(record,))
+    capture_b = _minimal_capture(records=(record,))
 
     bundle_a = build_support_bundle(capture_a)
     bundle_b = build_support_bundle(capture_b)
@@ -602,9 +622,11 @@ def test_manifest_stability_across_hash_seeds_via_subprocess() -> None:
         "from datetime import UTC, datetime\n"
         "from cryodaq.support.bundle import *\n"
         "r = EvidenceRecord.from_payload('log', {'level':'info','event_code':'engine.started','event_id':'log-1'})\n"
+        "u = ('attention', 'health', 'integrity')\n"
+        "s = tuple(UnavailableSource(name, 'source_not_provided') for name in u)\n"
         "c = BundleCapture('f36-5-seed-test', datetime(2026,7,14,tzinfo=UTC),\n"
         "    (SoftwareVersion('cryodaq','0.64.1'),),\n"
-        "    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','b'*64),), (r,))\n"
+        "    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','b'*64),), (r,), u, s)\n"
         "print(build_support_bundle(c).manifest_sha256)"
     )
     outputs = []
@@ -1677,8 +1699,14 @@ def test_attention_summary_id_collision_fails_attention_closed() -> None:
 
 
 def test_bundle_capture_rejects_duplicate_record_identities() -> None:
-    first = EvidenceRecord.from_payload("health", {"source_id": "plant", "state": "ok"})
-    second = EvidenceRecord.from_payload("health", {"source_id": "plant", "state": "fault"})
+    first = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant", "state": "ok", **_snapshot_record_fields(role="child")},
+    )
+    second = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant", "state": "fault", **_snapshot_record_fields(role="child")},
+    )
 
     with pytest.raises(ValueError, match="record identities"):
         _minimal_capture(records=(first, second))
@@ -1805,13 +1833,14 @@ def test_materially_distinct_recent_events_remain_distinguishable(input_name: st
     ),
 )
 def test_production_snapshot_identifiers_survive_the_bundle_schema(source_id: str) -> None:
+    mode = "replay" if source_id.startswith("replay/") else "live"
     record = EvidenceRecord.from_payload(
         "integrity",
         {
             "source_id": "data-integrity",
             "state": "ok",
-            "snapshot_source_id": source_id,
-            "snapshot_producer_id": source_id,
+            "storage": "available",
+            **_snapshot_record_fields(mode=mode, source_id=source_id, producer_id=source_id),
         },
     )
 
@@ -1824,7 +1853,12 @@ def test_production_alarm_identifier_survives_the_bundle_schema() -> None:
     alarm_id = "alarm:" + "a" * 32
     record = EvidenceRecord.from_payload(
         "attention",
-        {"attention_id": alarm_id, "state": "fault", "severity": "fault"},
+        {
+            "attention_id": alarm_id,
+            "state": "fault",
+            "severity": "fault",
+            **_snapshot_record_fields(role="child"),
+        },
     )
 
     assert json.loads(record.payload_json)["attention_id"] == alarm_id
@@ -2030,6 +2064,10 @@ def test_delimiter_obscured_credentials_and_private_names_never_reach_bundle(
     (
         ("operator", ("safety_audio_ack", "safety_fault")),
         ("auto", ("auto", "event_type")),
+        ("auto", ("auto", "experiment")),
+        ("auto", ("auto", "phase")),
+        ("auto", ("auto", "keithley")),
+        ("auto", ("auto", "leak_rate")),
         ("command", ()),
     ),
 )

@@ -27,7 +27,23 @@ NOW = datetime(2026, 7, 12, 7, 8, 9, 123456, tzinfo=UTC)
 HASH = "a" * 64
 
 
+def _snapshot_fields(*, role: str = "summary") -> dict[str, object]:
+    return {
+        "observed_at": "2026-07-12T07:08:08.123456Z",
+        "received_at": "2026-07-12T07:08:09.123456Z",
+        "record_role": role,
+        "revision": 1,
+        "snapshot_mode": "live",
+        "snapshot_producer_id": "engine-v1",
+        "snapshot_source_id": "engine-v1",
+        "source_age_us": 0,
+        "transport_age_us": 0,
+    }
+
+
 def _capture(*, records: tuple[EvidenceRecord, ...] = (), unavailable: tuple[str, ...] = ()) -> BundleCapture:
+    record_kinds = {record.kind for record in records}
+    unavailable = tuple(sorted(set(unavailable) | ({"attention", "health", "integrity"} - record_kinds)))
     return BundleCapture(
         bundle_id="support-0001",
         created_at=NOW,
@@ -162,7 +178,13 @@ def test_degraded_capture_retains_explicit_unavailable_fields() -> None:
             records=(
                 EvidenceRecord.from_payload(
                     "integrity",
-                    {"source_id": "database", "state": "unavailable", "reason_code": "database_locked"},
+                    {
+                        "source_id": "data-integrity",
+                        "state": "unavailable",
+                        "storage": "unavailable",
+                        "reason_code": "database_locked",
+                        **_snapshot_fields(),
+                    },
                 ),
             ),
             unavailable=("attention", "health"),
@@ -308,7 +330,10 @@ def test_capture_rejects_mutable_timezone_without_invoking_it() -> None:
 
 
 def test_unavailable_fields_cannot_contradict_present_evidence() -> None:
-    health = EvidenceRecord.from_payload("health", {"source_id": "engine", "state": "unavailable"})
+    health = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "engine", "state": "unavailable", **_snapshot_fields(role="child")},
+    )
     with pytest.raises(ValueError, match="cannot also contain"):
         BundleCapture(
             "bundle", NOW, (), (), (health,), ("health",), (UnavailableSource("health", "source_not_provided"),)
@@ -327,7 +352,7 @@ def test_unavailable_fields_cannot_contradict_present_evidence() -> None:
         BundleCapture(
             "bundle",
             NOW,
-            (),
+            (SoftwareVersion("cryodaq", "1"),),
             (ConfigFingerprint("alarms", "alarms.public.v1", "redacted_public_projection", HASH),),
             (),
             ("config_fingerprints",),
@@ -421,11 +446,22 @@ def test_fingerprint_requires_explicit_redacted_public_projection_provenance() -
     ],
 )
 def test_dedicated_digest_field_and_canonical_uuid_id_are_not_guessed_as_secrets(source_id: str) -> None:
-    record = EvidenceRecord.from_payload(
+    integrity = EvidenceRecord.from_payload(
         "integrity",
-        {"source_id": source_id, "state": "ok", "digest_sha256": HASH},
+        {
+            "source_id": "data-integrity",
+            "state": "ok",
+            "storage": "available",
+            "digest_sha256": HASH,
+            **_snapshot_fields(),
+        },
     )
-    assert json.loads(record.payload_json)["digest_sha256"] == HASH
+    child = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": source_id, "state": "ok", **_snapshot_fields(role="child")},
+    )
+    assert json.loads(integrity.payload_json)["digest_sha256"] == HASH
+    assert json.loads(child.payload_json)["source_id"] == source_id
     with pytest.raises(ValueError, match="opaque"):
         SoftwareVersion("component", "550e8400-e29b-41d4-a716-446655440000")
 
@@ -459,8 +495,10 @@ def test_bundle_is_stable_across_hash_seeds() -> None:
 from datetime import UTC, datetime
 from cryodaq.support.bundle import *
 r = EvidenceRecord.from_payload('log', {'level':'info','event_code':'worker.started','event_id':'log-1'})
+u = ('attention', 'health', 'integrity')
+s = tuple(UnavailableSource(name, 'source_not_provided') for name in u)
 c = BundleCapture('bundle-1', datetime(2026,1,1,tzinfo=UTC), (SoftwareVersion('cryodaq','1'),),
-    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','a'*64),), (r,))
+    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','a'*64),), (r,), u, s)
 print(build_support_bundle(c).manifest_sha256)
 """
     outputs = []

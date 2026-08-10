@@ -41,20 +41,44 @@ _MAX_ATTENTION_RECORDS = 32
 _MAX_LOG_RECORDS = 64
 _MAX_AUDIT_RECORDS = 64
 
-_PUBLIC_EVENT_SOURCES = frozenset({"engine", "experiment", "record-store", "safety", "system"})
+_PUBLIC_EVENT_SOURCE_CODES = {
+    "auto": "auto",
+    "command": "manual",
+    "dashboard": "manual",
+    "engine": "engine",
+    "experiment": "experiment",
+    "gui": "manual",
+    "machine": "machine",
+    "operator": "manual",
+    "record-store": "record-store",
+    "rest": "manual",
+    "safety": "safety",
+    "system": "system",
+    "telegram": "manual",
+    "zmq": "manual",
+}
 _PUBLIC_EVENT_TAGS = frozenset(
     {
         "accepted",
         "alarm",
+        "auto",
         "critical",
         "debug",
         "denied",
         "error",
+        "event_type",
+        "experiment",
         "failed",
         "fault",
         "info",
+        "keithley",
+        "leak_rate",
         "pending",
+        "phase",
+        "phase_transition",
         "run",
+        "safety_audio_ack",
+        "safety_fault",
         "settled",
         "success",
         "warning",
@@ -143,10 +167,11 @@ def _collect_versions(
         seen.add(core.component)
 
         if extra is not None:
-            if 1 + len(extra) > MAX_VERSIONS:
+            items = tuple(itertools.islice(extra.items(), MAX_VERSIONS + 1))
+            if 1 + len(items) > MAX_VERSIONS:
                 _mark_unavailable("versions", "source_invalid", unavailable)
                 return
-            for component, version in extra.items():
+            for component, version in items:
                 item = SoftwareVersion(component, version)
                 if item.component in seen:
                     raise ValueError("version component collision after redaction")
@@ -253,9 +278,9 @@ def _collect_health(
             payload: dict[str, object] = {
                 "source_id": safe_source_id,
                 "state": _safe_identifier(state.value),
-                "record_role": "child",
                 "observed_at": _utc_iso(_summary.observed_at),
                 "revision": _summary.revision,
+                **_summary_snapshot_fields(snapshot, _summary, record_role="child"),
             }
             _add_reason_fields(payload, reason_codes, transport_reason_codes)
             pending.append(EvidenceRecord.from_payload("health", payload))
@@ -315,9 +340,9 @@ def _collect_attention(
                 "attention_id": safe_attention_id,
                 "severity": _SEVERITY_FROM_STATE.get(state, "warning"),
                 "state": state,
-                "record_role": "child",
                 "observed_at": _utc_iso(item.observed_at),
                 "revision": attention.revision,
+                **_summary_snapshot_fields(snapshot, attention, record_role="child"),
             }
             _add_reason_fields(payload, (), item.transport_reason_codes)
             pending.append(EvidenceRecord.from_payload("attention", payload))
@@ -373,11 +398,19 @@ def _collect_recent_entries(
                 or any(type(tag) is not str for tag in entry.tags)
             ):
                 raise TypeError("recent evidence source and tags must be exact strings")
-            if entry.source not in _PUBLIC_EVENT_SOURCES or any(tag not in _PUBLIC_EVENT_TAGS for tag in entry.tags):
+            if entry.source not in _PUBLIC_EVENT_SOURCE_CODES or any(
+                tag not in _PUBLIC_EVENT_TAGS for tag in entry.tags
+            ):
                 raise ValueError("recent evidence source or tags are not in the public projection allowlist")
             observed_at = _utc_iso(entry.timestamp)
             public_tags = tuple(sorted(set(entry.tags)))
-            primary_tag = public_tags[0] if public_tags else "entry"
+            semantic_values = tuple(
+                tag for tag in public_tags if tag in (_AUDIT_OUTCOMES if kind == "audit" else _LOG_LEVELS)
+            )
+            if len(semantic_values) > 1:
+                raise ValueError("recent evidence has conflicting public semantic tags")
+            source_code = _PUBLIC_EVENT_SOURCE_CODES[entry.source]
+            tag_code = ".".join(public_tags) if public_tags else "entry"
             compact_time = observed_at.translate(str.maketrans("", "", "-:."))
             event_id = _safe_identifier(f"{kind}-{entry.id}-{compact_time}", field="event_id")
             if event_id in seen_event_ids:
@@ -385,15 +418,15 @@ def _collect_recent_entries(
             seen_event_ids.add(event_id)
             payload: dict[str, object] = {
                 "event_id": event_id,
-                "event_code": _safe_identifier(f"{kind}.{entry.source}.{primary_tag}", field="event_code"),
+                "event_code": _safe_identifier(f"{kind}.{source_code}.{tag_code}", field="event_code"),
                 "observed_at": observed_at,
                 "revision": entry.id,
                 "source_id": "record-store",
             }
             if kind == "audit":
-                payload["outcome"] = next((tag for tag in public_tags if tag in _AUDIT_OUTCOMES), "recorded")
+                payload["outcome"] = semantic_values[0] if semantic_values else "recorded"
             else:
-                payload["level"] = next((tag for tag in public_tags if tag in _LOG_LEVELS), "info")
+                payload["level"] = semantic_values[0] if semantic_values else "info"
             pending.append(EvidenceRecord.from_payload(kind, payload))
         records.extend(pending)
     except Exception as exc:
@@ -440,9 +473,11 @@ def _collect_integrity(
 def _summary_snapshot_fields(
     snapshot: OperatorSnapshot,
     summary: PlantHealthSummary | InfrastructureNodeHealth | AttentionQueue | DataIntegritySummary,
+    *,
+    record_role: str = "summary",
 ) -> dict[str, object]:
     return {
-        "record_role": "summary",
+        "record_role": record_role,
         "snapshot_mode": _safe_identifier(snapshot.cut.mode.value),
         "snapshot_source_id": _safe_identifier(snapshot.cut.source, field="snapshot_source_id"),
         "snapshot_producer_id": _safe_identifier(snapshot.cut.producer_id, field="snapshot_producer_id"),
