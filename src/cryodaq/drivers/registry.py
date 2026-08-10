@@ -36,7 +36,9 @@ from cryodaq.drivers.contracts import (
     _issue_registry_runtime_binding,
 )
 from cryodaq.health.contract import (
+    HealthTelemetryError,
     HealthTelemetryReader,
+    _identifier,
     _issue_health_telemetry_reader,
     _IssuedHealthTelemetryReader,
     _StaticHealthTelemetryAllowlistEntry,
@@ -161,6 +163,8 @@ class DriverConstructionContext:
     keithley_watchdog: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if type(self.mock) is not bool:
+            raise DriverRegistryError("DriverConstructionContext.mock must be an exact boolean")
         object.__setattr__(self, "data_dir", Path(self.data_dir))
         normalized = _normalize_keithley_watchdog(self.keithley_watchdog, path="keithley.watchdog")
         object.__setattr__(self, "keithley_watchdog", MappingProxyType(normalized))
@@ -727,6 +731,8 @@ def construct_health_telemetry_reader(
         raise DriverRegistryError("construct_health_telemetry_reader requires validated configuration")
     if not isinstance(context, DriverConstructionContext):
         raise DriverRegistryError("construct_health_telemetry_reader requires a DriverConstructionContext")
+    if type(context.mock) is not bool:
+        raise DriverRegistryError("DriverConstructionContext.mock must be an exact boolean")
     spec = get_health_telemetry_spec(config.spec.type_name)
     if config.spec is not spec:
         raise DriverRegistryError("validated health config does not reference a canonical registry spec")
@@ -872,7 +878,7 @@ def _revalidate_canonical_values(*, spec: DriverSpec, name: str, values: Mapping
     checked_name = checked.get("name")
     if not isinstance(name, str) or name != checked_name:
         raise DriverRegistryError("validated config.name does not match its identity")
-    checked["name"] = _validate_instrument_identity(name, path="validated config.name")
+    checked["name"] = _validate_registry_identity(spec, name, path="validated config.name")
     return checked
 
 
@@ -893,6 +899,15 @@ def _validate_instrument_identity(name: object, *, path: str) -> str:
     ):
         raise DriverRegistryError(f"{path} must be a stable identity, not path syntax")
     return stable_name
+
+
+def _validate_registry_identity(spec: DriverSpec, name: object, *, path: str) -> str:
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
+        try:
+            name = _identifier(name, field_name=path)
+        except (HealthTelemetryError, TypeError) as exc:
+            raise DriverRegistryError(str(exc)) from exc
+    return _validate_instrument_identity(name, path=path)
 
 
 def _validate_registry_entry(
@@ -927,7 +942,7 @@ def _validate_registry_entry(
     values = spec.normalizer(values, path)
     name = values["name"]
     assert isinstance(name, str)
-    stable_name = _validate_instrument_identity(name, path=f"{path}.name")
+    stable_name = _validate_registry_identity(spec, name, path=f"{path}.name")
     values["name"] = stable_name
     return ValidatedInstrumentConfig._from_validated(spec=spec, name=stable_name, values=values)
 

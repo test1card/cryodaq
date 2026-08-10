@@ -190,6 +190,33 @@ def test_registry_reader_cannot_be_coerced_into_command_capability() -> None:
     assert not hasattr(reader, "__dict__")
 
 
+@pytest.mark.parametrize(
+    ("mock", "message"),
+    [(False, "simulation-only"), ("not-a-bool", "exact boolean")],
+)
+def test_health_construction_requires_exact_true_simulation_context(mock: object, message: str) -> None:
+    validated = driver_registry.validate_health_telemetry_entry(_health_configuration())
+    binding_count = len(driver_registry._HEALTH_TELEMETRY_BINDINGS)
+
+    with pytest.raises(driver_registry.DriverRegistryError, match=message):
+        context = driver_registry.DriverConstructionContext(mock=mock)  # type: ignore[arg-type]
+        driver_registry.construct_health_telemetry_reader(validated, context)
+
+    assert len(driver_registry._HEALTH_TELEMETRY_BINDINGS) == binding_count
+
+
+def test_health_construction_revalidates_forged_context_mock_type() -> None:
+    validated = driver_registry.validate_health_telemetry_entry(_health_configuration())
+    context = object.__new__(driver_registry.DriverConstructionContext)
+    object.__setattr__(context, "mock", "not-a-bool")
+    binding_count = len(driver_registry._HEALTH_TELEMETRY_BINDINGS)
+
+    with pytest.raises(driver_registry.DriverRegistryError, match="exact boolean"):
+        driver_registry.construct_health_telemetry_reader(validated, context)
+
+    assert len(driver_registry._HEALTH_TELEMETRY_BINDINGS) == binding_count
+
+
 def test_configured_ordinary_lab_support_node_types_are_deterministic_at_two_hz() -> None:
     factory = getattr(driver_registry, "construct_health_telemetry_reader", None)
     assert callable(factory), "driver registry must construct allowlisted health telemetry readers"
@@ -226,6 +253,15 @@ def test_registry_rejects_faster_than_two_hz() -> None:
     assert callable(factory), "driver registry must construct allowlisted health telemetry readers"
     with pytest.raises(ValueError, match="cadence_hz"):
         _registry_reader(name="compressor.too_fast", cadence_hz=2.0001)
+
+
+@pytest.mark.parametrize("name", ["x" * 97, "я" * 49])
+def test_health_validation_rejects_names_exceeding_descriptor_utf8_limit(name: str) -> None:
+    with pytest.raises(driver_registry.DriverRegistryError, match="96 UTF-8 bytes"):
+        driver_registry.validate_health_telemetry_entry(
+            _health_configuration(name=name),
+            path="health_nodes[0]",
+        )
 
 
 @pytest.mark.parametrize("start_time_s", [1e308, float(2**52 - 1024)])
