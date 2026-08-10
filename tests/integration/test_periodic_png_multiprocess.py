@@ -381,16 +381,18 @@ def _require_periodic_render_process(process: psutil.Process, generation_id: str
 
 def _reap_observed_process(process: psutil.Process) -> None:
     try:
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return
         process.wait(timeout=_PROCESS_TIMEOUT_S)
         return
-    except psutil.NoSuchProcess:
+    except (psutil.NoSuchProcess, ChildProcessError):
         return
     except psutil.TimeoutExpired:
         pass
     try:
         process.kill()
         process.wait(timeout=_PROCESS_TIMEOUT_S)
-    except psutil.NoSuchProcess:
+    except (psutil.NoSuchProcess, ChildProcessError):
         return
 
 
