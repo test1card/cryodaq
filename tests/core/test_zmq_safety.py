@@ -64,6 +64,33 @@ def _receive_heartbeat(bridge: _RunningBridge) -> dict[object, object]:
     return message
 
 
+class _OverflowProbeQueue:
+    """Test queue proxy that gates the real warning enqueue."""
+
+    def __init__(self, inner: mp.Queue) -> None:
+        self._inner = inner
+        self.warning_attempt = mp.Event()
+        self.warning_release = mp.Event()
+        self.warning_enqueued = mp.Event()
+
+    def put_nowait(self, item: object) -> None:
+        if isinstance(item, dict) and item.get("__type") == "warning":
+            self.warning_attempt.set()
+            if not self.warning_release.wait(timeout=8.0):
+                raise queue.Full
+            self.warning_release.clear()
+            self._inner.put_nowait(item)
+            self.warning_enqueued.set()
+            return
+        self._inner.put_nowait(item)
+
+    def get(self, *args: object, **kwargs: object) -> object:
+        return self._inner.get(*args, **kwargs)
+
+    def full(self) -> bool:
+        return self._inner.full()
+
+
 def test_subprocess_sends_heartbeat() -> None:
     """A real bridge subprocess causally emits a heartbeat envelope."""
     with _running_bridge("tcp://127.0.0.1:59990", "tcp://127.0.0.1:59991") as bridge:
@@ -87,20 +114,14 @@ def test_heartbeat_has_timestamp() -> None:
 def test_overflow_counter_emits_warning_on_queue_full() -> None:
     """When data_queue overflows, subprocess emits a structured warning envelope.
 
-    Production code (zmq_subprocess.sub_drain_loop):
-      - On queue.Full: dropped_counter["n"] += 1
-      - If dropped_counter["n"] % 100 == 1: put_nowait warning (suppress Full)
-
-    Strategy: use a queue size of 20 and publish as fast as possible (no sleep).
-    The main thread does NOT drain the queue for 2 seconds so that overflow
-    accumulates to at least 100 drops, guaranteeing the warning fires at drop
-    101 (and every 100 drops thereafter).  Then we drain everything and check
-    for the warning envelope.
+    The test proxy synchronizes on the production queue.Full path and gates the
+    warning enqueue until the parent has freed a queue slot.  It then waits for
+    the successful enqueue event before draining and checking the envelope.
     """
     from cryodaq.core.zmq_subprocess import zmq_bridge_main
 
     QUEUE_SIZE = 20
-    data_q: mp.Queue = mp.Queue(maxsize=QUEUE_SIZE)
+    data_q = _OverflowProbeQueue(mp.Queue(maxsize=QUEUE_SIZE))
     cmd_q: mp.Queue = mp.Queue(maxsize=100)
     reply_q: mp.Queue = mp.Queue(maxsize=100)
     shutdown = mp.Event()
@@ -158,30 +179,26 @@ def test_overflow_counter_emits_warning_on_queue_full() -> None:
     pub_thread = threading.Thread(target=_publish, daemon=True)
     pub_thread.start()
 
-    # Phase 1: do NOT drain for 3s so the queue fills and drops accumulate.
-    # At 100 drops (% 100 == 1 fires at drop 1 and 101), the subprocess
-    # attempts put_nowait for the warning.  The queue is still full at this
-    # point so the warning is suppressed on drop 1.  After 100 more drops
-    # (drop 101) it tries again.  We need at least one slot free at drop 101.
-    _time.sleep(3.0)
+    # The probe observes the production queue.Full path and gates the warning
+    # put.  Free one slot before releasing it, so the warning cannot be lost to
+    # the full queue; then wait for the successful enqueue signal.
+    assert data_q.warning_attempt.wait(timeout=8.0), "subprocess must reach the queue overflow warning path"
+    data_q.get(timeout=1.0)
+    data_q.warning_release.set()
+    assert data_q.warning_enqueued.wait(timeout=8.0), "subprocess must enqueue the overflow warning"
+    stop_pub.set()
 
-    # Phase 2: drain ONE item to open a slot, then pause briefly so the
-    # subprocess can insert the warning (it fires continuously every 100 drops).
-    # Repeat for up to 8 seconds.
     warning_received = False
     deadline = _time.monotonic() + 8.0
     while _time.monotonic() < deadline and not warning_received:
         try:
-            msg = data_q.get_nowait()
-            if isinstance(msg, dict) and msg.get("__type") == "warning":
-                text = msg.get("message", "").lower()
-                if "dropped" in text or "overflow" in text:
-                    warning_received = True
-                    break
+            msg = data_q.get(timeout=max(0.001, deadline - _time.monotonic()))
         except queue.Empty:
-            pass
-        _time.sleep(0.001)  # 1ms cycle: drain one → let subprocess insert warning
-
+            break
+        if isinstance(msg, dict) and msg.get("__type") == "warning":
+            text = msg.get("message", "").lower()
+            if "dropped" in text or "overflow" in text:
+                warning_received = True
     stop_pub.set()
     pub_thread.join(timeout=2.0)
     shutdown.set()
