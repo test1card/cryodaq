@@ -2446,6 +2446,21 @@ def _decode_complete_output(stdout: _StreamEvidence, payload: bytes) -> str:
         raise _RunnerFoundationError("pytest output is not strict UTF-8") from exc
 
 
+_DIAGNOSTIC_OUTPUT_LIMIT = 4096
+
+
+def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
+    def bounded(payload: bytes) -> str:
+        text = payload.decode("utf-8", errors="replace")
+        if len(text) > _DIAGNOSTIC_OUTPUT_LIMIT:
+            text = text[:_DIAGNOSTIC_OUTPUT_LIMIT] + "\n...[truncated]"
+        return text if text else "<empty>"
+
+    return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
+        stderr
+    )
+
+
 def _parse_exact_collection(
     *,
     stdout_evidence: _StreamEvidence,
@@ -2455,7 +2470,9 @@ def _parse_exact_collection(
     exit_code: int,
 ) -> tuple[str, ...]:
     if exit_code != 0:
-        raise _RunnerFoundationError("exact-six collection exit code is nonzero")
+        raise _RunnerFoundationError(
+            "exact-six collection execution failed: " + _child_failure_message(exit_code, stdout, stderr)
+        )
     out = _decode_complete_output(stdout_evidence, stdout)
     err = _decode_complete_output(stderr_evidence, stderr)
     if err.strip():
@@ -2482,7 +2499,7 @@ def _validate_exact_execution(
     exit_code: int,
 ) -> None:
     if exit_code != 0:
-        raise _RunnerFoundationError("exact-six execution exit code is nonzero")
+        raise _RunnerFoundationError("exact-six execution failed: " + _child_failure_message(exit_code, stdout, stderr))
     out = _decode_complete_output(stdout_evidence, stdout)
     err = _decode_complete_output(stderr_evidence, stderr)
     if err.strip():
