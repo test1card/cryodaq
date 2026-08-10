@@ -55,13 +55,13 @@ This table defines the product contract, not a blanket conformance verdict. “T
 | **1.3.3 Sensory Characteristics** (A) | Target; evidence open | Instructions never refer only to shape/color/position (e.g., "click the red one") |
 | **1.3.4 Orientation** (AA) | Target; evidence open | Desktop-only; landscape is the only orientation |
 | **1.3.5 Identify Input Purpose** (AA) | Target; evidence open | Form autocomplete attributes where applicable (operator login, if present) |
-| **1.4.1 Use of Color** (A) | Mechanically mapped; human scenarios open | Production state inputs are checked for Russian text, accessible names, and distinct non-color geometry; operator recognition remains a scripted human gate. |
+| **1.4.1 Use of Color** (A) | Mechanically mapped; human scenarios open | Every production source state is checked against exact Russian visible/accessibility text, the real `CanonicalStatusLabel` name/description, and one of five pinned geometries rendered by the production painter; operator recognition remains a scripted human gate. |
 | **1.4.2 Audio Control** (A) | Open | Alarm beeps exist. Current dual-owner fail-loud behavior has no consolidated mute/volume surface; exact-activation acknowledgement and visible audio availability remain an explicit gate. |
-| **1.4.3 Contrast (Minimum)** (AA) | Mechanically measured subset with structured exceptions | Every declared text pair is recomputed across every real theme; exact exceptions and fallback channels live in `MANIFEST.md`. This is not an exhaustive proof of every rendered QSS context. |
+| **1.4.3 Contrast (Minimum)** (AA) | Mechanically measured subset with structured exceptions | The required case IDs/token pairs/minima are fixed, every declared text pair is recomputed across every real theme, and exact exception membership plus non-weakening per-theme floors live in `MANIFEST.md`. This is not an exhaustive proof of every rendered QSS context. |
 | **1.4.4 Resize Text** (AA) | Partial | Qt apps support OS-level DPI scaling; manual text zoom within app is out of scope |
 | **1.4.5 Images of Text** (AA) | Target; evidence open | No images of text; all text is actual text |
 | **1.4.10 Reflow** (AA) | Partial | Desktop-only; reflow at 320px viewport not targeted |
-| **1.4.11 Non-text Contrast** (AA) | Mechanically measured subset with structured exceptions | Quiet BORDER grouping is below 3:1 in every pack; FOCUS_RING and some status chrome also miss 3:1 in named packs. Exact theme sets and redundant channels live in `MANIFEST.md`; keyboard/visual verification remains open. |
+| **1.4.11 Non-text Contrast** (AA) | Mechanically measured subset with structured exceptions | Quiet BORDER grouping is below 3:1 in every pack; FOCUS_RING and some status chrome also miss 3:1 in named packs. Exact failure sets, non-weakening floors, and redundant channels live in `MANIFEST.md`; keyboard/visual verification remains open. |
 | **1.4.12 Text Spacing** (AA) | Target; evidence open | Line-height 1.5 default; letter-spacing adjustable via QSS |
 | **1.4.13 Content on Hover / Focus** (AA) | Target; evidence open | Tooltips dismissible (Escape closes); persistent while hovered; not obscuring |
 
@@ -137,7 +137,7 @@ Beyond WCAG, CryoDAQ has operator-specific accessibility features:
 
 Per `governance/testing-strategy.md`:
 
-1. **Automated in v4.2.0** — load every real theme pack and recompute the declared WCAG 2.2 AA pairs; require exact structured exceptions; compare canonical production state mapping with Russian text, accessible labels, token values, and non-color geometry.
+1. **Automated in v4.2.0** — load every real theme pack; recompute the fixed required WCAG 2.2 AA pairs; require exact failure membership and non-weakening per-theme exception floors; compare every production source state with exact Russian labels, `CanonicalStatusLabel` accessibility properties, token values, and five real `QImage`/`QPainter` geometry masks.
 2. **Human, still open** — keyboard-only whole-task traversal, focus visibility/restoration, NVDA on the real Windows build, and scripted operator recognition of non-color states.
 3. **Target environment, still open** — real frozen-build DPI/viewport behavior and runtime performance budgets. Screenshot approval alone is insufficient.
 
@@ -145,7 +145,7 @@ Per `governance/testing-strategy.md`:
 
 Do not claim that CryoDAQ conforms to WCAG 2.2 AA from this design-system release alone. The current defensible statement is:
 
-> CryoDAQ targets WCAG 2.2 Level AA. Design-system v4.2.0 mechanically checks declared contrast pairs across all bundled themes and canonical non-color state redundancy, with exact structured exceptions. Whole-shell keyboard/focus, NVDA, scripted operator tasks, rendered-context completeness, and target-build evidence remain open.
+> CryoDAQ targets WCAG 2.2 Level AA. Design-system v4.2.0 mechanically checks a fixed required contrast subset across all bundled themes, exact exception membership with non-weakening floors, and canonical non-color state rendering/accessibility properties. Whole-shell keyboard/focus, NVDA, scripted operator tasks, rendered-context completeness, and target-build evidence remain open.
 
 An external conformance statement requires those open procedures plus review of every applicable criterion and exception against the exact build.
 
@@ -180,7 +180,7 @@ An external conformance statement requires those open procedures plus review of 
 
 ## Changelog
 
-- 2026-08-10 (v4.2.0): Replaced unbound “Met” claims with explicit targets, recorded the real multi-theme contrast/non-color subset and structured exceptions, and left keyboard, focus, NVDA, operator-scenario, rendered-context, and target-build evidence open.
+- 2026-08-10 (v4.2.0): Replaced unbound “Met” claims with explicit targets; fixed the required contrast subset and non-weakening exception floors; exercised production state painting and widget accessibility properties; and left keyboard, focus, NVDA, operator-scenario, rendered-context, and target-build evidence open.
 
 - 2026-07-15 (v4.0.0): Classified runtime alarm beeps accurately and left consolidated audio control/availability evidence open.
 - 2026-04-17: Initial version. WCAG 2.2 Level AA target committed. Criterion-by-criterion commitment table with CryoDAQ mapping. AAA aspirations opportunistic not committed.

@@ -18,14 +18,16 @@ the design-system-specific definitions of "breaking" from
 ### Added
 
 - `MANIFEST.md` — one machine-readable contract for the narrow shared
-  semantic source surface, its corresponding specification families, WCAG 2.2
-  contrast cases, exact per-theme exceptions, and canonical non-color states.
+  semantic source surface, its corresponding specification families, 13 fixed
+  WCAG 2.2 contrast cases, non-weakening per-theme exception floors, and
+  canonical non-color states.
 - Exact-checkout F36.6 enforcement in
   `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned`.
   It compares the immutable `TRUSTED_BASE_SHA` slice with the real candidate
   checkout and requires specification, `VERSION`, and `CHANGELOG.md` changes.
 - Real-pack accessibility checks in `tests/gui/test_theme_loader.py` covering
-  all bundled theme YAML files and the production state visual mapper.
+  all bundled theme YAML files, the production state visual mapper and painter,
+  and `CanonicalStatusLabel` accessibility properties.
 
 ### Changed
 
@@ -39,11 +41,14 @@ the design-system-specific definitions of "breaking" from
 ### Accessibility evidence
 
 - WCAG 2.2 AA text (4.5:1) and non-text (3:1) ratios are recomputed from every
-  real bundled theme. Exceptions name exact case IDs and exact theme IDs; a new
-  failure or a stale exception fails the GUI partition.
+  real bundled theme. The 13 required case IDs, token pairs, and minima cannot
+  be removed or repointed; exception membership must equal the real failures,
+  and each measured ratio must remain above its non-weakening per-theme floor.
 - Canonical `ok | caution | warning | fault | stale | disconnected` inputs are
-  checked against production Russian labels, token values, and five distinct
-  non-color shapes. Legacy `warning` remains the `caution` presentation alias.
+  checked against exact production Russian labels and accessible labels,
+  `CanonicalStatusLabel` names/descriptions, token values, and five pinned
+  geometries rendered through `paint_state_shape` into real `QImage` masks.
+  Legacy `warning` remains the `caution` presentation alias.
 
 ### Open evidence
 

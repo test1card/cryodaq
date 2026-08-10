@@ -141,7 +141,9 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
           "src/cryodaq/gui/_plot_style.py"
         ],
         "specification_sets": [
-          ["docs/design-system/tokens/*.md"]
+          [
+            "docs/design-system/tokens/*.md"
+          ]
         ]
       },
       {
@@ -151,8 +153,12 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
           "config/themes/*.yaml"
         ],
         "specification_sets": [
-          ["docs/design-system/tokens/colors.md"],
-          ["docs/design-system/accessibility/contrast-matrix.md"]
+          [
+            "docs/design-system/tokens/colors.md"
+          ],
+          [
+            "docs/design-system/accessibility/contrast-matrix.md"
+          ]
         ]
       },
       {
@@ -174,18 +180,28 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
         "source_patterns": [
           "src/cryodaq/gui/presentation_severity.py",
           "src/cryodaq/gui/shell/operator_components/_visuals.py",
-          "src/cryodaq/gui/shell/operator_components/status.py"
+          "src/cryodaq/gui/shell/operator_components/status.py",
+          "src/cryodaq/operator_snapshot.py",
+          "src/cryodaq/gui/state/operator_view_models.py"
         ],
         "specification_sets": [
-          ["docs/design-system/patterns/state-visualization.md"],
-          ["docs/design-system/MANIFEST.md"]
+          [
+            "docs/design-system/patterns/state-visualization.md"
+          ],
+          [
+            "docs/design-system/MANIFEST.md"
+          ]
         ]
       },
       {
         "id": "tray_state_semantics",
-        "source_patterns": ["src/cryodaq/gui/tray_status.py"],
+        "source_patterns": [
+          "src/cryodaq/gui/tray_status.py"
+        ],
         "specification_sets": [
-          ["docs/design-system/cryodaq-primitives/tray-status.md"]
+          [
+            "docs/design-system/cryodaq-primitives/tray-status.md"
+          ]
         ]
       },
       {
@@ -194,14 +210,20 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
           "src/cryodaq/gui/shell/views/operator_display.py"
         ],
         "specification_sets": [
-          ["docs/design-system/patterns/operator-display-composition.md"]
+          [
+            "docs/design-system/patterns/operator-display-composition.md"
+          ]
         ]
       },
       {
         "id": "command_outcome_pattern",
-        "source_patterns": ["src/cryodaq/gui/shell/command_outcome.py"],
+        "source_patterns": [
+          "src/cryodaq/gui/shell/command_outcome.py"
+        ],
         "specification_sets": [
-          ["docs/design-system/patterns/command-outcome-unknown.md"]
+          [
+            "docs/design-system/patterns/command-outcome-unknown.md"
+          ]
         ]
       },
       {
@@ -349,8 +371,24 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
         ],
         "scope": "Supplementary or explicitly unavailable text only; never critical truth or action text.",
         "rationale": "The muted token intentionally de-emphasizes secondary evidence and is not a general body-text color.",
-        "fallback_channels": ["FOREGROUND text", "explicit unavailable semantics"],
-        "human_verification": "Keyboard and NVDA walkthrough must confirm no required meaning depends on muted text alone."
+        "fallback_channels": [
+          "FOREGROUND text",
+          "explicit unavailable semantics"
+        ],
+        "human_verification": "Keyboard and NVDA walkthrough must confirm no required meaning depends on muted text alone.",
+        "ratio_floors": {
+          "amber": 3.7069,
+          "anthropic_mono": 2.950593,
+          "braun": 4.222376,
+          "gost": 4.109723,
+          "instrument": 3.725763,
+          "ochre_bloom": 2.966639,
+          "rose_dusk": 3.018188,
+          "signal": 3.268795,
+          "taupe_quiet": 3.210661,
+          "warm_stone": 3.094435,
+          "xcode": 3.851237
+        }
       },
       {
         "id": "A11Y-EX-002",
@@ -367,17 +405,44 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
         ],
         "scope": "Known focus-ring gap on elevated operator controls.",
         "rationale": "FOCUS_RING does not reach 3:1 on the listed real packs and cannot be the only focus cue.",
-        "fallback_channels": ["2px focus geometry", "ACCENT where the component contract permits"],
-        "human_verification": "Keyboard-only focus traversal remains required on the real Windows build."
+        "fallback_channels": [
+          "2px focus geometry",
+          "ACCENT where the component contract permits"
+        ],
+        "human_verification": "Keyboard-only focus traversal remains required on the real Windows build.",
+        "ratio_floors": {
+          "amber": 2.170522,
+          "anthropic_mono": 2.401728,
+          "default_cool": 2.570572,
+          "instrument": 2.10437,
+          "ochre_bloom": 1.962009,
+          "rose_dusk": 1.919218,
+          "taupe_quiet": 2.354748,
+          "warm_stone": 2.086325
+        }
       },
       {
         "id": "A11Y-EX-003",
         "case_id": "status_fault_card",
-        "themes": ["instrument", "ochre_bloom", "rose_dusk", "taupe_quiet"],
+        "themes": [
+          "instrument",
+          "ochre_bloom",
+          "rose_dusk",
+          "taupe_quiet"
+        ],
         "scope": "Fault hue is chrome, never body or numeric text.",
         "rationale": "The listed packs miss 3:1 against card while preserving the canonical fault hue family.",
-        "fallback_channels": ["АВАРИЯ text in FOREGROUND", "square or fault-border geometry"],
-        "human_verification": "Operator scenarios must confirm fault recognition without color."
+        "fallback_channels": [
+          "\u0410\u0412\u0410\u0420\u0418\u042f text in FOREGROUND",
+          "square or fault-border geometry"
+        ],
+        "human_verification": "Operator scenarios must confirm fault recognition without color.",
+        "ratio_floors": {
+          "instrument": 2.702978,
+          "ochre_bloom": 2.946179,
+          "rose_dusk": 2.951782,
+          "taupe_quiet": 2.956365
+        }
       },
       {
         "id": "A11Y-EX-004",
@@ -395,35 +460,73 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
         ],
         "scope": "Stale hue is de-emphasized chrome, never body or numeric text.",
         "rationale": "The stale token is deliberately quiet on dark cards, so text and hollow geometry are load-bearing.",
-        "fallback_channels": ["УСТАРЕЛО text in FOREGROUND", "hollow-circle geometry"],
-        "human_verification": "Operator scenarios must distinguish stale from disconnected and current values."
+        "fallback_channels": [
+          "\u0423\u0421\u0422\u0410\u0420\u0415\u041b\u041e text in FOREGROUND",
+          "hollow-circle geometry"
+        ],
+        "human_verification": "Operator scenarios must distinguish stale from disconnected and current values.",
+        "ratio_floors": {
+          "amber": 2.297509,
+          "anthropic_mono": 2.360812,
+          "default_cool": 2.6456,
+          "instrument": 2.019105,
+          "ochre_bloom": 2.200774,
+          "rose_dusk": 2.20496,
+          "signal": 2.961427,
+          "taupe_quiet": 2.208383,
+          "warm_stone": 2.25824
+        }
       },
       {
         "id": "A11Y-EX-005",
         "case_id": "filled_fault",
-        "themes": ["default_cool"],
+        "themes": [
+          "default_cool"
+        ],
         "scope": "Filled fault-pill text is supplementary in the affected pack.",
         "rationale": "ON_DESTRUCTIVE on STATUS_FAULT measures below 4.5:1 in default_cool.",
-        "fallback_channels": ["adjacent FOREGROUND label", "fault icon or shape"],
-        "human_verification": "NVDA/manual review must confirm the adjacent label names the fault."
+        "fallback_channels": [
+          "adjacent FOREGROUND label",
+          "fault icon or shape"
+        ],
+        "human_verification": "NVDA/manual review must confirm the adjacent label names the fault.",
+        "ratio_floors": {
+          "default_cool": 4.074971
+        }
       },
       {
         "id": "A11Y-EX-006",
         "case_id": "filled_accent",
-        "themes": ["braun"],
+        "themes": [
+          "braun"
+        ],
         "scope": "Primary-action text on the Braun accent requires redundant action naming.",
         "rationale": "BACKGROUND on ACCENT measures below 4.5:1 only in the Braun pack.",
-        "fallback_channels": ["accessible action name", "stable button geometry"],
-        "human_verification": "Manual keyboard and visual review must verify the primary action remains readable."
+        "fallback_channels": [
+          "accessible action name",
+          "stable button geometry"
+        ],
+        "human_verification": "Manual keyboard and visual review must verify the primary action remains readable.",
+        "ratio_floors": {
+          "braun": 4.086638
+        }
       },
       {
         "id": "A11Y-EX-007",
         "case_id": "legacy_caution_inverse",
-        "themes": ["default_cool"],
+        "themes": [
+          "default_cool"
+        ],
         "scope": "Legacy ON_PRIMARY caution-fill text is not a generally safe pair.",
         "rationale": "The default_cool pair measures below 4.5:1 and must remain supplementary pending migration.",
-        "fallback_channels": ["adjacent FOREGROUND label", "caution triangle or text"],
-        "human_verification": "Manual review must confirm caution meaning without relying on the filled label."
+        "fallback_channels": [
+          "adjacent FOREGROUND label",
+          "caution triangle or text"
+        ],
+        "human_verification": "Manual review must confirm caution meaning without relying on the filled label.",
+        "ratio_floors": {
+          "default_cool": 2.568701
+        }
       },
       {
         "id": "A11Y-EX-008",
@@ -444,17 +547,77 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
         ],
         "scope": "BORDER is grouping chrome only, never a functional boundary.",
         "rationale": "Every bundled pack keeps the quiet grouping stroke below the 3:1 functional-boundary threshold.",
-        "fallback_channels": ["ACCENT focus boundary", "measured STATUS boundary", "surface luminance step"],
-        "human_verification": "Manual review must confirm grouping loss does not hide a control or state boundary."
+        "fallback_channels": [
+          "ACCENT focus boundary",
+          "measured STATUS boundary",
+          "surface luminance step"
+        ],
+        "human_verification": "Manual review must confirm grouping loss does not hide a control or state boundary.",
+        "ratio_floors": {
+          "amber": 1.418847,
+          "anthropic_mono": 1.557383,
+          "braun": 2.134742,
+          "default_cool": 1.461852,
+          "gost": 2.407457,
+          "instrument": 1.856912,
+          "ochre_bloom": 1.635669,
+          "rose_dusk": 1.576828,
+          "signal": 1.118236,
+          "taupe_quiet": 1.438573,
+          "warm_stone": 1.527526,
+          "xcode": 1.385558
+        }
       }
     ],
     "states": [
-      {"source": "ok", "canonical": "ok", "token": "STATUS_OK", "label": "НОРМА", "shape": "circle"},
-      {"source": "caution", "canonical": "caution", "token": "STATUS_CAUTION", "label": "ВНИМАНИЕ", "shape": "triangle"},
-      {"source": "warning", "canonical": "caution", "token": "STATUS_CAUTION", "label": "ВНИМАНИЕ", "shape": "triangle"},
-      {"source": "fault", "canonical": "fault", "token": "STATUS_FAULT", "label": "АВАРИЯ", "shape": "square"},
-      {"source": "stale", "canonical": "stale", "token": "STATUS_STALE", "label": "УСТАРЕЛО", "shape": "hollow_circle"},
-      {"source": "disconnected", "canonical": "disconnected", "token": "STATUS_STALE", "label": "НЕТ СВЯЗИ", "shape": "diamond"}
+      {
+        "source": "ok",
+        "canonical": "ok",
+        "token": "STATUS_OK",
+        "label": "\u041d\u041e\u0420\u041c\u0410",
+        "shape": "circle",
+        "accessible_label": "\u041d\u043e\u0440\u043c\u0430"
+      },
+      {
+        "source": "caution",
+        "canonical": "caution",
+        "token": "STATUS_CAUTION",
+        "label": "\u0412\u041d\u0418\u041c\u0410\u041d\u0418\u0415",
+        "shape": "triangle",
+        "accessible_label": "\u0422\u0440\u0435\u0431\u0443\u0435\u0442 \u0432\u043d\u0438\u043c\u0430\u043d\u0438\u044f"
+      },
+      {
+        "source": "warning",
+        "canonical": "caution",
+        "token": "STATUS_CAUTION",
+        "label": "\u0412\u041d\u0418\u041c\u0410\u041d\u0418\u0415",
+        "shape": "triangle",
+        "accessible_label": "\u0422\u0440\u0435\u0431\u0443\u0435\u0442 \u0432\u043d\u0438\u043c\u0430\u043d\u0438\u044f"
+      },
+      {
+        "source": "fault",
+        "canonical": "fault",
+        "token": "STATUS_FAULT",
+        "label": "\u0410\u0412\u0410\u0420\u0418\u042f",
+        "shape": "square",
+        "accessible_label": "\u0410\u0432\u0430\u0440\u0438\u044f"
+      },
+      {
+        "source": "stale",
+        "canonical": "stale",
+        "token": "STATUS_STALE",
+        "label": "\u0423\u0421\u0422\u0410\u0420\u0415\u041b\u041e",
+        "shape": "hollow_circle",
+        "accessible_label": "\u0414\u0430\u043d\u043d\u044b\u0435 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u0438"
+      },
+      {
+        "source": "disconnected",
+        "canonical": "disconnected",
+        "token": "STATUS_STALE",
+        "label": "\u041d\u0415\u0422 \u0421\u0412\u042f\u0417\u0418",
+        "shape": "diamond",
+        "accessible_label": "\u041d\u0435\u0442 \u0441\u0432\u044f\u0437\u0438"
+      }
     ]
   }
 }

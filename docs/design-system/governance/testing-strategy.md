@@ -17,8 +17,8 @@ How we verify that CryoDAQ code actually follows the design system. The rules an
 | Gate | Real invocation surface | What it proves |
 |---|---|---|
 | Same-slice co-versioning | `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` in the active exact checkout and standalone docs workflow | A mapped shared semantic source cannot move without its canonical spec, an advanced `VERSION`, and a matching `CHANGELOG.md` heading relative to exact `TRUSTED_BASE_SHA` |
-| Multi-theme contrast | `tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` in the `gui` candidate partition | Every declared pair is recomputed from every real `config/themes/*.yaml`; the exact failures must equal the structured exceptions in `MANIFEST.md` |
-| Non-color state redundancy | `tests/gui/test_theme_loader.py::test_machine_accessibility_non_color_states_match_real_runtime_contract` in the `gui` candidate partition | Production state mapping retains Russian labels, tokens, accessible labels, and distinct geometry, including the legacy warning-to-caution alias |
+| Multi-theme contrast | `tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` in the `gui` candidate partition | Thirteen bootstrap case IDs/token pairs/minima cannot be removed or repointed; every declared pair is recomputed from every real `config/themes/*.yaml`; exact failures and non-weakening per-theme floors must match `MANIFEST.md` |
+| Non-color state redundancy | `tests/gui/test_theme_loader.py::test_machine_accessibility_non_color_states_match_real_runtime_contract` in the `gui` candidate partition | Every source state matches exact production Russian labels and accessibility text; five pinned shapes render to distinct real `QImage` masks through `paint_state_shape`; `CanonicalStatusLabel` exposes the corresponding name/description, including the warning-to-caution alias |
 
 These checks cover only mechanical evidence. Whole-shell keyboard and focus traversal, NVDA on the real Windows build, scripted operator tasks, visual judgment, and target-machine performance measurements remain human or environment-specific gates. A screenshot does not close them.
 
@@ -154,7 +154,7 @@ def check_channel_t(path: Path) -> list[str]:
 
 ### Contrast contract (shipped subset)
 
-`MANIFEST.md` declares the exact token pairs, WCAG criterion, threshold, and per-theme exception set. The GUI test loads every real theme pack through the production validator and recomputes every ratio. A newly failing theme, a stale exception, or an exception without scope, rationale, fallback channels, and human verification fails the partition.
+`MANIFEST.md` declares the exact token pairs, WCAG criterion, threshold, and per-theme exception set. The GUI test fixes the 13 required case definitions and bootstrap exception floors, while allowing additive cases. It loads every real theme pack through the production validator and recomputes every ratio. A newly failing theme, stale exception, lowered/missing floor, ratio below its declared floor, or exception without scope, rationale, fallback channels, and human verification fails the partition.
 
 This is not a general AST proof of every QSS foreground/background use. Context discovery across arbitrary stylesheets remains review work until a production-path checker exists.
 
@@ -349,6 +349,6 @@ Per vladimir-voice principle (errors as data, not occasions for apology): test f
 
 ## Changelog
 
-- 2026-08-10 (v4.2.0): Documented the shipped exact-base co-versioning and real-theme accessibility nodes, structured exceptions, real CI ownership, and the human evidence boundary.
+- 2026-08-10 (v4.2.0): Documented the shipped exact-base co-versioning and real-theme accessibility nodes, fixed contrast definitions, non-weakening exception floors, production painter/widget checks, real CI ownership, and the human evidence boundary.
 
 - 2026-04-17: Initial version. Three enforcement layers (lint / audit / manual). Test categories (visual regression / token-usage / rule-compliance / accessibility / contrast). Tooling + CI integration. Failure-as-data principle applied.
