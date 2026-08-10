@@ -213,10 +213,7 @@ class AttentionHistoryPage:
                 raise ValueError("capacity exhaustion requires a positive revision")
         if any(later.timestamp < earlier.timestamp for earlier, later in zip(self.items, self.items[1:])):
             raise ValueError("attention history must be chronological")
-        if self.as_of is not None and (
-            any(item.timestamp > self.as_of for item in self.items)
-            or (self.capacity_exhausted_at is not None and self.capacity_exhausted_at > self.as_of)
-        ):
+        if self.as_of is not None and (any(item.timestamp > self.as_of for item in self.items)):
             raise ValueError("attention history page contains evidence after as_of")
         event_ids = tuple(item.event_id for item in self.items)
         if len(event_ids) != len(set(event_ids)):
