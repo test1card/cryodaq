@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
@@ -1933,3 +1934,195 @@ def test_private_identifier_cannot_borrow_a_public_technical_segment(private_ide
 
     assert private_identifier.encode() not in sealed
     assert {"component": "redacted-private", "version": "1.0"} in evidence["versions"]
+
+
+@pytest.mark.parametrize(
+    "hostile_version",
+    (
+        "Pwd=hunter2",
+        "user=alice",
+        "password%3Dhunter2",
+        r"C%3A%5CUsers%5CAlice%5Csecret",
+    ),
+)
+def test_credential_alias_and_percent_encoded_private_versions_never_reach_bundle(
+    hostile_version: str,
+) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": hostile_version})
+
+    assert hostile_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"]
+
+
+def test_production_safety_health_identifiers_remain_distinct() -> None:
+    source_ids = ("safety_fsm", "safety_monitor", "reviewed_source", "critical_inputs", "persistence")
+    snapshot = _snapshot(
+        health_items=tuple(
+            PlantHealthItem(source_id, "Public subsystem", OperatorPresentationState.OK, ()) for source_id in source_ids
+        )
+    )
+
+    evidence, _ = _sealed_evidence(snapshot=snapshot)
+    emitted_ids = {record["payload"]["source_id"] for record in evidence["records"] if record["kind"] == "health"}
+
+    assert "health" not in evidence["unavailable_fields"]
+    assert set(source_ids) <= emitted_ids
+
+
+@pytest.mark.parametrize(
+    ("source", "tags"),
+    (
+        ("rest", ()),
+        ("machine", ("safety_fault",)),
+        ("auto", ("auto", "phase_transition")),
+    ),
+)
+def test_production_operator_log_sources_and_tags_are_projected(
+    source: str,
+    tags: tuple[str, ...],
+) -> None:
+    entry = OperatorLogEntry(7, _OBS, None, "system", source, "STARTED", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+
+
+def test_snapshot_record_schema_rejects_provenance_stripped_health_record() -> None:
+    with pytest.raises(ValueError, match="snapshot provenance"):
+        EvidenceRecord.from_payload(
+            "health",
+            {"source_id": "plant-health-summary", "state": "ok"},
+        )
+
+
+@pytest.mark.parametrize(
+    "private_identifier",
+    ("ada12345",),
+)
+def test_unprefixed_hex_like_private_identifier_is_redacted(private_identifier: str) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={private_identifier: "1.0"})
+
+    assert private_identifier.encode() not in sealed
+    assert {"component": "redacted-private", "version": "1.0"} in evidence["versions"]
+
+
+@pytest.mark.parametrize(
+    "hostile_version",
+    (
+        "password" + "." * 70 + "=hunter2",
+        "build-alice-smith",
+    ),
+)
+def test_delimiter_obscured_credentials_and_private_names_never_reach_bundle(
+    hostile_version: str,
+) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": hostile_version})
+
+    assert hostile_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"]
+
+
+@pytest.mark.parametrize(
+    ("source", "tags"),
+    (
+        ("operator", ("safety_audio_ack", "safety_fault")),
+        ("auto", ("auto", "event_type")),
+        ("command", ()),
+    ),
+)
+def test_additional_production_operator_log_vocabularies_are_projected(
+    source: str,
+    tags: tuple[str, ...],
+) -> None:
+    entry = OperatorLogEntry(8, _OBS, None, "system", source, "RECORDED", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+    assert records[0]["payload"]["event_code"] != "redacted-private"
+
+
+@pytest.mark.parametrize(
+    ("kind", "tags"),
+    (
+        ("audit", ("accepted", "denied")),
+        ("log", ("error", "warning")),
+    ),
+)
+def test_conflicting_recent_event_semantics_fail_the_section_closed(
+    kind: str,
+    tags: tuple[str, ...],
+) -> None:
+    entry = OperatorLogEntry(9, _OBS, None, "system", "engine", "RECORDED", tags)
+    argument = "recent_audit_entries" if kind == "audit" else "recent_log_entries"
+
+    evidence, _ = _sealed_evidence(snapshot=None, **{argument: (entry,)})
+
+    assert kind in evidence["unavailable_fields"]
+    assert not any(record["kind"] == kind for record in evidence["records"])
+
+
+def _complete_integrity_provenance() -> dict[str, object]:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    return {
+        "source_id": "data-integrity",
+        "state": "caution",
+        "storage": "available",
+        "record_role": "summary",
+        "snapshot_mode": "live",
+        "snapshot_source_id": live_id,
+        "snapshot_producer_id": live_id,
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+        "received_at": "2026-07-14T11:59:01.000000Z",
+        "revision": 1,
+        "source_age_us": 0,
+        "transport_age_us": 0,
+    }
+
+
+def test_integrity_schema_rejects_ok_state_with_unavailable_storage() -> None:
+    payload = _complete_integrity_provenance()
+    payload.update(state="ok", storage="unavailable")
+
+    with pytest.raises(ValueError, match="storage"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_snapshot_schema_rejects_mode_and_structured_source_mismatch() -> None:
+    payload = _complete_integrity_provenance()
+    payload["snapshot_source_id"] = "replay/operator-v1/" + "a" * 32 + "/" + "b" * 32 + "/0000000000000001"
+
+    with pytest.raises(ValueError, match="snapshot.*mode|mode.*snapshot"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_dishonest_version_mapping_is_bounded_and_fails_only_versions_closed() -> None:
+    class DishonestVersions(dict[str, str]):
+        consumed = 0
+
+        def __len__(self) -> int:
+            return 0
+
+        def items(self) -> Iterator[tuple[str, str]]:
+            for index in range(1000):
+                self.consumed += 1
+                yield (f"plugin-{index}", "1.0")
+
+    versions = DishonestVersions()
+    safe_log = OperatorLogEntry(10, _OBS, None, "system", "engine", "RECORDED", ())
+
+    evidence, _ = _sealed_evidence(
+        snapshot=None,
+        extra_versions=versions,
+        recent_log_entries=(safe_log,),
+    )
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
+
+    assert versions.consumed == collector_module.MAX_VERSIONS + 1
+    assert reasons["versions"] == "source_invalid"
+    assert any(record["kind"] == "log" for record in evidence["records"])
