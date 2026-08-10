@@ -391,9 +391,30 @@ def _reap_observed_process(process: psutil.Process) -> None:
         pass
     try:
         process.kill()
-        process.wait(timeout=_PROCESS_TIMEOUT_S)
     except (psutil.NoSuchProcess, ChildProcessError):
         return
+    deadline = time.monotonic() + _PROCESS_TIMEOUT_S
+    while True:
+        try:
+            # A re-parented process that init has not collected yet is a zombie:
+            # it is dead, but psutil.wait() polls pid_exists() for a non-child
+            # and keeps seeing it.  The pre-kill branch above already treats
+            # that state as reaped; the post-kill branch must too, or a slow
+            # runner turns teardown into a test failure.
+            if process.status() == psutil.STATUS_ZOMBIE:
+                return
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            return
+        except (psutil.NoSuchProcess, ChildProcessError):
+            return
+        except psutil.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                break
+    try:
+        status = process.status()
+    except psutil.Error as error:  # pragma: no cover - diagnostic only
+        status = f"<unreadable: {error!r}>"
+    raise AssertionError(f"observed process {process.pid} survived kill() for {_PROCESS_TIMEOUT_S}s; status={status!r}")
 
 
 def _cut(sequence: int) -> LiveSourceCut:
