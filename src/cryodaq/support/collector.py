@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 
 from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.operator_snapshot import (
-    STATE_PRECEDENCE,
     AttentionQueue,
     DataIntegritySummary,
     InfrastructureNodeHealth,
@@ -41,6 +40,28 @@ _MAX_HEALTH_RECORDS = 64
 _MAX_ATTENTION_RECORDS = 32
 _MAX_LOG_RECORDS = 64
 _MAX_AUDIT_RECORDS = 64
+
+_PUBLIC_EVENT_SOURCES = frozenset({"engine", "experiment", "record-store", "safety", "system"})
+_PUBLIC_EVENT_TAGS = frozenset(
+    {
+        "accepted",
+        "alarm",
+        "critical",
+        "debug",
+        "denied",
+        "error",
+        "failed",
+        "fault",
+        "info",
+        "pending",
+        "run",
+        "settled",
+        "success",
+        "warning",
+    }
+)
+_AUDIT_OUTCOMES = frozenset({"accepted", "denied", "failed", "pending", "settled", "success"})
+_LOG_LEVELS = frozenset({"critical", "debug", "error", "fault", "info", "warning"})
 
 _SEVERITY_FROM_STATE = {
     "caution": "caution",
@@ -127,9 +148,10 @@ def _collect_versions(
                 return
             for component, version in extra.items():
                 item = SoftwareVersion(component, version)
-                if item.component not in seen:
-                    staging.append(item)
-                    seen.add(item.component)
+                if item.component in seen:
+                    raise ValueError("version component collision after redaction")
+                staging.append(item)
+                seen.add(item.component)
         versions.extend(staging)
     except Exception as exc:
         _log_failure("versions", exc)
@@ -167,9 +189,10 @@ def _collect_fingerprints(
                 provenance="redacted_public_projection",
                 sha256=sha256,
             )
-            if item.config_id not in seen:
-                staging.append(item)
-                seen.add(item.config_id)
+            if item.config_id in seen:
+                raise ValueError("config id collision after redaction")
+            staging.append(item)
+            seen.add(item.config_id)
         fingerprints.extend(staging)
     except Exception as exc:
         _log_failure("config_fingerprints", exc)
@@ -189,13 +212,13 @@ def _collect_health(
             _mark_unavailable("health", "source_invalid", unavailable)
             return
         items = (
-            (item.subsystem_id, item.state, item.transport_reason_codes or item.reason_codes, plant)
+            (item.subsystem_id, item.state, item.reason_codes, item.transport_reason_codes, plant)
             for item in plant.subsystems
         )
         items = itertools.chain(
             items,
             (
-                (item.node_id, item.state, item.transport_reason_codes or item.reason_codes, infrastructure)
+                (item.node_id, item.state, item.reason_codes, item.transport_reason_codes, infrastructure)
                 for item in infrastructure.nodes
             ),
         )
@@ -215,34 +238,41 @@ def _collect_health(
         return
 
     try:
+        safe_child_ids = tuple(_safe_identifier(source_id, field="source_id") for source_id, *_ in bounded)
+        reserved_ids = frozenset({"plant-health-summary", "infrastructure-summary"})
+        if len(set(safe_child_ids)) != len(safe_child_ids) or reserved_ids.intersection(safe_child_ids):
+            _mark_unavailable("health", "source_invalid", unavailable)
+            return
+
         pending: list[EvidenceRecord] = []
-        for source_id, state, reason_codes, summary in bounded:
+        for (source_id, state, reason_codes, transport_reason_codes, _summary), safe_source_id in zip(
+            bounded,
+            safe_child_ids,
+            strict=True,
+        ):
             payload: dict[str, object] = {
-                "source_id": _safe_identifier(source_id),
+                "source_id": safe_source_id,
                 "state": _safe_identifier(state.value),
+                "record_role": "child",
+                "observed_at": _utc_iso(_summary.observed_at),
+                "revision": _summary.revision,
             }
-            if reason_codes:
-                payload["reason_code"] = _safe_identifier(reason_codes[0])
-            payload["observed_at"] = _utc_iso(summary.observed_at)
-            payload["revision"] = summary.revision
+            _add_reason_fields(payload, reason_codes, transport_reason_codes)
             pending.append(EvidenceRecord.from_payload("health", payload))
+
         for summary_id, summary in (
             ("plant-health-summary", plant),
             ("infrastructure-summary", infrastructure),
         ):
-            child_states = tuple(state for _, state, _, owner in bounded if owner is summary)
-            max_child_state = max(child_states, key=STATE_PRECEDENCE.__getitem__, default=OperatorPresentationState.OK)
-            if STATE_PRECEDENCE[summary.state] > STATE_PRECEDENCE[max_child_state]:
-                summary_payload: dict[str, object] = {
-                    "source_id": summary_id,
-                    "state": _safe_identifier(summary.state.value),
-                    "observed_at": _utc_iso(summary.observed_at),
-                    "revision": summary.revision,
-                }
-                summary_reasons = summary.transport_reason_codes or summary.reason_codes
-                if summary_reasons:
-                    summary_payload["reason_code"] = _safe_identifier(summary_reasons[0])
-                pending.append(EvidenceRecord.from_payload("health", summary_payload))
+            summary_payload: dict[str, object] = {
+                "source_id": summary_id,
+                "state": _safe_identifier(summary.state.value),
+                "observed_at": _utc_iso(summary.observed_at),
+                "revision": summary.revision,
+                **_summary_snapshot_fields(snapshot, summary),
+            }
+            _add_reason_fields(summary_payload, summary.reason_codes, summary.transport_reason_codes)
+            pending.append(EvidenceRecord.from_payload("health", summary_payload))
         records.extend(pending)
     except Exception as exc:
         _log_failure("health", exc)
@@ -273,37 +303,36 @@ def _collect_attention(
         return
 
     try:
+        safe_attention_ids = tuple(_safe_identifier(item.attention_id, field="attention_id") for item in items)
+        if len(set(safe_attention_ids)) != len(safe_attention_ids) or "attention-summary" in safe_attention_ids:
+            _mark_unavailable("attention", "source_invalid", unavailable)
+            return
+
         pending: list[EvidenceRecord] = []
-        for item in items:
+        for item, safe_attention_id in zip(items, safe_attention_ids, strict=True):
             state = _safe_identifier(item.state.value)
             payload: dict[str, object] = {
-                "attention_id": _safe_identifier(item.attention_id),
+                "attention_id": safe_attention_id,
                 "severity": _SEVERITY_FROM_STATE.get(state, "warning"),
                 "state": state,
+                "record_role": "child",
                 "observed_at": _utc_iso(item.observed_at),
-            }
-            if item.transport_reason_codes:
-                payload["reason_code"] = _safe_identifier(item.transport_reason_codes[0])
-            payload["revision"] = attention.revision
-            pending.append(EvidenceRecord.from_payload("attention", payload))
-        max_item_state = max(
-            (item.state for item in items),
-            key=STATE_PRECEDENCE.__getitem__,
-            default=OperatorPresentationState.OK,
-        )
-        if STATE_PRECEDENCE[attention.state] > STATE_PRECEDENCE[max_item_state]:
-            summary_state = _safe_identifier(attention.state.value)
-            summary_payload: dict[str, object] = {
-                "attention_id": "attention-summary",
-                "severity": _SEVERITY_FROM_STATE.get(summary_state, "warning"),
-                "state": summary_state,
-                "observed_at": _utc_iso(attention.observed_at),
                 "revision": attention.revision,
             }
-            summary_reasons = attention.transport_reason_codes or attention.reason_codes
-            if summary_reasons:
-                summary_payload["reason_code"] = _safe_identifier(summary_reasons[0])
-            pending.append(EvidenceRecord.from_payload("attention", summary_payload))
+            _add_reason_fields(payload, (), item.transport_reason_codes)
+            pending.append(EvidenceRecord.from_payload("attention", payload))
+
+        summary_state = _safe_identifier(attention.state.value)
+        summary_payload: dict[str, object] = {
+            "attention_id": "attention-summary",
+            "severity": _SEVERITY_FROM_STATE.get(summary_state, "warning"),
+            "state": summary_state,
+            "observed_at": _utc_iso(attention.observed_at),
+            "revision": attention.revision,
+            **_summary_snapshot_fields(snapshot, attention),
+        }
+        _add_reason_fields(summary_payload, attention.reason_codes, attention.transport_reason_codes)
+        pending.append(EvidenceRecord.from_payload("attention", summary_payload))
         records.extend(pending)
     except Exception as exc:
         _log_failure("attention", exc)
@@ -332,16 +361,39 @@ def _collect_recent_entries(
 
     try:
         pending: list[EvidenceRecord] = []
+        seen_event_ids: set[str] = set()
         for entry in entries:
             if type(entry) is not OperatorLogEntry:
                 raise TypeError("recent evidence entries must be exact OperatorLogEntry values")
+            if type(entry.id) is not int or entry.id < 0:
+                raise ValueError("recent evidence entry ids must be non-negative exact ints")
+            if (
+                type(entry.source) is not str
+                or type(entry.tags) is not tuple
+                or any(type(tag) is not str for tag in entry.tags)
+            ):
+                raise TypeError("recent evidence source and tags must be exact strings")
+            if entry.source not in _PUBLIC_EVENT_SOURCES or any(tag not in _PUBLIC_EVENT_TAGS for tag in entry.tags):
+                raise ValueError("recent evidence source or tags are not in the public projection allowlist")
+            observed_at = _utc_iso(entry.timestamp)
+            public_tags = tuple(sorted(set(entry.tags)))
+            primary_tag = public_tags[0] if public_tags else "entry"
+            compact_time = observed_at.translate(str.maketrans("", "", "-:."))
+            event_id = _safe_identifier(f"{kind}-{entry.id}-{compact_time}", field="event_id")
+            if event_id in seen_event_ids:
+                raise ValueError("recent evidence event identities must be unique")
+            seen_event_ids.add(event_id)
             payload: dict[str, object] = {
-                "event_id": _safe_identifier(f"{kind}-{entry.id}"),
-                "event_code": "operator_log.entry",
-                "observed_at": _utc_iso(entry.timestamp),
+                "event_id": event_id,
+                "event_code": _safe_identifier(f"{kind}.{entry.source}.{primary_tag}", field="event_code"),
+                "observed_at": observed_at,
                 "revision": entry.id,
                 "source_id": "record-store",
             }
+            if kind == "audit":
+                payload["outcome"] = next((tag for tag in public_tags if tag in _AUDIT_OUTCOMES), "recorded")
+            else:
+                payload["level"] = next((tag for tag in public_tags if tag in _LOG_LEVELS), "info")
             pending.append(EvidenceRecord.from_payload(kind, payload))
         records.extend(pending)
     except Exception as exc:
@@ -368,24 +420,58 @@ def _collect_integrity(
         payload: dict[str, object] = {
             "source_id": "data-integrity",
             "state": _safe_identifier(integrity.state.value),
+            "storage": _safe_identifier(integrity.storage.value),
             "dropped_records": integrity.dropped_records,
             "observed_at": _utc_iso(integrity.observed_at),
             "pending_records": integrity.pending_records,
             "persisted_revision": integrity.persisted_revision,
             "revision": integrity.revision,
+            **_summary_snapshot_fields(snapshot, integrity),
         }
         if integrity.archive_revision is not None:
             payload["archive_revision"] = integrity.archive_revision
-        if integrity.reason_codes:
-            payload["reason_code"] = _safe_identifier(integrity.reason_codes[0])
+        _add_reason_fields(payload, integrity.reason_codes, integrity.transport_reason_codes)
         records.append(EvidenceRecord.from_payload("integrity", payload))
     except Exception as exc:
         _log_failure("integrity", exc)
         _mark_unavailable("integrity", "source_invalid", unavailable)
 
 
-def _safe_identifier(value: str) -> str:
-    return _identifier(value, field="identifier")
+def _summary_snapshot_fields(
+    snapshot: OperatorSnapshot,
+    summary: PlantHealthSummary | InfrastructureNodeHealth | AttentionQueue | DataIntegritySummary,
+) -> dict[str, object]:
+    return {
+        "record_role": "summary",
+        "snapshot_mode": _safe_identifier(snapshot.cut.mode.value),
+        "snapshot_source_id": _safe_identifier(snapshot.cut.source, field="snapshot_source_id"),
+        "snapshot_producer_id": _safe_identifier(snapshot.cut.producer_id, field="snapshot_producer_id"),
+        "received_at": _utc_iso(snapshot.cut.received_at),
+        "source_age_us": _age_us(summary.source_age_s),
+        "transport_age_us": _age_us(summary.transport_age_s),
+    }
+
+
+def _add_reason_fields(
+    payload: dict[str, object],
+    reason_codes: tuple[str, ...],
+    transport_reason_codes: tuple[str, ...],
+) -> None:
+    if reason_codes:
+        payload["reason_code"] = _safe_identifier(reason_codes[0], field="reason_code")
+    if transport_reason_codes:
+        payload["transport_reason_code"] = _safe_identifier(transport_reason_codes[0], field="transport_reason_code")
+
+
+def _age_us(value: float) -> int:
+    result = round(value * 1_000_000)
+    if type(result) is not int or result < 0:
+        raise ValueError("snapshot ages must project to non-negative integer microseconds")
+    return result
+
+
+def _safe_identifier(value: str, *, field: str = "identifier") -> str:
+    return _identifier(value, field=field)
 
 
 def _utc_iso(value: datetime) -> str:

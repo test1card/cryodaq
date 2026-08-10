@@ -19,6 +19,10 @@ from pathlib import PurePosixPath
 from typing import Final
 
 SCHEMA_VERSION: Final = 2
+_SCHEMA_V1_REJECTION: Final = (
+    "support-bundle schema 1 is intentionally unsupported because it was unreleased "
+    "and predates schema 2 redaction guarantees"
+)
 MAX_RECORDS: Final = 256
 MAX_VERSIONS: Final = 64
 MAX_FINGERPRINTS: Final = 128
@@ -32,6 +36,10 @@ MAX_TRAVERSAL_INPUT_BYTES: Final = 65_536
 MAX_TRAVERSAL_OUTPUT_BYTES: Final = 65_536
 
 _ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
+_LIVE_SNAPSHOT_ID_RE = re.compile(r"engine/operator-snapshot-v1/[0-9a-f]{32}\Z")
+_REPLAY_SNAPSHOT_ID_RE = re.compile(r"replay/operator-v1/[0-9a-f]{32}/[0-9a-f]{32}/[0-9a-f]{16}\Z")
+_ALARM_ID_RE = re.compile(r"alarm:[0-9a-f]{32}\Z")
+_PUBLIC_TECHNICAL_SEGMENT_RE = re.compile(r"(?:\d+|[fv]\d+|[0-9a-f]{8,64}|\d{8}t\d{12}z)\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _UUID_RE = re.compile(r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _PUBLIC_PROJECTION_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\.public\.v[1-9][0-9]*\Z")
@@ -118,6 +126,7 @@ _PATH_CONFUSABLE_TRANSLATION: Final = str.maketrans(
 )
 _ABSOLUTE_PATH_PATTERNS: Final = (
     re.compile(r"/[\s\S]*"),
+    re.compile(r"\\(?:[^\\\r\n]+\\)+[^\\\r\n]*"),
     re.compile(r"(?i)/(?:home|users)/[\s\S]*"),
     re.compile(r"(?i)[A-Z]:[\\/]+Users[\\/][\s\S]*"),
     re.compile(r"\\\\[\s\S]*"),
@@ -142,17 +151,106 @@ _PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}
 _PRIVATE_NAME_ONLY_RE: Final = re.compile(r"[^\W\d_]{2,64}(?:\s+[^\W\d_]{2,64}){1,3}\Z")
 _PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
 _DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
-_DOTTED_PHONE_RE: Final = re.compile(r"\d{3}\.\d{3}\.\d{4}\Z")
+_DOTTED_PHONE_RE: Final = re.compile(r"(?:\+?\d{1,3}\.)?\d{3}\.\d{3}\.\d{4}\Z")
 _SERIALIZED_BLOB_RE: Final = re.compile(r"(?:\{[\s\S]*\}|\[[\s\S]*\])")
 _KNOWN_CREDENTIAL_RE: Final = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
 _PATH_TRAVERSAL_RE: Final = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _PRIVATE_IDENTIFIER_SEGMENTS: Final = frozenset(
-    {"author", "contact", "email", "operator", "person", "phone", "user", "username"}
+    {"author", "contact", "email", "operator", "person", "phone", "private", "user", "username"}
+)
+_PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS: Final = frozenset(
+    {
+        "alarm",
+        "alarms",
+        "attention",
+        "attn",
+        "audit",
+        "authoritative",
+        "authority",
+        "battery",
+        "bundle",
+        "calendar",
+        "caution",
+        "channel",
+        "channels",
+        "component",
+        "config",
+        "core",
+        "cryodaq",
+        "credentials",
+        "data",
+        "database",
+        "disconnected",
+        "driver",
+        "engine",
+        "entry",
+        "experiment",
+        "failed",
+        "fault",
+        "health",
+        "healthy",
+        "infrastructure",
+        "instruments",
+        "integrity",
+        "item",
+        "invalid",
+        "kernel",
+        "locked",
+        "log",
+        "loss",
+        "main",
+        "node",
+        "operator",
+        "pack",
+        "plant",
+        "platform",
+        "plugin",
+        "probe",
+        "producer",
+        "python",
+        "record",
+        "requested",
+        "redacted",
+        "replay",
+        "run",
+        "safety",
+        "sensor",
+        "source",
+        "started",
+        "stopped",
+        "snapshot",
+        "stale",
+        "store",
+        "subsystem",
+        "summary",
+        "support",
+        "test",
+        "token",
+        "transport",
+        "unavailable",
+        "unknown",
+        "ups",
+        "vacuum",
+        "version",
+        "warning",
+        "worker",
+    }
 )
 _PRIVATE_IDENTIFIER_FIELDS: Final = frozenset(
-    {"attention_id", "bundle_id", "component", "config_id", "event_id", "source_id"}
+    {
+        "attention_id",
+        "bundle_id",
+        "component",
+        "config_id",
+        "event_code",
+        "event_id",
+        "reason_code",
+        "snapshot_producer_id",
+        "snapshot_source_id",
+        "source_id",
+        "transport_reason_code",
+    }
 )
-_DOTTED_PRIVATE_IDENTIFIER_RE: Final = re.compile(r"(?i)[a-z]{2,64}\.[a-z]{2,64}\Z")
 _OPAQUE_TOKEN_RE: Final = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/=_-])")
 _SECRET_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _SECRET_KEYS)
 _PRIVATE_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _PRIVATE_KEYS)
@@ -160,20 +258,53 @@ _PRIVATE_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold
 _RECORD_SCHEMAS: Final = {
     "health": {
         "required": frozenset({"source_id", "state"}),
-        "allowed": frozenset({"source_id", "state", "reason_code", "observed_at", "revision", "metric_count"}),
+        "allowed": frozenset(
+            {
+                "source_id",
+                "state",
+                "reason_code",
+                "transport_reason_code",
+                "observed_at",
+                "received_at",
+                "revision",
+                "metric_count",
+                "record_role",
+                "snapshot_mode",
+                "snapshot_source_id",
+                "snapshot_producer_id",
+                "source_age_us",
+                "transport_age_us",
+            }
+        ),
     },
     "attention": {
         "required": frozenset({"attention_id", "state", "severity"}),
         "allowed": frozenset(
-            {"attention_id", "state", "severity", "reason_code", "source_id", "observed_at", "revision"}
+            {
+                "attention_id",
+                "state",
+                "severity",
+                "reason_code",
+                "transport_reason_code",
+                "source_id",
+                "observed_at",
+                "received_at",
+                "revision",
+                "record_role",
+                "snapshot_mode",
+                "snapshot_source_id",
+                "snapshot_producer_id",
+                "source_age_us",
+                "transport_age_us",
+            }
         ),
     },
     "audit": {
-        "required": frozenset({"event_id", "event_code"}),
+        "required": frozenset({"event_id", "event_code", "outcome"}),
         "allowed": frozenset({"event_id", "event_code", "outcome", "source_id", "observed_at", "revision"}),
     },
     "log": {
-        "required": frozenset({"event_id", "event_code"}),
+        "required": frozenset({"event_id", "event_code", "level"}),
         "allowed": frozenset(
             {"event_id", "event_code", "level", "source_id", "observed_at", "revision", "occurrences"}
         ),
@@ -185,14 +316,23 @@ _RECORD_SCHEMAS: Final = {
                 "source_id",
                 "state",
                 "reason_code",
+                "transport_reason_code",
                 "digest_sha256",
                 "record_count",
                 "archive_revision",
                 "dropped_records",
                 "observed_at",
+                "received_at",
                 "pending_records",
                 "persisted_revision",
                 "revision",
+                "record_role",
+                "snapshot_mode",
+                "snapshot_source_id",
+                "snapshot_producer_id",
+                "source_age_us",
+                "transport_age_us",
+                "storage",
             }
         ),
     },
@@ -202,14 +342,29 @@ _IDENTIFIER_RECORD_FIELDS: Final = frozenset(
         "source_id",
         "state",
         "reason_code",
+        "transport_reason_code",
         "attention_id",
         "severity",
         "event_id",
         "event_code",
         "outcome",
         "level",
+        "record_role",
+        "snapshot_mode",
+        "snapshot_source_id",
+        "snapshot_producer_id",
+        "storage",
     }
 )
+_ENUM_RECORD_FIELDS: Final = {
+    "level": frozenset({"critical", "debug", "error", "fault", "info", "warning"}),
+    "outcome": frozenset({"accepted", "denied", "failed", "pending", "recorded", "settled", "success"}),
+    "record_role": frozenset({"child", "summary"}),
+    "severity": frozenset({"caution", "fault", "warning"}),
+    "snapshot_mode": frozenset({"live", "replay"}),
+    "state": frozenset({"caution", "disconnected", "fault", "ok", "stale", "unavailable", "warning"}),
+    "storage": frozenset({"available", "unavailable", "unknown"}),
+}
 _COUNT_RECORD_FIELDS: Final = frozenset(
     {
         "revision",
@@ -220,6 +375,8 @@ _COUNT_RECORD_FIELDS: Final = frozenset(
         "dropped_records",
         "pending_records",
         "persisted_revision",
+        "source_age_us",
+        "transport_age_us",
     }
 )
 _WINDOWS_RESERVED_NAMES: Final = frozenset(
@@ -241,15 +398,27 @@ def _exact_text(value: object, *, field: str, max_bytes: int = 512) -> str:
 
 def _identifier(value: object, *, field: str) -> str:
     value = _exact_text(value, field=field, max_bytes=128)
+    if field in {"snapshot_source_id", "snapshot_producer_id"} and (
+        _LIVE_SNAPSHOT_ID_RE.fullmatch(value) is not None or _REPLAY_SNAPSHOT_ID_RE.fullmatch(value) is not None
+    ):
+        return value
+    if field == "attention_id" and _ALARM_ID_RE.fullmatch(value) is not None:
+        return value
     value = _safe_text(value, allow_uuid=True)
-    if field in _PRIVATE_IDENTIFIER_FIELDS:
-        segments = frozenset(part for part in re.split(r"[._-]+", value.casefold()) if part)
-        if (len(segments) > 1 and segments.intersection(_PRIVATE_IDENTIFIER_SEGMENTS)) or (
-            _DOTTED_PRIVATE_IDENTIFIER_RE.fullmatch(value) is not None
-        ):
-            return "redacted-private"
     if _ID_RE.fullmatch(value) is None:
         raise ValueError(f"{field} contains unsupported characters")
+    if field in _PRIVATE_IDENTIFIER_FIELDS:
+        segments = tuple(part for part in re.split(r"[._-]+", value.casefold()) if part)
+        segment_set = frozenset(segments)
+        has_private_role_segment = len(segments) > 1 and bool(segment_set.intersection(_PRIVATE_IDENTIFIER_SEGMENTS))
+        has_unknown_alpha_segment = any(
+            any(char.isalpha() for char in segment)
+            and segment not in _PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS
+            and _PUBLIC_TECHNICAL_SEGMENT_RE.fullmatch(segment) is None
+            for segment in segments
+        )
+        if has_private_role_segment or (_UUID_RE.fullmatch(value) is None and has_unknown_alpha_segment):
+            return "redacted-private"
     return value
 
 
@@ -271,6 +440,8 @@ def _contains_sensitive_assignment(value: str) -> bool:
         if index >= MAX_CONTAINER_ITEMS:
             return True
         prefix = value[max(0, match.start() - 64) : match.start()]
+        if any(ord(char) > 127 and char.isalpha() for char in prefix):
+            return True
         for start in range(len(prefix)):
             if _secret_key_signature(prefix[start:].strip()) in sensitive:
                 return True
@@ -395,11 +566,10 @@ def _redact(
     if type(value) is str:
         input_bytes = len(value.encode("utf-8"))
         budget.charge(input_bytes=input_bytes)
-        safe = _safe_text(
-            value,
-            allow_sha256=key == "digest_sha256",
-            allow_uuid=key in _IDENTIFIER_RECORD_FIELDS,
-        )
+        if key in _IDENTIFIER_RECORD_FIELDS:
+            safe = _identifier(value, field=key)
+        else:
+            safe = _safe_text(value, allow_sha256=key == "digest_sha256")
         budget.charge(input_bytes=0, output_bytes=len(safe.encode("utf-8")), nodes=0)
         return safe
     if type(value) is list:
@@ -448,15 +618,15 @@ def _redact(
     raise TypeError("payload values must be exact JSON scalars, lists, or dictionaries")
 
 
-def _record_timestamp(value: object) -> str:
-    value = _exact_text(value, field="observed_at", max_bytes=32)
+def _record_timestamp(value: object, *, field: str) -> str:
+    value = _exact_text(value, field=field, max_bytes=32)
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ValueError("observed_at must be canonical UTC ISO-8601") from exc
+        raise ValueError(f"{field} must be canonical UTC ISO-8601") from exc
     canonical = _utc_timestamp(parsed)
     if canonical != value:
-        raise ValueError("observed_at must be canonical UTC ISO-8601 with microseconds")
+        raise ValueError(f"{field} must be canonical UTC ISO-8601 with microseconds")
     return value
 
 
@@ -476,14 +646,18 @@ def _validated_record_payload(kind: str, payload: object) -> dict[str, object]:
     validated: dict[str, object] = {}
     for field in sorted(redacted):
         value = redacted[field]
-        if field in _IDENTIFIER_RECORD_FIELDS:
+        if field in _ENUM_RECORD_FIELDS:
+            if type(value) is not str or value not in _ENUM_RECORD_FIELDS[field]:
+                raise ValueError(f"{field} is not an allowed public value")
+            validated[field] = value
+        elif field in _IDENTIFIER_RECORD_FIELDS:
             validated[field] = _identifier(value, field=field)
         elif field in _COUNT_RECORD_FIELDS:
             if type(value) is not int or value < 0:
                 raise ValueError(f"{field} must be an exact non-negative int")
             validated[field] = value
-        elif field == "observed_at":
-            validated[field] = _record_timestamp(value)
+        elif field in {"observed_at", "received_at"}:
+            validated[field] = _record_timestamp(value, field=field)
         elif field == "digest_sha256":
             if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
                 raise ValueError("digest_sha256 must be 64 lowercase hex")
@@ -602,7 +776,7 @@ class UnavailableSource:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source", _identifier(self.source, field="source"))
-        object.__setattr__(self, "reason_code", _identifier(self.reason_code, field="reason_code"))
+        object.__setattr__(self, "reason_code", _identifier(self.reason_code, field="unavailable_reason_code"))
         if self.source not in _UNAVAILABLE_FIELDS:
             raise ValueError("unavailable source is not part of the support-bundle schema")
         if self.reason_code not in _UNAVAILABLE_REASON_CODES:
@@ -637,6 +811,18 @@ class BundleCapture:
             raise ValueError("version components must be unique")
         if len(set(item.config_id for item in self.config_fingerprints)) != len(self.config_fingerprints):
             raise ValueError("config ids must be unique")
+        identity_fields = {
+            "health": "source_id",
+            "attention": "attention_id",
+            "audit": "event_id",
+            "log": "event_id",
+            "integrity": "source_id",
+        }
+        record_identities = tuple(
+            (item.kind, json.loads(item.payload_json)[identity_fields[item.kind]]) for item in self.records
+        )
+        if len(set(record_identities)) != len(record_identities):
+            raise ValueError("record identities must be unique within each evidence kind")
         if tuple(sorted(set(self.unavailable_fields))) != self.unavailable_fields:
             raise ValueError("unavailable_fields must be sorted and unique")
         if any(item not in _UNAVAILABLE_FIELDS for item in self.unavailable_fields):
@@ -727,8 +913,10 @@ def _capture_from_evidence_document(evidence: object) -> BundleCapture:
     if type(evidence) is not dict or set(evidence) != expected_fields:
         raise ValueError("evidence fields do not match the support-bundle schema")
     if type(evidence["schema_version"]) is not int or evidence["schema_version"] != SCHEMA_VERSION:
+        if type(evidence["schema_version"]) is int and evidence["schema_version"] == 1:
+            raise ValueError(_SCHEMA_V1_REJECTION)
         raise ValueError("unsupported evidence schema version")
-    created_text = _record_timestamp(evidence["created_at"])
+    created_text = _record_timestamp(evidence["created_at"], field="created_at")
     created_at = datetime.fromisoformat(created_text.replace("Z", "+00:00"))
 
     versions_value = evidence["versions"]
@@ -839,6 +1027,10 @@ class SupportBundle:
                 "size_bytes": len(self.artifacts[1].content),
             }
         ]
+        manifest_schema = manifest.get("schema_version")
+        evidence_schema = evidence.get("schema_version")
+        if any(type(version) is int and version == 1 for version in (manifest_schema, evidence_schema)):
+            raise ValueError(_SCHEMA_V1_REJECTION)
         if (
             manifest["artifacts"] != expected_artifacts
             or manifest["bundle_id"] != self.bundle_id
@@ -850,7 +1042,7 @@ class SupportBundle:
             raise ValueError("manifest/evidence identity or artifact join is inconsistent")
         if type(manifest["created_at"]) is not str or manifest["created_at"] != evidence.get("created_at"):
             raise ValueError("manifest/evidence creation time must match")
-        _record_timestamp(manifest["created_at"])
+        _record_timestamp(manifest["created_at"], field="created_at")
         capture = _capture_from_evidence_document(evidence)
         if _evidence_document(capture) != evidence:
             raise ValueError("evidence is not the canonical validated capture projection")

@@ -52,7 +52,7 @@ def test_identical_detached_inputs_are_byte_stable_and_sorted() -> None:
         _capture(
             records=(
                 EvidenceRecord.from_payload(
-                    "log", {"event_id": "log-2", "event_code": "worker.stopped", "level": "INFO"}
+                    "log", {"event_id": "log-2", "event_code": "worker.stopped", "level": "info"}
                 ),
                 EvidenceRecord.from_payload(
                     "audit", {"event_id": "audit-1", "event_code": "bundle.requested", "outcome": "accepted"}
@@ -67,7 +67,7 @@ def test_identical_detached_inputs_are_byte_stable_and_sorted() -> None:
                     "audit", {"outcome": "accepted", "event_code": "bundle.requested", "event_id": "audit-1"}
                 ),
                 EvidenceRecord.from_payload(
-                    "log", {"level": "INFO", "event_code": "worker.stopped", "event_id": "log-2"}
+                    "log", {"level": "info", "event_code": "worker.stopped", "event_id": "log-2"}
                 ),
             )
         )
@@ -229,10 +229,10 @@ def test_inputs_are_immutable_and_reject_subclasses_callables_and_mutation() -> 
         pass
 
     with pytest.raises(TypeError):
-        EvidenceRecord.from_payload("log", DictSubclass(event_id="x", event_code="x", level="INFO"))
+        EvidenceRecord.from_payload("log", DictSubclass(event_id="x", event_code="x", level="info"))
     with pytest.raises(TypeError):
         EvidenceRecord.from_payload(
-            "log", {"event_id": "x", "event_code": "x", "level": "INFO", "callback": lambda: None}
+            "log", {"event_id": "x", "event_code": "x", "level": "info", "callback": lambda: None}
         )
     with pytest.raises(TypeError):
         BundleCapture("x", NOW, [], (), ())  # type: ignore[arg-type]
@@ -241,11 +241,11 @@ def test_inputs_are_immutable_and_reject_subclasses_callables_and_mutation() -> 
     with pytest.raises(FrozenInstanceError):
         version.version = "2"  # type: ignore[misc]
 
-    source = {"event_id": "before", "event_code": "worker.started", "level": "INFO"}
+    source = {"event_id": "log-1", "event_code": "log.engine.entry", "level": "info"}
     record = EvidenceRecord.from_payload("log", source)
-    source["event_id"] = "after"
-    assert b"before" in record.payload_json
-    assert b"after" not in record.payload_json
+    source["event_id"] = "log-2"
+    assert b"log-1" in record.payload_json
+    assert b"log-2" not in record.payload_json
 
 
 @pytest.mark.parametrize("kind", ["command", "control", "setpoint", "raw_experiment_data"])
@@ -265,7 +265,7 @@ def test_nonfinite_values_depth_and_count_are_bounded() -> None:
     with pytest.raises(ValueError, match="too large"):
         EvidenceRecord.from_payload(
             "log",
-            {"event_id": "x", "event_code": "x", "level": "INFO"} | {str(index): index for index in range(129)},
+            {"event_id": "x", "event_code": "x", "level": "info"} | {str(index): index for index in range(129)},
         )
 
 
@@ -310,9 +310,19 @@ def test_capture_rejects_mutable_timezone_without_invoking_it() -> None:
 def test_unavailable_fields_cannot_contradict_present_evidence() -> None:
     health = EvidenceRecord.from_payload("health", {"source_id": "engine", "state": "unavailable"})
     with pytest.raises(ValueError, match="cannot also contain"):
-        BundleCapture("bundle", NOW, (), (), (health,), ("health",))
+        BundleCapture(
+            "bundle", NOW, (), (), (health,), ("health",), (UnavailableSource("health", "source_not_provided"),)
+        )
     with pytest.raises(ValueError, match="unavailable versions"):
-        BundleCapture("bundle", NOW, (SoftwareVersion("cryodaq", "1"),), (), (), ("versions",))
+        BundleCapture(
+            "bundle",
+            NOW,
+            (SoftwareVersion("cryodaq", "1"),),
+            (),
+            (),
+            ("versions",),
+            (UnavailableSource("versions", "source_not_provided"),),
+        )
     with pytest.raises(ValueError, match="unavailable config"):
         BundleCapture(
             "bundle",
@@ -321,6 +331,7 @@ def test_unavailable_fields_cannot_contradict_present_evidence() -> None:
             (ConfigFingerprint("alarms", "alarms.public.v1", "redacted_public_projection", HASH),),
             (),
             ("config_fingerprints",),
+            (UnavailableSource("config_fingerprints", "source_not_provided"),),
         )
 
 
@@ -447,7 +458,7 @@ def test_bundle_is_stable_across_hash_seeds() -> None:
     script = """
 from datetime import UTC, datetime
 from cryodaq.support.bundle import *
-r = EvidenceRecord.from_payload('log', {'level':'INFO','event_code':'worker.started','event_id':'log-1'})
+r = EvidenceRecord.from_payload('log', {'level':'info','event_code':'worker.started','event_id':'log-1'})
 c = BundleCapture('bundle-1', datetime(2026,1,1,tzinfo=UTC), (SoftwareVersion('cryodaq','1'),),
     (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','a'*64),), (r,))
 print(build_support_bundle(c).manifest_sha256)
