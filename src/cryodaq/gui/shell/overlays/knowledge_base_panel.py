@@ -233,12 +233,22 @@ class _RagSnippetPane(QWidget):
 
     def mark_disconnected(self) -> None:
         """Retain prior cards only with an explicit loss-of-authority cue."""
+        if self._scroll_layout.count() == 1:
+            self._status.setText("Нет связи с Engine · результатов для показа нет")
+            self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
+            self._status.setAccessibleDescription("Связь с Engine потеряна; сохранённых результатов нет")
+            return
         self._status.setText("Нет связи с Engine · показаны последние результаты")
         self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
         self._status.setAccessibleDescription("Связь с Engine потеряна; показанные результаты не являются текущими")
 
     def mark_reconnected(self) -> None:
         """Require a successor query before retained cards become current."""
+        if self._scroll_layout.count() == 1:
+            self._status.setText("Требуется новый запрос · предыдущих результатов нет")
+            self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
+            self._status.setAccessibleDescription("Связь восстановлена; требуется новый запрос")
+            return
         self._status.setText("Требуется новый запрос · показаны предыдущие результаты")
         self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
         self._status.setAccessibleDescription(

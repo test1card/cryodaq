@@ -1453,6 +1453,9 @@ def test_dashboard_disconnect_keeps_interval_fault_across_identity_and_stale_axe
     view._sensor_grid.refresh()
     assert view._sensor_grid._last_presentations["\u04221"][2] is ChannelStatus.OVERRANGE
 
+    view._sensor_grid.refresh()
+    assert view._sensor_grid._last_presentations["\u04221"][2] is ChannelStatus.OVERRANGE
+
     view.set_connected(False)
     cell = view._sensor_grid._cells["\u04221"]
     direct_text = cell._status_hint_widget.text()

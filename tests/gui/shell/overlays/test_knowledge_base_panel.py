@@ -279,6 +279,30 @@ def test_disconnect_marks_retained_rag_results_noncurrent(app: QApplication) -> 
     panel.deleteLater()
 
 
+@pytest.mark.parametrize("loading", [False, True])
+def test_disconnect_does_not_claim_retained_rag_results_when_pane_is_empty(app: QApplication, loading: bool) -> None:
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel.set_connected(True)
+    if loading:
+        panel._snippet_pane.set_loading("Alpha")
+
+    panel.set_connected(False)
+    assert panel._snippet_pane._scroll_layout.count() == 1
+    assert (
+        "\u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u0432 "
+        "\u0434\u043b\u044f \u043f\u043e\u043a\u0430\u0437\u0430 \u043d\u0435\u0442"
+        in panel._snippet_pane._status.text()
+    )
+
+    panel.set_connected(True)
+    assert (
+        "\u043f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0438\u0445 "
+        "\u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u0432 \u043d\u0435\u0442"
+        in panel._snippet_pane._status.text()
+    )
+    panel.deleteLater()
+
+
 def test_outgoing_rag_reply_cannot_cross_disconnect_reconnect(app: QApplication) -> None:
     """A prior bridge generation cannot overwrite RAG truth after reconnect."""
     from PySide6.QtWidgets import QLabel

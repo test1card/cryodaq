@@ -273,7 +273,7 @@ class DynamicSensorGrid(QWidget):
                         self._last_presentations[short_id] = (
                             reading,
                             identity_status,
-                            reading.status,
+                            _interval_status,
                         )
                 continue
 
