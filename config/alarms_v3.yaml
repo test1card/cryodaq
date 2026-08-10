@@ -274,12 +274,12 @@ phase_alarms:
 # файла через load_protected_channel_patterns() и load_critical_channels_from_alarms_v3(),
 # объединяя patterns для защиты safety-critical каналов от throttling.
 #
-# Секция ниже содержит только те интерлоки, чьи каналы НЕ покрываются regex
-# patterns из config/interlocks.yaml — сейчас это только Keithley power каналы
-# (Keithley_1/smua/power, Keithley_1/smub/power), которые не матчатся temperature-regex из interlocks.yaml.
+# Секция ниже содержит только те интерлоки, чьи каналы НЕ покрываются
+# объявленными sensor bindings из config/interlocks.yaml — сейчас это только
+# Keithley power каналы (Keithley_1/smua/power, Keithley_1/smub/power).
 #
 # НЕ добавлять сюда дубликаты config/interlocks.yaml. Каналы Т1–Т12 уже
-# защищены через regex patterns в interlocks.yaml.
+# защищены через разрешённые descriptor bindings в interlocks.yaml.
 # ============================================================================
 interlocks:
 
