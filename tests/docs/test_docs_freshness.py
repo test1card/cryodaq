@@ -2931,9 +2931,9 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
     running the command that refutes it. Both survived the whole green suite,
     because nothing derived the inventory from the tree.
 
-    Three of the six migrated files call ONLY the per-channel predicate and
-    never touch either list helper, so the two list parities the row quotes do
-    not by themselves cover them. That distinction is what a reader needs in
+    Two of the six migrated files call only the per-channel predicate, and one
+    archived-history site ranks from its persisted descriptor catalog, so the
+    two live-list parities the row quotes do not by themselves cover them. That distinction is what a reader needs in
     order to know what the parity evidence proves, so it is measured here from
     the frozen index and required to appear in the row.
     """
@@ -2955,6 +2955,49 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
     assert migrated, "OC-030 names no migrated GUI file, so this guard would prove nothing"
 
     list_helpers = ("get_visible_temperature_channels", "get_temperature_channels")
+
+    def uses_archive_catalog_sort_rank(tree: ast.AST) -> bool:
+        """Recognize only ExperimentSummaryWidget's persisted-quantity rank path."""
+        classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "ExperimentSummaryWidget"]
+        methods = (
+            []
+            if len(classes) != 1
+            else [n for n in classes[0].body if isinstance(n, ast.FunctionDef) and n.name == "_on_stats_loaded"]
+        )
+        if len(methods) != 1:
+            return False
+        method = methods[0]
+        rendered = [ast.unparse(node) for node in method.body]
+        expected_rank_block = (
+            "descriptor_catalog = result.get('descriptor_catalog', {})",
+            "def _rank(channel: str) -> int:\n"
+            "    quantity = descriptor_catalog.get(channel)\n"
+            "    if type(quantity) is not str:\n"
+            "        quantity = None\n"
+            "    if quantity == 'temperature':\n"
+            "        return 0\n"
+            "    return 1 if quantity in (None, 'legacy_unknown') else 2",
+            "ordered = sorted(data, key=lambda ch: (_rank(ch), ch))[:12]",
+        )
+        try:
+            lines_index = rendered.index("lines: list[str] = []")
+            render_loop = method.body[lines_index + 4]
+        except (ValueError, IndexError):
+            return False
+        calls_spelling = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "startswith"
+            for n in ast.walk(method)
+        )
+        rank_block = tuple(rendered[lines_index + 1 : lines_index + 4])
+        loop_consumes_order = (
+            isinstance(render_loop, ast.For)
+            and isinstance(render_loop.target, ast.Name)
+            and render_loop.target.id == "ch"
+            and isinstance(render_loop.iter, ast.Name)
+            and render_loop.iter.id == "ordered"
+        )
+        return not calls_spelling and rank_block == expected_rank_block and loop_consumes_order
+
     measured: dict[str, str] = {}
     selects_nothing: list[str] = []
     for path in migrated:
@@ -2970,9 +3013,10 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
         # reason -- and would have stayed `list` if that call were removed.
         # Only an ATTRIBUTE call on some object counts, which a local
         # definition and a bare local call are not.
+        tree = ast.parse(blob.decode("utf-8"))
         called = {
             node.func.attr
-            for node in ast.walk(ast.parse(blob.decode("utf-8")))
+            for node in ast.walk(tree)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
         }
         leaf = path.rsplit("/", 1)[-1]
@@ -2980,6 +3024,8 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
             measured[leaf] = "list"
         elif "is_temperature_channel" in called:
             measured[leaf] = "predicate"
+        elif uses_archive_catalog_sort_rank(tree):
+            measured[leaf] = "archive_catalog"
         else:
             # THE THIRD STATE, which an earlier version of this node folded into
             # `list` by writing the category as a ternary on predicate-only
@@ -2990,7 +3036,8 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
             # through the regression it exists to catch.
             selects_nothing.append(path)
     assert not selects_nothing, (
-        "these migrated files call neither a temperature-list helper nor `is_temperature_channel`, so they "
+        "these migrated files call neither a temperature-list helper, `is_temperature_channel`, nor the "
+        "symbol-scoped persisted descriptor-catalog sort rank, so they "
         f"no longer select by declared quantity at all: {selects_nothing}"
     )
 
@@ -3008,7 +3055,7 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
             f"{sorted(leaf for leaf, kind in measured.items() if kind == 'predicate')}"
         )
 
-    # BOTH CATEGORIES, COMPARED EXACTLY. An earlier version of this node only
+    # ALL CATEGORIES, COMPARED EXACTLY. An earlier version of this node only
     # required each predicate-only filename to appear SOMEWHERE in the row --
     # and every migrated filename already appears there, in the migration
     # inventory. So deleting the whole per-file breakdown left it green, and a
@@ -3017,10 +3064,13 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
     #
     # The row therefore carries an explicit inventory that this parses, and the
     # two sides must agree in both directions. `list` means the file calls a
-    # list helper; `predicate` means it calls only `is_temperature_channel`.
-    declared = dict(re.findall(r"`([A-Za-z0-9_]+\.py)`=(list|predicate)\b", oc_030))
+    # list helper; `predicate` means it calls only `is_temperature_channel`;
+    # `archive_catalog` means the symbol-scoped persisted quantity rank feeds sorted.
+    declared = dict(re.findall(r"`([A-Za-z0-9_]+\.py)`=(list|predicate|archive_catalog)\b", oc_030))
     assert declared == measured, (
         "OC-030's selector inventory disagrees with the tree. A file marked `list` calls a list helper; "
-        "`predicate` means it calls only `is_temperature_channel`, so the 16-for-16 and 24-for-24 parities "
+        "`predicate` means it calls only `is_temperature_channel`; "
+        "`archive_catalog` means the exact persisted-quantity rank feeds sorted, so the 16-for-16 "
+        "and 24-for-24 parities "
         f"do not cover it. declared={declared}, measured={measured}"
     )
