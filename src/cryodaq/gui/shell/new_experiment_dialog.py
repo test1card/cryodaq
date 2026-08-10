@@ -129,9 +129,7 @@ class NewExperimentDialog(QDialog):
             "\u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 "
             "\u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043e\u0442\u0447\u0451\u0442"
         )
-        self._report_enabled_check.setToolTip(
-            "DOCX/PDF отчёт будет создан после завершения эксперимента."
-        )
+        self._report_enabled_check.setToolTip("DOCX/PDF отчёт будет создан после завершения эксперимента.")
         form.addRow(
             "\u041e\u0442\u0447\u0451\u0442:",
             self._report_enabled_check,
@@ -146,9 +144,7 @@ class NewExperimentDialog(QDialog):
 
         # Validation hint
         self._validation_label = QLabel("")
-        self._validation_label.setStyleSheet(
-            f"color: {theme.STATUS_FAULT}; font-size: {theme.FONT_SIZE_SM}px;"
-        )
+        self._validation_label.setStyleSheet(f"color: {theme.FOREGROUND}; font-size: {theme.FONT_SIZE_SM}px;")
         self._validation_label.setVisible(False)
         root.addWidget(self._validation_label)
 
@@ -180,13 +176,9 @@ class NewExperimentDialog(QDialog):
             c.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
             return c
 
-        self._operator_combo.lineEdit().setCompleter(
-            _make_completer(self._preferences.get_history("operator"))
-        )
+        self._operator_combo.lineEdit().setCompleter(_make_completer(self._preferences.get_history("operator")))
         self._sample_edit.setCompleter(_make_completer(self._preferences.get_history("sample")))
-        self._cryostat_combo.lineEdit().setCompleter(
-            _make_completer(self._preferences.get_history("cryostat"))
-        )
+        self._cryostat_combo.lineEdit().setCompleter(_make_completer(self._preferences.get_history("cryostat")))
 
     def _on_template_changed(self) -> None:
         self._rebuild_custom_fields()
@@ -238,18 +230,15 @@ class NewExperimentDialog(QDialog):
             self._custom_form.addRow(f"{field.get('label', fid)}:", edit)
 
     def _on_create_clicked(self) -> None:
+        self._clear_error()
         name = self._name_edit.text().strip()
         operator = self._operator_combo.currentText().strip()
         if not name:
-            self._show_error(
-                "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435"  # noqa: E501
-            )
+            self._show_error("Введите название", self._name_edit)
             self._name_edit.setFocus()
             return
         if not operator:
-            self._show_error(
-                "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u043f\u0435\u0440\u0430\u0442\u043e\u0440\u0430"  # noqa: E501
-            )
+            self._show_error("Введите оператора", self._operator_combo)
             self._operator_combo.setFocus()
             return
 
@@ -264,9 +253,7 @@ class NewExperimentDialog(QDialog):
             "description": self._description_edit.toPlainText().strip(),
             "notes": self._notes_edit.toPlainText().strip(),
             "custom_fields": {
-                fid: edit.text().strip()
-                for fid, edit in self._custom_edits.items()
-                if edit.text().strip()
+                fid: edit.text().strip() for fid, edit in self._custom_edits.items() if edit.text().strip()
             },
             # IV.4 F6: per-experiment report_enabled override.
             "report_enabled": self._report_enabled_check.isChecked(),
@@ -297,6 +284,15 @@ class NewExperimentDialog(QDialog):
         self.experiment_create_requested.emit(payload)
         self.accept()
 
-    def _show_error(self, msg: str) -> None:
+    def _clear_error(self) -> None:
+        self._validation_label.clear()
+        self._validation_label.setVisible(False)
+        for field in (self._name_edit, self._operator_combo):
+            field.setStyleSheet("")
+            field.setAccessibleDescription("")
+
+    def _show_error(self, msg: str, field: QWidget) -> None:
         self._validation_label.setText(msg)
         self._validation_label.setVisible(True)
+        field.setStyleSheet(f"border: 2px solid {theme.STATUS_FAULT}; border-radius: {theme.RADIUS_SM}px;")
+        field.setAccessibleDescription(msg)

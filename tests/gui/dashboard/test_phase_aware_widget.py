@@ -8,6 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from datetime import UTC, datetime
 
+from PySide6.QtCore import Qt
+
 from cryodaq.core.phase_labels import PHASE_LABELS_RU, PHASE_ORDER
 from cryodaq.gui import theme
 from cryodaq.gui.dashboard.phase_aware_widget import PhaseAwareWidget
@@ -395,6 +397,19 @@ def test_mutation_gate_blocks_direct_phase_handlers_without_hiding_truth(app):
     assert not w._back_btn.isEnabled()
     assert not w._forward_btn.isEnabled()
     assert not w._jump_combo.isEnabled()
+
+
+def test_replay_disabled_create_action_has_canonical_disabled_treatment(app):
+    w = PhaseAwareWidget()
+    w.set_mutation_enabled(False)
+
+    style = w._create_btn.styleSheet()
+    assert "#phaseCreateBtn:disabled" in style
+    assert theme.TEXT_DISABLED in style
+    assert theme.SURFACE_CARD in style
+    assert w._create_btn.cursor().shape() == Qt.CursorShape.ArrowCursor
+    assert w._create_btn.toolTip() == "Недоступно в режиме повтора"
+    assert w._create_btn.accessibleDescription() == "Недоступно в режиме повтора"
 
 
 def test_phase_operation_unknown_is_visible_and_accessible(app):

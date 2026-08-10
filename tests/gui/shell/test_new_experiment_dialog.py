@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.gui import theme
 from cryodaq.gui.shell.new_experiment_dialog import NewExperimentDialog
 
 
@@ -30,6 +31,10 @@ def test_dialog_validates_empty_name(app):
     assert received == [], "signal must not fire on invalid input"
     assert not dialog._validation_label.isHidden()
     assert dialog._validation_label.text() == "Введите название"
+    assert theme.STATUS_FAULT not in dialog._validation_label.styleSheet()
+    assert theme.FOREGROUND in dialog._validation_label.styleSheet()
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._name_edit.styleSheet()
+    assert dialog._name_edit.accessibleDescription() == "Введите название"
 
 
 def test_dialog_validates_empty_operator(app):
@@ -45,6 +50,10 @@ def test_dialog_validates_empty_operator(app):
     assert received == [], "signal must not fire on invalid input"
     assert not dialog._validation_label.isHidden()
     assert dialog._validation_label.text() == "Введите оператора"
+    assert theme.STATUS_FAULT not in dialog._validation_label.styleSheet()
+    assert theme.FOREGROUND in dialog._validation_label.styleSheet()
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._operator_combo.styleSheet()
+    assert dialog._operator_combo.accessibleDescription() == "Введите оператора"
 
 
 def test_dialog_emits_payload_on_valid_submit(app):

@@ -455,6 +455,35 @@ def _contrast_ratio(fg: str, bg: str) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def test_warm_stone_muted_body_text_passes_on_every_claimed_surface(real_themes_dir):
+    """Every machine-readable Warm Stone body-text claim must match the real pack."""
+    matrix_path = Path(__file__).parents[2] / "docs" / "design-system" / "accessibility" / "contrast-matrix.md"
+    matrix = matrix_path.read_text(encoding="utf-8")
+    claims = matrix.split("<!-- BEGIN WARM_STONE_BODY_TEXT_CLAIMS -->", 1)[1].split(
+        "<!-- END WARM_STONE_BODY_TEXT_CLAIMS -->", 1
+    )[0]
+    rows = []
+    for line in claims.splitlines():
+        if not line.startswith("| MUTED_FOREGROUND"):
+            continue
+        cells = [cell.strip().strip("*") for cell in line.strip("|").split("|")]
+        rows.append((cells[0], cells[1], float(cells[2].removesuffix(":1")), float(cells[3].removesuffix(":1"))))
+
+    assert rows, "contrast matrix must enumerate Warm Stone body-text claims"
+    pack = loader._load_theme_pack("warm_stone")
+    for foreground_token, surface_token, threshold, documented_ratio in rows:
+        ratio = _contrast_ratio(pack[foreground_token], pack[surface_token])
+        assert round(ratio, 2) == documented_ratio, (
+            f"documented {foreground_token} vs {surface_token} ratio {documented_ratio:.2f}:1 "
+            f"does not match loaded warm_stone ratio {ratio:.2f}:1"
+        )
+        assert ratio >= threshold, (
+            f"warm_stone.{foreground_token} {pack[foreground_token]} vs "
+            f"{surface_token} {pack[surface_token]} contrast {ratio:.2f}:1 < "
+            f"{threshold:.2f}:1 claimed threshold"
+        )
+
+
 def test_status_palette_hue_locked_across_all_themes(real_themes_dir):
     """Safety invariant (ADR 001): every bundled theme must ship the same
     STATUS *hues*. Lightness is unlocked for light substrates to restore

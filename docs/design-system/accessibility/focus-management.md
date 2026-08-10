@@ -5,7 +5,7 @@ applies_to: focus indicator visuals + focus lifecycle across widgets and overlay
 status: canonical
 references: rules/accessibility-rules.md, rules/interaction-rules.md, tokens/colors.md, accessibility/keyboard-navigation.md
 external_reference: WCAG 2.2 sections 2.4.7, 2.4.11; Apple HIG Keyboard/Focus; Material Design focus-visible
-last_updated: 2026-04-17
+last_updated: 2026-08-10
 ---
 
 # Focus Management
@@ -31,6 +31,13 @@ Specifics:
 - **Visibility:** only on `:focus-visible` equivalent (Qt's focus based on Tab, not click)
 
 Rationale for 2px: visible without stealing pixels from content; distinguishable from BORDER's 1px; matches input `:focus` state already established in `components/input-field.md`.
+
+**Warm Stone ToolRail exception, v5.0.0:** the rail sits on
+SURFACE_PANEL #221f1c. FOCUS_RING #6b5d4d measures only 2.58:1 there and is
+not approved as that functional boundary. ToolRailButton therefore uses a
+keyboard-only 2 px ACCENT #b89e7a outer border (6.41:1), while the selected
+state keeps its independent 3 px left ACCENT rail. Focused + selected renders
+both widths; mouse focus does not display the keyboard ring.
 
 ## Focus-visible vs focus
 

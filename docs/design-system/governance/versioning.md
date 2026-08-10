@@ -5,7 +5,7 @@ applies_to: how design-system releases are numbered and what changes go into eac
 status: canonical
 references: governance/deprecation-policy.md, governance/contribution.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-07-20
+last_updated: 2026-08-10
 ---
 
 # Versioning
@@ -20,10 +20,9 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `4.0.3` — operator-state semantic correction: safety green
-is reserved for demonstrated health, ordinary activity/progress uses accent or
-neutral information, and new presentation producers use the single caution
-rung (see `CHANGELOG.md`).
+**Current version:** 5.0.0 — measured focus and secondary-body contrast
+correction. Warm Stone secondary body text now clears 4.5:1 on every
+claimed surface, and ToolRail keyboard focus uses its measured ACCENT pair.
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative

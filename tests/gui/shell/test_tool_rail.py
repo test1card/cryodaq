@@ -6,10 +6,11 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui import theme
-from cryodaq.gui.shell.tool_rail import _MNEMONIC_SHORTCUTS, ToolRail
+from cryodaq.gui.shell.tool_rail import _MNEMONIC_SHORTCUTS, ToolRail, ToolRailButton
 
 
 def _app() -> QApplication:
@@ -76,6 +77,29 @@ def test_set_active_marks_one_button() -> None:
     rail.set_active("summary")
     assert _active_border in rail._buttons["more"].styleSheet()
     assert _inactive_border in rail._buttons["home"].styleSheet()
+
+
+def test_keyboard_focus_changes_real_tool_rail_pixels_and_coexists_with_selection() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.set_active("home")
+    rail.show()
+    app.processEvents()
+
+    button = rail._buttons["home"]
+    assert isinstance(button, ToolRailButton)
+    rail._buttons["new_experiment"].setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    assert not button.hasFocus()
+    before = button.grab().toImage()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    focused_selected = button.grab().toImage()
+
+    assert focused_selected != before, "Tab focus must visibly change ToolRailButton pixels"
+    accent = theme.ACCENT.lower()
+    assert focused_selected.pixelColor(button.width() // 2, 1).name().lower() == accent
+    assert focused_selected.pixelColor(1, button.height() // 2).name().lower() == accent
 
 
 def test_rail_width_matches_design_token() -> None:

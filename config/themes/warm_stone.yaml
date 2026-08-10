@@ -16,7 +16,7 @@ BORDER_SUBTLE: "#2d2925"
 # Text
 FOREGROUND: "#e8e2d9"
 TEXT_SECONDARY: "#b6ada5"
-MUTED_FOREGROUND: "#7a7167"
+MUTED_FOREGROUND: "#a59d94"
 TEXT_DISABLED: "#5a554f"
 
 # Neutral interaction tokens (Phase III.A — decoupled from status semantics)

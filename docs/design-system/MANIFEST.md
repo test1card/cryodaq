@@ -1,15 +1,15 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.0
+last_updated: 2026-08-10
+version: 5.0.0
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-20
-**Session:** v4.0.3 operator-state semantic correction
-**Scope:** Design system v4.1.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-08-10
+**Session:** v5.0.0 measured focus and body-contrast correction
+**Scope:** Design system v5.0.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -206,7 +206,7 @@ Batch 6 — accessibility + governance:
 
 53. **WCAG 2.2 Level AA target** — AA floor with documented exceptions; AAA opportunistic not committed.
 54. **Out-of-scope AA criteria explicit** — 1.2.x (media), 1.4.4 (resize text beyond OS DPI), 2.5.5 (touch target) — not applicable for desktop-only industrial context.
-55. **Contrast matrix is the source of truth** — every token/surface combination measured. STATUS_FAULT 3.94:1 body text fails AA → border+icon carry signal, value stays FOREGROUND.
+55. **Contrast matrix is the source of truth** — every claimed token/surface combination is measured and guarded. Warm Stone MUTED_FOREGROUND passes all five claimed body-text surfaces (tightest 4.97:1); STATUS_FAULT body text remains forbidden, so border/icon/dot carry fault while labels stay neutral.
 56. **2px ACCENT focus ring is canonical** — uniform across all focusable widgets; selection chrome (3px left-bar) + focus ring (2px outer border) coexist, not collapsed.
 57. **No single-key shortcuts anywhere** — every shortcut uses Ctrl / Alt / Shift modifier. Function keys (F5, F11) OK as non-text-input.
 58. **Focus restoration mandatory** on overlay close — return to opener, not document start.
