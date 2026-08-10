@@ -206,7 +206,7 @@ Batch 6 — accessibility + governance:
 
 53. **WCAG 2.2 Level AA target** — AA floor with documented exceptions; AAA opportunistic not committed.
 54. **Out-of-scope AA criteria explicit** — 1.2.x (media), 1.4.4 (resize text beyond OS DPI), 2.5.5 (touch target) — not applicable for desktop-only industrial context.
-55. **Contrast matrix is the source of truth** — every claimed token/surface combination is measured and guarded. Warm Stone MUTED_FOREGROUND passes all five claimed body-text surfaces (tightest 4.97:1); STATUS_FAULT body text remains forbidden, so border/icon/dot carry fault while labels stay neutral.
+55. **Contrast matrix is the source of truth** — every claimed token/surface combination is measured and guarded. Warm Stone MUTED_FOREGROUND passes all six claimed body-text surfaces (tightest 4.97:1); STATUS_FAULT body text remains forbidden, so border/icon/dot carry fault while labels stay neutral.
 56. **2px ACCENT focus ring is canonical** — uniform across all focusable widgets; selection chrome (3px left-bar) + focus ring (2px outer border) coexist, not collapsed.
 57. **No single-key shortcuts anywhere** — every shortcut uses Ctrl / Alt / Shift modifier. Function keys (F5, F11) OK as non-text-input.
 58. **Focus restoration mandatory** on overlay close — return to opener, not document start.

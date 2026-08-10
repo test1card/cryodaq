@@ -134,7 +134,7 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 | `TEXT_FAULT` | `STATUS_FAULT` | `#c44545` | Fault status inline (respect contrast constraint) |
 | `TEXT_INFO` | `STATUS_INFO` | `#6490c4` | Info status inline |
 
-The legacy baseline MUTED_FOREGROUND #8a8f9b passes AA body on its documented surfaces. Warm Stone uses #a59d94; its five guarded pairings range from 4.97:1 on SURFACE_ELEVATED to 6.94:1 on SURFACE_SUNKEN. Never infer an unmeasured pack/surface pairing from either result.
+The legacy baseline MUTED_FOREGROUND #8a8f9b passes AA body on its documented surfaces. Warm Stone uses #a59d94; its six guarded pairings range from 4.97:1 on SURFACE_ELEVATED to 6.94:1 on SURFACE_SUNKEN. Never infer an unmeasured pack/surface pairing from either result.
 `TEXT_DISABLED` at 2.79:1 fails all contrast levels — this is intentional (disabled controls should be visibly unavailable).
 
 ## Interaction palette

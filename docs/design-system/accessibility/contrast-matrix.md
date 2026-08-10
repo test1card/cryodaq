@@ -84,6 +84,7 @@ a guard obligation automatically.
 | MUTED_FOREGROUND | SURFACE_PANEL | 4.50:1 | **6.13:1** |
 | MUTED_FOREGROUND | SURFACE_CARD | 4.50:1 | **5.54:1** |
 | MUTED_FOREGROUND | SURFACE_ELEVATED | 4.50:1 | **4.97:1** |
+| MUTED_FOREGROUND | SURFACE_MUTED | 4.50:1 | **5.91:1** |
 | MUTED_FOREGROUND | SURFACE_SUNKEN | 4.50:1 | **6.94:1** |
 <!-- END WARM_STONE_BODY_TEXT_CLAIMS -->
 
@@ -130,7 +131,7 @@ WCAG 1.4.11 requires ≥ 3:1 for UI component boundaries (borders, form outlines
 
 Safe (AA passes):
 - FOREGROUND on any background
-- Warm Stone MUTED_FOREGROUND on its five claimed surfaces (SURFACE_ELEVATED is tightest at 4.97:1); other packs require their own enumerated claims
+- Warm Stone MUTED_FOREGROUND on its six claimed surfaces (SURFACE_ELEVATED is tightest at 4.97:1); other packs require their own enumerated claims
 - ACCENT on any background
 - STATUS_OK on BACKGROUND only (4.67:1 — fails on CARD/SECONDARY/MUTED)
 - STATUS_CAUTION / legacy WARNING on any listed background (SECONDARY is the tightest at 4.95:1)
@@ -247,4 +248,4 @@ Any new token or background color added must go through this calculation + get a
 
 - 2026-04-17: Initial version. Measured ratios for all 13 primary text/accent tokens vs BACKGROUND. Filled-pill context ratios. Non-text contrast for UI borders. Documented AA gaps with rationale. Light theme deferred.
 - 2026-04-17: v1.0.1 — Recomputed all ratios from theme.py. Fixed stale ON_DESTRUCTIVE input. Corrected BORDER non-text contrast.
-- 2026-08-10 (v5.0.0): Replaced the false generic MUTED_FOREGROUND pass claim with five guarded Warm Stone token/surface measurements; no AA threshold exception.
+- 2026-08-10 (v5.0.0): Replaced the false generic MUTED_FOREGROUND pass claim with six guarded Warm Stone token/surface measurements; no AA threshold exception.

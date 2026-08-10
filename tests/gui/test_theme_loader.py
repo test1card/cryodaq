@@ -470,6 +470,14 @@ def test_warm_stone_muted_body_text_passes_on_every_claimed_surface(real_themes_
         rows.append((cells[0], cells[1], float(cells[2].removesuffix(":1")), float(cells[3].removesuffix(":1"))))
 
     assert rows, "contrast matrix must enumerate Warm Stone body-text claims"
+    assert {surface_token for _, surface_token, _, _ in rows} == {
+        "BACKGROUND",
+        "SURFACE_PANEL",
+        "SURFACE_CARD",
+        "SURFACE_ELEVATED",
+        "SURFACE_MUTED",
+        "SURFACE_SUNKEN",
+    }
     pack = loader._load_theme_pack("warm_stone")
     for foreground_token, surface_token, threshold, documented_ratio in rows:
         ratio = _contrast_ratio(pack[foreground_token], pack[surface_token])
