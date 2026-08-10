@@ -394,3 +394,99 @@ def test_successor_experiment_status_restores_cleared_template_truth() -> None:
 
     assert set(window._experiment_overlay._templates_by_id) == {"template-2"}
     assert window._experiment_overlay._experiment["experiment_id"] == "b" * 12
+
+
+def test_bridge_retirement_synchronously_disconnects_every_instantiated_panel() -> None:
+    """The bridge cut reaches every real connection-gated panel before a timer tick."""
+    _app()
+    window = MainWindowV2()
+    _stop_timers(window)
+    for route in (
+        "source",
+        "conductivity",
+        "multiline",
+        "knowledge_base",
+        "log",
+        "instruments",
+        "archive",
+        "calibration",
+        "experiment",
+    ):
+        window._ensure_overlay(route)
+    _stop_timers(window)
+
+    panels = {
+        "dashboard": window._overview_panel,
+        "alarms": window._alarm_panel,
+        "source": window._keithley_panel,
+        "conductivity": window._conductivity_panel,
+        "multiline": window._multiline_panel,
+        "knowledge_base": window._knowledge_base_panel,
+        "log": window._operator_log_panel,
+        "instruments": window._instrument_panel,
+        "archive": window._archive_panel,
+        "calibration": window._calibration_panel,
+        "experiment": window._experiment_overlay,
+    }
+    assert all(panel is not None for panel in panels.values())
+    for panel in panels.values():
+        panel.set_connected(True)
+    _stop_timers(window)
+    alarm_generation = window._alarm_panel._connection_generation
+    dashboard_generation = window._overview_panel._connection_generation
+    assert all(panel._connected is True for panel in panels.values())
+
+    window.invalidate_descriptor_transport()
+
+    assert all(panel._connected is False for panel in panels.values()), {
+        name: panel._connected for name, panel in panels.items()
+    }
+    assert window._alarm_panel._connection_generation > alarm_generation
+    assert window._overview_panel._connection_generation > dashboard_generation
+
+
+def test_bridge_retirement_synchronously_marks_bottom_bar_disconnected() -> None:
+    """Shell chrome must stop claiming live connection or current disk truth at the cut."""
+    from datetime import UTC, datetime
+
+    _app()
+    window = MainWindowV2()
+    _stop_timers(window)
+    window._bottom_bar.set_connected(True, "Подключено")
+    window._bottom_bar.set_data_rate(3.0)
+    assert window._bottom_bar.set_disk_evidence(20.0, source="disk_monitor", state="ok")
+    window._accepted_disk_bridge_instance_id = "a" * 32
+    window._last_disk_observed_at = datetime.now(UTC)
+    assert window._bottom_bar._conn_label.text() == "● Подключено"
+    assert window._bottom_bar._rate_label.text() == "3 изм/с"
+    assert window._bottom_bar._disk_label.text() == "Диск 20.0 ГБ"
+
+    window.invalidate_descriptor_transport()
+
+    assert window._bottom_bar._rate_label.text() == "~3 изм/с"
+    assert "текущая входящая скорость недействительна" in window._bottom_bar._rate_label.accessibleDescription()
+    assert window._bottom_bar._conn_label.text() == "● Engine потерян"
+    assert "Состояние связи: Engine потерян" in window._bottom_bar._conn_label.accessibleDescription()
+    assert window._bottom_bar._disk_label.text() == "Диск ~20.0 ГБ · нет связи"
+    assert window._accepted_disk_bridge_instance_id is None
+    assert window._last_disk_observed_at is None
+
+
+def test_status_tick_restores_knowledge_base_connection_after_bridge_cut() -> None:
+    """A current successor data flow re-enables RAG only through host authority."""
+    import time
+
+    _app()
+    window = MainWindowV2()
+    _stop_timers(window)
+    window._ensure_overlay("knowledge_base")
+    panel = window._knowledge_base_panel
+    assert panel is not None
+    panel.set_connected(True)
+    window.invalidate_descriptor_transport()
+    assert panel._connected is False
+
+    window._last_reading_time = time.monotonic()
+    window._tick_status()
+
+    assert panel._connected is True

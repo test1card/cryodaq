@@ -221,3 +221,35 @@ def test_get_sensor_summary_text_callable_from_host():
         assert w._instrument_panel.get_sensor_summary_text() == "—"
     finally:
         _stop_timers(w)
+
+
+def test_bridge_retirement_marks_retained_instrument_evidence_disconnected() -> None:
+    """Retained cards and diagnostics lose current-truth status at the bridge cut."""
+    _app()
+    window = MainWindowV2()
+    try:
+        window._ensure_overlay("instruments")
+        panel = window._instrument_panel
+        assert panel is not None
+        panel.set_connected(True)
+        window.dispatch_qualified_reading(_qualified(_k_reading("opaque-channel", instrument_id="asc-reference-42")))
+        QCoreApplication.processEvents()
+        panel.set_diagnostics(
+            {"opaque-channel": {"channel_name": "Generic channel", "health_score": 95}},
+            {"healthy": 1, "warning": 0, "critical": 0},
+        )
+        card = panel._cards["asc-reference-42"]
+        assert card._status_label.text() == "Статус: Норма"
+        assert [chip.text() for chip in panel.sensor_diag_section._chip_widgets] == ["1 ОК"]
+
+        window.invalidate_descriptor_transport()
+
+        from cryodaq.gui import theme
+
+        assert card._name_label.text() == "asc-reference-42"
+        assert card.total_readings == 1
+        assert card._status_label.text() == "Статус: Нет связи · последнее состояние: Норма"
+        assert theme.STATUS_STALE in card.styleSheet()
+        assert panel.sensor_diag_section._summary_label.text() == "НЕТ СВЯЗИ · последнее: 1 ОК"
+    finally:
+        _stop_timers(window)

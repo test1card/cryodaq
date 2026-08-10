@@ -982,3 +982,45 @@ def test_replay_poll_waits_for_bound_authority_before_request(monkeypatch) -> No
         assert RecordingWorker.instances[0].started is True
     finally:
         _dispose_bar(bar)
+
+
+def test_engine_retirement_synchronously_marks_channel_summary_unavailable() -> None:
+    """A lost producer cannot leave the last channel cut rendered as current OK."""
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    class _OneChannelManager:
+        def get_all_visible(self) -> list[str]:
+            return ["Т1"]
+
+    _app()
+    bar = TopWatchBar(channel_manager=_OneChannelManager())  # type: ignore[arg-type]
+    try:
+        bar._fast_timer.stop()
+        bar._slow_timer.stop()
+        bar._channel_refresh_timer.stop()
+        bar._stale_timer.stop()
+        bar.set_engine_state(True)
+        bar.on_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="engine",
+                channel="Т1 Криостат верх",
+                value=4.2,
+                unit="K",
+                status=ChannelStatus.OK,
+            )
+        )
+        bar._refresh_channels()
+        assert bar._channel_label.text() == "● 1/1 норма"
+        assert theme.STATUS_OK in bar._channel_label.styleSheet()
+
+        bar.invalidate_engine_producer()
+
+        assert bar._channel_last_seen == {}
+        assert "Нет текущих данных" in bar._channel_label.text()
+        assert "норма" not in bar._channel_label.text()
+        assert theme.STATUS_STALE in bar._channel_label.styleSheet()
+    finally:
+        _dispose_bar(bar)

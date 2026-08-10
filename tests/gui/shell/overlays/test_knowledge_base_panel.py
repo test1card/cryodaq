@@ -113,6 +113,7 @@ def test_clicking_category_switches_to_rag_page(app: QApplication) -> None:
     ZmqCommandWorker = knowledge_base_panel.ZmqCommandWorker
 
     panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel.set_connected(True)
     dispatched: list[dict] = []
 
     # Intercept ZmqCommandWorker construction to capture the command dict.
@@ -226,6 +227,7 @@ def test_panel_exposes_only_read_only_actions_and_offline_guidance(
     from PySide6.QtWidgets import QAbstractButton, QLabel
 
     panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel.set_connected(True)
     with patch("cryodaq.gui.shell.overlays.knowledge_base_panel.ZmqCommandWorker") as worker_type:
         for index in range(panel._list.count()):
             item = panel._list.item(index)
@@ -247,4 +249,91 @@ def test_panel_exposes_only_read_only_actions_and_offline_guidance(
     assert {command["cmd"] for command in dispatched} <= {"rag.search", "assistant.query"}
     label_text = " ".join(label.text() for label in panel.findChildren(QLabel))
     assert "cryodaq-rag-index" in label_text
+    panel.deleteLater()
+
+
+def test_disconnect_marks_retained_rag_results_noncurrent(app: QApplication) -> None:
+    """Retained RAG cards remain visible only with an explicit transport cue."""
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel.set_connected(True)
+    panel._snippet_pane.set_results(
+        "Alpha",
+        [
+            {
+                "source_kind": "vault",
+                "text": "Последний подтверждённый результат",
+                "metadata": {},
+                "score": 0.5,
+            }
+        ],
+    )
+    assert panel._snippet_pane._status.text() == "Найдено: 1"
+    assert panel._snippet_pane._scroll_layout.count() == 2
+
+    panel.set_connected(False)
+
+    assert panel._snippet_pane._status.text() == "Нет связи с Engine · показаны последние результаты"
+    assert panel._snippet_pane._scroll_layout.count() == 2
+    panel.set_connected(True)
+    assert panel._snippet_pane._status.text() == "Требуется новый запрос · показаны предыдущие результаты"
+    panel.deleteLater()
+
+
+def test_outgoing_rag_reply_cannot_cross_disconnect_reconnect(app: QApplication) -> None:
+    """A prior bridge generation cannot overwrite RAG truth after reconnect."""
+    from PySide6.QtWidgets import QLabel
+
+    from cryodaq.gui.shell.overlays import knowledge_base_panel
+
+    worker_type = knowledge_base_panel.ZmqCommandWorker
+    panel = KnowledgeBasePanel(categories=_custom_categories())
+    panel.set_connected(True)
+    with patch.object(worker_type, "start", lambda _worker: None):
+        item = panel._list.item(0)
+        panel._list.setCurrentItem(item)
+        panel._list.itemClicked.emit(item)
+        outgoing_worker = panel._workers[-1]
+        panel.set_connected(False)
+        panel.set_connected(True)
+
+        outgoing_worker.finished.emit(
+            {
+                "ok": True,
+                "results": [
+                    {
+                        "source_kind": "vault",
+                        "text": "OUTGOING",
+                        "metadata": {},
+                        "score": 0.9,
+                    }
+                ],
+            }
+        )
+
+        texts = [label.text() for label in panel._snippet_pane.findChildren(QLabel)]
+        assert "OUTGOING" not in texts
+        assert panel._snippet_pane._scroll_layout.count() == 1
+        assert panel._snippet_pane._status.text().startswith("Требуется новый запрос")
+
+        panel._list.itemClicked.emit(item)
+        current_worker = panel._workers[-1]
+        assert current_worker is not outgoing_worker
+        current_worker.finished.emit(
+            {
+                "ok": True,
+                "results": [
+                    {
+                        "source_kind": "vault",
+                        "text": "CURRENT",
+                        "metadata": {},
+                        "score": 1.0,
+                    }
+                ],
+            }
+        )
+
+    texts = [label.text() for label in panel._snippet_pane.findChildren(QLabel)]
+    assert panel._snippet_pane._status.text() == "Найдено: 1"
+    assert "CURRENT" in texts
+    assert "OUTGOING" not in texts
     panel.deleteLater()

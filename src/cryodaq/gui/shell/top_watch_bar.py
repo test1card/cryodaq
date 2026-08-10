@@ -1323,6 +1323,8 @@ class TopWatchBar(QWidget):
         Single source of truth — no internal polling for engine state.
         """
         alive = bool(alive)
+        if not alive:
+            self._channel_last_seen.clear()
         if not alive and self._engine_alive is not False:
             self._retire_live_status_authority()
         self._engine_alive = alive
@@ -1334,6 +1336,7 @@ class TopWatchBar(QWidget):
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
         for key in (_PRESSURE_VITAL, SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
             self._render_vital(key)
+        self._refresh_channels()
 
     def set_replay_mode(self, replay: bool) -> None:
         """Pin archive/replay truth before the first asynchronous status poll."""

@@ -196,3 +196,29 @@ def test_bridge_watchdog_groups_two_cut_failures_before_replacement() -> None:
     assert captured.value.exceptions[1] is window_failure
     bridge.shutdown.assert_not_called()
     bridge.start.assert_not_called()
+
+
+def test_bridge_watchdog_latches_after_authority_invalidation_failure() -> None:
+    """The public timer path cannot retry a failed authority cut every 10 ms."""
+    bridge = _make_dead_bridge(start_error=None)
+    snapshot_ingress = MagicMock()
+    window = MagicMock()
+    snapshot_ingress.invalidate_transport.side_effect = RuntimeError("snapshot cut failed")
+    window.invalidate_descriptor_transport.side_effect = ValueError("window cut failed")
+    watchdog = gui_app._BridgeWatchdog()
+
+    with pytest.raises(
+        ExceptionGroup,
+        match="multiple standalone GUI authority invalidations failed",
+    ):
+        watchdog.tick(bridge=bridge, window=window, snapshot_ingress=snapshot_ingress)
+
+    assert watchdog.latched is True
+    for _ in range(4):
+        watchdog.tick(bridge=bridge, window=window, snapshot_ingress=snapshot_ingress)
+    assert snapshot_ingress.invalidate_transport.call_count == 1
+    assert window.invalidate_descriptor_transport.call_count == 1
+    bridge.shutdown.assert_not_called()
+    bridge.start.assert_not_called()
+    bridge.is_healthy.return_value = True
+    assert watchdog.is_healthy(bridge) is False

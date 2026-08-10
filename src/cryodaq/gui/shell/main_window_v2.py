@@ -690,6 +690,23 @@ class MainWindowV2(QMainWindow):
             except Exception as exc:
                 failures.append(exc)
 
+        for attr in (
+            "_alarm_panel",
+            "_keithley_panel",
+            "_conductivity_panel",
+            "_multiline_panel",
+            "_knowledge_base_panel",
+            "_operator_log_panel",
+            "_instrument_panel",
+            "_archive_panel",
+            "_calibration_panel",
+            "_experiment_overlay",
+        ):
+            panel = getattr(self, attr, None)
+            set_connected = getattr(panel, "set_connected", None)
+            if callable(set_connected):
+                attempt(lambda set_connected=set_connected: set_connected(False))
+
         unavailable_reason = (
             "\u0421\u0442\u0430\u0442\u0443\u0441 "
             "\u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430 "
@@ -707,7 +724,15 @@ class MainWindowV2(QMainWindow):
             self._last_reading_time = 0.0
         if hasattr(self, "_rate_count"):
             self._rate_count = 0
-        if getattr(self, "_bottom_bar", None) is not None:
+        if hasattr(self, "_accepted_disk_bridge_instance_id"):
+            self._accepted_disk_bridge_instance_id = None
+        if hasattr(self, "_last_disk_observed_at"):
+            self._last_disk_observed_at = None
+        bottom_bar = getattr(self, "_bottom_bar", None)
+        if bottom_bar is not None:
+            attempt(lambda: bottom_bar.set_connected(False, "Engine потерян"))
+            attempt(lambda: bottom_bar.set_data_rate(float("nan")))
+            attempt(lambda: bottom_bar.mark_disk_stale(disconnected=True))
             attempt(lambda: self._invalidate_safety_authority(unavailable_reason, disconnected=True))
 
         overview = getattr(self, "_overview_panel", None)
@@ -720,13 +745,11 @@ class MainWindowV2(QMainWindow):
 
         experiment_overlay = getattr(self, "_experiment_overlay", None)
         if experiment_overlay is not None:
-            attempt(lambda: experiment_overlay.set_connected(False))
             attempt(lambda: experiment_overlay.set_templates([]))
             attempt(lambda: experiment_overlay.set_experiment(None, []))
 
         operator_log_panel = getattr(self, "_operator_log_panel", None)
         if operator_log_panel is not None:
-            attempt(lambda: operator_log_panel.set_connected(False))
             attempt(lambda: operator_log_panel.set_current_experiment(None))
 
         analytics_view = getattr(self, "_analytics_view", None)
@@ -745,6 +768,8 @@ class MainWindowV2(QMainWindow):
             attempt(top_bar.invalidate_engine_producer)
             if self._replay_mode:
                 attempt(top_bar.invalidate_replay_authority)
+        if overview is not None:
+            attempt(overview.invalidate_operator_snapshot_producer)
 
         if len(failures) == 1:
             raise failures[0]
@@ -756,23 +781,7 @@ class MainWindowV2(QMainWindow):
 
     def invalidate_engine_producer(self) -> None:
         """Retire every GUI consumer anchored to the outgoing engine."""
-        failures: list[Exception] = []
-        for invalidate in (
-            self.invalidate_descriptor_transport,
-            self._overview_panel.invalidate_operator_snapshot_producer,
-        ):
-            try:
-                invalidate()
-            except Exception as exc:
-                failures.append(exc)
-
-        if len(failures) == 1:
-            raise failures[0]
-        if failures:
-            raise ExceptionGroup(
-                "multiple GUI engine authority invalidations failed",
-                failures,
-            )
+        self.invalidate_descriptor_transport()
 
     def bind_replay_authority(
         self,
@@ -1289,6 +1298,8 @@ class MainWindowV2(QMainWindow):
             self._conductivity_panel.set_connected(connected)
         if self._multiline_panel is not None:
             self._multiline_panel.set_connected(connected)
+        if self._knowledge_base_panel is not None:
+            self._knowledge_base_panel.set_connected(connected)
         # Phase II.7: mirror to Calibration overlay (same contract).
         if self._calibration_panel is not None:
             self._calibration_panel.set_connected(connected)

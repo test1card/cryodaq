@@ -449,6 +449,7 @@ def test_stale_detection_marks_fault(app):
 
 def test_fresh_reading_recovers_to_ok(app):
     card = _InstrumentCard("inst")
+    card.update_from_reading(_reading("x", instrument_id="inst"))
     card._last_reading_time = time.monotonic() - 1000.0
     card.refresh_liveness()
     assert card.indicator_color == theme.STATUS_FAULT
@@ -457,8 +458,8 @@ def test_fresh_reading_recovers_to_ok(app):
     assert card.indicator_color == theme.STATUS_OK
     # After fresh reading, status must say Норма.
     assert "Норма" in card._status_label.text(), f"Post-recovery status label wrong: {card._status_label.text()!r}"
-    # Counters must reflect the new reading.
-    assert "Показания: 1" in card._counters_label.text()
+    # Counters must reflect both real production-path readings.
+    assert "Показания: 2" in card._counters_label.text()
 
 
 @pytest.mark.parametrize(
@@ -842,3 +843,25 @@ def test_health_color_caution_threshold():
 def test_health_color_fault_threshold():
     assert _health_color(49) == theme.STATUS_FAULT
     assert _health_color(0) == theme.STATUS_FAULT
+
+
+def test_outgoing_diagnostics_reply_cannot_cross_disconnect_reconnect(app) -> None:
+    """A prior connection generation cannot repopulate current diagnostics."""
+    panel = InstrumentsPanel()
+    panel.set_connected(True)
+    outgoing_worker = panel._workers[0]
+    panel.set_connected(False)
+    panel.set_connected(True)
+
+    outgoing_worker.finished.emit(
+        {
+            "ok": True,
+            "channels": {"Т1": {"channel_name": "Т1 Plate", "health_score": 95}},
+            "summary": {"healthy": 1, "warning": 0, "critical": 0},
+        }
+    )
+
+    assert panel.sensor_diag_section.row_count == 0
+    assert len(_StubWorker.dispatched) == 2
+    assert panel._diag_poll_in_flight is True
+    panel._diag_poll_timer.stop()

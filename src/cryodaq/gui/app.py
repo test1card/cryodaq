@@ -645,9 +645,13 @@ class _BridgeWatchdog:
             except Exception as exc:
                 failures.append(exc)
 
-        if len(failures) == 1:
-            raise failures[0]
         if failures:
+            self.latched = True
+            logger.critical(
+                "ZMQ bridge watchdog HOLD: GUI authority invalidation failed; automatic recovery is disabled"
+            )
+            if len(failures) == 1:
+                raise failures[0]
             raise ExceptionGroup(
                 "multiple standalone GUI authority invalidations failed",
                 failures,
