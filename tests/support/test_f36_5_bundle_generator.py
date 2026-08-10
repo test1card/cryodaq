@@ -2365,3 +2365,191 @@ def test_health_summaries_cannot_collectively_understate_a_child() -> None:
 
     with pytest.raises(ValueError, match="health summaries"):
         _minimal_capture(records=(plant, infrastructure, child))
+
+
+def test_valid_older_attention_item_preserves_capture_and_event_time() -> None:
+    item = AttentionItem(
+        "alarm:" + "a" * 32,
+        OperatorPresentationState.FAULT,
+        "Fault",
+        "Detail",
+        _OBS - timedelta(seconds=30),
+    )
+    snapshot = _snapshot(attention_items=(item,))
+
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=snapshot,
+        extra_fingerprints=(("alarms", "alarms.public.v1", "b" * 64),),
+    )
+    evidence = _evidence(build_support_bundle(capture))
+    child = next(
+        record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == "attention" and record["payload"]["record_role"] == "child"
+    )
+
+    assert "attention" not in evidence["unavailable_fields"]
+    assert child["observed_at"] == "2026-07-14T11:58:30.000000Z"
+
+
+@pytest.mark.parametrize(
+    "private_version",
+    (
+        "Smith,Alice",
+        "Alice",
+        "Alice, Jr.",
+        "Alice S.",
+        "Alice O'Neil",
+        "cGFzc3dvcmQ9aHVudGVyMg==",
+        "password&#x3d;hunter2",
+        "Alice;Smith",
+        "Alice:Smith",
+        "Alice+Smith",
+        "password hunter2",
+        "pwd hunter2",
+        "token->abc123",
+    ),
+)
+def test_common_delimited_private_and_credential_versions_never_reach_bundle(private_version: str) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": private_version})
+
+    assert private_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"] or all(
+        item["version"] != private_version for item in evidence["versions"]
+    )
+
+
+def test_integrity_ok_cannot_claim_dropped_records() -> None:
+    payload = _complete_integrity_provenance()
+    payload.update(state="ok", storage="available", dropped_records=1)
+
+    with pytest.raises(ValueError, match="dropped"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_attention_child_cannot_claim_ok() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+
+    with pytest.raises(ValueError, match="attention child"):
+        EvidenceRecord.from_payload(
+            "attention",
+            {
+                "attention_id": "alarm:" + "c" * 32,
+                "state": "ok",
+                "severity": "warning",
+                **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+            },
+        )
+
+
+def test_empty_health_evidence_cannot_claim_ok_summaries() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "ok", **fields},
+    )
+
+    with pytest.raises(ValueError, match="health summaries.*children"):
+        _minimal_capture(records=(plant, infrastructure))
+
+
+def test_one_log_entry_has_a_bounded_tag_cardinality() -> None:
+    max_event_tags = 16
+    tags = ("info",) * (max_event_tags + 1)
+    entry = OperatorLogEntry(9, _OBS, None, "system", "system", "INFO", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+
+    assert len(tags) == max_event_tags + 1
+    assert "log" in evidence["unavailable_fields"]
+    assert not any(record["kind"] == "log" for record in evidence["records"])
+    assert any(item["component"] == "cryodaq" for item in evidence["versions"])
+
+
+def test_health_child_is_bound_to_the_summary_that_must_cover_it() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "fault", **fields},
+    )
+
+    with pytest.raises(ValueError, match="health summary.*understate|parent"):
+        child = EvidenceRecord.from_payload(
+            "health",
+            {
+                "source_id": "sensor-1",
+                "parent_source_id": "plant-health-summary",
+                "state": "fault",
+                **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+            },
+        )
+        _minimal_capture(records=(plant, infrastructure, child))
+
+
+def test_snapshot_records_require_one_coherent_transport_age() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary_fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    child_fields = _snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id)
+    child_fields["transport_age_us"] = 999_999
+    summary = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "attention-summary",
+            "state": "fault",
+            "severity": "fault",
+            **summary_fields,
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "alarm:" + "d" * 32,
+            "state": "fault",
+            "severity": "fault",
+            **child_fields,
+        },
+    )
+
+    with pytest.raises(ValueError, match="coherent snapshot cut|coherent transport age"):
+        _minimal_capture(records=(summary, child))
+
+
+def test_snapshot_records_require_one_coherent_transport_condition() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary_fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    summary_fields["transport_reason_code"] = "snapshot_stale"
+    child_fields = _snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id)
+    child_fields["transport_reason_code"] = "transport_disconnected"
+    summary = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "attention-summary",
+            "state": "fault",
+            "severity": "fault",
+            **summary_fields,
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "alarm:" + "e" * 32,
+            "state": "warning",
+            "severity": "warning",
+            **child_fields,
+        },
+    )
+
+    with pytest.raises(ValueError, match="coherent transport condition"):
+        _minimal_capture(records=(summary, child))
