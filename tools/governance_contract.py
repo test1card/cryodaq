@@ -181,9 +181,11 @@ def disposition_state(record: Mapping[str, Any]) -> str:
     # `awaiting_green_sweep` would have told a consumer to expect a capture that
     # already happened, so they get their own state rather than a convenient
     # bucket.
-    if green and green != "pending":
-        return "evidence_complete"
-    return "awaiting_green_sweep"
+    try:
+        _validate_immutable_evidence(green, "green_evidence")
+    except GovernanceContractError:
+        return "awaiting_green_sweep"
+    return "evidence_complete"
 
 
 def _validate_immutable_evidence(value: Any, field: str) -> None:

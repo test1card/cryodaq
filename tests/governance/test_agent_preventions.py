@@ -1183,6 +1183,14 @@ def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -
     assert disposition_state(runtime) == "awaiting_green_sweep"
     assert disposition_state(pair) == "awaiting_green_sweep"
 
+    for invalid_green in (
+        "pending_immutable_capture",
+        "arbitrary prose",
+        {"locator": "github-run:12345", "sha256": "not-a-digest"},
+    ):
+        runtime["green_evidence"] = invalid_green
+        assert disposition_state(runtime) == "awaiting_green_sweep"
+
     runtime["green_evidence"] = {
         "locator": "git:0123456789abcdef0123456789abcdef01234567",
         "sha256": "sha256:" + "0" * 64,
