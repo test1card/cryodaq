@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Final
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 MAX_RECORDS: Final = 256
 MAX_VERSIONS: Final = 64
 MAX_FINGERPRINTS: Final = 128
@@ -39,6 +39,16 @@ _RECORD_KINDS: Final = frozenset({"health", "attention", "audit", "log", "integr
 _UNAVAILABLE_FIELDS: Final = frozenset(
     {"versions", "config_fingerprints", "health", "attention", "audit", "log", "integrity"}
 )
+_UNAVAILABLE_REASON_CODES: Final = frozenset(
+    {
+        "engine_unavailable",
+        "snapshot_unavailable",
+        "source_invalid",
+        "source_not_provided",
+        "source_read_failed",
+    }
+)
+
 _SECRET_KEYS: Final = frozenset(
     {
         "api_key",
@@ -95,6 +105,10 @@ _BIDI_OR_INVISIBLE: Final = frozenset(
     }
 )
 _ABSOLUTE_PATH_PATTERNS: Final = (
+    re.compile(r"/[\s\S]*"),
+    re.compile(r"(?i)/(?:home|users)/[\s\S]*"),
+    re.compile(r"(?i)[A-Z]:[\\/]+Users[\\/][\s\S]*"),
+    re.compile(r"\\\\[\s\S]*"),
     re.compile(r"(?<![A-Za-z0-9.])[^\S\r\n]*/[\s\S]*"),
     re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/][\s\S]*"),
     re.compile(r"(?<![A-Za-z0-9])\\\\[\s\S]*"),
@@ -106,8 +120,21 @@ _SECRET_ASSIGNMENT_RE: Final = re.compile(
     r"auth[\W_]*token|api[\W_/]*key|client[\W_]*secret|private[\W_]*key|"
     r"credential|credentials|cookie|session[\W_]*id|secret|token)\s*[:=]\s*\S+"
 )
-_BEARER_RE: Final = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}")
+_BEARER_RE: Final = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{6,}")
 _URL_CREDENTIAL_RE: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@")
+_EMAIL_RE: Final = re.compile(
+    r"(?i)(?<![A-Z0-9._%+-])[A-Z0-9._%+-]{1,64}@[A-Z0-9](?:[A-Z0-9.-]{0,251}[A-Z0-9])?(?![A-Z0-9.-])"
+)
+_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[A-Z][a-z]{1,63}(?: [A-Z][a-z]{1,63}){1,3}(?!\w)")
+_PRIVATE_NAME_ONLY_RE: Final = re.compile(r"[^\W\d_]{2,64}(?: [^\W\d_]{2,64}){1,3}\Z")
+_PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
+_DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
+_SERIALIZED_BLOB_RE: Final = re.compile(r"(?:\{[\s\S]*\}|\[[\s\S]*\])")
+_PATH_TRAVERSAL_RE: Final = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
+_PRIVATE_IDENTIFIER_SEGMENTS: Final = frozenset(
+    {"author", "contact", "email", "operator", "person", "phone", "user", "username"}
+)
+_PRIVATE_IDENTIFIER_FIELDS: Final = frozenset({"attention_id", "event_id", "source_id"})
 _OPAQUE_TOKEN_RE: Final = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/=_-])")
 _SECRET_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _SECRET_KEYS)
 _PRIVATE_KEY_SIGNATURES: Final = frozenset(re.sub(r"[^a-z0-9]", "", key.casefold()) for key in _PRIVATE_KEYS)
@@ -124,11 +151,11 @@ _RECORD_SCHEMAS: Final = {
         ),
     },
     "audit": {
-        "required": frozenset({"event_id", "event_code", "outcome"}),
+        "required": frozenset({"event_id", "event_code"}),
         "allowed": frozenset({"event_id", "event_code", "outcome", "source_id", "observed_at", "revision"}),
     },
     "log": {
-        "required": frozenset({"event_id", "event_code", "level"}),
+        "required": frozenset({"event_id", "event_code"}),
         "allowed": frozenset(
             {"event_id", "event_code", "level", "source_id", "observed_at", "revision", "occurrences"}
         ),
@@ -142,7 +169,11 @@ _RECORD_SCHEMAS: Final = {
                 "reason_code",
                 "digest_sha256",
                 "record_count",
+                "archive_revision",
+                "dropped_records",
                 "observed_at",
+                "pending_records",
+                "persisted_revision",
                 "revision",
             }
         ),
@@ -161,7 +192,18 @@ _IDENTIFIER_RECORD_FIELDS: Final = frozenset(
         "level",
     }
 )
-_COUNT_RECORD_FIELDS: Final = frozenset({"revision", "metric_count", "occurrences", "record_count"})
+_COUNT_RECORD_FIELDS: Final = frozenset(
+    {
+        "revision",
+        "metric_count",
+        "occurrences",
+        "record_count",
+        "archive_revision",
+        "dropped_records",
+        "pending_records",
+        "persisted_revision",
+    }
+)
 _WINDOWS_RESERVED_NAMES: Final = frozenset(
     {"con", "prn", "aux", "nul", "conin$", "conout$"}
     | {f"com{index}" for index in range(1, 10)}
@@ -182,6 +224,10 @@ def _exact_text(value: object, *, field: str, max_bytes: int = 512) -> str:
 def _identifier(value: object, *, field: str) -> str:
     value = _exact_text(value, field=field, max_bytes=128)
     value = _safe_text(value, allow_uuid=True)
+    if field in _PRIVATE_IDENTIFIER_FIELDS:
+        segments = frozenset(part for part in re.split(r"[._-]+", value.casefold()) if part)
+        if segments.intersection(_PRIVATE_IDENTIFIER_SEGMENTS):
+            raise ValueError(f"{field} contains private-data-shaped identifier")
     if _ID_RE.fullmatch(value) is None:
         raise ValueError(f"{field} contains unsupported characters")
     return value
@@ -222,6 +268,11 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
         for char in unicodedata.normalize("NFKC", normalized)
         if char not in _BIDI_OR_INVISIBLE and unicodedata.category(char) not in {"Cc", "Cf"}
     )
+    stripped_security = security_normalized.strip()
+    if _SERIALIZED_BLOB_RE.search(stripped_security):
+        raise ValueError("serialized blob text is not permitted")
+    if _PATH_TRAVERSAL_RE.search(security_normalized):
+        raise ValueError("path-traversal-shaped text is not permitted")
     if (
         _SECRET_ASSIGNMENT_RE.search(security_normalized)
         or _contains_sensitive_assignment(security_normalized)
@@ -230,12 +281,6 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
         or "-----BEGIN " in security_normalized.upper()
     ):
         raise ValueError("secret-shaped text is not permitted")
-    for candidate in _OPAQUE_TOKEN_RE.findall(security_normalized):
-        if not (
-            (allow_uuid and _UUID_RE.fullmatch(candidate) is not None)
-            or (allow_sha256 and _SHA256_RE.fullmatch(candidate) is not None)
-        ):
-            raise ValueError("opaque encoded token candidate is not permitted")
     chars: list[str] = []
     transformed_bytes = 0
     for char in normalized:
@@ -249,12 +294,31 @@ def _safe_text(value: str, *, allow_sha256: bool = False, allow_uuid: bool = Fal
             raise ValueError(f"transformed string exceeds {MAX_STRING_BYTES} UTF-8 bytes")
         chars.append(transformed)
     normalized = "".join(chars)
+    for pattern in _ABSOLUTE_PATH_PATTERNS:
+        normalized = pattern.sub("<redacted:path>", normalized)
+    security_screened = security_normalized
+    for pattern in _ABSOLUTE_PATH_PATTERNS:
+        security_screened = pattern.sub("<redacted:path>", security_screened)
+    if security_screened != security_normalized:
+        normalized = security_screened
     stripped = normalized.lstrip()
     if stripped.startswith(("=", "+", "-", "@")):
         prefix_len = len(normalized) - len(stripped)
         normalized = normalized[:prefix_len] + "<formula>" + stripped[1:]
-    for pattern in _ABSOLUTE_PATH_PATTERNS:
-        normalized = pattern.sub("<redacted:path>", normalized)
+    screened_stripped = security_screened.strip()
+    phone_match = _PHONE_RE.search(security_screened)
+    if _EMAIL_RE.search(security_screened) or (
+        phone_match is not None and _DOTTED_NUMERIC_VERSION_RE.fullmatch(screened_stripped) is None
+    ):
+        raise ValueError("private-data-shaped text is not permitted")
+    if _PRIVATE_NAME_RE.search(security_screened) or _PRIVATE_NAME_ONLY_RE.fullmatch(screened_stripped):
+        return "<redacted:private>"
+    for candidate in _OPAQUE_TOKEN_RE.findall(security_screened):
+        if not (
+            (allow_uuid and _UUID_RE.fullmatch(candidate) is not None)
+            or (allow_sha256 and _SHA256_RE.fullmatch(candidate) is not None)
+        ):
+            raise ValueError("opaque encoded token candidate is not permitted")
     if len(normalized.encode("utf-8")) > MAX_STRING_BYTES:
         raise ValueError(f"transformed string exceeds {MAX_STRING_BYTES} UTF-8 bytes")
     return normalized
@@ -337,6 +401,11 @@ def _redact(
         seen_signatures: set[str] = set()
         for item_key in exact_keys:
             budget.charge(input_bytes=len(item_key.encode("utf-8")))
+            raw_signature = _secret_key_signature(item_key)
+            if raw_signature in _SECRET_KEY_SIGNATURES:
+                raise ValueError("secret-bearing keys are not permitted")
+            if raw_signature in _PRIVATE_KEY_SIGNATURES:
+                raise ValueError("private-data keys are not permitted")
             safe_key = _safe_text(item_key)
             if not safe_key or len(safe_key.encode("utf-8")) > 128:
                 raise ValueError("payload mapping key is invalid")
@@ -501,6 +570,20 @@ class EvidenceRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class UnavailableSource:
+    source: str
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source", _identifier(self.source, field="source"))
+        object.__setattr__(self, "reason_code", _identifier(self.reason_code, field="reason_code"))
+        if self.source not in _UNAVAILABLE_FIELDS:
+            raise ValueError("unavailable source is not part of the support-bundle schema")
+        if self.reason_code not in _UNAVAILABLE_REASON_CODES:
+            raise ValueError("unavailable reason_code is not part of the support-bundle schema")
+
+
+@dataclass(frozen=True, slots=True)
 class BundleCapture:
     bundle_id: str
     created_at: datetime
@@ -508,6 +591,7 @@ class BundleCapture:
     config_fingerprints: tuple[ConfigFingerprint, ...]
     records: tuple[EvidenceRecord, ...]
     unavailable_fields: tuple[str, ...] = ()
+    unavailable_sources: tuple[UnavailableSource, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bundle_id", _identifier(self.bundle_id, field="bundle_id"))
@@ -517,6 +601,12 @@ class BundleCapture:
         self._exact_tuple(self.config_fingerprints, ConfigFingerprint, "config_fingerprints", MAX_FINGERPRINTS)
         self._exact_tuple(self.records, EvidenceRecord, "records", MAX_RECORDS)
         self._exact_tuple(self.unavailable_fields, str, "unavailable_fields", len(_UNAVAILABLE_FIELDS))
+        self._exact_tuple(
+            self.unavailable_sources,
+            UnavailableSource,
+            "unavailable_sources",
+            len(_UNAVAILABLE_FIELDS),
+        )
         if len(set(item.component for item in self.versions)) != len(self.versions):
             raise ValueError("version components must be unique")
         if len(set(item.config_id for item in self.config_fingerprints)) != len(self.config_fingerprints):
@@ -532,6 +622,13 @@ class BundleCapture:
             raise ValueError("unavailable versions must not contain version evidence")
         if "config_fingerprints" in self.unavailable_fields and self.config_fingerprints:
             raise ValueError("unavailable config_fingerprints must not contain fingerprint evidence")
+        if tuple(sorted(self.unavailable_sources, key=lambda item: item.source)) != self.unavailable_sources:
+            raise ValueError("unavailable_sources must be sorted and unique by source")
+        unavailable_source_names = tuple(item.source for item in self.unavailable_sources)
+        if len(set(unavailable_source_names)) != len(unavailable_source_names):
+            raise ValueError("unavailable_sources must be sorted and unique by source")
+        if unavailable_source_names != self.unavailable_fields:
+            raise ValueError("every unavailable field must have exactly one reason-coded source entry")
 
     @staticmethod
     def _exact_tuple(value: object, item_type: type, field: str, limit: int) -> None:
@@ -580,6 +677,9 @@ def _evidence_document(capture: BundleCapture) -> dict[str, object]:
         ],
         "schema_version": SCHEMA_VERSION,
         "unavailable_fields": list(capture.unavailable_fields),
+        "unavailable_sources": [
+            {"reason_code": item.reason_code, "source": item.source} for item in capture.unavailable_sources
+        ],
         "versions": [
             {"component": item.component, "version": item.version}
             for item in sorted(capture.versions, key=lambda item: item.component)
@@ -595,6 +695,7 @@ def _capture_from_evidence_document(evidence: object) -> BundleCapture:
         "records",
         "schema_version",
         "unavailable_fields",
+        "unavailable_sources",
         "versions",
     }
     if type(evidence) is not dict or set(evidence) != expected_fields:
@@ -608,6 +709,7 @@ def _capture_from_evidence_document(evidence: object) -> BundleCapture:
     fingerprints_value = evidence["config_fingerprints"]
     records_value = evidence["records"]
     unavailable_value = evidence["unavailable_fields"]
+    unavailable_sources_value = evidence["unavailable_sources"]
     if type(versions_value) is not list:
         raise TypeError("evidence versions must be an exact list")
     if type(fingerprints_value) is not list:
@@ -616,6 +718,8 @@ def _capture_from_evidence_document(evidence: object) -> BundleCapture:
         raise TypeError("evidence records must be an exact list")
     if type(unavailable_value) is not list:
         raise TypeError("evidence unavailable_fields must be an exact list")
+    if type(unavailable_sources_value) is not list:
+        raise TypeError("evidence unavailable_sources must be an exact list")
     if len(versions_value) > MAX_VERSIONS:
         raise ValueError(f"evidence versions exceed {MAX_VERSIONS} items")
     if len(fingerprints_value) > MAX_FINGERPRINTS:
@@ -624,6 +728,8 @@ def _capture_from_evidence_document(evidence: object) -> BundleCapture:
         raise ValueError(f"evidence records exceed {MAX_RECORDS} items")
     if len(unavailable_value) > len(_UNAVAILABLE_FIELDS):
         raise ValueError("evidence unavailable_fields exceed the schema limit")
+    if len(unavailable_sources_value) > len(_UNAVAILABLE_FIELDS):
+        raise ValueError("evidence unavailable_sources exceed the schema limit")
 
     versions: list[SoftwareVersion] = []
     for item in versions_value:
@@ -648,6 +754,11 @@ def _capture_from_evidence_document(evidence: object) -> BundleCapture:
             raise ValueError("record evidence fields are invalid")
         records.append(EvidenceRecord.from_payload(item["kind"], item["payload"]))
     unavailable = tuple(unavailable_value)
+    unavailable_sources: list[UnavailableSource] = []
+    for item in unavailable_sources_value:
+        if type(item) is not dict or set(item) != {"reason_code", "source"}:
+            raise ValueError("unavailable-source evidence fields are invalid")
+        unavailable_sources.append(UnavailableSource(source=item["source"], reason_code=item["reason_code"]))
     return BundleCapture(
         bundle_id=evidence["bundle_id"],
         created_at=created_at,
@@ -655,6 +766,7 @@ def _capture_from_evidence_document(evidence: object) -> BundleCapture:
         config_fingerprints=tuple(fingerprints),
         records=tuple(records),
         unavailable_fields=unavailable,
+        unavailable_sources=tuple(unavailable_sources),
     )
 
 

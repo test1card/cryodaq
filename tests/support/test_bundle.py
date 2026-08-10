@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 
 import pytest
 
+from cryodaq.support import SCHEMA_VERSION, UnavailableSource
 from cryodaq.support.bundle import (
     BundleArtifact,
     BundleCapture,
@@ -37,6 +38,7 @@ def _capture(*, records: tuple[EvidenceRecord, ...] = (), unavailable: tuple[str
         ),
         records=records,
         unavailable_fields=unavailable,
+        unavailable_sources=tuple(UnavailableSource(source, "source_not_provided") for source in unavailable),
     )
 
 
@@ -169,6 +171,10 @@ def test_degraded_capture_retains_explicit_unavailable_fields() -> None:
 
     evidence = _evidence(bundle)
     assert evidence["unavailable_fields"] == ["attention", "health"]
+    assert evidence["unavailable_sources"] == [
+        {"reason_code": "source_not_provided", "source": "attention"},
+        {"reason_code": "source_not_provided", "source": "health"},
+    ]
     assert evidence["records"][0]["payload"]["reason_code"] == "database_locked"
 
 
@@ -274,8 +280,10 @@ def test_schema_is_strict_and_does_not_crawl_live_sources() -> None:
         "records",
         "schema_version",
         "unavailable_fields",
+        "unavailable_sources",
         "versions",
     }
+    assert evidence["schema_version"] == SCHEMA_VERSION == 2
     assert not any(name in evidence for name in ("filesystem", "environment", "network", "credentials", "raw_data"))
 
 

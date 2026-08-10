@@ -1,22 +1,7 @@
-"""Bundle capture collector: assembles a BundleCapture from backend truth.
+"""Collect detached, bounded support evidence from existing backend truth.
 
-This module is the only place that knows how to translate live backend
-observations (operator snapshot, versions dict, config fingerprints) into
-a detached, bounded BundleCapture that the pure bundle.py serialiser can
-then redact and seal.
-
-Design constraints:
-- FAIL-CLOSED: every section is collected with section-level atomicity.  If
-  ANY item is omitted, invalid, unrepresentable, fails serialization, or the
-  input exceeds the supported cap, the WHOLE section is discarded and marked
-  explicitly unavailable.  No partial records survive as apparently-complete
-  truth.
-- DEGRADED-SAFE: every section is collected independently.  If the engine
-  is down or a section raises, that section is added to unavailable_fields
-  and collection continues.  The result is always a valid BundleCapture.
-- NO SIDE EFFECTS: reads only; never writes, never touches hardware.
-- DETERMINISTIC: the caller supplies bundle_id and created_at so that
-  identical inputs produce byte-identical manifests.
+Every source is optional and independent.  A failed source contributes a stable,
+non-sensitive unavailable reason; it never aborts the rest of the capture.
 """
 
 from __future__ import annotations
@@ -24,8 +9,19 @@ from __future__ import annotations
 import importlib.metadata
 import itertools
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+
+from cryodaq.core.operator_log import OperatorLogEntry
+from cryodaq.operator_snapshot import (
+    STATE_PRECEDENCE,
+    AttentionQueue,
+    DataIntegritySummary,
+    InfrastructureNodeHealth,
+    OperatorPresentationState,
+    OperatorSnapshot,
+    PlantHealthSummary,
+)
 
 from .bundle import (
     _UNAVAILABLE_FIELDS,
@@ -35,35 +31,22 @@ from .bundle import (
     ConfigFingerprint,
     EvidenceRecord,
     SoftwareVersion,
+    UnavailableSource,
     _identifier,
 )
 
-if TYPE_CHECKING:
-    from cryodaq.operator_snapshot import OperatorSnapshot
-
 _log = logging.getLogger(__name__)
 
-# Maximum evidence records extracted from each live section to stay inside
-# the BundleCapture.records limit (256 total across all kinds).
-_MAX_HEALTH_RECORDS: int = 64
-_MAX_ATTENTION_RECORDS: int = 32
-_MAX_INTEGRITY_RECORDS: int = 32
-_MAX_LOG_RECORDS: int = 64
-_MAX_AUDIT_RECORDS: int = 64
+_MAX_HEALTH_RECORDS = 64
+_MAX_ATTENTION_RECORDS = 32
+_MAX_LOG_RECORDS = 64
+_MAX_AUDIT_RECORDS = 64
 
-# Map AttentionItem.state → bundle attention record severity.
-# caution/warning/fault map 1-to-1; stale/disconnected/any unrecognised state
-# fall back to "warning" so the record is never silently suppressed.
-_SEVERITY_FROM_STATE: dict[str, str] = {
+_SEVERITY_FROM_STATE = {
     "caution": "caution",
     "warning": "warning",
     "fault": "fault",
 }
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def collect_bundle_capture(
@@ -72,266 +55,303 @@ def collect_bundle_capture(
     *,
     snapshot: OperatorSnapshot | None = None,
     extra_versions: dict[str, str | None] | None = None,
-    extra_fingerprints: list[tuple[str, str, str | None]] | None = None,
+    extra_fingerprints: Iterable[tuple[str, str, str | None]] | None = None,
+    recent_audit_entries: Iterable[OperatorLogEntry] | None = None,
+    recent_log_entries: Iterable[OperatorLogEntry] | None = None,
 ) -> BundleCapture:
-    """Assemble a BundleCapture from live backend truth.
-
-    Parameters
-    ----------
-    bundle_id:
-        Caller-supplied stable identifier (e.g. ``"support-20260714-001"``).
-    created_at:
-        Caller-supplied UTC datetime so identical inputs yield byte-identical
-        manifests.  Must be timezone-aware UTC.
-    snapshot:
-        Live OperatorSnapshot from the engine.  Pass None when the engine is
-        unavailable; all live sections are then marked unavailable.
-    extra_versions:
-        Additional ``{component: version}`` pairs to merge into the versions
-        section (e.g. firmware / driver pack identifiers).
-    extra_fingerprints:
-        Additional ``(config_id, projection_schema, sha256_or_none)`` tuples
-        for config fingerprints not yet covered by the snapshot.
-    """
+    """Assemble one deterministic capture without reading clocks or live I/O."""
     if type(created_at) is not datetime or created_at.tzinfo is not UTC:
         raise ValueError("created_at must be an exact UTC datetime")
 
-    unavailable: list[str] = []
+    unavailable: dict[str, str] = {}
     versions: list[SoftwareVersion] = []
     fingerprints: list[ConfigFingerprint] = []
     records: list[EvidenceRecord] = []
 
-    # --- versions -----------------------------------------------------------
     _collect_versions(versions, extra_versions, unavailable)
-
-    # --- config fingerprints ------------------------------------------------
     _collect_fingerprints(fingerprints, extra_fingerprints, unavailable)
+    _collect_recent_entries("audit", recent_audit_entries, records, unavailable)
+    _collect_recent_entries("log", recent_log_entries, records, unavailable)
 
-    # --- live sections from snapshot ----------------------------------------
     if snapshot is None:
-        for kind in ("health", "attention", "audit", "log", "integrity"):
-            _mark_unavailable(kind, unavailable)
+        for kind in ("health", "attention", "integrity"):
+            _mark_unavailable(kind, "engine_unavailable", unavailable)
+    elif type(snapshot) is not OperatorSnapshot:
+        for kind in ("health", "attention", "integrity"):
+            _mark_unavailable(kind, "source_invalid", unavailable)
     else:
         _collect_health(snapshot, records, unavailable)
         _collect_attention(snapshot, records, unavailable)
-        # The v1 snapshot has no audit/log evidence fields; absence is explicit.
-        _mark_unavailable("audit", unavailable)
-        _mark_unavailable("log", unavailable)
         _collect_integrity(snapshot, records, unavailable)
 
+    unavailable_fields = tuple(sorted(unavailable))
     return BundleCapture(
         bundle_id=bundle_id,
         created_at=created_at,
         versions=tuple(versions),
         config_fingerprints=tuple(fingerprints),
         records=tuple(records),
-        unavailable_fields=tuple(sorted(set(unavailable))),
+        unavailable_fields=unavailable_fields,
+        unavailable_sources=tuple(UnavailableSource(source, unavailable[source]) for source in unavailable_fields),
     )
 
 
-# ---------------------------------------------------------------------------
-# Internal collectors
-# ---------------------------------------------------------------------------
+def _mark_unavailable(kind: str, reason_code: str, unavailable: dict[str, str]) -> None:
+    if kind in _UNAVAILABLE_FIELDS:
+        unavailable.setdefault(kind, reason_code)
 
 
-def _mark_unavailable(kind: str, unavailable: list[str]) -> None:
-    if kind in _UNAVAILABLE_FIELDS and kind not in unavailable:
-        unavailable.append(kind)
+def _log_failure(kind: str, exc: BaseException) -> None:
+    _log.warning("bundle-collector: %s section failed (%s)", kind, type(exc).__name__)
 
 
 def _collect_versions(
     versions: list[SoftwareVersion],
     extra: dict[str, str | None] | None,
-    unavailable: list[str],
+    unavailable: dict[str, str],
 ) -> None:
-    # Fail-closed: build the complete version list in a staging area; if ANY
-    # item fails (including the core package lookup or any extra entry), discard
-    # the entire staging area and mark the section unavailable.
     try:
         staging: list[SoftwareVersion] = []
         seen: set[str] = set()
-
-        # Core package version via importlib.metadata (works frozen + editable).
         try:
             core_version: str | None = importlib.metadata.version("cryodaq")
         except importlib.metadata.PackageNotFoundError:
             core_version = None
-        sv = SoftwareVersion("cryodaq", core_version)
-        if sv.component not in seen:
-            staging.append(sv)
-            seen.add(sv.component)
+        core = SoftwareVersion("cryodaq", core_version)
+        staging.append(core)
+        seen.add(core.component)
 
-        if extra:
-            # Bound check: >MAX_VERSIONS total entries means the section cannot
-            # be represented faithfully; degrade rather than truncate.
-            total = 1 + len(extra)  # 1 for the core cryodaq entry
-            if total > MAX_VERSIONS:
-                _log.warning("bundle-collector: versions section exceeds cap (%s)", type(ValueError()).__name__)
-                _mark_unavailable("versions", unavailable)
+        if extra is not None:
+            if 1 + len(extra) > MAX_VERSIONS:
+                _mark_unavailable("versions", "source_invalid", unavailable)
                 return
             for component, version in extra.items():
-                sv = SoftwareVersion(component, version)
-                if sv.component not in seen:
-                    staging.append(sv)
-                    seen.add(sv.component)
-
+                item = SoftwareVersion(component, version)
+                if item.component not in seen:
+                    staging.append(item)
+                    seen.add(item.component)
         versions.extend(staging)
     except Exception as exc:
-        _log.warning("bundle-collector: versions section failed (%s)", type(exc).__name__)
-        _mark_unavailable("versions", unavailable)
+        _log_failure("versions", exc)
         versions.clear()
+        _mark_unavailable("versions", "source_invalid", unavailable)
 
 
 def _collect_fingerprints(
     fingerprints: list[ConfigFingerprint],
-    extra: list[tuple[str, str, str | None]] | None,
-    unavailable: list[str],
+    extra: Iterable[tuple[str, str, str | None]] | None,
+    unavailable: dict[str, str],
 ) -> None:
-    if not extra:
+    if extra is None:
+        _mark_unavailable("config_fingerprints", "source_not_provided", unavailable)
         return
-    # Fail-closed: any item failure or exceeding the cap degrades the whole
-    # section; no partial fingerprints survive as apparently-complete truth.
     try:
-        # Bound check before iteration.
-        if len(extra) > MAX_FINGERPRINTS:
-            _log.warning("bundle-collector: config_fingerprints section exceeds cap (%s)", type(ValueError()).__name__)
-            _mark_unavailable("config_fingerprints", unavailable)
-            return
-
+        items = tuple(itertools.islice(extra, MAX_FINGERPRINTS + 1))
+    except Exception as exc:
+        _log_failure("config_fingerprints", exc)
+        _mark_unavailable("config_fingerprints", "source_read_failed", unavailable)
+        return
+    if not items:
+        _mark_unavailable("config_fingerprints", "source_not_provided", unavailable)
+        return
+    if len(items) > MAX_FINGERPRINTS:
+        _mark_unavailable("config_fingerprints", "source_invalid", unavailable)
+        return
+    try:
         staging: list[ConfigFingerprint] = []
         seen: set[str] = set()
-        for config_id, projection_schema, sha256 in extra:
-            fp = ConfigFingerprint(
+        for config_id, projection_schema, sha256 in items:
+            item = ConfigFingerprint(
                 config_id=config_id,
                 projection_schema=projection_schema,
                 provenance="redacted_public_projection",
                 sha256=sha256,
             )
-            if fp.config_id not in seen:
-                staging.append(fp)
-                seen.add(fp.config_id)
-
+            if item.config_id not in seen:
+                staging.append(item)
+                seen.add(item.config_id)
         fingerprints.extend(staging)
     except Exception as exc:
-        _log.warning("bundle-collector: config_fingerprints section failed (%s)", type(exc).__name__)
-        _mark_unavailable("config_fingerprints", unavailable)
+        _log_failure("config_fingerprints", exc)
         fingerprints.clear()
+        _mark_unavailable("config_fingerprints", "source_invalid", unavailable)
 
 
 def _collect_health(
     snapshot: OperatorSnapshot,
     records: list[EvidenceRecord],
-    unavailable: list[str],
+    unavailable: dict[str, str],
 ) -> None:
-    # Fail-closed: materialise the full iterable into a bounded list before
-    # processing any items.  If the input exceeds the cap, or if ANY item fails
-    # serialization, the entire section is marked unavailable — no earlier
-    # records survive as apparently-complete truth.
     try:
-        items = tuple(itertools.islice(snapshot.plant_health.subsystems, _MAX_HEALTH_RECORDS + 1))
-
-        if len(items) > _MAX_HEALTH_RECORDS:
-            _log.warning("bundle-collector: health section exceeds cap (%s)", type(ValueError()).__name__)
-            _mark_unavailable("health", unavailable)
+        plant = snapshot.plant_health
+        infrastructure = snapshot.infrastructure
+        if type(plant) is not PlantHealthSummary or type(infrastructure) is not InfrastructureNodeHealth:
+            _mark_unavailable("health", "source_invalid", unavailable)
             return
+        items = ((item.subsystem_id, item.state, item.reason_codes, plant) for item in plant.subsystems)
+        items = itertools.chain(
+            items,
+            ((item.node_id, item.state, item.reason_codes, infrastructure) for item in infrastructure.nodes),
+        )
+        bounded = tuple(itertools.islice(items, _MAX_HEALTH_RECORDS + 1))
+    except Exception as exc:
+        _log_failure("health", exc)
+        _mark_unavailable("health", "source_read_failed", unavailable)
+        return
 
+    if len(bounded) > _MAX_HEALTH_RECORDS:
+        _mark_unavailable("health", "source_invalid", unavailable)
+        return
+    if (not plant.subsystems and plant.state is not OperatorPresentationState.OK) or (
+        not infrastructure.nodes and infrastructure.state is not OperatorPresentationState.OK
+    ):
+        _mark_unavailable("health", "snapshot_unavailable", unavailable)
+        return
+
+    try:
         pending: list[EvidenceRecord] = []
-        for subsystem in items:
+        for source_id, state, reason_codes, summary in bounded:
+            authoritative_state = max((state, summary.state), key=STATE_PRECEDENCE.__getitem__)
             payload: dict[str, object] = {
-                "source_id": _safe_identifier(subsystem.subsystem_id),
-                "state": _safe_identifier(subsystem.state.value),
+                "source_id": _safe_identifier(source_id),
+                "state": _safe_identifier(authoritative_state.value),
             }
-            if hasattr(subsystem, "observed_at") and subsystem.observed_at is not None:
-                payload["observed_at"] = _utc_iso(subsystem.observed_at)
-            rec = EvidenceRecord.from_payload("health", payload)
-            pending.append(rec)
-
-        # Only commit if every item succeeded; empty list is valid (no items → no records, no unavailable).
+            reasons = reason_codes or summary.reason_codes
+            if reasons:
+                payload["reason_code"] = _safe_identifier(reasons[0])
+            payload["observed_at"] = _utc_iso(summary.observed_at)
+            payload["revision"] = summary.revision
+            pending.append(EvidenceRecord.from_payload("health", payload))
         records.extend(pending)
     except Exception as exc:
-        _log.warning("bundle-collector: health section failed (%s)", type(exc).__name__)
-        _mark_unavailable("health", unavailable)
+        _log_failure("health", exc)
+        _mark_unavailable("health", "source_invalid", unavailable)
 
 
 def _collect_attention(
     snapshot: OperatorSnapshot,
     records: list[EvidenceRecord],
-    unavailable: list[str],
+    unavailable: dict[str, str],
 ) -> None:
-    # Fail-closed: materialise the full iterable into a bounded list before
-    # processing any items.  If the input exceeds the cap, or if ANY item fails
-    # serialization, the entire section is marked unavailable — no earlier
-    # records survive as apparently-complete truth.
     try:
-        items = tuple(itertools.islice(snapshot.attention.items, _MAX_ATTENTION_RECORDS + 1))
-
-        if len(items) > _MAX_ATTENTION_RECORDS:
-            _log.warning("bundle-collector: attention section exceeds cap (%s)", type(ValueError()).__name__)
-            _mark_unavailable("attention", unavailable)
+        attention = snapshot.attention
+        if type(attention) is not AttentionQueue:
+            _mark_unavailable("attention", "source_invalid", unavailable)
             return
+        items = tuple(itertools.islice(attention.items, _MAX_ATTENTION_RECORDS + 1))
+    except Exception as exc:
+        _log_failure("attention", exc)
+        _mark_unavailable("attention", "source_read_failed", unavailable)
+        return
 
+    if len(items) > _MAX_ATTENTION_RECORDS:
+        _mark_unavailable("attention", "source_invalid", unavailable)
+        return
+    if not items and attention.state is not OperatorPresentationState.OK:
+        _mark_unavailable("attention", "snapshot_unavailable", unavailable)
+        return
+
+    try:
         pending: list[EvidenceRecord] = []
         for item in items:
-            # AttentionItem has no severity field; derive it from state.
-            state_val = _safe_identifier(item.state.value)
-            severity = _SEVERITY_FROM_STATE.get(state_val, "warning")
+            authoritative_state = max((item.state, attention.state), key=STATE_PRECEDENCE.__getitem__)
+            state = _safe_identifier(authoritative_state.value)
             payload: dict[str, object] = {
                 "attention_id": _safe_identifier(item.attention_id),
-                "severity": severity,
-                "state": state_val,
+                "severity": _SEVERITY_FROM_STATE.get(state, "warning"),
+                "state": state,
+                "observed_at": _utc_iso(item.observed_at),
             }
-            # Map first transport reason code to bundle reason_code if present.
-            if item.transport_reason_codes:
-                payload["reason_code"] = _safe_identifier(item.transport_reason_codes[0])
-            if hasattr(item, "observed_at") and item.observed_at is not None:
-                payload["observed_at"] = _utc_iso(item.observed_at)
-            rec = EvidenceRecord.from_payload("attention", payload)
-            pending.append(rec)
-
-        # Only commit if every item succeeded; empty list is valid.
+            reasons = item.transport_reason_codes or attention.reason_codes
+            if reasons:
+                payload["reason_code"] = _safe_identifier(reasons[0])
+            payload["revision"] = attention.revision
+            pending.append(EvidenceRecord.from_payload("attention", payload))
         records.extend(pending)
     except Exception as exc:
-        _log.warning("bundle-collector: attention section failed (%s)", type(exc).__name__)
-        _mark_unavailable("attention", unavailable)
+        _log_failure("attention", exc)
+        _mark_unavailable("attention", "source_invalid", unavailable)
+
+
+def _collect_recent_entries(
+    kind: str,
+    source: Iterable[OperatorLogEntry] | None,
+    records: list[EvidenceRecord],
+    unavailable: dict[str, str],
+) -> None:
+    if source is None:
+        _mark_unavailable(kind, "source_not_provided", unavailable)
+        return
+    limit = _MAX_AUDIT_RECORDS if kind == "audit" else _MAX_LOG_RECORDS
+    try:
+        entries = tuple(itertools.islice(source, limit + 1))
+    except Exception as exc:
+        _log_failure(kind, exc)
+        _mark_unavailable(kind, "source_read_failed", unavailable)
+        return
+    if len(entries) > limit:
+        _mark_unavailable(kind, "source_invalid", unavailable)
+        return
+
+    try:
+        pending: list[EvidenceRecord] = []
+        for entry in entries:
+            if type(entry) is not OperatorLogEntry:
+                raise TypeError("recent evidence entries must be exact OperatorLogEntry values")
+            payload: dict[str, object] = {
+                "event_id": _safe_identifier(f"{kind}-{entry.id}"),
+                "event_code": "operator_log.entry",
+                "observed_at": _utc_iso(entry.timestamp),
+                "revision": entry.id,
+                "source_id": "record-store",
+            }
+            pending.append(EvidenceRecord.from_payload(kind, payload))
+        records.extend(pending)
+    except Exception as exc:
+        _log_failure(kind, exc)
+        _mark_unavailable(kind, "source_invalid", unavailable)
 
 
 def _collect_integrity(
     snapshot: OperatorSnapshot,
     records: list[EvidenceRecord],
-    unavailable: list[str],
+    unavailable: dict[str, str],
 ) -> None:
     try:
-        di = snapshot.data_integrity
-        availability_value = di.storage.value if hasattr(di.storage, "value") else str(di.storage)
-        # Map AvailabilityTruth to the integrity record state identifier.
-        state_map = {"available": "ok", "unavailable": "unavailable", "unknown": "unavailable"}
-        state = state_map.get(availability_value.lower(), "unavailable")
+        integrity = snapshot.data_integrity
+    except Exception as exc:
+        _log_failure("integrity", exc)
+        _mark_unavailable("integrity", "source_read_failed", unavailable)
+        return
+    if type(integrity) is not DataIntegritySummary:
+        _mark_unavailable("integrity", "source_invalid", unavailable)
+        return
+
+    try:
         payload: dict[str, object] = {
             "source_id": "data-integrity",
-            "state": state,
+            "state": _safe_identifier(integrity.state.value),
+            "dropped_records": integrity.dropped_records,
+            "observed_at": _utc_iso(integrity.observed_at),
+            "pending_records": integrity.pending_records,
+            "persisted_revision": integrity.persisted_revision,
+            "revision": integrity.revision,
         }
-        rec = EvidenceRecord.from_payload("integrity", payload)
-        records.append(rec)
+        if integrity.archive_revision is not None:
+            payload["archive_revision"] = integrity.archive_revision
+        if integrity.reason_codes:
+            payload["reason_code"] = _safe_identifier(integrity.reason_codes[0])
+        records.append(EvidenceRecord.from_payload("integrity", payload))
     except Exception as exc:
-        _log.warning("bundle-collector: integrity section failed (%s)", type(exc).__name__)
-        _mark_unavailable("integrity", unavailable)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+        _log_failure("integrity", exc)
+        _mark_unavailable("integrity", "source_invalid", unavailable)
 
 
 def _safe_identifier(value: str) -> str:
-    """Return a bundle-safe identifier, truncating if needed."""
-    # _identifier validates; _safe_text cleans hostile chars first.
-    # Truncate to 128 bytes to stay within the identifier limit.
-    truncated = value.encode("utf-8")[:128].decode("utf-8", errors="ignore")
-    return _identifier(truncated, field="identifier")
+    return _identifier(value, field="identifier")
 
 
 def _utc_iso(value: datetime) -> str:
-    """Return canonical UTC ISO-8601 with microseconds."""
-    if value.tzinfo is not UTC:
-        value = value.astimezone(UTC)
-    return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("evidence timestamps must be timezone-aware datetimes")
+    return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
