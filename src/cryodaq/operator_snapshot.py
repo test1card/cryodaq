@@ -73,7 +73,7 @@ class AvailabilityTruth(StrEnum):
 # worst-case headroom in tests; evidence is rejected, never silently truncated.
 MAX_FLEET_DEVICES = 100
 MAX_CHANNELS = 2_000
-MAX_ATTENTION_ITEMS = MAX_CHANNELS
+MAX_ATTENTION_ITEMS = MAX_CHANNELS * 19 // 20  # Reserve 5% for per-item protocol evolution.
 MAX_COOLDOWN_SAMPLES = MAX_CHANNELS
 MAX_BUNDLE_ENTRIES = MAX_CHANNELS
 MAX_REASON_CODES = 4
