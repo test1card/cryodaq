@@ -1137,3 +1137,62 @@ async def test_cross_day_descriptor_identity_or_unit_fork_is_refused(
             await reader.read_readings_history_with_descriptors()
     finally:
         await reader.stop()
+
+@pytest.mark.asyncio
+async def test_unfiltered_descriptor_history_catalog_uses_retained_rows(tmp_path: Path) -> None:
+    channel = "shared.temperature"
+    old_timestamp = datetime.now(UTC) - timedelta(seconds=2)
+    retained_timestamp = datetime.now(UTC) - timedelta(seconds=1)
+
+    legacy_writer = SQLiteWriter(tmp_path)
+    try:
+        assert await legacy_writer.write_immediate(
+            [
+                Reading(
+                    timestamp=old_timestamp,
+                    instrument_id="legacy-thermometer",
+                    channel=channel,
+                    value=3.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+    finally:
+        await legacy_writer.stop()
+
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=channel,
+        instrument_id="declared-thermometer",
+        source_key="input.1.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Shared temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([descriptor]))
+    try:
+        assert await writer.write_immediate(
+            [
+                Reading(
+                    timestamp=retained_timestamp,
+                    instrument_id=descriptor.instrument_id,
+                    channel=channel,
+                    value=4.0,
+                    unit=descriptor.unit,
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+        data, catalog = await writer.read_readings_history_with_descriptors(limit_per_channel=1)
+    finally:
+        await writer.stop()
+
+    assert data[channel] == [(retained_timestamp.timestamp(), 4.0)]
+    assert catalog[channel] == "temperature"
