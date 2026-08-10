@@ -660,6 +660,7 @@ async def test_query_agent_format_alarm_with_active_alarms() -> None:
 async def test_query_agent_router_failure_is_operator_visible() -> None:
     adapters = _make_adapters()
     adapters.cooldown.eta = AsyncMock(side_effect=RuntimeError("service down"))
+    chart = MagicMock()
     ollama = MagicMock()
     ollama.generate = AsyncMock(
         side_effect=[
@@ -668,10 +669,11 @@ async def test_query_agent_router_failure_is_operator_visible() -> None:
         ]
     )
 
-    agent = _make_agent(ollama, adapters)
-    response = await agent.handle_query("Is a cooldown forecast available?")
+    agent = _make_agent(ollama, adapters, chart_dispatcher=chart)
+    response = await agent.handle_query("Is a cooldown forecast available?", chat_id=42)
 
     adapters.cooldown.eta.assert_awaited_once_with()
+    chart.dispatch.assert_not_called()
     assert response == _FALLBACK
     assert ollama.generate.await_count == 1
     assert agent._audit.log.await_args.kwargs["errors"] == ["query_context_unavailable"]
