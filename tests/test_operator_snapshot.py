@@ -26,6 +26,7 @@ from cryodaq.operator_snapshot import (
     AttentionItem,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownHistorySummary,
     CooldownSample,
     DataIntegritySummary,
@@ -110,7 +111,7 @@ def _snapshot(*, mode: SnapshotMode = SnapshotMode.LIVE) -> OperatorSnapshot:
             (CooldownSample(0, 300),),
             None,
             (),
-            "sensor.main",
+            CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
         ),
         SupportBundleSummary(
             cut,
@@ -629,7 +630,7 @@ def test_codec_rejects_noncanonical_utc_spellings(alternate: str) -> None:
 
 def test_loader_rejects_duplicate_keys_at_outer_and_nested_depth() -> None:
     wire = dump_operator_snapshot(_snapshot())
-    outer = wire.replace('"version":3', '"version":3,"version":3', 1)
+    outer = wire.replace('"version":4', '"version":4,"version":4', 1)
     nested = wire.replace('"revision":42', '"revision":41,"revision":42', 1)
 
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):

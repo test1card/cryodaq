@@ -28,6 +28,7 @@ from cryodaq.operator_snapshot import (
     AttentionItem,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownHistorySummary,
     CooldownSample,
     DataIntegritySummary,
@@ -214,6 +215,7 @@ def _snapshot(
                     ),
                 )
             ),
+            1,
         ),
         experiment=ExperimentOperatingState(
             cut,
@@ -231,7 +233,7 @@ def _snapshot(
             (CooldownSample(0, 300), CooldownSample(60, 250)),
             "reference-a",
             (CooldownSample(0, 300), CooldownSample(60, 245)),
-            "sensor.main",
+            CooldownChannelBinding("sensor.main", "reference-thermometer", "input.1.temperature"),
         ),
         support_bundle=SupportBundleSummary(
             cut,
@@ -436,6 +438,31 @@ def test_cooldown_mission_unifies_cut_phase_attention_and_durable_history() -> N
         )
 
 
+def test_cooldown_mission_rejects_empty_history_for_a_different_experiment() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    foreign_empty = AttentionHistoryPage(
+        items=(),
+        item_revisions=(),
+        experiment_id="different-experiment",
+        truncated_before=False,
+        through_revision=1,
+        as_of=snapshot.cut.observed_at,
+    )
+
+    with pytest.raises(ValueError, match="experiment"):
+        _build_cooldown_mission(snapshot, foreign_empty)
+
+
+def test_cooldown_mission_rejects_history_revision_after_snapshot_cut() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    initial = _attention_history()
+    later_global_revision = replace(initial, through_revision=2)
+
+    _build_cooldown_mission(snapshot, initial)
+    with pytest.raises(ValueError, match="revision"):
+        _build_cooldown_mission(snapshot, later_global_revision)
+
+
 def test_cooldown_mission_export_uses_stable_ids_across_descriptor_rename() -> None:
     snapshot = _snapshot(state=OperatorPresentationState.WARNING)
     history = _attention_history()
@@ -456,6 +483,13 @@ def test_cooldown_mission_export_uses_stable_ids_across_descriptor_rename() -> N
     payload = json.loads(first_wire)
     assert payload["experiment_id"] == "exp-7"
     assert payload["trajectory_channel_id"] == "sensor.main"
+    assert payload.get("trajectory_channel") == {
+        "channel_id": "sensor.main",
+        "instrument_id": "reference-thermometer",
+        "source_key": "input.1.temperature",
+    }
+    assert payload["recent_history"].get("experiment_id") == "exp-7"
+    assert payload["recent_history"].get("item_revisions") == [1]
     assert original.display_name not in first_wire
     assert renamed.display_name not in first_wire
     assert "display_name" not in first_wire
@@ -497,6 +531,53 @@ def test_cooldown_mission_rejects_unrelated_valid_temperature_channel() -> None:
             _attention_history(),
             descriptor=unrelated,
         )
+
+
+def test_cooldown_mission_rejects_same_channel_id_from_a_different_source() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    replacement_source = _mission_descriptor(
+        instrument_id="replacement-thermometer",
+        source_key="input.9.temperature",
+    )
+
+    with pytest.raises(ValueError, match="channel.*identity"):
+        _build_cooldown_mission(
+            snapshot,
+            _attention_history(),
+            descriptor=replacement_source,
+        )
+
+
+def test_cooldown_mission_rejects_public_channel_relabel() -> None:
+    mission = _build_cooldown_mission(
+        _snapshot(state=OperatorPresentationState.WARNING),
+        _attention_history(),
+    )
+
+    with pytest.raises((TypeError, ValueError), match="trajectory_channel_id|channel identity"):
+        replace(mission, trajectory_channel_id="sensor.relabelled")
+
+
+def test_cooldown_mission_empty_trajectory_reports_missing_channel_identity() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    snapshot = replace(
+        snapshot,
+        cooldown_history=replace(
+            snapshot.cooldown_history,
+            samples=(),
+            reference_id=None,
+            reference_samples=(),
+            trajectory_channel=None,
+        ),
+    )
+
+    mission = _build_cooldown_mission(snapshot, _attention_history())
+    payload = json.loads(_dump_cooldown_mission(mission))
+
+    assert mission.trajectory == ()
+    assert mission.trajectory_missing_reason == "no_samples"
+    assert mission.trajectory_channel_id is None
+    assert payload.get("trajectory_channel_missing_reason") == "channel_identity_missing"
 
 
 @pytest.mark.parametrize(

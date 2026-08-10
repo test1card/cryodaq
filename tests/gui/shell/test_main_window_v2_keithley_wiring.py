@@ -27,6 +27,7 @@ from cryodaq.gui.zmq_client import ZmqBridge
 from cryodaq.operator_snapshot import (
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownHistorySummary,
     CooldownSample,
     DataIntegritySummary,
@@ -137,7 +138,14 @@ def _typed_ready_snapshot(
             recording_session_id,
         ),
         DataIntegritySummary(cut, status, 42, 41, 0, 0, availability),
-        CooldownHistorySummary(cut, status, (CooldownSample(0, 300),), None, (), "sensor.main"),
+        CooldownHistorySummary(
+            cut,
+            status,
+            (CooldownSample(0, 300),),
+            None,
+            (),
+            CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
+        ),
         SupportBundleSummary(cut, status, availability, support_manifest),
     )
 

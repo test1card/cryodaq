@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from cryodaq import operator_snapshot as _protocol
@@ -14,10 +14,12 @@ from cryodaq.operator_snapshot import *  # noqa: F403
 from cryodaq.operator_snapshot import (
     MAX_ID_UTF8_BYTES,
     MAX_LIVE_SOURCES_PER_SESSION,
+    MAX_NONNEGATIVE_INT,
     STATE_PRECEDENCE,
     AttentionItem,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownSample,
     DataIntegritySummary,
     ExperimentOperatingState,
@@ -49,7 +51,7 @@ __all__ = [
 _TRANSPORT_DISCONNECTED = "transport_disconnected"
 _SNAPSHOT_STALE = "snapshot_stale"
 _COOLDOWN_MISSION_SCHEMA = "cryodaq.cooldown-mission-evidence"
-_COOLDOWN_MISSION_VERSION = 1
+_COOLDOWN_MISSION_VERSION = 2
 
 
 def _mission_number(
@@ -155,7 +157,10 @@ class CooldownMission:
     cooldown_status: SummaryStatus
     attention_status: SummaryStatus
     experiment_id: str
-    trajectory_channel_id: str
+    trajectory_channel: CooldownChannelBinding | None
+    trajectory_channel_descriptor: ChannelDescriptorV1 = field(compare=False, repr=False)
+    trajectory_channel_missing_reason: str | None
+    attention_history_revision: int
     phase: str | None
     phase_missing_reason: str | None
     expected_cadence_s: float
@@ -172,10 +177,31 @@ class CooldownMission:
             raise TypeError("cooldown_status must be an exact SummaryStatus")
         if type(self.attention_status) is not SummaryStatus:
             raise TypeError("attention_status must be an exact SummaryStatus")
-        for field_name in ("experiment_id", "trajectory_channel_id"):
-            _mission_id(getattr(self, field_name), field_name=field_name)
+        _mission_id(self.experiment_id, field_name="experiment_id")
         if self.cut.experiment_id != self.experiment_id:
             raise ValueError("mission experiment_id must match its coherent cut")
+        if type(self.trajectory_channel_descriptor) is not ChannelDescriptorV1:
+            raise TypeError("trajectory_channel_descriptor must be an exact ChannelDescriptorV1")
+        if (
+            self.trajectory_channel_descriptor.quantity is not ChannelQuantity.TEMPERATURE
+            or self.trajectory_channel_descriptor.unit != "K"
+        ):
+            raise ValueError("trajectory_channel_descriptor must describe temperature in K")
+        if self.trajectory_channel is None:
+            if self.trajectory_channel_missing_reason != "channel_identity_missing":
+                raise ValueError("mission channel identity absence must be explicit")
+        else:
+            if type(self.trajectory_channel) is not CooldownChannelBinding:
+                raise TypeError("trajectory_channel must be an exact CooldownChannelBinding or None")
+            if self.trajectory_channel_descriptor.anchor != self.trajectory_channel.anchor:
+                raise ValueError("trajectory channel identity does not match cooldown evidence")
+            if self.trajectory_channel_missing_reason is not None:
+                raise ValueError("mission channel identity absence must be explicit")
+        if (
+            type(self.attention_history_revision) is not int
+            or not 0 <= self.attention_history_revision <= MAX_NONNEGATIVE_INT
+        ):
+            raise ValueError("attention_history_revision must be an exact bounded non-negative integer")
         if self.phase is None:
             if self.phase_missing_reason != "no_phase":
                 raise ValueError("mission phase absence must be explicit")
@@ -199,6 +225,8 @@ class CooldownMission:
         elif self.trajectory_missing_reason is not None:
             raise ValueError("trajectory absence must be explicit")
         points = tuple(item for item in self.trajectory if type(item) is CooldownMissionPoint)
+        if points and self.trajectory_channel is None:
+            raise ValueError("mission trajectory evidence requires stable channel identity")
         if any(later.sample.elapsed_s <= earlier.sample.elapsed_s for earlier, later in zip(points, points[1:])):
             raise ValueError("mission samples must remain strictly ordered")
         expected_trajectory: list[CooldownMissionPoint | CooldownMissionGap] = []
@@ -248,10 +276,16 @@ class CooldownMission:
             raise ValueError("mission attention state understates relevant evidence")
         if type(self.recent_history) is not AttentionHistoryPage:
             raise TypeError("recent_history must be an exact AttentionHistoryPage")
-        if any(item.experiment_id != self.experiment_id for item in self.recent_history.items):
+        if self.recent_history.experiment_id != self.experiment_id:
             raise ValueError("attention history experiment identity is inconsistent")
+        if self.recent_history.through_revision != self.attention_history_revision:
+            raise ValueError("attention history revision is not bound to the mission cut")
         if self.recent_history.as_of != self.cut.observed_at:
             raise ValueError("attention history is not bound to the mission cut")
+
+    @property
+    def trajectory_channel_id(self) -> str | None:
+        return None if self.trajectory_channel is None else self.trajectory_channel.channel_id
 
 
 def build_cooldown_mission(
@@ -271,16 +305,19 @@ def build_cooldown_mission(
         raise TypeError("trajectory_channel must be an exact ChannelDescriptorV1")
     if trajectory_channel.quantity is not ChannelQuantity.TEMPERATURE or trajectory_channel.unit != "K":
         raise ValueError("trajectory_channel must describe temperature in K")
-    authoritative_channel_id = snapshot.cooldown_history.trajectory_channel_id
-    if authoritative_channel_id is None:
-        raise ValueError("cooldown mission requires authoritative channel identity")
-    if trajectory_channel.channel_id != authoritative_channel_id:
+    authoritative_channel = snapshot.cooldown_history.trajectory_channel
+    if authoritative_channel is not None and trajectory_channel.anchor != authoritative_channel.anchor:
         raise ValueError("trajectory channel identity does not match cooldown evidence")
     experiment_id = snapshot.experiment.experiment_id
     if experiment_id is None or experiment_id != snapshot.cut.experiment_id:
         raise ValueError("cooldown mission requires one active stable experiment")
-    if any(item.experiment_id != experiment_id for item in attention_history.items):
+    if attention_history.experiment_id != experiment_id:
         raise ValueError("attention history belongs to a different experiment")
+    attention_history_revision = snapshot.attention.history_revision
+    if attention_history_revision is None:
+        raise ValueError("durable attention history revision is unavailable at the mission cut")
+    if attention_history.through_revision != attention_history_revision:
+        raise ValueError("attention history revision is not bound to the mission cut")
     cadence = _mission_number(
         expected_cadence_s,
         field_name="expected_cadence_s",
@@ -324,7 +361,10 @@ def build_cooldown_mission(
         cooldown_status=snapshot.cooldown_history.status,
         attention_status=snapshot.attention.status,
         experiment_id=experiment_id,
-        trajectory_channel_id=trajectory_channel.channel_id,
+        trajectory_channel=authoritative_channel,
+        trajectory_channel_descriptor=trajectory_channel,
+        trajectory_channel_missing_reason=("channel_identity_missing" if authoritative_channel is None else None),
+        attention_history_revision=attention_history_revision,
         phase=snapshot.experiment.phase,
         phase_missing_reason=("no_phase" if snapshot.experiment.phase is None else None),
         expected_cadence_s=cadence,
@@ -388,6 +428,17 @@ def dump_cooldown_mission(mission: CooldownMission) -> str:
         },
         "experiment_id": mission.experiment_id,
         "trajectory_channel_id": mission.trajectory_channel_id,
+        "trajectory_channel": (
+            None
+            if mission.trajectory_channel is None
+            else {
+                "channel_id": mission.trajectory_channel.channel_id,
+                "instrument_id": mission.trajectory_channel.instrument_id,
+                "source_key": mission.trajectory_channel.source_key,
+            }
+        ),
+        "trajectory_channel_missing_reason": mission.trajectory_channel_missing_reason,
+        "attention_history_revision": mission.attention_history_revision,
         "phase": mission.phase,
         "phase_missing_reason": mission.phase_missing_reason,
         "expected_cadence_s": mission.expected_cadence_s,
@@ -408,6 +459,8 @@ def dump_cooldown_mission(mission: CooldownMission) -> str:
             for item in mission.relevant_attention
         ],
         "recent_history": {
+            "experiment_id": mission.recent_history.experiment_id,
+            "item_revisions": list(mission.recent_history.item_revisions),
             "truncated_before": mission.recent_history.truncated_before,
             "through_revision": mission.recent_history.through_revision,
             "as_of": (None if mission.recent_history.as_of is None else mission.recent_history.as_of.isoformat()),

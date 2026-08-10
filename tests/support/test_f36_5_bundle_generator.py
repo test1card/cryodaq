@@ -27,6 +27,7 @@ from cryodaq.operator_snapshot import (
     AttentionItem,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownHistorySummary,
     CooldownSample,
     DataIntegritySummary,
@@ -146,7 +147,14 @@ def _snapshot(
             "rec-1",
         ),
         DataIntegritySummary(cut, ok, 42, 41, 0, 0, integrity_storage),
-        CooldownHistorySummary(cut, ok, (CooldownSample(0, 300),), None, (), "sensor.main"),
+        CooldownHistorySummary(
+            cut,
+            ok,
+            (CooldownSample(0, 300),),
+            None,
+            (),
+            CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
+        ),
         SupportBundleSummary(cut, ok, AvailabilityTruth.AVAILABLE, manifest),
     )
 

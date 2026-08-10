@@ -343,6 +343,7 @@ class OperatorSnapshotComposer:
             cut,
             _status(attention_state, source_age, attention_reasons, "Backend attention authority"),
             tuple(attention_items),
+            receipts.attention.history_revision,
         )
 
         experiment_state = (
@@ -389,7 +390,7 @@ class OperatorSnapshotComposer:
         cooldown_samples: tuple[CooldownSample, ...] = ()
         reference_samples: tuple[CooldownSample, ...] = ()
         reference_id = None
-        trajectory_channel_id = None
+        trajectory_channel = None
         if receipts.cooldown.availability is AuthorityAvailability.AVAILABLE:
             cooldown_samples = tuple(
                 CooldownSample(item.elapsed_s, item.temperature_k) for item in receipts.cooldown.samples
@@ -398,7 +399,7 @@ class OperatorSnapshotComposer:
                 CooldownSample(item.elapsed_s, item.temperature_k) for item in receipts.cooldown.reference_samples
             )
             reference_id = receipts.cooldown.reference_id
-            trajectory_channel_id = receipts.cooldown.trajectory_channel_id
+            trajectory_channel = receipts.cooldown.trajectory_channel
             cooldown_state = OperatorPresentationState.OK if cooldown_samples else OperatorPresentationState.CAUTION
             cooldown_reasons = () if cooldown_samples else ("cooldown_history_empty",)
         else:
@@ -410,7 +411,7 @@ class OperatorSnapshotComposer:
             cooldown_samples,
             reference_id,
             reference_samples,
-            trajectory_channel_id,
+            trajectory_channel,
         )
 
         infrastructure_nodes: tuple[InfrastructureNode, ...] = ()

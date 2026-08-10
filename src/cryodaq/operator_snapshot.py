@@ -1,7 +1,7 @@
 """Backend-owned immutable F36 operator snapshot protocol.
 
 This neutral module deliberately contains no GUI objects, transport calls, or
-commands. Engine/replay producers and GUI consumers share its strict v3 codec.
+commands. Engine/replay producers and GUI consumers share its strict v4 codec.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class AvailabilityTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
-# V3 resource budgets. Collection limits derive from the public fleet target of
+# V4 resource budgets. Collection limits derive from the public fleet target of
 # 100 devices / 2,000 channels. The 8 MiB wire cap is frozen with measured
 # worst-case headroom in tests; evidence is rejected, never silently truncated.
 MAX_FLEET_DEVICES = 100
@@ -105,7 +105,7 @@ STATE_PRECEDENCE = MappingProxyType(
 
 
 class OperatorSnapshotProtocolError(ValueError):
-    """Closed receiver-boundary failure for invalid or excessive v3 data."""
+    """Closed receiver-boundary failure for invalid or excessive v4 data."""
 
 
 __all__ = [
@@ -127,6 +127,7 @@ __all__ = [
     "AttentionItem",
     "AttentionQueue",
     "AvailabilityTruth",
+    "CooldownChannelBinding",
     "CooldownHistorySummary",
     "CooldownSample",
     "DataIntegritySummary",
@@ -702,14 +703,17 @@ class InfrastructureNodeHealth(_OperatorSummary):
 
 @dataclass(frozen=True, slots=True)
 class AttentionQueue(_OperatorSummary):
-    """Ordered backend-authoritative attention items."""
+    """Ordered backend-authoritative attention items at a durable revision."""
 
     items: tuple[AttentionItem, ...]
+    history_revision: int | None = None
 
     def __post_init__(self) -> None:
         super(AttentionQueue, self).__post_init__()
         _typed_tuple(self.items, AttentionItem, field_name="items")
         _bounded_tuple(self.items, field_name="items", limit=MAX_ATTENTION_ITEMS)
+        if self.history_revision is not None:
+            _non_negative_int(self.history_revision, field_name="history_revision")
         ids = tuple(item.attention_id for item in self.items)
         _unique(ids, field_name="attention ids")
         if any(item.observed_at > self.cut.observed_at for item in self.items):
@@ -799,13 +803,38 @@ class DataIntegritySummary(_OperatorSummary):
 
 
 @dataclass(frozen=True, slots=True)
+class CooldownChannelBinding:
+    """Stable source identity retained independently of display metadata."""
+
+    channel_id: str
+    instrument_id: str
+    source_key: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("channel_id", "instrument_id", "source_key"):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_empty(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                    max_bytes=MAX_ID_UTF8_BYTES,
+                ),
+            )
+
+    @property
+    def anchor(self) -> tuple[str, str, str]:
+        return (self.channel_id, self.instrument_id, self.source_key)
+
+
+@dataclass(frozen=True, slots=True)
 class CooldownHistorySummary(_OperatorSummary):
     """Cooldown observations and optional named comparison reference."""
 
     samples: tuple[CooldownSample, ...]
     reference_id: str | None
     reference_samples: tuple[CooldownSample, ...]
-    trajectory_channel_id: str | None = None
+    trajectory_channel: CooldownChannelBinding | None = None
 
     def __post_init__(self) -> None:
         super(CooldownHistorySummary, self).__post_init__()
@@ -819,23 +848,19 @@ class CooldownHistorySummary(_OperatorSummary):
                 "reference_id",
                 _non_empty(self.reference_id, field_name="reference_id", max_bytes=MAX_ID_UTF8_BYTES),
             )
-        if self.trajectory_channel_id is not None:
-            object.__setattr__(
-                self,
-                "trajectory_channel_id",
-                _non_empty(
-                    self.trajectory_channel_id,
-                    field_name="trajectory_channel_id",
-                    max_bytes=MAX_ID_UTF8_BYTES,
-                ),
-            )
+        if self.trajectory_channel is not None and type(self.trajectory_channel) is not CooldownChannelBinding:
+            raise TypeError("trajectory_channel must be an exact CooldownChannelBinding or None")
         if (self.reference_id is None) != (not self.reference_samples):
             raise ValueError("reference_id and reference_samples must be present together")
-        if (self.samples or self.reference_samples) and self.trajectory_channel_id is None:
+        if (self.samples or self.reference_samples) and self.trajectory_channel is None:
             raise ValueError("cooldown trajectory evidence requires stable channel identity")
         for name, values in (("samples", self.samples), ("reference_samples", self.reference_samples)):
             if any(later.elapsed_s <= earlier.elapsed_s for earlier, later in zip(values, values[1:])):
                 raise ValueError(f"{name} elapsed_s must be strictly increasing")
+
+    @property
+    def trajectory_channel_id(self) -> str | None:
+        return None if self.trajectory_channel is None else self.trajectory_channel.channel_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -951,11 +976,11 @@ class OperatorSnapshot:
 
 
 _SCHEMA = "cryodaq.operator-snapshot"
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 
 def encode_operator_snapshot(snapshot: OperatorSnapshot) -> dict[str, Any]:
-    """Return the strict v3 JSON-compatible envelope for ``snapshot``."""
+    """Return the strict v4 JSON-compatible envelope for ``snapshot``."""
 
     if not isinstance(snapshot, OperatorSnapshot):
         raise TypeError("snapshot must be an OperatorSnapshot")
@@ -979,7 +1004,7 @@ def dump_operator_snapshot(snapshot: OperatorSnapshot) -> str:
 
 
 def load_operator_snapshot(payload: str) -> OperatorSnapshot:
-    """Parse and validate one strict v3 JSON envelope."""
+    """Parse and validate one strict v4 JSON envelope."""
 
     if not isinstance(payload, str):
         raise TypeError("payload must be a string")
@@ -1114,6 +1139,7 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             "snapshot.attention.items",
             MAX_ATTENTION_ITEMS,
         ),
+        _optional_int(item["history_revision"], "snapshot.attention.history_revision"),
     )
     (status, item) = status_and("experiment")
     experiment = ExperimentOperatingState(
@@ -1152,9 +1178,9 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             "snapshot.cooldown_history.reference_samples",
             MAX_COOLDOWN_SAMPLES,
         ),
-        _optional_string(
-            item["trajectory_channel_id"],
-            "snapshot.cooldown_history.trajectory_channel_id",
+        _decode_cooldown_channel_binding(
+            item["trajectory_channel"],
+            "snapshot.cooldown_history.trajectory_channel",
         ),
     )
     (status, item) = status_and("support_bundle")
@@ -1298,6 +1324,17 @@ def _decode_attention_item(value: Any, path: str) -> AttentionItem:
     )
 
 
+def _decode_cooldown_channel_binding(value: Any, path: str) -> CooldownChannelBinding | None:
+    if value is None:
+        return None
+    item = _mapping(value, {"channel_id", "instrument_id", "source_key"}, path=path)
+    return CooldownChannelBinding(
+        _string(item["channel_id"], f"{path}.channel_id"),
+        _string(item["instrument_id"], f"{path}.instrument_id"),
+        _string(item["source_key"], f"{path}.source_key"),
+    )
+
+
 def _decode_cooldown_sample(value: Any, path: str) -> CooldownSample:
     item = _mapping(value, {field.name for field in fields(CooldownSample)}, path=path)
     return CooldownSample(
@@ -1373,7 +1410,7 @@ def _datetime(value: Any, path: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"{path} must be an ISO-8601 timestamp") from exc
     if _format_datetime(parsed) != raw:
-        raise ValueError(f"{path} is not the canonical v3 UTC timestamp")
+        raise ValueError(f"{path} is not the canonical v4 UTC timestamp")
     return parsed
 
 

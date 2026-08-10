@@ -35,6 +35,7 @@ from cryodaq.engine_wiring.operator_snapshot_authorities import (
 from cryodaq.engine_wiring.operator_snapshot_composer import OperatorSnapshotComposer
 from cryodaq.operator_snapshot import (
     AvailabilityTruth,
+    CooldownChannelBinding,
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
@@ -106,6 +107,7 @@ def _attention(cut: CommonCut) -> AlarmAttentionReceipt:
                 cut.observed_at,
             ),
         ),
+        history_revision=9,
     )
 
 
@@ -134,7 +136,7 @@ def _cooldown(cut: CommonCut) -> CooldownReceipt:
     return CooldownReceipt(
         **_base(cut),
         samples=(CooldownPoint(0.0, 300.0), CooldownPoint(1.0, 299.0)),
-        trajectory_channel_id="sensor.main",
+        trajectory_channel=CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
     )
 
 
@@ -209,6 +211,12 @@ async def test_complete_snapshot_has_one_cut_eight_detached_summaries_and_stable
     assert first.plant_health.subsystems[0] is not _safety(calls["safety"][0]).plant_health[0]
     assert first.attention.items[0].detail == "pressure_high"
     assert first.attention.items[0].state is OperatorPresentationState.WARNING
+    assert first.attention.history_revision == 9
+    assert first.cooldown_history.trajectory_channel == CooldownChannelBinding(
+        "sensor.main",
+        "thermometer",
+        "input.1.temperature",
+    )
     assert first.support_bundle.manifest is not None
     assert first.support_bundle.manifest.entries[0].path == "logs/engine.txt"
 

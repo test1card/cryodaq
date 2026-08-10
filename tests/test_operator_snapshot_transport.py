@@ -153,7 +153,7 @@ def test_decoder_rejects_invalid_utf8_before_protocol_decode(monkeypatch: pytest
         lambda wire: wire[:-1] + b',"schema":"cryodaq.operator-snapshot"}',
         lambda wire: wire.replace(b'"source_age_s":0.5', b'"source_age_s":NaN', 1),
         lambda wire: wire + b" trailing",
-        lambda wire: wire.replace(b'"version":3', b'"version":3,"unknown":true', 1),
+        lambda wire: wire.replace(b'"version":4', b'"version":4,"unknown":true', 1),
     ],
     ids=("duplicate-key", "nonfinite", "trailing", "unknown-field"),
 )
