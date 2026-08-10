@@ -959,6 +959,93 @@ async def test_predict_metadata_contains_trajectory(tmp_path: Path, model_in_tmp
         await broker.unsubscribe("test_meta")
 
 
+async def test_prediction_withholds_when_sensor_silence_exceeds_sensor_cadence(
+    tmp_path: Path,
+) -> None:
+    """A fast sensor going silent is stale before three prediction ticks."""
+    import time
+
+    from cryodaq.analytics.cooldown_service import CooldownService
+
+    broker = DataBroker()
+    cfg = _make_config(tmp_path, predict_interval_s=30.0)
+    service = CooldownService(broker, cfg, Path(cfg["model_dir"]))
+    service._model = object()
+    service._last_T_cold = 10.0
+    service._last_T_warm = 20.0
+    service._last_required_input_monotonic = {
+        service._channel_cold: time.monotonic() - 0.4,
+        service._channel_warm: time.monotonic() - 0.4,
+    }
+    for channel in (service._channel_cold, service._channel_warm):
+        service._required_input_intervals[channel].append(0.1)
+
+    with patch("cryodaq.analytics.cooldown_service.predict") as predict_mock:
+        await service._do_predict()
+
+    assert predict_mock.call_count == 0
+    assert 3.0 * 0.1 < 3.0 * service._predict_interval_s
+
+
+async def test_prediction_withholds_when_captured_inputs_stale_after_fresh_readings(
+    tmp_path: Path,
+) -> None:
+    """Fresh arrivals cannot bless a captured snapshot that aged in compute."""
+    import time
+
+    from cryodaq.analytics.cooldown_service import CooldownService
+
+    broker = DataBroker()
+    cfg = _make_config(tmp_path, predict_interval_s=30.0)
+    service = CooldownService(broker, cfg, Path(cfg["model_dir"]))
+    service._model = object()
+    service._last_T_cold = 10.0
+    service._last_T_warm = 20.0
+    captured_at = time.monotonic()
+    service._last_required_input_monotonic = {
+        service._channel_cold: captured_at,
+        service._channel_warm: captured_at,
+    }
+    for channel in (service._channel_cold, service._channel_warm):
+        service._required_input_intervals[channel].append(0.01)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_predict(*args: object, **kwargs: object) -> SimpleNamespace:
+        started.set()
+        assert release.wait(timeout=2.0)
+        return SimpleNamespace(
+            t_remaining_hours=1.0,
+            t_remaining_low_68=0.9,
+            t_remaining_high_68=1.1,
+            progress=0.5,
+            phase="cooling",
+            n_references=1,
+            future_t=None,
+        )
+
+    results_queue = await broker.subscribe(
+        "captured_snapshot_stale_test",
+        filter_fn=lambda reading: reading.channel.startswith("analytics/cooldown_predictor"),
+    )
+    try:
+        with patch("cryodaq.analytics.cooldown_service.predict", side_effect=slow_predict):
+            prediction = asyncio.create_task(service._do_predict())
+            await _wait_thread_event(started)
+            fresh_now = time.monotonic()
+            service._last_required_input_monotonic[service._channel_cold] = fresh_now
+            service._last_required_input_monotonic[service._channel_warm] = fresh_now
+            await asyncio.sleep(0.05)
+            release.set()
+            await prediction
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(results_queue.get(), timeout=0.1)
+    finally:
+        release.set()
+        await broker.unsubscribe("captured_snapshot_stale_test")
+
+
 async def test_prediction_withholds_when_inputs_stale_during_executor(
     tmp_path: Path,
 ) -> None:
@@ -977,6 +1064,8 @@ async def test_prediction_withholds_when_inputs_stale_during_executor(
         service._channel_cold: time.monotonic(),
         service._channel_warm: time.monotonic(),
     }
+    for channel in (service._channel_cold, service._channel_warm):
+        service._required_input_intervals[channel].append(0.01)
     started = threading.Event()
     release = threading.Event()
 
@@ -1001,9 +1090,7 @@ async def test_prediction_withholds_when_inputs_stale_during_executor(
         with patch("cryodaq.analytics.cooldown_service.predict", side_effect=slow_predict):
             prediction = asyncio.create_task(service._do_predict())
             await _wait_thread_event(started)
-            stale_stamp = time.monotonic() - max(3.0 * service._predict_interval_s, 1.0) - 0.01
-            service._last_required_input_monotonic[service._channel_cold] = stale_stamp
-            service._last_required_input_monotonic[service._channel_warm] = stale_stamp
+            await asyncio.sleep(0.05)
             release.set()
             await prediction
 

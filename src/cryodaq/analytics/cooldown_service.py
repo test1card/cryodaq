@@ -270,6 +270,11 @@ class CooldownService:
         self._last_T_cold: float | None = None
         self._last_T_warm: float | None = None
         self._last_required_input_monotonic: dict[str, float] = {}
+        self._last_required_input_timestamp: dict[str, float] = {}
+        self._required_input_intervals: dict[str, deque[float]] = {
+            self._channel_cold: deque(maxlen=5),
+            self._channel_warm: deque(maxlen=5),
+        }
 
         # Task 8a: lazily-loaded cooldown_baseline config from plugins.yaml
         # (None = not loaded yet). The fingerprint tap is flag-guarded and
@@ -638,13 +643,20 @@ class CooldownService:
                 if not reading.is_usable():
                     continue
 
+                if reading.channel in (self._channel_cold, self._channel_warm):
+                    previous_timestamp = self._last_required_input_timestamp.get(reading.channel)
+                    if previous_timestamp is not None:
+                        interval_s = reading_ts - previous_timestamp
+                        if interval_s > 0:
+                            self._required_input_intervals[reading.channel].append(interval_s)
+                    self._last_required_input_timestamp[reading.channel] = reading_ts
+                    self._last_required_input_monotonic[reading.channel] = time.monotonic()
+
                 if reading.channel == self._channel_cold:
-                    self._last_required_input_monotonic[self._channel_cold] = time.monotonic()
                     self._last_T_cold = reading.value
                     # Update detector (use reading timestamp for correct dT/dt)
                     self._detector.update(reading_ts, reading.value)
                 elif reading.channel == self._channel_warm:
-                    self._last_required_input_monotonic[self._channel_warm] = time.monotonic()
                     self._last_T_warm = reading.value
 
                 # Buffer data during cooldown
@@ -687,19 +699,36 @@ class CooldownService:
         phase = self._detector.phase
         cooldown_active = phase in (CooldownPhase.COOLING, CooldownPhase.STABILIZING)
 
-        T_cold = self._last_T_cold
-        T_warm = self._last_T_warm
-        if T_cold is None or T_warm is None:
-            return
-        freshness_horizon_s = max(3.0 * self._predict_interval_s, 1.0)
-        now_monotonic = time.monotonic()
         required_channels = (self._channel_cold, self._channel_warm)
+        input_snapshot = {
+            self._channel_cold: (
+                self._last_T_cold,
+                self._last_required_input_monotonic.get(self._channel_cold),
+            ),
+            self._channel_warm: (
+                self._last_T_warm,
+                self._last_required_input_monotonic.get(self._channel_warm),
+            ),
+        }
+        freshness_horizons_s = {
+            channel: 3.0 * float(np.median(self._required_input_intervals[channel]))
+            if self._required_input_intervals[channel]
+            else None
+            for channel in required_channels
+        }
         if any(
-            now_monotonic - self._last_required_input_monotonic.get(channel, float("-inf")) > freshness_horizon_s
+            input_snapshot[channel][0] is None
+            or input_snapshot[channel][1] is None
+            or freshness_horizons_s[channel] is None
+            or time.monotonic() - input_snapshot[channel][1] > freshness_horizons_s[channel]
             for channel in required_channels
         ):
-            logger.warning("Cooldown prediction withheld because a required input is stale")
+            logger.warning("Cooldown prediction withheld because a required input is stale or its cadence is unknown")
             return
+
+        T_cold = input_snapshot[self._channel_cold][0]
+        T_warm = input_snapshot[self._channel_warm][0]
+        assert T_cold is not None and T_warm is not None
 
         # Compute elapsed time
         # F-ReplayPredictor (v0.56.3): use the most recent reading timestamp
@@ -751,11 +780,10 @@ class CooldownService:
             return
 
         # The executor may outlive the pre-computation freshness horizon.
-        # Recheck the same required-input snapshot before publishing so
-        # Reading.now() cannot make stale-input output look current.
-        now_monotonic = time.monotonic()
+        # Recheck the captured value/timestamp pairs before publishing;
+        # fresh readings arriving during compute cannot bless stale inputs.
         if any(
-            now_monotonic - self._last_required_input_monotonic.get(channel, float("-inf")) > freshness_horizon_s
+            time.monotonic() - input_snapshot[channel][1] > freshness_horizons_s[channel]
             for channel in required_channels
         ):
             logger.warning("Cooldown prediction withheld because a required input is stale")
