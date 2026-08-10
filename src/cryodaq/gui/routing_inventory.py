@@ -24,7 +24,7 @@ from cryodaq.channels.descriptors import (
 
 DescriptorAnchor = tuple[str, str, str]
 _SEMANTIC_SITE_KEY: Final = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+")
-_RAW_LINE_SEGMENT: Final = re.compile(r"line-[0-9]+")
+_RAW_LINE_SEGMENT: Final = re.compile(r"(?:source-)?line(?:no)?-[0-9]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +111,8 @@ class GuiRoutingInventoryEntry:
         segments = self.site_key.split(".")
         if segments[0] != "gui":
             raise ValueError("site key must be rooted in the semantic gui namespace")
+        if any(segment in {"src", "cryodaq"} for segment in segments):
+            raise ValueError("site key must not encode a raw source path")
         if any(segment.isdecimal() or _RAW_LINE_SEGMENT.fullmatch(segment) for segment in segments):
             raise ValueError("site key must not encode a raw source line location")
         if self.selector is None and not self.findings:

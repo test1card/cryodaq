@@ -2561,6 +2561,13 @@ def _gui_inventory_binding_errors(inventory) -> list[str]:
     entries_by_registration = {entry.sweep_registration_id: entry for entry in inventory.values()}
     errors: list[str] = []
 
+    for mapping_site_key, entry in inventory.items():
+        if mapping_site_key != entry.site_key:
+            errors.append(
+                f"{entry.sweep_registration_id}: mapping key {mapping_site_key!r} "
+                f"does not match entry semantic site key {entry.site_key!r}"
+            )
+
     actual_registration_ids = frozenset(entries_by_registration)
     if actual_registration_ids != frozenset(_EXPECTED_GUI_SITE_KEYS):
         errors.append(
@@ -2713,11 +2720,30 @@ def test_c2_gui_routing_inventory_rejects_registration_payload_swaps() -> None:
     "site_key",
     (
         "src.cryodaq.gui.dashboard-view.line-264",
+        "gui.src.cryodaq.gui.dashboard.dashboard-view.on-reading.temperature",
         "gui.dashboard.dashboard-view.line-264",
+        "gui.dashboard.dashboard-view.source-line-264",
+        "gui.dashboard.dashboard-view.lineno-264",
         "gui.dashboard.dashboard-view.line.264",
     ),
 )
 def test_c2_gui_routing_inventory_rejects_raw_path_line_keys(site_key: str) -> None:
     entry = next(iter(GUI_ROUTING_INVENTORY.values()))
-    with pytest.raises(ValueError, match="semantic gui namespace|raw source line location"):
+    with pytest.raises(ValueError, match="semantic gui namespace|raw source"):
         replace(entry, site_key=site_key)
+
+
+def test_c2_gui_routing_inventory_rejects_whole_entry_mapping_swaps() -> None:
+    by_registration = {entry.sweep_registration_id: entry for entry in GUI_ROUTING_INVENTORY.values()}
+    temperature = by_registration["C2-047"]
+    pressure = by_registration["C2-048"]
+
+    mutated = dict(GUI_ROUTING_INVENTORY)
+    mutated[temperature.site_key] = pressure
+    mutated[pressure.site_key] = temperature
+    assert len(mutated) == len(GUI_ROUTING_INVENTORY) == 58
+    assert _registry_errors(_sites(_root()), _REGISTRY) == []
+
+    errors = _gui_inventory_binding_errors(mutated)
+    with pytest.raises(AssertionError, match=r"C2-048: mapping key"):
+        assert errors == [], "\n".join(errors)
