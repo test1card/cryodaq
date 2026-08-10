@@ -2358,6 +2358,67 @@ _GUI_UNREACHABLE_REGISTRATIONS = frozenset(
     }
 )
 
+_EXPECTED_GUI_SITE_KEYS = {
+    "C2-047": "gui.dashboard.dashboard-view.on-reading.temperature",
+    "C2-048": "gui.dashboard.dashboard-view.on-reading.pressure",
+    "C2-049": "gui.dashboard.dashboard-view.on-reading.analytics",
+    "C2-050": "gui.dashboard.dynamic-sensor-grid.rebuild.temperature",
+    "C2-051": "gui.dashboard.phase-aware-widget.on-reading.cooldown-eta",
+    "C2-052": "gui.dashboard.phase-aware-widget.on-reading.thermal-resistance",
+    "C2-053": "gui.dashboard.phase-aware-widget.on-reading.pressure",
+    "C2-054": "gui.dashboard.sensor-cell.update.temperature",
+    "C2-055": "gui.dashboard.temp-plot.rebuild.temperature",
+    "C2-112": "gui.dashboard.dynamic-sensor-grid.dispatch.configured-cell",
+    "C2-121": "gui.shell.annunciation-controller.protocol-identifiers",
+    "C2-123": "gui.shell.annunciation-controller.acknowledge.activation",
+    "C2-124": "gui.shell.annunciation-controller.pending-alarm-holds.activation",
+    "C2-066": "gui.shell.experiment-overlay.on-reading.operator-log",
+    "C2-067": "gui.shell.main-window.dispatch.measurement-flow",
+    "C2-068": "gui.shell.main-window.dispatch.disk-evidence",
+    "C2-069": "gui.shell.main-window.dispatch.operator-log",
+    "C2-070": "gui.shell.main-window.dispatch.keithley-state",
+    "C2-071": "gui.shell.main-window.dispatch.analytics-family",
+    "C2-072": "gui.shell.main-window.dispatch.safety-state",
+    "C2-073": "gui.shell.main-window.dispatch-disk-evidence.instrument-identity",
+    "C2-074": "gui.shell.main-window.analytics-adapter.cooldown",
+    "C2-075": "gui.shell.main-window.analytics-adapter.thermal-resistance",
+    "C2-076": "gui.shell.main-window.analytics-adapter.instrument-health",
+    "C2-077": "gui.shell.main-window.analytics-adapter.vacuum-prediction",
+    "C2-078": "gui.shell.calibration-panel.on-reading.raw-sensor",
+    "C2-128": "gui.shell.conductivity-panel.power-channel",
+    "C2-079": "gui.shell.conductivity-panel.temperature-channel-roster",
+    "C2-080": "gui.shell.conductivity-panel.resolve-configured-temperature",
+    "C2-081": "gui.shell.keithley-panel.command-description.target",
+    "C2-082": "gui.shell.keithley-panel.on-reading.state",
+    "C2-083": "gui.shell.keithley-panel.on-reading.source-channel",
+    "C2-084": "gui.shell.keithley-panel.on-reading.measurement",
+    "C2-085": "gui.shell.multiline-panel.manifest.instrument",
+    "C2-086": "gui.shell.multiline-panel.manifest.length-source",
+    "C2-087": "gui.shell.multiline-panel.manifest.length-source-separator",
+    "C2-092": "gui.shell.multiline-panel.curve.length-index",
+    "C2-094": "gui.shell.multiline-panel.descriptor-reading.length-source",
+    "C2-095": "gui.shell.multiline-panel.descriptor-reading.length-separator",
+    "C2-129": "gui.shell.multiline-panel.manifest.length-channel",
+    "C2-130": "gui.shell.multiline-panel.manifest.environment-channel",
+    "C2-132": "gui.shell.operator-log-panel.channel-roster",
+    "C2-133": "gui.shell.operator-log-panel.on-reading.channel",
+    "C2-134": "gui.shell.top-watch-bar.second-stage-channel",
+    "C2-135": "gui.shell.top-watch-bar.first-stage-channel",
+    "C2-098": "gui.shell.top-watch-bar.on-reading.temperature",
+    "C2-136": "gui.shell.top-watch-bar.on-reading.landmark",
+    "C2-099": "gui.shell.top-watch-bar.on-reading.pressure",
+    "C2-100": "gui.shell.top-watch-bar.refresh.temperature",
+    "C2-138": "gui.shell.analytics.keithley-power.source-a",
+    "C2-139": "gui.shell.analytics.keithley-power.source-b",
+    "C2-140": "gui.shell.analytics.keithley-power.drop-unknown-source",
+    "C2-141": "gui.shell.analytics.keithley-power.measurement-dispatch",
+    "C2-101": "gui.shell.analytics.experiment-summary.history.temperature-order.cyrillic-prefix",
+    "C2-102": "gui.shell.analytics.experiment-summary.history.temperature-order.latin-prefix",
+    "C2-142": "gui.shell.analytics.experiment-summary.history.other-measurements",
+    "C2-143": "gui.shell.analytics.temperature-steady-state.landmark-selection",
+    "C2-144": "gui.shell.analytics.temperature-steady-state.landmark-key",
+}
+
 _CRYOGENIC_IDS = frozenset(f"\u0422{index}" for index in range(1, 25))
 _RAW_SENSOR_IDS = frozenset(f"\u0422{index}.raw" for index in range(1, 25))
 _SOURCE_IDS = frozenset(
@@ -2416,7 +2477,7 @@ def _expected_gui_binding_ids() -> dict[str, frozenset[str]]:
         ),
         "C2-128",
     )
-    bind(_SOURCE_IDS, "C2-083", "C2-084", "C2-140")
+    bind(_SOURCE_IDS, "C2-083", "C2-084")
     bind(_MULTILINE_LENGTH_IDS | _MULTILINE_ENVIRONMENT_IDS, "C2-085")
     bind(
         _MULTILINE_LENGTH_IDS,
@@ -2431,9 +2492,9 @@ def _expected_gui_binding_ids() -> dict[str, frozenset[str]]:
     bind(frozenset({"\u042211"}), "C2-135")
     bind(frozenset({"\u042212"}), "C2-134")
     bind(frozenset({"\u042211", "\u042212"}), "C2-136", "C2-143", "C2-144")
-    bind(frozenset(channel_id for channel_id in _SOURCE_IDS if "/smua/" in channel_id), "C2-138")
-    bind(frozenset(channel_id for channel_id in _SOURCE_IDS if "/smub/" in channel_id), "C2-139")
-    bind(_SOURCE_DISPLAY_IDS, "C2-141")
+    bind(frozenset(channel_id for channel_id in _SOURCE_DISPLAY_IDS if "/smua/" in channel_id), "C2-138")
+    bind(frozenset(channel_id for channel_id in _SOURCE_DISPLAY_IDS if "/smub/" in channel_id), "C2-139")
+    bind(_SOURCE_DISPLAY_IDS, "C2-140", "C2-141")
     bind(_ALL_TEMPERATURE_IDS, "C2-101", "C2-102")
     bind(_NON_TEMPERATURE_IDS, "C2-142")
     return expected
@@ -2499,6 +2560,23 @@ def _gui_inventory_binding_errors(inventory) -> list[str]:
     by_channel = {descriptor.channel_id: descriptor for descriptor in descriptors}
     entries_by_registration = {entry.sweep_registration_id: entry for entry in inventory.values()}
     errors: list[str] = []
+
+    actual_registration_ids = frozenset(entries_by_registration)
+    if actual_registration_ids != frozenset(_EXPECTED_GUI_SITE_KEYS):
+        errors.append(
+            "inventory registrations changed: "
+            f"expected {sorted(_EXPECTED_GUI_SITE_KEYS)!r}, got {sorted(actual_registration_ids)!r}"
+        )
+    if len(entries_by_registration) != len(inventory):
+        errors.append("inventory registrations are not one-to-one")
+    for registration_id, expected_site_key in _EXPECTED_GUI_SITE_KEYS.items():
+        entry = entries_by_registration.get(registration_id)
+        if entry is None:
+            continue
+        if entry.site_key != expected_site_key:
+            errors.append(
+                f"{registration_id}: wrong semantic site key; expected {expected_site_key!r}, got {entry.site_key!r}"
+            )
 
     if frozenset(by_channel) != _ALL_DESCRIPTOR_IDS:
         errors.append(
@@ -2603,3 +2681,43 @@ def test_c2_gui_routing_inventory_rejects_a_same_cardinality_wrong_binding() -> 
     errors = _gui_inventory_binding_errors(mutated)
     with pytest.raises(AssertionError, match=r"top-watch-bar\.on-reading\.landmark"):
         assert errors == [], "\n".join(errors)
+
+
+def test_c2_gui_routing_inventory_rejects_registration_payload_swaps() -> None:
+    by_registration = {entry.sweep_registration_id: entry for entry in GUI_ROUTING_INVENTORY.values()}
+    temperature = by_registration["C2-047"]
+    pressure = by_registration["C2-048"]
+
+    mutated = dict(GUI_ROUTING_INVENTORY)
+    mutated[temperature.site_key] = replace(
+        temperature,
+        sweep_registration_id=pressure.sweep_registration_id,
+        selector=pressure.selector,
+        findings=pressure.findings,
+    )
+    mutated[pressure.site_key] = replace(
+        pressure,
+        sweep_registration_id=temperature.sweep_registration_id,
+        selector=temperature.selector,
+        findings=temperature.findings,
+    )
+    assert len(mutated) == len(GUI_ROUTING_INVENTORY) == 58
+    assert _registry_errors(_sites(_root()), _REGISTRY) == []
+
+    errors = _gui_inventory_binding_errors(mutated)
+    with pytest.raises(AssertionError, match=r"C2-047: wrong semantic site key"):
+        assert errors == [], "\n".join(errors)
+
+
+@pytest.mark.parametrize(
+    "site_key",
+    (
+        "src.cryodaq.gui.dashboard-view.line-264",
+        "gui.dashboard.dashboard-view.line-264",
+        "gui.dashboard.dashboard-view.line.264",
+    ),
+)
+def test_c2_gui_routing_inventory_rejects_raw_path_line_keys(site_key: str) -> None:
+    entry = next(iter(GUI_ROUTING_INVENTORY.values()))
+    with pytest.raises(ValueError, match="semantic gui namespace|raw source line location"):
+        replace(entry, site_key=site_key)

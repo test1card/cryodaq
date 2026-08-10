@@ -150,6 +150,24 @@ def test_source_metadata_routes_despite_non_vendor_name_and_voltage_suffix_lie()
     shell._push_analytics.assert_not_called()
 
 
+def test_source_resistance_routes_to_panel_but_not_analytics_snapshot() -> None:
+    reading = _reading("Keithley_1/smua/resistance", "Ohm", instrument_id="Keithley_1")
+    descriptor = _descriptor(
+        reading,
+        quantity=ChannelQuantity.RESISTANCE,
+        role=ChannelRole.SOURCE_READBACK,
+        safety_class=ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK,
+        source_key="smua.resistance",
+    )
+    shell = _shell()
+
+    _route(shell, reading, descriptor)
+
+    shell._keithley_panel.on_reading.assert_called_once_with(reading)
+    assert shell._analytics_keithley_snapshot == {}
+    shell._analytics_view.set_keithley_readings.assert_not_called()
+
+
 def test_passive_power_named_like_smu_never_routes_to_source_panel() -> None:
     reading = _reading("Keithley_1/smua/power", "W")
     descriptor = _descriptor(reading, quantity=ChannelQuantity.POWER)

@@ -24,6 +24,7 @@ from cryodaq.channels.descriptors import (
 
 DescriptorAnchor = tuple[str, str, str]
 _SEMANTIC_SITE_KEY: Final = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+")
+_RAW_LINE_SEGMENT: Final = re.compile(r"line-[0-9]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +108,11 @@ class GuiRoutingInventoryEntry:
             raise ValueError("sweep registration ID must use the C2-NNN grammar")
         if _SEMANTIC_SITE_KEY.fullmatch(self.site_key) is None:
             raise ValueError("site key must be normalized lowercase semantic segments")
+        segments = self.site_key.split(".")
+        if segments[0] != "gui":
+            raise ValueError("site key must be rooted in the semantic gui namespace")
+        if any(segment.isdecimal() or _RAW_LINE_SEGMENT.fullmatch(segment) for segment in segments):
+            raise ValueError("site key must not encode a raw source line location")
         if self.selector is None and not self.findings:
             raise ValueError("inventory entry needs a descriptor selector or an explicit finding")
         if type(self.findings) is not frozenset:
@@ -163,13 +169,13 @@ _SOURCE_DISPLAY = DescriptorSelector(
     roles=frozenset({ChannelRole.SOURCE_READBACK}),
     safety_classes=frozenset({ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK}),
 )
-_SMUA_READBACK = DescriptorSelector(
-    source_keys=frozenset({"smua.voltage", "smua.current", "smua.resistance", "smua.power"}),
+_SMUA_ANALYTICS = DescriptorSelector(
+    source_keys=frozenset({"smua.voltage", "smua.current", "smua.power"}),
     roles=frozenset({ChannelRole.SOURCE_READBACK}),
     safety_classes=frozenset({ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK}),
 )
-_SMUB_READBACK = DescriptorSelector(
-    source_keys=frozenset({"smub.voltage", "smub.current", "smub.resistance", "smub.power"}),
+_SMUB_ANALYTICS = DescriptorSelector(
+    source_keys=frozenset({"smub.voltage", "smub.current", "smub.power"}),
     roles=frozenset({ChannelRole.SOURCE_READBACK}),
     safety_classes=frozenset({ChannelSafetyClass.HAZARDOUS_SOURCE_READBACK}),
 )
@@ -269,7 +275,7 @@ _ENTRIES: Final = (
     _entry("C2-070", "gui.shell.main-window.dispatch.keithley-state", findings=_ANALYTICS),
     _entry("C2-071", "gui.shell.main-window.dispatch.analytics-family", findings=_ANALYTICS),
     _entry("C2-072", "gui.shell.main-window.dispatch.safety-state", findings=_ANALYTICS),
-    _entry("C2-073", "gui.shell.main-window.dispatch-disk-evidence.channel", findings=_SYSTEM),
+    _entry("C2-073", "gui.shell.main-window.dispatch-disk-evidence.instrument-identity", findings=_SYSTEM),
     _entry("C2-074", "gui.shell.main-window.analytics-adapter.cooldown", findings=_ANALYTICS),
     _entry(
         "C2-075",
@@ -338,19 +344,19 @@ _ENTRIES: Final = (
     _entry("C2-136", "gui.shell.top-watch-bar.on-reading.landmark", _T11_T12, _LANDMARK),
     _entry("C2-099", "gui.shell.top-watch-bar.on-reading.pressure", _VACUUM_PRESSURE),
     _entry("C2-100", "gui.shell.top-watch-bar.refresh.temperature", _CRYOGENIC_TEMPERATURE),
-    _entry("C2-138", "gui.shell.analytics.keithley-power.source-a", _SMUA_READBACK),
-    _entry("C2-139", "gui.shell.analytics.keithley-power.source-b", _SMUB_READBACK),
-    _entry("C2-140", "gui.shell.analytics.keithley-power.drop-unknown-source", _SOURCE_READBACK),
+    _entry("C2-138", "gui.shell.analytics.keithley-power.source-a", _SMUA_ANALYTICS),
+    _entry("C2-139", "gui.shell.analytics.keithley-power.source-b", _SMUB_ANALYTICS),
+    _entry("C2-140", "gui.shell.analytics.keithley-power.drop-unknown-source", _SOURCE_DISPLAY),
     _entry("C2-141", "gui.shell.analytics.keithley-power.measurement-dispatch", _SOURCE_DISPLAY),
     _entry(
         "C2-101",
-        "gui.shell.analytics.experiment-summary.history.temperature-count",
+        "gui.shell.analytics.experiment-summary.history.temperature-order.cyrillic-prefix",
         _ALL_TEMPERATURE,
         _HISTORY,
     ),
     _entry(
         "C2-102",
-        "gui.shell.analytics.experiment-summary.history.temperature-stability",
+        "gui.shell.analytics.experiment-summary.history.temperature-order.latin-prefix",
         _ALL_TEMPERATURE,
         _HISTORY,
     ),
