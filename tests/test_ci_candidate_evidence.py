@@ -49,8 +49,7 @@ from tools.ci_partition_execution_proof import PartitionExecutionProofError, _va
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "main.yml"
 
-EXPECTED_CANDIDATE_BIND_SCRIPT = """\
-set -euo pipefail
+EXPECTED_CANDIDATE_BIND_SCRIPT = r"""set -euo pipefail
 event_commit="$(git rev-parse --verify "${EVENT_SHA:?}^{commit}")"
 readonly event_commit
 require_commit() {
@@ -60,10 +59,9 @@ require_commit() {
     return 1
   fi
   if ! git rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1; then
-    # A force-pushed predecessor head is GitHub event authority but is
-    # not an ancestor of the new head, so the checkout lacks the
-    # object; fetch that exact commit once, then re-verify.  A SHA
-    # the remote cannot serve still fails closed below.
+    # Event authority can name an object absent from the checkout;
+    # fetch it once, then re-verify. The strict-ancestor check below
+    # still rejects a force-pushed or otherwise unrelated base.
     git fetch --no-tags origin "${sha}" >&2 || true
   fi
   if ! git rev-parse --verify "${sha}^{commit}" >/dev/null; then
@@ -78,7 +76,7 @@ if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
   readonly base_commit
   head_commit="$(git rev-parse --verify "${PR_HEAD_SHA:?}^{commit}")"
   readonly head_commit
-  read -r recorded first_parent second_parent extra \\
+  read -r recorded first_parent second_parent extra \
     <<<"$(git rev-list --parents -n 1 "$merge_commit")"
   test "$recorded" = "$merge_commit"
   test "$first_parent" = "$base_commit"
@@ -91,17 +89,15 @@ if [[ "${EVENT_NAME:?}" == "pull_request" ]]; then
   head_tree="$(git rev-parse --verify "${head_commit}^{tree}")"
   readonly head_tree
   if [[ "$merge_tree" != "$head_tree" ]]; then
-    echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree." \\
+    echo "::error::PR merge tree $merge_tree differs from executed head tree $head_tree." \
       "Update the PR branch onto master to restore tree equality, or implement a merge-validation lane."
     exit 1
   fi
   readonly evidence_sha="$head_commit"
   trusted_base_sha="$(require_commit 'pull request base' "${PR_BASE_SHA:?}")"
-  readonly trusted_base_sha
 elif [[ "$EVENT_NAME" == "merge_group" ]]; then
   readonly evidence_sha="$event_commit"
   trusted_base_sha="$(require_commit 'merge-group base' "${MERGE_GROUP_BASE_SHA:?}")"
-  readonly trusted_base_sha
 elif [[ "$EVENT_NAME" == "push" ]]; then
   if [[ "${PUSH_CREATED:-false}" == true ]]; then
     test "${PUSH_BEFORE:?}" = "0000000000000000000000000000000000000000"
@@ -115,18 +111,25 @@ elif [[ "$EVENT_NAME" == "push" ]]; then
     test "${PUSH_BEFORE:?}" != "0000000000000000000000000000000000000000"
     trusted_base_sha="$(require_commit 'push before' "${PUSH_BEFORE}")"
   fi
-  readonly trusted_base_sha
   readonly evidence_sha="$event_commit"
 elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
   readonly evidence_sha="$event_commit"
-  trusted_base_sha="$(require_commit 'workflow-dispatch trusted base' "${DISPATCH_TRUSTED_BASE_SHA:?}")"
-  readonly trusted_base_sha
+  test -n "${DEFAULT_BRANCH:?}"
+  git fetch --no-tags origin \
+    "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+  mapfile -t bases < <(git merge-base --all "$event_commit" "refs/remotes/origin/${DEFAULT_BRANCH}")
+  test "${#bases[@]}" = 1
+  trusted_base_sha="$(require_commit 'workflow-dispatch merge base' "${bases[0]}")"
 else
   echo "unsupported evidence authority event: $EVENT_NAME" >&2
   exit 1
 fi
-printf 'evidence_sha=%s\\n' "$evidence_sha" >>"$GITHUB_OUTPUT"
-printf 'trusted_base_sha=%s\\n' "$trusted_base_sha" >>"$GITHUB_OUTPUT"
+trusted_base_sha="$(git rev-parse --verify "${trusted_base_sha}^{commit}")"
+test "$trusted_base_sha" != "$evidence_sha"
+git merge-base --is-ancestor "$trusted_base_sha" "$evidence_sha"
+readonly trusted_base_sha
+printf 'evidence_sha=%s\n' "$evidence_sha" >>"$GITHUB_OUTPUT"
+printf 'trusted_base_sha=%s\n' "$trusted_base_sha" >>"$GITHUB_OUTPUT"
 """
 
 _TEST_RSA_N = int(
@@ -247,7 +250,6 @@ def _assert_candidate_identity_output(
     merge_group_base_sha: str = "",
     push_before: str = "",
     push_created: str = "false",
-    dispatch_trusted_base_sha: str = "",
 ) -> None:
     bind = next(step for step in workflow["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind")
     _git(repository, "checkout", "--detach", event_sha)
@@ -263,7 +265,6 @@ def _assert_candidate_identity_output(
             "PUSH_BEFORE": push_before,
             "PUSH_CREATED": push_created,
             "DEFAULT_BRANCH": "master",
-            "DISPATCH_TRUSTED_BASE_SHA": dispatch_trusted_base_sha,
             "GITHUB_OUTPUT": output.resolve().as_posix(),
         }
     )
@@ -2828,9 +2829,6 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         "PUSH_BEFORE": "${{ github.event.before }}",
         # Distinguishes a branch-creation push from an ordinary push.
         "PUSH_CREATED": "${{ github.event.created }}",
-        # A manual run has no event-derived before/base commit, so the operator
-        # must name the exact immutable trusted base explicitly.
-        "DISPATCH_TRUSTED_BASE_SHA": "${{ inputs.trusted_base_sha }}",
     }
     assert bind["run"] == EXPECTED_CANDIDATE_BIND_SCRIPT
     commands = tuple(
@@ -2886,15 +2884,7 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
 def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_path: Path) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     dispatch = payload[True]["workflow_dispatch"]
-    assert dispatch == {
-        "inputs": {
-            "trusted_base_sha": {
-                "description": "Exact 40-character commit SHA whose registered evidence is trusted",
-                "required": True,
-                "type": "string",
-            }
-        }
-    }
+    assert dispatch is None
 
     test_job = payload["jobs"]["test"]
     steps = {step.get("id"): step for step in test_job["steps"] if step.get("id")}
@@ -2911,12 +2901,23 @@ def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_
     assert 'test "${{ steps.active-remaining.outcome }}" = success' in enforce["run"]
 
     identity_job = payload["jobs"]["candidate_identity"]
-    bind = next(step for step in identity_job["steps"] if step.get("id") == "bind")
-    assert bind["env"]["DISPATCH_TRUSTED_BASE_SHA"] == "${{ inputs.trusted_base_sha }}"
-    dispatch_binding = (
-        'trusted_base_sha="$(require_commit \'workflow-dispatch trusted base\' "${DISPATCH_TRUSTED_BASE_SHA:?}")"'
+    identity_checkout = next(
+        step for step in identity_job["steps"] if str(step.get("uses", "")).startswith("actions/checkout@")
     )
+    assert identity_checkout["with"]["fetch-depth"] == 0
+    bind = next(step for step in identity_job["steps"] if step.get("id") == "bind")
+    assert "DISPATCH_TRUSTED_BASE_SHA" not in bind["env"]
+    assert "${{ inputs.trusted_base_sha }}" not in bind["run"]
+    assert 'test -n "${DEFAULT_BRANCH:?}"' in bind["run"]
+    assert '"+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"' in bind["run"]
+    assert 'git merge-base --all "$event_commit" "refs/remotes/origin/${DEFAULT_BRANCH}"' in bind["run"]
+    dispatch_binding = 'trusted_base_sha="$(require_commit \'workflow-dispatch merge base\' "${bases[0]}")"'
     assert dispatch_binding in bind["run"]
+    strict_binding = (
+        'test "$trusted_base_sha" != "$evidence_sha"\n'
+        'git merge-base --is-ancestor "$trusted_base_sha" "$evidence_sha"\n'
+    )
+    assert strict_binding in bind["run"]
 
     repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
     remote = tmp_path / "default-branch.git"
@@ -2958,7 +2959,6 @@ def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_
         {
             "event_name": "workflow_dispatch",
             "event_sha": head_commit,
-            "dispatch_trusted_base_sha": base_commit,
             "expected_sha": head_commit,
             "expected_trusted_base_sha": base_commit,
         },
@@ -2966,41 +2966,38 @@ def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_
     for index, case in enumerate(event_cases):
         _assert_candidate_identity_output(payload, repository, tmp_path / f"event-{index}.out", **case)
 
-    for index, invalid_base in enumerate(("", "not-a-sha", "f" * 40)):
-        output = tmp_path / f"invalid-dispatch-{index}.out"
-        with pytest.raises(AssertionError):
-            _assert_candidate_identity_output(
-                payload,
-                repository,
-                output,
-                event_name="workflow_dispatch",
-                event_sha=head_commit,
-                dispatch_trusted_base_sha=invalid_base,
-                expected_sha=head_commit,
-                expected_trusted_base_sha=base_commit,
-            )
-        assert not output.exists()
+    _git(repository, "push", "-q", "--force", "origin", f"{head_commit}:refs/heads/master")
+    self_base_output = tmp_path / "dispatch-self-base.out"
+    with pytest.raises(AssertionError):
+        _assert_candidate_identity_output(
+            payload,
+            repository,
+            self_base_output,
+            event_name="workflow_dispatch",
+            event_sha=head_commit,
+            expected_sha=head_commit,
+            expected_trusted_base_sha=base_commit,
+        )
+    assert not self_base_output.exists()
 
     restored_defect = copy.deepcopy(payload)
     restored_bind = next(
         step for step in restored_defect["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind"
     )
-    restored_bind["run"] = restored_bind["run"].replace(dispatch_binding, 'trusted_base_sha=""', 1)
-    with pytest.raises(AssertionError, match="unexpected trusted base"):
-        _assert_candidate_identity_output(
-            restored_defect,
-            repository,
-            tmp_path / "restored-empty-base.out",
-            event_name="workflow_dispatch",
-            event_sha=head_commit,
-            dispatch_trusted_base_sha=base_commit,
-            expected_sha=head_commit,
-            expected_trusted_base_sha=base_commit,
-        )
+    restored_bind["run"] = restored_bind["run"].replace(strict_binding, "", 1)
+    _assert_candidate_identity_output(
+        restored_defect,
+        repository,
+        tmp_path / "restored-self-base-defect.out",
+        event_name="workflow_dispatch",
+        event_sha=head_commit,
+        expected_sha=head_commit,
+        expected_trusted_base_sha=head_commit,
+    )
 
 
 def test_candidate_identity_fetches_force_pushed_before_commit(tmp_path: Path) -> None:
-    """A force-pushed predecessor is event authority absent from the checkout."""
+    """A fetchable but non-ancestral predecessor is rejected after resolution."""
 
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
@@ -3032,16 +3029,19 @@ def test_candidate_identity_fetches_force_pushed_before_commit(tmp_path: Path) -
         != 0
     )
 
-    _assert_candidate_identity_output(
-        payload,
-        repository,
-        tmp_path / "force-push.out",
-        event_name="push",
-        event_sha=head_commit,
-        push_before=superseded,
-        expected_sha=head_commit,
-        expected_trusted_base_sha=superseded,
-    )
+    force_push_output = tmp_path / "force-push.out"
+    with pytest.raises(AssertionError):
+        _assert_candidate_identity_output(
+            payload,
+            repository,
+            force_push_output,
+            event_name="push",
+            event_sha=head_commit,
+            push_before=superseded,
+            expected_sha=head_commit,
+            expected_trusted_base_sha=superseded,
+        )
+    assert not force_push_output.exists()
 
     # A before-SHA the remote cannot serve must still fail closed.
     unservable = tmp_path / "unservable-before.out"

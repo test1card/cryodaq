@@ -128,123 +128,128 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
 {
   "schema_version": 1,
   "co_versioning": {
-    "base_environment": "TRUSTED_BASE_SHA",
-    "required_release_files": [
+    "schema_version": 2,
+    "required_release_paths": [
       "docs/design-system/VERSION",
       "docs/design-system/CHANGELOG.md"
     ],
-    "groups": [
+    "release_only_patterns": [
+      ".github/workflows/docs-gate.yml",
+      "docs/design-system/ANTI_PATTERNS.md",
+      "docs/design-system/GUI_MIGRATION_INVENTORY.md",
+      "docs/design-system/MANIFEST.md",
+      "docs/design-system/README.md",
+      "docs/design-system/accessibility/*.md",
+      "docs/design-system/adr/*.md",
+      "docs/design-system/components/*.md",
+      "docs/design-system/cryodaq-primitives/*.md",
+      "docs/design-system/governance/*.md",
+      "docs/design-system/patterns/*.md",
+      "docs/design-system/rules/*.md",
+      "docs/design-system/tokens/*.md",
+      "tests/docs/test_docs_freshness.py",
+      "tests/gui/test_theme_loader.py"
+    ],
+    "routes": [
       {
-        "id": "tokens",
-        "source_patterns": [
-          "src/cryodaq/gui/theme.py",
-          "src/cryodaq/gui/_plot_style.py"
-        ],
-        "specification_sets": [
-          [
-            "docs/design-system/tokens/*.md"
-          ]
+        "source_pattern": "src/cryodaq/gui/theme.py",
+        "required_spec_paths": [
+          "docs/design-system/tokens/colors.md"
         ]
       },
       {
-        "id": "theme_packs",
-        "source_patterns": [
-          "src/cryodaq/gui/_theme_loader.py",
-          "config/themes/*.yaml"
-        ],
-        "specification_sets": [
-          [
-            "docs/design-system/tokens/colors.md"
-          ],
-          [
-            "docs/design-system/accessibility/contrast-matrix.md"
-          ]
+        "source_pattern": "src/cryodaq/gui/_plot_style.py",
+        "required_spec_paths": [
+          "docs/design-system/tokens/colors.md"
         ]
       },
       {
-        "id": "shared_components",
-        "source_patterns": [
-          "src/cryodaq/gui/widgets/common.py",
-          "src/cryodaq/gui/shell/operator_components/*.py",
-          "src/cryodaq/gui/shell/overlays/_design_system/*.py"
-        ],
-        "specification_sets": [
-          [
-            "docs/design-system/components/*.md",
-            "docs/design-system/cryodaq-primitives/operator-snapshot-components.md"
-          ]
+        "source_pattern": "src/cryodaq/gui/_theme_loader.py",
+        "required_spec_paths": [
+          "docs/design-system/accessibility/contrast-matrix.md",
+          "docs/design-system/tokens/colors.md"
         ]
       },
       {
-        "id": "state_semantics",
-        "source_patterns": [
-          "src/cryodaq/gui/presentation_severity.py",
-          "src/cryodaq/gui/shell/operator_components/_visuals.py",
-          "src/cryodaq/gui/shell/operator_components/status.py",
-          "src/cryodaq/operator_snapshot.py",
-          "src/cryodaq/gui/state/operator_view_models.py"
-        ],
-        "specification_sets": [
-          [
-            "docs/design-system/patterns/state-visualization.md"
-          ],
-          [
-            "docs/design-system/MANIFEST.md"
-          ]
+        "source_pattern": "config/themes/*.yaml",
+        "required_spec_paths": [
+          "docs/design-system/accessibility/contrast-matrix.md",
+          "docs/design-system/tokens/colors.md"
         ]
       },
       {
-        "id": "tray_state_semantics",
-        "source_patterns": [
-          "src/cryodaq/gui/tray_status.py"
-        ],
-        "specification_sets": [
-          [
-            "docs/design-system/cryodaq-primitives/tray-status.md"
-          ]
+        "source_pattern": "src/cryodaq/gui/widgets/common.py",
+        "required_spec_paths": [
+          "docs/design-system/cryodaq-primitives/operator-snapshot-components.md"
         ]
       },
       {
-        "id": "operator_display_pattern",
-        "source_patterns": [
-          "src/cryodaq/gui/shell/views/operator_display.py"
-        ],
-        "specification_sets": [
-          [
-            "docs/design-system/patterns/operator-display-composition.md"
-          ]
+        "source_pattern": "src/cryodaq/gui/shell/operator_components/*.py",
+        "required_spec_paths": [
+          "docs/design-system/cryodaq-primitives/operator-snapshot-components.md"
         ]
       },
       {
-        "id": "command_outcome_pattern",
-        "source_patterns": [
-          "src/cryodaq/gui/shell/command_outcome.py"
-        ],
-        "specification_sets": [
-          [
-            "docs/design-system/patterns/command-outcome-unknown.md"
-          ]
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/*.py",
+        "required_spec_paths": [
+          "docs/design-system/cryodaq-primitives/operator-snapshot-components.md"
         ]
       },
       {
-        "id": "canonical_contract",
-        "source_patterns": [
+        "source_pattern": "src/cryodaq/gui/presentation_severity.py",
+        "required_spec_paths": [
           "docs/design-system/MANIFEST.md",
-          "docs/design-system/ANTI_PATTERNS.md",
-          "docs/design-system/adr/*.md",
-          "docs/design-system/tokens/*.md",
-          "docs/design-system/rules/*.md",
-          "docs/design-system/components/*.md",
-          "docs/design-system/cryodaq-primitives/*.md",
-          "docs/design-system/patterns/*.md",
-          "docs/design-system/accessibility/*.md",
-          "docs/design-system/governance/*.md"
-        ],
-        "specification_sets": []
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/operator_components/_visuals.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/operator_components/status.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/operator_snapshot.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/state/operator_view_models.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/tray_status.py",
+        "required_spec_paths": [
+          "docs/design-system/cryodaq-primitives/tray-status.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/views/operator_display.py",
+        "required_spec_paths": [
+          "docs/design-system/patterns/operator-display-composition.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/command_outcome.py",
+        "required_spec_paths": [
+          "docs/design-system/patterns/command-outcome-unknown.md"
+        ]
       }
     ]
-  },
-  "mechanical_accessibility": {
+  },  "mechanical_accessibility": {
     "target": "WCAG 2.2 AA",
     "contrast_cases": [
       {

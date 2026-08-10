@@ -17,14 +17,16 @@ the design-system-specific definitions of "breaking" from
 
 ### Added
 
-- `MANIFEST.md` — one machine-readable contract for the narrow shared
-  semantic source surface, its corresponding specification families, 13 fixed
-  WCAG 2.2 contrast cases, non-weakening per-theme exception floors, and
-  canonical non-color states.
+- `MANIFEST.md` — one machine-readable contract containing schema-v2 exact
+  source/specification routes, narrow release-only triggers, 13 fixed WCAG 2.2
+  contrast cases, non-weakening per-theme exception floors, and canonical
+  non-color states.
 - Exact-checkout F36.6 enforcement in
   `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned`.
-  It compares the immutable `TRUSTED_BASE_SHA` slice with the real candidate
-  checkout and requires specification, `VERSION`, and `CHANGELOG.md` changes.
+  It loads the strict-ancestor trusted contract, permits only the immutable
+  first-release bootstrap to lack a marker, rejects candidate narrowing or
+  repointing, accumulates every overlapping exact route, and requires the
+  applicable specifications plus `VERSION` and `CHANGELOG.md` changes.
 - Real-pack accessibility checks in `tests/gui/test_theme_loader.py` covering
   all bundled theme YAML files, the production state visual mapper and painter,
   and `CanonicalStatusLabel` accessibility properties.
@@ -32,9 +34,13 @@ the design-system-specific definitions of "breaking" from
 ### Changed
 
 - Added RULE-GOV-005: reusable token, shared-component, pattern, and state
-  semantic owners are co-versioned with their canonical specification and
-  release evidence. Ordinary GUI consumers remain under the existing GUI
-  review gate and do not trigger a design-system release for every code edit.
+  semantic owners are co-versioned through additive exact routes and release
+  evidence. Ordinary GUI consumers remain under the existing GUI review gate
+  and do not trigger a design-system release for every code edit.
+- Removed caller-supplied trusted-base inputs from both docs and main CI.
+  Pull requests use their base, pushes use event authority, and manual runs use
+  the merge base with `origin/<default-branch>`; every result is canonicalized
+  and must be a strict ancestor of the tested candidate.
 - Reconciled stale v4.0.3/v4.1.0 marker prose onto the v4.2.0 release without
   changing runtime tokens, components, state behavior, or performance budgets.
 

@@ -24,6 +24,7 @@ from collections.abc import Callable
 from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 import yaml
@@ -1250,16 +1251,148 @@ def test_p5_pending_manifest_guard() -> None:
     test_p5_report_manifest_claim_remains_pending_until_immutable_freeze()
 
 
-_DESIGN_SYSTEM_GATE_IDS = {
-    "canonical_contract",
-    "command_outcome_pattern",
-    "operator_display_pattern",
-    "shared_components",
-    "state_semantics",
-    "theme_packs",
-    "tokens",
-    "tray_state_semantics",
-}
+class _CoVersioningContract(NamedTuple):
+    route_edges: frozenset[tuple[str, str]]
+    route_patterns: frozenset[str]
+    release_only_patterns: frozenset[str]
+    required_release_paths: frozenset[str]
+
+
+_F366_BOOTSTRAP_SHA = "d05856ecb3e0d5002e37083f32f4b2d7acf5927f"
+_F366_BOOTSTRAP_ROUTES = (
+    ("src/cryodaq/gui/theme.py", ("docs/design-system/tokens/colors.md",)),
+    ("src/cryodaq/gui/_plot_style.py", ("docs/design-system/tokens/colors.md",)),
+    (
+        "src/cryodaq/gui/_theme_loader.py",
+        (
+            "docs/design-system/accessibility/contrast-matrix.md",
+            "docs/design-system/tokens/colors.md",
+        ),
+    ),
+    (
+        "config/themes/*.yaml",
+        (
+            "docs/design-system/accessibility/contrast-matrix.md",
+            "docs/design-system/tokens/colors.md",
+        ),
+    ),
+    (
+        "src/cryodaq/gui/widgets/common.py",
+        ("docs/design-system/cryodaq-primitives/operator-snapshot-components.md",),
+    ),
+    (
+        "src/cryodaq/gui/shell/operator_components/*.py",
+        ("docs/design-system/cryodaq-primitives/operator-snapshot-components.md",),
+    ),
+    (
+        "src/cryodaq/gui/shell/overlays/_design_system/*.py",
+        ("docs/design-system/cryodaq-primitives/operator-snapshot-components.md",),
+    ),
+    (
+        "src/cryodaq/gui/presentation_severity.py",
+        (
+            "docs/design-system/MANIFEST.md",
+            "docs/design-system/patterns/state-visualization.md",
+        ),
+    ),
+    (
+        "src/cryodaq/gui/shell/operator_components/_visuals.py",
+        (
+            "docs/design-system/MANIFEST.md",
+            "docs/design-system/patterns/state-visualization.md",
+        ),
+    ),
+    (
+        "src/cryodaq/gui/shell/operator_components/status.py",
+        (
+            "docs/design-system/MANIFEST.md",
+            "docs/design-system/patterns/state-visualization.md",
+        ),
+    ),
+    (
+        "src/cryodaq/operator_snapshot.py",
+        (
+            "docs/design-system/MANIFEST.md",
+            "docs/design-system/patterns/state-visualization.md",
+        ),
+    ),
+    (
+        "src/cryodaq/gui/state/operator_view_models.py",
+        (
+            "docs/design-system/MANIFEST.md",
+            "docs/design-system/patterns/state-visualization.md",
+        ),
+    ),
+    (
+        "src/cryodaq/gui/tray_status.py",
+        ("docs/design-system/cryodaq-primitives/tray-status.md",),
+    ),
+    (
+        "src/cryodaq/gui/shell/views/operator_display.py",
+        ("docs/design-system/patterns/operator-display-composition.md",),
+    ),
+    (
+        "src/cryodaq/gui/shell/command_outcome.py",
+        ("docs/design-system/patterns/command-outcome-unknown.md",),
+    ),
+)
+_F366_BOOTSTRAP_RELEASE_ONLY_PATTERNS = frozenset(
+    {
+        ".github/workflows/docs-gate.yml",
+        "docs/design-system/ANTI_PATTERNS.md",
+        "docs/design-system/GUI_MIGRATION_INVENTORY.md",
+        "docs/design-system/MANIFEST.md",
+        "docs/design-system/README.md",
+        "docs/design-system/accessibility/*.md",
+        "docs/design-system/adr/*.md",
+        "docs/design-system/components/*.md",
+        "docs/design-system/cryodaq-primitives/*.md",
+        "docs/design-system/governance/*.md",
+        "docs/design-system/patterns/*.md",
+        "docs/design-system/rules/*.md",
+        "docs/design-system/tokens/*.md",
+        "tests/docs/test_docs_freshness.py",
+        "tests/gui/test_theme_loader.py",
+    }
+)
+_F366_BOOTSTRAP_CONTRACT = _CoVersioningContract(
+    route_edges=frozenset(
+        (source_pattern, spec_path) for source_pattern, spec_paths in _F366_BOOTSTRAP_ROUTES for spec_path in spec_paths
+    ),
+    route_patterns=frozenset(source_pattern for source_pattern, _spec_paths in _F366_BOOTSTRAP_ROUTES),
+    release_only_patterns=_F366_BOOTSTRAP_RELEASE_ONLY_PATTERNS,
+    required_release_paths=frozenset(
+        {
+            "docs/design-system/CHANGELOG.md",
+            "docs/design-system/VERSION",
+        }
+    ),
+)
+
+_LEGACY_V1_COVERSION_KEYS = frozenset({"base_environment", "groups", "required_release_files"})
+_LEGACY_V1_GROUP_KEYS = frozenset({"id", "source_patterns", "specification_sets"})
+_LEGACY_V1_GROUP_IDS = frozenset(
+    {
+        "tokens",
+        "theme_packs",
+        "shared_components",
+        "state_semantics",
+        "tray_state_semantics",
+        "operator_display_pattern",
+        "command_outcome_pattern",
+        "canonical_contract",
+    }
+)
+_LEGACY_V1_REQUIRED_RELEASE_FILES = frozenset(
+    {
+        "docs/design-system/CHANGELOG.md",
+        "docs/design-system/VERSION",
+    }
+)
+_LEGACY_V1_COMMITS = (
+    "c56789b8ad5d8fb32da772b50a1941e027505913",
+    "0f81040ea639cfcb1da197a8c26d14e2ca4edabc",
+)
 
 
 def _design_system_changed_paths(base_commit: str) -> set[str]:
@@ -1293,7 +1426,7 @@ def _design_system_changed_paths(base_commit: str) -> set[str]:
     return changed
 
 
-def _matches_design_patterns(path: str, patterns: list[str]) -> bool:
+def _matches_design_patterns(path: str, patterns: frozenset[str]) -> bool:
     return any(fnmatchcase(path, pattern) for pattern in patterns)
 
 
@@ -1301,19 +1434,267 @@ _MACHINE_GATE_START = "<!-- MACHINE_GATES:BEGIN -->\n```json\n"
 _MACHINE_GATE_END = "\n```\n<!-- MACHINE_GATES:END -->"
 
 
-def _design_system_machine_gates() -> dict:
-    manifest = _read(REPO_ROOT / "docs" / "design-system" / "MANIFEST.md")
-    assert manifest.count(_MACHINE_GATE_START) == 1
-    assert manifest.count(_MACHINE_GATE_END) == 1
+def _parse_design_system_machine_gates(manifest: str, *, label: str, required: bool) -> dict | None:
+    start_count = manifest.count(_MACHINE_GATE_START)
+    end_count = manifest.count(_MACHINE_GATE_END)
+    if start_count == 0 and end_count == 0:
+        assert not required, f"{label} design-system MANIFEST has no machine-gate marker"
+        return None
+    assert start_count == 1 and end_count == 1, f"{label} design-system MANIFEST has malformed machine-gate markers"
     payload = manifest.split(_MACHINE_GATE_START, 1)[1].split(_MACHINE_GATE_END, 1)[0]
     gate = json.loads(payload)
-    assert gate["schema_version"] == 1
+    assert gate["schema_version"] == 1, f"{label} machine-gate envelope schema is unsupported"
     return gate
 
 
-def test_design_system_governed_sources_are_coversioned() -> None:
-    """F36.6: shared semantic authorities move with specs, version, and changelog."""
+def _design_system_machine_gates() -> dict:
+    gate = _parse_design_system_machine_gates(
+        _read(REPO_ROOT / "docs" / "design-system" / "MANIFEST.md"),
+        label="candidate",
+        required=True,
+    )
+    assert gate is not None
+    return gate
 
+
+def _git_file_at(commit: str, path: str) -> str | None:
+    result = subprocess.run(
+        ["git", "show", f"{commit}:{path}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8")
+
+
+def _git_tracked_files(commit: str) -> set[str]:
+    raw = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", "--name-only", commit],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    return {field.decode("utf-8") for field in raw.rstrip(b"\0").split(b"\0") if field}
+
+
+def _assert_repo_relative(value: object, *, label: str, allow_glob: bool) -> str:
+    assert type(value) is str and value, f"{label} must be a non-empty string"
+    assert "\\" not in value and ":" not in value, f"{label} must use a repo-relative POSIX path: {value}"
+    parts = value.split("/")
+    assert all(part and part not in {".", ".."} for part in parts), f"{label} is not normalized: {value}"
+    if not allow_glob:
+        assert not any(character in value for character in "*?[]"), f"{label} must be an exact path: {value}"
+    return value
+
+
+def _normalize_coversion_contract(raw: object, *, label: str) -> _CoVersioningContract:
+    assert type(raw) is dict, f"{label} co_versioning must be an object"
+    assert set(raw) == {"schema_version", "required_release_paths", "release_only_patterns", "routes"}, (
+        f"{label} co_versioning has an unexpected schema"
+    )
+    assert raw["schema_version"] == 2, f"{label} co_versioning schema must be 2"
+
+    required_release_values = raw["required_release_paths"]
+    assert type(required_release_values) is list and required_release_values, (
+        f"{label} required_release_paths must be a non-empty list"
+    )
+    required_release_paths = frozenset(
+        _assert_repo_relative(value, label=f"{label} required release", allow_glob=False)
+        for value in required_release_values
+    )
+    assert len(required_release_paths) == len(required_release_values), f"{label} required release paths repeat"
+
+    release_pattern_values = raw["release_only_patterns"]
+    assert type(release_pattern_values) is list and release_pattern_values, (
+        f"{label} release_only_patterns must be a non-empty list"
+    )
+    release_only_patterns = frozenset(
+        _assert_repo_relative(value, label=f"{label} release-only pattern", allow_glob=True)
+        for value in release_pattern_values
+    )
+    assert len(release_only_patterns) == len(release_pattern_values), f"{label} release-only patterns repeat"
+    for required_path in required_release_paths:
+        assert not _matches_design_patterns(required_path, release_only_patterns), (
+            f"{label} release-only patterns must not match required release evidence: {required_path}"
+        )
+
+    routes = raw["routes"]
+    assert type(routes) is list and routes, f"{label} routes must be a non-empty list"
+    route_edges: set[tuple[str, str]] = set()
+    route_patterns: set[str] = set()
+    for index, route in enumerate(routes):
+        assert type(route) is dict and set(route) == {"source_pattern", "required_spec_paths"}, (
+            f"{label} route {index} has an unexpected schema"
+        )
+        source_pattern = _assert_repo_relative(
+            route["source_pattern"],
+            label=f"{label} route {index} source_pattern",
+            allow_glob=True,
+        )
+        assert source_pattern not in route_patterns, f"{label} repeats source route: {source_pattern}"
+        route_patterns.add(source_pattern)
+        spec_values = route["required_spec_paths"]
+        assert type(spec_values) is list and spec_values, f"{label} route {source_pattern} has no specifications"
+        spec_paths = frozenset(
+            _assert_repo_relative(
+                value,
+                label=f"{label} route {source_pattern} specification",
+                allow_glob=False,
+            )
+            for value in spec_values
+        )
+        assert len(spec_paths) == len(spec_values), f"{label} route {source_pattern} repeats a specification"
+        for spec_path in spec_paths:
+            assert spec_path.startswith("docs/design-system/") and spec_path.endswith(".md"), (
+                f"{label} route specification is outside the design-system corpus: {spec_path}"
+            )
+            route_edges.add((source_pattern, spec_path))
+
+    return _CoVersioningContract(
+        route_edges=frozenset(route_edges),
+        route_patterns=frozenset(route_patterns),
+        release_only_patterns=release_only_patterns,
+        required_release_paths=required_release_paths,
+    )
+
+
+def _migrate_legacy_v1_coversion_contract(raw: object, *, label: str) -> _CoVersioningContract:
+    """Validate legacy shape, then replace its routing authority with the v2 floor."""
+
+    assert type(raw) is dict, f"{label} legacy-v1 co_versioning must be an object"
+    assert set(raw) == _LEGACY_V1_COVERSION_KEYS, f"{label} legacy-v1 co_versioning has an unexpected schema"
+    assert raw["base_environment"] == "TRUSTED_BASE_SHA", f"{label} legacy-v1 base_environment must be TRUSTED_BASE_SHA"
+
+    release_values = raw["required_release_files"]
+    assert type(release_values) is list and release_values, (
+        f"{label} legacy-v1 required_release_files must be a non-empty list"
+    )
+    release_files = frozenset(
+        _assert_repo_relative(value, label=f"{label} legacy-v1 required release", allow_glob=False)
+        for value in release_values
+    )
+    assert len(release_files) == len(release_values), f"{label} legacy-v1 required release files repeat"
+    assert release_files == _LEGACY_V1_REQUIRED_RELEASE_FILES, (
+        f"{label} legacy-v1 required release files must exactly match the migration contract"
+    )
+
+    groups = raw["groups"]
+    assert type(groups) is list and groups, f"{label} legacy-v1 groups must be a non-empty list"
+    group_ids: set[str] = set()
+    for index, group in enumerate(groups):
+        assert type(group) is dict and set(group) == _LEGACY_V1_GROUP_KEYS, (
+            f"{label} legacy-v1 group {index} has an unexpected schema"
+        )
+        group_id = group["id"]
+        assert type(group_id) is str and group_id in _LEGACY_V1_GROUP_IDS, (
+            f"{label} legacy-v1 group {index} has an unknown ID"
+        )
+        assert group_id not in group_ids, f"{label} legacy-v1 repeats group ID: {group_id}"
+        group_ids.add(group_id)
+
+        source_values = group["source_patterns"]
+        assert type(source_values) is list and source_values, (
+            f"{label} legacy-v1 group {group_id} source_patterns must be a non-empty list"
+        )
+        source_patterns = frozenset(
+            _assert_repo_relative(
+                value,
+                label=f"{label} legacy-v1 group {group_id} source pattern",
+                allow_glob=True,
+            )
+            for value in source_values
+        )
+        assert len(source_patterns) == len(source_values), f"{label} legacy-v1 group {group_id} source patterns repeat"
+
+        specification_sets = group["specification_sets"]
+        assert type(specification_sets) is list, f"{label} legacy-v1 group {group_id} specification_sets must be a list"
+        if group_id == "canonical_contract":
+            assert not specification_sets, (
+                f"{label} legacy-v1 canonical_contract must not carry specification alternatives"
+            )
+        else:
+            assert specification_sets, f"{label} legacy-v1 group {group_id} specification_sets must be non-empty"
+
+        normalized_sets: set[frozenset[str]] = set()
+        for set_index, specification_values in enumerate(specification_sets):
+            assert type(specification_values) is list and specification_values, (
+                f"{label} legacy-v1 group {group_id} specification set {set_index} must be a non-empty list"
+            )
+            specification_patterns = frozenset(
+                _assert_repo_relative(
+                    value,
+                    label=f"{label} legacy-v1 group {group_id} specification",
+                    allow_glob=True,
+                )
+                for value in specification_values
+            )
+            assert len(specification_patterns) == len(specification_values), (
+                f"{label} legacy-v1 group {group_id} specification patterns repeat"
+            )
+            for specification_pattern in specification_patterns:
+                assert specification_pattern.startswith("docs/design-system/") and specification_pattern.endswith(
+                    ".md"
+                ), f"{label} legacy-v1 specification is outside the design-system corpus: {specification_pattern}"
+            assert specification_patterns not in normalized_sets, (
+                f"{label} legacy-v1 group {group_id} repeats a specification set"
+            )
+            normalized_sets.add(specification_patterns)
+
+    assert group_ids == _LEGACY_V1_GROUP_IDS, f"{label} legacy-v1 group IDs must be exact"
+
+    # The legacy groups are validated evidence of provenance, not routing
+    # authority. Always enforce the immutable schema-v2 bootstrap minimum.
+    return _F366_BOOTSTRAP_CONTRACT
+
+
+def _normalize_trusted_coversion_contract(raw: object, *, label: str) -> _CoVersioningContract:
+    assert type(raw) is dict, f"{label} co_versioning must be an object"
+    keys = set(raw)
+    if keys == {"schema_version", "required_release_paths", "release_only_patterns", "routes"}:
+        return _normalize_coversion_contract(raw, label=label)
+    if keys == _LEGACY_V1_COVERSION_KEYS:
+        return _migrate_legacy_v1_coversion_contract(raw, label=label)
+    raise AssertionError(f"{label} co_versioning schema is unsupported")
+
+
+def _legacy_v1_coversion_payload(commit: str) -> dict:
+    manifest = _git_file_at(commit, "docs/design-system/MANIFEST.md")
+    assert manifest is not None, f"legacy-v1 fixture has no MANIFEST: {commit}"
+    gate = _parse_design_system_machine_gates(manifest, label=f"legacy-v1 {commit}", required=True)
+    assert gate is not None
+    raw = gate.get("co_versioning")
+    assert type(raw) is dict
+    return raw
+
+
+def _validate_coversion_contract(
+    contract: _CoVersioningContract,
+    *,
+    label: str,
+    available_sources: set[str],
+    candidate_tracked: set[str],
+) -> None:
+    for source_pattern in contract.route_patterns:
+        assert any(fnmatchcase(path, source_pattern) for path in available_sources), (
+            f"{label} source pattern matches no trusted or candidate file: {source_pattern}"
+        )
+    for release_pattern in contract.release_only_patterns:
+        assert any(fnmatchcase(path, release_pattern) for path in available_sources), (
+            f"{label} release-only pattern matches no trusted or candidate file: {release_pattern}"
+        )
+    for _source_pattern, spec_path in contract.route_edges:
+        assert spec_path in candidate_tracked and (REPO_ROOT / spec_path).is_file(), (
+            f"{label} exact specification is missing from the candidate: {spec_path}"
+        )
+    for required_path in contract.required_release_paths:
+        assert required_path in candidate_tracked and (REPO_ROOT / required_path).is_file(), (
+            f"{label} required release evidence is missing from the candidate: {required_path}"
+        )
+
+
+def _strict_design_system_base() -> tuple[str, str]:
     base_ref = os.environ.get("TRUSTED_BASE_SHA", "")
     assert re.fullmatch(r"[0-9a-f]{40}", base_ref), (
         "TRUSTED_BASE_SHA must bind the immutable slice base; moving refs and HEAD^ are not accepted"
@@ -1326,57 +1707,158 @@ def test_design_system_governed_sources_are_coversioned() -> None:
         check=True,
     ).stdout.strip()
     assert base_commit == base_ref
-
-    gate = _design_system_machine_gates()["co_versioning"]
-    assert gate["base_environment"] == "TRUSTED_BASE_SHA"
-    groups = gate["groups"]
-    assert {group["id"] for group in groups} == _DESIGN_SYSTEM_GATE_IDS
-
-    tracked = set(_tracked_files())
-    for group in groups:
-        assert group["source_patterns"], group["id"]
-        for pattern in group["source_patterns"]:
-            assert any(fnmatchcase(path, pattern) for path in tracked), (group["id"], pattern)
-        for specification_set in group["specification_sets"]:
-            assert specification_set, group["id"]
-            assert any(fnmatchcase(path, pattern) for path in tracked for pattern in specification_set), (
-                group["id"],
-                specification_set,
-            )
-
-    changed = _design_system_changed_paths(base_commit)
-    triggered = [
-        group for group in groups if any(_matches_design_patterns(path, group["source_patterns"]) for path in changed)
-    ]
-    if not triggered:
-        return
-
-    violations: list[str] = []
-    for required in gate["required_release_files"]:
-        if required not in changed or not (REPO_ROOT / required).is_file():
-            violations.append(f"missing changed release evidence: {required}")
-
-    for group in triggered:
-        for specification_set in group["specification_sets"]:
-            if not any(
-                _matches_design_patterns(path, specification_set) and (REPO_ROOT / path).is_file() for path in changed
-            ):
-                violations.append(
-                    f"{group['id']} changed without a corresponding specification from {specification_set}"
-                )
-
-    version_path = REPO_ROOT / "docs" / "design-system" / "VERSION"
-    current_version = _read(version_path).strip()
-    assert re.fullmatch(r"\d+\.\d+\.\d+", current_version)
-    base_version = subprocess.run(
-        ["git", "show", f"{base_commit}:docs/design-system/VERSION"],
+    candidate_commit = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
     ).stdout.strip()
-    if tuple(map(int, current_version.split("."))) <= tuple(map(int, base_version.split("."))):
-        violations.append(f"VERSION must advance beyond trusted-base {base_version}; found {current_version}")
+    assert base_commit != candidate_commit, "TRUSTED_BASE_SHA must be a strict ancestor, not candidate HEAD"
+    ancestry = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", base_commit, candidate_commit],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ancestry.returncode == 0, (
+        "TRUSTED_BASE_SHA must be an ancestor of candidate HEAD; "
+        f"git merge-base returned {ancestry.returncode}: {ancestry.stderr.strip()}"
+    )
+    return base_commit, candidate_commit
+
+
+def _trusted_coversion_contract(
+    base_commit: str,
+    *,
+    available_sources: set[str],
+    candidate_tracked: set[str],
+) -> _CoVersioningContract:
+    base_manifest = _git_file_at(base_commit, "docs/design-system/MANIFEST.md")
+    gate = (
+        None
+        if base_manifest is None
+        else _parse_design_system_machine_gates(base_manifest, label="trusted-base", required=False)
+    )
+    if gate is None:
+        assert base_commit == _F366_BOOTSTRAP_SHA, (
+            "only the immutable F36.6 bootstrap base may omit the design-system machine gate"
+        )
+        contract = _F366_BOOTSTRAP_CONTRACT
+    else:
+        contract = _normalize_trusted_coversion_contract(gate.get("co_versioning"), label="trusted-base")
+    _validate_coversion_contract(
+        contract,
+        label="trusted-base",
+        available_sources=available_sources,
+        candidate_tracked=candidate_tracked,
+    )
+    return contract
+
+
+@pytest.mark.parametrize("legacy_commit", _LEGACY_V1_COMMITS)
+def test_design_system_legacy_v1_coversion_migrates_to_bootstrap(legacy_commit: str) -> None:
+    migrated = _normalize_trusted_coversion_contract(
+        _legacy_v1_coversion_payload(legacy_commit),
+        label=f"legacy-v1 {legacy_commit}",
+    )
+    assert migrated == _F366_BOOTSTRAP_CONTRACT
+
+
+def test_design_system_legacy_v1_coversion_rejects_malformed_authority() -> None:
+    legacy = _legacy_v1_coversion_payload(_LEGACY_V1_COMMITS[0])
+
+    wrong_release = json.loads(json.dumps(legacy))
+    wrong_release["required_release_files"] = ["docs/design-system/CHANGELOG.md"]
+
+    missing_group = json.loads(json.dumps(legacy))
+    missing_group["groups"] = missing_group["groups"][:-1]
+
+    unsafe_source = json.loads(json.dumps(legacy))
+    unsafe_source["groups"][0]["source_patterns"][0] = "../outside.py"
+
+    unsafe_specification = json.loads(json.dumps(legacy))
+    unsafe_specification["groups"][0]["specification_sets"][0][0] = "README.md"
+
+    malformed_specification_set = json.loads(json.dumps(legacy))
+    malformed_specification_set["groups"][0]["specification_sets"] = ["docs/design-system/tokens/*.md"]
+
+    unknown_schema = json.loads(json.dumps(legacy))
+    unknown_schema["schema_version"] = 1
+
+    cases = (
+        (wrong_release, "required release files must exactly match"),
+        (missing_group, "group IDs must be exact"),
+        (unsafe_source, "not normalized"),
+        (unsafe_specification, "specification is outside the design-system corpus"),
+        (malformed_specification_set, "specification set 0 must be a non-empty list"),
+        (unknown_schema, "co_versioning schema is unsupported"),
+    )
+    for index, (malformed, diagnostic) in enumerate(cases):
+        with pytest.raises(AssertionError, match=diagnostic):
+            _normalize_trusted_coversion_contract(malformed, label=f"legacy-v1 malformed {index}")
+
+
+def test_design_system_governed_sources_are_coversioned() -> None:
+    """F36.6: exact semantic routes move with specs, version, and changelog."""
+
+    base_commit, _candidate_commit = _strict_design_system_base()
+    candidate_tracked = set(_tracked_files())
+    available_sources = candidate_tracked | _git_tracked_files(base_commit)
+    candidate_gate = _design_system_machine_gates()
+    candidate = _normalize_coversion_contract(candidate_gate.get("co_versioning"), label="candidate")
+    _validate_coversion_contract(
+        candidate,
+        label="candidate",
+        available_sources=available_sources,
+        candidate_tracked=candidate_tracked,
+    )
+    trusted = _trusted_coversion_contract(
+        base_commit,
+        available_sources=available_sources,
+        candidate_tracked=candidate_tracked,
+    )
+
+    for field in (
+        "route_edges",
+        "route_patterns",
+        "release_only_patterns",
+        "required_release_paths",
+    ):
+        missing = getattr(trusted, field) - getattr(candidate, field)
+        assert not missing, f"candidate co_versioning narrows trusted {field}: {sorted(missing)}"
+
+    changed = _design_system_changed_paths(base_commit)
+    required_specs: dict[str, set[str]] = {}
+    for changed_path in changed:
+        for source_pattern, spec_path in candidate.route_edges:
+            if fnmatchcase(changed_path, source_pattern):
+                required_specs.setdefault(spec_path, set()).add(changed_path)
+    release_only_changed = {path for path in changed if _matches_design_patterns(path, candidate.release_only_patterns)}
+    if not required_specs and not release_only_changed:
+        return
+
+    violations: list[str] = []
+    for required_path in candidate.required_release_paths:
+        if required_path not in changed or not (REPO_ROOT / required_path).is_file():
+            violations.append(f"missing changed release evidence: {required_path}")
+
+    for spec_path, source_paths in sorted(required_specs.items()):
+        if spec_path not in changed or not (REPO_ROOT / spec_path).is_file():
+            violations.append(f"{', '.join(sorted(source_paths))} changed without exact specification: {spec_path}")
+
+    version_path = REPO_ROOT / "docs" / "design-system" / "VERSION"
+    current_version = _read(version_path).strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", current_version)
+    base_version_text = _git_file_at(base_commit, "docs/design-system/VERSION")
+    if base_version_text is None:
+        assert base_commit == _F366_BOOTSTRAP_SHA, "trusted base is missing design-system VERSION"
+    else:
+        base_version = base_version_text.strip()
+        assert re.fullmatch(r"\d+\.\d+\.\d+", base_version)
+        if tuple(map(int, current_version.split("."))) <= tuple(map(int, base_version.split("."))):
+            violations.append(f"VERSION must advance beyond trusted-base {base_version}; found {current_version}")
 
     changelog = _read(REPO_ROOT / "docs" / "design-system" / "CHANGELOG.md")
     if re.search(rf"^## \[{re.escape(current_version)}\]", changelog, re.MULTILINE) is None:

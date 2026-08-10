@@ -10,11 +10,6 @@ on:
   merge_group:
   # Manual "Run workflow" button in the Actions tab.
   workflow_dispatch:
-    inputs:
-      trusted_base_sha:
-        description: Exact 40-character commit SHA whose registered evidence is trusted
-        required: true
-        type: string
 
 # If you push again before CI finishes, cancel the superseded run to save
 # runner minutes — EXCEPT on master, where every mainline commit is fully
@@ -238,7 +233,6 @@ jobs:
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_CREATED: ${{ github.event.created }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          DISPATCH_TRUSTED_BASE_SHA: ${{ inputs.trusted_base_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -251,10 +245,9 @@ jobs:
               return 1
             fi
             if ! git rev-parse --verify "${sha}^{commit}" >/dev/null 2>&1; then
-              # A force-pushed predecessor head is GitHub event authority but is
-              # not an ancestor of the new head, so the checkout lacks the
-              # object; fetch that exact commit once, then re-verify.  A SHA
-              # the remote cannot serve still fails closed below.
+              # Event authority can name an object absent from the checkout;
+              # fetch it once, then re-verify. The strict-ancestor check below
+              # still rejects a force-pushed or otherwise unrelated base.
               git fetch --no-tags origin "${sha}" >&2 || true
             fi
             if ! git rev-parse --verify "${sha}^{commit}" >/dev/null; then
@@ -288,11 +281,9 @@ jobs:
             fi
             readonly evidence_sha="$head_commit"
             trusted_base_sha="$(require_commit 'pull request base' "${PR_BASE_SHA:?}")"
-            readonly trusted_base_sha
           elif [[ "$EVENT_NAME" == "merge_group" ]]; then
             readonly evidence_sha="$event_commit"
             trusted_base_sha="$(require_commit 'merge-group base' "${MERGE_GROUP_BASE_SHA:?}")"
-            readonly trusted_base_sha
           elif [[ "$EVENT_NAME" == "push" ]]; then
             if [[ "${PUSH_CREATED:-false}" == true ]]; then
               test "${PUSH_BEFORE:?}" = "0000000000000000000000000000000000000000"
@@ -306,15 +297,22 @@ jobs:
               test "${PUSH_BEFORE:?}" != "0000000000000000000000000000000000000000"
               trusted_base_sha="$(require_commit 'push before' "${PUSH_BEFORE}")"
             fi
-            readonly trusted_base_sha
             readonly evidence_sha="$event_commit"
           elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             readonly evidence_sha="$event_commit"
-            trusted_base_sha="$(require_commit 'workflow-dispatch trusted base' "${DISPATCH_TRUSTED_BASE_SHA:?}")"
-            readonly trusted_base_sha
+            test -n "${DEFAULT_BRANCH:?}"
+            git fetch --no-tags origin \
+              "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+            mapfile -t bases < <(git merge-base --all "$event_commit" "refs/remotes/origin/${DEFAULT_BRANCH}")
+            test "${#bases[@]}" = 1
+            trusted_base_sha="$(require_commit 'workflow-dispatch merge base' "${bases[0]}")"
           else
             echo "unsupported evidence authority event: $EVENT_NAME" >&2
             exit 1
           fi
+          trusted_base_sha="$(git rev-parse --verify "${trusted_base_sha}^{commit}")"
+          test "$trusted_base_sha" != "$evidence_sha"
+          git merge-base --is-ancestor "$trusted_base_sha" "$evidence_sha"
+          readonly trusted_base_sha
           printf 'evidence_sha=%s\n' "$evidence_sha" >>"$GITHUB_OUTPUT"
           printf 'trusted_base_sha=%s\n' "$trusted_base_sha" >>"$GITHUB_OUTPUT"

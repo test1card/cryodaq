@@ -33,15 +33,17 @@ Version tracked in:
 
 ## Same-slice co-versioning
 
-`VERSION` remains the only version number; F36.6 does not introduce a parallel scheme. The machine-gate JSON block in `MANIFEST.md` maps only shared semantic authorities: token definitions, theme packs/loaders, reusable design-system components, canonical state mappers, and the two root-owned product patterns. Ordinary panel/view consumers stay under the roadmap-wide GUI review gate and do not force a design-system release for every local edit.
+`VERSION` remains the only version number; F36.6 does not introduce a parallel scheme. `MANIFEST.md` carries `co_versioning` schema v2: exact `routes`, exact `required_release_paths`, and narrow `release_only_patterns`. Every route names one governed source pattern and exact specification paths; when patterns overlap, all matching specification requirements accumulate. Ordinary panel/view consumers stay under the roadmap-wide GUI review gate and do not force a design-system release for every local edit.
 
-When a mapped source or canonical contract changes relative to the exact 40-character `TRUSTED_BASE_SHA`, the same slice must:
+The workflow supplies an exact 40-character `TRUSTED_BASE_SHA` that must be a strict ancestor of candidate `HEAD`; a dispatch caller cannot choose it. The trusted contract is loaded from that commit and normalized with the candidate contract. Trusted route edges, source patterns, release-only patterns, and release paths must remain subsets of the candidate, so additions are allowed while removal, narrowing, or repointing fails. Source-pattern validation uses both trees so deleting a governed source does not escape its route. Only immutable bootstrap `d05856ecb3e0d5002e37083f32f4b2d7acf5927f` may lack the machine-gate marker.
 
-1. change the mapped canonical specification;
-2. advance `VERSION`; and
-3. add the matching current heading to `CHANGELOG.md`.
+When a mapped source or canonical contract changes, the same slice must:
 
-`tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` enforces this against the real checkout. A missing, moving, or unresolvable base fails closed.
+1. change every exact specification required by every matching source route;
+2. change every required release path, including `VERSION` and `CHANGELOG.md`; and
+3. carry the current version heading and advance beyond a trusted-base version when one exists.
+
+A release-only change requires the release paths and version/changelog evidence but no unrelated source specification. `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` enforces these rules against the real checkout; missing/malformed authority, self/non-ancestor bases, candidate narrowing, missing exact specs, or stale release evidence fails closed.
 
 ## What's in MAJOR
 
@@ -259,7 +261,7 @@ Design-system: v1.1.0 (adds ShiftHandover widget, SHIFT_* tokens)
 
 ## Changelog
 
-- 2026-08-10 (v4.2.0): Added one exact-base same-slice co-versioning gate using the existing SemVer marker and documented its deliberately narrow shared-semantic surface.
+- 2026-08-10 (v4.2.0): Added schema-v2 exact routes and release-only triggers, additive trusted-contract comparison, strict workflow-derived base ancestry, and same-slice specification/version/changelog enforcement on the deliberately narrow shared-semantic surface.
 
 - 2026-04-17: Initial version. SemVer 2.0.0 baseline with CryoDAQ-specific definitions of "breaking". Release cadence expectations. Independence from CryoDAQ package version. Post-1.0.0 trajectory anticipated.
 - 2026-04-17 (v1.0.1): Created the `VERSION` and `CHANGELOG.md` artifacts that this document was referencing but which did not previously exist (FR-013). No process changes — the described release process is now actually wired up.
