@@ -13,10 +13,13 @@ import ast
 import hashlib
 import os
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+
+from cryodaq.gui.routing_inventory import GUI_ROUTING_INVENTORY, GuiRoutingFinding
+from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
 
 _IDENTITY_WORDS = frozenset({"channel", "channel_id", "instrument_id", "source_key", "identifier"})
 _GUI_IDENTITY_WORDS = frozenset({"ch", "ch_id", "channel_raw", "measurement", "short_id"})
@@ -2309,3 +2312,294 @@ def test_c2_repo_wide_spelling_sweep_accepts_declared_identity_equalities(tmp_pa
         encoding="utf-8",
     )
     assert _sites(root) == []
+
+
+_GUI_SETUP_ONLY_REGISTRATIONS = frozenset(
+    {
+        "C2-056",
+        "C2-057",
+        "C2-058",
+        "C2-059",
+        "C2-060",
+        "C2-061",
+        "C2-062",
+        "C2-063",
+        "C2-064",
+        "C2-065",
+        "C2-115",
+        "C2-118",
+        "C2-119",
+        "C2-120",
+    }
+)
+_GUI_INCIDENTAL_REGISTRATIONS = frozenset(
+    {
+        "C2-116",
+        "C2-117",
+        "C2-122",
+        "C2-125",
+        "C2-126",
+        "C2-127",
+        "C2-137",
+    }
+)
+_GUI_UNREACHABLE_REGISTRATIONS = frozenset(
+    {
+        "C2-088",
+        "C2-089",
+        "C2-090",
+        "C2-091",
+        "C2-093",
+        "C2-096",
+        "C2-097",
+        "C2-113",
+        "C2-114",
+        "C2-131",
+    }
+)
+
+_CRYOGENIC_IDS = frozenset(f"\u0422{index}" for index in range(1, 25))
+_RAW_SENSOR_IDS = frozenset(f"\u0422{index}.raw" for index in range(1, 25))
+_SOURCE_IDS = frozenset(
+    f"Keithley_1/{source}/{quantity}"
+    for source in ("smua", "smub")
+    for quantity in ("voltage", "current", "resistance", "power")
+)
+_VACUUM_IDS = frozenset({"VSP63D_1/pressure"})
+_MULTILINE_LENGTH_IDS = frozenset(f"MultiLine_1/length_ch{index}" for index in range(1, 5))
+_MULTILINE_ENVIRONMENT_IDS = frozenset(
+    {
+        "MultiLine_1/env_temperature",
+        "MultiLine_1/env_pressure",
+        "MultiLine_1/env_humidity",
+    }
+)
+_ALL_DESCRIPTOR_IDS = (
+    _CRYOGENIC_IDS | _RAW_SENSOR_IDS | _SOURCE_IDS | _VACUUM_IDS | _MULTILINE_LENGTH_IDS | _MULTILINE_ENVIRONMENT_IDS
+)
+_ALL_TEMPERATURE_IDS = _CRYOGENIC_IDS | frozenset({"MultiLine_1/env_temperature"})
+_NON_TEMPERATURE_IDS = _ALL_DESCRIPTOR_IDS - _ALL_TEMPERATURE_IDS
+_SOURCE_DISPLAY_IDS = frozenset(
+    f"Keithley_1/{source}/{quantity}" for source in ("smua", "smub") for quantity in ("voltage", "current", "power")
+)
+
+
+def _expected_gui_binding_ids() -> dict[str, frozenset[str]]:
+    expected: dict[str, frozenset[str]] = {}
+
+    def bind(channel_ids: frozenset[str], *registration_ids: str) -> None:
+        for registration_id in registration_ids:
+            assert registration_id not in expected
+            expected[registration_id] = channel_ids
+
+    bind(
+        _CRYOGENIC_IDS,
+        "C2-047",
+        "C2-050",
+        "C2-054",
+        "C2-055",
+        "C2-079",
+        "C2-080",
+        "C2-098",
+        "C2-100",
+        "C2-112",
+    )
+    bind(_VACUUM_IDS, "C2-048", "C2-099")
+    bind(_ALL_DESCRIPTOR_IDS, "C2-067")
+    bind(_RAW_SENSOR_IDS, "C2-078")
+    bind(
+        frozenset(
+            {
+                "Keithley_1/smua/power",
+                "Keithley_1/smub/power",
+            }
+        ),
+        "C2-128",
+    )
+    bind(_SOURCE_IDS, "C2-083", "C2-084", "C2-140")
+    bind(_MULTILINE_LENGTH_IDS | _MULTILINE_ENVIRONMENT_IDS, "C2-085")
+    bind(
+        _MULTILINE_LENGTH_IDS,
+        "C2-086",
+        "C2-087",
+        "C2-092",
+        "C2-094",
+        "C2-095",
+        "C2-129",
+    )
+    bind(_MULTILINE_ENVIRONMENT_IDS, "C2-130")
+    bind(frozenset({"\u042211"}), "C2-135")
+    bind(frozenset({"\u042212"}), "C2-134")
+    bind(frozenset({"\u042211", "\u042212"}), "C2-136", "C2-143", "C2-144")
+    bind(frozenset(channel_id for channel_id in _SOURCE_IDS if "/smua/" in channel_id), "C2-138")
+    bind(frozenset(channel_id for channel_id in _SOURCE_IDS if "/smub/" in channel_id), "C2-139")
+    bind(_SOURCE_DISPLAY_IDS, "C2-141")
+    bind(_ALL_TEMPERATURE_IDS, "C2-101", "C2-102")
+    bind(_NON_TEMPERATURE_IDS, "C2-142")
+    return expected
+
+
+_EXPECTED_GUI_BINDING_IDS = _expected_gui_binding_ids()
+
+
+def _expected_gui_findings() -> dict[str, frozenset[GuiRoutingFinding]]:
+    expected: dict[str, frozenset[GuiRoutingFinding]] = {}
+
+    def find(finding: GuiRoutingFinding, *registration_ids: str) -> None:
+        for registration_id in registration_ids:
+            assert registration_id not in expected
+            expected[registration_id] = frozenset({finding})
+
+    find(
+        GuiRoutingFinding.ANALYTICS_DESCRIPTOR_ABSENT,
+        "C2-049",
+        "C2-051",
+        "C2-052",
+        "C2-053",
+        "C2-066",
+        "C2-069",
+        "C2-070",
+        "C2-071",
+        "C2-072",
+        "C2-074",
+        "C2-075",
+        "C2-076",
+        "C2-077",
+        "C2-082",
+        "C2-132",
+        "C2-133",
+    )
+    find(GuiRoutingFinding.SYSTEM_DESCRIPTOR_ABSENT, "C2-068", "C2-073")
+    find(
+        GuiRoutingFinding.ANNUNCIATION_PROTOCOL_IDENTITY,
+        "C2-121",
+        "C2-123",
+        "C2-124",
+    )
+    find(GuiRoutingFinding.COMMAND_TARGET_REQUIRES_SAFETY_AUTHORITY, "C2-081")
+    find(GuiRoutingFinding.HISTORY_REQUIRES_DESCRIPTOR_JOIN, "C2-101", "C2-102", "C2-142")
+    find(
+        GuiRoutingFinding.LANDMARK_ROLE_NOT_IN_DESCRIPTOR,
+        "C2-134",
+        "C2-135",
+        "C2-136",
+        "C2-143",
+        "C2-144",
+    )
+    return expected
+
+
+_EXPECTED_GUI_FINDINGS = _expected_gui_findings()
+
+
+def _gui_inventory_binding_errors(inventory) -> list[str]:
+    descriptor_path = _root() / "config" / "channel_descriptors.yaml"
+    catalog = load_live_channel_descriptor_catalog(descriptor_path).storage_catalog_snapshot()
+    descriptors = catalog.descriptors
+    by_channel = {descriptor.channel_id: descriptor for descriptor in descriptors}
+    entries_by_registration = {entry.sweep_registration_id: entry for entry in inventory.values()}
+    errors: list[str] = []
+
+    if frozenset(by_channel) != _ALL_DESCRIPTOR_IDS:
+        errors.append(
+            f"live descriptor catalog IDs changed: expected {sorted(_ALL_DESCRIPTOR_IDS)!r}, got {sorted(by_channel)!r}"
+        )
+
+    actual_selector_ids = frozenset(
+        registration_id for registration_id, entry in entries_by_registration.items() if entry.selector is not None
+    )
+    if actual_selector_ids != frozenset(_EXPECTED_GUI_BINDING_IDS):
+        errors.append(
+            "selector-bearing registrations changed: "
+            f"expected {sorted(_EXPECTED_GUI_BINDING_IDS)!r}, got {sorted(actual_selector_ids)!r}"
+        )
+
+    for registration_id, expected_ids in _EXPECTED_GUI_BINDING_IDS.items():
+        entry = entries_by_registration.get(registration_id)
+        if entry is None:
+            errors.append(f"{registration_id}: missing inventory entry")
+            continue
+        missing_ids = expected_ids - frozenset(by_channel)
+        if missing_ids:
+            errors.append(f"{entry.site_key}: expected descriptor IDs are absent: {sorted(missing_ids)!r}")
+            continue
+        if entry.selector is None:
+            errors.append(f"{entry.site_key}: descriptor selector is missing")
+            continue
+        expected_anchors = frozenset(by_channel[channel_id].anchor for channel_id in expected_ids)
+        actual_anchors = entry.selector.resolve(descriptors)
+        if actual_anchors != expected_anchors:
+            errors.append(
+                f"{entry.site_key}: wrong descriptor binding; "
+                f"expected {sorted(expected_anchors)!r}, got {sorted(actual_anchors)!r}"
+            )
+
+    actual_finding_ids = frozenset(
+        registration_id for registration_id, entry in entries_by_registration.items() if entry.findings
+    )
+    if actual_finding_ids != frozenset(_EXPECTED_GUI_FINDINGS):
+        errors.append(
+            "finding-bearing registrations changed: "
+            f"expected {sorted(_EXPECTED_GUI_FINDINGS)!r}, got {sorted(actual_finding_ids)!r}"
+        )
+    for registration_id, expected_findings in _EXPECTED_GUI_FINDINGS.items():
+        entry = entries_by_registration.get(registration_id)
+        if entry is None:
+            continue
+        if entry.findings != expected_findings:
+            errors.append(
+                f"{entry.site_key}: wrong finding; "
+                f"expected {sorted(expected_findings)!r}, got {sorted(entry.findings)!r}"
+            )
+    return errors
+
+
+def test_c2_gui_routing_inventory_partitions_every_gui_registration() -> None:
+    gui_roster = frozenset(
+        registration.registration_id
+        for registration in _REGISTRY
+        if registration.challenge.path.startswith("src/cryodaq/gui/")
+    )
+    live = frozenset(entry.sweep_registration_id for entry in GUI_ROUTING_INVENTORY.values())
+    classifications = (
+        live,
+        _GUI_SETUP_ONLY_REGISTRATIONS,
+        _GUI_INCIDENTAL_REGISTRATIONS,
+        _GUI_UNREACHABLE_REGISTRATIONS,
+    )
+
+    assert len(_REGISTRY) == 135
+    assert len(gui_roster) == 89
+    assert tuple(map(len, classifications)) == (58, 14, 7, 10)
+    assert all(
+        left.isdisjoint(right) for index, left in enumerate(classifications) for right in classifications[index + 1 :]
+    )
+    assert frozenset().union(*classifications) == gui_roster
+    assert set(GUI_ROUTING_INVENTORY) == {entry.site_key for entry in GUI_ROUTING_INVENTORY.values()}
+
+
+def test_c2_gui_routing_inventory_binds_each_live_site_to_descriptors() -> None:
+    errors = _gui_inventory_binding_errors(GUI_ROUTING_INVENTORY)
+    assert errors == [], "\n".join(errors)
+
+
+def test_c2_gui_routing_inventory_rejects_a_same_cardinality_wrong_binding() -> None:
+    by_registration = {entry.sweep_registration_id: entry for entry in GUI_ROUTING_INVENTORY.values()}
+    target = by_registration["C2-136"]
+    wrong_source = by_registration["C2-128"]
+    assert target.selector is not None
+    assert wrong_source.selector is not None
+
+    descriptor_path = _root() / "config" / "channel_descriptors.yaml"
+    descriptors = load_live_channel_descriptor_catalog(descriptor_path).storage_catalog_snapshot().descriptors
+    assert len(target.selector.resolve(descriptors)) == 2
+    assert len(wrong_source.selector.resolve(descriptors)) == 2
+
+    mutated = dict(GUI_ROUTING_INVENTORY)
+    mutated[target.site_key] = replace(target, selector=wrong_source.selector)
+    assert len(mutated) == len(GUI_ROUTING_INVENTORY) == 58
+    assert _registry_errors(_sites(_root()), _REGISTRY) == []
+
+    errors = _gui_inventory_binding_errors(mutated)
+    with pytest.raises(AssertionError, match=r"top-watch-bar\.on-reading\.landmark"):
+        assert errors == [], "\n".join(errors)
