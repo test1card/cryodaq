@@ -399,7 +399,7 @@ def test_mutation_gate_blocks_direct_phase_handlers_without_hiding_truth(app):
     assert not w._jump_combo.isEnabled()
 
 
-def test_replay_disabled_create_action_has_canonical_disabled_treatment(app):
+def test_disabled_create_action_has_truthful_generic_explanation(app):
     w = PhaseAwareWidget()
     w.set_mutation_enabled(False)
 
@@ -408,8 +408,8 @@ def test_replay_disabled_create_action_has_canonical_disabled_treatment(app):
     assert theme.TEXT_DISABLED in style
     assert theme.SURFACE_CARD in style
     assert w._create_btn.cursor().shape() == Qt.CursorShape.ArrowCursor
-    assert w._create_btn.toolTip() == "Недоступно в режиме повтора"
-    assert w._create_btn.accessibleDescription() == "Недоступно в режиме повтора"
+    assert w._create_btn.toolTip() == "Создание сейчас недоступно"
+    assert w._create_btn.accessibleDescription() == "Создание сейчас недоступно"
 
 
 def test_phase_operation_unknown_is_visible_and_accessible(app):

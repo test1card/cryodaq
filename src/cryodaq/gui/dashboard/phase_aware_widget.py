@@ -439,9 +439,9 @@ class PhaseAwareWidget(QWidget):
         create_enabled = self._mutation_enabled and not self._has_active_experiment
         self._create_btn.setEnabled(create_enabled)
         self._create_btn.setCursor(Qt.CursorShape.PointingHandCursor if create_enabled else Qt.CursorShape.ArrowCursor)
-        replay_reason = "Недоступно в режиме повтора" if not self._mutation_enabled else ""
-        self._create_btn.setToolTip(replay_reason)
-        self._create_btn.setAccessibleDescription(replay_reason)
+        disabled_reason = "" if create_enabled else "Создание сейчас недоступно"
+        self._create_btn.setToolTip(disabled_reason)
+        self._create_btn.setAccessibleDescription(disabled_reason)
         self._jump_combo.setEnabled(self._mutation_enabled and self._has_active_experiment)
         if not self._mutation_enabled or not self._has_active_experiment:
             self._back_btn.setEnabled(False)
