@@ -223,6 +223,18 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
             "ChannelDescriptorV1",
             "legacy_unknown_descriptor",
         ),
+        # Approved because it consumes the contract the way this guard exists to
+        # protect: the attention view model requires an EXACT ChannelDescriptorV1
+        # and selects the trajectory channel by `quantity is
+        # ChannelQuantity.TEMPERATURE` and unit. Selecting by descriptor identity
+        # is the direction OC-023/OC-030 require; the alternative offered here was
+        # `hasattr` duck typing plus a string comparison against "temperature",
+        # which is the defect those cells exist to remove.
+        "gui/state/operator_view_models.py": _direct_imports(
+            "cryodaq.channels.descriptors",
+            "ChannelDescriptorV1",
+            "ChannelQuantity",
+        ),
         "storage/channel_descriptors.py": _direct_imports(
             "cryodaq.channels.descriptors",
             "MAX_CATALOG_DESCRIPTORS",
