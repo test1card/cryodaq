@@ -1138,6 +1138,7 @@ async def test_cross_day_descriptor_identity_or_unit_fork_is_refused(
     finally:
         await reader.stop()
 
+
 @pytest.mark.asyncio
 async def test_unfiltered_descriptor_history_catalog_uses_retained_rows(tmp_path: Path) -> None:
     channel = "shared.temperature"
