@@ -415,6 +415,7 @@ class CooldownReceipt(AuthorityReceipt):
     samples: tuple[CooldownPoint, ...] = ()
     reference_id: str | None = None
     reference_samples: tuple[CooldownPoint, ...] = ()
+    trajectory_channel_id: str | None = None
 
     def __post_init__(self) -> None:
         super(CooldownReceipt, self).__post_init__()
@@ -425,13 +426,28 @@ class CooldownReceipt(AuthorityReceipt):
             "reference_id",
             _bounded_text(self.reference_id, field="reference_id", max_bytes=MAX_ID_UTF8_BYTES, optional=True),
         )
+        object.__setattr__(
+            self,
+            "trajectory_channel_id",
+            _bounded_text(
+                self.trajectory_channel_id,
+                field="trajectory_channel_id",
+                max_bytes=MAX_ID_UTF8_BYTES,
+                optional=True,
+            ),
+        )
         if (self.reference_id is None) != (not self.reference_samples):
             raise ValueError("reference_id and reference_samples must be present together")
+        if (self.samples or self.reference_samples) and self.trajectory_channel_id is None:
+            raise ValueError("cooldown trajectory evidence requires stable channel identity")
         for field, values in (("samples", self.samples), ("reference_samples", self.reference_samples)):
             if any(current.elapsed_s >= following.elapsed_s for current, following in zip(values, values[1:])):
                 raise ValueError(f"{field} elapsed_s must be strictly increasing")
         if self.availability is AuthorityAvailability.UNAVAILABLE and (
-            self.samples or self.reference_id is not None or self.reference_samples
+            self.samples
+            or self.reference_id is not None
+            or self.reference_samples
+            or self.trajectory_channel_id is not None
         ):
             raise ValueError("unavailable cooldown receipt cannot carry trajectory evidence")
 

@@ -249,16 +249,28 @@ def test_integrity_receipt_distinguishes_zero_counters_from_unavailable() -> Non
 def test_cooldown_contract_is_bounded_ordered_and_explicitly_unavailable() -> None:
     point_a = CooldownPoint(0, 300)
     point_b = CooldownPoint(1, 299)
-    receipt = CooldownReceipt(**_base(), samples=(point_a, point_b))
+    receipt = CooldownReceipt(
+        **_base(),
+        samples=(point_a, point_b),
+        trajectory_channel_id="sensor.main",
+    )
     assert receipt.samples == (point_a, point_b)
     unavailable = UnavailableCooldownAuthority().snapshot_for_cut(_cut())
     assert unavailable.availability is AuthorityAvailability.UNAVAILABLE
     with pytest.raises(ValueError, match="strictly increasing"):
-        CooldownReceipt(**_base(), samples=(point_b, point_a))
+        CooldownReceipt(
+            **_base(),
+            samples=(point_b, point_a),
+            trajectory_channel_id="sensor.main",
+        )
     with pytest.raises(ValueError, match="present together"):
         CooldownReceipt(**_base(), reference_id="baseline")
     with pytest.raises(TypeError, match="at most"):
-        CooldownReceipt(**_base(), samples=(point_a,) * (MAX_COOLDOWN_SAMPLES + 1))
+        CooldownReceipt(
+            **_base(),
+            samples=(point_a,) * (MAX_COOLDOWN_SAMPLES + 1),
+            trajectory_channel_id="sensor.main",
+        )
 
 
 def test_infrastructure_contract_is_bounded_unique_and_missing_f36_4_stays_unavailable() -> None:

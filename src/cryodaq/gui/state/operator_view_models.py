@@ -12,6 +12,7 @@ from cryodaq.channels.descriptors import ChannelDescriptorV1, ChannelQuantity
 from cryodaq.core.operator_log import AttentionHistoryPage
 from cryodaq.operator_snapshot import *  # noqa: F403
 from cryodaq.operator_snapshot import (
+    MAX_ID_UTF8_BYTES,
     MAX_LIVE_SOURCES_PER_SESSION,
     STATE_PRECEDENCE,
     AttentionItem,
@@ -66,6 +67,22 @@ def _mission_number(
     if not math.isfinite(normalized) or (non_negative and normalized < 0):
         raise ValueError(f"{field_name} must be finite")
     return normalized
+
+
+def _mission_id(value: object, *, field_name: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{field_name} must be stable non-empty text")
+    if len(value.encode("utf-8")) > MAX_ID_UTF8_BYTES:
+        raise ValueError(f"{field_name} exceeds {MAX_ID_UTF8_BYTES} UTF-8 bytes")
+    return value
+
+
+def _attention_order_key(item: AttentionItem) -> tuple[int, float, str]:
+    return (
+        -STATE_PRECEDENCE[item.state],
+        -item.observed_at.timestamp(),
+        item.attention_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,12 +173,13 @@ class CooldownMission:
         if type(self.attention_status) is not SummaryStatus:
             raise TypeError("attention_status must be an exact SummaryStatus")
         for field_name in ("experiment_id", "trajectory_channel_id"):
-            value = getattr(self, field_name)
-            if type(value) is not str or not value:
-                raise ValueError(f"{field_name} must be stable non-empty text")
+            _mission_id(getattr(self, field_name), field_name=field_name)
         if self.cut.experiment_id != self.experiment_id:
             raise ValueError("mission experiment_id must match its coherent cut")
-        if (self.phase is None) != (self.phase_missing_reason == "no_phase"):
+        if self.phase is None:
+            if self.phase_missing_reason != "no_phase":
+                raise ValueError("mission phase absence must be explicit")
+        elif _mission_id(self.phase, field_name="phase") != self.phase or self.phase_missing_reason is not None:
             raise ValueError("mission phase absence must be explicit")
         cadence = _mission_number(
             self.expected_cadence_s,
@@ -175,32 +193,65 @@ class CooldownMission:
             type(item) not in {CooldownMissionPoint, CooldownMissionGap} for item in self.trajectory
         ):
             raise TypeError("trajectory must be a tuple of exact mission entries")
-        if (not self.trajectory) != (self.trajectory_missing_reason == "no_samples"):
+        if not self.trajectory:
+            if self.trajectory_missing_reason != "no_samples":
+                raise ValueError("trajectory absence must be explicit")
+        elif self.trajectory_missing_reason is not None:
             raise ValueError("trajectory absence must be explicit")
         points = tuple(item for item in self.trajectory if type(item) is CooldownMissionPoint)
         if any(later.sample.elapsed_s <= earlier.sample.elapsed_s for earlier, later in zip(points, points[1:])):
             raise ValueError("mission samples must remain strictly ordered")
-        for index, entry in enumerate(self.trajectory):
-            if type(entry) is CooldownMissionPoint:
-                continue
-            if (
-                index == 0
-                or index == len(self.trajectory) - 1
-                or type(self.trajectory[index - 1]) is not CooldownMissionPoint
-                or type(self.trajectory[index + 1]) is not CooldownMissionPoint
-                or entry.after_elapsed_s != self.trajectory[index - 1].sample.elapsed_s
-                or entry.before_elapsed_s != self.trajectory[index + 1].sample.elapsed_s
-                or entry.before_elapsed_s - entry.after_elapsed_s <= cadence
-            ):
-                raise ValueError("mission gap must bind adjacent real samples")
+        expected_trajectory: list[CooldownMissionPoint | CooldownMissionGap] = []
+        for point in points:
+            if expected_trajectory:
+                previous = expected_trajectory[-1]
+                if type(previous) is CooldownMissionGap:
+                    previous = expected_trajectory[-2]
+                delta = point.sample.elapsed_s - previous.sample.elapsed_s
+                if delta > cadence:
+                    expected_trajectory.append(
+                        CooldownMissionGap(
+                            after_elapsed_s=previous.sample.elapsed_s,
+                            before_elapsed_s=point.sample.elapsed_s,
+                        )
+                    )
+            expected_trajectory.append(point)
+        if self.trajectory != tuple(expected_trajectory):
+            raise ValueError("mission gap must exist exactly when cadence evidence is missing")
+        if self.reference_id is None:
+            if any(point.comparison_missing_reason != "no_reference" for point in points):
+                raise ValueError("mission reference identity must match comparison evidence")
+        else:
+            _mission_id(self.reference_id, field_name="reference_id")
+            if any(point.comparison_missing_reason == "no_reference" for point in points):
+                raise ValueError("mission reference identity must match comparison evidence")
         if type(self.relevant_attention) is not tuple or any(
             type(item) is not AttentionItem for item in self.relevant_attention
         ):
             raise TypeError("relevant_attention must contain exact AttentionItem values")
+        if self.relevant_attention != tuple(sorted(self.relevant_attention, key=_attention_order_key)):
+            raise ValueError("mission attention order is not deterministic")
+        if len({item.attention_id for item in self.relevant_attention}) != len(self.relevant_attention):
+            raise ValueError("mission attention ids must be unique")
+        if any(item.observed_at > self.cut.observed_at for item in self.relevant_attention):
+            raise ValueError("mission attention cut excludes future evidence")
+        if any(
+            item.transport_reason_codes != self.attention_status.transport_reason_codes
+            for item in self.relevant_attention
+        ):
+            raise ValueError("mission attention transport evidence is inconsistent")
+        required_attention_state = max(
+            (STATE_PRECEDENCE[item.state] for item in self.relevant_attention),
+            default=0,
+        )
+        if STATE_PRECEDENCE[self.attention_status.state] < required_attention_state:
+            raise ValueError("mission attention state understates relevant evidence")
         if type(self.recent_history) is not AttentionHistoryPage:
             raise TypeError("recent_history must be an exact AttentionHistoryPage")
         if any(item.experiment_id != self.experiment_id for item in self.recent_history.items):
             raise ValueError("attention history experiment identity is inconsistent")
+        if any(item.timestamp > self.cut.observed_at for item in self.recent_history.items):
+            raise ValueError("attention history is not bound to the mission cut")
 
 
 def build_cooldown_mission(
@@ -220,6 +271,11 @@ def build_cooldown_mission(
         raise TypeError("trajectory_channel must be an exact ChannelDescriptorV1")
     if trajectory_channel.quantity is not ChannelQuantity.TEMPERATURE or trajectory_channel.unit != "K":
         raise ValueError("trajectory_channel must describe temperature in K")
+    authoritative_channel_id = snapshot.cooldown_history.trajectory_channel_id
+    if authoritative_channel_id is None:
+        raise ValueError("cooldown mission requires authoritative channel identity")
+    if trajectory_channel.channel_id != authoritative_channel_id:
+        raise ValueError("trajectory channel identity does not match cooldown evidence")
     experiment_id = snapshot.experiment.experiment_id
     if experiment_id is None or experiment_id != snapshot.cut.experiment_id:
         raise ValueError("cooldown mission requires one active stable experiment")
@@ -274,7 +330,7 @@ def build_cooldown_mission(
         expected_cadence_s=cadence,
         trajectory=tuple(trajectory),
         trajectory_missing_reason=("no_samples" if not snapshot.cooldown_history.samples else None),
-        relevant_attention=snapshot.attention.items,
+        relevant_attention=tuple(sorted(snapshot.attention.items, key=_attention_order_key)),
         recent_history=attention_history,
         reference_id=snapshot.cooldown_history.reference_id,
     )

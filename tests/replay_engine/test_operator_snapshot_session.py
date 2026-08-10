@@ -46,6 +46,7 @@ def _evidence(observed_at: datetime = NOW) -> ReplaySnapshotEvidence:
         experiment_id="archive-exp-1",
         experiment_name="Historical cooldown",
         phase="cooldown",
+        cooldown_channel_id="sensor.main",
         cooldown_samples=(CooldownSample(0, 300), CooldownSample(60, 250)),
         cooldown_reference_id="reference-1",
         cooldown_reference=(CooldownSample(0, 300), CooldownSample(60, 245)),

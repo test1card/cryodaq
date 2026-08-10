@@ -227,6 +227,7 @@ def _snapshot(
             (CooldownSample(0, 300), CooldownSample(60, 250)),
             "reference-a",
             (CooldownSample(0, 300), CooldownSample(60, 245)),
+            "sensor.main",
         ),
         support_bundle=SupportBundleSummary(
             cut,
@@ -450,6 +451,115 @@ def test_cooldown_mission_export_uses_stable_ids_across_descriptor_rename() -> N
     assert original.display_name not in first_wire
     assert renamed.display_name not in first_wire
     assert "display_name" not in first_wire
+
+
+def test_cooldown_mission_rejects_history_not_bound_to_its_cut() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    future = new_attention_incident(
+        timestamp=snapshot.cut.observed_at + timedelta(seconds=1),
+        experiment_id="exp-7",
+        alarm_id="future-alarm",
+        level="WARNING",
+        message="This incident postdates the mission cut",
+        channel_ids=("sensor.main",),
+    )
+    unbound = AttentionHistoryPage(items=(future,), truncated_before=False)
+
+    with pytest.raises(ValueError, match="history.*cut"):
+        _build_cooldown_mission(snapshot, unbound)
+
+
+def test_cooldown_mission_rejects_unrelated_valid_temperature_channel() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    unrelated = _mission_descriptor(
+        channel_id="sensor.unrelated",
+        source_key="input.2.temperature",
+    )
+
+    with pytest.raises(ValueError, match="channel identity"):
+        _build_cooldown_mission(
+            snapshot,
+            _attention_history(),
+            descriptor=unrelated,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        (lambda mission: replace(mission, phase_missing_reason="not-missing"), "phase"),
+        (
+            lambda mission: replace(
+                mission,
+                trajectory=tuple(entry for entry in mission.trajectory if hasattr(entry, "sample")),
+            ),
+            "gap",
+        ),
+        (lambda mission: replace(mission, reference_id=None), "reference"),
+        (
+            lambda mission: replace(
+                mission,
+                attention_status=replace(
+                    mission.attention_status,
+                    state=OperatorPresentationState.CAUTION,
+                ),
+            ),
+            "attention state",
+        ),
+        (
+            lambda mission: replace(
+                mission,
+                relevant_attention=tuple(reversed(mission.relevant_attention)),
+            ),
+            "attention order",
+        ),
+        (
+            lambda mission: replace(
+                mission,
+                relevant_attention=(
+                    replace(
+                        mission.relevant_attention[0],
+                        observed_at=mission.cut.observed_at + timedelta(seconds=1),
+                    ),
+                    *mission.relevant_attention[1:],
+                ),
+            ),
+            "attention cut",
+        ),
+    ),
+    ids=(
+        "present-phase-carries-missing-reason",
+        "required-gap-removed",
+        "reference-id-removed",
+        "attention-status-understates-severity",
+        "attention-order-reversed",
+        "attention-postdates-cut",
+    ),
+)
+def test_cooldown_mission_rejects_contradictory_public_replacement(
+    mutation: object,
+    message: str,
+) -> None:
+    snapshot = _with_cooldown_history(
+        _snapshot(state=OperatorPresentationState.WARNING),
+        samples=(CooldownSample(0, 300), CooldownSample(180, 190)),
+        reference_id="reference-a",
+        reference_samples=(CooldownSample(0, 300), CooldownSample(180, 185)),
+    )
+    mission = _build_cooldown_mission(snapshot, _attention_history())
+
+    with pytest.raises(ValueError, match=message):
+        mutation(mission)  # type: ignore[operator]
+
+
+def test_cooldown_mission_value_is_frozen() -> None:
+    mission = _build_cooldown_mission(
+        _snapshot(state=OperatorPresentationState.WARNING),
+        _attention_history(),
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        mission.phase = "warmup"  # type: ignore[misc]
 
 
 def test_cooldown_mission_replay_round_trip_is_deterministic() -> None:

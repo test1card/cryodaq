@@ -137,7 +137,7 @@ def _typed_ready_snapshot(
             recording_session_id,
         ),
         DataIntegritySummary(cut, status, 42, 41, 0, 0, availability),
-        CooldownHistorySummary(cut, status, (CooldownSample(0, 300),), None, ()),
+        CooldownHistorySummary(cut, status, (CooldownSample(0, 300),), None, (), "sensor.main"),
         SupportBundleSummary(cut, status, availability, support_manifest),
     )
 

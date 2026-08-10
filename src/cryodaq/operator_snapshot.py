@@ -1,7 +1,7 @@
 """Backend-owned immutable F36 operator snapshot protocol.
 
 This neutral module deliberately contains no GUI objects, transport calls, or
-commands. Engine/replay producers and GUI consumers share its strict v2 codec.
+commands. Engine/replay producers and GUI consumers share its strict v3 codec.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class AvailabilityTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
-# V2 resource budgets. Collection limits derive from the public fleet target of
+# V3 resource budgets. Collection limits derive from the public fleet target of
 # 100 devices / 2,000 channels. The 8 MiB wire cap is frozen with measured
 # worst-case headroom in tests; evidence is rejected, never silently truncated.
 MAX_FLEET_DEVICES = 100
@@ -105,7 +105,7 @@ STATE_PRECEDENCE = MappingProxyType(
 
 
 class OperatorSnapshotProtocolError(ValueError):
-    """Closed receiver-boundary failure for invalid or excessive v2 data."""
+    """Closed receiver-boundary failure for invalid or excessive v3 data."""
 
 
 __all__ = [
@@ -805,6 +805,7 @@ class CooldownHistorySummary(_OperatorSummary):
     samples: tuple[CooldownSample, ...]
     reference_id: str | None
     reference_samples: tuple[CooldownSample, ...]
+    trajectory_channel_id: str | None = None
 
     def __post_init__(self) -> None:
         super(CooldownHistorySummary, self).__post_init__()
@@ -818,8 +819,20 @@ class CooldownHistorySummary(_OperatorSummary):
                 "reference_id",
                 _non_empty(self.reference_id, field_name="reference_id", max_bytes=MAX_ID_UTF8_BYTES),
             )
+        if self.trajectory_channel_id is not None:
+            object.__setattr__(
+                self,
+                "trajectory_channel_id",
+                _non_empty(
+                    self.trajectory_channel_id,
+                    field_name="trajectory_channel_id",
+                    max_bytes=MAX_ID_UTF8_BYTES,
+                ),
+            )
         if (self.reference_id is None) != (not self.reference_samples):
             raise ValueError("reference_id and reference_samples must be present together")
+        if (self.samples or self.reference_samples) and self.trajectory_channel_id is None:
+            raise ValueError("cooldown trajectory evidence requires stable channel identity")
         for name, values in (("samples", self.samples), ("reference_samples", self.reference_samples)):
             if any(later.elapsed_s <= earlier.elapsed_s for earlier, later in zip(values, values[1:])):
                 raise ValueError(f"{name} elapsed_s must be strictly increasing")
@@ -938,11 +951,11 @@ class OperatorSnapshot:
 
 
 _SCHEMA = "cryodaq.operator-snapshot"
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 def encode_operator_snapshot(snapshot: OperatorSnapshot) -> dict[str, Any]:
-    """Return the strict v2 JSON-compatible envelope for ``snapshot``."""
+    """Return the strict v3 JSON-compatible envelope for ``snapshot``."""
 
     if not isinstance(snapshot, OperatorSnapshot):
         raise TypeError("snapshot must be an OperatorSnapshot")
@@ -966,7 +979,7 @@ def dump_operator_snapshot(snapshot: OperatorSnapshot) -> str:
 
 
 def load_operator_snapshot(payload: str) -> OperatorSnapshot:
-    """Parse and validate one strict v2 JSON envelope."""
+    """Parse and validate one strict v3 JSON envelope."""
 
     if not isinstance(payload, str):
         raise TypeError("payload must be a string")
@@ -1138,6 +1151,10 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             _decode_cooldown_sample,
             "snapshot.cooldown_history.reference_samples",
             MAX_COOLDOWN_SAMPLES,
+        ),
+        _optional_string(
+            item["trajectory_channel_id"],
+            "snapshot.cooldown_history.trajectory_channel_id",
         ),
     )
     (status, item) = status_and("support_bundle")
@@ -1356,7 +1373,7 @@ def _datetime(value: Any, path: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"{path} must be an ISO-8601 timestamp") from exc
     if _format_datetime(parsed) != raw:
-        raise ValueError(f"{path} is not the canonical v2 UTC timestamp")
+        raise ValueError(f"{path} is not the canonical v3 UTC timestamp")
     return parsed
 
 

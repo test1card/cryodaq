@@ -134,6 +134,7 @@ def _cooldown(cut: CommonCut) -> CooldownReceipt:
     return CooldownReceipt(
         **_base(cut),
         samples=(CooldownPoint(0.0, 300.0), CooldownPoint(1.0, 299.0)),
+        trajectory_channel_id="sensor.main",
     )
 
 

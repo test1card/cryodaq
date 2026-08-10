@@ -104,7 +104,14 @@ def _snapshot(*, mode: SnapshotMode = SnapshotMode.LIVE) -> OperatorSnapshot:
             0,
             AvailabilityTruth.UNKNOWN if mode is SnapshotMode.REPLAY else AvailabilityTruth.AVAILABLE,
         ),
-        CooldownHistorySummary(cut, summary_status, (CooldownSample(0, 300),), None, ()),
+        CooldownHistorySummary(
+            cut,
+            summary_status,
+            (CooldownSample(0, 300),),
+            None,
+            (),
+            "sensor.main",
+        ),
         SupportBundleSummary(
             cut,
             summary_status,
@@ -622,7 +629,7 @@ def test_codec_rejects_noncanonical_utc_spellings(alternate: str) -> None:
 
 def test_loader_rejects_duplicate_keys_at_outer_and_nested_depth() -> None:
     wire = dump_operator_snapshot(_snapshot())
-    outer = wire.replace('"version":2', '"version":3,"version":2', 1)
+    outer = wire.replace('"version":3', '"version":3,"version":3', 1)
     nested = wire.replace('"revision":42', '"revision":41,"revision":42', 1)
 
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):
@@ -652,7 +659,7 @@ def test_live_readiness_lifecycle_is_exact_and_transport_loss_erases_lifecycle_a
         decode_operator_snapshot(malformed)
 
 
-def test_v2_snapshot_identity_is_mandatory_and_bound_to_the_coherent_experiment() -> None:
+def test_v3_snapshot_identity_is_mandatory_and_bound_to_the_coherent_experiment() -> None:
     snapshot = _snapshot()
     envelope = encode_operator_snapshot(snapshot)
 

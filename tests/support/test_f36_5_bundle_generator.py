@@ -146,7 +146,7 @@ def _snapshot(
             "rec-1",
         ),
         DataIntegritySummary(cut, ok, 42, 41, 0, 0, integrity_storage),
-        CooldownHistorySummary(cut, ok, (CooldownSample(0, 300),), None, ()),
+        CooldownHistorySummary(cut, ok, (CooldownSample(0, 300),), None, (), "sensor.main"),
         SupportBundleSummary(cut, ok, AvailabilityTruth.AVAILABLE, manifest),
     )
 

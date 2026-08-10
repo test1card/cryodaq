@@ -318,6 +318,7 @@ def _snapshot(
         samples=(CooldownSample(0.0, 300.0), CooldownSample(60.0, 280.0)),
         reference_id="baseline-a",
         reference_samples=(CooldownSample(0.0, 300.0), CooldownSample(60.0, 275.0)),
+        trajectory_channel_id="sensor.main",
     )
 
     support_state = transport_state or (
