@@ -431,19 +431,23 @@ def _parse_frozen_driver_import_payload(stdout: bytes) -> dict[str, object]:
         raise ValueError(f"frozen driver import emitted {len(records)} result records instead of one")
     payload = json.loads(records[0], object_pairs_hook=_unique_json_object)
     expected = _expected_frozen_driver_import_payload()
-    expected_fields = {"schema", "status", "registry_compat_version", "modules"}
+    expected_fields = {"schema", "status", "registry_compat_version", "modules", "module_files"}
     if not isinstance(payload, dict) or set(payload) != expected_fields:
         raise ValueError("frozen driver import payload does not have the exact field set")
     modules = payload["modules"]
+    module_files = payload["module_files"]
     if (
         type(payload["schema"]) is not int
         or type(payload["status"]) is not str
         or type(payload["registry_compat_version"]) is not int
         or type(modules) is not list
         or any(type(module) is not str for module in modules)
+        or type(module_files) is not dict
+        or set(module_files) != set(modules)
+        or any(type(path) is not str or not path for path in module_files.values())
     ):
         raise ValueError("frozen driver import payload does not have exact field types")
-    if payload != expected:
+    if {key: payload[key] for key in expected} != expected:
         raise ValueError(f"frozen driver import payload does not match the source registry: {payload!r}")
     return expected
 

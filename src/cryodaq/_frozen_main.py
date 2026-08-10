@@ -122,11 +122,19 @@ def main_verify_frozen_drivers() -> None:
     verified = verify_allowlisted_driver_imports()
     if verified != ALLOWLISTED_DRIVER_MODULES:
         raise RuntimeError("frozen driver import result does not match the live registry projection")
+    imported_module_files: dict[str, str] = {}
+    for module_name in verified:
+        imported_module = sys.modules.get(module_name)
+        module_file = getattr(imported_module, "__file__", None)
+        if not isinstance(module_file, str) or not module_file:
+            raise RuntimeError(f"frozen driver import did not register module: {module_name}")
+        imported_module_files[module_name] = module_file
     payload = {
         "schema": 1,
         "status": "PASS",
         "registry_compat_version": DRIVER_REGISTRY_COMPAT_VERSION,
         "modules": list(verified),
+        "module_files": imported_module_files,
     }
     print(_FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
 

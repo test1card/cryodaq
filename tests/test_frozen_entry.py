@@ -159,6 +159,8 @@ def test_frozen_driver_verification_dispatches_live_imports(
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     monkeypatch.setattr(sys, "argv", ["CryoDAQ.exe", "--mode=verify-frozen-drivers"])
+    for module_name in ALLOWLISTED_DRIVER_MODULES:
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     module._dispatch()
 
@@ -168,12 +170,13 @@ def test_frozen_driver_verification_dispatches_live_imports(
         if line.startswith(module._FROZEN_DRIVER_IMPORT_PREFIX)
     ]
     assert len(records) == 1
-    assert json.loads(records[0]) == {
-        "schema": 1,
-        "status": "PASS",
-        "registry_compat_version": DRIVER_REGISTRY_COMPAT_VERSION,
-        "modules": list(ALLOWLISTED_DRIVER_MODULES),
-    }
+    payload = json.loads(records[0])
+    assert payload["schema"] == 1
+    assert payload["status"] == "PASS"
+    assert payload["registry_compat_version"] == DRIVER_REGISTRY_COMPAT_VERSION
+    assert payload["modules"] == list(ALLOWLISTED_DRIVER_MODULES)
+    assert set(payload["module_files"]) == set(ALLOWLISTED_DRIVER_MODULES)
+    assert all(isinstance(path, str) and path for path in payload["module_files"].values())
 
 
 def test_frozen_dispatch_forwards_periodic_argv_exactly(

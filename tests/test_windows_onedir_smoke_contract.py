@@ -143,7 +143,11 @@ def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
     executable = runtime_root / "CryoDAQ.exe"
     executable.write_bytes(b"test placeholder")
     expected = smoke._expected_frozen_driver_import_payload()
-    stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(expected) + "\n").encode()
+    payload = {
+        **expected,
+        "module_files": {module: f"frozen/{module}.py" for module in expected["modules"]},
+    }
+    stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(payload) + "\n").encode()
     captured: dict[str, object] = {}
 
     def complete(command: list[str], **kwargs: object) -> SimpleNamespace:
@@ -167,7 +171,11 @@ def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
 
     modules = expected["modules"]
     assert isinstance(modules, list) and modules
-    incomplete = {**expected, "modules": modules[1:]}
+    incomplete = {
+        **payload,
+        "modules": modules[1:],
+        "module_files": {module: payload["module_files"][module] for module in modules[1:]},
+    }
     incomplete_stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(incomplete) + "\n").encode()
     with pytest.raises(ValueError, match="does not match the source registry"):
         smoke._parse_frozen_driver_import_payload(incomplete_stdout)
@@ -175,6 +183,10 @@ def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
 
 def test_frozen_driver_import_payload_rejects_integer_equality_type_collisions() -> None:
     expected = smoke._expected_frozen_driver_import_payload()
+    payload = {
+        **expected,
+        "module_files": {module: f"frozen/{module}.py" for module in expected["modules"]},
+    }
     for field in ("schema", "registry_compat_version"):
         integer = expected[field]
         assert type(integer) is int
@@ -183,8 +195,8 @@ def test_frozen_driver_import_payload_rejects_integer_equality_type_collisions()
             collisions.append(bool(integer))
         for collision in collisions:
             assert collision == integer and type(collision) is not int
-            malformed = {**expected, field: collision}
-            assert malformed == expected
+            malformed = {**payload, field: collision}
+            assert malformed[field] == collision
             stdout = (smoke._FROZEN_DRIVER_IMPORT_PREFIX + json.dumps(malformed) + "\n").encode()
             with pytest.raises(ValueError, match="exact field types"):
                 smoke._parse_frozen_driver_import_payload(stdout)
