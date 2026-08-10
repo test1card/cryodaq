@@ -7150,7 +7150,8 @@ async def _run_engine(
         rollback=attention_history_feed.stop,
     )
     await startup.call(
-        lambda: event_bus.retain_required_observer(
+        functools.partial(
+            event_bus.retain_required_observer,
             "durable_attention_history",
             attention_history_feed.persist_event,
         )
