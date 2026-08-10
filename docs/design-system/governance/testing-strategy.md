@@ -16,9 +16,11 @@ How we verify that CryoDAQ code actually follows the design system. The rules an
 
 | Gate | Real invocation surface | What it proves |
 |---|---|---|
-| Same-slice co-versioning | `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` in the active exact checkout and standalone docs workflow | A mapped shared semantic source cannot move without its canonical spec, an advanced `VERSION`, and a matching `CHANGELOG.md` heading relative to exact `TRUSTED_BASE_SHA` |
+| Same-slice co-versioning | `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` in the active exact checkout and standalone docs workflow | A mapped shared semantic source cannot move without its canonical spec, an advanced `VERSION`, and a matching `CHANGELOG.md` heading relative to exact `TRUSTED_BASE_SHA`; `theme.py` public Assign/AnnAssign/AugAssign/Delete deltas select exact category specs, while unclassified symbols and every other residual AST delta require the full owned category set |
 | Multi-theme contrast | `tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` in the `gui` candidate partition | Thirteen bootstrap case IDs/token pairs/minima cannot be removed or repointed; every declared pair is recomputed from every real `config/themes/*.yaml`; exact failures and non-weakening per-theme floors must match `MANIFEST.md` |
 | Non-color state redundancy | `tests/gui/test_theme_loader.py::test_machine_accessibility_non_color_states_match_real_runtime_contract` in the `gui` candidate partition | Every source state matches exact production Russian labels and accessibility text; five pinned shapes render to distinct real `QImage` masks through `paint_state_shape`; `CanonicalStatusLabel` exposes the corresponding name/description, including the warning-to-caution alias |
+
+The co-versioning gate parses Git's actual NUL-delimited name-status stream: a pure D may retire with an empty rename map, while each R must persist its exact old/new pair and land on an active candidate route with the full retired specification set (or a superset). A later change to that destination still triggers its specifications plus release evidence.
 
 These checks cover only mechanical evidence. Whole-shell keyboard and focus traversal, NVDA on the real Windows build, scripted operator tasks, visual judgment, and target-machine performance measurements remain human or environment-specific gates. A screenshot does not close them.
 
@@ -300,7 +302,7 @@ The real gates are already owned by repository CI:
 
 - `python -m tools.ci_candidate_runner --suite gui` selects the GUI partition that contains the two mechanical accessibility nodes.
 - `python -m tools.ci_active_checkout_runner --suite remaining --trusted-base <exact-commit> ...` runs exact-checkout guards, including `tests/docs/test_docs_freshness.py`.
-- `.github/workflows/docs-gate.yml` also runs the full docs-freshness file and supplies the immutable pull-request base (or required manual-dispatch base).
+- `.github/workflows/docs-gate.yml` also runs the full docs-freshness file. Pull requests use event base authority; manual dispatch derives the merge base with the default branch and, at the default-branch tip, the candidate first parent. A caller supplies no base input, and a root candidate fails closed.
 - `ruff check --no-cache src/ tests/` remains the repository lint command; it is not a substitute for parsing or for either design-system guard.
 
 ## Test failure response

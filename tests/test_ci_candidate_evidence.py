@@ -119,7 +119,12 @@ elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
     "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
   mapfile -t bases < <(git merge-base --all "$event_commit" "refs/remotes/origin/${DEFAULT_BRANCH}")
   test "${#bases[@]}" = 1
-  trusted_base_sha="$(require_commit 'workflow-dispatch merge base' "${bases[0]}")"
+  if [[ "${bases[0]}" == "$event_commit" ]]; then
+    predecessor="$(git rev-parse --verify "${event_commit}^1")"
+    trusted_base_sha="$(require_commit 'workflow-dispatch predecessor' "$predecessor")"
+  else
+    trusted_base_sha="$(require_commit 'workflow-dispatch merge base' "${bases[0]}")"
+  fi
 else
   echo "unsupported evidence authority event: $EVENT_NAME" >&2
   exit 1
@@ -2881,7 +2886,7 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         assert "${GITHUB_SHA:?}" not in indexed[step_id]["run"]
 
 
-def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_path: Path) -> None:
+def test_workflow_dispatch_derives_strict_predecessor_and_executes_active_runner(tmp_path: Path) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     dispatch = payload[True]["workflow_dispatch"]
     assert dispatch is None
@@ -2911,13 +2916,35 @@ def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_
     assert 'test -n "${DEFAULT_BRANCH:?}"' in bind["run"]
     assert '"+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"' in bind["run"]
     assert 'git merge-base --all "$event_commit" "refs/remotes/origin/${DEFAULT_BRANCH}"' in bind["run"]
-    dispatch_binding = 'trusted_base_sha="$(require_commit \'workflow-dispatch merge base\' "${bases[0]}")"'
-    assert dispatch_binding in bind["run"]
+    fallback_block = (
+        'if [[ "${bases[0]}" == "$event_commit" ]]; then\n'
+        '    predecessor="$(git rev-parse --verify "${event_commit}^1")"\n'
+        '    trusted_base_sha="$(require_commit \'workflow-dispatch predecessor\' "$predecessor")"\n'
+        "  else\n"
+        '    trusted_base_sha="$(require_commit \'workflow-dispatch merge base\' "${bases[0]}")"\n'
+        "  fi\n"
+    )
+    assert fallback_block in bind["run"]
     strict_binding = (
         'test "$trusted_base_sha" != "$evidence_sha"\n'
         'git merge-base --is-ancestor "$trusted_base_sha" "$evidence_sha"\n'
     )
     assert strict_binding in bind["run"]
+
+    docs_workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "docs-gate.yml").read_text(encoding="utf-8"))
+    docs_bind = next(
+        step
+        for step in docs_workflow["jobs"]["docs-freshness"]["steps"]
+        if step.get("name") == "Bind strict trusted base"
+    )
+    docs_fallback = (
+        '    if [[ "${bases[0]}" == "$candidate" ]]; then\n'
+        '      base_authority="$(git rev-parse --verify "${candidate}^1")"\n'
+        "    else\n"
+        '      base_authority="${bases[0]}"\n'
+        "    fi\n"
+    )
+    assert docs_fallback in docs_bind["run"]
 
     repository, base_commit, head_commit, merge_commit = _candidate_identity_repository(tmp_path)
     remote = tmp_path / "default-branch.git"
@@ -2966,34 +2993,84 @@ def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_
     for index, case in enumerate(event_cases):
         _assert_candidate_identity_output(payload, repository, tmp_path / f"event-{index}.out", **case)
 
+    def run_docs_dispatch(event_sha: str, output: Path) -> subprocess.CompletedProcess[str]:
+        _git(repository, "checkout", "--detach", event_sha)
+        output.unlink(missing_ok=True)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "EVENT_NAME": "workflow_dispatch",
+                "PR_BASE_SHA": "",
+                "PUSH_BEFORE": "",
+                "DEFAULT_BRANCH": "master",
+                "GITHUB_ENV": output.resolve().as_posix(),
+            }
+        )
+        return subprocess.run(
+            [_workflow_bash_executable(repository)],
+            cwd=repository,
+            env=environment,
+            input=docs_bind["run"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
     _git(repository, "push", "-q", "--force", "origin", f"{head_commit}:refs/heads/master")
-    self_base_output = tmp_path / "dispatch-self-base.out"
+    _assert_candidate_identity_output(
+        payload,
+        repository,
+        tmp_path / "dispatch-default-tip.out",
+        event_name="workflow_dispatch",
+        event_sha=head_commit,
+        expected_sha=head_commit,
+        expected_trusted_base_sha=base_commit,
+    )
+    docs_output = tmp_path / "docs-dispatch-default-tip.env"
+    docs_result = run_docs_dispatch(head_commit, docs_output)
+    assert docs_result.returncode == 0, docs_result.stderr
+    assert docs_output.read_text(encoding="utf-8") == f"TRUSTED_BASE_SHA={base_commit}\n"
+
+    omitted_fallback = copy.deepcopy(payload)
+    omitted_bind = next(
+        step for step in omitted_fallback["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind"
+    )
+    omitted_bind["run"] = omitted_bind["run"].replace(
+        fallback_block,
+        'trusted_base_sha="$(require_commit \'workflow-dispatch merge base\' "${bases[0]}")"\n',
+        1,
+    )
+    omitted_output = tmp_path / "dispatch-omitted-fallback.out"
     with pytest.raises(AssertionError):
         _assert_candidate_identity_output(
-            payload,
+            omitted_fallback,
             repository,
-            self_base_output,
+            omitted_output,
             event_name="workflow_dispatch",
             event_sha=head_commit,
             expected_sha=head_commit,
             expected_trusted_base_sha=base_commit,
         )
-    assert not self_base_output.exists()
+    assert not omitted_output.exists()
 
-    restored_defect = copy.deepcopy(payload)
-    restored_bind = next(
-        step for step in restored_defect["jobs"]["candidate_identity"]["steps"] if step.get("id") == "bind"
-    )
-    restored_bind["run"] = restored_bind["run"].replace(strict_binding, "", 1)
-    _assert_candidate_identity_output(
-        restored_defect,
-        repository,
-        tmp_path / "restored-self-base-defect.out",
-        event_name="workflow_dispatch",
-        event_sha=head_commit,
-        expected_sha=head_commit,
-        expected_trusted_base_sha=head_commit,
-    )
+    _git(repository, "push", "-q", "--force", "origin", f"{base_commit}:refs/heads/master")
+    root_output = tmp_path / "dispatch-root.out"
+    with pytest.raises(AssertionError):
+        _assert_candidate_identity_output(
+            payload,
+            repository,
+            root_output,
+            event_name="workflow_dispatch",
+            event_sha=base_commit,
+            expected_sha=base_commit,
+            expected_trusted_base_sha=base_commit,
+        )
+    assert not root_output.exists()
+    docs_root_output = tmp_path / "docs-dispatch-root.env"
+    docs_root_result = run_docs_dispatch(base_commit, docs_root_output)
+    assert docs_root_result.returncode != 0
+    assert not docs_root_output.exists()
 
 
 def test_candidate_identity_fetches_force_pushed_before_commit(tmp_path: Path) -> None:

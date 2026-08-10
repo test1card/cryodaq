@@ -17,10 +17,24 @@ the design-system-specific definitions of "breaking" from
 
 ### Added
 
-- `MANIFEST.md` — one machine-readable contract containing schema-v2 exact
+- `MANIFEST.md` — one machine-readable contract containing schema-v3 exact
   source/specification routes, narrow release-only triggers, 13 fixed WCAG 2.2
   contrast cases, non-weakening per-theme exception floors, and canonical
   non-color states.
+- Corrected the semantic authority map: `theme.py` now uses AST-derived
+  public-symbol routes covering Assign/AnnAssign/AugAssign/Delete that require
+  its runtime authority plus the exact changed category, with every owned
+  category required for unclassified symbols or other residual AST deltas, while
+  `_plot_style.py` routes through chart tokens, `widgets/common.py` through its
+  compatibility authority, and each overlay module through its actual
+  component contracts.
+- Added persistent structured route retirement with exact trusted-specification,
+  D/R source, same-slice specification, current-version, and append-only-record
+  controls. Git R records persist their exact old/new map and require an active,
+  nonweakening destination route; pure deletions retain an empty map. Historical
+  schema-v2 authority is validated and migrated to the corrected bootstrap floor.
+- Added strict SemVer 2.0.0 parsing and precedence controls, including
+  prerelease ordering and build-metadata equality.
 - Exact-checkout F36.6 enforcement in
   `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned`.
   It loads the strict-ancestor trusted contract, permits only the immutable

@@ -54,7 +54,13 @@ jobs:
               test -n "${DEFAULT_BRANCH:?}"
               git fetch --no-tags origin \
                 "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
-              base_authority="$(git merge-base "$candidate" "refs/remotes/origin/${DEFAULT_BRANCH}")"
+              mapfile -t bases < <(git merge-base --all "$candidate" "refs/remotes/origin/${DEFAULT_BRANCH}")
+              test "${#bases[@]}" = 1
+              if [[ "${bases[0]}" == "$candidate" ]]; then
+                base_authority="$(git rev-parse --verify "${candidate}^1")"
+              else
+                base_authority="${bases[0]}"
+              fi
               ;;
             *)
               echo "unsupported docs-gate event: $EVENT_NAME" >&2

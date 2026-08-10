@@ -26,13 +26,14 @@ design-system/
 │   ├── 001-light-theme-status-unlock.md
 │   └── 002-accent-status-decoupling.md
 │
-├── tokens/                             # Foundation: 11 files, what exists and why
+├── tokens/                             # Foundation: 12 files, what exists and why
 │   ├── colors.md                       # 77 color/runtime-color constants
 │   ├── typography.md                   # 36 typography tokens, Fira fonts, Cyrillic rules
 │   ├── spacing.md                      # 9 spacing tokens + semantic aliases
 │   ├── radius.md                       # 5 radius tokens, tight scale
 │   ├── layout.md                       # 7 layout tokens, including coupled constants
 │   ├── chart-tokens.md                 # pyqtgraph integration
+│   ├── runtime-authority.md            # theme.py token-category authority map
 │   ├── motion.md                       # 3 shipped durations; easing/expanded scale proposed
 │   ├── elevation.md                    # zero-shadow policy + z-index levels
 │   ├── icons.md                        # Lucide bundle + emoji prohibition
@@ -50,7 +51,8 @@ design-system/
 │   ├── content-voice-rules.md          # COPY-001..008
 │   └── governance-rules.md             # GOV-001..005 (thin pointers to governance/*)
 │
-├── components/                         # Generic primitives: 14 files, anatomy + invariants + code
+├── components/                         # Generic primitives: 15 files, anatomy + invariants + code
+    ├── legacy-common-runtime.md        # widgets/common.py compatibility authority
     ├── card.md                         # generic rounded container
     ├── button.md                       # secondary/ghost/destructive/icon/hold-confirm
     ├── input-field.md                  # text/numeric/search/password + validation
@@ -128,13 +130,14 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
 {
   "schema_version": 1,
   "co_versioning": {
-    "schema_version": 2,
+    "schema_version": 3,
     "required_release_paths": [
       "docs/design-system/VERSION",
       "docs/design-system/CHANGELOG.md"
     ],
     "release_only_patterns": [
       ".github/workflows/docs-gate.yml",
+      ".github/workflows/main.yml",
       "docs/design-system/ANTI_PATTERNS.md",
       "docs/design-system/GUI_MIGRATION_INVENTORY.md",
       "docs/design-system/MANIFEST.md",
@@ -148,19 +151,117 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
       "docs/design-system/rules/*.md",
       "docs/design-system/tokens/*.md",
       "tests/docs/test_docs_freshness.py",
-      "tests/gui/test_theme_loader.py"
+      "tests/gui/test_theme_loader.py",
+      "tests/test_ci_candidate_evidence.py"
     ],
-    "routes": [
+    "python_semantic_routes": [
       {
-        "source_pattern": "src/cryodaq/gui/theme.py",
-        "required_spec_paths": [
-          "docs/design-system/tokens/colors.md"
+        "source_path": "src/cryodaq/gui/theme.py",
+        "aggregate_spec_path": "docs/design-system/tokens/runtime-authority.md",
+        "fallback_spec_paths": [
+          "docs/design-system/tokens/colors.md",
+          "docs/design-system/tokens/typography.md",
+          "docs/design-system/tokens/spacing.md",
+          "docs/design-system/tokens/layout.md",
+          "docs/design-system/tokens/radius.md",
+          "docs/design-system/tokens/motion.md",
+          "docs/design-system/tokens/chart-tokens.md"
+        ],
+        "assignment_routes": [
+          {
+            "name_patterns": [
+              "BACKGROUND",
+              "FOREGROUND",
+              "SURFACE_*",
+              "PRIMARY",
+              "SECONDARY",
+              "CARD",
+              "MUTED",
+              "CARD_FOREGROUND",
+              "BORDER*",
+              "ACCENT*",
+              "RING",
+              "SELECTION_BG",
+              "FOCUS_RING",
+              "ON_*",
+              "MUTED_FOREGROUND",
+              "STATUS_*",
+              "COLD_HIGHLIGHT",
+              "DESTRUCTIVE",
+              "QUANTITY_*",
+              "TEXT_*",
+              "STONE_*",
+              "SUCCESS_*",
+              "WARNING_*",
+              "DANGER_*",
+              "QDARKTHEME_ACCENT"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/colors.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "FONT_*"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/typography.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "SPACE_*",
+              "CARD_PADDING",
+              "GRID_GAP"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/spacing.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "HEADER_HEIGHT",
+              "TOOL_RAIL_WIDTH",
+              "BOTTOM_BAR_HEIGHT",
+              "ROW_HEIGHT"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/layout.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "RADIUS_*",
+              "QDARKTHEME_CORNER_SHAPE"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/radius.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "TRANSITION_*_MS"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/motion.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "PLOT_*"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/chart-tokens.md"
+            ]
+          }
         ]
-      },
+      }
+    ],    "routes": [
+
       {
         "source_pattern": "src/cryodaq/gui/_plot_style.py",
         "required_spec_paths": [
-          "docs/design-system/tokens/colors.md"
+          "docs/design-system/tokens/chart-tokens.md"
         ]
       },
       {
@@ -180,7 +281,7 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
       {
         "source_pattern": "src/cryodaq/gui/widgets/common.py",
         "required_spec_paths": [
-          "docs/design-system/cryodaq-primitives/operator-snapshot-components.md"
+          "docs/design-system/components/legacy-common-runtime.md"
         ]
       },
       {
@@ -190,9 +291,37 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
         ]
       },
       {
-        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/*.py",
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py",
         "required_spec_paths": [
-          "docs/design-system/cryodaq-primitives/operator-snapshot-components.md"
+          "docs/design-system/components/bento-grid.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py",
+        "required_spec_paths": [
+          "docs/design-system/components/breadcrumb.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/modal_card.py",
+        "required_spec_paths": [
+          "docs/design-system/components/modal.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/__init__.py",
+        "required_spec_paths": [
+          "docs/design-system/components/bento-grid.md",
+          "docs/design-system/components/breadcrumb.md",
+          "docs/design-system/components/modal.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/_showcase.py",
+        "required_spec_paths": [
+          "docs/design-system/components/bento-grid.md",
+          "docs/design-system/components/breadcrumb.md",
+          "docs/design-system/components/modal.md"
         ]
       },
       {
@@ -248,7 +377,8 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
           "docs/design-system/patterns/command-outcome-unknown.md"
         ]
       }
-    ]
+    ],
+    "retired_routes": []
   },  "mechanical_accessibility": {
     "target": "WCAG 2.2 AA",
     "contrast_cases": [
@@ -631,7 +761,7 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
 
 ## Statistics
 
-- **85 Markdown files in the design-system tree**: 81 contract/specification
+- **87 Markdown files in the design-system tree**: 83 contract/specification
   documents plus README, MANIFEST, CHANGELOG, and the GUI migration inventory;
   `VERSION` is the additional non-Markdown release marker; the executable gate data is embedded below in this tracked manifest.
 - **84 rule IDs** across 9 rule categories (79 widget rules plus 5 governance rules)
@@ -756,7 +886,7 @@ F36 operator-snapshot additions:
     values; missing/refused identity uses fixed bounded Russian text and no
     vendor, model, channel-name, diagnostic, or payload fallback.
 
-82. **Co-versioned semantic authority** — a change to a mapped shared token, theme pack, component, pattern, or state owner must change its canonical specification, `VERSION`, and `CHANGELOG.md` in the same immutable-base slice; real-theme WCAG exceptions live as exact machine data, while keyboard/NVDA/operator/performance evidence remains human.
+82. **Co-versioned semantic authority** — a change to a mapped shared token, theme pack, component, pattern, or state owner must change its canonical specification, `VERSION`, and `CHANGELOG.md` in the same immutable-base slice. `theme.py` public Assign/AnnAssign/AugAssign/Delete deltas select exact category specs and multiple categories accumulate; unclassified symbols and every other residual semantic AST delta require the aggregate plus full owned set. Real-theme WCAG exceptions live as exact machine data, while keyboard/NVDA/operator/performance evidence remains human.
 
 ## Status
 

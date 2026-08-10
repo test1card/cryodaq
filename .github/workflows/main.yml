@@ -305,7 +305,12 @@ jobs:
               "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
             mapfile -t bases < <(git merge-base --all "$event_commit" "refs/remotes/origin/${DEFAULT_BRANCH}")
             test "${#bases[@]}" = 1
-            trusted_base_sha="$(require_commit 'workflow-dispatch merge base' "${bases[0]}")"
+            if [[ "${bases[0]}" == "$event_commit" ]]; then
+              predecessor="$(git rev-parse --verify "${event_commit}^1")"
+              trusted_base_sha="$(require_commit 'workflow-dispatch predecessor' "$predecessor")"
+            else
+              trusted_base_sha="$(require_commit 'workflow-dispatch merge base' "${bases[0]}")"
+            fi
           else
             echo "unsupported evidence authority event: $EVENT_NAME" >&2
             exit 1

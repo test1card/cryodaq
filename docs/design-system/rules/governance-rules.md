@@ -72,12 +72,11 @@ test, and revise/revert trigger.
 
 ## RULE-GOV-005
 
-A change to a mapped shared token, theme pack, reusable design-system component, canonical state mapper, or root-owned design-system pattern MUST update every exact specification from every matching schema-v2 route, advance the existing design-system `VERSION`, and add the matching `CHANGELOG.md` entry in the same immutable-base slice. Canonical contract/test/workflow changes named by `release_only_patterns` require the release evidence without inventing an unrelated source specification.
+A change to a mapped shared token, theme pack, reusable design-system component, canonical state mapper, or root-owned design-system pattern MUST update every exact specification from every matching schema-v3 active route, advance the existing design-system `VERSION` by SemVer precedence, and add the matching `CHANGELOG.md` entry in the same immutable-base slice. For `theme.py`, changed public Assign/AnnAssign/AugAssign/Delete operations also require the symbol-mapped category specification; multiple categories accumulate and an unclassified symbol requires the full owned set. Every other residual semantic AST delta requires the aggregate plus all owned categories. Aggregate-only evidence cannot satisfy a category-aware or residual change. Canonical contract/test/workflow changes named by `release_only_patterns` require the release evidence without inventing an unrelated source specification.
 
-**Canonical source:** `governance/versioning.md`; the deliberately narrow exact routes and release-only patterns are data in `MANIFEST.md`. Candidate additions are allowed, but trusted route edges/patterns/release paths cannot be removed, narrowed, or repointed. Ordinary panel and view consumers remain under the roadmap-wide GUI review gate without forcing a design-system release for every local implementation edit.
+**Canonical source:** `governance/versioning.md`; the deliberately narrow exact routes, persistent structured retirements, and release-only patterns are data in `MANIFEST.md`. Candidate additions are allowed, but active trusted route specifications cannot narrow. Removing an active route requires exact D/R source evidence, a same-version `retired_routes` record preserving its complete specification set and exact Git R old/new map, and same-slice specification/release changes. Every rename destination must remain covered by an active route with that full specification set or a superset; pure deletion records an empty rename map. Retirement records persist unchanged. Ordinary panel and view consumers remain under the roadmap-wide GUI review gate without forcing a design-system release for every local implementation edit.
 
-**Enforcement:** `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` compares the real candidate checkout with a workflow-derived strict-ancestor `TRUSTED_BASE_SHA`; missing/malformed authority, self/non-ancestor bases, candidate narrowing, missing exact specifications, a non-advancing version, or an absent current changelog heading fails closed.
-
+**Enforcement:** `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` compares the real candidate checkout with a workflow-derived strict-ancestor `TRUSTED_BASE_SHA`; missing/malformed authority, self/non-ancestor bases, candidate narrowing, invalid route retirement, missing exact specifications, a non-advancing SemVer version, or an absent current changelog heading fails closed.
 ## Why five rules, not more
 
 RULE-GOV-* deliberately minimal. Governance rules describe the system's self-change mechanism; each additional rule adds process overhead. Five rules cover the critical axes:
@@ -103,7 +102,7 @@ These five rules are themselves subject to the design system's evolution process
 
 ## Changelog
 
-- 2026-08-10 (v4.2.0): Added RULE-GOV-005 with additive schema-v2 route enforcement, strict workflow-derived ancestry, and the same-slice exact-specification/version/changelog invariant.
+- 2026-08-10 (v4.2.0): Added RULE-GOV-005 with schema-v3 active-route and persistent-retirement enforcement, strict workflow-derived ancestry, and the same-slice exact-specification/version/changelog invariant.
 
 - 2026-07-15 (v4.0.0): Added RULE-GOV-004, the mandatory five-field
   operator/safety change-impact record.

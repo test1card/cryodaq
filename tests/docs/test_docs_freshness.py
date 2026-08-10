@@ -1251,17 +1251,32 @@ def test_p5_pending_manifest_guard() -> None:
     test_p5_report_manifest_claim_remains_pending_until_immutable_freeze()
 
 
+class _RetiredRoute(NamedTuple):
+    source_pattern: str
+    required_spec_paths: frozenset[str]
+    renamed_paths: frozenset[tuple[str, str]]
+    retired_in: str
+    reason: str
+
+
 class _CoVersioningContract(NamedTuple):
     route_edges: frozenset[tuple[str, str]]
     route_patterns: frozenset[str]
+    python_semantic_assignment_edges: frozenset[tuple[str, str, str]]
+    python_semantic_aggregate_edges: frozenset[tuple[str, str]]
+    python_semantic_fallback_edges: frozenset[tuple[str, str]]
+    retired_routes: frozenset[_RetiredRoute]
     release_only_patterns: frozenset[str]
     required_release_paths: frozenset[str]
 
 
 _F366_BOOTSTRAP_SHA = "d05856ecb3e0d5002e37083f32f4b2d7acf5927f"
+_F366_SCHEMA_V2_SHA = "29731d453f0e1afbd7057af01cdb145c1bc77973"
 _F366_BOOTSTRAP_ROUTES = (
-    ("src/cryodaq/gui/theme.py", ("docs/design-system/tokens/colors.md",)),
-    ("src/cryodaq/gui/_plot_style.py", ("docs/design-system/tokens/colors.md",)),
+    (
+        "src/cryodaq/gui/_plot_style.py",
+        ("docs/design-system/tokens/chart-tokens.md",),
+    ),
     (
         "src/cryodaq/gui/_theme_loader.py",
         (
@@ -1278,15 +1293,39 @@ _F366_BOOTSTRAP_ROUTES = (
     ),
     (
         "src/cryodaq/gui/widgets/common.py",
-        ("docs/design-system/cryodaq-primitives/operator-snapshot-components.md",),
+        ("docs/design-system/components/legacy-common-runtime.md",),
     ),
     (
         "src/cryodaq/gui/shell/operator_components/*.py",
         ("docs/design-system/cryodaq-primitives/operator-snapshot-components.md",),
     ),
     (
-        "src/cryodaq/gui/shell/overlays/_design_system/*.py",
-        ("docs/design-system/cryodaq-primitives/operator-snapshot-components.md",),
+        "src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py",
+        ("docs/design-system/components/bento-grid.md",),
+    ),
+    (
+        "src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py",
+        ("docs/design-system/components/breadcrumb.md",),
+    ),
+    (
+        "src/cryodaq/gui/shell/overlays/_design_system/modal_card.py",
+        ("docs/design-system/components/modal.md",),
+    ),
+    (
+        "src/cryodaq/gui/shell/overlays/_design_system/__init__.py",
+        (
+            "docs/design-system/components/bento-grid.md",
+            "docs/design-system/components/breadcrumb.md",
+            "docs/design-system/components/modal.md",
+        ),
+    ),
+    (
+        "src/cryodaq/gui/shell/overlays/_design_system/_showcase.py",
+        (
+            "docs/design-system/components/bento-grid.md",
+            "docs/design-system/components/breadcrumb.md",
+            "docs/design-system/components/modal.md",
+        ),
     ),
     (
         "src/cryodaq/gui/presentation_severity.py",
@@ -1336,9 +1375,64 @@ _F366_BOOTSTRAP_ROUTES = (
         ("docs/design-system/patterns/command-outcome-unknown.md",),
     ),
 )
+_F366_THEME_SEMANTIC_SOURCE = "src/cryodaq/gui/theme.py"
+_F366_THEME_AGGREGATE_SPEC = "docs/design-system/tokens/runtime-authority.md"
+_F366_THEME_CATEGORY_SPECS = frozenset(
+    {
+        "docs/design-system/tokens/colors.md",
+        "docs/design-system/tokens/typography.md",
+        "docs/design-system/tokens/spacing.md",
+        "docs/design-system/tokens/layout.md",
+        "docs/design-system/tokens/radius.md",
+        "docs/design-system/tokens/motion.md",
+        "docs/design-system/tokens/chart-tokens.md",
+    }
+)
+_F366_THEME_ASSIGNMENT_ROUTES = (
+    (
+        (
+            "BACKGROUND",
+            "FOREGROUND",
+            "SURFACE_*",
+            "PRIMARY",
+            "SECONDARY",
+            "CARD",
+            "MUTED",
+            "CARD_FOREGROUND",
+            "BORDER*",
+            "ACCENT*",
+            "RING",
+            "SELECTION_BG",
+            "FOCUS_RING",
+            "ON_*",
+            "MUTED_FOREGROUND",
+            "STATUS_*",
+            "COLD_HIGHLIGHT",
+            "DESTRUCTIVE",
+            "QUANTITY_*",
+            "TEXT_*",
+            "STONE_*",
+            "SUCCESS_*",
+            "WARNING_*",
+            "DANGER_*",
+            "QDARKTHEME_ACCENT",
+        ),
+        ("docs/design-system/tokens/colors.md",),
+    ),
+    (("FONT_*",), ("docs/design-system/tokens/typography.md",)),
+    (("SPACE_*", "CARD_PADDING", "GRID_GAP"), ("docs/design-system/tokens/spacing.md",)),
+    (
+        ("HEADER_HEIGHT", "TOOL_RAIL_WIDTH", "BOTTOM_BAR_HEIGHT", "ROW_HEIGHT"),
+        ("docs/design-system/tokens/layout.md",),
+    ),
+    (("RADIUS_*", "QDARKTHEME_CORNER_SHAPE"), ("docs/design-system/tokens/radius.md",)),
+    (("TRANSITION_*_MS",), ("docs/design-system/tokens/motion.md",)),
+    (("PLOT_*",), ("docs/design-system/tokens/chart-tokens.md",)),
+)
 _F366_BOOTSTRAP_RELEASE_ONLY_PATTERNS = frozenset(
     {
         ".github/workflows/docs-gate.yml",
+        ".github/workflows/main.yml",
         "docs/design-system/ANTI_PATTERNS.md",
         "docs/design-system/GUI_MIGRATION_INVENTORY.md",
         "docs/design-system/MANIFEST.md",
@@ -1353,6 +1447,7 @@ _F366_BOOTSTRAP_RELEASE_ONLY_PATTERNS = frozenset(
         "docs/design-system/tokens/*.md",
         "tests/docs/test_docs_freshness.py",
         "tests/gui/test_theme_loader.py",
+        "tests/test_ci_candidate_evidence.py",
     }
 )
 _F366_BOOTSTRAP_CONTRACT = _CoVersioningContract(
@@ -1360,6 +1455,17 @@ _F366_BOOTSTRAP_CONTRACT = _CoVersioningContract(
         (source_pattern, spec_path) for source_pattern, spec_paths in _F366_BOOTSTRAP_ROUTES for spec_path in spec_paths
     ),
     route_patterns=frozenset(source_pattern for source_pattern, _spec_paths in _F366_BOOTSTRAP_ROUTES),
+    python_semantic_assignment_edges=frozenset(
+        (_F366_THEME_SEMANTIC_SOURCE, name_pattern, spec_path)
+        for name_patterns, spec_paths in _F366_THEME_ASSIGNMENT_ROUTES
+        for name_pattern in name_patterns
+        for spec_path in spec_paths
+    ),
+    python_semantic_aggregate_edges=frozenset({(_F366_THEME_SEMANTIC_SOURCE, _F366_THEME_AGGREGATE_SPEC)}),
+    python_semantic_fallback_edges=frozenset(
+        (_F366_THEME_SEMANTIC_SOURCE, spec_path) for spec_path in _F366_THEME_CATEGORY_SPECS
+    ),
+    retired_routes=frozenset(),
     release_only_patterns=_F366_BOOTSTRAP_RELEASE_ONLY_PATTERNS,
     required_release_paths=frozenset(
         {
@@ -1395,7 +1501,39 @@ _LEGACY_V1_COMMITS = (
 )
 
 
-def _design_system_changed_paths(base_commit: str) -> set[str]:
+class _DesignSystemDiff(NamedTuple):
+    changed_paths: frozenset[str]
+    removed_or_renamed_from: frozenset[str]
+    renamed_paths: frozenset[tuple[str, str]]
+
+
+def _parse_design_system_name_status(raw: bytes) -> _DesignSystemDiff:
+    fields = raw.rstrip(b"\0").split(b"\0") if raw else []
+    changed: set[str] = set()
+    removed_or_renamed_from: set[str] = set()
+    renamed_paths: set[tuple[str, str]] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index].decode("ascii")
+        index += 1
+        path_count = 2 if status[:1] in {"R", "C"} else 1
+        assert index + path_count <= len(fields), (status, fields[index:])
+        paths = tuple(field.decode("utf-8") for field in fields[index : index + path_count])
+        changed.update(paths)
+        if status[:1] == "D":
+            removed_or_renamed_from.add(paths[0])
+        elif status[:1] == "R":
+            removed_or_renamed_from.add(paths[0])
+            renamed_paths.add((paths[0], paths[1]))
+        index += path_count
+    return _DesignSystemDiff(
+        changed_paths=frozenset(changed),
+        removed_or_renamed_from=frozenset(removed_or_renamed_from),
+        renamed_paths=frozenset(renamed_paths),
+    )
+
+
+def _design_system_diff(base_commit: str) -> _DesignSystemDiff:
     raw = subprocess.run(
         [
             "git",
@@ -1412,18 +1550,11 @@ def _design_system_changed_paths(base_commit: str) -> set[str]:
         capture_output=True,
         check=True,
     ).stdout
-    fields = raw.rstrip(b"\0").split(b"\0") if raw else []
-    changed: set[str] = set()
-    index = 0
-    while index < len(fields):
-        status = fields[index].decode("ascii")
-        index += 1
-        path_count = 2 if status[:1] in {"R", "C"} else 1
-        assert index + path_count <= len(fields), (status, fields[index:])
-        for field in fields[index : index + path_count]:
-            changed.add(field.decode("utf-8"))
-        index += path_count
-    return changed
+    return _parse_design_system_name_status(raw)
+
+
+def _design_system_changed_paths(base_commit: str) -> set[str]:
+    return set(_design_system_diff(base_commit).changed_paths)
 
 
 def _matches_design_patterns(path: str, patterns: frozenset[str]) -> bool:
@@ -1489,12 +1620,81 @@ def _assert_repo_relative(value: object, *, label: str, allow_glob: bool) -> str
     return value
 
 
-def _normalize_coversion_contract(raw: object, *, label: str) -> _CoVersioningContract:
-    assert type(raw) is dict, f"{label} co_versioning must be an object"
-    assert set(raw) == {"schema_version", "required_release_paths", "release_only_patterns", "routes"}, (
-        f"{label} co_versioning has an unexpected schema"
+_SEMVER_RE = re.compile(
+    r"^(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)\."
+    r"(0|[1-9][0-9]*)"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
+
+
+class _SemanticVersion(NamedTuple):
+    core: tuple[int, int, int]
+    prerelease: tuple[str, ...] | None
+
+
+def _parse_semver(value: object, *, label: str) -> _SemanticVersion:
+    assert type(value) is str, f"{label} must be a string"
+    match = _SEMVER_RE.fullmatch(value)
+    assert match is not None, f"{label} must be strict SemVer 2.0.0: {value}"
+    prerelease_text = match.group(4)
+    prerelease = None if prerelease_text is None else tuple(prerelease_text.split("."))
+    if prerelease is not None:
+        leading_zero = next(
+            (
+                identifier
+                for identifier in prerelease
+                if identifier.isdigit() and len(identifier) > 1 and identifier[0] == "0"
+            ),
+            None,
+        )
+        assert leading_zero is None, f"{label} has a leading-zero numeric prerelease identifier: {leading_zero}"
+    return _SemanticVersion(
+        core=(int(match.group(1)), int(match.group(2)), int(match.group(3))),
+        prerelease=prerelease,
     )
-    assert raw["schema_version"] == 2, f"{label} co_versioning schema must be 2"
+
+
+def _compare_semver(left_text: str, right_text: str) -> int:
+    """Return SemVer precedence; build metadata is intentionally ignored."""
+
+    left = _parse_semver(left_text, label="left version")
+    right = _parse_semver(right_text, label="right version")
+    if left.core != right.core:
+        return -1 if left.core < right.core else 1
+    if left.prerelease is None or right.prerelease is None:
+        if left.prerelease is right.prerelease:
+            return 0
+        return 1 if left.prerelease is None else -1
+    for left_id, right_id in zip(left.prerelease, right.prerelease, strict=False):
+        if left_id == right_id:
+            continue
+        left_numeric = left_id.isdigit()
+        right_numeric = right_id.isdigit()
+        if left_numeric and right_numeric:
+            return -1 if int(left_id) < int(right_id) else 1
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return -1 if left_id < right_id else 1
+    if len(left.prerelease) == len(right.prerelease):
+        return 0
+    return -1 if len(left.prerelease) < len(right.prerelease) else 1
+
+
+def _normalize_coversion_contract(
+    raw: object,
+    *,
+    label: str,
+    expected_schema: int = 3,
+) -> _CoVersioningContract:
+    assert type(raw) is dict, f"{label} co_versioning must be an object"
+    assert expected_schema in {2, 3}
+    expected_keys = {"schema_version", "required_release_paths", "release_only_patterns", "routes"}
+    if expected_schema == 3:
+        expected_keys.update({"python_semantic_routes", "retired_routes"})
+    assert set(raw) == expected_keys, f"{label} co_versioning has an unexpected schema"
+    assert raw["schema_version"] == expected_schema, f"{label} co_versioning schema must be {expected_schema}"
 
     required_release_values = raw["required_release_paths"]
     assert type(required_release_values) is list and required_release_values, (
@@ -1552,16 +1752,223 @@ def _normalize_coversion_contract(raw: object, *, label: str) -> _CoVersioningCo
             )
             route_edges.add((source_pattern, spec_path))
 
+    python_semantic_assignment_edges: set[tuple[str, str, str]] = set()
+    python_semantic_aggregate_edges: set[tuple[str, str]] = set()
+    python_semantic_fallback_edges: set[tuple[str, str]] = set()
+    semantic_sources: set[str] = set()
+    if expected_schema == 3:
+        semantic_values = raw["python_semantic_routes"]
+        assert type(semantic_values) is list and semantic_values, (
+            f"{label} python_semantic_routes must be a non-empty list"
+        )
+        for semantic_index, semantic_route in enumerate(semantic_values):
+            assert type(semantic_route) is dict and set(semantic_route) == {
+                "source_path",
+                "aggregate_spec_path",
+                "fallback_spec_paths",
+                "assignment_routes",
+            }, f"{label} python semantic route {semantic_index} has an unexpected schema"
+            source_path = _assert_repo_relative(
+                semantic_route["source_path"],
+                label=f"{label} python semantic route {semantic_index} source_path",
+                allow_glob=False,
+            )
+            assert source_path.endswith(".py"), f"{label} python semantic source must be Python: {source_path}"
+            assert source_path not in semantic_sources, f"{label} repeats python semantic source: {source_path}"
+            semantic_sources.add(source_path)
+
+            aggregate_spec = _assert_repo_relative(
+                semantic_route["aggregate_spec_path"],
+                label=f"{label} python semantic route {source_path} aggregate specification",
+                allow_glob=False,
+            )
+            assert aggregate_spec.startswith("docs/design-system/") and aggregate_spec.endswith(".md"), (
+                f"{label} python semantic aggregate is outside the design-system corpus: {aggregate_spec}"
+            )
+            python_semantic_aggregate_edges.add((source_path, aggregate_spec))
+
+            fallback_values = semantic_route["fallback_spec_paths"]
+            assert type(fallback_values) is list and fallback_values, (
+                f"{label} python semantic route {source_path} fallback_spec_paths must be non-empty"
+            )
+            fallback_specs = frozenset(
+                _assert_repo_relative(
+                    value,
+                    label=f"{label} python semantic route {source_path} fallback specification",
+                    allow_glob=False,
+                )
+                for value in fallback_values
+            )
+            assert len(fallback_specs) == len(fallback_values), (
+                f"{label} python semantic route {source_path} fallback specifications repeat"
+            )
+            for spec_path in fallback_specs:
+                assert spec_path.startswith("docs/design-system/") and spec_path.endswith(".md"), (
+                    f"{label} python semantic fallback is outside the design-system corpus: {spec_path}"
+                )
+                python_semantic_fallback_edges.add((source_path, spec_path))
+
+            assignment_values = semantic_route["assignment_routes"]
+            assert type(assignment_values) is list and assignment_values, (
+                f"{label} python semantic route {source_path} assignment_routes must be non-empty"
+            )
+            seen_patterns: set[str] = set()
+            for assignment_index, assignment_route in enumerate(assignment_values):
+                assert type(assignment_route) is dict and set(assignment_route) == {
+                    "name_patterns",
+                    "required_spec_paths",
+                }, f"{label} python semantic assignment route {source_path}:{assignment_index} has an unexpected schema"
+                pattern_values = assignment_route["name_patterns"]
+                assert type(pattern_values) is list and pattern_values, (
+                    f"{label} python semantic assignment route {source_path}:{assignment_index} has no patterns"
+                )
+                patterns = frozenset(
+                    _assert_repo_relative(
+                        value,
+                        label=f"{label} python semantic assignment pattern",
+                        allow_glob=True,
+                    )
+                    for value in pattern_values
+                )
+                assert all("/" not in pattern for pattern in patterns), (
+                    f"{label} python semantic assignment patterns must be symbol names"
+                )
+                assert len(patterns) == len(pattern_values), (
+                    f"{label} python semantic assignment patterns repeat within a route"
+                )
+                repeated_patterns = seen_patterns & patterns
+                assert not repeated_patterns, (
+                    f"{label} repeats python semantic assignment patterns: {sorted(repeated_patterns)}"
+                )
+                seen_patterns.update(patterns)
+
+                spec_values = assignment_route["required_spec_paths"]
+                assert type(spec_values) is list and spec_values, (
+                    f"{label} python semantic assignment route {source_path}:{assignment_index} has no specifications"
+                )
+                spec_paths = frozenset(
+                    _assert_repo_relative(
+                        value,
+                        label=f"{label} python semantic assignment specification",
+                        allow_glob=False,
+                    )
+                    for value in spec_values
+                )
+                assert len(spec_paths) == len(spec_values), f"{label} python semantic assignment specifications repeat"
+                for spec_path in spec_paths:
+                    assert spec_path.startswith("docs/design-system/") and spec_path.endswith(".md"), (
+                        f"{label} python semantic assignment spec is outside the design-system corpus: {spec_path}"
+                    )
+                    for name_pattern in patterns:
+                        python_semantic_assignment_edges.add((source_path, name_pattern, spec_path))
+    retired_routes: set[_RetiredRoute] = set()
+    retired_patterns: set[str] = set()
+    if expected_schema == 3:
+        retired_values = raw["retired_routes"]
+        assert type(retired_values) is list, f"{label} retired_routes must be a list"
+        for index, retired in enumerate(retired_values):
+            assert type(retired) is dict and set(retired) == {
+                "source_pattern",
+                "required_spec_paths",
+                "renamed_paths",
+                "retired_in",
+                "reason",
+            }, f"{label} retired route {index} has an unexpected schema"
+            source_pattern = _assert_repo_relative(
+                retired["source_pattern"],
+                label=f"{label} retired route {index} source_pattern",
+                allow_glob=True,
+            )
+            assert source_pattern not in retired_patterns, f"{label} repeats retired route: {source_pattern}"
+            retired_patterns.add(source_pattern)
+            spec_values = retired["required_spec_paths"]
+            assert type(spec_values) is list and spec_values, (
+                f"{label} retired route {source_pattern} has no specifications"
+            )
+            spec_paths = frozenset(
+                _assert_repo_relative(
+                    value,
+                    label=f"{label} retired route {source_pattern} specification",
+                    allow_glob=False,
+                )
+                for value in spec_values
+            )
+            assert len(spec_paths) == len(spec_values), (
+                f"{label} retired route {source_pattern} repeats a specification"
+            )
+            for spec_path in spec_paths:
+                assert spec_path.startswith("docs/design-system/") and spec_path.endswith(".md"), (
+                    f"{label} retired route specification is outside the design-system corpus: {spec_path}"
+                )
+            rename_values = retired["renamed_paths"]
+            assert type(rename_values) is list, f"{label} retired route {source_pattern} renamed_paths must be a list"
+            renamed_paths: set[tuple[str, str]] = set()
+            renamed_from: set[str] = set()
+            for rename_index, rename in enumerate(rename_values):
+                assert type(rename) is dict and set(rename) == {"from_path", "to_path"}, (
+                    f"{label} retired route {source_pattern} rename {rename_index} has an unexpected schema"
+                )
+                from_path = _assert_repo_relative(
+                    rename["from_path"],
+                    label=f"{label} retired route {source_pattern} rename from_path",
+                    allow_glob=False,
+                )
+                to_path = _assert_repo_relative(
+                    rename["to_path"],
+                    label=f"{label} retired route {source_pattern} rename to_path",
+                    allow_glob=False,
+                )
+                assert from_path != to_path, f"{label} retired route rename must change path: {from_path}"
+                assert from_path not in renamed_from, (
+                    f"{label} retired route {source_pattern} repeats renamed from_path: {from_path}"
+                )
+                renamed_from.add(from_path)
+                renamed_paths.add((from_path, to_path))
+            assert len(renamed_paths) == len(rename_values), (
+                f"{label} retired route {source_pattern} renamed_paths repeat"
+            )
+            retired_in = retired["retired_in"]
+            _parse_semver(retired_in, label=f"{label} retired route {source_pattern} retired_in")
+            reason = retired["reason"]
+            assert type(reason) is str and reason == reason.strip() and reason, (
+                f"{label} retired route {source_pattern} reason must be non-empty normalized text"
+            )
+            retired_routes.add(
+                _RetiredRoute(
+                    source_pattern=source_pattern,
+                    required_spec_paths=spec_paths,
+                    renamed_paths=frozenset(renamed_paths),
+                    retired_in=retired_in,
+                    reason=reason,
+                )
+            )
+        assert len(retired_routes) == len(retired_values), f"{label} retired routes repeat"
+
     return _CoVersioningContract(
         route_edges=frozenset(route_edges),
         route_patterns=frozenset(route_patterns),
+        python_semantic_assignment_edges=frozenset(python_semantic_assignment_edges),
+        python_semantic_aggregate_edges=frozenset(python_semantic_aggregate_edges),
+        python_semantic_fallback_edges=frozenset(python_semantic_fallback_edges),
+        retired_routes=frozenset(retired_routes),
         release_only_patterns=release_only_patterns,
         required_release_paths=required_release_paths,
     )
 
 
+def _migrate_schema_v2_coversion_contract(raw: object, *, label: str) -> _CoVersioningContract:
+    """Validate the historical v2 payload, then replace its routing authority."""
+
+    validated = _normalize_coversion_contract(raw, label=label, expected_schema=2)
+    assert not validated.python_semantic_assignment_edges
+    assert not validated.python_semantic_aggregate_edges
+    assert not validated.python_semantic_fallback_edges
+    assert not validated.retired_routes
+    return _F366_BOOTSTRAP_CONTRACT
+
+
 def _migrate_legacy_v1_coversion_contract(raw: object, *, label: str) -> _CoVersioningContract:
-    """Validate legacy shape, then replace its routing authority with the v2 floor."""
+    """Validate legacy shape, then replace its routing authority with the schema-v3 floor."""
 
     assert type(raw) is dict, f"{label} legacy-v1 co_versioning must be an object"
     assert set(raw) == _LEGACY_V1_COVERSION_KEYS, f"{label} legacy-v1 co_versioning has an unexpected schema"
@@ -1645,28 +2052,39 @@ def _migrate_legacy_v1_coversion_contract(raw: object, *, label: str) -> _CoVers
     assert group_ids == _LEGACY_V1_GROUP_IDS, f"{label} legacy-v1 group IDs must be exact"
 
     # The legacy groups are validated evidence of provenance, not routing
-    # authority. Always enforce the immutable schema-v2 bootstrap minimum.
+    # authority. Always enforce the immutable schema-v3 bootstrap minimum.
     return _F366_BOOTSTRAP_CONTRACT
 
 
 def _normalize_trusted_coversion_contract(raw: object, *, label: str) -> _CoVersioningContract:
     assert type(raw) is dict, f"{label} co_versioning must be an object"
     keys = set(raw)
-    if keys == {"schema_version", "required_release_paths", "release_only_patterns", "routes"}:
+    v2_keys = {"schema_version", "required_release_paths", "release_only_patterns", "routes"}
+    if keys == v2_keys | {"python_semantic_routes", "retired_routes"}:
         return _normalize_coversion_contract(raw, label=label)
+    if keys == v2_keys:
+        return _migrate_schema_v2_coversion_contract(raw, label=label)
     if keys == _LEGACY_V1_COVERSION_KEYS:
         return _migrate_legacy_v1_coversion_contract(raw, label=label)
     raise AssertionError(f"{label} co_versioning schema is unsupported")
 
 
-def _legacy_v1_coversion_payload(commit: str) -> dict:
+def _coversion_payload(commit: str, *, fixture_label: str) -> dict:
     manifest = _git_file_at(commit, "docs/design-system/MANIFEST.md")
-    assert manifest is not None, f"legacy-v1 fixture has no MANIFEST: {commit}"
-    gate = _parse_design_system_machine_gates(manifest, label=f"legacy-v1 {commit}", required=True)
+    assert manifest is not None, f"{fixture_label} fixture has no MANIFEST: {commit}"
+    gate = _parse_design_system_machine_gates(manifest, label=f"{fixture_label} {commit}", required=True)
     assert gate is not None
     raw = gate.get("co_versioning")
     assert type(raw) is dict
     return raw
+
+
+def _legacy_v1_coversion_payload(commit: str) -> dict:
+    return _coversion_payload(commit, fixture_label="legacy-v1")
+
+
+def _schema_v2_coversion_payload(commit: str) -> dict:
+    return _coversion_payload(commit, fixture_label="schema-v2")
 
 
 def _validate_coversion_contract(
@@ -1678,13 +2096,22 @@ def _validate_coversion_contract(
 ) -> None:
     for source_pattern in contract.route_patterns:
         assert any(fnmatchcase(path, source_pattern) for path in available_sources), (
-            f"{label} source pattern matches no trusted or candidate file: {source_pattern}"
+            f"{label} source pattern matches no available file: {source_pattern}"
         )
     for release_pattern in contract.release_only_patterns:
         assert any(fnmatchcase(path, release_pattern) for path in available_sources), (
-            f"{label} release-only pattern matches no trusted or candidate file: {release_pattern}"
+            f"{label} release-only pattern matches no available file: {release_pattern}"
         )
-    for _source_pattern, spec_path in contract.route_edges:
+    specification_paths = {spec_path for _source_pattern, spec_path in contract.route_edges}
+    specification_paths.update(spec_path for _source_path, spec_path in contract.python_semantic_aggregate_edges)
+    specification_paths.update(spec_path for _source_path, spec_path in contract.python_semantic_fallback_edges)
+    specification_paths.update(
+        spec_path for _source_path, _name_pattern, spec_path in contract.python_semantic_assignment_edges
+    )
+    specification_paths.update(
+        spec_path for retired in contract.retired_routes for spec_path in retired.required_spec_paths
+    )
+    for spec_path in specification_paths:
         assert spec_path in candidate_tracked and (REPO_ROOT / spec_path).is_file(), (
             f"{label} exact specification is missing from the candidate: {spec_path}"
         )
@@ -1692,6 +2119,275 @@ def _validate_coversion_contract(
         assert required_path in candidate_tracked and (REPO_ROOT / required_path).is_file(), (
             f"{label} required release evidence is missing from the candidate: {required_path}"
         )
+
+
+def _active_route_specs(contract: _CoVersioningContract) -> dict[str, frozenset[str]]:
+    return {
+        source_pattern: frozenset(
+            spec_path for edge_pattern, spec_path in contract.route_edges if edge_pattern == source_pattern
+        )
+        for source_pattern in contract.route_patterns
+    }
+
+
+def _active_candidate_spec_coverage(contract: _CoVersioningContract, path: str) -> frozenset[str]:
+    covered = {spec_path for source_pattern, spec_path in contract.route_edges if fnmatchcase(path, source_pattern)}
+    if path in _python_semantic_sources(contract):
+        covered.update(
+            spec_path for source_path, spec_path in contract.python_semantic_aggregate_edges if source_path == path
+        )
+        covered.update(
+            spec_path for source_path, spec_path in contract.python_semantic_fallback_edges if source_path == path
+        )
+        covered.update(
+            spec_path
+            for source_path, _name_pattern, spec_path in contract.python_semantic_assignment_edges
+            if source_path == path
+        )
+    return frozenset(covered)
+
+
+def _validate_coversion_transition(
+    trusted: _CoVersioningContract,
+    candidate: _CoVersioningContract,
+    *,
+    current_version: str,
+    base_tracked: set[str],
+    candidate_tracked: set[str],
+    diff: _DesignSystemDiff,
+) -> list[str]:
+    """Reject route narrowing unless an exact, evidenced retirement is recorded."""
+
+    _parse_semver(current_version, label="candidate design-system VERSION")
+    for field in (
+        "python_semantic_assignment_edges",
+        "python_semantic_aggregate_edges",
+        "python_semantic_fallback_edges",
+        "release_only_patterns",
+        "required_release_paths",
+    ):
+        missing = getattr(trusted, field) - getattr(candidate, field)
+        assert not missing, f"candidate co_versioning narrows trusted {field}: {sorted(missing)}"
+
+    trusted_active = _active_route_specs(trusted)
+    candidate_active = _active_route_specs(candidate)
+    candidate_retired = {record.source_pattern: record for record in candidate.retired_routes}
+    active_retirement_abuse = sorted(set(candidate_active) & set(candidate_retired))
+    assert not active_retirement_abuse, f"active source routes cannot also be retired: {active_retirement_abuse}"
+    assert trusted.retired_routes <= candidate.retired_routes, (
+        "candidate must retain trusted retired_routes records unchanged"
+    )
+
+    for source_pattern, trusted_specs in trusted_active.items():
+        if source_pattern in candidate_active:
+            missing_specs = trusted_specs - candidate_active[source_pattern]
+            assert not missing_specs, (
+                f"candidate active route narrows trusted specifications for {source_pattern}: {sorted(missing_specs)}"
+            )
+            continue
+        retirement = candidate_retired.get(source_pattern)
+        assert retirement is not None, f"candidate silently removes trusted source route: {source_pattern}"
+        assert retirement.required_spec_paths == trusted_specs, (
+            f"retired route must preserve the entire trusted exact specification set for {source_pattern}"
+        )
+
+    trusted_retired_patterns = {record.source_pattern for record in trusted.retired_routes}
+    new_retirements = candidate.retired_routes - trusted.retired_routes
+    for retirement in new_retirements:
+        source_pattern = retirement.source_pattern
+        assert source_pattern not in trusted_retired_patterns
+        assert source_pattern in trusted_active, f"candidate retires an unknown source route: {source_pattern}"
+        assert retirement.required_spec_paths == trusted_active[source_pattern], (
+            f"retired route must preserve the entire trusted exact specification set for {source_pattern}"
+        )
+        assert retirement.retired_in == current_version, (
+            f"new retired route {source_pattern} retired_in must equal current VERSION {current_version}"
+        )
+        base_matches = {path for path in base_tracked if fnmatchcase(path, source_pattern)}
+        candidate_matches = {path for path in candidate_tracked if fnmatchcase(path, source_pattern)}
+        assert base_matches, f"retired route matched no trusted-base source: {source_pattern}"
+        assert not candidate_matches, (
+            f"retired route still matches candidate sources for {source_pattern}: {sorted(candidate_matches)}"
+        )
+        missing_removals = base_matches - diff.removed_or_renamed_from
+        assert not missing_removals, f"retired route lacks D/R evidence for trusted sources: {sorted(missing_removals)}"
+        actual_renames = frozenset(
+            (from_path, to_path) for from_path, to_path in diff.renamed_paths if from_path in base_matches
+        )
+        assert retirement.renamed_paths == actual_renames, (
+            f"retired route rename map must exactly match Git R evidence for {source_pattern}: "
+            f"recorded={sorted(retirement.renamed_paths)} actual={sorted(actual_renames)}"
+        )
+        for from_path, to_path in retirement.renamed_paths:
+            assert to_path in candidate_tracked, (
+                f"retired route rename destination is absent from candidate: {from_path} -> {to_path}"
+            )
+            coverage = _active_candidate_spec_coverage(candidate, to_path)
+            missing_coverage = retirement.required_spec_paths - coverage
+            assert not missing_coverage, (
+                f"retired route rename destination lacks active nonweakening coverage: "
+                f"{from_path} -> {to_path}; missing {sorted(missing_coverage)}"
+            )
+
+    violations: list[str] = []
+    for retirement in sorted(new_retirements, key=lambda record: record.source_pattern):
+        for spec_path in sorted(retirement.required_spec_paths):
+            if spec_path not in diff.changed_paths:
+                violations.append(
+                    f"new retired route {retirement.source_pattern} changed without exact specification: {spec_path}"
+                )
+    return violations
+
+
+class _PythonSemanticState(NamedTuple):
+    public_symbol_operations: dict[str, tuple[str, ...]]
+    residual_ast: str
+
+
+def _python_semantic_state(source: str, *, label: str) -> _PythonSemanticState:
+    try:
+        tree = ast.parse(source, filename=label, type_comments=True)
+    except SyntaxError as error:
+        raise AssertionError(f"{label} is not valid Python: {error}") from error
+    operations: dict[str, list[str]] = {}
+    residual_body: list[ast.stmt] = []
+    for node in tree.body:
+        public_targets: list[str] = []
+        operation: str | None = None
+        mixed_target = False
+        if isinstance(node, ast.Assign):
+            public_targets = [
+                target.id for target in node.targets if isinstance(target, ast.Name) and not target.id.startswith("_")
+            ]
+            mixed_target = bool(public_targets) and len(public_targets) != len(node.targets)
+            operation = f"Assign:{ast.dump(node.value, include_attributes=False)}"
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if not node.target.id.startswith("_"):
+                public_targets = [node.target.id]
+                annotation_and_value = ast.Tuple(
+                    elts=[node.annotation, node.value or ast.Constant(value=None)],
+                    ctx=ast.Load(),
+                )
+                operation = f"AnnAssign:{ast.dump(annotation_and_value, include_attributes=False)}"
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            if not node.target.id.startswith("_"):
+                public_targets = [node.target.id]
+                operator_and_value = ast.Tuple(elts=[node.op, node.value], ctx=ast.Load())
+                operation = f"AugAssign:{ast.dump(operator_and_value, include_attributes=False)}"
+        elif isinstance(node, ast.Delete):
+            public_targets = [
+                target.id for target in node.targets if isinstance(target, ast.Name) and not target.id.startswith("_")
+            ]
+            mixed_target = bool(public_targets) and len(public_targets) != len(node.targets)
+            operation = "Delete"
+        if public_targets:
+            assert operation is not None
+            for public_target in public_targets:
+                operations.setdefault(public_target, []).append(operation)
+            if mixed_target:
+                residual_body.append(node)
+        else:
+            residual_body.append(node)
+    residual = ast.Module(body=residual_body, type_ignores=tree.type_ignores)
+    return _PythonSemanticState(
+        public_symbol_operations={name: tuple(values) for name, values in operations.items()},
+        residual_ast=ast.dump(residual, include_attributes=False),
+    )
+
+
+def _python_semantic_required_specs(
+    contract: _CoVersioningContract,
+    *,
+    source_path: str,
+    base_source: str,
+    candidate_source: str,
+) -> frozenset[str]:
+    aggregate_specs = {
+        spec_path for edge_source, spec_path in contract.python_semantic_aggregate_edges if edge_source == source_path
+    }
+    fallback_specs = {
+        spec_path for edge_source, spec_path in contract.python_semantic_fallback_edges if edge_source == source_path
+    }
+    assignment_edges = {
+        (name_pattern, spec_path)
+        for edge_source, name_pattern, spec_path in contract.python_semantic_assignment_edges
+        if edge_source == source_path
+    }
+    assert aggregate_specs, f"python semantic source has no aggregate specification: {source_path}"
+    assert fallback_specs, f"python semantic source has no conservative fallback specifications: {source_path}"
+    assert assignment_edges, f"python semantic source has no assignment routes: {source_path}"
+
+    base = _python_semantic_state(base_source, label=f"trusted-base:{source_path}")
+    candidate = _python_semantic_state(candidate_source, label=f"candidate:{source_path}")
+    changed_names = {
+        name
+        for name in set(base.public_symbol_operations) | set(candidate.public_symbol_operations)
+        if base.public_symbol_operations.get(name) != candidate.public_symbol_operations.get(name)
+    }
+    required_specs: set[str] = set()
+    if changed_names:
+        required_specs.update(aggregate_specs)
+    for changed_name in changed_names:
+        classified = {
+            spec_path for name_pattern, spec_path in assignment_edges if fnmatchcase(changed_name, name_pattern)
+        }
+        required_specs.update(classified or fallback_specs)
+    if base.residual_ast != candidate.residual_ast:
+        required_specs.update(aggregate_specs)
+        required_specs.update(fallback_specs)
+    return frozenset(required_specs)
+
+
+def _python_semantic_sources(contract: _CoVersioningContract) -> frozenset[str]:
+    return frozenset(source_path for source_path, _spec_path in contract.python_semantic_aggregate_edges)
+
+
+def _coversion_required_specs(
+    contract: _CoVersioningContract,
+    *,
+    changed_paths: set[str],
+    base_source_text: Callable[[str], str | None],
+    candidate_source_text: Callable[[str], str | None],
+) -> dict[str, set[str]]:
+    required_specs: dict[str, set[str]] = {}
+    for changed_path in changed_paths:
+        for source_pattern, spec_path in contract.route_edges:
+            if fnmatchcase(changed_path, source_pattern):
+                required_specs.setdefault(spec_path, set()).add(changed_path)
+    for source_path in _python_semantic_sources(contract) & changed_paths:
+        semantic_specs = _python_semantic_required_specs(
+            contract,
+            source_path=source_path,
+            base_source=base_source_text(source_path) or "",
+            candidate_source=candidate_source_text(source_path) or "",
+        )
+        for spec_path in semantic_specs:
+            required_specs.setdefault(spec_path, set()).add(source_path)
+    return required_specs
+
+
+def _missing_coversion_spec_violations(
+    required_specs: dict[str, set[str]],
+    *,
+    changed_paths: set[str],
+) -> list[str]:
+    violations: list[str] = []
+    for spec_path, source_paths in sorted(required_specs.items()):
+        if spec_path not in changed_paths or not (REPO_ROOT / spec_path).is_file():
+            violations.append(f"{', '.join(sorted(source_paths))} changed without exact specification: {spec_path}")
+    return violations
+
+
+def _missing_release_evidence_violations(
+    contract: _CoVersioningContract,
+    *,
+    changed_paths: set[str],
+) -> list[str]:
+    return [
+        f"missing changed release evidence: {required_path}"
+        for required_path in sorted(contract.required_release_paths)
+        if required_path not in changed_paths or not (REPO_ROOT / required_path).is_file()
+    ]
 
 
 def _strict_design_system_base() -> tuple[str, str]:
@@ -1766,6 +2462,283 @@ def test_design_system_legacy_v1_coversion_migrates_to_bootstrap(legacy_commit: 
     assert migrated == _F366_BOOTSTRAP_CONTRACT
 
 
+@pytest.mark.parametrize(
+    ("source_path", "required_spec", "wrong_spec"),
+    (
+        (
+            "src/cryodaq/gui/_plot_style.py",
+            "docs/design-system/tokens/chart-tokens.md",
+            "docs/design-system/tokens/colors.md",
+        ),
+        (
+            "src/cryodaq/gui/widgets/common.py",
+            "docs/design-system/components/legacy-common-runtime.md",
+            "docs/design-system/cryodaq-primitives/operator-snapshot-components.md",
+        ),
+        (
+            "src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py",
+            "docs/design-system/components/bento-grid.md",
+            "docs/design-system/cryodaq-primitives/operator-snapshot-components.md",
+        ),
+    ),
+)
+def test_design_system_real_manifest_rejects_wrong_semantic_route(
+    source_path: str,
+    required_spec: str,
+    wrong_spec: str,
+) -> None:
+    """Control: each corrected real source route fails if repointed to the old/wrong spec."""
+
+    assert (REPO_ROOT / source_path).is_file()
+    assert (REPO_ROOT / required_spec).is_file()
+    raw = json.loads(json.dumps(_design_system_machine_gates()["co_versioning"]))
+    route = next(route for route in raw["routes"] if route["source_pattern"] == source_path)
+    assert route["required_spec_paths"] == [required_spec]
+    route["required_spec_paths"] = [wrong_spec]
+    malformed = _normalize_coversion_contract(raw, label=f"wrong route {source_path}")
+    with pytest.raises(AssertionError, match="candidate active route narrows trusted specifications"):
+        _validate_coversion_transition(
+            _F366_BOOTSTRAP_CONTRACT,
+            malformed,
+            current_version="4.2.0",
+            base_tracked=set(_tracked_files()),
+            candidate_tracked=set(_tracked_files()),
+            diff=_DesignSystemDiff(frozenset(), frozenset(), frozenset()),
+        )
+
+
+@pytest.mark.parametrize(
+    "required_floor",
+    (
+        ".github/workflows/main.yml",
+        "tests/test_ci_candidate_evidence.py",
+    ),
+)
+def test_design_system_real_manifest_rejects_omitted_release_floor(required_floor: str) -> None:
+    """Control: executable base-binding owners cannot leave the release-only floor."""
+
+    assert (REPO_ROOT / required_floor).is_file()
+    raw = json.loads(json.dumps(_design_system_machine_gates()["co_versioning"]))
+    assert required_floor in raw["release_only_patterns"]
+    raw["release_only_patterns"].remove(required_floor)
+    malformed = _normalize_coversion_contract(raw, label=f"omitted floor {required_floor}")
+    with pytest.raises(AssertionError, match="narrows trusted release_only_patterns"):
+        _validate_coversion_transition(
+            _F366_BOOTSTRAP_CONTRACT,
+            malformed,
+            current_version="4.2.0",
+            base_tracked=set(_tracked_files()),
+            candidate_tracked=set(_tracked_files()),
+            diff=_DesignSystemDiff(frozenset(), frozenset(), frozenset()),
+        )
+
+
+def _real_theme_semantic_fixture() -> tuple[_CoVersioningContract, str]:
+    source_path = _F366_THEME_SEMANTIC_SOURCE
+    trusted_source = _git_file_at(_F366_SCHEMA_V2_SHA, source_path)
+    assert trusted_source is not None
+    candidate_source = _read(REPO_ROOT / source_path)
+    assert candidate_source == trusted_source, "semantic fixture requires the real unchanged theme.py base"
+    contract = _normalize_coversion_contract(
+        _design_system_machine_gates()["co_versioning"],
+        label="real semantic manifest",
+    )
+    return contract, candidate_source
+
+
+def _replace_public_assignment(source: str, name: str, expression: str) -> str:
+    pattern = re.compile(rf"(?m)^({re.escape(name)}\s*=\s*).+$")
+    replaced, count = pattern.subn(rf"\g<1>{expression}", source)
+    assert count == 1, f"expected one real assignment for {name}; found {count}"
+    return replaced
+
+
+@pytest.mark.parametrize(
+    ("name", "expression", "category_spec"),
+    (
+        ("FONT_SIZE_XS", "99", "docs/design-system/tokens/typography.md"),
+        ("QUANTITY_VOLTAGE", '"#000000"', "docs/design-system/tokens/colors.md"),
+        ("SPACE_1", "5", "docs/design-system/tokens/spacing.md"),
+    ),
+)
+def test_theme_semantic_routes_select_only_known_assignment_category(
+    name: str,
+    expression: str,
+    category_spec: str,
+) -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = _replace_public_assignment(base_source, name, expression)
+    assert _python_semantic_required_specs(
+        contract,
+        source_path=_F366_THEME_SEMANTIC_SOURCE,
+        base_source=base_source,
+        candidate_source=candidate_source,
+    ) == frozenset({_F366_THEME_AGGREGATE_SPEC, category_spec})
+
+
+def test_theme_semantic_routes_classify_public_augassign_by_category() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    assert _python_semantic_required_specs(
+        contract,
+        source_path=_F366_THEME_SEMANTIC_SOURCE,
+        base_source=base_source,
+        candidate_source=base_source + "\nFONT_SIZE_XS += 1\n",
+    ) == frozenset({_F366_THEME_AGGREGATE_SPEC, "docs/design-system/tokens/typography.md"})
+
+
+def test_theme_semantic_routes_classify_public_delete_by_category() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    assert _python_semantic_required_specs(
+        contract,
+        source_path=_F366_THEME_SEMANTIC_SOURCE,
+        base_source=base_source,
+        candidate_source=base_source + "\ndel FONT_SIZE_XS\n",
+    ) == frozenset({_F366_THEME_AGGREGATE_SPEC, "docs/design-system/tokens/typography.md"})
+
+
+def test_theme_semantic_routes_union_multiple_changed_categories() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = _replace_public_assignment(base_source, "FONT_SIZE_XS", "99")
+    candidate_source = _replace_public_assignment(candidate_source, "QUANTITY_VOLTAGE", '"#000000"')
+    candidate_source = _replace_public_assignment(candidate_source, "SPACE_1", "5")
+    assert _python_semantic_required_specs(
+        contract,
+        source_path=_F366_THEME_SEMANTIC_SOURCE,
+        base_source=base_source,
+        candidate_source=candidate_source,
+    ) == frozenset(
+        {
+            _F366_THEME_AGGREGATE_SPEC,
+            "docs/design-system/tokens/typography.md",
+            "docs/design-system/tokens/colors.md",
+            "docs/design-system/tokens/spacing.md",
+        }
+    )
+
+
+def test_theme_semantic_routes_use_full_owned_set_for_unclassified_public_assignment() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = base_source + "\nUNCLASSIFIED_PUBLIC_TOKEN = 1\n"
+    assert _python_semantic_required_specs(
+        contract,
+        source_path=_F366_THEME_SEMANTIC_SOURCE,
+        base_source=base_source,
+        candidate_source=candidate_source,
+    ) == _F366_THEME_CATEGORY_SPECS | {_F366_THEME_AGGREGATE_SPEC}
+
+
+def test_theme_semantic_routes_ignore_comment_only_change() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    assert not _python_semantic_required_specs(
+        contract,
+        source_path=_F366_THEME_SEMANTIC_SOURCE,
+        base_source=base_source,
+        candidate_source=base_source + "\n# semantic-route comment-only probe\n",
+    )
+
+
+def test_theme_semantic_routes_use_full_owned_set_for_unknown_residual_ast_change() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = base_source + "\ndef _semantic_route_probe() -> int:\n    return 1\n"
+    assert _python_semantic_required_specs(
+        contract,
+        source_path=_F366_THEME_SEMANTIC_SOURCE,
+        base_source=base_source,
+        candidate_source=candidate_source,
+    ) == _F366_THEME_CATEGORY_SPECS | {_F366_THEME_AGGREGATE_SPEC}
+
+
+def test_theme_semantic_production_path_rejects_aggregate_only_false_green() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = _replace_public_assignment(base_source, "FONT_SIZE_XS", "99")
+    required = _coversion_required_specs(
+        contract,
+        changed_paths={_F366_THEME_SEMANTIC_SOURCE},
+        base_source_text=lambda source_path: base_source if source_path == _F366_THEME_SEMANTIC_SOURCE else None,
+        candidate_source_text=lambda source_path: (
+            candidate_source if source_path == _F366_THEME_SEMANTIC_SOURCE else None
+        ),
+    )
+    changed = {
+        _F366_THEME_SEMANTIC_SOURCE,
+        _F366_THEME_AGGREGATE_SPEC,
+        "docs/design-system/VERSION",
+        "docs/design-system/CHANGELOG.md",
+    }
+    assert _missing_coversion_spec_violations(required, changed_paths=changed) == [
+        "src/cryodaq/gui/theme.py changed without exact specification: docs/design-system/tokens/typography.md"
+    ]
+
+
+def test_theme_augassign_production_path_rejects_aggregate_only_false_green() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = base_source + "\nFONT_SIZE_XS += 1\n"
+    required = _coversion_required_specs(
+        contract,
+        changed_paths={_F366_THEME_SEMANTIC_SOURCE},
+        base_source_text=lambda source_path: base_source if source_path == _F366_THEME_SEMANTIC_SOURCE else None,
+        candidate_source_text=lambda source_path: (
+            candidate_source if source_path == _F366_THEME_SEMANTIC_SOURCE else None
+        ),
+    )
+    changed = {
+        _F366_THEME_SEMANTIC_SOURCE,
+        _F366_THEME_AGGREGATE_SPEC,
+        "docs/design-system/VERSION",
+        "docs/design-system/CHANGELOG.md",
+    }
+    assert _missing_coversion_spec_violations(required, changed_paths=changed) == [
+        "src/cryodaq/gui/theme.py changed without exact specification: docs/design-system/tokens/typography.md"
+    ]
+
+
+def test_theme_semantic_manifest_classifies_every_current_public_assignment() -> None:
+    contract, source = _real_theme_semantic_fixture()
+    assignments = _python_semantic_state(source, label="real theme.py").public_symbol_operations
+    unclassified = sorted(
+        name
+        for name in assignments
+        if not any(
+            edge_source == _F366_THEME_SEMANTIC_SOURCE and fnmatchcase(name, name_pattern)
+            for edge_source, name_pattern, _spec_path in contract.python_semantic_assignment_edges
+        )
+    )
+    assert not unclassified
+    assert len(assignments) == 142
+
+
+def test_theme_semantic_manifest_rejects_candidate_edge_narrowing() -> None:
+    raw = json.loads(json.dumps(_design_system_machine_gates()["co_versioning"]))
+    semantic = raw["python_semantic_routes"][0]
+    font_route = next(route for route in semantic["assignment_routes"] if route["name_patterns"] == ["FONT_*"])
+    semantic["assignment_routes"].remove(font_route)
+    narrowed = _normalize_coversion_contract(raw, label="narrowed semantic manifest")
+    with pytest.raises(AssertionError, match="narrows trusted python_semantic_assignment_edges"):
+        _validate_coversion_transition(
+            _F366_BOOTSTRAP_CONTRACT,
+            narrowed,
+            current_version="4.2.0",
+            base_tracked=set(_tracked_files()),
+            candidate_tracked=set(_tracked_files()),
+            diff=_DesignSystemDiff(frozenset(), frozenset(), frozenset()),
+        )
+
+
+def test_design_system_schema_v2_parent_migrates_to_corrected_bootstrap() -> None:
+    raw = _schema_v2_coversion_payload(_F366_SCHEMA_V2_SHA)
+    assert raw["schema_version"] == 2
+    migrated = _normalize_trusted_coversion_contract(raw, label="actual schema-v2 parent")
+    assert migrated == _F366_BOOTSTRAP_CONTRACT
+
+
+def test_design_system_schema_v2_parent_is_validated_before_migration() -> None:
+    raw = _schema_v2_coversion_payload(_F366_SCHEMA_V2_SHA)
+    malformed = json.loads(json.dumps(raw))
+    malformed["routes"][0]["required_spec_paths"] = []
+    with pytest.raises(AssertionError, match="has no specifications"):
+        _normalize_trusted_coversion_contract(malformed, label="malformed schema-v2 parent")
+
+
 def test_design_system_legacy_v1_coversion_rejects_malformed_authority() -> None:
     legacy = _legacy_v1_coversion_payload(_LEGACY_V1_COMMITS[0])
 
@@ -1800,64 +2773,395 @@ def test_design_system_legacy_v1_coversion_rejects_malformed_authority() -> None
             _normalize_trusted_coversion_contract(malformed, label=f"legacy-v1 malformed {index}")
 
 
+_RETIREMENT_SOURCE = "src/cryodaq/gui/retired_owner.py"
+_RETIREMENT_DESTINATION = "src/cryodaq/gui/replacement_owner.py"
+_RETIREMENT_RETAINED_SOURCE = "src/cryodaq/gui/retained_owner.py"
+_RETIREMENT_SPECS = frozenset(
+    {
+        "docs/design-system/components/bento-grid.md",
+        "docs/design-system/components/card.md",
+    }
+)
+_RETIREMENT_EXTRA_SPEC = "docs/design-system/components/badge.md"
+_RETIREMENT_RETAINED_SPEC = "docs/design-system/components/button.md"
+_RETIREMENT_RELEASE_PATHS = frozenset(
+    {
+        "docs/design-system/CHANGELOG.md",
+        "docs/design-system/VERSION",
+    }
+)
+
+
+def _transition_contract(
+    active: dict[str, frozenset[str]],
+    *,
+    retired: frozenset[_RetiredRoute] = frozenset(),
+    required_release_paths: frozenset[str] = _RETIREMENT_RELEASE_PATHS,
+) -> _CoVersioningContract:
+    return _CoVersioningContract(
+        route_edges=frozenset(
+            (source_pattern, spec_path) for source_pattern, spec_paths in active.items() for spec_path in spec_paths
+        ),
+        route_patterns=frozenset(active),
+        python_semantic_assignment_edges=frozenset(),
+        python_semantic_aggregate_edges=frozenset(),
+        python_semantic_fallback_edges=frozenset(),
+        retired_routes=retired,
+        release_only_patterns=frozenset(),
+        required_release_paths=required_release_paths,
+    )
+
+
+def _retirement_transition_fixture(
+    *,
+    renamed_to: str | None = None,
+    replacement_specs: frozenset[str] | None = None,
+    record_rename: bool = True,
+) -> tuple[
+    _CoVersioningContract,
+    _CoVersioningContract,
+    set[str],
+    set[str],
+    _DesignSystemDiff,
+]:
+    actual_renames = frozenset({(_RETIREMENT_SOURCE, renamed_to)}) if renamed_to is not None else frozenset()
+    recorded_renames = actual_renames if record_rename else frozenset()
+    retirement = _RetiredRoute(
+        source_pattern=_RETIREMENT_SOURCE,
+        required_spec_paths=_RETIREMENT_SPECS,
+        renamed_paths=recorded_renames,
+        retired_in="2.0.0",
+        reason="Owner removed after replacement shipped.",
+    )
+    trusted = _transition_contract(
+        {
+            _RETIREMENT_SOURCE: _RETIREMENT_SPECS,
+            _RETIREMENT_RETAINED_SOURCE: frozenset({_RETIREMENT_RETAINED_SPEC}),
+        }
+    )
+    candidate_active = {
+        _RETIREMENT_RETAINED_SOURCE: frozenset({_RETIREMENT_RETAINED_SPEC}),
+    }
+    if renamed_to is not None and replacement_specs is not None:
+        candidate_active[renamed_to] = replacement_specs
+    candidate = _transition_contract(candidate_active, retired=frozenset({retirement}))
+    base_tracked = {
+        _RETIREMENT_SOURCE,
+        _RETIREMENT_RETAINED_SOURCE,
+        _RETIREMENT_RETAINED_SPEC,
+        *_RETIREMENT_SPECS,
+    }
+    candidate_tracked = {
+        _RETIREMENT_RETAINED_SOURCE,
+        _RETIREMENT_RETAINED_SPEC,
+        _RETIREMENT_EXTRA_SPEC,
+        *_RETIREMENT_SPECS,
+    }
+    changed = {_RETIREMENT_SOURCE, *_RETIREMENT_SPECS}
+    if renamed_to is not None:
+        candidate_tracked.add(renamed_to)
+        changed.add(renamed_to)
+    diff = _DesignSystemDiff(
+        changed_paths=frozenset(changed),
+        removed_or_renamed_from=frozenset({_RETIREMENT_SOURCE}),
+        renamed_paths=actual_renames,
+    )
+    return trusted, candidate, base_tracked, candidate_tracked, diff
+
+
+def test_parse_design_system_name_status_preserves_actual_rename_mapping() -> None:
+    parsed = _parse_design_system_name_status(
+        b"R100\0src/old.py\0src/new.py\0D\0src/deleted.py\0C100\0src/copy.py\0src/copied.py\0"
+    )
+    assert parsed.changed_paths == frozenset(
+        {
+            "src/old.py",
+            "src/new.py",
+            "src/deleted.py",
+            "src/copy.py",
+            "src/copied.py",
+        }
+    )
+    assert parsed.removed_or_renamed_from == frozenset({"src/old.py", "src/deleted.py"})
+    assert parsed.renamed_paths == frozenset({("src/old.py", "src/new.py")})
+
+
+def test_coversion_route_retirement_accepts_source_deletion() -> None:
+    trusted, candidate, base_tracked, candidate_tracked, diff = _retirement_transition_fixture()
+    assert not _validate_coversion_transition(
+        trusted,
+        candidate,
+        current_version="2.0.0",
+        base_tracked=base_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=diff,
+    )
+
+
+def test_coversion_route_retirement_rejects_ungoverned_rename_destination() -> None:
+    fixture = _retirement_transition_fixture(renamed_to=_RETIREMENT_DESTINATION)
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    with pytest.raises(AssertionError, match="rename destination lacks active nonweakening coverage"):
+        _validate_coversion_transition(
+            trusted,
+            candidate,
+            current_version="2.0.0",
+            base_tracked=base_tracked,
+            candidate_tracked=candidate_tracked,
+            diff=diff,
+        )
+
+
+def test_coversion_route_retirement_rejects_under_specified_rename_destination() -> None:
+    fixture = _retirement_transition_fixture(
+        renamed_to=_RETIREMENT_DESTINATION,
+        replacement_specs=frozenset({"docs/design-system/components/bento-grid.md"}),
+    )
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    with pytest.raises(AssertionError, match="rename destination lacks active nonweakening coverage"):
+        _validate_coversion_transition(
+            trusted,
+            candidate,
+            current_version="2.0.0",
+            base_tracked=base_tracked,
+            candidate_tracked=candidate_tracked,
+            diff=diff,
+        )
+
+
+@pytest.mark.parametrize(
+    "replacement_specs",
+    (
+        _RETIREMENT_SPECS,
+        _RETIREMENT_SPECS | frozenset({_RETIREMENT_EXTRA_SPEC}),
+    ),
+)
+def test_coversion_route_retirement_accepts_full_or_superset_replacement(
+    replacement_specs: frozenset[str],
+) -> None:
+    fixture = _retirement_transition_fixture(
+        renamed_to=_RETIREMENT_DESTINATION,
+        replacement_specs=replacement_specs,
+    )
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    assert not _validate_coversion_transition(
+        trusted,
+        candidate,
+        current_version="2.0.0",
+        base_tracked=base_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=diff,
+    )
+
+
+def test_coversion_route_retirement_rejects_inaccurate_rename_record() -> None:
+    fixture = _retirement_transition_fixture(
+        renamed_to=_RETIREMENT_DESTINATION,
+        replacement_specs=_RETIREMENT_SPECS,
+        record_rename=False,
+    )
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    with pytest.raises(AssertionError, match="rename map must exactly match Git R evidence"):
+        _validate_coversion_transition(
+            trusted,
+            candidate,
+            current_version="2.0.0",
+            base_tracked=base_tracked,
+            candidate_tracked=candidate_tracked,
+            diff=diff,
+        )
+
+
+def test_coversion_retired_route_normalizer_persists_auditable_rename_mapping() -> None:
+    raw = json.loads(json.dumps(_design_system_machine_gates()["co_versioning"]))
+    raw["retired_routes"].append(
+        {
+            "source_pattern": _RETIREMENT_SOURCE,
+            "required_spec_paths": sorted(_RETIREMENT_SPECS),
+            "renamed_paths": [
+                {
+                    "from_path": _RETIREMENT_SOURCE,
+                    "to_path": _RETIREMENT_DESTINATION,
+                }
+            ],
+            "retired_in": "2.0.0",
+            "reason": "Owner removed after replacement shipped.",
+        }
+    )
+    normalized = _normalize_coversion_contract(raw, label="auditable retired rename")
+    record = next(route for route in normalized.retired_routes if route.source_pattern == _RETIREMENT_SOURCE)
+    assert record.renamed_paths == frozenset({(_RETIREMENT_SOURCE, _RETIREMENT_DESTINATION)})
+
+
+def test_coversion_route_retirement_rejects_active_route_abuse() -> None:
+    trusted, candidate, base_tracked, candidate_tracked, diff = _retirement_transition_fixture()
+    active_and_retired = _transition_contract(
+        {_RETIREMENT_SOURCE: _RETIREMENT_SPECS},
+        retired=candidate.retired_routes,
+    )
+    with pytest.raises(AssertionError, match="active source routes cannot also be retired"):
+        _validate_coversion_transition(
+            trusted,
+            active_and_retired,
+            current_version="2.0.0",
+            base_tracked=base_tracked,
+            candidate_tracked=candidate_tracked | {_RETIREMENT_SOURCE},
+            diff=diff,
+        )
+
+
+def test_coversion_route_retirement_persists_exact_rename_mapping_next_slice() -> None:
+    fixture = _retirement_transition_fixture(
+        renamed_to=_RETIREMENT_DESTINATION,
+        replacement_specs=_RETIREMENT_SPECS,
+    )
+    _trusted, retired_contract, _base_tracked, candidate_tracked, _diff = fixture
+    assert not _validate_coversion_transition(
+        retired_contract,
+        retired_contract,
+        current_version="2.1.0",
+        base_tracked=candidate_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=_DesignSystemDiff(frozenset(), frozenset(), frozenset()),
+    )
+
+
+def test_coversion_renamed_destination_remains_governed_next_slice() -> None:
+    fixture = _retirement_transition_fixture(
+        renamed_to=_RETIREMENT_DESTINATION,
+        replacement_specs=_RETIREMENT_SPECS,
+    )
+    _trusted, retired_contract, _base_tracked, _candidate_tracked, _diff = fixture
+    changed = {_RETIREMENT_DESTINATION}
+    required_specs = _coversion_required_specs(
+        retired_contract,
+        changed_paths=changed,
+        base_source_text=lambda _source_path: None,
+        candidate_source_text=lambda _source_path: None,
+    )
+    assert set(required_specs) == set(_RETIREMENT_SPECS)
+    assert len(_missing_coversion_spec_violations(required_specs, changed_paths=changed)) == len(_RETIREMENT_SPECS)
+    assert _missing_release_evidence_violations(retired_contract, changed_paths=changed) == [
+        "missing changed release evidence: docs/design-system/CHANGELOG.md",
+        "missing changed release evidence: docs/design-system/VERSION",
+    ]
+    complete_change = changed | set(_RETIREMENT_SPECS) | set(_RETIREMENT_RELEASE_PATHS)
+    assert not _missing_coversion_spec_violations(required_specs, changed_paths=complete_change)
+    assert not _missing_release_evidence_violations(retired_contract, changed_paths=complete_change)
+
+
+def test_coversion_route_retirement_requires_same_slice_specification_change() -> None:
+    trusted, candidate, base_tracked, candidate_tracked, diff = _retirement_transition_fixture()
+    no_spec_change = _DesignSystemDiff(
+        changed_paths=frozenset({_RETIREMENT_SOURCE}),
+        removed_or_renamed_from=diff.removed_or_renamed_from,
+        renamed_paths=diff.renamed_paths,
+    )
+    violations = _validate_coversion_transition(
+        trusted,
+        candidate,
+        current_version="2.0.0",
+        base_tracked=base_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=no_spec_change,
+    )
+    assert violations == [
+        f"new retired route {_RETIREMENT_SOURCE} changed without exact specification: {spec_path}"
+        for spec_path in sorted(_RETIREMENT_SPECS)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    (
+        ("1.0.0+one", "1.0.0+two", 0),
+        ("1.0.0-alpha+one", "1.0.0-alpha+two", 0),
+        ("1.0.0-rc.1", "1.0.0", -1),
+        ("1.0.0-alpha.1", "1.0.0-alpha.beta", -1),
+        ("1.0.0-beta.2", "1.0.0-beta.11", -1),
+        ("1.0.0-alpha", "1.0.0-alpha.1", -1),
+    ),
+)
+def test_design_system_semver_precedence(left: str, right: str, expected: int) -> None:
+    assert _compare_semver(left, right) == expected
+    assert _compare_semver(right, left) == -expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "01.0.0",
+        "1.01.0",
+        "1.0.01",
+        "1.0.0-01",
+        "1.0.0-",
+        "1.0.0-alpha..1",
+        "1.0",
+    ),
+)
+def test_design_system_semver_rejects_invalid_values(value: str) -> None:
+    with pytest.raises(AssertionError, match="SemVer|leading-zero"):
+        _parse_semver(value, label="probe")
+
+
 def test_design_system_governed_sources_are_coversioned() -> None:
     """F36.6: exact semantic routes move with specs, version, and changelog."""
 
     base_commit, _candidate_commit = _strict_design_system_base()
     candidate_tracked = set(_tracked_files())
-    available_sources = candidate_tracked | _git_tracked_files(base_commit)
+    base_tracked = _git_tracked_files(base_commit)
     candidate_gate = _design_system_machine_gates()
     candidate = _normalize_coversion_contract(candidate_gate.get("co_versioning"), label="candidate")
     _validate_coversion_contract(
         candidate,
         label="candidate",
-        available_sources=available_sources,
+        available_sources=candidate_tracked,
         candidate_tracked=candidate_tracked,
     )
     trusted = _trusted_coversion_contract(
         base_commit,
-        available_sources=available_sources,
+        available_sources=candidate_tracked | base_tracked,
         candidate_tracked=candidate_tracked,
     )
 
-    for field in (
-        "route_edges",
-        "route_patterns",
-        "release_only_patterns",
-        "required_release_paths",
-    ):
-        missing = getattr(trusted, field) - getattr(candidate, field)
-        assert not missing, f"candidate co_versioning narrows trusted {field}: {sorted(missing)}"
-
-    changed = _design_system_changed_paths(base_commit)
-    required_specs: dict[str, set[str]] = {}
-    for changed_path in changed:
-        for source_pattern, spec_path in candidate.route_edges:
-            if fnmatchcase(changed_path, source_pattern):
-                required_specs.setdefault(spec_path, set()).add(changed_path)
-    release_only_changed = {path for path in changed if _matches_design_patterns(path, candidate.release_only_patterns)}
-    if not required_specs and not release_only_changed:
-        return
-
-    violations: list[str] = []
-    for required_path in candidate.required_release_paths:
-        if required_path not in changed or not (REPO_ROOT / required_path).is_file():
-            violations.append(f"missing changed release evidence: {required_path}")
-
-    for spec_path, source_paths in sorted(required_specs.items()):
-        if spec_path not in changed or not (REPO_ROOT / spec_path).is_file():
-            violations.append(f"{', '.join(sorted(source_paths))} changed without exact specification: {spec_path}")
-
     version_path = REPO_ROOT / "docs" / "design-system" / "VERSION"
     current_version = _read(version_path).strip()
-    assert re.fullmatch(r"\d+\.\d+\.\d+", current_version)
+    _parse_semver(current_version, label="candidate design-system VERSION")
+    diff = _design_system_diff(base_commit)
+    violations = _validate_coversion_transition(
+        trusted,
+        candidate,
+        current_version=current_version,
+        base_tracked=base_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=diff,
+    )
+
+    changed = set(diff.changed_paths)
+    required_specs = _coversion_required_specs(
+        candidate,
+        changed_paths=changed,
+        base_source_text=lambda source_path: _git_file_at(base_commit, source_path),
+        candidate_source_text=lambda source_path: (
+            _read(REPO_ROOT / source_path) if (REPO_ROOT / source_path).is_file() else None
+        ),
+    )
+    release_only_changed = {path for path in changed if _matches_design_patterns(path, candidate.release_only_patterns)}
+    new_retirements = candidate.retired_routes - trusted.retired_routes
+    if not required_specs and not release_only_changed and not new_retirements:
+        return
+
+    violations.extend(_missing_release_evidence_violations(candidate, changed_paths=changed))
+
+    violations.extend(_missing_coversion_spec_violations(required_specs, changed_paths=changed))
+
     base_version_text = _git_file_at(base_commit, "docs/design-system/VERSION")
     if base_version_text is None:
         assert base_commit == _F366_BOOTSTRAP_SHA, "trusted base is missing design-system VERSION"
     else:
         base_version = base_version_text.strip()
-        assert re.fullmatch(r"\d+\.\d+\.\d+", base_version)
-        if tuple(map(int, current_version.split("."))) <= tuple(map(int, base_version.split("."))):
+        _parse_semver(base_version, label="trusted-base design-system VERSION")
+        if _compare_semver(current_version, base_version) <= 0:
             violations.append(f"VERSION must advance beyond trusted-base {base_version}; found {current_version}")
 
     changelog = _read(REPO_ROOT / "docs" / "design-system" / "CHANGELOG.md")
@@ -1870,7 +3174,7 @@ def test_design_system_governed_sources_are_coversioned() -> None:
 def test_design_system_release_markers_are_one_version() -> None:
     design_root = REPO_ROOT / "docs" / "design-system"
     version = _read(design_root / "VERSION").strip()
-    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+    _parse_semver(version, label="design-system VERSION")
 
     versioned = (
         design_root / "README.md",
