@@ -371,14 +371,12 @@ def _install_periodic_child_observer(
     (hook_dir / "sitecustomize.py").write_text("\n".join(source) + "\n", encoding="utf-8")
 
 
-def _periodic_render_process(process_id: int, generation_id: str) -> psutil.Process:
+def _require_periodic_render_process(process: psutil.Process, generation_id: str) -> None:
     expected_generation = f"--generation-id={generation_id}"
-    process = psutil.Process(process_id)
     command = process.cmdline()
     module_child = command[1:4] == ["-m", "cryodaq.reporting", "periodic"]
     frozen_child = command[1:3] == ["--mode=report-render", "periodic"]
     assert expected_generation in command and (module_child or frozen_child)
-    return process
 
 
 def _reap_observed_process(process: psutil.Process) -> None:
@@ -629,7 +627,9 @@ async def _run_supervisor_child(
             alarm_query=_ProcessAlarm(),
             archive_query=_Archive(),
             runner=(
-                ReportProcessRunner(data_dir, timeout_s=20.0) if joined_dir is not None else _Runner(data_dir, messages)
+                ReportProcessRunner(data_dir, timeout_s=observed.render_timeout_s)
+                if joined_dir is not None
+                else _Runner(data_dir, messages)
             ),
             delivery=_Telegram(data_dir, messages),
             destination_fingerprint=DESTINATION_FINGERPRINT,
@@ -1418,6 +1418,8 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
             started.append(process)
 
         _wait_for_path(staging_marker)
+        render_process = psutil.Process(int(staging_marker.read_text(encoding="ascii")))
+        render_processes.append(render_process)
         candidate = load_periodic_state(data_dir).payload.get("active")
         assert isinstance(candidate, dict) and candidate.get("status") == "RENDERING"
         rendering = dict(candidate)
@@ -1428,11 +1430,7 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
         killed = next(process for process in contenders if process.pid == initial_pid)
         assert killed.is_alive()
 
-        render_process = _periodic_render_process(
-            int(staging_marker.read_text(encoding="ascii")),
-            str(rendering["generation_id"]),
-        )
-        render_processes.append(render_process)
+        _require_periodic_render_process(render_process, str(rendering["generation_id"]))
         assert render_process.ppid() == initial_pid
         staging = periodic_staging_dir(data_dir, str(rendering["generation_id"]))
         interrupted_final = periodic_generation_dir(data_dir, str(rendering["generation_id"]))
@@ -1459,6 +1457,10 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
                 break
             time.sleep(0.01)
         old_promoted = promotion_marker.exists()
+        assert old_promoted is (os.name != "nt"), (
+            "interrupted renderer violated the platform lifecycle contract: "
+            f"os.name={os.name!r}, old_promoted={old_promoted}"
+        )
 
         if old_promoted:
             assert int(promotion_marker.read_text(encoding="ascii")) == render_process.pid
@@ -1468,15 +1470,13 @@ def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
             assert not os.path.lexists(interrupted_final)
             _write_durable(takeover_release, "continue")
             _wait_for_path(promotion_marker)
+            promoted_process = psutil.Process(int(promotion_marker.read_text(encoding="ascii")))
+            render_processes.append(promoted_process)
             promoted_state = load_periodic_state(data_dir).payload.get("active")
             assert isinstance(promoted_state, dict) and promoted_state.get("status") == "RENDERING"
             promoted_active = dict(promoted_state)
             promoted_final = periodic_generation_dir(data_dir, str(promoted_active["generation_id"]))
-            promoted_process = _periodic_render_process(
-                int(promotion_marker.read_text(encoding="ascii")),
-                str(promoted_active["generation_id"]),
-            )
-            render_processes.append(promoted_process)
+            _require_periodic_render_process(promoted_process, str(promoted_active["generation_id"]))
 
         assert promoted_final.is_dir()
         promoted_recovered = ReportProcessRunner(data_dir, timeout_s=20.0).recover_periodic(
