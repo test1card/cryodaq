@@ -477,6 +477,13 @@ def _contrast_ratio(fg: str, bg: str) -> float:
     return (lighter + 0.05) / (darker + 0.05)
 
 
+def test_default_cool_alarm_labels_pass_aa(real_themes_dir):
+    pack = loader.validate_theme_pack("default_cool")
+    for token in ("STATUS_OK", "STATUS_CAUTION", "STATUS_INFO"):
+        ratio = _contrast_ratio(pack["ON_PRIMARY"], pack[token])
+        assert ratio >= 4.5, f"default_cool.ON_PRIMARY vs {token} contrast {ratio:.2f}:1 < 4.5 AA"
+
+
 def test_status_palette_hue_locked_across_all_themes(real_themes_dir):
     """Safety invariant (ADR 001): every bundled theme must ship the same
     STATUS *hues*. Lightness is unlocked for light substrates to restore
