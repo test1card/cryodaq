@@ -29,7 +29,7 @@ def _evidence(payload: bytes, *, complete: bool = True) -> runner._StreamEvidenc
 
 
 def _collection() -> bytes:
-    return ("\n".join((*runner._EXACT_NODE_IDS, "6 tests collected in 0.12s")) + "\n").encode()
+    return ("\n".join((*runner._EXACT_NODE_IDS, "7 tests collected in 0.12s")) + "\n").encode()
 
 
 def _completed(payload: bytes, *, stderr: bytes = b"", exit_code: int = 0) -> runner._CompletedCommand:
@@ -114,7 +114,7 @@ def test_fixed_commands_and_exact_ordered_six_are_not_caller_selected() -> None:
         "-q",
         *runner._EXACT_NODE_IDS,
     )
-    assert len(runner._EXACT_NODE_IDS) == len(set(runner._EXACT_NODE_IDS)) == 6
+    assert len(runner._EXACT_NODE_IDS) == len(set(runner._EXACT_NODE_IDS)) == 7
     assert (
         runner._parse_exact_collection(
             stdout_evidence=_evidence(_collection()),
@@ -138,7 +138,7 @@ def test_fixed_commands_and_exact_ordered_six_are_not_caller_selected() -> None:
 )
 def test_collection_mismatch_never_creates_exact_six(mutate) -> None:
     nodes = tuple(mutate(runner._EXACT_NODE_IDS))
-    payload = ("\n".join((*nodes, "6 tests collected in 0.1s")) + "\n").encode()
+    payload = ("\n".join((*nodes, "7 tests collected in 0.1s")) + "\n").encode()
     with pytest.raises(runner._RunnerFoundationError):
         runner._parse_exact_collection(
             stdout_evidence=_evidence(payload),
@@ -152,10 +152,10 @@ def test_collection_mismatch_never_creates_exact_six(mutate) -> None:
 @pytest.mark.parametrize(
     ("payload", "exit_code"),
     [
-        (b"...... [100%]\n6 passed in 1.20s\n", 1),
+        (b"....... [100%]\n7 passed in 1.20s\n", 1),
         (b".....s\n5 passed, 1 skipped in 1.20s\n", 0),
-        (b"......\n6 passed, 1 deselected in 1.20s\n", 0),
-        (b"......\n6 passed in 1.20s\nextra\n", 0),
+        (b".......\n7 passed, 1 deselected in 1.20s\n", 0),
+        (b".......\n7 passed in 1.20s\nextra\n", 0),
     ],
 )
 def test_execution_requires_complete_exact_six_result(payload: bytes, exit_code: int) -> None:
@@ -170,7 +170,7 @@ def test_execution_requires_complete_exact_six_result(payload: bytes, exit_code:
 
 
 def test_exact_execution_parser_accepts_only_complete_bound_bytes() -> None:
-    payload = b"...... [100%]\n6 passed in 1.20s\n"
+    payload = b"....... [100%]\n7 passed in 1.20s\n"
     runner._validate_exact_execution(
         stdout_evidence=_evidence(payload),
         stdout=payload,
@@ -274,7 +274,7 @@ def test_exact_six_execution_writes_one_runner_owned_result(monkeypatch: pytest.
     def execute(argv: tuple[str, ...], *, observer: object, snapshot: object) -> runner._CompletedCommand:
         assert isinstance(observer, _Observer) and snapshot is not None
         seen_commands.append(argv)
-        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"...... [100%]\n6 passed in 1.20s\n")
+        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n")
 
     _install_execution_fakes(monkeypatch, Collector)
     monkeypatch.setattr(runner, "_execute_bounded_process", execute)
@@ -400,7 +400,7 @@ def test_exact_six_authority_rejects_forgery_cross_evidence_and_replay(tmp_path:
 
     def execute(argv: tuple[str, ...], *, observer: object, snapshot: object) -> runner._CompletedCommand:
         del observer, snapshot
-        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"...... [100%]\n6 passed in 1.20s\n")
+        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n")
 
     sink = Sink()
     with pytest.MonkeyPatch.context() as patcher:
@@ -958,7 +958,7 @@ def test_exact_six_publication_collision_never_overwrites_racer(
 
     def execute(argv: tuple[str, ...], *, observer: object, snapshot: object) -> runner._CompletedCommand:
         del observer, snapshot
-        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"...... [100%]\n6 passed in 1.20s\n")
+        return _completed(_collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n")
 
     original_link = soak.os.link
 

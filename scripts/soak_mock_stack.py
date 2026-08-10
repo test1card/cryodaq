@@ -58,7 +58,13 @@ EXACT_SIX_COMMAND = (
     "-p",
     "no:cacheprovider",
     "-q",
-    "tests/integration/test_periodic_png_multiprocess.py",
+    "tests/integration/test_periodic_png_multiprocess.py::test_real_loopback_publisher_rep_and_adapter_startup_hydration_alarm_seals",
+    "tests/integration/test_periodic_png_multiprocess.py::test_publisher_restart_changes_session_and_fresh_adapter_recovers",
+    "tests/integration/test_periodic_png_multiprocess.py::test_subscriber_disconnect_monitor_invalidates_and_callbacks_stop",
+    "tests/integration/test_periodic_png_multiprocess.py::test_two_assistants_one_leader_per_domain",
+    "tests/integration/test_periodic_png_multiprocess.py::test_killed_elected_assistant_replacement_makes_one_forward_result",
+    "tests/integration/test_periodic_png_multiprocess.py::test_killed_rendering_leader_promotes_then_authorizes_one_delivery",
+    "tests/integration/test_periodic_png_multiprocess.py::test_replay_exact_off_child_creates_no_periodic_resources",
 )
 EXACT_SIX_RESULT_SCHEMA = "cryodaq-exact-six-result/v1"
 SOURCE_COMMAND_TAIL = ("-m", "cryodaq.launcher", "--mock", "--tray")

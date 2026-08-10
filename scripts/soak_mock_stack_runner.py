@@ -39,6 +39,7 @@ _EXACT_NODE_IDS: Final = (
     f"{_TEST_FILE}::test_subscriber_disconnect_monitor_invalidates_and_callbacks_stop",
     f"{_TEST_FILE}::test_two_assistants_one_leader_per_domain",
     f"{_TEST_FILE}::test_killed_elected_assistant_replacement_makes_one_forward_result",
+    f"{_TEST_FILE}::test_killed_rendering_leader_promotes_then_authorizes_one_delivery",
     f"{_TEST_FILE}::test_replay_exact_off_child_creates_no_periodic_resources",
 )
 _COLLECTION_ARGV: Final = (
@@ -70,9 +71,9 @@ _EXECUTION_ARGV: Final = (
 )
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
-_SUMMARY_RE = re.compile(r"6 passed in [0-9]+(?:\.[0-9]+)?s\Z")
-_COLLECTION_SUMMARY_RE = re.compile(r"6 tests collected in [0-9]+(?:\.[0-9]+)?s\Z")
-_PROGRESS_RE = re.compile(r"\.{6}\s+\[100%\]\Z")
+_SUMMARY_RE = re.compile(r"7 passed in [0-9]+(?:\.[0-9]+)?s\Z")
+_COLLECTION_SUMMARY_RE = re.compile(r"7 tests collected in [0-9]+(?:\.[0-9]+)?s\Z")
+_PROGRESS_RE = re.compile(r"\.{7}\s+\[100%\]\Z")
 _FORBIDDEN_PYTEST_MARKERS: Final = (" skipped", " deselected", " xfailed", " xpassed", " error")
 _MAX_STREAM_BYTES: Final = 8 * 1024 * 1024
 _MAX_SNAPSHOT_ARCHIVE_BYTES: Final = 32 * 1024 * 1024
