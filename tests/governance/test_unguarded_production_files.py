@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import psutil
 import pytest
@@ -1133,3 +1133,319 @@ def test_main_real_pytest_attributes_an_exact_rename_to_its_guard(
     output = capsys.readouterr().out
     assert "test_candidate_name_exists" in output
     assert "every isolated production artifact introduced a new failure" in output
+
+
+def test_main_does_not_certify_a_mutant_only_empty_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    old = repository / "src" / "old_parent" / "artifact.py"
+    old.parent.mkdir(parents=True)
+    old.write_text("VALUE = 'before'\n", encoding="utf-8")
+    _git(repository, "add", "src/old_parent/artifact.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+
+    new = repository / "src" / "new_parent" / "artifact.py"
+    new.parent.mkdir(parents=True)
+    old.replace(new)
+    old.parent.rmdir()
+    _git(repository, "add", "-A")
+    _git(repository, "commit", "-qm", "rename production artifact")
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_no_empty_directories",
+        "from pathlib import Path\n\n"
+        "def test_no_empty_directories():\n"
+        "    empty = [str(path) for path in Path('src').rglob('*') "
+        "if path.is_dir() and not any(path.iterdir())]\n"
+        "    assert not empty, empty\n",
+    )
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", suite],
+    )
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+def test_main_does_not_expose_a_mutant_only_checkout_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_checkout_path_identity",
+        "from pathlib import Path\n\n"
+        "def test_checkout_path_is_phase_neutral():\n"
+        "    assert Path.cwd().parent.name != 'measurement-mutant'\n",
+    )
+    original_mkdtemp = subject.tempfile.mkdtemp
+    phase_names = iter(("measurement-control", "measurement-mutant", "measurement-confirmation"))
+    run_index = 0
+
+    def allocated_mkdtemp(*, prefix: str = "tmp", suffix: str = "", dir: str | Path | None = None) -> str:
+        nonlocal run_index
+        if prefix == "measurement-":
+            path = Path(dir) / next(phase_names)
+        elif prefix == "unguarded-run-":
+            run_index += 1
+            path = tmp_path / f"unguarded-run-{run_index}"
+        else:
+            return original_mkdtemp(prefix=prefix, suffix=suffix, dir=dir)
+        path.mkdir()
+        return str(path)
+
+    monkeypatch.setattr(subject.tempfile, "mkdtemp", allocated_mkdtemp)
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", suite])
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+def test_main_does_not_inherit_arbitrary_candidate_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_inherited_candidate_identity",
+        "import os\n"
+        "import subprocess\n\n"
+        "def test_inherited_tree_is_not_a_phase_oracle():\n"
+        "    tree = os.environ.get('ARBITRARY_CANDIDATE_TREE_SENTINEL')\n"
+        "    if tree is not None:\n"
+        "        observed = subprocess.run(['git', 'cat-file', '-e', f'{tree}^{{tree}}'])\n"
+        "        assert observed.returncode == 0\n",
+    )
+    candidate_tree = _git(repository, "rev-parse", "HEAD^{tree}")
+    monkeypatch.setenv("ARBITRARY_CANDIDATE_TREE_SENTINEL", candidate_tree)
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", suite])
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+def test_main_rebinds_product_root_away_from_the_measured_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    package = repository / "src" / "cryodaq"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes(b"")
+    source_paths = Path(__file__).resolve().parents[2] / "src" / "cryodaq" / "paths.py"
+    (package / "paths.py").write_bytes(source_paths.read_bytes())
+    old = repository / "plugins" / "before.py"
+    old.parent.mkdir()
+    old.write_bytes(b"VALUE = True\n")
+    (repository / ".gitignore").write_text("config/.first_run_done\n", encoding="utf-8")
+    _git(repository, "add", ".gitignore", "src/cryodaq/__init__.py", "src/cryodaq/paths.py", "plugins/before.py")
+    _git(repository, "commit", "-qm", "base with production paths")
+    base = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "mv", "plugins/before.py", "plugins/after.py")
+    _git(repository, "commit", "-qm", "rename plugin")
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_product_root_authority",
+        "from cryodaq.paths import get_config_dir\n\n"
+        "def test_product_root_write_is_disposable():\n"
+        "    marker = get_config_dir() / '.first_run_done'\n"
+        "    marker.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    marker.write_text('measurement process write', encoding='utf-8')\n",
+    )
+    source_marker = repository / "config" / ".first_run_done"
+    monkeypatch.setenv("CRYODAQ_ROOT", str(repository))
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", suite])
+
+    result = subject.main()
+    source_was_written = source_marker.exists()
+    if source_was_written:
+        source_marker.unlink()
+        source_marker.parent.rmdir()
+
+    assert result == 1
+    assert not source_was_written
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+
+
+def test_main_requires_the_same_complete_failure_node_to_repeat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    counter = tmp_path / "alternating-node-count"
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_alternating_failure_nodes",
+        "from pathlib import Path\n"
+        "import pytest\n\n"
+        f"COUNTER = Path({str(counter)!r})\n"
+        "MUTANT = Path('src/before.py').is_file()\n"
+        "if MUTANT:\n"
+        "    ACTIVE = int(COUNTER.read_text(encoding='ascii')) if COUNTER.exists() else 0\n"
+        "    COUNTER.write_text(str(ACTIVE + 1), encoding='ascii')\n"
+        "else:\n"
+        "    ACTIVE = -1\n\n"
+        "class TestA:\n"
+        "    def test_guard(self):\n"
+        "        if ACTIVE == 0:\n"
+        "            pytest.fail('coverage signal')\n\n"
+        "class TestB:\n"
+        "    def test_guard(self):\n"
+        "        if ACTIVE == 1:\n"
+        "            pytest.fail('coverage signal')\n",
+    )
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", suite])
+
+    try:
+        result = subject.main()
+    finally:
+        counter.unlink(missing_ok=True)
+
+    assert result == 1
+    output = capsys.readouterr().out
+    assert "mutant failures did not repeat exactly" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+def test_disposable_reverse_rename_prunes_only_the_vacated_parent_chain(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    old = repository / "src" / "legacy" / "deep" / "artifact.py"
+    sibling = repository / "src" / "new_parent" / "sibling.py"
+    old.parent.mkdir(parents=True)
+    sibling.parent.mkdir(parents=True)
+    old.write_bytes(b"VALUE = True\n")
+    sibling.write_bytes(b"SIBLING = True\n")
+    _git(repository, "add", "src/legacy/deep/artifact.py", "src/new_parent/sibling.py")
+    _git(repository, "commit", "-qm", "base nested artifact")
+    base = _git(repository, "rev-parse", "HEAD")
+    new = repository / "src" / "new_parent" / "deep" / "deeper" / "artifact.py"
+    new.parent.mkdir(parents=True)
+    old.replace(new)
+    old.parent.rmdir()
+    old.parent.parent.rmdir()
+    _git(repository, "add", "-A")
+    _git(repository, "commit", "-qm", "rename nested artifact")
+    head = _git(repository, "rev-parse", "HEAD")
+    before = subject.git_entry_at(repository, base, "src/legacy/deep/artifact.py")
+    candidate = subject.git_entry_at(repository, head, "src/new_parent/deep/deeper/artifact.py")
+    assert before is not None and candidate is not None
+    monkeypatch.chdir(repository)
+
+    with subject.disposable_checkout(
+        repository,
+        head,
+        reverse_rename=(
+            "src/legacy/deep/artifact.py",
+            "src/new_parent/deep/deeper/artifact.py",
+            before,
+            candidate,
+        ),
+    ) as checkout:
+        assert (checkout / "src" / "legacy" / "deep" / "artifact.py").read_bytes() == b"VALUE = True\n"
+        assert not (checkout / "src" / "new_parent" / "deep").exists()
+        assert (checkout / "src" / "new_parent" / "sibling.py").read_bytes() == b"SIBLING = True\n"
+
+
+@pytest.mark.parametrize(
+    ("old_relative", "new_relative"),
+    (
+        ("src/node", "src/node/deep/artifact.py"),
+        ("src/node/deep/artifact.py", "src/node"),
+    ),
+)
+def test_disposable_reverse_rename_handles_file_directory_prefixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    old_relative: str,
+    new_relative: str,
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    old = repository / old_relative
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"VALUE = 'same entry'\n")
+    _git(repository, "add", old_relative)
+    _git(repository, "commit", "-qm", "base prefix entry")
+    base = _git(repository, "rev-parse", "HEAD")
+    payload = old.read_bytes()
+    old.unlink()
+    current = old.parent
+    source_root = repository / "src"
+    while current != source_root and not any(current.iterdir()):
+        parent = current.parent
+        current.rmdir()
+        current = parent
+    new = repository / new_relative
+    new.parent.mkdir(parents=True, exist_ok=True)
+    new.write_bytes(payload)
+    _git(repository, "add", "-A")
+    _git(repository, "commit", "-qm", "rename across file directory prefix")
+    head = _git(repository, "rev-parse", "HEAD")
+    before = subject.git_entry_at(repository, base, old_relative)
+    candidate = subject.git_entry_at(repository, head, new_relative)
+    assert before is not None and candidate is not None
+    monkeypatch.chdir(repository)
+
+    with subject.disposable_checkout(
+        repository,
+        head,
+        reverse_rename=(old_relative, new_relative, before, candidate),
+    ) as checkout:
+        assert (checkout / old_relative).read_bytes() == payload
+        candidate_path = checkout / new_relative
+        if PurePosixPath(old_relative).is_relative_to(PurePosixPath(new_relative)):
+            assert candidate_path.is_dir()
+        else:
+            assert not candidate_path.exists()
+        assert not subject.path_matches_git_entry(candidate_path, candidate)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows checkouts may not materialize Git symlinks")
+def test_disposable_checkout_rejects_a_tracked_symlink_resolving_outside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    outside = tmp_path / "outside.py"
+    outside.write_text("VALUE = 'outside'\n", encoding="utf-8")
+    link = repository / "src" / "outside.py"
+    link.parent.mkdir()
+    os.symlink(outside, link)
+    _git(repository, "add", "src/outside.py")
+    _git(repository, "commit", "-qm", "tracked external symlink")
+    head = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+
+    with pytest.raises(subject.MeasurementError, match="resolves outside the disposable checkout"):
+        with subject.disposable_checkout(repository, head):
+            raise AssertionError("external tracked symlink reached candidate execution")

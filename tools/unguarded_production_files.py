@@ -78,25 +78,26 @@ the same asymmetry the tool exists to exploit:
   refused. An exact-entry rename is reversed only inside a disposable checkout
   with an atomic filesystem rename, then committed into a clean synthetic
   snapshot before pytest can run.
-* **A mutation created persistent structure.** A former parent is created only
-  inside the disposable checkout; the source tree never gains directories or
-  recovery artifacts.
+* **A mutation created observable structure.** Atomic parking handles path-prefix
+  renames, vacated parents are pruned, and a no-follow inventory requires every
+  non-Git leaf and directory to come from the synthetic tree before pytest runs.
 * **Measurement scaffolding looked like production.** Dirty/staged Git state,
-  phase-labelled cache paths, original-candidate ancestry/refs/reflogs, and
-  inherited candidate SHA values could make unrelated tests red. Every phase
-  now uses a neutral external path and a clean two-commit same-tree history;
-  source Git identity is removed and pruned, and child SHA is rebound to that
-  synthetic HEAD before candidate code runs.
+  distinct checkout/cache paths, original-candidate ancestry/refs/reflogs, and
+  inherited candidate identity could make unrelated tests red. Every phase
+  recreates the same external slot and run path with a clean two-commit
+  same-tree history; source Git identity is pruned and child SHA is rebound to
+  that synthetic HEAD before candidate code runs.
 * **A clean checkout hid transformed bytes.** Git filters can materialize bytes
   that differ from the tree while porcelain remains clean. Every tracked raw
   blob and supported mode is verified before candidate code runs.
-* **Candidate code retained judge authority.** Protected CI channels, inherited
-  Git redirection, source-path environment values, clone origins, and
-  unconfined pytest selectors could escape the disposable boundary. They are
-  stripped or rejected before launch.
-* **One flaky red counted as coverage.** A mutant failure must repeat exactly,
-  then the same node must disappear in a fresh candidate checkout in this
-  invocation.
+* **Candidate code retained judge authority.** Protected CI channels, arbitrary
+  candidate-identity variables, source-root routing, clone origins, and
+  unconfined pytest selectors could escape the disposable boundary. The child
+  environment is constructed from a small OS allowlist and binds every project,
+  cache, home, and runtime path to disposable state.
+* **One flaky red counted as coverage.** The complete pytest node and failure
+  summary must repeat after the mutant checkout is reset to its exact tree;
+  then that full identity must disappear in a fresh candidate phase.
 
 USAGE
 
@@ -160,6 +161,23 @@ from tools.ci_active_checkout_runner import (
 _NON_RUNTIME_TOP_LEVELS = frozenset({".github", "build_scripts", "docs", "governance", "scripts", "tests", "tools"})
 _PYTEST_TIMEOUT_SECONDS = 120
 _STATE_DIRECTORY_NAME = "cryodaq-unguarded-production-files"
+_MEASUREMENT_ENV_PASSTHROUGH = frozenset(
+    {
+        "COMSPEC",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "NUMBER_OF_PROCESSORS",
+        "OS",
+        "PATH",
+        "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "WINDIR",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -548,6 +566,200 @@ def assert_checkout_matches_tree(root: Path, revision: str) -> None:
             raise MeasurementError(f"tracked file {relative!r} does not have its Git tree's raw blob identity")
 
 
+def _tracked_checkout_shape(root: Path, revision: str) -> tuple[set[str], set[str], set[str]]:
+    listing = _git_bytes_at(root, ["ls-tree", "-r", "-z", revision])
+    if listing.returncode != 0:
+        raise MeasurementError("disposable checkout inventory could not read the synthetic tree")
+    leaves: set[str] = set()
+    directories: set[str] = set()
+    symlinks: set[str] = set()
+    for record in listing.stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_relative = record.split(b"\t", 1)
+        mode, object_type, _object_id = metadata.decode("ascii").split()
+        relative = _safe_relative(os.fsdecode(raw_relative))
+        if object_type != "blob" or mode not in {"100644", "100755", "120000"}:
+            raise MeasurementError(f"tracked entry {relative!r} has unsupported checkout identity {mode} {object_type}")
+        leaves.add(relative)
+        if mode == "120000":
+            symlinks.add(relative)
+        for parent in PurePosixPath(relative).parents:
+            if parent == PurePosixPath("."):
+                break
+            directories.add(parent.as_posix())
+    return leaves, directories, symlinks
+
+
+def _actual_checkout_shape(root: Path) -> tuple[set[str], set[str]]:
+    canonical_root = root.resolve(strict=True)
+    git_directory = canonical_root / ".git"
+    junction = getattr(git_directory, "is_junction", None)
+    if git_directory.is_symlink() or (junction is not None and junction()) or not git_directory.is_dir():
+        raise MeasurementError("disposable checkout Git metadata is not a confined directory")
+
+    leaves: set[str] = set()
+    directories: set[str] = set()
+    pending: list[tuple[Path, PurePosixPath]] = [(canonical_root, PurePosixPath("."))]
+    while pending:
+        directory, relative_parent = pending.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError as exc:
+            raise MeasurementError(f"disposable checkout directory could not be inventoried: {directory}") from exc
+        for entry in entries:
+            if relative_parent == PurePosixPath(".") and entry.name == ".git":
+                continue
+            relative = (
+                PurePosixPath(entry.name) if relative_parent == PurePosixPath(".") else relative_parent / entry.name
+            )
+            relative_text = _safe_relative(relative.as_posix())
+            path = Path(entry.path)
+            if entry.is_symlink():
+                leaves.add(relative_text)
+                continue
+            path_junction = getattr(path, "is_junction", None)
+            if path_junction is not None and path_junction():
+                raise MeasurementError(f"disposable checkout contains an unexpected junction: {relative_text}")
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise MeasurementError(f"disposable checkout entry could not be inventoried: {relative_text}") from exc
+            reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            attributes = getattr(observed, "st_file_attributes", 0)
+            if reparse and attributes & reparse:
+                raise MeasurementError(f"disposable checkout contains an unexpected reparse point: {relative_text}")
+            if entry.is_dir(follow_symlinks=False):
+                directories.add(relative_text)
+                pending.append((path, relative))
+            elif entry.is_file(follow_symlinks=False):
+                leaves.add(relative_text)
+            else:
+                raise MeasurementError(f"disposable checkout contains an unsupported entry: {relative_text}")
+    return leaves, directories
+
+
+def assert_disposable_checkout_matches_tree(root: Path, revision: str) -> None:
+    """Require the entire non-Git filesystem shape to be exactly tree-derived."""
+
+    assert_checkout_matches_tree(root, revision)
+    expected_leaves, expected_directories, symlinks = _tracked_checkout_shape(root, revision)
+    actual_leaves, actual_directories = _actual_checkout_shape(root)
+    if actual_leaves != expected_leaves or actual_directories != expected_directories:
+        detail = {
+            "extra_leaves": sorted(actual_leaves - expected_leaves)[:5],
+            "missing_leaves": sorted(expected_leaves - actual_leaves)[:5],
+            "extra_directories": sorted(actual_directories - expected_directories)[:5],
+            "missing_directories": sorted(expected_directories - actual_directories)[:5],
+        }
+        raise MeasurementError(f"disposable checkout filesystem does not exactly match its synthetic tree: {detail}")
+
+    canonical_root = root.resolve(strict=True)
+    for relative in sorted(symlinks):
+        path = _checkout_path(canonical_root, relative)
+        try:
+            target = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise MeasurementError(f"tracked symlink {relative!r} has no confined materialized target") from exc
+        if target == canonical_root or not target.is_relative_to(canonical_root):
+            raise MeasurementError(f"tracked symlink {relative!r} resolves outside the disposable checkout")
+        target_relative = target.relative_to(canonical_root).as_posix()
+        if target_relative == ".git" or target_relative.startswith(".git/"):
+            raise MeasurementError(f"tracked symlink {relative!r} resolves into disposable Git metadata")
+        if target_relative not in expected_leaves and target_relative not in expected_directories:
+            raise MeasurementError(f"tracked symlink {relative!r} resolves to an untracked checkout entry")
+
+
+def _prune_empty_checkout_parents(root: Path, start: Path) -> None:
+    canonical_root = root.resolve(strict=True)
+    current = start
+    while current != canonical_root:
+        junction = getattr(current, "is_junction", None)
+        if current.is_symlink() or (junction is not None and junction()):
+            raise MeasurementError(f"refusing to prune a linked disposable directory: {current}")
+        try:
+            canonical = current.resolve(strict=True)
+        except OSError as exc:
+            raise MeasurementError(f"disposable directory could not be resolved before pruning: {current}") from exc
+        if not canonical.is_relative_to(canonical_root):
+            raise MeasurementError(f"refusing to prune outside the disposable checkout: {canonical}")
+        try:
+            current.rmdir()
+        except OSError:
+            try:
+                if any(current.iterdir()):
+                    return
+            except OSError as exc:
+                raise MeasurementError(
+                    f"disposable directory could not be inspected before pruning: {current}"
+                ) from exc
+            raise MeasurementError(f"empty disposable directory could not be pruned: {current}")
+        current = current.parent
+
+
+def _create_checkout_parents(root: Path, relative: str) -> None:
+    canonical_root = root.resolve(strict=True)
+    current = canonical_root
+    for part in PurePosixPath(_safe_relative(relative)).parts[:-1]:
+        current /= part
+        if current.exists() or current.is_symlink():
+            junction = getattr(current, "is_junction", None)
+            if current.is_symlink() or (junction is not None and junction()) or not current.is_dir():
+                raise MeasurementError(f"disposable-checkout parent is not a confined directory: {current}")
+        else:
+            current.mkdir()
+        if not current.resolve(strict=True).is_relative_to(canonical_root):
+            raise MeasurementError(f"disposable-checkout parent escapes its root: {current}")
+
+
+def _atomically_reverse_exact_rename(
+    checkout: Path,
+    old_relative: str,
+    new_relative: str,
+    before: GitEntry,
+    candidate: GitEntry,
+) -> None:
+    new = _checkout_path(checkout, new_relative)
+    old = checkout.joinpath(*PurePosixPath(_safe_relative(old_relative)).parts)
+    old_is_candidate_container = old.is_dir() and not old.is_symlink() and new.is_relative_to(old)
+    if ((old.exists() or old.is_symlink()) and not old_is_candidate_container) or not path_matches_git_entry(
+        new, candidate
+    ):
+        raise MeasurementError("disposable candidate rename pair has an unexpected identity")
+
+    parking = checkout / ".git" / "cryodaq-mutant-entry"
+    if parking.exists() or parking.is_symlink():
+        raise MeasurementError("disposable mutation parking path is unexpectedly occupied")
+    os.replace(new, parking)
+    if not path_matches_git_entry(parking, candidate):
+        raise MeasurementError("atomic disposable parking move lost the candidate entry")
+    _prune_empty_checkout_parents(checkout, new.parent)
+    _create_checkout_parents(checkout, old_relative)
+    old = _checkout_path(checkout, old_relative)
+    if old.exists() or old.is_symlink():
+        raise MeasurementError("disposable reverse-rename destination became occupied")
+    os.replace(parking, old)
+    new_is_mutant_container = new.is_dir() and not new.is_symlink() and old.is_relative_to(new)
+    if (
+        not path_matches_git_entry(old, before)
+        or ((new.exists() or new.is_symlink()) and not new_is_mutant_container)
+        or parking.exists()
+    ):
+        raise MeasurementError("atomic disposable rename did not produce the requested mutant")
+
+
+def _normalize_disposable_checkout(checkout: Path, revision: str) -> None:
+    _run_measurement_command(("git", "reset", "--hard", "--quiet", revision), root=checkout)
+    _run_measurement_command(("git", "clean", "-d", "-f", "-x", "--quiet"), root=checkout)
+    observed_head = _git_at(checkout, ["rev-parse", "HEAD"])
+    status = _git_at(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
+    if observed_head.returncode != 0 or observed_head.stdout.strip() != revision:
+        raise MeasurementError("synthetic measurement snapshot did not become HEAD")
+    if status.returncode != 0 or status.stdout:
+        raise MeasurementError("synthetic measurement snapshot is not index/worktree clean")
+    assert_disposable_checkout_matches_tree(checkout, revision)
+
+
 def _synthetic_commit_environment() -> dict[str, str]:
     environment = _git_env()
     environment.update(
@@ -573,7 +785,7 @@ def _materialize_clean_snapshot(
     candidate_tree = _git_at(checkout, ["rev-parse", f"{revision}^{{tree}}"])
     if candidate_tree.returncode != 0:
         raise MeasurementError("candidate tree could not be resolved in the disposable checkout")
-    assert_checkout_matches_tree(checkout, revision)
+    assert_disposable_checkout_matches_tree(checkout, revision)
 
     old_relative: str | None = None
     new_relative: str | None = None
@@ -585,15 +797,7 @@ def _materialize_clean_snapshot(
         new_relative = _safe_relative(new_relative)
         if before != candidate or old_relative == new_relative:
             raise MeasurementError("disposable mutation is not an exact-entry rename")
-        old = _checkout_path(checkout, old_relative)
-        new = _checkout_path(checkout, new_relative)
-        if old.exists() or old.is_symlink() or not path_matches_git_entry(new, candidate):
-            raise MeasurementError("disposable candidate rename pair has an unexpected identity")
-        old.parent.mkdir(parents=True, exist_ok=True)
-        old = _checkout_path(checkout, old_relative)
-        os.replace(new, old)
-        if not path_matches_git_entry(old, before) or new.exists() or new.is_symlink():
-            raise MeasurementError("atomic disposable rename did not produce the requested mutant")
+        _atomically_reverse_exact_rename(checkout, old_relative, new_relative, before, candidate)
         _run_measurement_command(("git", "update-index", "--force-remove", "--", new_relative), root=checkout)
         _run_measurement_command(
             (
@@ -631,22 +835,19 @@ def _materialize_clean_snapshot(
         environment=commit_environment,
     ).stdout.strip()
     _run_measurement_command(("git", "config", "core.logAllRefUpdates", "false"), root=checkout)
-    _run_measurement_command(("git", "reset", "--hard", "--quiet", commit), root=checkout)
-    observed_head = _git_at(checkout, ["rev-parse", "HEAD"])
-    status = _git_at(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
-    if observed_head.returncode != 0 or observed_head.stdout.strip() != commit:
-        raise MeasurementError("synthetic measurement snapshot did not become HEAD")
-    if status.returncode != 0 or status.stdout:
-        raise MeasurementError("synthetic measurement snapshot is not index/worktree clean")
+    _normalize_disposable_checkout(checkout, commit)
     ancestry = _git_at(checkout, ["diff", "--quiet", "HEAD^", "HEAD"])
     if ancestry.returncode != 0:
         raise MeasurementError("synthetic measurement ancestry exposes a phase-specific tree change")
-    assert_checkout_matches_tree(checkout, commit)
+    assert_disposable_checkout_matches_tree(checkout, commit)
     if reverse_rename is not None:
         assert old_relative is not None and new_relative is not None and before is not None
         old = _checkout_path(checkout, old_relative)
-        new = _checkout_path(checkout, new_relative)
-        if not path_matches_git_entry(old, before) or new.exists() or new.is_symlink():
+        new = checkout.joinpath(*PurePosixPath(_safe_relative(new_relative)).parts)
+        new_is_mutant_container = new.is_dir() and not new.is_symlink() and old.is_relative_to(new)
+        if not path_matches_git_entry(old, before) or (
+            (new.exists() or new.is_symlink()) and not new_is_mutant_container
+        ):
             raise MeasurementError("clean synthetic mutant lost the exact reverse rename")
     return commit
 
@@ -808,7 +1009,14 @@ def disposable_checkout(
     """Yield a verified local checkout and never write the measured source tree."""
 
     source = source.resolve(strict=True)
-    state = Path(tempfile.mkdtemp(prefix="measurement-", dir=_state_directory(source))).resolve(strict=True)
+    state = _state_directory(source) / f"measurement-{os.getpid()}"
+    try:
+        state.mkdir()
+    except FileExistsError as exc:
+        raise MeasurementError(f"phase-neutral disposable slot is already occupied: {state}") from exc
+    except OSError as exc:
+        raise MeasurementError(f"phase-neutral disposable slot could not be created: {state}") from exc
+    state = state.resolve(strict=True)
     checkout = state / "checkout"
     preserve = False
     try:
@@ -870,55 +1078,81 @@ def _validated_suite_selector(root: Path, selector: str) -> str:
 
 
 def _measurement_environment(source_root: Path, checkout_root: Path, run_root: Path) -> dict[str, str]:
-    environment = _checkout_environment(checkout_root)
-    for key in tuple(environment):
-        if key.startswith("GIT_"):
-            environment.pop(key)
-    for key in (
-        "BUILD_SOURCEVERSION",
-        "CI_COMMIT_SHA",
-        "GITHUB_BASE_SHA",
-        "GITHUB_EVENT_PATH",
-        "GITHUB_HEAD_SHA",
-        "GITHUB_WORKSPACE",
-        "INIT_CWD",
-        "OLDPWD",
-        "PYTEST_ADDOPTS",
-        "PYTEST_PLUGINS",
-    ):
-        environment.pop(key, None)
+    inherited = _checkout_environment(checkout_root)
+    environment = {key: inherited[key] for key in _MEASUREMENT_ENV_PASSTHROUGH if key in inherited}
+    source_root = source_root.resolve(strict=True)
+    path_entries: list[str] = []
+    for entry in environment.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            resolved = Path(entry).resolve(strict=False)
+        except OSError:
+            continue
+        if resolved == source_root or resolved.is_relative_to(source_root):
+            continue
+        path_entries.append(entry)
+    environment["PATH"] = os.pathsep.join(path_entries)
 
     synthetic_head = _git_at(checkout_root, ["rev-parse", "HEAD"])
     if synthetic_head.returncode != 0:
         raise MeasurementError("synthetic candidate HEAD could not be bound into the child environment")
-    source_spellings = {str(source_root).casefold(), source_root.as_posix().casefold()}
-    for key in ("PYTHONPATH", "PWD"):
-        value = environment.get(key, "")
-        if any(spelling and spelling in value.casefold() for spelling in source_spellings):
-            environment.pop(key, None)
-
     runtime = run_root / "runtime"
     temporary = run_root / "tmp"
     cache = run_root / "cache"
     pycache = run_root / "pycache"
-    for path in (runtime, temporary, cache, pycache):
+    home = run_root / "home"
+    appdata = run_root / "appdata"
+    local_appdata = run_root / "local-appdata"
+    config_home = run_root / "config"
+    data_home = run_root / "data"
+    state_home = run_root / "state"
+    for path in (
+        runtime,
+        temporary,
+        cache,
+        pycache,
+        home,
+        appdata,
+        local_appdata,
+        config_home,
+        data_home,
+        state_home,
+    ):
         path.mkdir(parents=True, exist_ok=True)
     environment.update(
         {
+            "APPDATA": str(appdata),
             "COVERAGE_FILE": str(cache / ".coverage"),
+            "CRYODAQ_ROOT": str(checkout_root),
             "CRYODAQ_STATE_ROOT": str(runtime),
             "GITHUB_SHA": synthetic_head.stdout.strip(),
+            "HOME": str(home),
+            "LOCALAPPDATA": str(local_appdata),
+            "MPLBACKEND": "Agg",
             "MPLCONFIGDIR": str(cache / "matplotlib"),
             "NUMBA_CACHE_DIR": str(cache / "numba"),
             "PWD": str(checkout_root),
+            "PYTHONHASHSEED": "0",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONPATH": os.pathsep.join((str(checkout_root), str(checkout_root / "src"))),
             "PYTHONPYCACHEPREFIX": str(pycache),
+            "PYTHONUTF8": "1",
+            "QT_QPA_PLATFORM": "offscreen",
             "TEMP": str(temporary),
             "TMP": str(temporary),
             "TMPDIR": str(temporary),
+            "USERPROFILE": str(home),
             "XDG_CACHE_HOME": str(cache / "xdg"),
+            "XDG_CONFIG_HOME": str(config_home),
+            "XDG_DATA_HOME": str(data_home),
+            "XDG_STATE_HOME": str(state_home),
         }
     )
-    environment.pop("PYTHONDONTWRITEBYTECODE", None)
+    if os.name == "nt":
+        home_drive, home_path = os.path.splitdrive(str(home))
+        environment["HOMEDRIVE"] = home_drive
+        environment["HOMEPATH"] = home_path
     return environment
 
 
@@ -951,7 +1185,7 @@ def failures(
             raise MeasurementError(f"pytest over {suite!r} exceeded {_PYTEST_TIMEOUT_SECONDS} seconds") from exc
         stdout = str(run.stdout or "")
         stderr = str(run.stderr or "")
-        parsed = [line.split("::")[-1].strip() for line in stdout.splitlines() if line.startswith("FAILED")]
+        parsed = [line.removeprefix("FAILED ").strip() for line in stdout.splitlines() if line.startswith("FAILED ")]
         if run.returncode not in (0, 1) or (run.returncode == 1 and not parsed):
             tail = "\n".join((stdout + stderr).splitlines()[-15:])
             raise MeasurementError(f"pytest over {suite!r} exited {run.returncode} with no readable result:\n{tail}")
@@ -965,17 +1199,27 @@ def fresh_failures(
     root: Path | None = None,
     source_root: Path | None = None,
 ) -> list[str]:
-    run_root = Path(tempfile.mkdtemp(prefix="unguarded-run-"))
+    checkout_root = (root or repository_root()).resolve(strict=True)
+    run_root = checkout_root.parent / "unguarded-run"
+    if run_root.exists() or run_root.is_symlink():
+        raise MeasurementError(f"phase-neutral pytest state path is already occupied: {run_root}")
+    run_root.mkdir()
     preserve = False
     try:
-        return failures(suites, run_root, root=root, source_root=source_root)
+        return failures(suites, run_root, root=checkout_root, source_root=source_root)
     except UnsettledProcessTree as unsettled:
         preserve = True
         raise UnsettledProcessTree(f"{unsettled}; phase-neutral pytest state preserved at {run_root}") from unsettled
     finally:
         if not preserve:
+            junction = getattr(run_root, "is_junction", None)
+            if run_root.is_symlink() or (junction is not None and junction()):
+                raise MeasurementError(f"refusing to clean linked pytest state at {run_root}")
             try:
-                shutil.rmtree(run_root)
+                canonical = run_root.resolve(strict=True)
+                if canonical.parent != checkout_root.parent.resolve(strict=True) or canonical.name != "unguarded-run":
+                    raise MeasurementError(f"refusing to clean unbound pytest state at {canonical}")
+                shutil.rmtree(canonical)
             except OSError as exc:
                 raise MeasurementError(f"pytest state cleanup failed at {run_root}: {exc}") from exc
 
@@ -988,6 +1232,8 @@ def repeated_mutant_failures(
     inputs: SuiteInputs,
 ) -> list[str]:
     first = sorted(set(fresh_failures(suites, root=root, source_root=source_root)))
+    assert_suite_inputs_unchanged(inputs, root)
+    _normalize_disposable_checkout(root, inputs.head)
     assert_suite_inputs_unchanged(inputs, root)
     second = sorted(set(fresh_failures(suites, root=root, source_root=source_root)))
     assert_suite_inputs_unchanged(inputs, root)
