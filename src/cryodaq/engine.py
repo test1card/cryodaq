@@ -7155,12 +7155,19 @@ async def _run_engine(
         label="durable_attention_history_feed",
         rollback=attention_history_feed.stop,
     )
-    await startup.call(
-        lambda: event_bus.retain_required_observer(
+    # Called directly rather than through startup.call: two guards bind this site.
+    # test_operator_snapshot_production requires the literal call in _run_engine's
+    # source, and test_engine_b3_structure forbids nested callables there, so neither
+    # a lambda nor a functools.partial can satisfy both. The try/except preserves
+    # startup.call's rollback-then-reraise semantics exactly.
+    try:
+        event_bus.retain_required_observer(
             "durable_attention_history",
             attention_history_feed.persist_event,
         )
-    )
+    except BaseException:
+        await startup.rollback()
+        raise
     startup.add(
         "durable_attention_history_observer",
         functools.partial(event_bus.release_required_observer, "durable_attention_history"),
