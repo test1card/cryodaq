@@ -220,6 +220,8 @@ class MainWindowV2(QMainWindow):
         self._typed_safety_ready = False
         self._last_disk_observed_at: datetime | None = None
         self._accepted_disk_bridge_instance_id: str | None = None
+        self._reading_transport_invalidated = False
+        self._retired_reading_bridge_instance_id: str | None = None
 
         self.setWindowTitle("CryoDAQ")
         self.setMinimumSize(1280, 800)
@@ -649,6 +651,9 @@ class MainWindowV2(QMainWindow):
         if type(qualified) is not DescriptorQualifiedReading or type(qualified.reading) is not Reading:
             logger.warning("malformed descriptor-qualified reading dropped")
             return
+        if not MainWindowV2._accept_reading_bridge_authority(self, qualified.reading):
+            logger.debug("retired or foreign bridge reading dropped")
+            return
 
         view: DescriptorView | None = None
         result: IngestResult | None = None
@@ -682,6 +687,8 @@ class MainWindowV2(QMainWindow):
 
     def invalidate_descriptor_transport(self) -> None:
         """Retire every GUI consumer anchored to the outgoing bridge."""
+        self._reading_transport_invalidated = True
+        self._retired_reading_bridge_instance_id = self._current_bridge_instance_id()
         failures: list[Exception] = []
 
         def attempt(callback: Callable[[], None]) -> None:
@@ -867,6 +874,25 @@ class MainWindowV2(QMainWindow):
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
                 self._dispatch_safety_evidence(reading)
+
+    def _accept_reading_bridge_authority(self, reading: Reading) -> bool:
+        """Bind production qualified readings to the current bridge incarnation."""
+        if getattr(self, "_bridge", None) is None:
+            return True
+        current_bridge_instance_id = MainWindowV2._current_bridge_instance_id(self)
+        metadata = reading.metadata
+        if (
+            current_bridge_instance_id is None
+            or type(metadata) is not dict
+            or metadata.get("bridge_instance_id") != current_bridge_instance_id
+        ):
+            return False
+        if getattr(self, "_reading_transport_invalidated", False):
+            if current_bridge_instance_id == getattr(self, "_retired_reading_bridge_instance_id", None):
+                return False
+            self._reading_transport_invalidated = False
+            self._retired_reading_bridge_instance_id = None
+        return True
 
     def _current_bridge_instance_id(self) -> str | None:
         value = getattr(self._bridge, "bridge_instance_id", None)
