@@ -320,6 +320,7 @@ _RECORD_SCHEMAS: Final = {
         "allowed": frozenset(
             {
                 "source_id",
+                "parent_source_id",
                 "state",
                 "reason_code",
                 "transport_reason_code",
@@ -399,6 +400,7 @@ _RECORD_SCHEMAS: Final = {
 _IDENTIFIER_RECORD_FIELDS: Final = frozenset(
     {
         "source_id",
+        "parent_source_id",
         "state",
         "reason_code",
         "transport_reason_code",
@@ -739,6 +741,9 @@ def _validate_snapshot_relationships(kind: str, payload: dict[str, object]) -> N
         raise ValueError(f"{kind} child uses a reserved summary identity")
     if kind == "integrity" and role != "summary":
         raise ValueError("integrity evidence must have summary record_role")
+    if kind == "health" and role == "child" and "parent_source_id" in payload:
+        if payload["parent_source_id"] not in summary_identities:
+            raise ValueError("health child parent must identify a canonical health summary")
     for field in ("snapshot_source_id", "snapshot_producer_id"):
         source_id = payload[field]
         if _LIVE_SNAPSHOT_ID_RE.fullmatch(source_id) is not None and mode != "live":
@@ -751,11 +756,15 @@ def _validate_snapshot_relationships(kind: str, payload: dict[str, object]) -> N
         expected_severity = _ATTENTION_SEVERITY_BY_STATE.get(payload["state"], "warning")
         if payload["severity"] != expected_severity:
             raise ValueError("attention severity contradicts its state")
+        if role == "child" and payload["state"] == "ok":
+            raise ValueError("attention child cannot claim ok state")
     if kind == "integrity":
         state = payload["state"]
         storage = payload["storage"]
         if state == "ok" and storage != "available":
             raise ValueError("ok integrity state requires available storage")
+        if state == "ok" and payload.get("dropped_records", 0) != 0:
+            raise ValueError("ok integrity state requires zero dropped records")
         if state in {"stale", "disconnected"} and storage != "unknown":
             raise ValueError("stale/disconnected integrity state requires unknown storage")
 
@@ -977,6 +986,13 @@ class BundleCapture:
         }
         if len(snapshot_cuts) > 1:
             raise ValueError("snapshot records do not share one coherent snapshot cut")
+        snapshot_records = tuple(payload for kind, payload in decoded_records if kind in _SNAPSHOT_RECORD_KINDS)
+        transport_ages = {payload["transport_age_us"] for payload in snapshot_records}
+        if len(transport_ages) > 1:
+            raise ValueError("snapshot records do not share one coherent transport age")
+        transport_conditions = {payload.get("transport_reason_code") for payload in snapshot_records}
+        if len(transport_conditions) > 1:
+            raise ValueError("snapshot records do not share one coherent transport condition")
         for snapshot_kind, summary_label in (("health", "health summaries"), ("attention", "attention summary")):
             summary_states = tuple(
                 payload["state"]
@@ -989,12 +1005,34 @@ class BundleCapture:
                 if kind == snapshot_kind and payload["record_role"] == "child"
             )
             if (
+                snapshot_kind == "health"
+                and summary_states
+                and not child_states
+                and any(state == "ok" for state in summary_states)
+            ):
+                raise ValueError(f"{summary_label} cannot claim ok without children")
+            if (
                 summary_states
                 and child_states
                 and max(_STATE_RANK[state] for state in summary_states)
                 < max(_STATE_RANK[state] for state in child_states)
             ):
                 raise ValueError(f"{summary_label} understate child evidence")
+            if snapshot_kind == "health":
+                summary_by_id = {
+                    payload["source_id"]: payload
+                    for kind, payload in decoded_records
+                    if kind == "health" and payload["record_role"] == "summary"
+                }
+                for kind, payload in decoded_records:
+                    if kind != "health" or payload["record_role"] != "child":
+                        continue
+                    parent_id = payload.get("parent_source_id")
+                    if (
+                        parent_id is not None
+                        and _STATE_RANK[payload["state"]] > _STATE_RANK[summary_by_id[parent_id]["state"]]
+                    ):
+                        raise ValueError("health summary understate parent-bound child evidence")
         if tuple(sorted(set(self.unavailable_fields))) != self.unavailable_fields:
             raise ValueError("unavailable_fields must be sorted and unique")
         if any(item not in _UNAVAILABLE_FIELDS for item in self.unavailable_fields):

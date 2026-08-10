@@ -39,6 +39,7 @@ _log = logging.getLogger(__name__)
 _MAX_HEALTH_RECORDS = 64
 _MAX_ATTENTION_RECORDS = 32
 _MAX_LOG_RECORDS = 64
+_MAX_EVENT_TAGS = 16
 _MAX_AUDIT_RECORDS = 64
 
 _PUBLIC_EVENT_SOURCE_CODES = {
@@ -281,6 +282,7 @@ def _collect_health(
         ):
             payload: dict[str, object] = {
                 "source_id": safe_source_id,
+                "parent_source_id": ("plant-health-summary" if _summary is plant else "infrastructure-summary"),
                 "state": _safe_identifier(state.value),
                 "observed_at": _utc_iso(_summary.observed_at),
                 "revision": _summary.revision,
@@ -404,6 +406,8 @@ def _collect_recent_entries(
                 raise TypeError("recent evidence source and tags must be exact strings")
             if entry.source not in _PUBLIC_EVENT_SOURCE_CODES:
                 raise ValueError("recent evidence source is not in the public projection allowlist")
+            if len(entry.tags) > _MAX_EVENT_TAGS:
+                raise ValueError("recent evidence tag cardinality exceeds the public projection bounds")
             if any(not tag or len(tag.encode("utf-8")) > 128 for tag in entry.tags):
                 raise ValueError("recent evidence tags exceed the public projection bounds")
             unknown_tags = tuple(tag for tag in entry.tags if tag not in _PUBLIC_EVENT_TAGS)
