@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -268,6 +269,7 @@ class CooldownService:
         # Latest T values for detector
         self._last_T_cold: float | None = None
         self._last_T_warm: float | None = None
+        self._last_required_input_monotonic: dict[str, float] = {}
 
         # Task 8a: lazily-loaded cooldown_baseline config from plugins.yaml
         # (None = not loaded yet). The fingerprint tap is flag-guarded and
@@ -637,10 +639,12 @@ class CooldownService:
                     continue
 
                 if reading.channel == self._channel_cold:
+                    self._last_required_input_monotonic[self._channel_cold] = time.monotonic()
                     self._last_T_cold = reading.value
                     # Update detector (use reading timestamp for correct dT/dt)
                     self._detector.update(reading_ts, reading.value)
                 elif reading.channel == self._channel_warm:
+                    self._last_required_input_monotonic[self._channel_warm] = time.monotonic()
                     self._last_T_warm = reading.value
 
                 # Buffer data during cooldown
@@ -686,6 +690,16 @@ class CooldownService:
         T_cold = self._last_T_cold
         T_warm = self._last_T_warm
         if T_cold is None or T_warm is None:
+            return
+        freshness_horizon_s = max(3.0 * self._predict_interval_s, 1.0)
+        now_monotonic = time.monotonic()
+        required_channels = (self._channel_cold, self._channel_warm)
+        if any(
+            now_monotonic - self._last_required_input_monotonic.get(channel, float("-inf"))
+            > freshness_horizon_s
+            for channel in required_channels
+        ):
+            logger.warning("Cooldown prediction withheld because a required input is stale")
             return
 
         # Compute elapsed time
@@ -748,6 +762,7 @@ class CooldownService:
             "cooldown_start_ts": self._detector.cooldown_start_ts or 0,
             "T_cold": T_cold,
             "T_warm": T_warm,
+            "producer_interval_s": self._predict_interval_s,
         }
         self._last_prediction = metadata  # cache for F30 query agent
         # v0.55.3 — keep the raw dataclass so expected_value() can

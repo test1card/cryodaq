@@ -17,6 +17,7 @@ silently lies -- a vanished readout is what caused revert `0bea0449`.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import queue
 from datetime import UTC, datetime, timedelta
@@ -24,12 +25,13 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import msgpack
 import pytest
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.core import zmq_subprocess as subprocess_module
 from cryodaq.core.channel_manager import ChannelManager
-from cryodaq.core.zmq_bridge import _pack_reading
+from cryodaq.core.zmq_bridge import ZMQPublisher, _pack_reading
 from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, _decode_reading_frames
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
@@ -70,6 +72,14 @@ def _configured_dashboard(tmp_path, monkeypatch, *, cadence_s: float) -> Dashboa
     return view
 
 
+class _PublisherSocket:
+    def __init__(self) -> None:
+        self.frames: list[list[bytes]] = []
+
+    async def send_multipart(self, frames: list[bytes]) -> None:
+        self.frames.append(frames)
+
+
 def _eta_reading(
     timestamp: datetime,
     value: float = 2.0,
@@ -77,18 +87,41 @@ def _eta_reading(
     cadence_s: float | None = 30.0,
     source_age_s: float | None = 0.0,
 ) -> Reading:
-    metadata = {}
+    source_metadata = {}
     if cadence_s is not None:
-        metadata["producer_interval_s"] = cadence_s
+        source_metadata["producer_interval_s"] = cadence_s
     if source_age_s is not None:
-        metadata["source_age_s"] = source_age_s
-    return Reading(
+        source_metadata["source_age_s"] = source_age_s
+    source = Reading(
         timestamp=timestamp,
         instrument_id="cooldown_predictor",
         channel="analytics/cooldown_predictor/cooldown_eta",
         value=value,
         unit="h",
-        metadata=metadata,
+        metadata=source_metadata,
+    )
+    socket = _PublisherSocket()
+    publisher = ZMQPublisher()
+    publisher._socket = socket  # type: ignore[assignment]
+    publisher._session_id = "test-session"
+    publisher._running = True
+    asyncio.run(publisher._publish_reading(source))
+    payload = msgpack.unpackb(socket.frames[0][1], raw=False)
+    if cadence_s is not None:
+        assert payload["meta"]["producer_interval_s"] == cadence_s
+    if source_age_s is not None:
+        assert payload["meta"]["source_age_s"] == source_age_s
+    if source_age_s is None:
+        payload["meta"].pop("source_age_s", None)
+    return Reading(
+        timestamp=datetime.fromtimestamp(payload["ts"], tz=UTC),
+        instrument_id=payload["iid"],
+        channel=payload["ch"],
+        value=payload["v"],
+        unit=payload["u"],
+        status=ChannelStatus(payload["st"]),
+        raw=payload.get("raw"),
+        metadata=payload["meta"],
     )
 
 

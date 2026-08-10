@@ -790,7 +790,7 @@ class ZMQPublisher:
         if self._applied_cold_stage_channel is not None:
             metadata["engine_applied"] = {"cooldown": {"channel_cold": self._applied_cold_stage_channel}}
         async with self._send_lock:
-            if "producer_interval_s" in metadata:
+            if "producer_interval_s" in metadata and "source_age_s" not in metadata:
                 source_age_s = time.time() - reading.timestamp.timestamp()
                 if math.isfinite(source_age_s) and source_age_s >= 0:
                     metadata["source_age_s"] = source_age_s

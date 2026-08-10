@@ -117,10 +117,16 @@ class ThermalCalculator(AnalyticsPlugin):
         ]
         relevant.sort(key=lambda r: r.timestamp)
 
+        if {r.channel for r in relevant} != target_channels:
+            _log.debug(
+                "ThermalCalculator: required inputs were not all present in this batch; publication withheld"
+            )
+            return []
+
         for reading in relevant:
             self._last[reading.channel] = reading.value
 
-        # Проверить, что все три канала известны
+        # Verify that all three required channels are known
         missing = target_channels - self._last.keys()
         if missing:
             _log.debug(
