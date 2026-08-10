@@ -161,6 +161,7 @@ from cryodaq.drivers.registry import (
     is_reviewed_source_binding,
     validate_instrument_entries,
 )
+from cryodaq.engine_wiring.operator_snapshot_live_authorities import DurableAttentionHistoryFeed
 from cryodaq.engine_wiring.operator_snapshot_production import build_operator_snapshot_publication_service
 from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
 from cryodaq.engine_wiring.runtime_tasks import (
@@ -6741,6 +6742,7 @@ async def _run_engine(
     _alarm_v2_setpoint = ExperimentSetpointProvider(experiment_manager, _alarm_v2_engine_cfg.setpoints)
     alarm_v2_evaluator = AlarmEvaluator(_alarm_v2_state_tracker, _alarm_v2_rate, _alarm_v2_phase, _alarm_v2_setpoint)
     alarm_v2_state_mgr = AlarmStateManager()
+    attention_history_feed = DurableAttentionHistoryFeed(writer)
     zmq_pub.configure_periodic_authority(
         reading_drop_count=functools.partial(_zmq_publisher_drop_count, broker),
         alarm_snapshot=alarm_v2_state_mgr.snapshot_active_canonical,
@@ -7143,6 +7145,21 @@ async def _run_engine(
         rollback=writer.stop,
     )
     await startup.acquire(
+        attention_history_feed.start(),
+        label="durable_attention_history_feed",
+        rollback=attention_history_feed.stop,
+    )
+    await startup.call(
+        lambda: event_bus.retain_required_observer(
+            "durable_attention_history",
+            attention_history_feed.persist_event,
+        )
+    )
+    startup.add(
+        "durable_attention_history_observer",
+        functools.partial(event_bus.release_required_observer, "durable_attention_history"),
+    )
+    await startup.acquire(
         safety_manager.start(),
         label="safety_manager",
         rollback=functools.partial(stop_safety_manager_with_hold, safety_manager, logger),
@@ -7175,6 +7192,8 @@ async def _run_engine(
             recording_feed=recording_lifecycle_feed,
             publisher=zmq_pub,
             data_root=_DATA_DIR,
+            alarm_state_owner=alarm_v2_state_mgr,
+            attention_history_feed=attention_history_feed,
         )
     except Exception as exc:  # noqa: BLE001 - observational publication is fail-dark
         logger.warning(
@@ -7713,6 +7732,31 @@ async def _run_engine(
                 _EngineShutdownOwner(
                     "alarm_dispatch_tasks",
                     functools.partial(_drain_dispatch_tasks, _alarm_dispatch_tasks, logger),
+                ),
+            ),
+        )
+    )
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "durable_attention_history_observer_cutover",
+            (
+                _EngineShutdownOwner(
+                    "durable_attention_history_observer",
+                    functools.partial(
+                        event_bus.release_required_observer,
+                        "durable_attention_history",
+                    ),
+                ),
+            ),
+        )
+    )
+    shutdown_layers.append(
+        _EngineShutdownLayer(
+            "durable_attention_history_feed",
+            (
+                _EngineShutdownOwner(
+                    "durable_attention_history_feed",
+                    attention_history_feed.stop,
                 ),
             ),
         )

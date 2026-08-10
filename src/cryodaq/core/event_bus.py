@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -39,14 +40,40 @@ class RequiredEventPublicationReceipt:
 class EventBus:
     """Lightweight pub/sub for engine events (not Reading data).
 
-    Subscribers receive a dedicated asyncio.Queue. Publish is non-blocking:
-    a full queue logs a warning and drops the event rather than blocking
-    the engine event loop.
+    Subscribers receive a dedicated asyncio.Queue.  After any retained required
+    observer settles, queue fanout is non-blocking: a full queue logs a warning
+    and drops the event rather than blocking the engine event loop.
     """
 
     def __init__(self) -> None:
         self._subscribers: dict[str, asyncio.Queue[EngineEvent]] = {}
         self._required_publication_authority = object()
+        self._required_observer_name: str | None = None
+        self._required_observer: Callable[[EngineEvent], Awaitable[None]] | None = None
+
+    def retain_required_observer(
+        self,
+        name: str,
+        observer: Callable[[EngineEvent], Awaitable[None]],
+    ) -> None:
+        """Retain the sole persistence-first observer for ordinary events."""
+
+        if type(name) is not str or not name or len(name) > 128 or not name.isascii():
+            raise ValueError("required EventBus observer name is invalid")
+        if not callable(observer):
+            raise TypeError("required EventBus observer must be callable")
+        if self._required_observer is not None:
+            raise RuntimeError("required EventBus observer is already retained")
+        self._required_observer_name = name
+        self._required_observer = observer
+
+    def release_required_observer(self, name: str) -> None:
+        """Release only the exact named persistence observer owner."""
+
+        if name != self._required_observer_name or self._required_observer is None:
+            raise RuntimeError("required EventBus observer owner does not match")
+        self._required_observer_name = None
+        self._required_observer = None
 
     async def subscribe(self, name: str, *, maxsize: int = 1000) -> asyncio.Queue[EngineEvent]:
         """Register a named subscriber and return its dedicated queue."""
@@ -61,7 +88,17 @@ class EventBus:
         self._subscribers.pop(name, None)
 
     async def publish(self, event: EngineEvent) -> None:
-        """Fan out event to all subscriber queues (non-blocking; drops on full)."""
+        """Persist through the retained observer, then fan out best-effort."""
+
+        if type(event) is not EngineEvent:
+            raise TypeError("EventBus publication must be an exact EngineEvent")
+        observer_failure: BaseException | None = None
+        required_observer = self._required_observer
+        if required_observer is not None:
+            try:
+                await required_observer(copy.deepcopy(event))
+            except (Exception, asyncio.CancelledError) as exc:
+                observer_failure = exc
         for name, q in list(self._subscribers.items()):
             try:
                 q.put_nowait(event)
@@ -71,6 +108,8 @@ class EventBus:
                     name,
                     event.event_type,
                 )
+        if observer_failure is not None:
+            raise observer_failure
 
     async def publish_required(
         self,
@@ -90,6 +129,8 @@ class EventBus:
 
         if type(event) is not EngineEvent:
             raise TypeError("required publication event must be exactly EngineEvent")
+        if event.event_type == "alarm_fired":
+            raise ValueError("alarm_fired must use persistence-aware publish")
         if (event_identity is None) is not (payload_digest is None):
             raise ValueError("required publication identity and payload digest must be supplied together")
         if event_identity is not None:

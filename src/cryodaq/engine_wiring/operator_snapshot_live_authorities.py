@@ -1,21 +1,28 @@
 """Fail-closed adapters from current live owners to F36 authority receipts.
 
-The adapters in this module only project immutable, constant-time owner cuts.
-They perform no I/O and activate no producer, publisher, engine, or GUI path.
+Receipt adapters project immutable, constant-time owner cuts without I/O.  The
+engine-owned attention feed separately settles durable incident annotations;
+it never owns or mutates canonical alarm state.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import math
 import re
 import time
 import unicodedata
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Protocol
 
+from cryodaq.core.alarm_v2 import AlarmCanonicalSnapshot, AlarmStateManager
+from cryodaq.core.event_bus import EngineEvent
 from cryodaq.core.experiment import OperatorExperimentSnapshot
+from cryodaq.core.operator_log import AttentionHistoryItem
 from cryodaq.engine_wiring.experiment_recording_owner import (
     ExperimentOperation,
     ExperimentRecordingOwner,
@@ -23,6 +30,8 @@ from cryodaq.engine_wiring.experiment_recording_owner import (
 )
 from cryodaq.engine_wiring.operator_safety_snapshot import OperatorSafetySnapshot
 from cryodaq.engine_wiring.operator_snapshot_authorities import (
+    AlarmAttentionReceipt,
+    AlarmEvidence,
     AuthorityAvailability,
     CommonCut,
     ExperimentReceipt,
@@ -43,8 +52,12 @@ from cryodaq.operator_snapshot import (
     AvailabilityTruth,
     RecordingTruth,
 )
+from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 _GENERATION_RE = re.compile(r"[0-9a-f]{32}")
+logger = logging.getLogger(__name__)
+
+_NO_ACTIVE_EXPERIMENT_ID = "no-active-experiment"
 
 # The SafetyManager refreshes its immutable operator cut once per second.  A
 # live receipt may survive at most three missed refresh periods; beyond that
@@ -105,6 +118,284 @@ def _generation_id(value: object) -> str:
     if _GENERATION_RE.fullmatch(generation) is None:
         raise ValueError("owner generation must be exact lowercase 128-bit hex")
     return generation
+
+
+class DurableAttentionHistoryFeed:
+    """Persist alarm incidents before EventBus fanout and retain one revision."""
+
+    __slots__ = ("__writer", "__lock", "__started", "__pending", "__revision", "__failure_latched")
+
+    def __init__(self, writer: SQLiteWriter) -> None:
+        if type(writer) is not SQLiteWriter:
+            raise TypeError("writer must be the exact engine SQLiteWriter")
+        self.__writer = writer
+        self.__lock = asyncio.Lock()
+        self.__started = False
+        self.__pending = 0
+        self.__revision: int | None = None
+        self.__failure_latched = False
+
+    async def start(self) -> None:
+        if self.__started:
+            raise RuntimeError("durable attention history feed is already started")
+        page = await self.__writer.get_attention_history(
+            experiment_id=_NO_ACTIVE_EXPERIMENT_ID,
+            limit=1,
+        )
+        self.__revision = page.through_revision
+        self.__failure_latched = False
+        self.__started = True
+
+    def stop(self) -> None:
+        if self.__pending:
+            raise RuntimeError("durable attention history feed still owns pending persistence")
+        self.__started = False
+        self.__revision = None
+        self.__failure_latched = False
+
+    @property
+    def current_revision(self) -> int | None:
+        if not self.__started or self.__pending or self.__failure_latched:
+            return None
+        return self.__revision
+
+    async def persist_event(self, event: EngineEvent) -> None:
+        """Settle exact alarm persistence through cancellation before returning."""
+
+        if type(event) is not EngineEvent:
+            raise TypeError("attention persistence requires an exact EngineEvent")
+        if event.event_type != "alarm_fired":
+            return
+        if not self.__started:
+            raise RuntimeError("durable attention history feed is not started")
+        if event.experiment_id is not None and (type(event.experiment_id) is not str or not event.experiment_id):
+            raise ValueError("attention event experiment identity is invalid")
+        persisted_event = EngineEvent(
+            event_type=event.event_type,
+            timestamp=event.timestamp,
+            payload=event.payload,
+            experiment_id=event.experiment_id or _NO_ACTIVE_EXPERIMENT_ID,
+        )
+        self.__pending += 1
+        owner = asyncio.create_task(
+            self.__persist_owned(persisted_event),
+            name="durable_attention_history_append",
+        )
+        cancellation_seen = False
+        persistence_failure: Exception | None = None
+        try:
+            while not owner.done():
+                try:
+                    await asyncio.shield(owner)
+                except asyncio.CancelledError:
+                    cancellation_seen = True
+                except Exception:
+                    pass
+            try:
+                owner.result()
+            except Exception as exc:
+                persistence_failure = exc
+        finally:
+            self.__pending -= 1
+        if persistence_failure is not None:
+            logger.error(
+                "Durable attention history unavailable; exception=%s",
+                type(persistence_failure).__name__,
+            )
+        if cancellation_seen:
+            raise asyncio.CancelledError
+
+    async def annotate_acknowledgement(
+        self,
+        incident: AttentionHistoryItem,
+        *,
+        actor: str,
+        note: str,
+        timestamp: datetime,
+    ) -> AttentionHistoryItem:
+        """Append operator awareness while retaining the new durable cut."""
+
+        if not self.__started:
+            raise RuntimeError("durable attention history feed is not started")
+        self.__pending += 1
+        owner = asyncio.create_task(
+            self.__annotate_owned(
+                incident,
+                actor=actor,
+                note=note,
+                timestamp=timestamp,
+            ),
+            name="durable_attention_history_acknowledgement",
+        )
+        cancellation_seen = False
+        try:
+            while not owner.done():
+                try:
+                    await asyncio.shield(owner)
+                except asyncio.CancelledError:
+                    cancellation_seen = True
+            annotation = owner.result()
+        finally:
+            self.__pending -= 1
+        if cancellation_seen:
+            raise asyncio.CancelledError
+        return annotation
+
+    async def __persist_owned(self, event: EngineEvent) -> None:
+        async with self.__lock:
+            failure: BaseException | None = None
+            try:
+                await self.__writer.append_attention_event(event)
+            except BaseException as exc:  # retain failure through revision refresh
+                failure = exc
+            try:
+                page = await self.__writer.get_attention_history(
+                    experiment_id=event.experiment_id or _NO_ACTIVE_EXPERIMENT_ID,
+                    limit=1,
+                )
+                revision = page.through_revision
+                if self.__revision is not None and revision < self.__revision:
+                    raise RuntimeError("durable attention history revision regressed")
+                self.__revision = revision
+            except BaseException:
+                self.__revision = None
+                self.__failure_latched = True
+                raise
+            if failure is not None:
+                self.__failure_latched = True
+                raise failure
+
+    async def __annotate_owned(
+        self,
+        incident: AttentionHistoryItem,
+        *,
+        actor: str,
+        note: str,
+        timestamp: datetime,
+    ) -> AttentionHistoryItem:
+        async with self.__lock:
+            failure: BaseException | None = None
+            annotation: AttentionHistoryItem | None = None
+            try:
+                annotation = await self.__writer.annotate_attention_acknowledgement(
+                    incident,
+                    actor=actor,
+                    note=note,
+                    timestamp=timestamp,
+                )
+            except BaseException as exc:  # retain failure through revision refresh
+                failure = exc
+            try:
+                page = await self.__writer.get_attention_history(
+                    experiment_id=incident.experiment_id,
+                    limit=1,
+                )
+                revision = page.through_revision
+                if self.__revision is not None and revision < self.__revision:
+                    raise RuntimeError("durable attention history revision regressed")
+                self.__revision = revision
+            except BaseException:
+                self.__revision = None
+                self.__failure_latched = True
+                raise
+            if failure is not None:
+                self.__failure_latched = True
+                raise failure
+            if annotation is None:
+                raise RuntimeError("attention acknowledgement produced no durable item")
+            return annotation
+
+
+class LiveAlarmAttentionAuthority:
+    """Project the exact canonical alarm cut at the durable history revision."""
+
+    __slots__ = (
+        "__owner",
+        "__history_feed",
+        "__last_state_revision",
+        "__last_history_revision",
+        "__last_payload",
+        "__receipt_revision",
+    )
+
+    def __init__(
+        self,
+        owner: AlarmStateManager,
+        history_feed: DurableAttentionHistoryFeed,
+    ) -> None:
+        if type(owner) is not AlarmStateManager:
+            raise TypeError("owner must be the exact AlarmStateManager")
+        if type(history_feed) is not DurableAttentionHistoryFeed:
+            raise TypeError("history_feed must be the exact DurableAttentionHistoryFeed")
+        self.__owner = owner
+        self.__history_feed = history_feed
+        self.__last_state_revision = 0
+        self.__last_history_revision = 0
+        self.__last_payload: str | None = None
+        self.__receipt_revision = 0
+
+    def snapshot_for_cut(self, cut: CommonCut) -> AlarmAttentionReceipt:
+        try:
+            snapshot = self.__owner.snapshot_active_canonical()
+            if type(snapshot) is not AlarmCanonicalSnapshot:
+                raise TypeError("wrong canonical alarm snapshot type")
+            state_revision = _exact_revision(snapshot.state_revision)
+            history_revision = self.__history_feed.current_revision
+            if history_revision is None:
+                raise ValueError("durable attention history cut is unavailable")
+            history_revision = _exact_revision(history_revision)
+            _exact_text(snapshot.state_token)
+            if state_revision < self.__last_state_revision or history_revision < self.__last_history_revision:
+                raise ValueError("alarm or attention history revision regressed")
+            if type(snapshot.active) is not dict:
+                raise TypeError("canonical active alarm mapping is invalid")
+            alarms: list[AlarmEvidence] = []
+            for alarm_id in sorted(snapshot.active):
+                item = snapshot.active[alarm_id]
+                if type(item) is not dict or set(item) != {
+                    "level",
+                    "triggered_at",
+                    "channels",
+                    "acknowledged",
+                    "acknowledged_at",
+                }:
+                    raise ValueError("canonical active alarm item is invalid")
+                alarms.append(
+                    AlarmEvidence(
+                        alarm_id,
+                        item["level"],
+                        datetime.fromtimestamp(item["triggered_at"], UTC),
+                        item["acknowledged"],
+                    )
+                )
+            payload = json.dumps(
+                [state_revision, snapshot.state_token, history_revision],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if payload != self.__last_payload:
+                if self.__receipt_revision >= MAX_NONNEGATIVE_INT:
+                    raise OverflowError("alarm attention authority revision exhausted")
+                receipt_revision = self.__receipt_revision + 1
+            else:
+                receipt_revision = self.__receipt_revision
+            if receipt_revision < 1:
+                raise ValueError("alarm attention authority revision is unavailable")
+            receipt = AlarmAttentionReceipt(
+                cut=cut,
+                revision=receipt_revision,
+                token=_token(receipt_revision, "alarm-attention", payload),
+                availability=AuthorityAvailability.AVAILABLE,
+                alarms=tuple(alarms),
+                history_revision=history_revision,
+            )
+        except Exception:
+            return AlarmAttentionReceipt(**_unavailable(cut, "attention_authority_unavailable"))
+        self.__last_state_revision = state_revision
+        self.__last_history_revision = history_revision
+        self.__last_payload = payload
+        self.__receipt_revision = receipt_revision
+        return receipt
 
 
 class LiveSafetyReadinessAuthority:
@@ -443,6 +734,8 @@ class LiveIntegrityPersistenceAuthority:
 
 
 __all__ = [
+    "DurableAttentionHistoryFeed",
+    "LiveAlarmAttentionAuthority",
     "LiveExperimentAuthority",
     "LiveIntegrityPersistenceAuthority",
     "LiveRecordingExperimentAuthority",

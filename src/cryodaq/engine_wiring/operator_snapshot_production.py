@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from cryodaq.core.alarm_v2 import AlarmStateManager
 from cryodaq.core.zmq_bridge import ZMQPublisher
 from cryodaq.engine_wiring.operator_safety_snapshot import OperatorSafetySnapshot
 from cryodaq.engine_wiring.operator_snapshot_authorities import (
@@ -16,6 +17,8 @@ from cryodaq.engine_wiring.operator_snapshot_authorities import (
 from cryodaq.engine_wiring.operator_snapshot_composer import OperatorSnapshotComposer
 from cryodaq.engine_wiring.operator_snapshot_live_authorities import (
     SAFETY_SNAPSHOT_FRESHNESS_BUDGET_S,
+    DurableAttentionHistoryFeed,
+    LiveAlarmAttentionAuthority,
     LiveIntegrityPersistenceAuthority,
     LiveRecordingExperimentAuthority,
     LiveSafetyReadinessAuthority,
@@ -35,6 +38,8 @@ def build_operator_snapshot_publication_service(
     recording_feed: RecordingLifecycleFeed,
     publisher: ZMQPublisher,
     data_root: Path,
+    alarm_state_owner: AlarmStateManager | None = None,
+    attention_history_feed: DurableAttentionHistoryFeed | None = None,
     cadence_hz: float = 1.0,
 ) -> OperatorSnapshotPublicationService:
     """Build one fail-dark service from exact loop-owned production feeds."""
@@ -45,12 +50,23 @@ def build_operator_snapshot_publication_service(
         raise TypeError("publisher must be the exact engine ZMQPublisher")
     if not isinstance(data_root, Path):
         raise TypeError("data_root must be pathlib.Path")
+    if (alarm_state_owner is None) is not (attention_history_feed is None):
+        raise ValueError("alarm state owner and attention history feed must be supplied together")
+    if alarm_state_owner is not None and type(alarm_state_owner) is not AlarmStateManager:
+        raise TypeError("alarm_state_owner must be the exact engine AlarmStateManager")
+    if attention_history_feed is not None and type(attention_history_feed) is not DurableAttentionHistoryFeed:
+        raise TypeError("attention_history_feed must be the exact engine DurableAttentionHistoryFeed")
     composer = OperatorSnapshotComposer(
         safety=LiveSafetyReadinessAuthority(
             safety_owner,
             freshness_budget_s=SAFETY_SNAPSHOT_FRESHNESS_BUDGET_S,
         ),
-        attention=UnavailableAlarmAttentionAuthority(),
+        attention=LiveAlarmAttentionAuthority(
+            alarm_state_owner,
+            attention_history_feed,
+        )
+        if alarm_state_owner is not None and attention_history_feed is not None
+        else UnavailableAlarmAttentionAuthority(),
         experiment=LiveRecordingExperimentAuthority(recording_feed),
         integrity=LiveIntegrityPersistenceAuthority(recording_feed),
         cooldown=UnavailableCooldownAuthority(),
