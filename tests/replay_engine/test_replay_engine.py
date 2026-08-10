@@ -30,10 +30,6 @@ from cryodaq.replay_engine.sources import (
     resolve_source,
 )
 
-_TEST_PUB = "tcp://127.0.0.1:15555"
-_TEST_CMD = "tcp://127.0.0.1:15556"
-_TEST_SAFE_CMD = "tcp://127.0.0.1:15558"
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -984,22 +980,23 @@ def test_resolve_source_unsupported_suffix_raises(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-async def _start_engine_with_curve(tmp_path: Path):
-    """Start ReplayEngine with a curve fixture; return (engine, source_task)."""
+async def _start_engine_with_curve(tmp_path: Path, start_replay_engine):
+    """Start ReplayEngine with a curve fixture on OS-selected endpoints."""
     from cryodaq.replay_engine.server import ReplayEngine
 
     j = tmp_path / "curve.json"
     _write_curve_json(j)
-    engine = ReplayEngine(
-        j,
-        speed=0.0,
-        pub_addr=_TEST_PUB,
-        cmd_addr=_TEST_CMD,
-        safe_cmd_addr=_TEST_SAFE_CMD,
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            j,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
     )
-    await engine.start()
     source_task = asyncio.create_task(engine.run_source(), name="test_source")
-    return engine, source_task
+    return engine, source_task, endpoints
 
 
 async def _stop_engine(engine, source_task) -> None:
@@ -1012,7 +1009,7 @@ async def _stop_engine(engine, source_task) -> None:
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_first_reading_pub(tmp_path):
+async def test_replay_engine_first_reading_pub(tmp_path, start_replay_engine):
     """PUB socket delivers the first msgpack-encoded reading within 2 s.
 
     This directly tests that the engine publishes readings on the ZMQ PUB
@@ -1027,19 +1024,20 @@ async def test_replay_engine_first_reading_pub(tmp_path):
 
     j = tmp_path / "curve.json"
     _write_curve_json(j)
-    engine = ReplayEngine(
-        j,
-        speed=0.0,
-        pub_addr=_TEST_PUB,
-        cmd_addr=_TEST_CMD,
-        safe_cmd_addr=_TEST_SAFE_CMD,
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            j,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
     )
-    await engine.start()
 
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.LINGER, 0)
-    sub.connect(_TEST_PUB)
+    sub.connect(endpoints.pub_addr)
     sub.subscribe(b"readings")
     await asyncio.sleep(0.05)  # Let ZMQ subscription establish before source.
 
@@ -1060,14 +1058,17 @@ async def test_replay_engine_first_reading_pub(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_transport_rejects_live_safety_and_marks_legacy_status_unavailable(tmp_path):
+async def test_replay_engine_transport_rejects_live_safety_and_marks_legacy_status_unavailable(
+    tmp_path,
+    start_replay_engine,
+):
     """Real REP transport must never invent live safety or an empty alarm set."""
-    engine, source_task = await _start_engine_with_curve(tmp_path)
+    engine, source_task, endpoints = await _start_engine_with_curve(tmp_path, start_replay_engine)
     ctx = zmq.asyncio.Context()
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.LINGER, 0)
     req.setsockopt(zmq.RCVTIMEO, 2000)
-    req.connect(_TEST_CMD)
+    req.connect(endpoints.cmd_addr)
     try:
         await req.send_string('{"cmd": "safety_status"}')
         raw = await asyncio.wait_for(req.recv_string(), timeout=2.0)
@@ -1106,27 +1107,31 @@ async def test_replay_engine_transport_rejects_live_safety_and_marks_legacy_stat
 
 
 @pytest.mark.asyncio
-async def test_replay_safe_endpoint_proves_exact_session_and_never_grants_live_authority(tmp_path) -> None:
+async def test_replay_safe_endpoint_proves_exact_session_and_never_grants_live_authority(
+    tmp_path,
+    start_replay_engine,
+) -> None:
     from cryodaq.core.zmq_bridge import PROTOCOL_VERSION
     from cryodaq.replay_engine.server import ReplayEngine
 
     source = tmp_path / "curve.json"
     _write_curve_json(source)
-    engine = ReplayEngine(
-        source,
-        speed=0.0,
-        pub_addr=_TEST_PUB,
-        cmd_addr=_TEST_CMD,
-        safe_cmd_addr=_TEST_SAFE_CMD,
-        launcher_ready_nonce="a" * 64,
-        launcher_session_id="b" * 32,
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            source,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+            launcher_ready_nonce="a" * 64,
+            launcher_session_id="b" * 32,
+        )
     )
-    await engine.start()
     context = zmq.asyncio.Context()
     safe = context.socket(zmq.REQ)
     safe.setsockopt(zmq.LINGER, 0)
     safe.setsockopt(zmq.RCVTIMEO, 2000)
-    safe.connect(_TEST_SAFE_CMD)
+    safe.connect(endpoints.safe_cmd_addr)
     receipt = {
         "schema": "cryodaq.replay_ready.v2",
         "nonce": "a" * 64,
@@ -1135,9 +1140,9 @@ async def test_replay_safe_endpoint_proves_exact_session_and_never_grants_live_a
         "source": str(source),
         "speed": 0.0,
         "pid": os.getpid(),
-        "pub_addr": _TEST_PUB,
-        "cmd_addr": _TEST_CMD,
-        "safe_cmd_addr": _TEST_SAFE_CMD,
+        "pub_addr": endpoints.pub_addr,
+        "cmd_addr": endpoints.cmd_addr,
+        "safe_cmd_addr": endpoints.safe_cmd_addr,
     }
     safe_direction_commands = (
         {"cmd": "keithley_emergency_off", "channel": "smua"},
@@ -1195,26 +1200,27 @@ def test_replay_rejects_any_overlapping_transport_addresses(
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_current_phase(tmp_path):
+async def test_replay_engine_current_phase(tmp_path, start_replay_engine):
     """REP current_phase returns the configured phase."""
     from cryodaq.replay_engine.server import ReplayEngine
 
     j = tmp_path / "curve.json"
     _write_curve_json(j)
-    engine = ReplayEngine(
-        j,
-        speed=0.0,
-        phase="measurement",
-        pub_addr=_TEST_PUB,
-        cmd_addr=_TEST_CMD,
-        safe_cmd_addr=_TEST_SAFE_CMD,
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            j,
+            speed=0.0,
+            phase="measurement",
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
     )
-    await engine.start()
     source_task = asyncio.create_task(engine.run_source())
     ctx = zmq.asyncio.Context()
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.LINGER, 0)
-    req.connect(_TEST_CMD)
+    req.connect(endpoints.cmd_addr)
     try:
         await req.send_string('{"cmd": "current_phase"}')
         import json as _json
@@ -1231,13 +1237,13 @@ async def test_replay_engine_current_phase(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_rejects_set_target(tmp_path):
+async def test_replay_engine_rejects_set_target(tmp_path, start_replay_engine):
     """Hardware commands return ok=False, reason=REPLAY_MODE_READONLY."""
-    engine, source_task = await _start_engine_with_curve(tmp_path)
+    engine, source_task, endpoints = await _start_engine_with_curve(tmp_path, start_replay_engine)
     ctx = zmq.asyncio.Context()
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.LINGER, 0)
-    req.connect(_TEST_CMD)
+    req.connect(endpoints.cmd_addr)
     try:
         await req.send_string('{"cmd": "set_target", "channel": "T11", "value": 4.2}')
         import json as _json
@@ -1253,13 +1259,16 @@ async def test_replay_engine_rejects_set_target(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replay_ordinary_endpoint_rejects_safe_direction_before_dispatch(tmp_path):
+async def test_replay_ordinary_endpoint_rejects_safe_direction_before_dispatch(
+    tmp_path,
+    start_replay_engine,
+):
     """Safe actions never enter replay through the ordinary command lane."""
-    engine, source_task = await _start_engine_with_curve(tmp_path)
+    engine, source_task, endpoints = await _start_engine_with_curve(tmp_path, start_replay_engine)
     ctx = zmq.asyncio.Context()
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.LINGER, 0)
-    req.connect(_TEST_CMD)
+    req.connect(endpoints.cmd_addr)
     try:
         await req.send_string('{"cmd": "keithley_emergency_off"}')
         import json as _json
@@ -1276,7 +1285,7 @@ async def test_replay_ordinary_endpoint_rejects_safe_direction_before_dispatch(t
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_curve_data_pub(tmp_path):
+async def test_replay_engine_curve_data_pub(tmp_path, start_replay_engine):
     """Curve replay PUBs >=10 readings containing BOTH Т11 and Т12 channels
     with numeric temperature values in the expected cooldown range.
 
@@ -1293,20 +1302,21 @@ async def test_replay_engine_curve_data_pub(tmp_path):
 
     j = tmp_path / "curve.json"
     _write_curve_json(j)
-    engine = ReplayEngine(
-        j,
-        speed=0.0,
-        pub_addr=_TEST_PUB,
-        cmd_addr=_TEST_CMD,
-        safe_cmd_addr=_TEST_SAFE_CMD,
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            j,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
     )
-    await engine.start()
 
     # Subscribe before source task so all readings are seen (slow-joiner fix).
     ctx = zmq.asyncio.Context()
     sub = ctx.socket(zmq.SUB)
     sub.setsockopt(zmq.LINGER, 0)
-    sub.connect(_TEST_PUB)
+    sub.connect(endpoints.pub_addr)
     sub.subscribe(b"readings")
     # Readiness loop: poll until ZMQ subscription is established before source starts.
     # We don't know exactly when the subscription handshake completes, so we yield
@@ -1372,26 +1382,27 @@ async def test_replay_engine_explicitly_rejects_live_alarm_endpoints(action: str
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_experiment_status(tmp_path):
+async def test_replay_engine_experiment_status(tmp_path, start_replay_engine):
     """experiment_status returns ok=True with app_mode=replay and configured phase."""
     from cryodaq.replay_engine.server import ReplayEngine
 
     j = tmp_path / "curve.json"
     _write_curve_json(j)
-    engine = ReplayEngine(
-        j,
-        speed=0.0,
-        phase="cooldown",
-        pub_addr=_TEST_PUB,
-        cmd_addr=_TEST_CMD,
-        safe_cmd_addr=_TEST_SAFE_CMD,
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            j,
+            speed=0.0,
+            phase="cooldown",
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
     )
-    await engine.start()
     source_task = asyncio.create_task(engine.run_source())
     ctx = zmq.asyncio.Context()
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.LINGER, 0)
-    req.connect(_TEST_CMD)
+    req.connect(endpoints.cmd_addr)
     try:
         await req.send_string('{"cmd": "experiment_status"}')
         import json as _json
@@ -1412,13 +1423,13 @@ async def test_replay_engine_experiment_status(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replay_engine_cooldown_history_unavailable(tmp_path):
+async def test_replay_engine_cooldown_history_unavailable(tmp_path, start_replay_engine):
     """/cooldown_history_get returns predictor_unavailable_in_replay before Stage 5."""
-    engine, source_task = await _start_engine_with_curve(tmp_path)
+    engine, source_task, endpoints = await _start_engine_with_curve(tmp_path, start_replay_engine)
     ctx = zmq.asyncio.Context()
     req = ctx.socket(zmq.REQ)
     req.setsockopt(zmq.LINGER, 0)
-    req.connect(_TEST_CMD)
+    req.connect(endpoints.cmd_addr)
     try:
         await req.send_string('{"cmd": "cooldown_history_get"}')
         import json as _json
