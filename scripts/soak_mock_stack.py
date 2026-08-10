@@ -2620,13 +2620,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     selected = profile(args.profile)
+    if selected.name != "short":
+        print(
+            f"soak profile {selected.name!r} is defined but not activated: "
+            "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
+            "long-duration evidence remains open",
+            file=sys.stderr,
+        )
+        return 3
     from scripts import soak_mock_stack_runner as runner
 
     try:
         runner._PosixSoakRunner.require_platform()
     except runner._RunnerActivationDisabled:
-        return 2
-    if selected.name != "short":
         return 2
     try:
         evidence = Evidence(args.evidence_dir or _default_evidence_dir(selected))
