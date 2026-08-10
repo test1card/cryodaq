@@ -6,22 +6,22 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | Measure | Value |
 |---|---:|
 | Baseline commit | `f5d6434d20dffae62c9f03fbc12f68b03f48351b` |
-| Source snapshot tree | `1b3ffda8be6f54424919473a96ca7df85128c884` |
-| Source snapshot object manifest SHA-256 | `85718d721ff7dd1abf1d03970e49583512a073cb4e205a3501782f94ca50f07b` |
+| Source snapshot tree | `552c1444e626f69d536af76e2a14a4d4d5cf7250` |
+| Source snapshot object manifest SHA-256 | `f106b2b72e6d33654e2d2a1d1fdc6e73de74c39808399a5da18f5231544acc0a` |
 | Changed source-inventory paths | 858 |
-| Source-inventory Git churn | 307,608 insertions / 21,007 deletions / 286,601 net |
+| Source-inventory Git churn | 308,045 insertions / 21,007 deletions / 287,038 net |
 | Delivered-tree changed paths | 860 |
-| Delivered-tree Git churn | 307,729 insertions / 21,007 deletions / 286,722 net |
+| Delivered-tree Git churn | 308,166 insertions / 21,007 deletions / 287,159 net |
 | Changed binary paths, source / delivered | 9 / 9 |
 | Baseline repository text | 188,539 lines |
-| Candidate source-inventory text | 475,140 lines |
-| Delivered-tree text | 475,261 lines |
+| Candidate source-inventory text | 475,577 lines |
+| Delivered-tree text | 475,698 lines |
 | Baseline production Python | 68,857 lines |
 | Candidate production Python | 156,653 lines |
 | Production-Python inventory growth | 87,796 lines |
 | Baseline test Python | 80,529 lines |
-| Candidate test Python | 231,662 lines |
-| Test-Python inventory growth | 151,133 lines |
+| Candidate test Python | 232,093 lines |
+| Test-Python inventory growth | 151,564 lines |
 | Baseline files | 779 |
 | Candidate source-manifest files | 1,215 |
 | Delivered-tree files | 1,217 |
@@ -33,5 +33,5 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | `_run_engine`, baseline / candidate | 1,945 / 1,320 lines |
 | Engine local-module imports, baseline / candidate | 69 / 58 |
 | `scripts/soak_mock_stack_runner.py` | 3,883 lines |
-| `scripts/soak_mock_stack.py` | 2,677 lines |
+| `scripts/soak_mock_stack.py` | 2,683 lines |
 | Generated metrics document / surviving SVG | 37 / 84 lines |
