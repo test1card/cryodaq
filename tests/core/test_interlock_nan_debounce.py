@@ -380,6 +380,41 @@ async def test_usable_recovery_reaches_tripped_multi_channel_condition() -> None
     assert "T9" not in engine._nonusable_windows
 
 
+async def test_nonusable_window_matures_for_sibling_after_condition_trips() -> None:
+    escalations: list[tuple[str, str]] = []
+
+    async def handler(condition, reading):
+        escalations.append((condition.name, reading.channel))
+        return True
+
+    engine = InterlockEngine(
+        broker=DataBroker(),
+        actions={"emergency_off": _noop},
+        dead_channel_handler=handler,
+    )
+    engine.add_condition(
+        InterlockCondition(
+            name="overheat_compressor",
+            description="compressor overheat",
+            channel_ids=frozenset({"T9", "T10"}),
+            threshold=350.0,
+            comparison=">",
+            action="emergency_off",
+        )
+    )
+    engine._nonusable_min_samples = 5
+    engine._nonusable_min_duration_s = 10.0
+
+    await engine._process_reading(_reading(channel="T10", value=400.0, offset_s=0.0, status=ChannelStatus.OK))
+    assert engine.get_state()["overheat_compressor"] is InterlockState.TRIPPED
+
+    for offset_s in (1.0, 4.0, 7.0, 10.0, 13.0):
+        await engine._process_reading(_reading(channel="T9", offset_s=offset_s))
+
+    assert escalations == [("overheat_compressor", "T9")]
+    assert engine._nonusable_windows["T9"].escalated is True
+
+
 # ---------------------------------------------------------------------------
 # S2 (HIGH): +inf overrange on an above-threshold interlock is direct evidence
 # of the guarded hazard — insta-trip, do NOT wait out the non-usable debounce.

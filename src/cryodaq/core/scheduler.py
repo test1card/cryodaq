@@ -1251,7 +1251,8 @@ class Scheduler:
                             completion_is_success=True,
                         )
                         if recovered is None:
-                            await self._publish_failed_poll_readings(state)
+                            for terminal_state in states:
+                                await self._publish_failed_poll_readings(terminal_state)
                             return
                         if not recovered:
                             logger.warning("Device recovery failed for '%s'", driver.name)

@@ -651,6 +651,82 @@ async def test_stop_during_cancellation_resistant_device_recovery_owns_late_task
     await asyncio.wait_for(scheduler.stop(), timeout=0.1)
 
 
+async def test_cancellation_resistant_device_recovery_publishes_terminal_evidence_for_every_peer() -> None:
+    descriptor = BusDescriptor(
+        "resistant-device-peer-bus",
+        supported_recovery=frozenset({BusRecoveryLevel.DEVICE_CLEAR}),
+    )
+    resistant_driver = _Driver("resistant-device-peer", fail=True)
+    peer_driver = _Driver("device-recovery-peer", fail=True)
+
+    class _ResistantParticipant(_Participant):
+        def __init__(self, driver: _Driver) -> None:
+            super().__init__(descriptor, driver)
+            self.finished = asyncio.Event()
+            self.active = 0
+
+        async def recover_device(self) -> None:
+            self.recoveries += 1
+            self.active += 1
+            self.recovery_started.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.2)
+            finally:
+                self.active -= 1
+                self.finished.set()
+
+    resistant = _ResistantParticipant(resistant_driver)
+    peer = _Participant(descriptor, peer_driver)
+    reports: list[tuple[str, str]] = []
+
+    async def report_failed_poll(instrument_name: str, reason: str) -> None:
+        reports.append((instrument_name, reason))
+
+    scheduler = Scheduler(
+        DataBroker(),
+        drain_timeout_s=0.01,
+        failed_poll_persistence_handler=report_failed_poll,
+    )
+    scheduler.add(
+        InstrumentConfig(
+            resistant_driver,
+            runtime_binding=_binding(
+                resistant_driver,
+                descriptor.bus_id,
+                poll=0.005,
+                connect=0.01,
+                participant=resistant,
+            ),
+        )
+    )
+    scheduler.add(
+        InstrumentConfig(
+            peer_driver,
+            runtime_binding=_binding(
+                peer_driver,
+                descriptor.bus_id,
+                poll=0.005,
+                connect=0.01,
+                participant=peer,
+            ),
+        )
+    )
+
+    await scheduler.start()
+    await asyncio.wait_for(resistant.recovery_started.wait(), timeout=0.5)
+    await asyncio.sleep(0.05)
+    assert scheduler._instruments[resistant_driver.name].task is not None
+    assert scheduler._instruments[resistant_driver.name].task.done()
+    assert {name for name, _reason in reports} == {
+        resistant_driver.name,
+        peer_driver.name,
+    }
+    await asyncio.wait_for(resistant.finished.wait(), timeout=0.3)
+    await scheduler.stop()
+
+
 async def test_cancellation_resistant_read_terminalizes_bus_without_peer_overlap() -> None:
     descriptor = BusDescriptor("resistant-read-bus")
 

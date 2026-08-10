@@ -624,7 +624,7 @@ class InterlockEngine:
             for record in self._interlocks.values()
             if record.state == InterlockState.ARMED and record.condition.matches_reading(reading, descriptor_envelope)
         ]
-        recovery_matching = [
+        protected_matching = [
             record
             for record in self._interlocks.values()
             if record.condition.matches_reading(reading, descriptor_envelope)
@@ -638,9 +638,9 @@ class InterlockEngine:
         # обрабатывается и НЕ идёт в пороговое сравнение (иначе ±inf ложно
         # сработало бы как реальное превышение).
         if reading.is_usable():
-            if recovery_matching:
-                await self._handle_usable(reading, recovery_matching[0].condition)
-        elif matching:
+            if protected_matching:
+                await self._handle_usable(reading, protected_matching[0].condition)
+        elif protected_matching:
             if math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
                 # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
                 # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
@@ -654,7 +654,7 @@ class InterlockEngine:
                 # window so a prior blip series does not linger past this trip.
                 self._nonusable_windows.pop(reading.channel, None)
             else:
-                await self._handle_nonusable(reading, matching[0].condition)
+                await self._handle_nonusable(reading, protected_matching[0].condition)
                 return
 
         for record in matching:
