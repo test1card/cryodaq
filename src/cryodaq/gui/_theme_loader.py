@@ -3,7 +3,7 @@
 Reads the selected theme name from ``config/settings.local.yaml`` and
 loads the matching pack from ``config/themes/<name>.yaml``. Validates
 that every required token is present and hex-well-formed; on any
-failure, falls back to the bundled default pack (``warm_stone``).
+failure, falls back to the bundled default pack (``default_cool``).
 
 Imported at module-level by :mod:`cryodaq.gui.theme` before any color
 token is defined, so downstream consumers see the loaded values via
@@ -23,7 +23,7 @@ from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_THEME = "warm_stone"
+DEFAULT_THEME = "default_cool"
 
 _CONFIG_DIR = get_config_dir()
 THEMES_DIR = _CONFIG_DIR / "themes"

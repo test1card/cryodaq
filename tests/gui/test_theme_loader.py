@@ -78,9 +78,13 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Pat
     return themes_dir, settings_file
 
 
+def _write_default_pack(themes_dir: Path) -> None:
+    _write_pack(themes_dir / f"{loader.DEFAULT_THEME}.yaml")
+
+
 def test_loads_default_when_no_settings(monkeypatch, tmp_path):
     themes_dir, _ = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
 
     pack = loader.load_theme()
 
@@ -90,37 +94,37 @@ def test_loads_default_when_no_settings(monkeypatch, tmp_path):
 
 def test_loads_default_when_settings_is_garbage(monkeypatch, tmp_path):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     settings_file.write_text("::: not valid YAML :::")
 
-    assert loader._selected_theme_name() == "warm_stone"
+    assert loader._selected_theme_name() == loader.DEFAULT_THEME
     pack = loader.load_theme()
     assert pack["STATUS_OK"] == "#4a8a5e"
 
 
 def test_loads_default_when_theme_key_wrong_type(monkeypatch, tmp_path):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     settings_file.write_text("theme: 42\n")
 
-    assert loader._selected_theme_name() == "warm_stone"
+    assert loader._selected_theme_name() == loader.DEFAULT_THEME
 
 
 @pytest.mark.parametrize("content", ["- one\n- two\n", "42\n", "plain scalar\n"])
 def test_truthy_nonmapping_settings_fall_back_without_import_failure(monkeypatch, tmp_path, content):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     settings_file.write_text(content)
 
-    assert loader._selected_theme_name() == "warm_stone"
+    assert loader._selected_theme_name() == loader.DEFAULT_THEME
     theme_id, pack = loader.resolve_theme()
-    assert theme_id == "warm_stone"
+    assert theme_id == loader.DEFAULT_THEME
     assert pack["BACKGROUND"] == "#111111"
 
 
 def test_unknown_pack_falls_back_to_default(monkeypatch, tmp_path, caplog):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     settings_file.write_text("theme: nonexistent\n")
 
     with caplog.at_level("WARNING"):
@@ -132,7 +136,7 @@ def test_unknown_pack_falls_back_to_default(monkeypatch, tmp_path, caplog):
 
 def test_missing_token_falls_back(monkeypatch, tmp_path, caplog):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     _write_pack(themes_dir / "broken.yaml", overrides={"BACKGROUND": None})
     settings_file.write_text("theme: broken\n")
 
@@ -145,7 +149,7 @@ def test_missing_token_falls_back(monkeypatch, tmp_path, caplog):
 
 def test_invalid_hex_falls_back(monkeypatch, tmp_path, caplog):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     _write_pack(themes_dir / "broken.yaml", overrides={"ACCENT": "not-a-hex"})
     settings_file.write_text("theme: broken\n")
 
@@ -158,7 +162,7 @@ def test_invalid_hex_falls_back(monkeypatch, tmp_path, caplog):
 
 def test_warning_must_alias_caution_or_pack_falls_back(monkeypatch, tmp_path, caplog):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     _write_pack(themes_dir / "split.yaml", overrides={"STATUS_WARNING": "#abcdef"})
     settings_file.write_text("theme: split\n")
 
@@ -171,7 +175,7 @@ def test_warning_must_alias_caution_or_pack_falls_back(monkeypatch, tmp_path, ca
 
 def test_short_hex_rejected(monkeypatch, tmp_path):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     _write_pack(themes_dir / "shorthex.yaml", overrides={"ACCENT": "#abc"})
     settings_file.write_text("theme: shorthex\n")
 
@@ -223,8 +227,8 @@ def test_post_build_seeds_theme_pack_for_frozen_loader(monkeypatch: pytest.Monke
 
     assert module.THEMES_DIR == bundle_root / "config" / "themes"
     theme_id, pack = module.resolve_theme()
-    assert (module.THEMES_DIR / "warm_stone.yaml").is_file()
-    assert theme_id == "warm_stone"
+    assert (module.THEMES_DIR / "default_cool.yaml").is_file()
+    assert theme_id == "default_cool"
     assert pack["BACKGROUND"].startswith("#")
 
 
@@ -319,13 +323,13 @@ def test_available_themes_excludes_invalid_packs(monkeypatch, tmp_path):
 
 def test_resolve_theme_reports_actual_default_after_fallback(monkeypatch, tmp_path):
     themes_dir, settings_file = _isolate(monkeypatch, tmp_path)
-    _write_pack(themes_dir / "warm_stone.yaml")
+    _write_default_pack(themes_dir)
     _write_pack(themes_dir / "broken.yaml", overrides={"ACCENT": "invalid"})
     settings_file.write_text("theme: broken\n")
 
     theme_id, pack = loader.resolve_theme()
 
-    assert theme_id == "warm_stone"
+    assert theme_id == loader.DEFAULT_THEME
     assert pack["ACCENT"] == "#b89e7a"
 
 
@@ -334,12 +338,19 @@ def test_resolve_theme_reports_actual_default_after_fallback(monkeypatch, tmp_pa
 # ---------------------------------------------------------------------------
 
 
-def test_default_theme_is_warm_stone():
-    assert loader.DEFAULT_THEME == "warm_stone"
+def test_default_theme_is_default_cool_and_loads(real_themes_dir):
+    assert loader.DEFAULT_THEME == "default_cool", "fresh installs must default to default_cool"
+    pack_file = real_themes_dir / f"{loader.DEFAULT_THEME}.yaml"
+    assert pack_file.is_file(), f"bundled default theme is missing: {pack_file}"
+    pack = loader.validate_theme_pack(loader.DEFAULT_THEME)
+    assert set(loader.REQUIRED_TOKENS).issubset(pack)
 
 
-def test_bundled_default_pack_exists(real_themes_dir):
-    assert (real_themes_dir / "warm_stone.yaml").exists()
+def test_warm_stone_pack_remains_available(real_themes_dir):
+    pack_file = real_themes_dir / "warm_stone.yaml"
+    assert pack_file.is_file()
+    pack = loader.validate_theme_pack("warm_stone")
+    assert set(loader.REQUIRED_TOKENS).issubset(pack)
 
 
 def test_all_bundled_packs_load_cleanly(real_themes_dir):
