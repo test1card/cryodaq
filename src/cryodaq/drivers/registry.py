@@ -718,6 +718,18 @@ def get_health_telemetry_spec(type_name: object) -> DriverSpec:
     return spec
 
 
+def _require_construction_context(
+    context: object,
+    *,
+    operation: str,
+) -> DriverConstructionContext:
+    if not isinstance(context, DriverConstructionContext):
+        raise DriverRegistryError(f"{operation} requires a DriverConstructionContext")
+    if type(getattr(context, "mock", None)) is not bool:
+        raise DriverRegistryError("DriverConstructionContext.mock must be an exact boolean")
+    return context
+
+
 def construct_health_telemetry_reader(
     config: ValidatedInstrumentConfig,
     context: DriverConstructionContext,
@@ -729,10 +741,7 @@ def construct_health_telemetry_reader(
         or getattr(config, "_provenance", None) is not _VALIDATION_PROVENANCE
     ):
         raise DriverRegistryError("construct_health_telemetry_reader requires validated configuration")
-    if not isinstance(context, DriverConstructionContext):
-        raise DriverRegistryError("construct_health_telemetry_reader requires a DriverConstructionContext")
-    if type(context.mock) is not bool:
-        raise DriverRegistryError("DriverConstructionContext.mock must be an exact boolean")
+    context = _require_construction_context(context, operation="construct_health_telemetry_reader")
     spec = get_health_telemetry_spec(config.spec.type_name)
     if config.spec is not spec:
         raise DriverRegistryError("validated health config does not reference a canonical registry spec")
@@ -987,8 +996,7 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
         or getattr(config, "_provenance", None) is not _VALIDATION_PROVENANCE
     ):
         raise DriverRegistryError("construct_driver requires output from validate_instrument_entry")
-    if not isinstance(context, DriverConstructionContext):
-        raise DriverRegistryError("construct_driver requires a DriverConstructionContext")
+    context = _require_construction_context(context, operation="construct_driver")
     canonical = get_instrument_driver_spec(config.spec.type_name)
     if config.spec is not canonical:
         raise DriverRegistryError("validated config does not reference a canonical registry spec")

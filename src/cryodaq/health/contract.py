@@ -59,8 +59,10 @@ def _bounded_text(value: object, *, field_name: str, maximum: int = MAX_TEXT_BYT
         raise TypeError(f"{field_name} must be a string")
     if unicodedata.normalize("NFC", value) != value:
         raise HealthTelemetryError(f"{field_name} must be NFC-normalized")
-    if any(unicodedata.category(character).startswith("C") for character in value):
-        raise HealthTelemetryError(f"{field_name} contains a Unicode control character")
+    if any(
+        (category := unicodedata.category(character)).startswith("C") or category in {"Zl", "Zp"} for character in value
+    ):
+        raise HealthTelemetryError(f"{field_name} contains a Unicode control or line-separator character")
     try:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -80,7 +82,10 @@ def _identifier(value: object, *, field_name: str) -> str:
 def _finite_nonnegative(value: object, *, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{field_name} must be a finite non-negative number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise HealthTelemetryError(f"{field_name} must be a finite non-negative number") from exc
     if not math.isfinite(normalized) or normalized < 0:
         raise HealthTelemetryError(f"{field_name} must be a finite non-negative number")
     return normalized
@@ -89,15 +94,20 @@ def _finite_nonnegative(value: object, *, field_name: str) -> float:
 def _finite_number(value: object, *, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{field_name} must be a finite number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise HealthTelemetryError(f"{field_name} must be a finite number") from exc
     if not math.isfinite(normalized):
         raise HealthTelemetryError(f"{field_name} must be a finite number")
     return normalized
 
 
-def _strict_int(value: object, *, field_name: str, minimum: int = 0) -> int:
+def _strict_int(value: object, *, field_name: str, minimum: int = 0, maximum: int = 2**63 - 1) -> int:
     if type(value) is not int or value < minimum:
         raise HealthTelemetryError(f"{field_name} must be an integer >= {minimum}")
+    if value > maximum:
+        raise HealthTelemetryError(f"{field_name} must be an integer <= {maximum}")
     return value
 
 

@@ -449,6 +449,168 @@ def test_issued_reader_exposes_no_control_callback_credential_or_discovery_surfa
             pass
 
 
+@pytest.mark.parametrize("rejected", (2**63, 10**5000), ids=("one-past-max", "huge"))
+@pytest.mark.parametrize(
+    ("field_name", "build"),
+    (
+        pytest.param(
+            "revision",
+            lambda value: HealthTelemetrySnapshot(
+                HealthDeviceDescriptor("rack.health.01", "support_node", "fixture/v1"),
+                value,
+                10.0,
+                10.0,
+                "running",
+            ),
+            id="revision",
+        ),
+        pytest.param(
+            "counter",
+            lambda value: _metric(kind=HealthMetricKind.COUNTER, value=value),
+            id="counter",
+        ),
+    ),
+)
+def test_revision_and_counter_reject_integers_above_signed_64_bit(
+    rejected: int,
+    field_name: str,
+    build: object,
+) -> None:
+    assert callable(build)
+    with pytest.raises(HealthTelemetryError, match=field_name):
+        build(rejected)
+
+
+def test_revision_and_counter_accept_signed_64_bit_boundary() -> None:
+    maximum = 2**63 - 1
+    snapshot = HealthTelemetrySnapshot(
+        HealthDeviceDescriptor("rack.health.01", "support_node", "fixture/v1"),
+        maximum,
+        10.0,
+        10.0,
+        "running",
+        metrics=(_metric(kind=HealthMetricKind.COUNTER, value=maximum),),
+    )
+
+    assert snapshot.revision == maximum
+    assert snapshot.metrics[0].value == maximum
+
+
+@pytest.mark.parametrize(
+    ("field_name", "build"),
+    (
+        pytest.param(
+            "quantity",
+            lambda value: _metric(value=value),
+            id="quantity",
+        ),
+        pytest.param(
+            "observed_time_s",
+            lambda value: HealthTelemetrySnapshot(
+                HealthDeviceDescriptor("rack.health.01", "support_node", "fixture/v1"),
+                1,
+                value,
+                10.0,
+                "running",
+            ),
+            id="observed-time",
+        ),
+        pytest.param(
+            "stale_after_s",
+            lambda value: HealthDeviceDescriptor(
+                "rack.health.01",
+                "support_node",
+                "fixture/v1",
+                stale_after_s=value,
+                disconnected_after_s=5.0,
+            ),
+            id="stale-after",
+        ),
+    ),
+)
+def test_oversized_numeric_inputs_raise_contract_error(
+    field_name: str,
+    build: object,
+) -> None:
+    assert callable(build)
+    with pytest.raises(HealthTelemetryError, match=field_name):
+        build(10**5000)
+
+
+@pytest.mark.parametrize("separator", ("\u2028", "\u2029"), ids=("line", "paragraph"))
+@pytest.mark.parametrize(
+    ("field_name", "build"),
+    (
+        pytest.param(
+            "unit",
+            lambda text: HealthMetricDescriptor(
+                "health.temperature",
+                HealthMetricKind.QUANTITY,
+                text,
+                "device_health",
+                "Infrastructure",
+            ),
+            id="unit",
+        ),
+        pytest.param(
+            "display_group",
+            lambda text: HealthMetricDescriptor(
+                "health.temperature",
+                HealthMetricKind.QUANTITY,
+                "K",
+                "device_health",
+                text,
+            ),
+            id="display-group",
+        ),
+        pytest.param(
+            "state value",
+            lambda text: _metric(kind=HealthMetricKind.STATE, value=text),
+            id="state-value",
+        ),
+        pytest.param(
+            "message",
+            lambda text: HealthAlarm(
+                "health.cooling",
+                HealthAlarmSeverity.WARNING,
+                True,
+                text,
+                10.0,
+            ),
+            id="alarm-message",
+        ),
+        pytest.param(
+            "provenance",
+            lambda text: HealthDeviceDescriptor(
+                "rack.health.01",
+                "support_node",
+                text,
+            ),
+            id="provenance",
+        ),
+        pytest.param(
+            "mode",
+            lambda text: HealthTelemetrySnapshot(
+                HealthDeviceDescriptor("rack.health.01", "support_node", "fixture/v1"),
+                1,
+                10.0,
+                10.0,
+                text,
+            ),
+            id="mode",
+        ),
+    ),
+)
+def test_non_identifier_text_rejects_unicode_line_separators(
+    separator: str,
+    field_name: str,
+    build: object,
+) -> None:
+    assert callable(build)
+    with pytest.raises(HealthTelemetryError, match=field_name):
+        build(f"left{separator}right")
+
+
 def test_reader_is_not_publicly_exported_and_package_surface_is_exact() -> None:
     assert not hasattr(health_package, "IssuedHealthTelemetryReader")
     assert set(health_package.__all__) == {

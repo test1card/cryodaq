@@ -65,6 +65,21 @@ def test_simulator_rejects_invalid_manual_clock_origin(start: float) -> None:
         DeterministicFleetHealthSimulator(start_time_s=start)
 
 
+@pytest.mark.parametrize(
+    ("cadence_hz", "start_time_s"),
+    [
+        (2.0, 1e308),
+        (float.fromhex("0x0.0000000000001p-1022"), 10.0),
+    ],
+)
+def test_fleet_clock_rejects_ranges_without_finite_distinct_ticks(
+    cadence_hz: float,
+    start_time_s: float,
+) -> None:
+    with pytest.raises(HealthTelemetryError, match="finite, distinct simulator ticks"):
+        DeterministicFleetHealthSimulator(cadence_hz=cadence_hz, start_time_s=start_time_s)
+
+
 def test_frames_are_aggregation_ready_and_faults_are_not_diluted() -> None:
     frame = DeterministicFleetHealthSimulator().frame()
     faulted = [device for device in frame.devices if device.alarms]

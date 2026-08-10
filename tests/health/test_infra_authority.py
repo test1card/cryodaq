@@ -10,6 +10,7 @@ from types import MappingProxyType
 import pytest
 
 import cryodaq.drivers.registry as driver_registry
+import cryodaq.health.infra_authority as infra_authority
 from cryodaq.engine_wiring.operator_snapshot_authorities import AuthorityAvailability, CommonCut
 from cryodaq.health.contract import (
     HealthAlarm,
@@ -218,6 +219,25 @@ def test_metric_quality_is_conservative(quality, expected, reader) -> None:
     authority = ReaderPoolHealthAuthority((reader(Device(metrics=(metric(quality),))),))
     authority.presample(observed_time_s=NOW.timestamp())
     assert authority.snapshot_for_cut(cut()).nodes[0].state is expected
+
+
+def test_contract_invalid_revision_fails_closed_before_digest(
+    reader: Callable[[Device], HealthTelemetryReader],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest_calls: list[object] = []
+
+    def digest_spy(payload: object) -> str:
+        digest_calls.append(payload)
+        return "0" * 64
+
+    monkeypatch.setattr(infra_authority, "_digest", digest_spy)
+    authority = ReaderPoolHealthAuthority((reader(Device(revision=10**5000)),))
+
+    authority.presample(observed_time_s=NOW.timestamp())
+
+    assert digest_calls == []
+    assert authority.snapshot_for_cut(cut()).availability is AuthorityAvailability.UNAVAILABLE
 
 
 def test_cached_freshness_ages_at_cut_without_polling(reader) -> None:

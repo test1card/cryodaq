@@ -23,7 +23,7 @@ from cryodaq.health.contract import (
     HealthTelemetrySnapshot,
 )
 
-MAX_SIMULATOR_FRAMES = 2**63 - 1
+MAX_SIMULATOR_FRAMES = 2**52
 MAX_DETERMINISTIC_HEALTH_NODE_FRAMES = 1_000_000
 _ORDINARY_COMPONENT_TYPES = frozenset({"compressor", "pump_station", "cryocooler", "support_node"})
 
@@ -91,6 +91,20 @@ class DeterministicFleetHealthSimulator:
         start = float(start_time_s)
         if not math.isfinite(start) or start < 10.0:
             raise HealthTelemetryError("start_time_s must be finite and >= 10 for deterministic stale cuts")
+        try:
+            tick_s = 1.0 / cadence
+            horizon_s = start + (MAX_SIMULATOR_FRAMES - 1) * tick_s
+        except OverflowError as exc:
+            raise HealthTelemetryError(
+                "start_time_s and cadence_hz must yield finite, distinct simulator ticks"
+            ) from exc
+        if (
+            not math.isfinite(tick_s)
+            or not math.isfinite(horizon_s)
+            or start + tick_s <= start
+            or math.ulp(horizon_s) > tick_s
+        ):
+            raise HealthTelemetryError("start_time_s and cadence_hz must yield finite, distinct simulator ticks")
 
         self._seed = seed
         self._cadence_hz = cadence

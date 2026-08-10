@@ -312,6 +312,40 @@ def test_construct_driver_rejects_object_without_provenance() -> None:
         construct_driver(forged, DriverConstructionContext(mock=True))
 
 
+def test_construct_driver_rejects_forged_context_before_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    factory_calls: list[object] = []
+
+    def forbidden_factory(
+        config: ValidatedInstrumentConfig,
+        context: DriverConstructionContext,
+    ) -> InstrumentDriver:
+        factory_calls.append((config, context.mock))
+        raise AssertionError("factory must not run for an invalid construction context")
+
+    spec = replace(BUILTIN_DRIVER_SPECS["thyracont_vsp63d"], factory=forbidden_factory)
+    specs = dict(BUILTIN_DRIVER_SPECS)
+    specs[spec.type_name] = spec
+    monkeypatch.setattr(registry_module, "BUILTIN_DRIVER_SPECS", MappingProxyType(specs))
+    config = validate_instrument_entry(
+        {
+            "type": "thyracont_vsp63d",
+            "name": "P",
+            "resource": "COM3",
+        }
+    )
+    context = object.__new__(DriverConstructionContext)
+    object.__setattr__(context, "mock", "not-a-bool")
+
+    with pytest.raises(DriverRegistryError, match="exact boolean"):
+        construct_driver(config, context)
+
+    missing_mock = object.__new__(DriverConstructionContext)
+    with pytest.raises(DriverRegistryError, match="exact boolean"):
+        construct_driver(config, missing_mock)
+
+    assert factory_calls == []
+
+
 def test_valid_lakeshore_config_is_normalized_and_immutable() -> None:
     config = validate_instrument_entry(
         {
