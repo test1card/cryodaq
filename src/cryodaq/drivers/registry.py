@@ -658,16 +658,27 @@ def verify_allowlisted_driver_imports() -> tuple[str, ...]:
                 f"allowlisted driver {type_name!r} failed to import {spec.module!r}: {type(exc).__name__}: {exc}"
             ) from exc
         implementation = getattr(module, spec.class_name, None)
-        if (
-            not isinstance(implementation, type)
-            or implementation is InstrumentDriver
-            or not issubclass(implementation, InstrumentDriver)
-            or inspect.isabstract(implementation)
-            or implementation.__module__ != spec.module
-        ):
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
+            valid_implementation = isinstance(implementation, type) and implementation.__module__ == spec.module
+            if valid_implementation:
+                try:
+                    _StaticHealthTelemetryAllowlistEntry(spec.type_name, implementation)
+                except (HealthTelemetryError, TypeError):
+                    valid_implementation = False
+            expected = "the exact declared health telemetry implementation class"
+        else:
+            valid_implementation = (
+                isinstance(implementation, type)
+                and implementation is not InstrumentDriver
+                and issubclass(implementation, InstrumentDriver)
+                and not inspect.isabstract(implementation)
+                and implementation.__module__ == spec.module
+            )
+            expected = "a concrete InstrumentDriver class"
+        if not valid_implementation:
             raise DriverRegistryError(
                 f"allowlisted driver {type_name!r} does not resolve "
-                f"{spec.module}.{spec.class_name} to a concrete InstrumentDriver class defined by that module"
+                f"{spec.module}.{spec.class_name} to {expected} defined by that module"
             )
         verified.append(spec.module)
     return tuple(sorted(verified))

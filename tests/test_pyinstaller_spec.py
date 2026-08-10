@@ -307,6 +307,30 @@ def test_frozen_driver_guard_rejects_misdeclared_abstract_base(monkeypatch: pyte
         _assert_frozen_driver_contract()
 
 
+def test_frozen_driver_guard_rejects_misdeclared_passive_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_specs = tuple(driver_registry.BUILTIN_DRIVER_SPECS.values())
+    seed = next(
+        spec
+        for spec in live_specs
+        if spec.authority is driver_registry.DriverAuthority.PASSIVE_EXTENSION
+        and driver_registry.DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities
+    )
+    corrupted = replace(seed)
+    object.__setattr__(corrupted, "class_name", "DeterministicFleetHealthSimulator")
+    _replace_registry(
+        monkeypatch,
+        tuple(corrupted if spec is seed else spec for spec in live_specs),
+    )
+
+    with pytest.raises(
+        driver_registry.DriverRegistryError,
+        match="exact declared health telemetry implementation class",
+    ):
+        _assert_frozen_driver_contract()
+
+
 def test_frozen_driver_guard_rejects_registry_only_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     live_specs = tuple(driver_registry.BUILTIN_DRIVER_SPECS.values())
     seed = next(spec for spec in live_specs if spec.reviewed_source_binding is None)
