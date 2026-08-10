@@ -73,6 +73,7 @@ PERIODIC_REPORTER_FACILITIES = (
 
 # Kept importable only as dead characterization during the H3 cutover.
 RETIRED_PERIODIC_REPORTER_SYMBOLS = ("cryodaq.notifications.periodic_report.PeriodicReporter",)
+NON_PERIODIC_REPORT_OWNER_SYMBOLS = ("cryodaq.agents.assistant.report_coordinator.ReportCoordinator",)
 
 
 def validate_periodic_reporter_inventory(
@@ -86,7 +87,11 @@ def validate_periodic_reporter_inventory(
     if references:
         raise RuntimeError(f"retired periodic reporter is referenced: {references!r}")
     expected = tuple(
-        sorted([facility.symbol for facility in PERIODIC_REPORTER_FACILITIES] + list(RETIRED_PERIODIC_REPORTER_SYMBOLS))
+        sorted(
+            [facility.symbol for facility in PERIODIC_REPORTER_FACILITIES]
+            + list(RETIRED_PERIODIC_REPORTER_SYMBOLS)
+            + list(NON_PERIODIC_REPORT_OWNER_SYMBOLS)
+        )
     )
     observed = tuple(sorted(symbols))
     if observed != expected:

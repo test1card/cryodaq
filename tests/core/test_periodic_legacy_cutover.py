@@ -103,7 +103,8 @@ def _engine_tree() -> ast.Module:
 
 _REPORT_NAME_TOKENS = ("report", "summary", "digest")
 _SCHEDULE_NAME_TOKENS = ("periodic", "scheduled", "daily", "hourly", "interval", "cadence")
-_CADENCE_CALL_TOKENS = ("sleep", "call_later", "call_at", "add_job", "schedule", "wait_until", "enterabs")
+_TIMER_CALL_TOKENS = ("call_later", "call_at", "add_job", "schedule", "enter", "enterabs")
+_DELAY_CALL_TOKENS = ("sleep", "wait_until")
 
 
 def _python_source_paths(source_root: Path) -> list[Path]:
@@ -123,10 +124,9 @@ def _call_name(node: ast.Call) -> str:
     return ""
 
 
-def _has_cadence_call(node: ast.AST) -> bool:
+def _has_call_token(node: ast.AST, tokens: tuple[str, ...]) -> bool:
     return any(
-        isinstance(child, ast.Call) and any(token in _call_name(child) for token in _CADENCE_CALL_TOKENS)
-        for child in ast.walk(node)
+        isinstance(child, ast.Call) and any(token in _call_name(child) for token in tokens) for child in ast.walk(node)
     )
 
 
@@ -142,13 +142,14 @@ def _is_periodic_reporter_owner(node: ast.AST) -> bool:
         return False
     if not _has_async_owner_lifecycle(node):
         return False
-    cadence_call = _has_cadence_call(node)
-    if not cadence_call and not any(isinstance(child, ast.While) for child in ast.walk(node)):
-        return False
     name = node.name.lower()
-    report_shaped = any(token in name for token in _REPORT_NAME_TOKENS) or ("periodic" in name and "supervisor" in name)
-    schedule_shaped = any(token in name for token in _SCHEDULE_NAME_TOKENS) or cadence_call
-    return report_shaped and schedule_shaped
+    schedule_named = any(token in name for token in _SCHEDULE_NAME_TOKENS)
+    has_loop = any(isinstance(child, ast.While) for child in ast.walk(node))
+    has_timer = _has_call_token(node, _TIMER_CALL_TOKENS)
+    has_named_delay = schedule_named and _has_call_token(node, _DELAY_CALL_TOKENS)
+    if not (has_loop or has_timer or has_named_delay):
+        return False
+    return any(token in name for token in _REPORT_NAME_TOKENS) or ("periodic" in name and "supervisor" in name)
 
 
 def _periodic_reporter_symbols(source_root: Path) -> tuple[str, ...]:
@@ -160,26 +161,56 @@ def _periodic_reporter_symbols(source_root: Path) -> tuple[str, ...]:
     return tuple(sorted(symbols))
 
 
+def _literal_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_string(node.left)
+        right = _literal_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
 def _retired_periodic_reporter_references(source_root: Path) -> tuple[str, ...]:
     legacy_path = source_root / "notifications" / "periodic_report.py"
+    manifest_path = source_root / "agents" / "assistant_bootstrap.py"
     references: set[str] = set()
     for path in _python_source_paths(source_root):
         if path == legacy_path:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        allowed_manifest_nodes: set[ast.AST] = set()
+        if path == manifest_path:
+            for statement in tree.body:
+                if isinstance(statement, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == "RETIRED_PERIODIC_REPORTER_SYMBOLS"
+                    for target in statement.targets
+                ):
+                    allowed_manifest_nodes.update(ast.walk(statement.value))
         for node in ast.walk(tree):
+            if node in allowed_manifest_nodes:
+                continue
+            imported_module = node.module or "" if isinstance(node, ast.ImportFrom) else ""
             is_reference = isinstance(node, ast.ImportFrom) and (
-                node.module == _RETIRED_REPORTER_MODULE
+                imported_module == _RETIRED_REPORTER_MODULE
+                or imported_module.endswith("notifications.periodic_report")
+                or (node.level > 0 and imported_module == "periodic_report")
                 or (
-                    node.module == "cryodaq.notifications"
+                    node.level > 0
+                    and not imported_module
+                    and path.parent.name == "notifications"
                     and any(alias.name == "periodic_report" for alias in node.names)
                 )
-                or (node.level > 0 and path.parent.name == "notifications" and node.module == "periodic_report")
             )
             is_reference = is_reference or (
                 isinstance(node, ast.Import) and any(alias.name == _RETIRED_REPORTER_MODULE for alias in node.names)
             )
-            is_reference = is_reference or (isinstance(node, ast.Constant) and node.value == _RETIRED_REPORTER_MODULE)
+            literal = _literal_string(node)
+            is_reference = is_reference or (
+                literal is not None
+                and (literal == _RETIRED_REPORTER_MODULE or literal.startswith(f"{_RETIRED_REPORTER_MODULE}."))
+            )
             is_reference = is_reference or (
                 isinstance(node, ast.Call)
                 and (
@@ -187,6 +218,12 @@ def _retired_periodic_reporter_references(source_root: Path) -> tuple[str, ...]:
                     and node.func.id == "PeriodicReporter"
                     or isinstance(node.func, ast.Attribute)
                     and node.func.attr == "PeriodicReporter"
+                    or (
+                        isinstance(node.func, ast.Name)
+                        and node.func.id == "getattr"
+                        and len(node.args) >= 2
+                        and _literal_string(node.args[1]) == "PeriodicReporter"
+                    )
                 )
             )
             if is_reference:
@@ -229,9 +266,11 @@ def test_periodic_reporter_inventory_rejects_third_reporters_and_legacy_reactiva
         "class ScheduledReportDispatcher:\n"
         "    async def start(self):\n"
         "        asyncio.get_running_loop().call_later(60, self._send_report)\n\n"
-        "async def report_loop():\n"
+        "async def report_loop(tick):\n"
         "    while True:\n"
-        "        await asyncio.sleep(60)\n",
+        "        await tick.wait()\n\n"
+        "async def render_report():\n"
+        "    await asyncio.sleep(0)\n",
         encoding="utf-8",
     )
 
@@ -242,6 +281,7 @@ def test_periodic_reporter_inventory_rejects_third_reporters_and_legacy_reactiva
         )
     assert "ScheduledReportDispatcher" in str(unexpected.value)
     assert ".report_loop" in str(unexpected.value)
+    assert ".render_report" not in str(unexpected.value)
 
     decoy.unlink()
     validate_periodic_reporter_inventory(
@@ -251,15 +291,33 @@ def test_periodic_reporter_inventory_rejects_third_reporters_and_legacy_reactiva
 
     activation = scratch_source / "agents" / "assistant" / "legacy_activation.py"
     activation.write_text(
-        "from cryodaq.notifications.periodic_report import PeriodicReporter\n\n"
-        "async def activate(reporter: PeriodicReporter):\n"
-        "    await reporter.start()\n",
+        "from ...notifications.periodic_report import PeriodicReporter as Legacy\n\n"
+        "def build(*args, **kwargs):\n"
+        "    return Legacy(*args, **kwargs)\n",
         encoding="utf-8",
     )
+    alias_references = _retired_periodic_reporter_references(scratch_source)
+    assert any(reference.endswith(":1") for reference in alias_references)
     with pytest.raises(RuntimeError, match="legacy_activation.py"):
         validate_periodic_reporter_inventory(
             _periodic_reporter_symbols(scratch_source),
-            retired_references=_retired_periodic_reporter_references(scratch_source),
+            retired_references=alias_references,
+        )
+
+    activation.write_text(
+        "def load_legacy(load_object, module):\n"
+        '    by_path = load_object("cryodaq.notifications." + "periodic_report." + "PeriodicReporter")\n'
+        '    by_name = getattr(module, "Periodic" + "Reporter")\n'
+        "    return by_path, by_name\n",
+        encoding="utf-8",
+    )
+    dynamic_references = _retired_periodic_reporter_references(scratch_source)
+    assert any(reference.endswith(":2") for reference in dynamic_references)
+    assert any(reference.endswith(":3") for reference in dynamic_references)
+    with pytest.raises(RuntimeError, match="legacy_activation.py"):
+        validate_periodic_reporter_inventory(
+            _periodic_reporter_symbols(scratch_source),
+            retired_references=dynamic_references,
         )
 
     activation.unlink()
