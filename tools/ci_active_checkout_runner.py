@@ -431,9 +431,11 @@ def _run_candidate_process(
             except ProcessLookupError:
                 pass
             except BaseException as exc:
-                cleanup_errors.append(("candidate root termination", exc))
+                unsettled = CandidateProcessUnsettledError(f"candidate root termination failed: {exc}")
+                unsettled.__cause__ = exc
+                cleanup_errors.append(("candidate root termination", unsettled))
             else:
-                record_cleanup_error("candidate root wait", lambda: process.wait(timeout=5))
+                settle_process_tree("candidate root wait", lambda: process.wait(timeout=5))
 
         for reader in readers:
             reader.join(timeout=5)

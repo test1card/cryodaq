@@ -756,6 +756,62 @@ def test_active_checkout_runner_settles_session_escaped_grandchild_after_timeout
     assert not psutil.pid_exists(escaped_pid), "runner returned success before the escaped descendant was reaped"
 
 
+@pytest.mark.parametrize("failure_point", ["kill", "wait"])
+def test_candidate_root_fallback_failure_is_always_unsettled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    """A failed fallback cannot be mistaken for the primary timeout or setup error."""
+
+    injected: BaseException
+    if failure_point == "kill":
+        injected = RuntimeError("simulated fallback kill failure")
+    else:
+        injected = subprocess.TimeoutExpired(("pytest",), 5)
+
+    class FakeProcess:
+        stdout = None
+        stderr = None
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def kill() -> None:
+            if failure_point == "kill":
+                raise injected
+
+        @staticmethod
+        def wait(*, timeout: float) -> int:
+            assert timeout == 5
+            raise injected
+
+    monkeypatch.setattr(ci_active_checkout_runner.os, "name", "nt")
+    monkeypatch.setattr(ci_active_checkout_runner, "_windows_job", lambda: 1)
+    monkeypatch.setattr(ci_active_checkout_runner.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(
+        ci_active_checkout_runner,
+        "_assign_windows_job",
+        lambda *_args: (_ for _ in ()).throw(
+            ci_active_checkout_runner.CandidateProcessSettlementError("simulated assignment failure")
+        ),
+    )
+    monkeypatch.setattr(ci_active_checkout_runner, "_settle_windows_job", lambda _job: None)
+
+    with pytest.raises(ci_active_checkout_runner.CandidateProcessUnsettledError) as raised:
+        ci_active_checkout_runner._run_candidate_process(
+            ("pytest",),
+            root=tmp_path,
+            environment=os.environ.copy(),
+            capture_output=False,
+        )
+
+    assert raised.value.__cause__ is injected
+    assert any("simulated assignment failure" in note for note in raised.value.__notes__)
+
+
 def test_active_checkout_runner_refuses_unsupported_posix_before_candidate_launch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
