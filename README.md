@@ -606,7 +606,9 @@ Active configuration files in the Montana candidate:
 - `config/sinks.yaml.example` — sinks (vault notes, webhook) on finalize
 - `config/web.local.yaml.example` — template for the FastAPI write-token
   (`web.local.yaml` is gitignored)
-- `config/themes/*.yaml` — bundled GUI theme packs; selected via gitignored
+- `config/themes/*.yaml` — bundled GUI theme packs; `default_cool` is the
+  default. To select another pack for this site on the next launch, set
+  `theme: warm_stone` (or another pack ID) in the gitignored
   `config/settings.local.yaml`
 - `config/experiment_templates/*.yaml` — experiment-type templates
 
