@@ -3378,7 +3378,7 @@ false_green_pairs:
 
 records:
   - id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
-    status: open
+    status: reopened
     scope: product_contract
     authority_source: docs/OPEN_CELLS.md#oc-030
     applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled, every descriptor-bearing hot or cold archived-history read and command reply that can consult mutable live classification or misstate persisted descriptor authority, and every ChannelManager reload that replaces the declared channel-role state, accepted configuration path, or both.
