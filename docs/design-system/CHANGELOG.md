@@ -51,6 +51,7 @@ the design-system-specific definitions of "breaking" from
   scripted operator task acceptance, visual judgment, and runtime
   frame/startup/memory measurements remain human or target-environment gates.
   This release does not claim those measurements from static checks.
+
 ## [4.1.0] — 2026-08-05
 
 ### Added
