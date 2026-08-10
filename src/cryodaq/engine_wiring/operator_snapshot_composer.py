@@ -326,6 +326,8 @@ class OperatorSnapshotComposer:
                         f"Active {alarm.level} alarm",
                         alarm.alarm_id,
                         alarm.triggered_at,
+                        channel_ids=alarm.channel_ids,
+                        canonical_acknowledged=alarm.acknowledged,
                     )
                 )
             attention_items.extend(

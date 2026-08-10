@@ -97,7 +97,7 @@ def _safety(cut: CommonCut) -> SafetyReadinessReceipt:
 def _attention(cut: CommonCut) -> AlarmAttentionReceipt:
     return AlarmAttentionReceipt(
         **_base(cut),
-        alarms=(AlarmEvidence("pressure_high", "WARNING", cut.observed_at, False),),
+        alarms=(AlarmEvidence("pressure_high", "WARNING", cut.observed_at, False, ("sensor.main",)),),
         attention=(
             AttentionEvidence(
                 "inspect-vacuum",
@@ -211,6 +211,8 @@ async def test_complete_snapshot_has_one_cut_eight_detached_summaries_and_stable
     assert first.plant_health.subsystems[0] is not _safety(calls["safety"][0]).plant_health[0]
     assert first.attention.items[0].detail == "pressure_high"
     assert first.attention.items[0].state is OperatorPresentationState.WARNING
+    assert first.attention.items[0].channel_ids == ("sensor.main",)
+    assert first.attention.items[0].canonical_acknowledged is False
     assert first.attention.history_revision == 9
     assert first.cooldown_history.trajectory_channel == CooldownChannelBinding(
         "sensor.main",

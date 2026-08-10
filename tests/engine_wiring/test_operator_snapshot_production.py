@@ -715,6 +715,7 @@ async def test_alarm_dispatch_timeline_acknowledgement_and_restart_use_live_owne
     assert receipt.availability is AuthorityAvailability.AVAILABLE
     assert receipt.history_revision == timeline.through_revision
     assert [(alarm.alarm_id, alarm.acknowledged) for alarm in receipt.alarms] == [("alarm.hot", False)]
+    assert receipt.alarms[0].channel_ids == ("probe.1",)
 
     assert alarm_owner.process("alarm.hot", None, {}) == "CLEARED"
     resolved_at = acknowledgement.timestamp + timedelta(microseconds=1)

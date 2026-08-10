@@ -200,6 +200,7 @@ def test_lifecycle_fields_have_no_constructor_defaults() -> None:
 
 def test_codec_version_text_matches_wire_schema() -> None:
     schema_version = protocol._SCHEMA_VERSION
+    assert schema_version == 5
     source = Path(protocol.__file__).read_text(encoding="utf-8")
     stated_versions = {int(value) for value in re.findall(r"\b[vV](\d+)\b", source)}
 
@@ -610,6 +611,66 @@ def test_codec_round_trip_is_byte_canonical_for_live_and_replay() -> None:
         assert ".456789Z" in wire
 
 
+def _snapshot_with_channel_bound_attention() -> OperatorSnapshot:
+    snapshot = _snapshot()
+    item = AttentionItem(
+        "alarm.hot",
+        OperatorPresentationState.WARNING,
+        "Hot channel",
+        "Check the cooldown sensor",
+        snapshot.cut.observed_at,
+        channel_ids=tuple(f"sensor.{index}" for index in range(5)),
+        canonical_acknowledged=False,
+    )
+    return replace(
+        snapshot,
+        attention=replace(
+            snapshot.attention,
+            status=_status(OperatorPresentationState.WARNING),
+            items=(item,),
+        ),
+    )
+
+
+def test_attention_codec_round_trips_stable_channels_and_canonical_alarm_truth() -> None:
+    snapshot = _snapshot_with_channel_bound_attention()
+
+    wire = dump_operator_snapshot(snapshot)
+    restored = load_operator_snapshot(wire)
+    payload = json.loads(wire)["snapshot"]["attention"]["items"][0]
+
+    assert restored == snapshot
+    assert restored.attention.items[0].channel_ids == tuple(f"sensor.{index}" for index in range(5))
+    assert restored.attention.items[0].canonical_acknowledged is False
+    assert payload["channel_ids"] == [f"sensor.{index}" for index in range(5)]
+    assert payload["canonical_acknowledged"] is False
+    assert "acknowledged" not in payload
+
+
+def test_attention_codec_rejects_missing_or_malformed_identity_and_canonical_truth() -> None:
+    snapshot = _snapshot_with_channel_bound_attention()
+
+    missing_channels = encode_operator_snapshot(snapshot)
+    del missing_channels["snapshot"]["attention"]["items"][0]["channel_ids"]
+    with pytest.raises(ValueError, match="contain exactly"):
+        decode_operator_snapshot(missing_channels)
+
+    non_array_channels = encode_operator_snapshot(snapshot)
+    non_array_channels["snapshot"]["attention"]["items"][0]["channel_ids"] = "sensor.0"
+    with pytest.raises(TypeError, match=r"channel_ids must be an array"):
+        decode_operator_snapshot(non_array_channels)
+
+    duplicate_channels = encode_operator_snapshot(snapshot)
+    duplicate_channels["snapshot"]["attention"]["items"][0]["channel_ids"] = ["sensor.0", "sensor.0"]
+    with pytest.raises(ValueError, match="channel ids must be unique"):
+        decode_operator_snapshot(duplicate_channels)
+
+    non_boolean_acknowledgement = encode_operator_snapshot(snapshot)
+    non_boolean_acknowledgement["snapshot"]["attention"]["items"][0]["canonical_acknowledged"] = 0
+    with pytest.raises(TypeError, match=r"canonical_acknowledged must be a boolean"):
+        decode_operator_snapshot(non_boolean_acknowledgement)
+
+
 @pytest.mark.parametrize(
     "alternate",
     [
@@ -630,7 +691,12 @@ def test_codec_rejects_noncanonical_utc_spellings(alternate: str) -> None:
 
 def test_loader_rejects_duplicate_keys_at_outer_and_nested_depth() -> None:
     wire = dump_operator_snapshot(_snapshot())
-    outer = wire.replace('"version":4', '"version":4,"version":4', 1)
+    version = protocol._SCHEMA_VERSION
+    outer = wire.replace(
+        f'"version":{version}',
+        f'"version":{version},"version":{version}',
+        1,
+    )
     nested = wire.replace('"revision":42', '"revision":41,"revision":42', 1)
 
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):

@@ -51,7 +51,7 @@ __all__ = [
 _TRANSPORT_DISCONNECTED = "transport_disconnected"
 _SNAPSHOT_STALE = "snapshot_stale"
 _COOLDOWN_MISSION_SCHEMA = "cryodaq.cooldown-mission-evidence"
-_COOLDOWN_MISSION_VERSION = 2
+_COOLDOWN_MISSION_VERSION = 3
 
 
 def _mission_number(
@@ -259,6 +259,12 @@ class CooldownMission:
             raise TypeError("relevant_attention must contain exact AttentionItem values")
         if self.relevant_attention != tuple(sorted(self.relevant_attention, key=_attention_order_key)):
             raise ValueError("mission attention order is not deterministic")
+        if any(
+            item.channel_ids
+            and (self.trajectory_channel is None or self.trajectory_channel.channel_id not in item.channel_ids)
+            for item in self.relevant_attention
+        ):
+            raise ValueError("mission attention contains an unrelated stable channel")
         if len({item.attention_id for item in self.relevant_attention}) != len(self.relevant_attention):
             raise ValueError("mission attention ids must be unique")
         if any(item.observed_at > self.cut.observed_at for item in self.relevant_attention):
@@ -356,6 +362,13 @@ def build_cooldown_mission(
         )
         previous = sample
 
+    relevant_attention = tuple(
+        item
+        for item in snapshot.attention.items
+        if not item.channel_ids
+        or (authoritative_channel is not None and authoritative_channel.channel_id in item.channel_ids)
+    )
+
     return CooldownMission(
         cut=snapshot.cut,
         cooldown_status=snapshot.cooldown_history.status,
@@ -370,7 +383,7 @@ def build_cooldown_mission(
         expected_cadence_s=cadence,
         trajectory=tuple(trajectory),
         trajectory_missing_reason=("no_samples" if not snapshot.cooldown_history.samples else None),
-        relevant_attention=tuple(sorted(snapshot.attention.items, key=_attention_order_key)),
+        relevant_attention=tuple(sorted(relevant_attention, key=_attention_order_key)),
         recent_history=attention_history,
         reference_id=snapshot.cooldown_history.reference_id,
     )
@@ -455,6 +468,8 @@ def dump_cooldown_mission(mission: CooldownMission) -> str:
                 "detail": item.detail,
                 "observed_at": item.observed_at.isoformat(),
                 "transport_reason_codes": list(item.transport_reason_codes),
+                "channel_ids": list(item.channel_ids),
+                "canonical_acknowledged": item.canonical_acknowledged,
             }
             for item in mission.relevant_attention
         ],

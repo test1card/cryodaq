@@ -1,7 +1,7 @@
 """Backend-owned immutable F36 operator snapshot protocol.
 
 This neutral module deliberately contains no GUI objects, transport calls, or
-commands. Engine/replay producers and GUI consumers share its strict v4 codec.
+commands. Engine/replay producers and GUI consumers share its strict v5 codec.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class AvailabilityTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
-# V4 resource budgets. Collection limits derive from the public fleet target of
+# V5 resource budgets. Collection limits derive from the public fleet target of
 # 100 devices / 2,000 channels. The 8 MiB wire cap is frozen with measured
 # worst-case headroom in tests; evidence is rejected, never silently truncated.
 MAX_FLEET_DEVICES = 100
@@ -105,7 +105,7 @@ STATE_PRECEDENCE = MappingProxyType(
 
 
 class OperatorSnapshotProtocolError(ValueError):
-    """Closed receiver-boundary failure for invalid or excessive v4 data."""
+    """Closed receiver-boundary failure for invalid or excessive v5 data."""
 
 
 __all__ = [
@@ -467,6 +467,8 @@ class AttentionItem:
     detail: str
     observed_at: datetime
     transport_reason_codes: tuple[str, ...] = ()
+    channel_ids: tuple[str, ...] = ()
+    canonical_acknowledged: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -488,6 +490,17 @@ class AttentionItem:
             "transport_reason_codes",
             _transport_reason_codes(self.transport_reason_codes),
         )
+        if type(self.channel_ids) is not tuple:
+            raise TypeError("channel_ids must be an exact tuple")
+        _bounded_tuple(self.channel_ids, field_name="channel_ids", limit=MAX_CHANNELS)
+        channel_ids = tuple(
+            _non_empty(channel_id, field_name="channel_id", max_bytes=MAX_ID_UTF8_BYTES)
+            for channel_id in self.channel_ids
+        )
+        _unique(channel_ids, field_name="channel ids")
+        object.__setattr__(self, "channel_ids", channel_ids)
+        if self.canonical_acknowledged is not None and type(self.canonical_acknowledged) is not bool:
+            raise TypeError("canonical_acknowledged must be exact bool or None")
         _validate_transport_presentation(
             self.state,
             self.transport_reason_codes,
@@ -976,11 +989,11 @@ class OperatorSnapshot:
 
 
 _SCHEMA = "cryodaq.operator-snapshot"
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 def encode_operator_snapshot(snapshot: OperatorSnapshot) -> dict[str, Any]:
-    """Return the strict v4 JSON-compatible envelope for ``snapshot``."""
+    """Return the strict v5 JSON-compatible envelope for ``snapshot``."""
 
     if not isinstance(snapshot, OperatorSnapshot):
         raise TypeError("snapshot must be an OperatorSnapshot")
@@ -1004,7 +1017,7 @@ def dump_operator_snapshot(snapshot: OperatorSnapshot) -> str:
 
 
 def load_operator_snapshot(payload: str) -> OperatorSnapshot:
-    """Parse and validate one strict v4 JSON envelope."""
+    """Parse and validate one strict v5 JSON envelope."""
 
     if not isinstance(payload, str):
         raise TypeError("payload must be a string")
@@ -1321,6 +1334,14 @@ def _decode_attention_item(value: Any, path: str) -> AttentionItem:
         _string(item["detail"], f"{path}.detail"),
         _datetime(item["observed_at"], f"{path}.observed_at"),
         _string_tuple(item["transport_reason_codes"], f"{path}.transport_reason_codes"),
+        _string_tuple(
+            item["channel_ids"],
+            f"{path}.channel_ids",
+            limit=MAX_CHANNELS,
+        ),
+        None
+        if item["canonical_acknowledged"] is None
+        else _bool(item["canonical_acknowledged"], f"{path}.canonical_acknowledged"),
     )
 
 
@@ -1371,11 +1392,11 @@ def _optional_string(value: Any, path: str) -> str | None:
     return None if value is None else _string(value, path)
 
 
-def _string_tuple(value: Any, path: str) -> tuple[str, ...]:
+def _string_tuple(value: Any, path: str, *, limit: int = MAX_REASON_CODES) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise TypeError(f"{path} must be an array")
-    if len(value) > MAX_REASON_CODES:
-        raise ValueError(f"{path} exceeds {MAX_REASON_CODES} values")
+    if len(value) > limit:
+        raise ValueError(f"{path} exceeds {limit} values")
     return tuple(_string(item, f"{path}[{index}]") for index, item in enumerate(value))
 
 
@@ -1410,7 +1431,7 @@ def _datetime(value: Any, path: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"{path} must be an ISO-8601 timestamp") from exc
     if _format_datetime(parsed) != raw:
-        raise ValueError(f"{path} is not the canonical v4 UTC timestamp")
+        raise ValueError(f"{path} is not the canonical v5 UTC timestamp")
     return parsed
 
 

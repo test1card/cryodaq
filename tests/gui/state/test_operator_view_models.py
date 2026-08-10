@@ -408,6 +408,58 @@ def test_cooldown_mission_compares_only_exact_reference_points() -> None:
     assert points[2].comparison_missing_reason == "no_exact_reference_sample"
 
 
+def test_cooldown_mission_filters_attention_by_stable_channel_and_exports_acknowledgement() -> None:
+    snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    observed_at = snapshot.cut.observed_at
+    main = AttentionItem(
+        "alarm-main",
+        OperatorPresentationState.WARNING,
+        "Main alarm",
+        "main-channel-alarm",
+        observed_at,
+        channel_ids=("sensor.main",),
+        canonical_acknowledged=True,
+    )
+    unrelated = AttentionItem(
+        "alarm-other",
+        OperatorPresentationState.WARNING,
+        "Other alarm",
+        "other-channel-alarm",
+        observed_at,
+        channel_ids=("sensor.other",),
+        canonical_acknowledged=False,
+    )
+    global_notice = AttentionItem(
+        "global-notice",
+        OperatorPresentationState.CAUTION,
+        "Global notice",
+        "experiment-wide",
+        observed_at,
+    )
+    snapshot = replace(
+        snapshot,
+        attention=replace(
+            snapshot.attention,
+            items=(unrelated, main, global_notice),
+        ),
+    )
+
+    mission = _build_cooldown_mission(snapshot, _attention_history())
+
+    assert tuple(item.attention_id for item in mission.relevant_attention) == (
+        "alarm-main",
+        "global-notice",
+    )
+    payload = json.loads(_dump_cooldown_mission(mission))
+    assert payload["version"] == 3
+    exported = {item["attention_id"]: item for item in payload["relevant_attention"]}
+    assert set(exported) == {"alarm-main", "global-notice"}
+    assert exported["alarm-main"]["channel_ids"] == ["sensor.main"]
+    assert exported["alarm-main"]["canonical_acknowledged"] is True
+    assert exported["global-notice"]["channel_ids"] == []
+    assert exported["global-notice"]["canonical_acknowledged"] is None
+
+
 def test_cooldown_mission_unifies_cut_phase_attention_and_durable_history() -> None:
     snapshot = _snapshot(state=OperatorPresentationState.WARNING)
     history = _attention_history()
@@ -465,6 +517,18 @@ def test_cooldown_mission_rejects_history_revision_after_snapshot_cut() -> None:
 
 def test_cooldown_mission_export_uses_stable_ids_across_descriptor_rename() -> None:
     snapshot = _snapshot(state=OperatorPresentationState.WARNING)
+    channel_bound = replace(
+        snapshot.attention.items[0],
+        channel_ids=("sensor.main",),
+        canonical_acknowledged=False,
+    )
+    snapshot = replace(
+        snapshot,
+        attention=replace(
+            snapshot.attention,
+            items=(channel_bound, *snapshot.attention.items[1:]),
+        ),
+    )
     history = _attention_history()
     original = _mission_descriptor()
     renamed = replace(
@@ -481,6 +545,9 @@ def test_cooldown_mission_export_uses_stable_ids_across_descriptor_rename() -> N
     assert first == second
     assert first_wire == second_wire
     payload = json.loads(first_wire)
+    exported_attention = {item["attention_id"]: item for item in payload["relevant_attention"]}
+    assert exported_attention["alarm-1"]["channel_ids"] == ["sensor.main"]
+    assert exported_attention["alarm-1"]["canonical_acknowledged"] is False
     assert payload["experiment_id"] == "exp-7"
     assert payload["trajectory_channel_id"] == "sensor.main"
     assert payload.get("trajectory_channel") == {

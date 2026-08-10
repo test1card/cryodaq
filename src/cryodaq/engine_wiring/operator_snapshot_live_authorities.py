@@ -411,6 +411,7 @@ class LiveAlarmAttentionAuthority:
                         item["level"],
                         datetime.fromtimestamp(item["triggered_at"], UTC),
                         item["acknowledged"],
+                        tuple(item["channels"]),
                     )
                 )
             payload = json.dumps(
