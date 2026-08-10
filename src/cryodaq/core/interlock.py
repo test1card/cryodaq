@@ -624,6 +624,11 @@ class InterlockEngine:
             for record in self._interlocks.values()
             if record.state == InterlockState.ARMED and record.condition.matches_reading(reading, descriptor_envelope)
         ]
+        recovery_matching = [
+            record
+            for record in self._interlocks.values()
+            if record.condition.matches_reading(reading, descriptor_envelope)
+        ]
 
         # NaN-доктрина P2-5: непригодное показание (NaN / error-status) на
         # interlock-защищённом канале. Пороговое сравнение с NaN всегда даёт
@@ -632,10 +637,11 @@ class InterlockEngine:
         # ТОЛЬКО интерлоками). Годное показание сбрасывает дебаунс; непригодное
         # обрабатывается и НЕ идёт в пороговое сравнение (иначе ±inf ложно
         # сработало бы как реальное превышение).
-        if matching:
-            if reading.is_usable():
-                await self._handle_usable(reading, matching[0].condition)
-            elif math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
+        if reading.is_usable():
+            if recovery_matching:
+                await self._handle_usable(reading, recovery_matching[0].condition)
+        elif matching:
+            if math.isinf(reading.value) and any(record.condition.is_triggered(reading.value) for record in matching):
                 # S2 fail-closed: ±inf carries DIRECTIONAL evidence. +inf (sensor
                 # pegged HIGH / OVL) satisfies any above-threshold ('>') interlock;
                 # -inf (pegged LOW) satisfies any below-threshold ('<') interlock.

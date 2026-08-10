@@ -1184,7 +1184,8 @@ class Scheduler:
                         label=f"read {driver.name}",
                     )
                     if readings is None:
-                        await self._publish_failed_poll_readings(state)
+                        for terminal_state in states:
+                            await self._publish_failed_poll_readings(terminal_state)
                         if reviewed and reviewed_read_started:
                             binding = self._reviewed_binding(state)
                             generation = state.reviewed_source_generation

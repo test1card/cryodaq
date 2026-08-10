@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from cryodaq.core.broker import DataBroker
-from cryodaq.core.interlock import InterlockCondition, InterlockEngine
+from cryodaq.core.interlock import InterlockCondition, InterlockEngine, InterlockState
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -343,6 +343,41 @@ async def test_mature_idle_dead_channel_survives_ack_until_usable_recovery() -> 
         assert engine._nonusable_windows[_CHANNEL_ID].escalated is True
     finally:
         await mgr.stop()
+
+
+async def test_usable_recovery_reaches_tripped_multi_channel_condition() -> None:
+    """Recovery remains descriptor-authoritative after a sibling trips the condition."""
+    recovery_calls: list[tuple[str, str]] = []
+
+    def recovery_handler(condition, reading):
+        recovery_calls.append((condition.name, reading.channel))
+
+    engine = InterlockEngine(
+        broker=DataBroker(),
+        actions={"emergency_off": _noop},
+        dead_channel_recovery_handler=recovery_handler,
+    )
+    engine.add_condition(
+        InterlockCondition(
+            name="overheat_compressor",
+            description="compressor overheat",
+            channel_ids=frozenset({"T9", "T10"}),
+            threshold=350.0,
+            comparison=">",
+            action="emergency_off",
+        )
+    )
+    engine._nonusable_min_samples = 5
+    engine._nonusable_min_duration_s = 10.0
+
+    for offset_s in (0.0, 3.0, 6.0, 9.0, 12.0):
+        await engine._process_reading(_reading(channel="T9", offset_s=offset_s))
+    await engine._process_reading(_reading(channel="T10", value=400.0, offset_s=13.0, status=ChannelStatus.OK))
+    assert engine.get_state()["overheat_compressor"] is InterlockState.TRIPPED
+
+    await engine._process_reading(_reading(channel="T9", value=42.0, offset_s=15.0, status=ChannelStatus.OK))
+    assert recovery_calls == [("overheat_compressor", "T10"), ("overheat_compressor", "T9")]
+    assert "T9" not in engine._nonusable_windows
 
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,9 @@ class _Driver(InstrumentDriver):
     async def disconnect(self) -> None:
         self._connected = False
 
+    def failure_readings(self) -> list[Reading]:
+        return [Reading.now("CH", float("nan"), "K", instrument_id=self.name)]
+
     async def read_channels(self) -> list[Reading]:
         if self.concurrency is not None:
             self.concurrency[0] += 1
@@ -728,7 +731,8 @@ async def test_cancellation_resistant_read_terminalizes_bus_without_peer_overlap
     assert descriptor.bus_id in scheduler._terminal_bus_authority
     assert resistant.reads == resistant.max_active == resistant.active == 1
     assert failed_poll_reports == [
-        ("resistant-reader", "failed-poll samples could not obtain persistence-backed publication authority")
+        ("resistant-reader", "failed-poll samples could not obtain persistence-backed publication authority"),
+        ("peer", "failed-poll samples could not obtain persistence-backed publication authority"),
     ]
     assert peer.reads == 0
 
