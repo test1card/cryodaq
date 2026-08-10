@@ -750,6 +750,17 @@ class CooldownService:
         if not self._executor_admission_open:
             return
 
+        # The executor may outlive the pre-computation freshness horizon.
+        # Recheck the same required-input snapshot before publishing so
+        # Reading.now() cannot make stale-input output look current.
+        now_monotonic = time.monotonic()
+        if any(
+            now_monotonic - self._last_required_input_monotonic.get(channel, float("-inf")) > freshness_horizon_s
+            for channel in required_channels
+        ):
+            logger.warning("Cooldown prediction withheld because a required input is stale")
+            return
+
         # Build metadata
         metadata: dict[str, Any] = {
             "t_remaining_hours": pred.t_remaining_hours,
