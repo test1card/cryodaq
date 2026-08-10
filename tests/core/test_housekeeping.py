@@ -16,15 +16,40 @@ from cryodaq.core.housekeeping import (
     HousekeepingConfigError,
     HousekeepingService,
     load_housekeeping_config,
+    load_protected_channel_patterns,
 )
 from cryodaq.core.safety_broker import SafetyBroker
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
+from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
 from cryodaq.storage.sqlite_writer import SQLiteWriter
+
+_DESCRIPTORS_PATH = Path(__file__).resolve().parents[2] / "config" / "channel_descriptors.yaml"
 
 
 async def _wait_thread_event(event: threading.Event, *, timeout_s: float = 2.0) -> None:
     assert await asyncio.to_thread(event.wait, timeout_s), "worker thread did not reach the expected barrier"
+
+
+def test_interlock_binding_failure_is_housekeeping_config_error(tmp_path: Path) -> None:
+    config_path = tmp_path / "interlocks.yaml"
+    config_path.write_text(
+        """interlocks:
+  - name: missing_sensor
+    channel_bindings:
+      - instrument_id: LS218_1
+        source_key: input.99.temperature
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(HousekeepingConfigError, match="invalid interlock binding") as captured:
+        load_protected_channel_patterns(
+            config_path,
+            descriptor_catalog=load_live_channel_descriptor_catalog(_DESCRIPTORS_PATH),
+        )
+
+    assert type(captured.value.__cause__) is ValueError
 
 
 class StableDriver(InstrumentDriver):

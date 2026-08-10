@@ -819,6 +819,15 @@ class LiveChannelDescriptorCatalog:
 
         return snapshot_catalog(self._catalog)
 
+    def emitted_channel_for_channel_id(self, channel_id: str) -> str:
+        """Return the exact pre-bind emitted label for one declared channel."""
+        if type(channel_id) is not str:
+            raise TypeError("channel_id must be an exact string")
+        for (_instrument_id, emitted_channel), bound_channel_id in self._bindings.items():
+            if bound_channel_id == channel_id:
+                return emitted_channel
+        raise ChannelDescriptorStorageError("declared channel has no emitted-channel binding")
+
     def require_exact_instruments(self, instrument_ids: object) -> None:
         """Fail startup unless manifest and driver configuration agree exactly."""
 

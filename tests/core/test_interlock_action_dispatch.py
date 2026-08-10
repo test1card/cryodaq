@@ -147,7 +147,7 @@ async def test_interlock_engine_trip_handler_receives_full_context():
     cond = InterlockCondition(
         name="detector_warmup",
         description="T12 too warm",
-        channel_pattern=r".*Т12.*",
+        channel_ids=frozenset({"lakeshore/Т12"}),
         threshold=10.0,
         comparison=">",
         action="stop_source",
