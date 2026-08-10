@@ -47,10 +47,11 @@ the same asymmetry the tool exists to exploit:
   CORRUPTED mutant: the suite then failed on encoding damage rather than on the
   reverted behaviour, and the artifact was reported guarded. Blobs are read as
   bytes.
-* **Clobbering a concurrent writer.** The up-front porcelain check could not see
-  a later edit, and an unconditional restore destroyed another worker's bytes.
-  The source checkout is now read-only and revalidated around every disposable
-  run; no mutant or confirmation operation targets a source path.
+* **Clobbering or hiding a source input.** Porcelain missed later edits and
+  assume-unchanged/skip-worktree could conceal a deleted sole guard. The source
+  checkout is never a mutation target, nonordinary index flags are rejected,
+  and every tracked raw byte/mode is bound to captured HEAD before disposable
+  execution and revalidated around every run.
 * **Losing the file's identity.** A byte-only restore erased symlink and mode
   identity while its content assertion passed. Disposable checkouts come from
   Git, exact renames move the entry itself, and its complete Git identity is
@@ -80,10 +81,12 @@ the same asymmetry the tool exists to exploit:
 * **A mutation created persistent structure.** A former parent is created only
   inside the disposable checkout; the source tree never gains directories or
   recovery artifacts.
-* **Measurement scaffolding looked like production.** Dirty/staged mutant Git
-  state and phase-labelled cache paths could make unrelated tests red. Every
-  phase now runs from a clean deterministic synthetic commit and uses the same
-  neutral external-state path shape.
+* **Measurement scaffolding looked like production.** Dirty/staged Git state,
+  phase-labelled cache paths, original-candidate ancestry/refs/reflogs, and
+  inherited candidate SHA values could make unrelated tests red. Every phase
+  now uses a neutral external path and a clean two-commit same-tree history;
+  source Git identity is removed and pruned, and child SHA is rebound to that
+  synthetic HEAD before candidate code runs.
 * **A clean checkout hid transformed bytes.** Git filters can materialize bytes
   that differ from the tree while porcelain remains clean. Every tracked raw
   blob and supported mode is verified before candidate code runs.
@@ -202,6 +205,7 @@ class SuiteInputs:
 
     head: str
     index_entries: bytes
+    index_flags: bytes
     porcelain: bytes
     listed_paths: tuple[str, ...]
     worktree: tuple[tuple[str, PathIdentity], ...]
@@ -210,6 +214,7 @@ class SuiteInputs:
         return SuiteInputs(
             self.head,
             self.index_entries,
+            self.index_flags,
             self.porcelain,
             tuple(path for path in self.listed_paths if path not in paths),
             tuple(item for item in self.worktree if item[0] not in paths),
@@ -409,14 +414,17 @@ def _suite_inputs_once(root: Path, excluded: set[str] | None = None) -> SuiteInp
     excluded = excluded or set()
     head = _git_at(root, ["rev-parse", "HEAD"])
     index_entries = _git_bytes_at(root, ["ls-files", "--stage", "-z"])
+    index_flags = _git_bytes_at(root, ["ls-files", "-v", "-z"])
     listed_paths = _git_bytes_at(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
     paths = tuple(os.fsdecode(raw) for raw in listed_paths.stdout.split(b"\0") if raw)
     included = tuple(path for path in paths if path not in excluded)
     identities = tuple((path, path_identity(root / path)) for path in included)
     porcelain = _git_bytes_at(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-    if any(run.returncode != 0 for run in (head, index_entries, listed_paths, porcelain)):
+    if any(run.returncode != 0 for run in (head, index_entries, index_flags, listed_paths, porcelain)):
         raise SuiteInputDrift("repository inputs became unreadable while their identity was captured")
-    return SuiteInputs(head.stdout.strip(), index_entries.stdout, porcelain.stdout, included, identities)
+    return SuiteInputs(
+        head.stdout.strip(), index_entries.stdout, index_flags.stdout, porcelain.stdout, included, identities
+    )
 
 
 def capture_suite_inputs(root: Path) -> SuiteInputs:
@@ -442,6 +450,8 @@ def assert_suite_inputs_unchanged(expected: SuiteInputs, root: Path, *, excluded
         detail = f"HEAD moved from {baseline.head[:8]} to {first.head[:8]}"
     elif first.index_entries != baseline.index_entries:
         detail = "the Git index changed"
+    elif first.index_flags != baseline.index_flags:
+        detail = "the Git index flags changed"
     elif first.porcelain != baseline.porcelain:
         detail = "the Git worktree/index cleanliness changed"
     elif first.listed_paths != baseline.listed_paths:
@@ -609,11 +619,18 @@ def _materialize_clean_snapshot(
         if difference.returncode != 0 or difference.stdout != expected:
             raise MeasurementError("synthetic mutant tree differs by more than the exact reverse rename")
 
-    commit = _run_measurement_command(
-        ("git", "commit-tree", tree, "-p", revision, "-m", "CryoDAQ phase-neutral measurement snapshot"),
+    commit_environment = _synthetic_commit_environment()
+    parent = _run_measurement_command(
+        ("git", "commit-tree", tree, "-m", "CryoDAQ phase-neutral measurement base"),
         root=checkout,
-        environment=_synthetic_commit_environment(),
+        environment=commit_environment,
     ).stdout.strip()
+    commit = _run_measurement_command(
+        ("git", "commit-tree", tree, "-p", parent, "-m", "CryoDAQ phase-neutral measurement snapshot"),
+        root=checkout,
+        environment=commit_environment,
+    ).stdout.strip()
+    _run_measurement_command(("git", "config", "core.logAllRefUpdates", "false"), root=checkout)
     _run_measurement_command(("git", "reset", "--hard", "--quiet", commit), root=checkout)
     observed_head = _git_at(checkout, ["rev-parse", "HEAD"])
     status = _git_at(checkout, ["status", "--porcelain=v1", "--untracked-files=all"])
@@ -621,6 +638,9 @@ def _materialize_clean_snapshot(
         raise MeasurementError("synthetic measurement snapshot did not become HEAD")
     if status.returncode != 0 or status.stdout:
         raise MeasurementError("synthetic measurement snapshot is not index/worktree clean")
+    ancestry = _git_at(checkout, ["diff", "--quiet", "HEAD^", "HEAD"])
+    if ancestry.returncode != 0:
+        raise MeasurementError("synthetic measurement ancestry exposes a phase-specific tree change")
     assert_checkout_matches_tree(checkout, commit)
     if reverse_rename is not None:
         assert old_relative is not None and new_relative is not None and before is not None
@@ -695,10 +715,21 @@ def _run_measurement_command(
     return run
 
 
-def _scrub_clone_source_metadata(checkout: Path, source: Path) -> None:
-    """Remove clone metadata that would disclose or redirect into the measured source."""
+def _scrub_clone_source_metadata(
+    checkout: Path,
+    source: Path,
+    original_revision: str,
+    synthetic_head: str,
+) -> None:
+    """Leave only phase-neutral Git identity and no route back to the source."""
 
     _run_measurement_command(("git", "remote", "remove", "origin"), root=checkout)
+    references = _git_at(checkout, ["for-each-ref", "--format=%(refname)"])
+    if references.returncode != 0:
+        raise MeasurementError("disposable checkout references could not be enumerated")
+    for reference in references.stdout.splitlines():
+        _run_measurement_command(("git", "update-ref", "-d", reference), root=checkout)
+
     git_directory = checkout / ".git"
     alternates = git_directory / "objects" / "info" / "alternates"
     if alternates.exists() and alternates.read_bytes().strip():
@@ -709,7 +740,7 @@ def _scrub_clone_source_metadata(checkout: Path, source: Path) -> None:
         pass
     except OSError as exc:
         raise MeasurementError("disposable checkout clone reflogs could not be scrubbed") from exc
-    for name in ("FETCH_HEAD", "ORIG_HEAD"):
+    for name in ("FETCH_HEAD", "ORIG_HEAD", "shallow"):
         try:
             (git_directory / name).unlink()
         except FileNotFoundError:
@@ -717,12 +748,34 @@ def _scrub_clone_source_metadata(checkout: Path, source: Path) -> None:
         except OSError as exc:
             raise MeasurementError(f"disposable checkout {name} could not be scrubbed") from exc
 
+    _run_measurement_command(("git", "config", "core.longpaths", "true"), root=checkout)
+    _run_measurement_command(("git", "gc", "--prune=now", "--quiet", "--no-cruft"), root=checkout)
     remotes = _git_at(checkout, ["remote"])
+    remaining_references = _git_at(checkout, ["for-each-ref", "--format=%(refname)"])
     remote_urls = _git_at(checkout, ["config", "--local", "--get-regexp", r"^remote\..*\.url$"])
+    observed_head = _git_at(checkout, ["rev-parse", "HEAD"])
+    prior_reflog = _git_at(checkout, ["rev-parse", "--verify", "HEAD@{1}"])
+    original = _git_at(checkout, ["cat-file", "-e", f"{original_revision}^{{commit}}"])
+    unreachable = _git_at(checkout, ["fsck", "--unreachable", "--no-reflogs"])
+    neutral_ancestry = _git_at(checkout, ["diff", "--quiet", "HEAD^", "HEAD"])
     if remotes.returncode != 0 or remotes.stdout.strip():
         raise MeasurementError("disposable checkout retained a source remote")
+    if remaining_references.returncode != 0 or remaining_references.stdout.strip():
+        raise MeasurementError("disposable checkout retained a named source reference")
     if remote_urls.returncode not in {0, 1} or remote_urls.stdout.strip():
         raise MeasurementError("disposable checkout retained a source remote URL")
+    if observed_head.returncode != 0 or observed_head.stdout.strip() != synthetic_head:
+        raise MeasurementError("disposable checkout lost its synthetic HEAD while sealing metadata")
+    if prior_reflog.returncode == 0:
+        raise MeasurementError("disposable checkout retained pre-snapshot reflog identity")
+    if original.returncode == 0:
+        raise MeasurementError("disposable checkout retained the original candidate commit")
+    if unreachable.returncode != 0 or unreachable.stdout.strip():
+        detail = unreachable.stdout.strip().splitlines()[:5]
+        raise MeasurementError(f"disposable checkout retained unreachable source Git objects: {detail}")
+    if neutral_ancestry.returncode != 0:
+        raise MeasurementError("disposable checkout synthetic ancestry is not phase-neutral")
+
     config = (git_directory / "config").read_text(encoding="utf-8", errors="replace").casefold()
     source_spellings = {str(source).casefold(), source.as_posix().casefold()}
     if any(spelling and spelling in config for spelling in source_spellings):
@@ -762,6 +815,8 @@ def disposable_checkout(
         _run_measurement_command(
             (
                 "git",
+                "-c",
+                "core.longpaths=true",
                 "clone",
                 "--quiet",
                 "--no-hardlinks",
@@ -779,8 +834,8 @@ def disposable_checkout(
         if status.returncode != 0 or status.stdout.strip():
             raise MeasurementError("fresh disposable candidate checkout is not clean")
 
-        _scrub_clone_source_metadata(checkout, source)
-        _materialize_clean_snapshot(checkout, revision, reverse_rename)
+        synthetic_head = _materialize_clean_snapshot(checkout, revision, reverse_rename)
+        _scrub_clone_source_metadata(checkout, source, revision, synthetic_head)
         yield checkout
     except UnsettledProcessTree as unsettled:
         preserve = True
@@ -819,9 +874,23 @@ def _measurement_environment(source_root: Path, checkout_root: Path, run_root: P
     for key in tuple(environment):
         if key.startswith("GIT_"):
             environment.pop(key)
-    for key in ("GITHUB_WORKSPACE", "INIT_CWD", "OLDPWD", "PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
+    for key in (
+        "BUILD_SOURCEVERSION",
+        "CI_COMMIT_SHA",
+        "GITHUB_BASE_SHA",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_HEAD_SHA",
+        "GITHUB_WORKSPACE",
+        "INIT_CWD",
+        "OLDPWD",
+        "PYTEST_ADDOPTS",
+        "PYTEST_PLUGINS",
+    ):
         environment.pop(key, None)
 
+    synthetic_head = _git_at(checkout_root, ["rev-parse", "HEAD"])
+    if synthetic_head.returncode != 0:
+        raise MeasurementError("synthetic candidate HEAD could not be bound into the child environment")
     source_spellings = {str(source_root).casefold(), source_root.as_posix().casefold()}
     for key in ("PYTHONPATH", "PWD"):
         value = environment.get(key, "")
@@ -838,6 +907,7 @@ def _measurement_environment(source_root: Path, checkout_root: Path, run_root: P
         {
             "COVERAGE_FILE": str(cache / ".coverage"),
             "CRYODAQ_STATE_ROOT": str(runtime),
+            "GITHUB_SHA": synthetic_head.stdout.strip(),
             "MPLCONFIGDIR": str(cache / "matplotlib"),
             "NUMBA_CACHE_DIR": str(cache / "numba"),
             "PWD": str(checkout_root),
@@ -861,10 +931,10 @@ def failures(
 ) -> list[str]:
     root = (root or repository_root()).resolve(strict=True)
     source_root = (source_root or root).resolve(strict=True)
+    validated_suites = tuple(_validated_suite_selector(root, suite) for suite in suites)
     environment = _measurement_environment(source_root, root, run_root)
     found: list[str] = []
-    for raw_suite in suites:
-        suite = _validated_suite_selector(root, raw_suite)
+    for suite in validated_suites:
         try:
             run = _run_candidate_process(
                 (sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"),
@@ -936,8 +1006,24 @@ def _measure(options: argparse.Namespace, root: Path) -> int:
         print("REFUSING: uncommitted candidate inputs cannot be attributed to HEAD:")
         print(source_inputs.porcelain.decode("utf-8", "replace").replace("\0", "\n").rstrip())
         return 2
+    nonordinary_flags = tuple(
+        os.fsdecode(record)
+        for record in source_inputs.index_flags.split(b"\0")
+        if record and not record.startswith(b"H ")
+    )
+    if nonordinary_flags:
+        print("REFUSING: nonordinary Git index flags can hide candidate inputs:")
+        for record in nonordinary_flags[:10]:
+            print(record)
+        return 2
 
     head = source_inputs.head
+    try:
+        assert_checkout_matches_tree(root, head)
+        assert_suite_inputs_unchanged(source_inputs, root)
+    except (MeasurementError, SuiteInputDrift) as mismatch:
+        print(f"REFUSING: source checkout does not exactly materialize captured HEAD: {mismatch}")
+        return 2
     point = merge_base(options.base, head)
     suites = options.suite or ["tests"]
     includes = tuple(dict.fromkeys((*default_runtime_includes(point, head), *options.include)))

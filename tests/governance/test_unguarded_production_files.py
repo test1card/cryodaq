@@ -515,18 +515,22 @@ def test_main_does_not_certify_a_failure_that_remains_red_after_restore(tmp_path
 
 
 def test_failures_times_out_a_hanging_pytest_process(tmp_path: Path, monkeypatch) -> None:
-    hanging = tmp_path / "tests" / "test_hangs.py"
+    checkout = _repository(tmp_path / "checkout")
+    hanging = checkout / "tests" / "test_hangs.py"
     hanging.parent.mkdir()
     hanging.write_text("import time\n\ndef test_hangs():\n    time.sleep(60)\n", encoding="utf-8")
+    _git(checkout, "add", "tests/test_hangs.py")
+    _git(checkout, "commit", "-qm", "add hanging test")
     monkeypatch.setattr(subject, "_PYTEST_TIMEOUT_SECONDS", 0.2)
 
     with pytest.raises(subject.MeasurementError, match="exceeded 0.2 seconds"):
-        subject.failures(["tests/test_hangs.py"], tmp_path / "run", root=tmp_path, source_root=tmp_path)
+        subject.failures(["tests/test_hangs.py"], tmp_path / "run", root=checkout, source_root=checkout)
 
 
 def test_failures_settles_the_entire_pytest_process_tree_on_timeout(tmp_path: Path, monkeypatch) -> None:
-    pid_path = tmp_path / "pytest-grandchild.pid"
-    hanging = tmp_path / "tests" / "test_process_tree.py"
+    checkout = _repository(tmp_path / "checkout")
+    pid_path = checkout / "pytest-grandchild.pid"
+    hanging = checkout / "tests" / "test_process_tree.py"
     hanging.parent.mkdir()
     hanging.write_text(
         "import pathlib, subprocess, sys, time\n\n"
@@ -536,10 +540,12 @@ def test_failures_settles_the_entire_pytest_process_tree_on_timeout(tmp_path: Pa
         "    time.sleep(60)\n",
         encoding="utf-8",
     )
+    _git(checkout, "add", "tests/test_process_tree.py")
+    _git(checkout, "commit", "-qm", "add process-tree test")
     monkeypatch.setattr(subject, "_PYTEST_TIMEOUT_SECONDS", 10.0)
 
     with pytest.raises(subject.MeasurementError, match="exceeded 10.0 seconds"):
-        subject.failures(["tests/test_process_tree.py"], tmp_path / "run", root=tmp_path, source_root=tmp_path)
+        subject.failures(["tests/test_process_tree.py"], tmp_path / "run", root=checkout, source_root=checkout)
 
     assert pid_path.exists(), "the real pytest test did not reach its child-process boundary"
     grandchild_pid = int(pid_path.read_text(encoding="ascii"))
@@ -996,3 +1002,134 @@ def test_concurrent_source_target_writer_is_preserved_and_refuses_attribution(
     assert subject.main() == 2
     assert candidate.read_bytes() == b"VALUE = 'concurrent writer'\n"
     assert "suite inputs drifted during mutation attribution" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flag", ("--skip-worktree", "--assume-unchanged"))
+def test_main_rejects_a_hidden_index_guard_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    guard = _commit_real_rename_guard(repository)
+    _git(repository, "update-index", flag, "tests/test_guard.py")
+    guard.unlink()
+    assert _git(repository, "status", "--porcelain=v1") == ""
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 2
+    output = capsys.readouterr().out
+    assert "nonordinary Git index flags can hide candidate inputs" in output
+    assert "tests/test_guard.py" in output
+    assert not guard.exists()
+
+
+def test_main_rebinds_inherited_candidate_sha_to_each_synthetic_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    source_head = _git(repository, "rev-parse", "HEAD")
+    suite = _commit_measurement_only_suite(
+        repository,
+        "test_candidate_sha",
+        "import os\n"
+        "import subprocess\n\n"
+        "def test_head_tree_matches_bound_candidate():\n"
+        "    bound = subprocess.run(['git', 'diff', '--quiet', os.environ['GITHUB_SHA'], 'HEAD'])\n"
+        "    ancestry = subprocess.run(['git', 'diff', '--quiet', 'HEAD^', 'HEAD'])\n"
+        "    assert bound.returncode == ancestry.returncode == 0\n",
+    )
+    monkeypatch.setenv("GITHUB_SHA", source_head)
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["unguarded_production_files", "--base", base, "--suite", suite],
+    )
+
+    assert subject.main() == 1
+    output = capsys.readouterr().out
+    assert "0 new - UNGUARDED" in output
+    assert "every isolated production artifact introduced a new failure" not in output
+
+
+def test_disposable_candidate_and_mutant_have_only_phase_neutral_git_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    source_head = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.chdir(repository)
+    before = subject.git_entry(base, "src/before.py")
+    candidate = subject.git_entry(source_head, "src/after.py")
+    assert before is not None and candidate is not None
+
+    for reverse_rename in (
+        None,
+        ("src/before.py", "src/after.py", before, candidate),
+    ):
+        with subject.disposable_checkout(
+            repository,
+            source_head,
+            reverse_rename=reverse_rename,
+        ) as checkout:
+            assert _git(checkout, "rev-list", "--count", "HEAD") == "2"
+            assert _git(checkout, "diff", "--quiet", "HEAD^", "HEAD") == ""
+            assert _git(checkout, "for-each-ref", "--format=%(refname)") == ""
+            assert _git(checkout, "remote") == ""
+            assert (
+                subprocess.run(
+                    ["git", "-C", str(checkout), "rev-parse", "--verify", "HEAD@{1}"],
+                    capture_output=True,
+                ).returncode
+                != 0
+            )
+            assert (
+                subprocess.run(
+                    ["git", "-C", str(checkout), "cat-file", "-e", f"{source_head}^{{commit}}"],
+                    capture_output=True,
+                ).returncode
+                != 0
+            )
+            unreachable = subprocess.run(
+                ["git", "-C", str(checkout), "fsck", "--unreachable", "--no-reflogs"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            assert unreachable.stdout == ""
+
+
+def test_main_real_pytest_attributes_an_exact_rename_to_its_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = _repository(tmp_path / "candidate")
+    base, _old, _new = _candidate_rename(repository)
+    _commit_real_rename_guard(repository)
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "unguarded_production_files",
+            "--base",
+            base,
+            "--suite",
+            "tests/test_guard.py",
+        ],
+    )
+
+    assert subject.main() == 0
+    output = capsys.readouterr().out
+    assert "test_candidate_name_exists" in output
+    assert "every isolated production artifact introduced a new failure" in output
