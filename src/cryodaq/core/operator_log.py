@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -274,8 +275,8 @@ def new_attention_acknowledgement(
         raise ValueError("attention acknowledgement requires an exact incident")
     if _attention_time(timestamp, field_name="timestamp") < incident.timestamp:
         raise ValueError("attention acknowledgement cannot predate its incident")
-    return AttentionHistoryItem(
-        event_id=uuid4().hex,
+    provisional = AttentionHistoryItem(
+        event_id="0" * 32,
         kind="acknowledgement",
         timestamp=timestamp,
         experiment_id=incident.experiment_id,
@@ -286,6 +287,24 @@ def new_attention_acknowledgement(
         annotation_of=incident.event_id,
         actor=actor,
         note=note,
+    )
+    identity_payload = provisional.to_payload()
+    del identity_payload["event_id"]
+    canonical_identity = json.dumps(
+        {
+            "schema": ATTENTION_HISTORY_ITEM_SCHEMA,
+            "version": ATTENTION_HISTORY_ITEM_VERSION,
+            "operation": "acknowledgement",
+            "item": identity_payload,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return replace(
+        provisional,
+        event_id=sha256(canonical_identity).hexdigest()[:32],
     )
 
 

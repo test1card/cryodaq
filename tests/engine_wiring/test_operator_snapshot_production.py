@@ -409,6 +409,85 @@ async def test_cancelled_alarm_publication_settles_one_incident_before_propagati
         await asyncio.get_running_loop().shutdown_default_executor()
 
 
+async def test_cancelled_attention_acknowledgement_retry_is_one_durable_annotation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = _writer(tmp_path / "attention-ack-cancel")
+    await writer.start_immediate()
+    history_feed = DurableAttentionHistoryFeed(writer)
+    await history_feed.start()
+    event_bus = EventBus()
+    event_bus.retain_required_observer("durable_attention_history", history_feed.persist_event)
+    incident_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    await event_bus.publish(
+        EngineEvent(
+            "alarm_fired",
+            incident_at,
+            {
+                "alarm_id": "alarm.ack-cancel",
+                "level": "WARNING",
+                "message": "Acknowledge cancellation boundary",
+                "channels": ["probe.1"],
+            },
+            "experiment-ack-cancel",
+        )
+    )
+    incident_page = await writer.get_attention_history(
+        experiment_id="experiment-ack-cancel",
+        limit=10,
+    )
+    incident = incident_page.items[0]
+    acknowledgement_at = incident_at + timedelta(seconds=1)
+    entered = threading.Event()
+    released = threading.Event()
+    real_append = writer._append_attention_history_item_sync
+
+    def blocked_append(item: object, *, require_persisted_incident: bool) -> object:
+        if require_persisted_incident:
+            entered.set()
+            assert released.wait(timeout=5)
+        return real_append(
+            item,
+            require_persisted_incident=require_persisted_incident,
+        )
+
+    monkeypatch.setattr(writer, "_append_attention_history_item_sync", blocked_append)
+    caller = asyncio.create_task(
+        history_feed.annotate_acknowledgement(
+            incident,
+            actor="operator-17",
+            note="reviewed",
+            timestamp=acknowledgement_at,
+        )
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        caller.cancel()
+        released.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        retried = await history_feed.annotate_acknowledgement(
+            incident,
+            actor="operator-17",
+            note="reviewed",
+            timestamp=acknowledgement_at,
+        )
+        page = await writer.get_attention_history(
+            experiment_id="experiment-ack-cancel",
+            limit=10,
+        )
+        acknowledgements = tuple(item for item in page.items if item.kind == "acknowledgement")
+        assert acknowledgements == (retried,)
+        assert page.through_revision == 2
+    finally:
+        released.set()
+        event_bus.release_required_observer("durable_attention_history")
+        history_feed.stop()
+        await writer.stop()
+        await asyncio.get_running_loop().shutdown_default_executor()
+
 async def test_attention_persistence_failure_preserves_alarm_fanout_and_latches_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
