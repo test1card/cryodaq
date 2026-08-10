@@ -285,9 +285,9 @@ def test_the_analytics_summary_orders_only_declared_temperatures(
             "ok": True,
             "data": {PRESSURE_SPELLED_TE: [(0.0, 1.0)], RENAMED: [(0.0, 2.0)], "Т1": [(0.0, 3.0)]},
             "descriptor_catalog": {
-                PRESSURE_SPELLED_TE: {"quantity": "pressure"},
-                RENAMED: {"quantity": "temperature"},
-                "Т1": {"quantity": "temperature"},
+                PRESSURE_SPELLED_TE: "pressure",
+                RENAMED: "temperature",
+                "Т1": "temperature",
             },
         }
     )
@@ -338,7 +338,7 @@ def test_the_analytics_cutoff_changes_membership_not_only_order(
         {
             "ok": True,
             "data": data,
-            "descriptor_catalog": {channel: {"quantity": mixed_manager.get_quantity(channel)} for channel in data},
+            "descriptor_catalog": {channel: mixed_manager.get_quantity(channel) for channel in data},
         }
     )
     rendered = widget._stats_label.text()
@@ -358,12 +358,11 @@ def test_archived_history_is_not_displaced_by_an_absent_declaration(
 ) -> None:
     """A completed experiment must summarise the same after an unrelated config edit.
 
-    This widget summarises ARCHIVED history, and `readings_history` supplies
-    names and point pairs with no descriptor. Classifying a channel the current
-    configuration has never heard of as "not a temperature" demoted it behind
-    today's declared channels and, past the twelve-row cutoff, dropped it — so
-    the same finished experiment produced a different summary after someone
-    edited `channels.yaml`.
+    This widget summarises ARCHIVED history. `readings_history` now supplies
+    the quantity resolved from each retained row's persisted descriptor rather
+    than consulting today's configuration. A pre-descriptor row remains
+    `legacy_unknown`: it is not silently demoted behind today's declared
+    channels and dropped past the twelve-row cutoff.
 
     The pre-OC-030 code avoided this for the wrong reason: it tested the archived
     NAME, which needs no configuration at all. Migrating to a declared quantity
@@ -404,8 +403,8 @@ def test_archived_history_is_not_displaced_by_an_absent_declaration(
             "ok": True,
             "data": data,
             "descriptor_catalog": {
-                **{channel: {"quantity": "pressure"} for channel in payload["channels"]},
-                archived: {"quantity": "legacy_unknown"},
+                **{channel: "pressure" for channel in payload["channels"]},
+                archived: "legacy_unknown",
             },
         }
     )
@@ -437,9 +436,7 @@ def test_archived_history_ranking_uses_its_descriptor_after_live_reclassificatio
     result = {
         "ok": True,
         "data": {channel: [(0.0, 42.0)] for channel in channels},
-        "descriptor_catalog": {
-            channel: {"quantity": "temperature" if channel == archived else "pressure"} for channel in channels
-        },
+        "descriptor_catalog": {channel: "temperature" if channel == archived else "pressure" for channel in channels},
     }
     widget._on_stats_loaded(result)
     before = widget._stats_label.text()

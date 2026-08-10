@@ -79,7 +79,7 @@ async def test_readings_history_command_returns_the_persisted_descriptor_catalog
     context.writer.read_readings_history_with_descriptors = AsyncMock(
         return_value=(
             {"archive.temperature": [(1.0, 4.2)]},
-            {"archive.temperature": {"quantity": "temperature", "descriptor_hash": "sha256:history"}},
+            {"archive.temperature": "temperature"},
         )
     )
 
@@ -88,7 +88,7 @@ async def test_readings_history_command_returns_the_persisted_descriptor_catalog
     assert result == {
         "ok": True,
         "data": {"archive.temperature": [(1.0, 4.2)]},
-        "descriptor_catalog": {"archive.temperature": {"quantity": "temperature", "descriptor_hash": "sha256:history"}},
+        "descriptor_catalog": {"archive.temperature": "temperature"},
     }
 
 

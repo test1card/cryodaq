@@ -1633,8 +1633,9 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
         descriptor_catalog = result.get("descriptor_catalog", {})
 
         def _rank(channel: str) -> int:
-            descriptor = descriptor_catalog.get(channel, {})
-            quantity = descriptor.get("quantity") if isinstance(descriptor, dict) else None
+            quantity = descriptor_catalog.get(channel)
+            if type(quantity) is not str:
+                quantity = None
             if quantity == "temperature":
                 return 0
             return 1 if quantity in (None, "legacy_unknown") else 2
