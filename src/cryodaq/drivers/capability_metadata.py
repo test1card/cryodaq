@@ -132,3 +132,11 @@ _BUILTIN_DRIVER_METADATA_ROWS: Final = (
 BUILTIN_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = MappingProxyType(
     {metadata.type_name: metadata for metadata in _BUILTIN_DRIVER_METADATA_ROWS}
 )
+
+INSTRUMENT_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = MappingProxyType(
+    {
+        type_name: metadata
+        for type_name, metadata in BUILTIN_DRIVER_METADATA.items()
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE not in metadata.capabilities
+    }
+)

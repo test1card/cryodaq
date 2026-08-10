@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
 import subprocess
 import sys
 import tracemalloc
 from datetime import UTC, datetime
 from typing import get_type_hints
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 

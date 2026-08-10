@@ -22,6 +22,7 @@ from typing import Final, TypeGuard
 from cryodaq.drivers.base import InstrumentDriver
 from cryodaq.drivers.capability_metadata import (
     BUILTIN_DRIVER_METADATA,
+    INSTRUMENT_DRIVER_METADATA,
     DriverAuthority,
     DriverCapability,
     build_driver_metadata_projection,
@@ -644,7 +645,17 @@ if _derived_metadata != BUILTIN_DRIVER_METADATA:
     raise DriverRegistryError(
         "driver capability metadata drift between the registry specs and the inert table: " + ", ".join(_drift)
     )
-del _derived_metadata
+_derived_instrument_metadata = build_driver_metadata_projection(INSTRUMENT_DRIVER_SPECS.values())
+if _derived_instrument_metadata != INSTRUMENT_DRIVER_METADATA:
+    _drift = sorted(set(_derived_instrument_metadata) ^ set(INSTRUMENT_DRIVER_METADATA)) or sorted(
+        key
+        for key in _derived_instrument_metadata
+        if _derived_instrument_metadata[key] != INSTRUMENT_DRIVER_METADATA.get(key)
+    )
+    raise DriverRegistryError(
+        "instrument capability metadata drift between the registry partition and the inert table: " + ", ".join(_drift)
+    )
+del _derived_metadata, _derived_instrument_metadata
 
 
 def _normalize_keithley_watchdog(value: object, *, path: str) -> dict[str, object]:
