@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import subprocess
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 import pytest
 
 _TESTS_ROOT = Path(__file__).resolve().parents[1]
+_REPOSITORY_ROOT = _TESTS_ROOT.parent
 _SCOPE_NODES = (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)
 _UNKNOWN = object()
 
@@ -590,6 +592,93 @@ def _scan_tree(root: Path) -> Counter[FixedPortBind]:
     return findings
 
 
+def _git_stdout(repository_root: Path, *arguments: str, stdin: bytes | None = None) -> bytes:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=repository_root,
+        input=stdin,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise AssertionError(
+            f"git {' '.join(arguments)} failed with exit {completed.returncode}: {stderr or '<no stderr>'}"
+        )
+    return completed.stdout
+
+
+def _index_python_entries(repository_root: Path) -> tuple[tuple[str, str], ...]:
+    raw = _git_stdout(repository_root, "ls-files", "--cached", "--stage", "-z", "--", "tests")
+    entries: list[tuple[str, str]] = []
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path_bytes = record.split(b"\t", 1)
+            _mode, object_id, stage = metadata.split(b" ", 2)
+            relative_path = path_bytes.decode("utf-8")
+            object_name = object_id.decode("ascii")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise AssertionError("git ls-files returned a malformed staged-index record") from exc
+        if not relative_path.endswith(".py"):
+            continue
+        if stage != b"0":
+            raise AssertionError(f"staged-index path is unmerged: {relative_path}")
+        entries.append((relative_path, object_name))
+    if not entries:
+        raise AssertionError("staged index contains no tracked Python files under tests/")
+    return tuple(sorted(entries))
+
+
+def _index_blob_sources(
+    repository_root: Path,
+    entries: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    requested = b"".join(f"{object_id}\n".encode("ascii") for _path, object_id in entries)
+    raw = _git_stdout(repository_root, "cat-file", "--batch", stdin=requested)
+    cursor = 0
+    sources: list[tuple[str, str]] = []
+    for relative_path, expected_object_id in entries:
+        header_end = raw.find(b"\n", cursor)
+        if header_end < 0:
+            raise AssertionError(f"git cat-file omitted the header for :{relative_path}")
+        header = raw[cursor:header_end].split(b" ")
+        if len(header) != 3:
+            raise AssertionError(f"git cat-file returned a malformed header for :{relative_path}")
+        object_id, object_type, raw_size = header
+        try:
+            size = int(raw_size)
+        except ValueError as exc:
+            raise AssertionError(f"git cat-file returned a malformed size for :{relative_path}") from exc
+        blob_start = header_end + 1
+        blob_end = blob_start + size
+        if (
+            object_id.decode("ascii") != expected_object_id
+            or object_type != b"blob"
+            or blob_end >= len(raw)
+            or raw[blob_end : blob_end + 1] != b"\n"
+        ):
+            raise AssertionError(f"git cat-file returned the wrong staged blob for :{relative_path}")
+        try:
+            source = raw[blob_start:blob_end].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AssertionError(f"staged Python blob is not UTF-8: {relative_path}") from exc
+        sources.append((relative_path, source))
+        cursor = blob_end + 1
+    if cursor != len(raw):
+        raise AssertionError("git cat-file returned unrequested staged-index data")
+    return tuple(sources)
+
+
+def _scan_index(repository_root: Path) -> Counter[FixedPortBind]:
+    entries = _index_python_entries(repository_root)
+    findings: Counter[FixedPortBind] = Counter()
+    for relative_path, source in _index_blob_sources(repository_root, entries):
+        findings.update(_scan_source(source, relative_path))
+    return findings
+
+
 def _registry_delta(
     actual: Counter[FixedPortBind],
     registered: Counter[FixedPortBind],
@@ -609,12 +698,31 @@ def test_no_unregistered_fixed_port_binds_under_tests() -> None:
     registered = Counter(item.site for item in _FIXED_PORT_EXCEPTIONS)
     assert len(registered) == len(_FIXED_PORT_EXCEPTIONS), "fixed-port exception registry has duplicates"
 
-    unexpected, missing = _registry_delta(_scan_tree(_TESTS_ROOT), registered)
+    unexpected, missing = _registry_delta(_scan_index(_REPOSITORY_ROOT), registered)
     assert not unexpected and not missing, (
         "Fixed-port registry and tests/ differ in one or both directions.\n"
         f"UNREGISTERED:\n{_render(unexpected) or '<none>'}\n"
         f"STALE REGISTRY:\n{_render(missing) or '<none>'}"
     )
+
+
+def test_fixed_port_sweep_reads_staged_index_not_working_tree(tmp_path: Path) -> None:
+    _git_stdout(tmp_path, "init", "--quiet")
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    probe = tests_root / "test_probe.py"
+    fixed = 'def test_probe(listener):\n    listener.bind(("127.0.0.1", 45123))\n'
+    safe = fixed.replace("45123", "0")
+
+    probe.write_text(fixed, encoding="utf-8")
+    _git_stdout(tmp_path, "add", "--", "tests/test_probe.py")
+    probe.write_text(safe, encoding="utf-8")
+    findings = _scan_index(tmp_path)
+    assert {(site.path, site.endpoint) for site in findings} == {("tests/test_probe.py", "127.0.0.1:45123")}
+
+    _git_stdout(tmp_path, "add", "--", "tests/test_probe.py")
+    probe.write_text(fixed, encoding="utf-8")
+    assert _scan_index(tmp_path) == Counter()
 
 
 def test_fixed_port_sweep_fails_closed_for_missing_or_empty_root(tmp_path: Path) -> None:
