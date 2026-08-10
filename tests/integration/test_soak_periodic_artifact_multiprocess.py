@@ -78,6 +78,39 @@ def _spawn_sender(endpoint: socket.socket, output: Any) -> None:
     asyncio.run(send())
 
 
+def _observe_receipt_fsyncs(
+    sink: _ArtifactReceiptSink,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_at: int | None = None,
+) -> list[str]:
+    real_open = os.open
+    real_fsync = os.fsync
+    opened: dict[int, str] = {}
+    events: list[str] = []
+
+    def tracked_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        name = os.fsdecode(path)
+        if name == "periodic-receipts.jsonl":
+            opened[fd] = "ledger"
+        elif name.startswith(".periodic-g") and name.endswith(".tmp"):
+            opened[fd] = "artifact"
+        return fd
+
+    def tracked_fsync(fd: int) -> None:
+        event = "directory" if fd == sink._dir_fd else opened.get(fd)
+        if event is not None:
+            events.append(event)
+            if fail_at == len(events):
+                raise OSError(f"injected {event} fsync failure")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "fsync", tracked_fsync)
+    return events
+
+
 def _prepare_ready_local_delivery(data_dir: Path, nonce: str) -> tuple[dict[str, object], bytes, str]:
     photo = _photo()
     caption = "Summary"
@@ -242,6 +275,63 @@ def test_real_spawn_process_delivers_one_durable_ack(tmp_path: Path) -> None:
     sink.close()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="AF_UNIX durability proof is POSIX-only")
+@pytest.mark.parametrize(
+    "failure_at,expected_events",
+    [
+        (1, ["artifact"]),
+        (2, ["artifact", "directory"]),
+        (3, ["artifact", "directory", "ledger"]),
+        (4, ["artifact", "directory", "ledger", "directory"]),
+    ],
+)
+def test_receipt_fsync_failure_prevents_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_at: int,
+    expected_events: list[str],
+) -> None:
+    os.chmod(tmp_path, 0o700)
+    parent, child = socket.socketpair()
+    context = multiprocessing.get_context("spawn")
+    output = context.Queue()
+    process = context.Process(target=_spawn_sender, args=(child, output))
+    process.start()
+    child.close()
+    sink = _ArtifactReceiptSink(parent, nonce="e" * 64, evidence_dir=tmp_path)
+    events = _observe_receipt_fsyncs(sink, monkeypatch, fail_at=failure_at)
+    ack_calls: list[bytes] = []
+
+    def observe_ack(_sink: _ArtifactReceiptSink, ack: bytes, *, deadline: float) -> None:
+        assert deadline > 0
+        ack_calls.append(ack)
+
+    monkeypatch.setattr(_ArtifactReceiptSink, "_write_all", observe_ack)
+    with pytest.raises(OSError, match=rf"injected {expected_events[-1]} fsync failure"):
+        sink.accept_one(
+            assistant_observation=_AssistantProcessObservation(
+                _ProcessIdentity(process.pid, "spawn-observed-start"),
+                os.getpid(),
+                "assistant",
+                True,
+            ),
+            expected_launcher_pid=os.getpid(),
+            expected_assistant_generation=1,
+            expected_slot_id="sha256:" + "a" * 64,
+            expected_generation_id="b" * 32,
+            expected_owner_token="c" * 32,
+            expected_artifact_sha256="sha256:" + hashlib.sha256(_photo()).hexdigest(),
+        )
+    process.join(timeout=15)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=15)
+    assert process.exitcode == 0
+    assert output.get(timeout=2) == ("unknown", None)
+    assert events == expected_events
+    assert ack_calls == []
+
+
 @pytest.mark.skipif(os.name != "posix", reason="AF_UNIX spawn and SIGKILL proof is POSIX-only")
 @pytest.mark.parametrize("iteration", range(3))
 def test_durable_receipt_before_ack_survives_unknown_sender_replacement(
@@ -271,6 +361,7 @@ def test_durable_receipt_before_ack_survives_unknown_sender_replacement(
         True,
     )
     delivery_cuts: list[dict[str, object]] = []
+    durability_events: list[str]
 
     def disconnect_after_durable_persist(
         sink: _ArtifactReceiptSink,
@@ -279,6 +370,7 @@ def test_durable_receipt_before_ack_survives_unknown_sender_replacement(
         deadline: float,
     ) -> None:
         assert deadline > 0
+        assert durability_events == ["artifact", "directory", "ledger", "directory"]
         ledger_path = evidence_dir / "periodic-receipts.jsonl"
         records = [json.loads(line) for line in ledger_path.read_text(encoding="ascii").splitlines()]
         assert len(records) == 1
@@ -293,6 +385,7 @@ def test_durable_receipt_before_ack_survives_unknown_sender_replacement(
 
     monkeypatch.setattr(_ArtifactReceiptSink, "_write_all", disconnect_after_durable_persist)
     sink = _ArtifactReceiptSink(parent, nonce=nonce, evidence_dir=evidence_dir)
+    durability_events = _observe_receipt_fsyncs(sink, monkeypatch)
     try:
         with pytest.raises(ConnectionAbortedError, match="after durable receipt and before ACK"):
             sink.accept_one(
