@@ -38,6 +38,7 @@ EXECUTION_ROOTS = (
         files=(
             "tests/docs/test_docs_freshness.py",
             "tests/governance/test_agent_formatter_gate.py",
+            "tests/governance/test_no_fixed_test_ports.py",
             "tests/governance/test_red_reproduction_immutability.py",
             "tests/test_claudemd_index.py",
         ),
