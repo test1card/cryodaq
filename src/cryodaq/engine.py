@@ -2472,11 +2472,12 @@ def _interlock_dead_channel_recovery_handler(
     *,
     context: _InterlockHandlerContext,
 ) -> None:
-    """Clear only SafetyManager's exact canonical blocker after usable evidence."""
+    """Clear the exact blocker and alarm episode after usable evidence."""
     context.safety_manager.on_interlock_channel_recovered(
         condition.name,
         reading.channel,
     )
+    context.dead_channel_alarm_sent.discard(f"{condition.name}:{reading.channel}")
 
 
 async def _multiline_burst_auto_stop(
