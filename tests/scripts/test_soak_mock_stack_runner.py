@@ -99,7 +99,7 @@ def test_fixed_commands_and_exact_ordered_six_are_not_caller_selected() -> None:
         "no:cacheprovider",
         "--collect-only",
         "-q",
-        "tests/integration/test_periodic_png_multiprocess.py",
+        *runner._EXACT_NODE_IDS,
     )
     assert runner._EXECUTION_ARGV == (
         ".venv/bin/python",
@@ -112,7 +112,7 @@ def test_fixed_commands_and_exact_ordered_six_are_not_caller_selected() -> None:
         "-p",
         "no:cacheprovider",
         "-q",
-        "tests/integration/test_periodic_png_multiprocess.py",
+        *runner._EXACT_NODE_IDS,
     )
     assert len(runner._EXACT_NODE_IDS) == len(set(runner._EXACT_NODE_IDS)) == 6
     assert (

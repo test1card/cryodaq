@@ -33,6 +33,14 @@ import yaml
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 _TEST_FILE: Final = "tests/integration/test_periodic_png_multiprocess.py"
+_EXACT_NODE_IDS: Final = (
+    f"{_TEST_FILE}::test_real_loopback_publisher_rep_and_adapter_startup_hydration_alarm_seals",
+    f"{_TEST_FILE}::test_publisher_restart_changes_session_and_fresh_adapter_recovers",
+    f"{_TEST_FILE}::test_subscriber_disconnect_monitor_invalidates_and_callbacks_stop",
+    f"{_TEST_FILE}::test_two_assistants_one_leader_per_domain",
+    f"{_TEST_FILE}::test_killed_elected_assistant_replacement_makes_one_forward_result",
+    f"{_TEST_FILE}::test_replay_exact_off_child_creates_no_periodic_resources",
+)
 _COLLECTION_ARGV: Final = (
     ".venv/bin/python",
     "-m",
@@ -45,7 +53,7 @@ _COLLECTION_ARGV: Final = (
     "no:cacheprovider",
     "--collect-only",
     "-q",
-    _TEST_FILE,
+    *_EXACT_NODE_IDS,
 )
 _EXECUTION_ARGV: Final = (
     ".venv/bin/python",
@@ -58,15 +66,7 @@ _EXECUTION_ARGV: Final = (
     "-p",
     "no:cacheprovider",
     "-q",
-    _TEST_FILE,
-)
-_EXACT_NODE_IDS: Final = (
-    f"{_TEST_FILE}::test_real_loopback_publisher_rep_and_adapter_startup_hydration_alarm_seals",
-    f"{_TEST_FILE}::test_publisher_restart_changes_session_and_fresh_adapter_recovers",
-    f"{_TEST_FILE}::test_subscriber_disconnect_monitor_invalidates_and_callbacks_stop",
-    f"{_TEST_FILE}::test_two_assistants_one_leader_per_domain",
-    f"{_TEST_FILE}::test_killed_elected_assistant_replacement_makes_one_forward_result",
-    f"{_TEST_FILE}::test_replay_exact_off_child_creates_no_periodic_resources",
+    *_EXACT_NODE_IDS,
 )
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
