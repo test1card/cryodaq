@@ -11,11 +11,15 @@ import sqlite3
 import textwrap
 import threading
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 
+from cryodaq.core import operator_log as operator_log_module
+from cryodaq.core.alarm_v2 import AlarmEvent, AlarmStateManager
+from cryodaq.core.event_bus import EngineEvent
 from cryodaq.core.operator_log import (
     OperatorLogIdempotencyConflictError,
     OperatorLogIdempotencyUnavailableError,
@@ -35,6 +39,330 @@ CREATE TABLE operator_log (
     tags          TEXT    NOT NULL DEFAULT '[]'
 )
 """
+
+
+def _attention_event(
+    *,
+    alarm_id: str = "cooldown-deviation",
+    timestamp: datetime = datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+) -> EngineEvent:
+    return EngineEvent(
+        event_type="alarm_fired",
+        timestamp=timestamp,
+        payload={
+            "alarm_id": alarm_id,
+            "level": "WARNING",
+            "message": "Cooldown trajectory deviated from reference",
+            "channels": ["temperature.cold-stage"],
+        },
+        experiment_id="exp-stable-7",
+    )
+
+
+async def test_attention_history_survives_writer_restart_with_explicit_bound(
+    tmp_path: Path,
+) -> None:
+    """The production writer must reopen the same bounded incident timeline."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        append = getattr(writer, "append_attention_event", None)
+        read = getattr(writer, "get_attention_history", None)
+        assert callable(append), "SQLiteWriter must durably append attention events"
+        assert callable(read), "SQLiteWriter must expose typed attention history"
+        first = await append(_attention_event())
+        await append(
+            _attention_event(
+                alarm_id="vacuum-deviation",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+        before = await read(experiment_id="exp-stable-7", limit=1)
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        read = getattr(restarted, "get_attention_history", None)
+        assert callable(read), "restarted SQLiteWriter must expose attention history"
+        after = await read(experiment_id="exp-stable-7", limit=1)
+        complete = await read(experiment_id="exp-stable-7", limit=2)
+    finally:
+        await restarted.stop()
+
+    assert before == after
+    assert after.truncated_before is True
+    assert len(after.items) == 1
+    assert after.items[0].alarm_id == "vacuum-deviation"
+    assert complete.truncated_before is False
+    assert tuple(item.event_id for item in complete.items)[0] == first.event_id
+    assert complete.items[0].channel_ids == ("temperature.cold-stage",)
+
+
+async def test_attention_history_capacity_is_fail_closed_durable_and_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlite_writer_module, "ATTENTION_HISTORY_MAX_ITEMS", 2)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        first = await writer.append_attention_event(_attention_event())
+        await writer.append_attention_event(
+            _attention_event(
+                alarm_id="second",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="third",
+                    timestamp=datetime(2026, 8, 10, 12, 2, tzinfo=UTC),
+                )
+            )
+        before = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        after = await restarted.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await restarted.stop()
+
+    assert before == after
+    assert after.truncated_before is False
+    assert after.rejected_after_capacity == 1
+    assert tuple(item.alarm_id for item in after.items) == (
+        first.alarm_id,
+        "second",
+    )
+    assert first.event_id in {item.event_id for item in after.items}
+
+
+async def test_attention_acknowledgement_is_annotation_not_alarm_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = AlarmStateManager()
+    canonical_event = AlarmEvent(
+        alarm_id="cooldown-deviation",
+        level="WARNING",
+        message="Cooldown trajectory deviated from reference",
+        triggered_at=datetime(2026, 8, 10, 12, 0, tzinfo=UTC).timestamp(),
+        channels=["temperature.cold-stage"],
+        values={"temperature.cold-stage": 8.2},
+    )
+    assert manager.process("cooldown-deviation", canonical_event, {}) == "TRIGGERED"
+    canonical_before = manager.snapshot_active_canonical()
+
+    def reject_canonical_ack(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("attention annotation called canonical AlarmStateManager.acknowledge")
+
+    monkeypatch.setattr(AlarmStateManager, "acknowledge", reject_canonical_ack)
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        incident = await writer.append_attention_event(_attention_event())
+        annotate = getattr(writer, "annotate_attention_acknowledgement", None)
+        assert callable(annotate), "attention acknowledgement must be an append-only annotation"
+        annotation = await annotate(
+            incident,
+            actor="operator-7",
+            note="Seen during cooldown review",
+            timestamp=datetime(2026, 8, 10, 12, 2, tzinfo=UTC),
+        )
+        history = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    canonical_after = manager.snapshot_active_canonical()
+    assert canonical_after == canonical_before
+    assert manager.state_revision == canonical_before.state_revision
+    assert annotation.kind == "acknowledgement"
+    assert annotation.annotation_of == incident.event_id
+    assert tuple(item.kind for item in history.items) == (
+        "incident",
+        "acknowledgement",
+    )
+
+
+async def test_attention_annotation_rejects_unpersisted_incident(
+    tmp_path: Path,
+) -> None:
+    fabricated = operator_log_module.new_attention_incident(
+        timestamp=datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+        experiment_id="exp-stable-7",
+        alarm_id="fabricated",
+        level="WARNING",
+        message="Not persisted",
+        channel_ids=("temperature.cold-stage",),
+    )
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        with pytest.raises(ValueError, match="persisted incident"):
+            await writer.annotate_attention_acknowledgement(
+                fabricated,
+                actor="operator-7",
+                note="must not attach",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.parametrize(
+    "damage_sql",
+    (
+        "DROP TABLE attention_history",
+        "DELETE FROM attention_history_status",
+    ),
+    ids=("missing-history-table", "missing-status-row"),
+)
+async def test_attention_history_restart_rejects_missing_established_authority(
+    tmp_path: Path,
+    damage_sql: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event())
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute(damage_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="attention history established storage is incomplete",
+        ):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_restart_rejects_dangling_annotation(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        incident = await writer.append_attention_event(_attention_event())
+        annotation = await writer.annotate_attention_acknowledgement(
+            incident,
+            actor="operator-7",
+            note="Seen",
+            timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+        )
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        missing_parent_id = "f" * 32
+        assert missing_parent_id != incident.event_id
+        damaged = replace(annotation, annotation_of=missing_parent_id)
+        conn.execute(
+            "UPDATE attention_history SET annotation_of = ?, payload = ? WHERE event_id = ?",
+            (
+                damaged.annotation_of,
+                operator_log_module.dump_attention_history_item(damaged),
+                damaged.event_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="attention history incident graph is invalid",
+        ):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_restart_rejects_deleted_standalone_incident(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        incident = await writer.append_attention_event(_attention_event())
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute(
+            "DELETE FROM attention_history WHERE event_id = ?",
+            (incident.event_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="attention history admitted row total is invalid",
+        ):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+def test_attention_codec_rejects_boolean_schema_version() -> None:
+    item = operator_log_module.new_attention_incident(
+        timestamp=datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+        experiment_id="exp-stable-7",
+        alarm_id="cooldown-deviation",
+        level="WARNING",
+        message="Deviation",
+        channel_ids=("temperature.cold-stage",),
+    )
+    payload = operator_log_module.dump_attention_history_item(item)
+    mutant = payload.replace('"version":1', '"version":true')
+    assert mutant != payload
+    with pytest.raises(ValueError, match="attention history item is invalid"):
+        operator_log_module.load_attention_history_item(mutant)
 
 
 def _publication_payload(
