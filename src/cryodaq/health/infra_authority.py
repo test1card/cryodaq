@@ -238,6 +238,8 @@ class ReaderPoolHealthAuthority(_CachedHealthAuthority):
     def __init__(self, readers: tuple[HealthTelemetryReader, ...]) -> None:
         if type(readers) is not tuple:
             raise TypeError("readers must be an exact bounded tuple")
+        if not readers:
+            raise ValueError("reader pool must contain at least one reader")
         if len(readers) > MAX_FLEET_DEVICES:
             raise ValueError(f"reader pool exceeds MAX_FLEET_DEVICES ({MAX_FLEET_DEVICES})")
         readers_tuple = readers

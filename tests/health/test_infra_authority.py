@@ -158,6 +158,11 @@ def test_reader_pool_rejects_non_tuple_without_calling_untrusted_container_metho
         ReaderPoolHealthAuthority((object(),) * (MAX_FLEET_DEVICES + 1))  # type: ignore[arg-type]
 
 
+def test_reader_pool_rejects_empty_tuple() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        ReaderPoolHealthAuthority(())
+
+
 def test_unissued_structural_reader_is_rejected() -> None:
     class ForgedReader:
         grants_control_authority = False
