@@ -230,8 +230,13 @@ async def test_attention_annotation_rejects_unpersisted_incident(
     (
         "DROP TABLE attention_history",
         "DELETE FROM attention_history_status",
+        "DROP TABLE attention_history; DROP TABLE attention_history_status",
     ),
-    ids=("missing-history-table", "missing-status-row"),
+    ids=(
+        "missing-history-table",
+        "missing-status-row",
+        "missing-all-attention-objects",
+    ),
 )
 async def test_attention_history_restart_rejects_missing_established_authority(
     tmp_path: Path,
@@ -246,7 +251,7 @@ async def test_attention_history_restart_rejects_missing_established_authority(
 
     conn = sqlite3.connect(tmp_path / "control.db")
     try:
-        conn.execute(damage_sql)
+        conn.executescript(damage_sql)
         conn.commit()
     finally:
         conn.close()

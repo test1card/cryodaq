@@ -390,6 +390,18 @@ CREATE TABLE IF NOT EXISTS attention_history_status (
 );
 """
 
+SCHEMA_CONTROL_FEATURE_MARKERS = """
+CREATE TABLE IF NOT EXISTS control_feature_markers (
+    feature_id    TEXT    PRIMARY KEY
+        CHECK (feature_id = 'attention_history'),
+    schema_version INTEGER NOT NULL
+        CHECK (
+            typeof(schema_version) = 'integer'
+            AND schema_version = 1
+        )
+);
+"""
+
 SCHEMA_ALARM_ACK_OUTBOX_LEGACY = """
 CREATE TABLE IF NOT EXISTS alarm_ack_outbox (
     request_id TEXT PRIMARY KEY,
@@ -6725,6 +6737,9 @@ class SQLiteWriter:
             "SELECT type, name, tbl_name FROM sqlite_master WHERE name IN (?, ?, ?) ORDER BY name",
             object_names,
         ).fetchall()
+        marker_object = conn.execute(
+            "SELECT type, tbl_name, sql FROM sqlite_master WHERE name = 'control_feature_markers'"
+        ).fetchone()
         expected = {
             ("table", "attention_history", "attention_history"),
             ("table", "attention_history_status", "attention_history_status"),
@@ -6734,17 +6749,23 @@ class SQLiteWriter:
                 "attention_history",
             ),
         }
-        if not rows:
+        if not rows and marker_object is None:
+            conn.execute(SCHEMA_CONTROL_FEATURE_MARKERS)
             conn.execute(SCHEMA_ATTENTION_HISTORY)
             conn.execute(INDEX_ATTENTION_HISTORY_EXPERIMENT)
             conn.execute(SCHEMA_ATTENTION_HISTORY_STATUS)
+            marker = conn.execute(
+                "INSERT INTO control_feature_markers "
+                "(feature_id, schema_version) VALUES ('attention_history', 1) "
+                "RETURNING feature_id, schema_version"
+            ).fetchone()
             inserted = conn.execute(
                 "INSERT INTO attention_history_status "
                 "(singleton, admitted_total, rejected_after_capacity) "
                 "VALUES (1, 0, 0) RETURNING singleton, admitted_total, "
                 "rejected_after_capacity"
             ).fetchone()
-            if inserted != (1, 0, 0):
+            if marker != ("attention_history", 1) or inserted != (1, 0, 0):
                 raise RuntimeError("attention history initial status was not created exactly")
             cls._verify_attention_history_storage(conn)
             return
@@ -6753,12 +6774,25 @@ class SQLiteWriter:
             or len(rows) != len(expected)
             or any(type(row) is not tuple or len(row) != 3 for row in rows)
             or set(rows) != expected
+            or type(marker_object) is not tuple
+            or len(marker_object) != 3
+            or marker_object[0] != "table"
+            or marker_object[1] != "control_feature_markers"
+            or cls._normalized_schema_sql(marker_object[2])
+            not in {
+                cls._normalized_schema_sql(SCHEMA_CONTROL_FEATURE_MARKERS),
+                cls._normalized_schema_sql(SCHEMA_CONTROL_FEATURE_MARKERS).replace(
+                    " if not exists",
+                    "",
+                ),
+            }
         ):
             raise RuntimeError("attention history established storage is incomplete")
+        marker = conn.execute("SELECT feature_id, schema_version FROM control_feature_markers LIMIT 2").fetchall()
         status = conn.execute(
             "SELECT singleton, admitted_total, rejected_after_capacity FROM attention_history_status LIMIT 2"
         ).fetchall()
-        if type(status) is not list or len(status) != 1:
+        if marker != [("attention_history", 1)] or type(status) is not list or len(status) != 1:
             raise RuntimeError("attention history established storage is incomplete")
         cls._verify_attention_history_storage(conn)
 
@@ -6770,6 +6804,12 @@ class SQLiteWriter:
         if type(ATTENTION_HISTORY_MAX_ITEMS) is not int or not 1 <= ATTENTION_HISTORY_MAX_ITEMS <= _SQLITE_MAX_ROWID:
             raise RuntimeError("attention history retained row bound is invalid")
         expected_objects = (
+            (
+                "table",
+                "control_feature_markers",
+                "control_feature_markers",
+                SCHEMA_CONTROL_FEATURE_MARKERS,
+            ),
             ("table", "attention_history", "attention_history", SCHEMA_ATTENTION_HISTORY),
             (
                 "table",
@@ -6801,7 +6841,8 @@ class SQLiteWriter:
         for catalog in ("sqlite_master", "sqlite_temp_master"):
             trigger = conn.execute(
                 f"SELECT 1 FROM {catalog} WHERE type = 'trigger' "
-                "AND (tbl_name IN ('attention_history', 'attention_history_status') "
+                "AND (tbl_name IN ('attention_history', 'attention_history_status', "
+                "'control_feature_markers') "
                 "OR instr(lower(coalesce(sql, '')), 'attention_history') > 0) LIMIT 1"
             ).fetchone()
             if trigger is not None:
