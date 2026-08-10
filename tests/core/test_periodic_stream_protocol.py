@@ -102,22 +102,33 @@ async def test_reading_transport_is_additive_and_internal_marker_is_stripped() -
     }
 
 
-async def test_analytics_transport_carries_engine_comparable_source_age(monkeypatch) -> None:
+async def test_source_age_follows_declared_producer_cadence_not_channel_spelling(monkeypatch) -> None:
     publisher, socket = _prime_publisher()
-    reading = Reading(
+    declared = Reading(
         timestamp=datetime(2026, 7, 10, tzinfo=UTC),
         instrument_id="thermal_calculator",
-        channel="analytics/thermal_calculator/R_thermal",
+        channel="renamed-derived/thermal/R_thermal",
         value=4.2,
         unit="K/W",
         metadata={"producer_interval_s": 1.0},
     )
-    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: reading.timestamp.timestamp() + 2.5)
+    spelling_only = Reading(
+        timestamp=declared.timestamp,
+        instrument_id="unclassified_source",
+        channel="analytics/looks-derived-but-is-not-declared",
+        value=1.0,
+        unit="1",
+        metadata={},
+    )
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: declared.timestamp.timestamp() + 2.5)
 
-    await publisher._publish_reading(reading)
+    await publisher._publish_reading(declared)
+    await publisher._publish_reading(spelling_only)
 
-    payload = msgpack.unpackb(socket.frames[0][1], raw=False)
-    assert payload["meta"]["source_age_s"] == 2.5
+    declared_payload = msgpack.unpackb(socket.frames[0][1], raw=False)
+    spelling_only_payload = msgpack.unpackb(socket.frames[1][1], raw=False)
+    assert declared_payload["meta"]["source_age_s"] == 2.5
+    assert "source_age_s" not in spelling_only_payload["meta"]
 
 
 async def test_analytics_source_age_is_measured_after_waiting_for_the_send_lock(monkeypatch) -> None:
@@ -125,7 +136,7 @@ async def test_analytics_source_age_is_measured_after_waiting_for_the_send_lock(
     reading = Reading(
         timestamp=datetime(2026, 7, 10, tzinfo=UTC),
         instrument_id="thermal_calculator",
-        channel="analytics/thermal_calculator/R_thermal",
+        channel="renamed-derived/thermal/R_thermal",
         value=4.2,
         unit="K/W",
         metadata={"producer_interval_s": 1.0},
