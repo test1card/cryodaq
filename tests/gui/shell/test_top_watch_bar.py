@@ -364,6 +364,87 @@ def test_mode_badge_updates_when_experiment_active() -> None:
     assert "Эксперимент" in bar._mode_badge.text()
 
 
+def test_live_experiment_poll_rejects_outgoing_engine_reply_after_reconnect(monkeypatch) -> None:
+    """A deferred callback stays bound to the engine generation that sent it."""
+    import cryodaq.gui.zmq_client as zmq_client
+
+    class DeferredSignal:
+        def __init__(self) -> None:
+            self._callbacks: list = []
+
+        def connect(self, callback) -> None:
+            self._callbacks.append(callback)
+
+        def emit(self, result: dict) -> None:
+            for callback in tuple(self._callbacks):
+                callback(result)
+
+    class DeferredWorker:
+        instances: list = []
+
+        def __init__(self, cmd: dict, parent=None) -> None:
+            del parent
+            self.cmd = dict(cmd)
+            self.finished = DeferredSignal()
+            self._finished = False
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            return None
+
+        def isFinished(self) -> bool:  # noqa: N802
+            return self._finished
+
+        def finish(self, result: dict) -> None:
+            self._finished = True
+            self.finished.emit(result)
+
+    monkeypatch.setattr(zmq_client, "ZmqCommandWorker", DeferredWorker)
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    accepted = _live_experiment_status(name="accepted current engine")
+    outgoing = _live_experiment_status(name="stale outgoing engine")
+    successor = _live_experiment_status(name="accepted successor engine")
+    try:
+        bar.set_engine_state(True)
+        bar._poll_fast()
+        first_worker = DeferredWorker.instances[-1]
+        assert first_worker.cmd == {"cmd": "experiment_status"}
+        first_worker.finish(accepted)
+        assert emitted == [accepted]
+
+        bar._poll_fast()
+        outgoing_worker = DeferredWorker.instances[-1]
+        assert outgoing_worker is not first_worker
+        bar.set_engine_state(False)
+        bar.set_engine_state(True)
+        outgoing_worker.finish(outgoing)
+
+        assert emitted == [accepted]
+        assert "accepted current engine" in bar._last_experiment_full_text
+        assert "stale outgoing engine" not in bar._last_experiment_full_text
+        assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        assert "недоступен" in document.toPlainText().lower()
+
+        bar.set_engine_state(False)
+        worker_count = len(DeferredWorker.instances)
+        bar._poll_fast()
+        assert len(DeferredWorker.instances) == worker_count
+
+        bar.set_engine_state(True)
+        bar._poll_fast()
+        successor_worker = DeferredWorker.instances[-1]
+        successor_worker.finish(successor)
+        assert emitted == [accepted, successor]
+        assert "accepted successor engine" in bar._last_experiment_full_text
+        assert theme.TEXT_PRIMARY in bar._exp_label.styleSheet()
+    finally:
+        _dispose_bar(bar)
+
+
 def test_top_watch_accepts_live_experiment_manager_status_only_after_real_encoding(tmp_path) -> None:
     from cryodaq.core.experiment import ExperimentManager
 

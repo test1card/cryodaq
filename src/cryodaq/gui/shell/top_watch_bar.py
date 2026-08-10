@@ -639,6 +639,7 @@ class TopWatchBar(QWidget):
         # ``replay`` additionally requires the exact launcher/bridge authority.
         self._expected_app_mode_domain = "live"
         self._replay_authority: ReplayStatusAuthority | None = None
+        self._live_status_generation = 0
         self._engine_alive: bool | None = None
         self._last_experiment_full_text = "\u25cb Нет активного эксперимента"
 
@@ -1120,15 +1121,21 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
 
     def _poll_fast(self) -> None:
-        """Poll experiment status (zone 2). Skips if previous still in flight."""
+        """Poll experiment status only with connected producer authority."""
+        if self._engine_alive is not True:
+            self._mark_experiment_status_unavailable()
+            return
         if self._experiment_worker is not None and not self._experiment_worker.isFinished():
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
+        expected_live_generation = self._live_status_generation if self._expected_app_mode_domain == "live" else None
         self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
         self._experiment_worker.finished.connect(
-            lambda result, expected=expected_replay_authority: self._on_experiment_result(result, expected)
+            lambda result, replay=expected_replay_authority, live=expected_live_generation: self._on_experiment_result(
+                result, replay, live
+            )
         )
         self._experiment_worker.start()
 
@@ -1136,6 +1143,7 @@ class TopWatchBar(QWidget):
         self,
         result: dict,
         expected_replay_authority: ReplayStatusAuthority | None = None,
+        expected_live_generation: int | None = None,
     ) -> None:
         accepted = decode_experiment_status(result)
         if accepted is None:
@@ -1146,6 +1154,10 @@ class TopWatchBar(QWidget):
         if accepted_domain != self._expected_app_mode_domain:
             self._mark_experiment_status_unavailable()
             return
+        if accepted_domain == "live" and expected_live_generation is not None:
+            if self._engine_alive is not True or expected_live_generation != self._live_status_generation:
+                self._mark_experiment_status_unavailable()
+                return
         if self._expected_app_mode_domain == "replay":
             current_authority = self._replay_authority
             if (
@@ -1260,6 +1272,18 @@ class TopWatchBar(QWidget):
     # External setters (for direct injection from MainWindowV2 dispatchers)
     # ------------------------------------------------------------------
 
+    def _retire_live_status_authority(self) -> None:
+        """Invalidate every callback issued by the outgoing live producer."""
+        self._live_status_generation += 1
+        if self._expected_app_mode_domain == "live":
+            self._mark_experiment_status_unavailable()
+
+    def invalidate_engine_producer(self) -> None:
+        """Synchronously retire live status before engine replacement."""
+        if self._engine_alive is False:
+            self._retire_live_status_authority()
+        self.set_engine_state(False)
+
     def set_engine_state(self, alive: bool) -> None:
         """Update zone 1 from authoritative external source.
 
@@ -1267,7 +1291,10 @@ class TopWatchBar(QWidget):
         and by the launcher (which owns the engine subprocess lifecycle).
         Single source of truth — no internal polling for engine state.
         """
-        self._engine_alive = bool(alive)
+        alive = bool(alive)
+        if not alive and self._engine_alive is not False:
+            self._retire_live_status_authority()
+        self._engine_alive = alive
         if self._engine_alive:
             self._engine_label.setText("● Engine: работает")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_OK};")
@@ -1282,7 +1309,10 @@ class TopWatchBar(QWidget):
 
         if type(replay) is not bool:
             raise TypeError("replay mode must be an exact bool")
-        self._expected_app_mode_domain = "replay" if replay else "live"
+        domain = "replay" if replay else "live"
+        if domain != self._expected_app_mode_domain:
+            self._live_status_generation += 1
+        self._expected_app_mode_domain = domain
         self._replay_authority = None
         self._mark_experiment_status_unavailable()
 

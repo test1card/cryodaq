@@ -700,6 +700,7 @@ class MainWindowV2(QMainWindow):
     def invalidate_engine_producer(self) -> None:
         """Retire every GUI consumer anchored to the outgoing engine."""
 
+        self._top_bar.invalidate_engine_producer()
         self.invalidate_descriptor_transport()
         self._overview_panel.invalidate_operator_snapshot_producer()
 

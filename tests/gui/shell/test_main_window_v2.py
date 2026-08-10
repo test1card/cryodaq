@@ -50,6 +50,22 @@ def test_main_window_v2_constructs_with_shell_components() -> None:
     assert w.windowTitle() == "CryoDAQ"
 
 
+def test_engine_producer_retirement_reaches_top_watch_live_authority() -> None:
+    """MainWindow producer turnover synchronously retires TopWatch callbacks."""
+    from cryodaq.gui import theme
+
+    _app()
+    window = MainWindowV2()
+    _stop_timers(window)
+    window._top_bar.set_engine_state(True)
+    generation = window._top_bar._live_status_generation
+
+    window.invalidate_engine_producer()
+
+    assert window._top_bar._live_status_generation == generation + 1
+    assert theme.STATUS_CAUTION in window._top_bar._exp_label.styleSheet()
+
+
 def test_operator_display_is_fail_closed_home_and_routes_to_drill_down(monkeypatch) -> None:
     _app()
     w = MainWindowV2()
