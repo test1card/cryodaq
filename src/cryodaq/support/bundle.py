@@ -9,6 +9,7 @@ required jail, no-follow and atomic-replace policy, belongs to a later adapter.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -156,6 +157,8 @@ _DELIMITED_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:[-_.]+[
 _PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
 _DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
 _DOTTED_PHONE_RE: Final = re.compile(r"(?:\+?\d{1,3}\.)?\d{3}\.\d{3}\.\d{4}\Z")
+_VERSION_PERSON_RE: Final = re.compile(r"^[A-Z][^\W\d_]*(?:[ .,:;+\-\'?]+[A-Za-z][^\W\d_\'?]*)*[.,]?$")
+_VERSION_CREDENTIAL_RE: Final = re.compile(r"(?i)\b(?:password|pwd|token)(?:[ ._:=]+|\s*&#x3d;|\s*->)\s*\S+")
 _SERIALIZED_BLOB_RE: Final = re.compile(r"(?:\{[\s\S]*\}|\[[\s\S]*\])")
 _KNOWN_CREDENTIAL_RE: Final = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
 _PATH_TRAVERSAL_RE: Final = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
@@ -302,7 +305,6 @@ _SNAPSHOT_CUT_FIELDS: Final = (
     "snapshot_mode",
     "snapshot_source_id",
     "snapshot_producer_id",
-    "observed_at",
     "received_at",
     "revision",
 )
@@ -833,6 +835,21 @@ def _canonical(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _safe_version_text(value: str) -> str:
+    safe = _safe_text(value)
+    if _VERSION_CREDENTIAL_RE.search(value):
+        raise ValueError("credential-shaped version text is not permitted")
+    try:
+        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        decoded = ""
+    if decoded and _VERSION_CREDENTIAL_RE.search(decoded):
+        raise ValueError("encoded credential-shaped version text is not permitted")
+    if _VERSION_PERSON_RE.fullmatch(value.strip()) is not None:
+        return "<redacted:private>"
+    return safe
+
+
 @dataclass(frozen=True, slots=True)
 class SoftwareVersion:
     component: str
@@ -841,7 +858,7 @@ class SoftwareVersion:
     def __post_init__(self) -> None:
         object.__setattr__(self, "component", _identifier(self.component, field="component"))
         if self.version is not None:
-            object.__setattr__(self, "version", _safe_text(_exact_text(self.version, field="version")))
+            object.__setattr__(self, "version", _safe_version_text(_exact_text(self.version, field="version")))
 
 
 @dataclass(frozen=True, slots=True)
