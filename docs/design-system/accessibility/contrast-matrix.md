@@ -1,15 +1,15 @@
 ---
 title: Contrast Matrix
 keywords: contrast, wcag, aa, aaa, ratios, measured, token-pairs, foreground, background, accessible-colors
-applies_to: WCAG contrast ratios for every token pair used in the product
+applies_to: default_cool reference ratios plus the declared all-theme mechanical subset
 status: canonical
-references: tokens/colors.md, rules/accessibility-rules.md, rules/color-rules.md
-last_updated: 2026-04-17
+references: tokens/colors.md, rules/accessibility-rules.md, rules/color-rules.md, wcag-baseline.md, ../MACHINE_GATES.json
+last_updated: 2026-08-10
 ---
 
 # Contrast Matrix
 
-Measured contrast ratios for every token pair that combines a text/icon color with a background color. The source of truth for which color pairs are safe for body text, which are safe for large text only, and which are reserved for chrome accents.
+Reference contrast ratios for the canonical `default_cool` palette, plus the pointer to the exact all-theme machine contract. These tables explain intended use; they are not an exhaustive inventory of every rendered QSS foreground/background context.
 
 ## How ratios are computed
 
@@ -22,6 +22,12 @@ WCAG 2.x contrast ratio formula:
 where L is relative luminance, and L₁ ≥ L₂. Ratios ≥ 4.5:1 pass AA body text, ≥ 3:1 pass AA large text (≥18pt or ≥14pt bold), ≥ 7:1 pass AAA body text, ≥ 4.5:1 pass AAA large text.
 
 All ratios below computed against **BACKGROUND `#0d0e12`** (the canonical shell background) unless otherwise stated. Secondary backgrounds (CARD, SECONDARY, MUTED) have slightly different luminance; key differences noted inline.
+
+## All-theme mechanical subset
+
+`MACHINE_GATES.json` is the source of truth for the cases enforced across every real `config/themes/*.yaml` pack. Each case names the WCAG criterion, semantic role, foreground/background tokens, and threshold. Each allowed failure is structured data with an exact case ID, exact theme IDs, scope, rationale, fallback channels, and required human verification.
+
+`tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` loads packs through the production validator and requires the measured failure set to equal that data exactly. A new failing pack or stale exception fails the GUI partition. This mechanical subset does not prove keyboard focus perception, operator recognition, NVDA output, or unlisted rendered token contexts; those remain separate evidence.
 
 ## Measured ratios vs BACKGROUND
 
@@ -220,6 +226,8 @@ Any new token or background color added must go through this calculation + get a
 - `tokens/colors.md` — token definitions; this file is the contrast companion
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Scoped the legacy tables to `default_cool` and added the real-pack machine contract with exact structured exceptions and an explicit rendered-context/human-evidence boundary.
 
 - 2026-04-17: Initial version. Measured ratios for all 13 primary text/accent tokens vs BACKGROUND. Filled-pill context ratios. Non-text contrast for UI borders. Documented AA gaps with rationale. Light theme deferred.
 - 2026-04-17: v1.0.1 — Recomputed all ratios from theme.py. Fixed stale ON_DESTRUCTIVE input. Corrected BORDER non-text contrast.

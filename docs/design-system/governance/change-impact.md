@@ -3,7 +3,7 @@ title: GUI Change Impact Review
 keywords: tradeoff, operator impact, safety impact, mitigation, revert trigger
 applies_to: every GUI, UI, UX, and design-system change
 status: canonical
-last_updated: 2026-07-20
+last_updated: 2026-08-10
 references: ../README.md, ../patterns/operator-evidence-and-retention.md, testing-strategy.md
 ---
 
@@ -37,6 +37,7 @@ operator agency, the change is rejected.
 
 | Slice | Better | Worse | Safety/workflow justification | Mitigation and tests | Revise/revert trigger |
 |---|---|---|---|---|---|
+| F36.6 co-versioning and mechanical accessibility | Mapped shared semantic owners cannot silently diverge from the trusted design-system version; known contrast gaps and non-color states become exact reviewable data | Intentional shared-semantic changes carry a specification/version/changelog maintenance cost, and exception lists require upkeep | A stale trusted contract or prose-only accessibility waiver can create false operator and reviewer confidence | Deliberately narrow `MACHINE_GATES.json` map; immutable `TRUSTED_BASE_SHA`; real-file docs test; all real theme packs and production state mapper; red-control proof; keyboard/NVDA/operator/performance evidence stays open | Revise the map if ordinary consumer edits create nuisance failures; broaden it if a shared authority escapes; reject the release if missing/stale docs or exceptions can remain green |
 | Warning compatibility → caution | Operators learn one yellow-orange attention step between safe and fault | Legacy logs and payloads still contain the word `warning` | Similar warning/caution visuals must not create a false precision in operator severity | Normalize only at presentation boundaries; preserve backend/history truth; test legacy and canonical inputs render identically | Revise if warning and caution paint differently, source history is rewritten, or unknown severity becomes quiet |
 | Measurement palette separation | Series and quantity colors no longer train operators to ignore safety colors | Several familiar trace hues change | Green/yellow-orange/red must keep one safety meaning | Keep stable series order, visible legends/units, line-style redundancy, and disjointness tests across every theme | Revert a hue if it collides with any safety token or operators cannot distinguish adjacent labeled series |
 | Active phase uses ACCENT | Activity no longer makes a green healthy assertion | Operators accustomed to green phase progress must adapt | Progress and health are independent facts | Completed phases use neutral chrome; health remains separately visible; component tests assert no STATUS_OK progress | Revise if active phase is mistaken for health or loses a visible current-step cue |

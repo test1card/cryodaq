@@ -7,6 +7,7 @@ and the locked-status-palette invariant across all shipped themes.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,9 @@ import pytest
 import yaml
 
 from cryodaq.gui import _theme_loader as loader
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MACHINE_GATES = _REPO_ROOT / "docs" / "design-system" / "MACHINE_GATES.json"
 
 
 @pytest.fixture
@@ -453,6 +457,77 @@ def _contrast_ratio(fg: str, bg: str) -> float:
     lb = _relative_luminance(bg)
     lighter, darker = (lf, lb) if lf >= lb else (lb, lf)
     return (lighter + 0.05) / (darker + 0.05)
+
+
+def _mechanical_accessibility_contract() -> dict:
+    return json.loads(_MACHINE_GATES.read_text(encoding="utf-8"))["mechanical_accessibility"]
+
+
+def test_machine_accessibility_contrast_contract_matches_all_real_themes(real_themes_dir):
+    contract = _mechanical_accessibility_contract()
+    assert contract["target"] == "WCAG 2.2 AA"
+    cases = contract["contrast_cases"]
+    exceptions = contract["contrast_exceptions"]
+    assert len({case["id"] for case in cases}) == len(cases)
+    assert len({exception["id"] for exception in exceptions}) == len(exceptions)
+    by_case = {exception["case_id"]: exception for exception in exceptions}
+    assert len(by_case) == len(exceptions)
+    minimum_by_criterion = {"1.4.3": 4.5, "1.4.11": 3.0}
+
+    packs = {path.stem: loader.validate_theme_pack(path.stem) for path in sorted(real_themes_dir.glob("*.yaml"))}
+    assert packs
+    for case in cases:
+        assert case["minimum"] == minimum_by_criterion[case["criterion"]], case
+        failed_themes = sorted(
+            theme_id
+            for theme_id, pack in packs.items()
+            if _contrast_ratio(pack[case["foreground"]], pack[case["background"]]) < case["minimum"]
+        )
+        exception = by_case.get(case["id"])
+        expected_failures = [] if exception is None else exception["themes"]
+        if exception is not None:
+            assert expected_failures == sorted(set(expected_failures)), exception["id"]
+            assert expected_failures, f"stale empty contrast exception: {exception['id']}"
+        assert failed_themes == expected_failures, (
+            case["id"],
+            case["foreground"],
+            case["background"],
+            failed_themes,
+            expected_failures,
+        )
+        if exception is not None:
+            assert exception["scope"].strip()
+            assert exception["rationale"].strip()
+            assert exception["fallback_channels"]
+            assert exception["human_verification"].strip()
+
+    assert set(by_case) <= {case["id"] for case in cases}
+
+
+def test_machine_accessibility_non_color_states_match_real_runtime_contract():
+    from cryodaq.gui import theme
+    from cryodaq.gui.presentation_severity import operator_state_for_display
+    from cryodaq.gui.shell.operator_components._visuals import state_visual
+    from cryodaq.operator_snapshot import OperatorPresentationState
+
+    states = _mechanical_accessibility_contract()["states"]
+    assert {item["source"] for item in states} == {state.value for state in OperatorPresentationState}
+    canonical_shapes: dict[str, str] = {}
+    for item in states:
+        source_state = OperatorPresentationState(item["source"])
+        display_state = operator_state_for_display(source_state)
+        visual = state_visual(source_state)
+        assert display_state.value == item["canonical"]
+        assert visual.label == item["label"]
+        assert visual.shape == item["shape"]
+        assert visual.color == getattr(theme, item["token"])
+        assert any("А" <= character <= "я" or character == "Ё" for character in visual.label)
+        assert visual.accessible_label.strip()
+        canonical_shapes.setdefault(item["canonical"], item["shape"])
+        assert canonical_shapes[item["canonical"]] == item["shape"]
+
+    assert len(canonical_shapes) == 5
+    assert len(set(canonical_shapes.values())) == 5
 
 
 def test_status_palette_hue_locked_across_all_themes(real_themes_dir):

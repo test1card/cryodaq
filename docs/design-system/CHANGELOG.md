@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-10
+version: 4.2.0
 ---
 
 # Design System Changelog
@@ -13,6 +13,44 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
+## [4.2.0] — 2026-08-10
+
+### Added
+
+- `MACHINE_GATES.json` — one machine-readable contract for the narrow shared
+  semantic source surface, its corresponding specification families, WCAG 2.2
+  contrast cases, exact per-theme exceptions, and canonical non-color states.
+- Exact-checkout F36.6 enforcement in
+  `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned`.
+  It compares the immutable `TRUSTED_BASE_SHA` slice with the real candidate
+  checkout and requires specification, `VERSION`, and `CHANGELOG.md` changes.
+- Real-pack accessibility checks in `tests/gui/test_theme_loader.py` covering
+  all bundled theme YAML files and the production state visual mapper.
+
+### Changed
+
+- Added RULE-GOV-005: reusable token, shared-component, pattern, and state
+  semantic owners are co-versioned with their canonical specification and
+  release evidence. Ordinary GUI consumers remain under the existing GUI
+  review gate and do not trigger a design-system release for every code edit.
+- Reconciled stale v4.0.3/v4.1.0 marker prose onto the v4.2.0 release without
+  changing runtime tokens, components, state behavior, or performance budgets.
+
+### Accessibility evidence
+
+- WCAG 2.2 AA text (4.5:1) and non-text (3:1) ratios are recomputed from every
+  real bundled theme. Exceptions name exact case IDs and exact theme IDs; a new
+  failure or a stale exception fails the GUI partition.
+- Canonical `ok | caution | warning | fault | stale | disconnected` inputs are
+  checked against production Russian labels, token values, and five distinct
+  non-color shapes. Legacy `warning` remains the `caution` presentation alias.
+
+### Open evidence
+
+- Whole-shell keyboard/focus traversal, NVDA on the real Windows build,
+  scripted operator task acceptance, visual judgment, and runtime
+  frame/startup/memory measurements remain human or target-environment gates.
+  This release does not claim those measurements from static checks.
 ## [4.1.0] — 2026-08-05
 
 ### Added

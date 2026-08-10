@@ -3,9 +3,9 @@ title: Versioning
 keywords: versioning, semver, breaking-change, major, minor, patch, release, changelog
 applies_to: how design-system releases are numbered and what changes go into each
 status: canonical
-references: governance/deprecation-policy.md, governance/contribution.md
+references: governance/deprecation-policy.md, governance/contribution.md, governance/testing-strategy.md, ../MACHINE_GATES.json
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-07-20
+last_updated: 2026-08-10
 ---
 
 # Versioning
@@ -20,19 +20,29 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `4.0.3` — operator-state semantic correction: safety green
-is reserved for demonstrated health, ordinary activity/progress uses accent or
-neutral information, and new presentation producers use the single caution
-rung (see `CHANGELOG.md`).
+**Current version:** `4.2.0` — F36.6 adds an immutable-base co-versioning gate and exact machine-readable contrast/non-color evidence without changing runtime GUI semantics (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
 - Top of `docs/design-system/README.md`
 - `docs/design-system/MANIFEST.md`
 - `docs/design-system/CHANGELOG.md` — human-readable release notes
+- `docs/design-system/MACHINE_GATES.json` — governed-source map and mechanical accessibility evidence
 - `docs/design-system/GUI_MIGRATION_INVENTORY.md`
 - `docs/design-system/cryodaq-primitives/tray-status.md`
 - Tagged in git as `design-system-vX.Y.Z` (e.g., `design-system-v1.0.1`)
+
+## Same-slice co-versioning
+
+`VERSION` remains the only version number; F36.6 does not introduce a parallel scheme. `MACHINE_GATES.json` maps only shared semantic authorities: token definitions, theme packs/loaders, reusable design-system components, canonical state mappers, and the two root-owned product patterns. Ordinary panel/view consumers stay under the roadmap-wide GUI review gate and do not force a design-system release for every local edit.
+
+When a mapped source or canonical contract changes relative to the exact 40-character `TRUSTED_BASE_SHA`, the same slice must:
+
+1. change the mapped canonical specification;
+2. advance `VERSION`; and
+3. add the matching current heading to `CHANGELOG.md`.
+
+`tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` enforces this against the real checkout. A missing, moving, or unresolvable base fails closed.
 
 ## What's in MAJOR
 
@@ -209,28 +219,17 @@ Design-system: v1.1.0 (adds ShiftHandover widget, SHIFT_* tokens)
 
 ## Release process (high-level)
 
-1. Complete planned changes on feature branches → merge to main
-2. Update `VERSION` file
-3. Update CHANGELOG.md with version section
-4. Update references to version number (README, MANIFEST)
-5. Run full audit (rules, contrast, tokens) via `governance/testing-strategy.md`
-6. Tag release in git
-7. Announce to operator team + any external consumers
+1. Complete the bounded change and its mapped canonical specification.
+2. Advance `VERSION` and add the matching `CHANGELOG.md` release section.
+3. Reconcile the release-marker documents (README, MANIFEST, inventory, and governed primitives).
+4. Run the exact-base co-versioning test plus the applicable GUI/docs partitions described in `governance/testing-strategy.md`.
+5. Complete independent review and any required human/target-environment evidence.
+6. Tag or announce only under separate publication authority.
 
 ## Current trajectory
 
-Anticipated versions:
-
-- **v2.0.0** (2026): breaking descriptor-qualified instrument identity API;
-  visual tokens and component anatomy otherwise remain unchanged.
-- **v3.0.0** (2026): the complete GUI corpus must be informative and
-  intentionally beautiful. The breaking compliance expansion rejects generic
-  LabVIEW-style dashboard assembly and requires migration of touched surfaces;
-  safety truth, legibility, provenance, freshness, uncertainty, and the next
-  safe action retain precedence.
-- **Later releases:** light theme, three-layer token migration, or palette
-  restructuring require their own compatibility analysis and release notes;
-  they are not implied by the v2.0.0 identity cutover.
+- **v4.2.0** (2026): exact-base co-versioning and the checkable WCAG 2.2 AA/non-color subset; runtime GUI semantics are unchanged.
+- **Later releases:** light-theme changes, three-layer token migration, or palette restructuring require their own compatibility analysis, mapped specification updates, and release notes.
 
 ## Rules applied
 
@@ -260,6 +259,8 @@ Anticipated versions:
 - `governance/testing-strategy.md` — audit gate before version tag
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Added one exact-base same-slice co-versioning gate using the existing SemVer marker and documented its deliberately narrow shared-semantic surface.
 
 - 2026-04-17: Initial version. SemVer 2.0.0 baseline with CryoDAQ-specific definitions of "breaking". Release cadence expectations. Independence from CryoDAQ package version. Post-1.0.0 trajectory anticipated.
 - 2026-04-17 (v1.0.1): Created the `VERSION` and `CHANGELOG.md` artifacts that this document was referencing but which did not previously exist (FR-013). No process changes — the described release process is now actually wired up.

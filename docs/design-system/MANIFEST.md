@@ -1,15 +1,15 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.0
+last_updated: 2026-08-10
+version: 4.2.0
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-20
-**Session:** v4.0.3 operator-state semantic correction
-**Scope:** Design system v4.1.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-08-10
+**Session:** v4.2.0 design-system governance gate
+**Scope:** Design system v4.2.0 — foundation tokens + 79 widget rules + 5 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -17,6 +17,7 @@ version: 4.1.0
 design-system/
 ├── README.md                           # Entry point, navigation, precedence rules
 ├── MANIFEST.md                         # This file
+├── MACHINE_GATES.json                # Executable co-versioning and accessibility data
 ├── CHANGELOG.md                        # Design-system release history
 ├── VERSION                             # Authoritative version marker
 ├── GUI_MIGRATION_INVENTORY.md          # Auditable v3 production-surface backlog
@@ -39,7 +40,7 @@ design-system/
 │   ├── breakpoints.md                  # desktop-only responsive
 │   └── keyboard-shortcuts.md           # canonical bindings; Python constants proposed
 │
-├── rules/                              # Enforcement: 9 files, 83 rules total with code examples
+├── rules/                              # Enforcement: 9 files, 84 rules total with code examples
 │   ├── color-rules.md                  # COLOR-001..011
 │   ├── surface-rules.md                # SURF-001..010
 │   ├── typography-rules.md             # TYPO-001..010
@@ -48,7 +49,7 @@ design-system/
 │   ├── data-display-rules.md           # DATA-001..010
 │   ├── accessibility-rules.md          # A11Y-001..008
 │   ├── content-voice-rules.md          # COPY-001..008
-│   └── governance-rules.md             # GOV-001..003 (thin pointers to governance/*)
+│   └── governance-rules.md             # GOV-001..005 (thin pointers to governance/*)
 │
 ├── components/                         # Generic primitives: 14 files, anatomy + invariants + code
     ├── card.md                         # generic rounded container
@@ -123,8 +124,8 @@ design-system/
 
 - **85 Markdown files in the design-system tree**: 81 contract/specification
   documents plus README, MANIFEST, CHANGELOG, and the GUI migration inventory;
-  `VERSION` is the additional non-Markdown release marker.
-- **79 rule IDs** across 9 rule categories (Batches 1+2+6)
+  `VERSION` and `MACHINE_GATES.json` are the two non-Markdown release and enforcement files.
+- **84 rule IDs** across 9 rule categories (79 widget rules plus 5 governance rules)
 - **14 generic components** specified (Batch 3)
 - **19 CryoDAQ domain primitives** specified (Batch 4 + F36 + tray contract)
 - **13 cross-surface patterns** specified (including operator evidence
@@ -216,10 +217,10 @@ Batch 6 — accessibility + governance:
     requires implementation, discoverability, tests, and hazard review before
     becoming canonical.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in the current v4.0.3 line** — the v2.0.0
+62. **Design system remains flat-token in the current v4.2.0 line** — the v2.0.0
     instrument-identity major and v3.0.0 composition-contract major did not
     perform the separately reviewed future three-layer token migration.
-63. **STONE_* remains deprecated/read-only in the current v4.0.3 line** — neither
+63. **STONE_* remains deprecated/read-only in the current v4.2.0 line** — neither
     major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
@@ -246,9 +247,11 @@ F36 operator-snapshot additions:
     values; missing/refused identity uses fixed bounded Russian text and no
     vendor, model, channel-name, diagnostic, or payload fallback.
 
+82. **Co-versioned semantic authority** — a change to a mapped shared token, theme pack, component, pattern, or state owner must change its canonical specification, `VERSION`, and `CHANGELOG.md` in the same immutable-base slice; real-theme WCAG exceptions live as exact machine data, while keyboard/NVDA/operator/performance evidence remains human.
+
 ## Status
 
-**Design system v4.0.3 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
-83 rules (79 widget rules plus 4 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
-ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
+**Design system v4.2.0 — the F36.6 co-versioning and mechanical accessibility gate is active for mapped shared semantic authorities; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing remain implemented, while manual and target-environment evidence stays open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+84 rules (79 widget rules plus 5 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
+ONEDIR whole-shell/DPI/NVDA, keyboard walkthrough, scripted operator, operator-performance, and long-session evidence
 remain open.

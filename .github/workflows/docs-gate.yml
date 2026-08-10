@@ -15,6 +15,11 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      trusted_base_sha:
+        description: Exact 40-character commit SHA used as the design-system slice base
+        required: true
+        type: string
 
 concurrency:
   group: docs-gate-${{ github.ref }}
@@ -26,6 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: src
+      TRUSTED_BASE_SHA: ${{ github.event.pull_request.base.sha || inputs.trusted_base_sha }}
     steps:
       - uses: actions/checkout@v4
         with:

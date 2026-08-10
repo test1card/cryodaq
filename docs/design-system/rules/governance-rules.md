@@ -3,13 +3,13 @@ title: Governance Rules
 keywords: rules, governance, token-naming, versioning, deprecation, RULE-GOV
 applies_to: meta-rules about how the design system itself evolves
 status: canonical
-references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md
-last_updated: 2026-07-20
+references: governance/token-naming.md, governance/versioning.md, governance/deprecation-policy.md, governance/testing-strategy.md, ../MACHINE_GATES.json
+last_updated: 2026-08-10
 ---
 
 # Governance Rules
 
-Four rules govern how the design system itself evolves. Distinct from the eight enforcement-rule categories (COLOR, SURF, TYPO, SPACE, INTER, DATA, A11Y, COPY) — those govern what widgets look like; these govern how the system gets changed.
+Five rules govern how the design system itself evolves. Distinct from the eight enforcement-rule categories (COLOR, SURF, TYPO, SPACE, INTER, DATA, A11Y, COPY) — those govern what widgets look like; these govern how the system gets changed.
 
 Each rule is a thin pointer to the authoritative governance document, because the full specification is too long to duplicate here and because governance documents need room for worked examples, migration guides, and lifecycle diagrams.
 
@@ -44,9 +44,7 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v4.1.0 (operator-state semantic correction: safety green is
-reserved for independently demonstrated health; ordinary activity uses accent,
-and new attention producers use the single caution rung; flat tokens unchanged).
+**Current version:** v4.2.0 (exact-base co-versioning and the checkable WCAG/non-color subset; runtime token and component semantics are unchanged).
 
 ## RULE-GOV-003
 
@@ -72,20 +70,29 @@ record defined by `governance/change-impact.md`. Review blocks the change when
 an aesthetic benefit obscures truth or when the downside has no mitigation,
 test, and revise/revert trigger.
 
-## Why four rules, not more
+## RULE-GOV-005
 
-RULE-GOV-* deliberately minimal. Governance rules describe the system's self-change mechanism; each additional rule adds process overhead. Four rules cover the critical axes:
+A change to a mapped shared token, theme pack, reusable design-system component, canonical state mapper, or root-owned design-system pattern MUST update its canonical specification, advance the existing design-system `VERSION`, and add the matching `CHANGELOG.md` entry in the same immutable-base slice.
+
+**Canonical source:** `governance/versioning.md`; the deliberately narrow source/specification map is data in `MACHINE_GATES.json`. Ordinary panel and view consumers remain governed by the roadmap-wide GUI review gate without forcing a design-system release for every local implementation edit.
+
+**Enforcement:** `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` compares the real candidate checkout with exact `TRUSTED_BASE_SHA`; a missing base, missing mapped specification, non-advancing version, or absent current changelog heading fails closed.
+
+## Why five rules, not more
+
+RULE-GOV-* deliberately minimal. Governance rules describe the system's self-change mechanism; each additional rule adds process overhead. Five rules cover the critical axes:
 
 1. **Naming** (GOV-001) — how artifacts are identified
 2. **Versioning** (GOV-002) — when changes ship
 3. **Deprecation** (GOV-003) — how old artifacts retire
 4. **Operator impact** (GOV-004) — how GUI benefits and costs are reviewed
+5. **Co-versioning** (GOV-005) — how shared semantic source and trusted specification stay one release
 
 Other governance concerns (testing, performance, contribution workflow) are documented as governance documents but not promoted to RULE-* status because they're process guidance rather than invariant constraints.
 
 ## Rules applied to themselves
 
-These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.1.0 state: all four Active, no pending removals.
+These five rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.2.0 state: all five Active, no pending removals.
 
 ## Related rules and patterns
 
@@ -95,6 +102,8 @@ These four rules are themselves subject to the design system's evolution process
 - All governance documents in `governance/*`
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Added RULE-GOV-005, the exact-base same-slice specification/version/changelog invariant for mapped shared semantic authorities.
 
 - 2026-07-15 (v4.0.0): Added RULE-GOV-004, the mandatory five-field
   operator/safety change-impact record.

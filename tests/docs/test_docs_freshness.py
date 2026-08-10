@@ -21,6 +21,7 @@ import tomllib
 import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Callable
+from fnmatch import fnmatchcase
 from functools import cache
 from pathlib import Path
 
@@ -1249,6 +1250,128 @@ def test_p5_pending_manifest_guard() -> None:
     test_p5_report_manifest_claim_remains_pending_until_immutable_freeze()
 
 
+_DESIGN_SYSTEM_GATE_IDS = {
+    "canonical_contract",
+    "command_outcome_pattern",
+    "operator_display_pattern",
+    "shared_components",
+    "state_semantics",
+    "theme_packs",
+    "tokens",
+    "tray_state_semantics",
+}
+
+
+def _design_system_changed_paths(base_commit: str) -> set[str]:
+    raw = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--find-copies",
+            "--diff-filter=ACDMRT",
+            base_commit,
+            "--",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    fields = raw.rstrip(b"\0").split(b"\0") if raw else []
+    changed: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index].decode("ascii")
+        index += 1
+        path_count = 2 if status[:1] in {"R", "C"} else 1
+        assert index + path_count <= len(fields), (status, fields[index:])
+        for field in fields[index : index + path_count]:
+            changed.add(field.decode("utf-8"))
+        index += path_count
+    return changed
+
+
+def _matches_design_patterns(path: str, patterns: list[str]) -> bool:
+    return any(fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def test_design_system_governed_sources_are_coversioned() -> None:
+    """F36.6: shared semantic authorities move with specs, version, and changelog."""
+
+    base_ref = os.environ.get("TRUSTED_BASE_SHA", "")
+    assert re.fullmatch(r"[0-9a-f]{40}", base_ref), (
+        "TRUSTED_BASE_SHA must bind the immutable slice base; moving refs and HEAD^ are not accepted"
+    )
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert base_commit == base_ref
+
+    gate_path = REPO_ROOT / "docs" / "design-system" / "MACHINE_GATES.json"
+    gate = json.loads(_read(gate_path))["co_versioning"]
+    assert gate["base_environment"] == "TRUSTED_BASE_SHA"
+    groups = gate["groups"]
+    assert {group["id"] for group in groups} == _DESIGN_SYSTEM_GATE_IDS
+
+    tracked = set(_tracked_files())
+    for group in groups:
+        assert group["source_patterns"], group["id"]
+        for pattern in group["source_patterns"]:
+            assert any(fnmatchcase(path, pattern) for path in tracked), (group["id"], pattern)
+        for specification_set in group["specification_sets"]:
+            assert specification_set, group["id"]
+            assert any(fnmatchcase(path, pattern) for path in tracked for pattern in specification_set), (
+                group["id"],
+                specification_set,
+            )
+
+    changed = _design_system_changed_paths(base_commit)
+    triggered = [
+        group for group in groups if any(_matches_design_patterns(path, group["source_patterns"]) for path in changed)
+    ]
+    if not triggered:
+        return
+
+    violations: list[str] = []
+    for required in gate["required_release_files"]:
+        if required not in changed or not (REPO_ROOT / required).is_file():
+            violations.append(f"missing changed release evidence: {required}")
+
+    for group in triggered:
+        for specification_set in group["specification_sets"]:
+            if not any(
+                _matches_design_patterns(path, specification_set) and (REPO_ROOT / path).is_file() for path in changed
+            ):
+                violations.append(
+                    f"{group['id']} changed without a corresponding specification from {specification_set}"
+                )
+
+    version_path = REPO_ROOT / "docs" / "design-system" / "VERSION"
+    current_version = _read(version_path).strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", current_version)
+    base_version = subprocess.run(
+        ["git", "show", f"{base_commit}:docs/design-system/VERSION"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if tuple(map(int, current_version.split("."))) <= tuple(map(int, base_version.split("."))):
+        violations.append(f"VERSION must advance beyond trusted-base {base_version}; found {current_version}")
+
+    changelog = _read(REPO_ROOT / "docs" / "design-system" / "CHANGELOG.md")
+    if re.search(rf"^## \[{re.escape(current_version)}\]", changelog, re.MULTILINE) is None:
+        violations.append(f"CHANGELOG.md has no current [{current_version}] release heading")
+
+    assert not violations, "F36.6 design-system co-versioning failed:\n" + "\n".join(sorted(violations))
+
+
 def test_design_system_release_markers_are_one_version() -> None:
     design_root = REPO_ROOT / "docs" / "design-system"
     version = _read(design_root / "VERSION").strip()
@@ -1269,7 +1392,14 @@ def test_design_system_release_markers_are_one_version() -> None:
     assert re.search(rf"^## \[{re.escape(version)}\]", _read(design_root / "CHANGELOG.md"), re.MULTILINE)
     assert f"design-system v{version} corpus-wide" in _read(design_root / "GUI_MIGRATION_INVENTORY.md")
 
+    readme = _read(design_root / "README.md")
+    manifest = _read(design_root / "MANIFEST.md")
+    assert f"Released v{version}:" in readme
+    assert f"**Session:** v{version}" in manifest
+    assert f"**Design system v{version} —" in manifest
+
     versioning = _read(design_root / "governance" / "versioning.md")
+    assert f"**Current version:** `{version}`" in versioning
     for path in (design_root / "VERSION", *versioned):
         relative = path.relative_to(REPO_ROOT).as_posix()
         assert relative in versioning, relative
@@ -1288,6 +1418,7 @@ def test_canonical_design_system_artifacts_and_markdown_references_are_tracked()
         "docs/design-system/CHANGELOG.md",
         "docs/design-system/VERSION",
         "docs/design-system/GUI_MIGRATION_INVENTORY.md",
+        "docs/design-system/MACHINE_GATES.json",
         "docs/design-system/cryodaq-primitives/tray-status.md",
     }
 
