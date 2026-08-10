@@ -685,11 +685,22 @@ class CooldownService:
 
                     # Reading.timestamp is wall-clock/source time; convert its
                     # observed age into the monotonic domain before storing the
-                    # anchor. If the clocks cannot be compared, None is a
-                    # fail-closed freshness state rather than a fresh stamp.
+                    # anchor, so a drained backlog cannot present an old sample
+                    # as newly received.
+                    #
+                    # A source timestamp AHEAD of the wall clock is not evidence
+                    # of staleness. The replay engine re-bases a series onto
+                    # `now` and then plays it faster than real time, so its
+                    # timestamps legitimately run ahead -- measured here at
+                    # -1210s to -11495s on tests/replay_engine. Treating that as
+                    # "clocks incomparable" withheld every prediction for the
+                    # whole run. Clamp at zero: the sample is at least as fresh
+                    # as its arrival. Only a non-finite age is uncomparable, and
+                    # that still fails closed.
                     source_age_s = time.time() - reading_ts
-                    if math.isfinite(source_age_s) and source_age_s >= 0.0:
-                        self._last_required_input_monotonic[reading.channel] = arrival_monotonic - source_age_s
+                    if math.isfinite(source_age_s):
+                        observed_age_s = max(0.0, source_age_s)
+                        self._last_required_input_monotonic[reading.channel] = arrival_monotonic - observed_age_s
                     else:
                         self._last_required_input_monotonic[reading.channel] = None
 
@@ -732,6 +743,39 @@ class CooldownService:
         except asyncio.CancelledError:
             return
 
+    def _freshness_horizon_s(self, channel: str) -> float | None:
+        """How long a required input may go without a new sample.
+
+        Measured from BOTH clock domains, because replay decouples them in both
+        directions and either one alone is wrong at one end:
+
+        * arrival cadence alone breaks ACCELERATED replay. Measured on
+          ``tests/replay_engine``: a re-based series arrives in a burst, arrival
+          intervals are 0.0002-0.0004 s, the horizon becomes 0.0008 s, and every
+          prediction is withheld 18 ms later while the producer is healthy.
+        * source cadence alone breaks SLOW replay -- the reviewer's finding:
+          two-second source samples arriving every 20 wall seconds set a
+          six-second horizon and withhold from a healthy producer.
+
+        Taking the larger says an input is fresh when it is fresh in EITHER
+        domain. That does not let a stale sample through: the anchor carries the
+        sample's own source age, so a drained backlog is pushed back regardless
+        of how wide this horizon is. Outage gaps are already excluded from both
+        deques, so neither can be inflated by a silence.
+        """
+
+        candidates = [
+            float(np.median(intervals))
+            for intervals in (
+                self._required_input_arrival_intervals[channel],
+                self._required_input_intervals[channel],
+            )
+            if intervals
+        ]
+        if not candidates:
+            return None
+        return 3.0 * max(candidates)
+
     async def _do_predict(self) -> None:
         """Выполнить прогнозирование и опубликовать результат."""
         if self._model is None:
@@ -751,15 +795,7 @@ class CooldownService:
                 self._last_required_input_monotonic.get(self._channel_warm),
             ),
         }
-        freshness_horizons_s = {
-            # Compare monotonic age with arrival cadence. Source cadence is
-            # retained for discovery, but replay speed makes it incomparable
-            # with wall-clock time used by this freshness check.
-            channel: 3.0 * float(np.median(self._required_input_arrival_intervals[channel]))
-            if self._required_input_arrival_intervals[channel]
-            else None
-            for channel in required_channels
-        }
+        freshness_horizons_s = {channel: self._freshness_horizon_s(channel) for channel in required_channels}
         if any(
             input_snapshot[channel][0] is None
             or input_snapshot[channel][1] is None
