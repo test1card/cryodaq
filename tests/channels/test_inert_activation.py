@@ -199,6 +199,14 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         ),
         "core/zmq_bridge.py": _direct_imports("cryodaq.channels.persistence", "MAX_PERSISTED_ENVELOPE_BYTES"),
         "core/zmq_subprocess.py": _direct_imports("cryodaq.channels.persistence", "MAX_PERSISTED_ENVELOPE_BYTES"),
+        "gui/routing_inventory.py": _direct_imports(
+            "cryodaq.channels.descriptors",
+            "ChannelDescriptorV1",
+            "ChannelQuantity",
+            "ChannelRole",
+            "ChannelSafetyClass",
+            "ChannelStreamClass",
+        ),
         "gui/shell/main_window_v2.py": _direct_imports(
             "cryodaq.channels.descriptors",
             "ChannelDescriptorV1",
