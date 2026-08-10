@@ -390,7 +390,7 @@ async def test_failed_poll_persistence_failure_latches_safety(
     monkeypatch: pytest.MonkeyPatch,
     persistence_outcome: str,
 ) -> None:
-    """Acknowledgment cannot clear silence whose publication remains unproven."""
+    """Only the exact instrument's committed publication can clear its block."""
 
     class RecoverableTemperatureDriver(LakeShore218S):
         def __init__(self) -> None:
@@ -427,7 +427,16 @@ async def test_failed_poll_persistence_failure_latches_safety(
     monkeypatch.setattr(writer, "_write_live_batch", persistence_failure)
 
     broker = DataBroker()
-    data_probe = await broker.subscribe("oc041_persistence_probe", maxsize=32)
+    ls1_probe = await broker.subscribe(
+        "oc041_ls1_persistence_probe",
+        maxsize=32,
+        filter_fn=lambda reading: reading.instrument_id == "LS218_1",
+    )
+    ls2_probe = await broker.subscribe(
+        "oc041_ls2_persistence_probe",
+        maxsize=32,
+        filter_fn=lambda reading: reading.instrument_id == "LS218_2",
+    )
     safety_broker = SafetyBroker()
     safety_probe = safety_broker.subscribe("oc041_safety_probe", maxsize=32)
     safety = SafetyManager(safety_broker, keithley_driver=None, mock=True)
@@ -450,6 +459,7 @@ async def test_failed_poll_persistence_failure_latches_safety(
             runtime_binding=_bus_binding(driver, "GPIB0", 2.0),
         )
     )
+    control_scheduler: Scheduler | None = None
     try:
         await scheduler.start()
         await asyncio.wait_for(
@@ -459,10 +469,11 @@ async def test_failed_poll_persistence_failure_latches_safety(
         await scheduler.stop()
 
         assert driver.failure_reading_calls == 1
-        assert data_probe.empty(), "rejected failed-poll evidence must not bypass persistence into DataBroker"
+        assert ls1_probe.empty(), "rejected failed-poll evidence must not bypass persistence into DataBroker"
+        assert ls2_probe.empty()
         assert safety_probe.empty(), "rejected failed-poll evidence must not bypass persistence into SafetyBroker"
         assert "failed-poll" in safety.fault_reason
-        assert "LS218_1" in safety._failed_poll_persistence_blockers
+        assert set(safety._failed_poll_persistence_blockers) == {"LS218_1"}
 
         acknowledged = await safety.acknowledge_fault("persistent failed-poll persistence failure")
         assert acknowledged == {"ok": True, "state": SafetyState.MANUAL_RECOVERY.value}
@@ -471,6 +482,10 @@ async def test_failed_poll_persistence_failure_latches_safety(
         preconditions_ok, refusal = safety._check_preconditions()
         assert preconditions_ok is False
         assert "LS218_1" in refusal
+        unresolved = safety.snapshot_operator_safety()
+        assert "failed_poll_persistence_unresolved" in {blocker.code for blocker in unresolved.blockers}
+        persistence_fact = next(fact for fact in unresolved.plant_health if fact.subsystem_id == "persistence")
+        assert persistence_fact.reason_code == "failed_poll_persistence_unresolved"
 
         blocked = await safety.request_run(0.5, 40.0, 1.0)
         assert blocked["ok"] is False
@@ -478,16 +493,57 @@ async def test_failed_poll_persistence_failure_latches_safety(
         assert driver.failure_reading_calls == 1, "no second failed-poll callback supplied the block"
 
         monkeypatch.setattr(writer, "_write_live_batch", original_write_live_batch)
+        control_driver = LakeShore218S(
+            "LS218_2",
+            "GPIB0::13::INSTR",
+            channel_labels=_LS218_2_LABELS,
+            mock=True,
+        )
+        control_scheduler = Scheduler(
+            broker,
+            safety_broker=safety_broker,
+            sqlite_writer=writer,
+            failed_poll_persistence_handler=safety.on_failed_poll_persistence_failure,
+            failed_poll_persistence_recovery_handler=safety.on_failed_poll_persistence_recovered,
+        )
+        control_scheduler.add(
+            InstrumentConfig(
+                driver=control_driver,
+                runtime_binding=_bus_binding(control_driver, "GPIB0-control", 2.0),
+            )
+        )
+        await control_scheduler.start()
+        control_reading = await asyncio.wait_for(ls2_probe.get(), timeout=5.0)
+        ls2_probe.task_done()
+        assert control_reading.metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] is True
+        await control_scheduler.stop()
+
+        assert set(safety._failed_poll_persistence_blockers) == {"LS218_1"}
+        still_blocked = safety.snapshot_operator_safety()
+        assert "failed_poll_persistence_unresolved" in {blocker.code for blocker in still_blocked.blockers}
+        persistence_fact = next(fact for fact in still_blocked.plant_health if fact.subsystem_id == "persistence")
+        assert persistence_fact.reason_code == "failed_poll_persistence_unresolved"
+        preconditions_ok, refusal = safety._check_preconditions()
+        assert preconditions_ok is False
+        assert "LS218_1" in refusal
+
         driver.fail_reads = False
         await scheduler.start()
-
+        recovered_reading = await asyncio.wait_for(ls1_probe.get(), timeout=5.0)
+        ls1_probe.task_done()
+        assert recovered_reading.metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] is True
+        assert safety._failed_poll_persistence_blockers == {}
+        cleared = safety.snapshot_operator_safety()
+        assert "failed_poll_persistence_unresolved" not in {blocker.code for blocker in cleared.blockers}
+        persistence_fact = next(fact for fact in cleared.plant_health if fact.subsystem_id == "persistence")
+        assert persistence_fact.reason_code == "persistence_fault_absent"
         await asyncio.wait_for(
             _wait_for_safety_state(safety, SafetyState.READY),
-            timeout=5.0,
+            timeout=2.0,
         )
-        assert "LS218_1" not in safety._failed_poll_persistence_blockers
-        assert not data_probe.empty()
     finally:
+        if control_scheduler is not None:
+            await control_scheduler.stop()
         await scheduler.stop()
         await safety.stop()
         await writer.stop()
