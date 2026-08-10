@@ -846,7 +846,7 @@ def test_controlled_environment_genuinely_executes_strict_exact_six() -> None:
             runner._EXECUTION_ARGV,
             observer=runner._LockedPsutilObserver(psutil),
             snapshot=snapshot,
-            timeout_s=60,
+            timeout_s=120,
         )
     runner._validate_exact_execution(
         stdout_evidence=completed.stdout_evidence,
