@@ -1280,7 +1280,7 @@ class _CoVersioningContract(NamedTuple):
     required_release_paths: frozenset[str]
 
 
-_F366_BOOTSTRAP_SHA = "d05856ecb3e0d5002e37083f32f4b2d7acf5927f"
+_F366_BOOTSTRAP_SHA = "301e73cf2775f7bc44f0fdd4b1f7035ca15ba145"
 _F366_SCHEMA_V2_SHA = "29731d453f0e1afbd7057af01cdb145c1bc77973"
 _F366_BOOTSTRAP_ROUTES = (
     (
