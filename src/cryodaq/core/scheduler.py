@@ -209,7 +209,8 @@ class Scheduler:
         persistence_commit_observer: Callable[[object], None] | None = None,
         persistence_rejection_observer: Callable[[int, str], None] | None = None,
         persistence_ambiguity_observer: Callable[[], None] | None = None,
-        failed_poll_persistence_handler: Callable[[str], Awaitable[None]] | None = None,
+        failed_poll_persistence_handler: Callable[[str, str], Awaitable[None]] | None = None,
+        failed_poll_persistence_recovery_handler: Callable[[str], None] | None = None,
     ) -> None:
         self._broker = broker
         self._safety_broker = safety_broker
@@ -230,6 +231,7 @@ class Scheduler:
         self._persistence_rejection_observer = persistence_rejection_observer
         self._persistence_ambiguity_observer = persistence_ambiguity_observer
         self._failed_poll_persistence_handler = failed_poll_persistence_handler
+        self._failed_poll_persistence_recovery_handler = failed_poll_persistence_recovery_handler
         self._instruments: dict[str, _InstrumentState] = {}
         self._running = False
         self._shared_bus_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1333,7 +1335,7 @@ class Scheduler:
                 reason,
             )
             return
-        await handler(f"{instrument_name}: {reason}")
+        await handler(instrument_name, reason)
 
     async def _process_readings(
         self,
@@ -1484,7 +1486,10 @@ class Scheduler:
             )
         if self._safety_broker is not None:
             await self._safety_broker.publish_batch(readings)
-        return bool(committed_publish_readings)
+        delivered = bool(committed_publish_readings)
+        if delivered and persistence_authoritative and self._failed_poll_persistence_recovery_handler is not None:
+            self._failed_poll_persistence_recovery_handler(name)
+        return delivered
 
     def _observe_persistence_commit(self, receipt: object) -> None:
         observer = self._persistence_commit_observer
@@ -1540,10 +1545,13 @@ class Scheduler:
             self._safety_broker is not None
             and self._sqlite_writer is not None
             and getattr(self._sqlite_writer, "descriptor_authoritative", False) is True
-            and self._failed_poll_persistence_handler is None
+            and (
+                self._failed_poll_persistence_handler is None or self._failed_poll_persistence_recovery_handler is None
+            )
         ):
             raise RuntimeError(
-                "descriptor-authoritative dual-broker scheduling requires a failed-poll persistence safety handler"
+                "descriptor-authoritative dual-broker scheduling requires "
+                "failed-poll persistence failure and recovery safety handlers"
             )
         self._running = True
 

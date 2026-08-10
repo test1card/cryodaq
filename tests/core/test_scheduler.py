@@ -390,9 +390,9 @@ async def test_failed_poll_persistence_failure_latches_safety(
     monkeypatch: pytest.MonkeyPatch,
     persistence_outcome: str,
 ) -> None:
-    """Rejected or failed commits cannot turn instrument silence back into silence."""
+    """Acknowledgment cannot clear silence whose publication remains unproven."""
 
-    class FailingTemperatureDriver(LakeShore218S):
+    class RecoverableTemperatureDriver(LakeShore218S):
         def __init__(self) -> None:
             super().__init__(
                 "LS218_1",
@@ -402,10 +402,13 @@ async def test_failed_poll_persistence_failure_latches_safety(
             )
             self.read_calls = 0
             self.failure_reading_calls = 0
+            self.fail_reads = True
 
         async def read_channels(self) -> list[Reading]:
             self.read_calls += 1
-            raise OSError("simulated GPIB read failure")
+            if self.fail_reads:
+                raise OSError("simulated GPIB read failure")
+            return await super().read_channels()
 
         def failure_readings(self) -> list[Reading]:
             self.failure_reading_calls += 1
@@ -414,6 +417,7 @@ async def test_failed_poll_persistence_failure_latches_safety(
     catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
     writer = SQLiteWriter(tmp_path / "writer", channel_catalog=catalog)
     await writer.start_immediate()
+    original_write_live_batch = writer._write_live_batch
 
     def persistence_failure(_batch: object) -> None:
         if persistence_outcome == "rejection":
@@ -432,30 +436,18 @@ async def test_failed_poll_persistence_failure_latches_safety(
     safety._config.cooldown_before_rearm_s = 0.0
     await safety.start()
 
-    failure_report_count = 0
-    allow_reassertion = asyncio.Event()
-    second_failure_reported = asyncio.Event()
-
-    async def handle_failed_poll_persistence(reason: str) -> None:
-        nonlocal failure_report_count
-        failure_report_count += 1
-        if failure_report_count > 1:
-            await allow_reassertion.wait()
-        await safety.on_persistence_failure(reason)
-        if failure_report_count > 1:
-            second_failure_reported.set()
-
-    driver = FailingTemperatureDriver()
+    driver = RecoverableTemperatureDriver()
     scheduler = Scheduler(
         broker,
         safety_broker=safety_broker,
         sqlite_writer=writer,
-        failed_poll_persistence_handler=handle_failed_poll_persistence,
+        failed_poll_persistence_handler=safety.on_failed_poll_persistence_failure,
+        failed_poll_persistence_recovery_handler=safety.on_failed_poll_persistence_recovered,
     )
     scheduler.add(
         InstrumentConfig(
             driver=driver,
-            runtime_binding=_bus_binding(driver, "GPIB0", 0.01),
+            runtime_binding=_bus_binding(driver, "GPIB0", 2.0),
         )
     )
     try:
@@ -464,42 +456,68 @@ async def test_failed_poll_persistence_failure_latches_safety(
             _wait_for_safety_state(safety, SafetyState.FAULT_LATCHED),
             timeout=2.0,
         )
+        await scheduler.stop()
 
-        assert driver.failure_reading_calls >= 1
+        assert driver.failure_reading_calls == 1
         assert data_probe.empty(), "rejected failed-poll evidence must not bypass persistence into DataBroker"
         assert safety_probe.empty(), "rejected failed-poll evidence must not bypass persistence into SafetyBroker"
         assert "failed-poll" in safety.fault_reason
+        assert "LS218_1" in safety._failed_poll_persistence_blockers
 
         acknowledged = await safety.acknowledge_fault("persistent failed-poll persistence failure")
         assert acknowledged == {"ok": True, "state": SafetyState.MANUAL_RECOVERY.value}
-        allow_reassertion.set()
-        await asyncio.wait_for(second_failure_reported.wait(), timeout=2.0)
-        await asyncio.wait_for(
-            _wait_for_safety_state(safety, SafetyState.FAULT_LATCHED),
-            timeout=2.0,
-        )
+        await safety._run_checks()
+        assert safety.state is SafetyState.MANUAL_RECOVERY
+        preconditions_ok, refusal = safety._check_preconditions()
+        assert preconditions_ok is False
+        assert "LS218_1" in refusal
 
         blocked = await safety.request_run(0.5, 40.0, 1.0)
         assert blocked["ok"] is False
-        assert blocked["state"] == SafetyState.FAULT_LATCHED.value
-        assert failure_report_count >= 2
-        assert driver.failure_reading_calls >= 2
-        assert data_probe.empty()
-        assert safety_probe.empty()
+        assert blocked["state"] == SafetyState.MANUAL_RECOVERY.value
+        assert driver.failure_reading_calls == 1, "no second failed-poll callback supplied the block"
+
+        monkeypatch.setattr(writer, "_write_live_batch", original_write_live_batch)
+        driver.fail_reads = False
+        await scheduler.start()
+
+        await asyncio.wait_for(
+            _wait_for_safety_state(safety, SafetyState.READY),
+            timeout=5.0,
+        )
+        assert "LS218_1" not in safety._failed_poll_persistence_blockers
+        assert not data_probe.empty()
     finally:
         await scheduler.stop()
         await safety.stop()
         await writer.stop()
 
 
-async def test_descriptor_dual_broker_requires_failed_poll_persistence_handler(tmp_path: Path) -> None:
-    """A production-shaped dual-broker scheduler cannot omit the latch route."""
+async def test_descriptor_dual_broker_requires_failed_poll_persistence_handlers(tmp_path: Path) -> None:
+    """A production-shaped scheduler requires both latch and recovery routes."""
+
+    async def report_failure(_instrument_name: str, _reason: str) -> None:
+        return None
+
+    def report_recovery(_instrument_name: str) -> None:
+        return None
+
     catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
     writer = SQLiteWriter(tmp_path / "writer", channel_catalog=catalog)
-    scheduler = Scheduler(DataBroker(), safety_broker=SafetyBroker(), sqlite_writer=writer)
+    missing_one_handler = (
+        {"failed_poll_persistence_recovery_handler": report_recovery},
+        {"failed_poll_persistence_handler": report_failure},
+    )
     try:
-        with pytest.raises(RuntimeError, match="failed-poll persistence safety handler"):
-            await scheduler.start()
+        for callbacks in missing_one_handler:
+            scheduler = Scheduler(
+                DataBroker(),
+                safety_broker=SafetyBroker(),
+                sqlite_writer=writer,
+                **callbacks,
+            )
+            with pytest.raises(RuntimeError, match="failure and recovery safety handlers"):
+                await scheduler.start()
     finally:
         await writer.stop()
 
@@ -789,7 +807,8 @@ async def test_ls218_2_single_failed_poll_faults_mandatory_critical_inputs(tmp_p
         broker,
         safety_broker=safety_broker,
         sqlite_writer=writer,
-        failed_poll_persistence_handler=safety.on_persistence_failure,
+        failed_poll_persistence_handler=safety.on_failed_poll_persistence_failure,
+        failed_poll_persistence_recovery_handler=safety.on_failed_poll_persistence_recovered,
     )
     scheduler.add(
         InstrumentConfig(

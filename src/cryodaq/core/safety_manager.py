@@ -231,6 +231,11 @@ class SafetyManager:
         # matured. SafetyManager owns this RUN blocker; only a later usable
         # sample accepted by InterlockEngine may clear the exact channel.
         self._mature_dead_interlock_channels: dict[str, str] = {}
+        # Instruments whose synthetic failed-poll samples could not obtain
+        # persistence-backed publication authority. Acknowledgment clears the
+        # fault latch, not this RUN blocker; only Scheduler-observed committed
+        # publication for the exact instrument clears it.
+        self._failed_poll_persistence_blockers: dict[str, str] = {}
         # P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): cooldown
         # predictor model status, reported by a wired CooldownService via
         # set_cooldown_predictor_status(). None = no subsystem has ever
@@ -2658,6 +2663,7 @@ class SafetyManager:
                 )
             )
 
+        unresolved_failed_poll_instruments = sorted(self._failed_poll_persistence_blockers)
         if self._persistence_fault_active:
             plant.append(
                 PlantHealthFact(
@@ -2673,6 +2679,24 @@ class SafetyManager:
                     OperatorPresentationState.FAULT,
                     "Persistence has an unacknowledged failure",
                     "Restore persistence and complete explicit fault recovery",
+                )
+            )
+        elif unresolved_failed_poll_instruments:
+            instruments = ", ".join(unresolved_failed_poll_instruments)
+            plant.append(
+                PlantHealthFact(
+                    "persistence",
+                    "Persistence",
+                    OperatorPresentationState.FAULT,
+                    "failed_poll_persistence_unresolved",
+                )
+            )
+            blockers.append(
+                SafetyBlocker(
+                    "failed_poll_persistence_unresolved",
+                    OperatorPresentationState.FAULT,
+                    f"Failed-poll persistence authority remains unresolved for: {instruments}",
+                    "Restore persistence-backed publication for every named instrument",
                 )
             )
         else:
@@ -3321,6 +3345,10 @@ class SafetyManager:
         if self._cooldown_predictor_available is False:
             return False, f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
 
+        if self._failed_poll_persistence_blockers:
+            instruments = ", ".join(sorted(self._failed_poll_persistence_blockers))
+            return False, f"Failed-poll persistence authority unresolved for instrument(s): {instruments}"
+
         if self._mature_dead_interlock_channels:
             channels = ", ".join(sorted(self._mature_dead_interlock_channels))
             return False, f"Persistently unusable interlock channel(s): {channels}"
@@ -3782,6 +3810,23 @@ class SafetyManager:
             channel,
             interlock_name,
             recorded_interlock,
+        )
+        self._refresh_operator_safety_snapshot()
+
+    async def on_failed_poll_persistence_failure(self, instrument_name: str, reason: str) -> None:
+        """Latch a fault and retain an instrument-scoped RUN blocker."""
+        self._failed_poll_persistence_blockers[instrument_name] = reason
+        await self.on_persistence_failure(f"{instrument_name}: {reason}")
+
+    def on_failed_poll_persistence_recovered(self, instrument_name: str) -> None:
+        """Clear one blocker only after Scheduler publishes a committed batch."""
+        reason = self._failed_poll_persistence_blockers.pop(instrument_name, None)
+        if reason is None:
+            return
+        logger.warning(
+            "Failed-poll persistence authority restored for %s (prior failure: %s)",
+            instrument_name,
+            reason,
         )
         self._refresh_operator_safety_snapshot()
 

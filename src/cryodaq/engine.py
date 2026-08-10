@@ -6645,7 +6645,8 @@ async def _run_engine(
         persistence_commit_observer=recording_lifecycle_feed.persistence_committed,
         persistence_rejection_observer=recording_lifecycle_feed.persistence_rejected,
         persistence_ambiguity_observer=recording_lifecycle_feed.persistence_ambiguous,
-        failed_poll_persistence_handler=safety_manager.on_persistence_failure,
+        failed_poll_persistence_handler=safety_manager.on_failed_poll_persistence_failure,
+        failed_poll_persistence_recovery_handler=safety_manager.on_failed_poll_persistence_recovered,
     )
     for cfg in driver_configs:
         scheduler.add(cfg)
