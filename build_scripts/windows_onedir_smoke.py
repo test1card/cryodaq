@@ -63,6 +63,17 @@ _KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS = frozenset(
 _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
 _FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
+_REQUIRED_SMOKE_CELLS = (
+    "frozen_driver_imports",
+    "gui_startup_offscreen",
+    "report_render_unicode",
+    "windows_job_timeout",
+    "assistant_h2_agent_off",
+    "assistant_h2_agent_missing",
+    "assistant_replay_exact_off",
+    "assistant_h3_only_allowed_idle",
+    "assistant_h3_only_restart_lock_release",
+)
 
 
 def _json_bytes(payload: object) -> bytes:
@@ -895,6 +906,9 @@ def smoke_summary(cells: list[dict[str, Any]]) -> tuple[str, str | None]:
         return "FAIL", "REQUIRED_CELLS_NOT_RUN"
     if not cells or any(status != "PASS" for status in statuses):
         return "FAIL", "INVALID_CELL_STATUS"
+    cell_names = tuple(cell.get("name") for cell in cells)
+    if cell_names != _REQUIRED_SMOKE_CELLS:
+        return "FAIL", "REQUIRED_CELL_ROSTER_MISMATCH"
     return "PASS", None
 
 

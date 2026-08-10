@@ -388,7 +388,7 @@ def test_report_evidence_rejects_malformed_result_report(tmp_path: Path) -> None
         smoke.validate_report_evidence(tmp_path, "exp-1", generation)
 
 
-def test_smoke_summary_fails_closed_on_not_run_or_invalid_status() -> None:
+def test_smoke_summary_fails_closed_on_status_or_roster_mismatch() -> None:
     assert smoke.smoke_summary([{"name": "pending", "status": "NOT_RUN"}]) == (
         "FAIL",
         "REQUIRED_CELLS_NOT_RUN",
@@ -397,9 +397,20 @@ def test_smoke_summary_fails_closed_on_not_run_or_invalid_status() -> None:
         "FAIL",
         "INVALID_CELL_STATUS",
     )
-    assert smoke.smoke_summary([{"name": "done", "status": "PASS"}]) == (
-        "PASS",
-        None,
+
+    valid_cells = [{"name": name, "status": "PASS"} for name in smoke._REQUIRED_SMOKE_CELLS]
+    assert smoke.smoke_summary(valid_cells) == ("PASS", None)
+
+    missing_driver_cell = [cell for cell in valid_cells if cell["name"] != "frozen_driver_imports"]
+
+    assert smoke.smoke_summary(missing_driver_cell) == (
+        "FAIL",
+        "REQUIRED_CELL_ROSTER_MISMATCH",
+    )
+    duplicated_cell = [*valid_cells, dict(valid_cells[0])]
+    assert smoke.smoke_summary(duplicated_cell) == (
+        "FAIL",
+        "REQUIRED_CELL_ROSTER_MISMATCH",
     )
 
 

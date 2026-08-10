@@ -46,7 +46,11 @@ def _execute_spec() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
         return []
 
     def analysis(*_args: object, **kwargs: object) -> SimpleNamespace:
-        analysis_calls.append(kwargs)
+        snapshot = dict(kwargs)
+        hiddenimports = snapshot.get("hiddenimports")
+        if isinstance(hiddenimports, list):
+            snapshot["hiddenimports"] = list(hiddenimports)
+        analysis_calls.append(snapshot)
         return SimpleNamespace(pure=(), zipped_data=(), scripts=(), binaries=(), datas=(), zipfiles=())
 
     def build_artifact(*_args: object, **_kwargs: object) -> SimpleNamespace:
@@ -332,6 +336,45 @@ def test_frozen_driver_guard_rejects_frozen_only_driver(monkeypatch: pytest.Monk
     message = str(caught.value)
     assert "registry_only=[]" in message
     assert f"frozen_only=['{removed.module}']" in message
+
+
+def test_frozen_driver_guard_rejects_allowlist_added_after_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = SPEC.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(SPEC))
+    addition = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AugAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "hidden_imports"
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "list"
+    )
+    analysis_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "Analysis"
+    )
+    assert addition.lineno < analysis_assignment.lineno
+    assert analysis_assignment.end_lineno is not None
+    lines = source.splitlines(keepends=True)
+    addition_line = lines.pop(addition.lineno - 1)
+    lines.insert(analysis_assignment.end_lineno - 1, addition_line)
+    mutated_source = "".join(lines)
+    mutated_spec = tmp_path / "cryodaq.spec"
+    ast.parse(mutated_source, filename=str(mutated_spec))
+    mutated_spec.write_text(mutated_source, encoding="utf-8", newline="\n")
+    monkeypatch.setitem(globals(), "SPEC", mutated_spec)
+
+    with pytest.raises(FrozenDriverContractError, match="must reach Analysis.hiddenimports exactly once"):
+        _assert_frozen_driver_contract()
 
 
 def test_frozen_driver_guard_rejects_direct_hidden_driver_outside_allowlist(
