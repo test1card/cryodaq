@@ -14,25 +14,18 @@ from typing import Any
 
 import pytest
 
-from cryodaq.agents.assistant.periodic_delivery import (
-    PeriodicDeliveryContext,
-    PeriodicDeliveryReceipt,
-)
+from cryodaq.agents.assistant.periodic_delivery import PeriodicDeliveryContext
 from cryodaq.agents.assistant.periodic_png import PeriodicPngCoordinator
 from cryodaq.agents.assistant.soak_periodic_delivery import SoakPeriodicDeliverySession
 from cryodaq.periodic_state import (
     PeriodicArtifact,
-    PeriodicStateDocument,
     PeriodicStatus,
     allocate_pending,
     latest_completed_slot,
     load_periodic_state,
     mark_ready,
     mark_rendering,
-    mark_succeeded,
     periodic_local_destination_fingerprint,
-    rotate_terminal_active,
-    set_periodic_health,
     write_periodic_state,
 )
 from cryodaq.report_process import read_periodic_artifact_bytes
@@ -40,7 +33,6 @@ from scripts.soak_mock_stack_runner import (
     _ArtifactReceiptSink,
     _AssistantProcessObservation,
     _ProcessIdentity,
-    _validate_joined_receipt,
 )
 from tests.agents.assistant.test_periodic_png_coordinator import (
     Alarm,
@@ -251,16 +243,18 @@ def test_real_spawn_process_delivers_one_durable_ack(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="AF_UNIX spawn and SIGKILL proof is POSIX-only")
+@pytest.mark.parametrize("iteration", range(3))
 def test_durable_receipt_before_ack_survives_unknown_sender_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    iteration: int,
 ) -> None:
-    nonce = "e" * 64
+    nonce = f"{iteration + 1:064x}"
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir(mode=0o700)
     os.chmod(evidence_dir, 0o700)
     data_dir = tmp_path / "data"
-    active, photo, _caption = _prepare_ready_local_delivery(data_dir, nonce)
+    active, photo, caption = _prepare_ready_local_delivery(data_dir, nonce)
     parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     context = multiprocessing.get_context("spawn")
     output = context.Queue()
@@ -342,35 +336,66 @@ def test_durable_receipt_before_ack_survives_unknown_sender_replacement(
         replacement.join(timeout=15)
         replacement_parent.close()
 
-    record = json.loads((evidence_dir / "periodic-receipts.jsonl").read_text(encoding="ascii"))
-    receipt = PeriodicDeliveryReceipt(
-        "soak_local",
-        str(record["receipt_id"]),
-        str(record["acknowledgement_sha256"]),
-    )
-    delivery_state = PeriodicStateDocument(delivery_cuts[0])
-    succeeded = mark_succeeded(
-        delivery_state,
-        receipt=receipt,
-        slot_id=str(record["slot_id"]),
-        owner_token=str(record["owner_token"]),
-        now=float(delivery_state.payload["updated_at"]) + 1,
-    )
-    terminal = rotate_terminal_active(succeeded, now=float(succeeded.payload["updated_at"]) + 1)
-    terminal = set_periodic_health(
-        terminal,
-        status="ready",
-        code=None,
-        text="",
-        now=float(terminal.payload["updated_at"]) + 1,
-    )
-    joined = _validate_joined_receipt(
-        ledger_record=record,
-        delivery_state_payload=delivery_cuts[0],
-        terminal_state_payload=terminal.payload,
-        artifact_bytes=(evidence_dir / str(record["filename"])).read_bytes(),
-        assistant_observation=observation,
-        expected_launcher_pid=os.getpid(),
-    )
-    assert joined.receipt_id == record["receipt_id"]
-    assert joined.acknowledgement_sha256 == record["acknowledgement_sha256"]
+    ledger_path = evidence_dir / "periodic-receipts.jsonl"
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="ascii").splitlines()]
+    assert len(records) == 1
+    record = records[0]
+    persisted_photo = (evidence_dir / str(record["filename"])).read_bytes()
+    delivery_active = delivery_cuts[0]["active"]
+    recovered_state = load_periodic_state(data_dir).payload
+    assert sum(value is not None for value in (recovered_state["active"], recovered_state["last_terminal"])) == 1
+    unknown = recovered_state["last_terminal"] or recovered_state["active"]
+    unresolved = recovered_state["unresolved_delivery"]
+
+    assert _ArtifactReceiptSink._valid_ledger_record(record)
+    assert isinstance(delivery_active, dict)
+    artifact = delivery_active["artifact"]
+    assert isinstance(artifact, dict)
+    assert isinstance(unknown, dict)
+    assert unknown["status"] == "DELIVERY_UNKNOWN"
+    assert unknown["receipt"] is None
+    assert len(unresolved) == 1
+    unresolved_entry = unresolved[0]
+    assert isinstance(unresolved_entry, dict)
+
+    assert persisted_photo == photo
+    assert record["artifact_sha256"] == "sha256:" + hashlib.sha256(persisted_photo).hexdigest()
+    assert record["artifact_size"] == len(persisted_photo)
+    caption_bytes = caption.encode("utf-8")
+    assert record["caption_sha256"] == "sha256:" + hashlib.sha256(caption_bytes).hexdigest()
+    assert record["caption_size"] == len(caption_bytes)
+    destination_fingerprint = periodic_local_destination_fingerprint(str(record["nonce"]))
+    assert (
+        record["assistant_pid"],
+        record["assistant_start_identity"],
+        record["assistant_generation"],
+        record["sequence"],
+        record["receipt_id"],
+        record["nonce"],
+    ) == (observation.identity.pid, observation.identity.start_identity, 1, 1, "g1:s1", nonce)
+
+    assert {
+        "slot_id": record["slot_id"],
+        "generation_id": record["generation_id"],
+        "owner_token": record["owner_token"],
+        "artifact_sha256": record["artifact_sha256"],
+        "artifact_size": record["artifact_size"],
+    } == {
+        "slot_id": delivery_active["slot_id"],
+        "generation_id": delivery_active["generation_id"],
+        "owner_token": delivery_active["owner_token"],
+        "artifact_sha256": artifact["sha256"],
+        "artifact_size": artifact["size"],
+    }
+    assert {
+        "slot_id": record["slot_id"],
+        "generation_id": record["generation_id"],
+        "artifact_sha256": record["artifact_sha256"],
+        "destination_fingerprint": destination_fingerprint,
+    } == {
+        "slot_id": unresolved_entry["slot_id"],
+        "generation_id": unresolved_entry["generation_id"],
+        "artifact_sha256": unresolved_entry["artifact_sha256"],
+        "destination_fingerprint": unresolved_entry["destination_fingerprint"],
+    }
+    assert delivery_active["destination_fingerprint"] == destination_fingerprint
