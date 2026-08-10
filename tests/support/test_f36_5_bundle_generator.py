@@ -205,6 +205,7 @@ def _evidence(bundle) -> dict[str, object]:
 def _snapshot_record_fields(
     *,
     role: str = "summary",
+    parent_source_id: str | None = None,
     mode: str = "live",
     source_id: str = "engine-v1",
     producer_id: str = "engine-v1",
@@ -219,6 +220,7 @@ def _snapshot_record_fields(
         "snapshot_source_id": source_id,
         "source_age_us": 0,
         "transport_age_us": 0,
+        **({"parent_source_id": parent_source_id} if parent_source_id is not None else {}),
     }
 
 
@@ -461,7 +463,11 @@ def test_collector_keeps_safe_versions_when_name_like_value_is_redacted() -> Non
 def test_identifier_valued_private_role_is_rejected(value: str) -> None:
     record = EvidenceRecord.from_payload(
         "health",
-        {"source_id": value, "state": "ok", **_snapshot_record_fields(role="child")},
+        {
+            "source_id": value,
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
     )
 
     assert json.loads(record.payload_json)["source_id"] == "redacted-private"
@@ -1701,11 +1707,19 @@ def test_attention_summary_id_collision_fails_attention_closed() -> None:
 def test_bundle_capture_rejects_duplicate_record_identities() -> None:
     first = EvidenceRecord.from_payload(
         "health",
-        {"source_id": "plant", "state": "ok", **_snapshot_record_fields(role="child")},
+        {
+            "source_id": "plant",
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
     )
     second = EvidenceRecord.from_payload(
         "health",
-        {"source_id": "plant", "state": "fault", **_snapshot_record_fields(role="child")},
+        {
+            "source_id": "plant",
+            "state": "fault",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
     )
 
     with pytest.raises(ValueError, match="record identities"):
@@ -1838,8 +1852,9 @@ def test_production_snapshot_identifiers_survive_the_bundle_schema(source_id: st
         "integrity",
         {
             "source_id": "data-integrity",
-            "state": "ok",
+            "state": ("fault" if mode == "replay" else "ok"),
             "storage": "available",
+            "dropped_records": 0,
             **_snapshot_record_fields(mode=mode, source_id=source_id, producer_id=source_id),
         },
     )
@@ -2120,6 +2135,7 @@ def _complete_integrity_provenance() -> dict[str, object]:
         "revision": 1,
         "source_age_us": 0,
         "transport_age_us": 0,
+        "dropped_records": 0,
     }
 
 
@@ -2191,7 +2207,8 @@ def test_integrity_schema_requires_every_snapshot_truth_field(missing_field: str
 
 def test_bundle_capture_rejects_snapshot_records_from_mixed_cuts() -> None:
     integrity_payload = _complete_integrity_provenance()
-    health_payload = {key: value for key, value in integrity_payload.items() if key != "storage"}
+    excluded_integrity_fields = {"storage", "dropped_records"}
+    health_payload = {key: value for key, value in integrity_payload.items() if key not in excluded_integrity_fields}
     health_payload.update(source_id="plant-health-summary", state="caution")
     health_payload.update(
         revision=2,
@@ -2359,7 +2376,12 @@ def test_health_summaries_cannot_collectively_understate_a_child() -> None:
         {
             "source_id": "sensor-1",
             "state": "fault",
-            **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+            **_snapshot_record_fields(
+                role="child",
+                parent_source_id="plant-health-summary",
+                source_id=live_id,
+                producer_id=live_id,
+            ),
         },
     )
 

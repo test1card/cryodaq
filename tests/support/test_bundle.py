@@ -38,6 +38,7 @@ def _snapshot_fields(*, role: str = "summary") -> dict[str, object]:
         "snapshot_source_id": "engine-v1",
         "source_age_us": 0,
         "transport_age_us": 0,
+        **({"parent_source_id": "plant-health-summary"} if role == "child" else {}),
     }
 
 
@@ -453,6 +454,7 @@ def test_dedicated_digest_field_and_canonical_uuid_id_are_not_guessed_as_secrets
             "state": "ok",
             "storage": "available",
             "digest_sha256": HASH,
+            "dropped_records": 0,
             **_snapshot_fields(),
         },
     )
