@@ -2147,6 +2147,46 @@ def _active_route_specs(contract: _CoVersioningContract) -> dict[str, frozenset[
     }
 
 
+class _SemanticRouteBody(NamedTuple):
+    aggregate_specs: frozenset[str]
+    fallback_specs: frozenset[str]
+    assignment_edges: frozenset[tuple[str, str]]
+
+    @property
+    def all_spec_paths(self) -> frozenset[str]:
+        return (
+            self.aggregate_specs
+            | self.fallback_specs
+            | frozenset(spec_path for _name_pattern, spec_path in self.assignment_edges)
+        )
+
+
+def _semantic_route_body(contract: _CoVersioningContract, source_path: str) -> _SemanticRouteBody:
+    return _SemanticRouteBody(
+        aggregate_specs=frozenset(
+            spec_path
+            for edge_source, spec_path in contract.python_semantic_aggregate_edges
+            if edge_source == source_path
+        ),
+        fallback_specs=frozenset(
+            spec_path
+            for edge_source, spec_path in contract.python_semantic_fallback_edges
+            if edge_source == source_path
+        ),
+        assignment_edges=frozenset(
+            (name_pattern, spec_path)
+            for edge_source, name_pattern, spec_path in contract.python_semantic_assignment_edges
+            if edge_source == source_path
+        ),
+    )
+
+
+def _ordinary_route_coverage(contract: _CoVersioningContract, path: str) -> frozenset[str]:
+    return frozenset(
+        spec_path for source_pattern, spec_path in contract.route_edges if fnmatchcase(path, source_pattern)
+    )
+
+
 def _active_candidate_spec_coverage(contract: _CoVersioningContract, path: str) -> frozenset[str]:
     covered = {spec_path for source_pattern, spec_path in contract.route_edges if fnmatchcase(path, source_pattern)}
     if path in _python_semantic_sources(contract):
@@ -2185,6 +2225,38 @@ def _validate_coversion_transition(
     ):
         missing = getattr(trusted, field) - getattr(candidate, field)
         assert not missing, f"candidate co_versioning narrows trusted {field}: {sorted(missing)}"
+
+    trusted_semantic_sources = frozenset(
+        source_path for source_path, _spec_path in trusted.python_semantic_aggregate_edges
+    )
+    for source_path in sorted(trusted_semantic_sources & base_tracked):
+        if source_path in candidate_tracked:
+            continue
+        assert source_path in diff.removed_or_renamed_from, (
+            f"trusted semantic source disappeared without D/R evidence: {source_path}"
+        )
+        trusted_body = _semantic_route_body(trusted, source_path)
+        rename_destinations = sorted(to_path for from_path, to_path in diff.renamed_paths if from_path == source_path)
+        for destination in rename_destinations:
+            assert destination in candidate_tracked, (
+                f"trusted semantic route rename destination is absent from candidate: {source_path} -> {destination}"
+            )
+            candidate_body = _semantic_route_body(candidate, destination)
+            semantic_nonweakening = (
+                trusted_body.aggregate_specs <= candidate_body.aggregate_specs
+                and trusted_body.fallback_specs <= candidate_body.fallback_specs
+                and trusted_body.assignment_edges <= candidate_body.assignment_edges
+            )
+            ordinary_coverage = _ordinary_route_coverage(candidate, destination)
+            ordinary_nonweakening = trusted_body.all_spec_paths <= ordinary_coverage
+            assert semantic_nonweakening or ordinary_nonweakening, (
+                f"trusted semantic route rename destination lacks nonweakening coverage: "
+                f"{source_path} -> {destination}; "
+                f"semantic missing aggregate={sorted(trusted_body.aggregate_specs - candidate_body.aggregate_specs)} "
+                f"fallback={sorted(trusted_body.fallback_specs - candidate_body.fallback_specs)} "
+                f"assignments={sorted(trusted_body.assignment_edges - candidate_body.assignment_edges)}; "
+                f"ordinary missing specs={sorted(trusted_body.all_spec_paths - ordinary_coverage)}"
+            )
 
     trusted_active = _active_route_specs(trusted)
     candidate_active = _active_route_specs(candidate)
@@ -2913,6 +2985,241 @@ def test_design_system_legacy_v1_coversion_rejects_malformed_authority() -> None
     for index, (malformed, diagnostic) in enumerate(cases):
         with pytest.raises(AssertionError, match=diagnostic):
             _normalize_trusted_coversion_contract(malformed, label=f"legacy-v1 malformed {index}")
+
+
+_SEMANTIC_RENAME_SOURCE = "src/cryodaq/gui/theme.py"
+_SEMANTIC_RENAME_DESTINATION = "src/cryodaq/gui/theme_tokens.py"
+_SEMANTIC_RENAME_AGGREGATE_SPEC = "docs/design-system/tokens/runtime-authority.md"
+_SEMANTIC_RENAME_COLOR_SPEC = "docs/design-system/tokens/colors.md"
+_SEMANTIC_RENAME_TYPOGRAPHY_SPEC = "docs/design-system/tokens/typography.md"
+_SEMANTIC_RENAME_EXTRA_SPEC = "docs/design-system/tokens/chart-tokens.md"
+_SEMANTIC_RENAME_RELEASE_PATHS = frozenset(
+    {
+        "docs/design-system/CHANGELOG.md",
+        "docs/design-system/VERSION",
+    }
+)
+_SEMANTIC_RENAME_TRUSTED_BODY = _SemanticRouteBody(
+    aggregate_specs=frozenset({_SEMANTIC_RENAME_AGGREGATE_SPEC}),
+    fallback_specs=frozenset(
+        {
+            _SEMANTIC_RENAME_COLOR_SPEC,
+            _SEMANTIC_RENAME_TYPOGRAPHY_SPEC,
+        }
+    ),
+    assignment_edges=frozenset(
+        {
+            ("FONT_*", _SEMANTIC_RENAME_TYPOGRAPHY_SPEC),
+            ("STATUS_*", _SEMANTIC_RENAME_COLOR_SPEC),
+        }
+    ),
+)
+
+
+def _semantic_transition_contract(
+    semantic_routes: dict[str, _SemanticRouteBody],
+    *,
+    ordinary_routes: dict[str, frozenset[str]] | None = None,
+) -> _CoVersioningContract:
+    ordinary_routes = ordinary_routes or {}
+    return _CoVersioningContract(
+        route_edges=frozenset(
+            (source_pattern, spec_path)
+            for source_pattern, spec_paths in ordinary_routes.items()
+            for spec_path in spec_paths
+        ),
+        route_patterns=frozenset(ordinary_routes),
+        python_semantic_assignment_edges=frozenset(
+            (source_path, name_pattern, spec_path)
+            for source_path, body in semantic_routes.items()
+            for name_pattern, spec_path in body.assignment_edges
+        ),
+        python_semantic_aggregate_edges=frozenset(
+            (source_path, spec_path)
+            for source_path, body in semantic_routes.items()
+            for spec_path in body.aggregate_specs
+        ),
+        python_semantic_fallback_edges=frozenset(
+            (source_path, spec_path)
+            for source_path, body in semantic_routes.items()
+            for spec_path in body.fallback_specs
+        ),
+        retired_routes=frozenset(),
+        release_only_patterns=frozenset(),
+        required_release_paths=_SEMANTIC_RENAME_RELEASE_PATHS,
+    )
+
+
+def _semantic_rename_transition_fixture(
+    *,
+    destination_body: _SemanticRouteBody | None = None,
+    ordinary_destination_specs: frozenset[str] | None = None,
+    deletion: bool = False,
+) -> tuple[
+    _CoVersioningContract,
+    _CoVersioningContract,
+    set[str],
+    set[str],
+    _DesignSystemDiff,
+]:
+    assert not (deletion and (destination_body is not None or ordinary_destination_specs is not None))
+    trusted = _semantic_transition_contract({_SEMANTIC_RENAME_SOURCE: _SEMANTIC_RENAME_TRUSTED_BODY})
+    semantic_routes = {_SEMANTIC_RENAME_SOURCE: _SEMANTIC_RENAME_TRUSTED_BODY}
+    ordinary_routes: dict[str, frozenset[str]] = {}
+    if destination_body is not None:
+        semantic_routes[_SEMANTIC_RENAME_DESTINATION] = destination_body
+    if ordinary_destination_specs is not None:
+        ordinary_routes[_SEMANTIC_RENAME_DESTINATION] = ordinary_destination_specs
+    candidate = _semantic_transition_contract(
+        semantic_routes,
+        ordinary_routes=ordinary_routes,
+    )
+    all_specs = {
+        *_SEMANTIC_RENAME_TRUSTED_BODY.all_spec_paths,
+        _SEMANTIC_RENAME_EXTRA_SPEC,
+    }
+    base_tracked = {
+        _SEMANTIC_RENAME_SOURCE,
+        *all_specs,
+        *_SEMANTIC_RENAME_RELEASE_PATHS,
+    }
+    candidate_tracked = {
+        *all_specs,
+        *_SEMANTIC_RENAME_RELEASE_PATHS,
+    }
+    if deletion:
+        raw_diff = f"D\0{_SEMANTIC_RENAME_SOURCE}\0".encode()
+    else:
+        candidate_tracked.add(_SEMANTIC_RENAME_DESTINATION)
+        raw_diff = (f"R100\0{_SEMANTIC_RENAME_SOURCE}\0{_SEMANTIC_RENAME_DESTINATION}\0").encode()
+    return (
+        trusted,
+        candidate,
+        base_tracked,
+        candidate_tracked,
+        _parse_design_system_name_status(raw_diff),
+    )
+
+
+def test_coversion_semantic_rename_rejects_ungoverned_destination() -> None:
+    fixture = _semantic_rename_transition_fixture()
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    with pytest.raises(AssertionError, match="semantic route rename destination lacks nonweakening coverage"):
+        _validate_coversion_transition(
+            trusted,
+            candidate,
+            current_version="4.2.0",
+            base_tracked=base_tracked,
+            candidate_tracked=candidate_tracked,
+            diff=diff,
+        )
+
+
+def test_coversion_semantic_rename_rejects_undercovered_destination() -> None:
+    undercovered = _SemanticRouteBody(
+        aggregate_specs=_SEMANTIC_RENAME_TRUSTED_BODY.aggregate_specs,
+        fallback_specs=frozenset({_SEMANTIC_RENAME_COLOR_SPEC}),
+        assignment_edges=frozenset({("STATUS_*", _SEMANTIC_RENAME_COLOR_SPEC)}),
+    )
+    fixture = _semantic_rename_transition_fixture(destination_body=undercovered)
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    with pytest.raises(AssertionError, match="semantic route rename destination lacks nonweakening coverage"):
+        _validate_coversion_transition(
+            trusted,
+            candidate,
+            current_version="4.2.0",
+            base_tracked=base_tracked,
+            candidate_tracked=candidate_tracked,
+            diff=diff,
+        )
+
+
+@pytest.mark.parametrize(
+    "destination_body",
+    (
+        _SEMANTIC_RENAME_TRUSTED_BODY,
+        _SemanticRouteBody(
+            aggregate_specs=_SEMANTIC_RENAME_TRUSTED_BODY.aggregate_specs,
+            fallback_specs=_SEMANTIC_RENAME_TRUSTED_BODY.fallback_specs | frozenset({_SEMANTIC_RENAME_EXTRA_SPEC}),
+            assignment_edges=_SEMANTIC_RENAME_TRUSTED_BODY.assignment_edges
+            | frozenset({("PLOT_*", _SEMANTIC_RENAME_EXTRA_SPEC)}),
+        ),
+    ),
+)
+def test_coversion_semantic_rename_accepts_equivalent_or_superset_destination(
+    destination_body: _SemanticRouteBody,
+) -> None:
+    fixture = _semantic_rename_transition_fixture(destination_body=destination_body)
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    assert not _validate_coversion_transition(
+        trusted,
+        candidate,
+        current_version="4.2.0",
+        base_tracked=base_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=diff,
+    )
+
+
+def test_coversion_semantic_rename_accepts_conservative_ordinary_destination() -> None:
+    fixture = _semantic_rename_transition_fixture(
+        ordinary_destination_specs=_SEMANTIC_RENAME_TRUSTED_BODY.all_spec_paths,
+    )
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    assert not _validate_coversion_transition(
+        trusted,
+        candidate,
+        current_version="4.2.0",
+        base_tracked=base_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=diff,
+    )
+
+
+def test_coversion_semantic_source_deletion_keeps_audit_record() -> None:
+    fixture = _semantic_rename_transition_fixture(deletion=True)
+    trusted, candidate, base_tracked, candidate_tracked, diff = fixture
+    assert _semantic_route_body(candidate, _SEMANTIC_RENAME_SOURCE) == _SEMANTIC_RENAME_TRUSTED_BODY
+    assert not diff.renamed_paths
+    assert not _validate_coversion_transition(
+        trusted,
+        candidate,
+        current_version="4.2.0",
+        base_tracked=base_tracked,
+        candidate_tracked=candidate_tracked,
+        diff=diff,
+    )
+
+
+def test_coversion_semantic_rename_destination_remains_governed_next_slice() -> None:
+    fixture = _semantic_rename_transition_fixture(destination_body=_SEMANTIC_RENAME_TRUSTED_BODY)
+    _trusted, renamed_contract, _base_tracked, _candidate_tracked, _diff = fixture
+    _real_contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = base_source + "\nFONT_SIZE_XS += 1\n"
+    changed = {_SEMANTIC_RENAME_DESTINATION}
+    required_specs = _coversion_required_specs(
+        renamed_contract,
+        changed_paths=changed,
+        base_source_text=lambda source_path: base_source if source_path == _SEMANTIC_RENAME_DESTINATION else None,
+        candidate_source_text=lambda source_path: (
+            candidate_source if source_path == _SEMANTIC_RENAME_DESTINATION else None
+        ),
+    )
+    assert set(required_specs) == {
+        _SEMANTIC_RENAME_AGGREGATE_SPEC,
+        _SEMANTIC_RENAME_TYPOGRAPHY_SPEC,
+    }
+    assert _missing_coversion_spec_violations(required_specs, changed_paths=changed) == [
+        f"{_SEMANTIC_RENAME_DESTINATION} changed without exact specification: {_SEMANTIC_RENAME_AGGREGATE_SPEC}",
+        f"{_SEMANTIC_RENAME_DESTINATION} changed without exact specification: {_SEMANTIC_RENAME_TYPOGRAPHY_SPEC}",
+    ]
+    assert _missing_release_evidence_violations(renamed_contract, changed_paths=changed) == [
+        "missing changed release evidence: docs/design-system/CHANGELOG.md",
+        "missing changed release evidence: docs/design-system/VERSION",
+    ]
+    complete_change = changed | set(required_specs) | set(_SEMANTIC_RENAME_RELEASE_PATHS)
+    assert not _missing_coversion_spec_violations(required_specs, changed_paths=complete_change)
+    assert not _missing_release_evidence_violations(renamed_contract, changed_paths=complete_change)
 
 
 _RETIREMENT_SOURCE = "src/cryodaq/gui/retired_owner.py"

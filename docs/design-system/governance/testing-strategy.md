@@ -22,6 +22,8 @@ How we verify that CryoDAQ code actually follows the design system. The rules an
 
 The co-versioning gate parses Git's actual NUL-delimited name-status stream: a pure D may retire with an empty rename map, while each R must persist its exact old/new pair and land on an active candidate route with the full retired specification set (or a superset). A later change to that destination still triggers its specifications plus release evidence.
 
+Semantic-source records remain additive audit authority rather than using ordinary retirement records. For an actual semantic-source R, parser-shaped controls reject an ungoverned or under-covered destination and accept only a nonweakening copy/superset of the complete semantic body under the new path, or one ordinary route covering the old body's full specification union. A pure semantic-source D needs no destination. A two-slice control changes the renamed destination with AugAssign and proves that its mapped category plus aggregate, `VERSION`, and `CHANGELOG.md` are still required.
+
 These checks cover only mechanical evidence. Whole-shell keyboard and focus traversal, NVDA on the real Windows build, scripted operator tasks, visual judgment, and target-machine performance measurements remain human or environment-specific gates. A screenshot does not close them.
 
 The lint and test snippets below describe intended rule checks. Unless a concrete repository node or tool is named as shipped above, a snippet is an implementation example rather than current CI evidence.

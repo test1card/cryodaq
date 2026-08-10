@@ -55,6 +55,12 @@ the design-system-specific definitions of "breaking" from
   whose exact values are canonical in both `colors.md` and `chart-tokens.md`
   now require both specifications, while chart-only geometry and width symbols
   continue to require only `chart-tokens.md`.
+- Closed semantic-source rename escape: additive old-path semantic records remain
+  audit data, while every Git R destination must carry a nonweakening complete
+  semantic body under the new path or one ordinary route covering the old full
+  specification union. Pure D remains valid, and a two-slice control proves that
+  later destination changes still require their exact specification and release
+  evidence.
 - Removed caller-supplied trusted-base inputs from both docs and main CI.
   Pull requests use their base, pushes use event authority, and manual runs use
   the merge base with `origin/<default-branch>`; every result is canonicalized
