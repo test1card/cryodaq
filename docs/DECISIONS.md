@@ -326,3 +326,76 @@ exactly once in `src/` — its own definition. Production never reported a deliv
 outcome, only tests called it, so a narration lost to a broken transport was
 indistinguishable from one the operator read. The outcome is now reported from
 the dispatch path.
+
+## [Owner] 2026-08-01 — Every change goes through a pull request with independent agent review
+
+> *"from now on, dont commit straight away. open PRs, make other agents review
+> them and so on"*
+
+No direct commits to `master`. Each item: branch off `master` → focused
+commits → push → open a PR → independent reviewers at the exact head → the
+merge gate. Recorded here because it was previously held only in an
+out-of-tree working file, where repository search could not find it.
+
+## [Owner] 2026-08-01 — Keep the two landed campaign branches
+
+> *"2 big branches are def not okay, they are already in. dont delete them
+> though, just keep for a good measure."*
+
+`feat/montana-phase-a` and `review/montana-cli-corrections-staging` are
+superseded trunks whose content is in `master`. They stay.
+
+## [Owner] 2026-08-01 — Agent approvals are internal records, not GitHub review states
+
+> *"agent approval is internal, no need to put it into github"*
+
+The authoritative approval records for the qualification-campaign merge are
+the out-of-tree approver transcripts and verdicts, retained in the archived
+campaign layer. The absence of GitHub `APPROVED` review states is by design
+(the PR author cannot approve their own PR, and there are no other human
+maintainers); do not treat that absence as an open item, and never submit an
+approval under the owner's identity representing a model's judgement as his.
+
+## [Owner] 2026-08-04 — Review rounds are not divergence
+
+> *"rounds dont matter. it matters to find real errors and correct them. it
+> matters not to repeat our own errors."*
+
+Do not apply a round cap or treat a high round count as failure. Measured on
+merged PRs: inline-finding counts in the high twenties converged and merged.
+
+## [Owner] 2026-08-06 — Bench and hardware evidence waits for a settled branch
+
+> *"We have to finish the software side. And then only when the main branch
+> stops moving due to the logic changes and other stuff. Only then I would go
+> to the lab and test everything myself… I already bench tested a lot of
+> stuff. But since the code is moving, I still need to recheck everything."*
+
+Hardware items (independent physical-OFF proof; the hardware half of the
+critical-input identity work) are not queueable pending work: asking him to go
+to the lab before the code settles is asking him to do it twice.
+
+## [Owner] 2026-08-08 — Pushes, PR openings, and gate-met merges are pre-authorized
+
+> *"i landed pr 17 and from now on i explicitly approve your pushes and merges
+> to remote. when all necessary gates are met"* · *"I approve openings of new
+> prs and pushes to remote and merges"*
+
+Within this repository, the coordinator pushes, opens PRs, and merges by CLI
+fast-forward once the gates are verified in the merging turn on the exact
+head: green CI **and** a positive Codex verdict bound to that same SHA, plus a
+clean fast-forward check. Anything outside this repository remains owner-only.
+
+## [Owner] 2026-08-09 — The agent working layer moves out of temp; obligations are registered in-tree
+
+The out-of-tree agent working layer (state, plans, evidence, campaign history)
+moved from the machine temp directory into a durable, agent-agnostic workspace
+beside the repository checkout, with one live state file and an integrity
+guard. Owner directions that are deferred behind trigger conditions are
+registered in `docs/OBLIGATIONS.md` — the register is the single home for such
+directions and repository search must be able to find them.
+
+**Why:** two owner directions recorded 2026-07-31 in a temp-directory file
+were invisible to repository search; one had its trigger fire and sat
+undischarged for nine days. Preservation, classification, and the migration
+were verified against byte-exact snapshots before anything was deleted.

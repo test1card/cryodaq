@@ -187,6 +187,7 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         | _direct_imports(
             "cryodaq.channels.persistence",
             "PersistedChannelEnvelopeError",
+            "PersistedChannelEnvelopeV1",
             "decode_persisted_channel_envelope",
         ),
         "core/safety_pattern_liveness.py": _direct_imports(
