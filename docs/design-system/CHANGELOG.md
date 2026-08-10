@@ -51,6 +51,10 @@ the design-system-specific definitions of "breaking" from
   semantic owners are co-versioned through additive exact routes and release
   evidence. Ordinary GUI consumers remain under the existing GUI review gate
   and do not trigger a design-system release for every code edit.
+- Corrected the `theme.py` PLOT semantic map: the nine color/palette/alpha symbols
+  whose exact values are canonical in both `colors.md` and `chart-tokens.md`
+  now require both specifications, while chart-only geometry and width symbols
+  continue to require only `chart-tokens.md`.
 - Removed caller-supplied trusted-base inputs from both docs and main CI.
   Pull requests use their base, pushes use event authority, and manual runs use
   the merge base with `origin/<default-branch>`; every result is canonicalized

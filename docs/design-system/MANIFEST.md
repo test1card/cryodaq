@@ -194,7 +194,16 @@ The JSON block below is canonical data, not illustrative prose. Tests parse it d
               "SUCCESS_*",
               "WARNING_*",
               "DANGER_*",
-              "QDARKTHEME_ACCENT"
+              "QDARKTHEME_ACCENT",
+              "PLOT_BG",
+              "PLOT_FG",
+              "PLOT_GRID_COLOR",
+              "PLOT_GRID_ALPHA",
+              "PLOT_LABEL_COLOR",
+              "PLOT_TICK_COLOR",
+              "PLOT_REGION_WARN_ALPHA",
+              "PLOT_REGION_FAULT_ALPHA",
+              "PLOT_LINE_PALETTE"
             ],
             "required_spec_paths": [
               "docs/design-system/tokens/colors.md"

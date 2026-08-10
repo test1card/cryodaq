@@ -1377,6 +1377,22 @@ _F366_BOOTSTRAP_ROUTES = (
 )
 _F366_THEME_SEMANTIC_SOURCE = "src/cryodaq/gui/theme.py"
 _F366_THEME_AGGREGATE_SPEC = "docs/design-system/tokens/runtime-authority.md"
+_F366_THEME_COLOR_PLOT_SYMBOLS = (
+    "PLOT_BG",
+    "PLOT_FG",
+    "PLOT_GRID_COLOR",
+    "PLOT_GRID_ALPHA",
+    "PLOT_LABEL_COLOR",
+    "PLOT_TICK_COLOR",
+    "PLOT_REGION_WARN_ALPHA",
+    "PLOT_REGION_FAULT_ALPHA",
+    "PLOT_LINE_PALETTE",
+)
+_F366_THEME_CHART_ONLY_PLOT_SYMBOLS = (
+    "PLOT_AXIS_WIDTH_PX",
+    "PLOT_LINE_WIDTH",
+    "PLOT_LINE_WIDTH_HIGHLIGHTED",
+)
 _F366_THEME_CATEGORY_SPECS = frozenset(
     {
         "docs/design-system/tokens/colors.md",
@@ -1416,6 +1432,7 @@ _F366_THEME_ASSIGNMENT_ROUTES = (
             "WARNING_*",
             "DANGER_*",
             "QDARKTHEME_ACCENT",
+            *_F366_THEME_COLOR_PLOT_SYMBOLS,
         ),
         ("docs/design-system/tokens/colors.md",),
     ),
@@ -2553,6 +2570,14 @@ def _replace_public_assignment(source: str, name: str, expression: str) -> str:
     return replaced
 
 
+def _documented_color_plot_symbols() -> frozenset[str]:
+    colors = _read(REPO_ROOT / "docs/design-system/tokens/colors.md")
+    plot_section = colors.split("## Plot palette (pyqtgraph-specific)", 1)[1].split("## Destructive action palette", 1)[
+        0
+    ]
+    return frozenset(re.findall(r"^\| `(PLOT_[A-Z0-9_]+)` \|", plot_section, re.MULTILINE))
+
+
 @pytest.mark.parametrize(
     ("name", "expression", "category_spec"),
     (
@@ -2574,6 +2599,57 @@ def test_theme_semantic_routes_select_only_known_assignment_category(
         base_source=base_source,
         candidate_source=candidate_source,
     ) == frozenset({_F366_THEME_AGGREGATE_SPEC, category_spec})
+
+
+def test_theme_semantic_routes_overlap_every_color_documented_plot_symbol() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    documented = _documented_color_plot_symbols()
+    assert documented == frozenset(_F366_THEME_COLOR_PLOT_SYMBOLS)
+    assignments = _python_semantic_state(base_source, label="real theme.py").public_symbol_operations
+    assert documented <= set(assignments)
+    expected = frozenset(
+        {
+            _F366_THEME_AGGREGATE_SPEC,
+            "docs/design-system/tokens/colors.md",
+            "docs/design-system/tokens/chart-tokens.md",
+        }
+    )
+    for name in sorted(documented):
+        candidate_source = f"{base_source}\n{name} += None\n"
+        assert (
+            _python_semantic_required_specs(
+                contract,
+                source_path=_F366_THEME_SEMANTIC_SOURCE,
+                base_source=base_source,
+                candidate_source=candidate_source,
+            )
+            == expected
+        ), name
+
+
+def test_theme_semantic_routes_keep_chart_only_plot_symbols_out_of_colors() -> None:
+    contract, base_source = _real_theme_semantic_fixture()
+    assignments = _python_semantic_state(base_source, label="real theme.py").public_symbol_operations
+    current_plot_symbols = frozenset(name for name in assignments if name.startswith("PLOT_"))
+    chart_only = current_plot_symbols - _documented_color_plot_symbols()
+    assert chart_only == frozenset(_F366_THEME_CHART_ONLY_PLOT_SYMBOLS)
+    expected = frozenset(
+        {
+            _F366_THEME_AGGREGATE_SPEC,
+            "docs/design-system/tokens/chart-tokens.md",
+        }
+    )
+    for name in sorted(chart_only):
+        candidate_source = f"{base_source}\n{name} += None\n"
+        assert (
+            _python_semantic_required_specs(
+                contract,
+                source_path=_F366_THEME_SEMANTIC_SOURCE,
+                base_source=base_source,
+                candidate_source=candidate_source,
+            )
+            == expected
+        ), name
 
 
 def test_theme_semantic_routes_classify_public_augassign_by_category() -> None:
@@ -2670,6 +2746,50 @@ def test_theme_semantic_production_path_rejects_aggregate_only_false_green() -> 
     ]
 
 
+def _plot_grid_alpha_production_fixture() -> tuple[_CoVersioningContract, dict[str, set[str]]]:
+    contract, base_source = _real_theme_semantic_fixture()
+    candidate_source = _replace_public_assignment(base_source, "PLOT_GRID_ALPHA", "0.99")
+    required = _coversion_required_specs(
+        contract,
+        changed_paths={_F366_THEME_SEMANTIC_SOURCE},
+        base_source_text=lambda source_path: base_source if source_path == _F366_THEME_SEMANTIC_SOURCE else None,
+        candidate_source_text=lambda source_path: (
+            candidate_source if source_path == _F366_THEME_SEMANTIC_SOURCE else None
+        ),
+    )
+    return contract, required
+
+
+def test_plot_grid_alpha_production_path_rejects_missing_colors_spec() -> None:
+    contract, required = _plot_grid_alpha_production_fixture()
+    assert set(required) == {
+        _F366_THEME_AGGREGATE_SPEC,
+        "docs/design-system/tokens/colors.md",
+        "docs/design-system/tokens/chart-tokens.md",
+    }
+    supplied = {
+        _F366_THEME_SEMANTIC_SOURCE,
+        _F366_THEME_AGGREGATE_SPEC,
+        "docs/design-system/tokens/chart-tokens.md",
+        *contract.required_release_paths,
+    }
+    assert not _missing_release_evidence_violations(contract, changed_paths=supplied)
+    assert _missing_coversion_spec_violations(required, changed_paths=supplied) == [
+        "src/cryodaq/gui/theme.py changed without exact specification: docs/design-system/tokens/colors.md"
+    ]
+
+
+def test_plot_grid_alpha_production_path_accepts_both_category_specs() -> None:
+    contract, required = _plot_grid_alpha_production_fixture()
+    supplied = {
+        _F366_THEME_SEMANTIC_SOURCE,
+        *required,
+        *contract.required_release_paths,
+    }
+    assert not _missing_release_evidence_violations(contract, changed_paths=supplied)
+    assert not _missing_coversion_spec_violations(required, changed_paths=supplied)
+
+
 def test_theme_augassign_production_path_rejects_aggregate_only_false_green() -> None:
     contract, base_source = _real_theme_semantic_fixture()
     candidate_source = base_source + "\nFONT_SIZE_XS += 1\n"
@@ -2713,6 +2833,28 @@ def test_theme_semantic_manifest_rejects_candidate_edge_narrowing() -> None:
     font_route = next(route for route in semantic["assignment_routes"] if route["name_patterns"] == ["FONT_*"])
     semantic["assignment_routes"].remove(font_route)
     narrowed = _normalize_coversion_contract(raw, label="narrowed semantic manifest")
+    with pytest.raises(AssertionError, match="narrows trusted python_semantic_assignment_edges"):
+        _validate_coversion_transition(
+            _F366_BOOTSTRAP_CONTRACT,
+            narrowed,
+            current_version="4.2.0",
+            base_tracked=set(_tracked_files()),
+            candidate_tracked=set(_tracked_files()),
+            diff=_DesignSystemDiff(frozenset(), frozenset(), frozenset()),
+        )
+
+
+def test_theme_semantic_manifest_rejects_color_plot_overlap_narrowing() -> None:
+    raw = json.loads(json.dumps(_design_system_machine_gates()["co_versioning"]))
+    semantic = raw["python_semantic_routes"][0]
+    color_route = next(
+        route
+        for route in semantic["assignment_routes"]
+        if route["required_spec_paths"] == ["docs/design-system/tokens/colors.md"]
+    )
+    assert set(_F366_THEME_COLOR_PLOT_SYMBOLS) <= set(color_route["name_patterns"])
+    color_route["name_patterns"].remove("PLOT_GRID_ALPHA")
+    narrowed = _normalize_coversion_contract(raw, label="narrowed PLOT color overlap")
     with pytest.raises(AssertionError, match="narrows trusted python_semantic_assignment_edges"):
         _validate_coversion_transition(
             _F366_BOOTSTRAP_CONTRACT,
