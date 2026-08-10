@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from cryodaq.drivers.base import Reading
+from cryodaq.health.contract import HealthDeviceDescriptor, HealthTelemetrySnapshot
 
 
 @runtime_checkable
@@ -30,6 +31,20 @@ class PassiveSensor(Protocol):
     async def disconnect(self) -> None: ...
 
     async def read_channels(self) -> list[Reading]: ...
+
+
+@runtime_checkable
+class HealthTelemetryDevice(Protocol):
+    """A snapshot-only passive infrastructure-health device.
+
+    Structural conformance grants no authority; construction still requires an
+    exact entry in the static driver registry.
+    """
+
+    @property
+    def health_descriptor(self) -> HealthDeviceDescriptor: ...
+
+    def read_health_snapshot(self, *, observed_time_s: float) -> HealthTelemetrySnapshot: ...
 
 
 @runtime_checkable

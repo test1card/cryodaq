@@ -39,7 +39,7 @@ from cryodaq.drivers.registry import (
     DriverAuthority,
     DriverRegistryError,
     ValueKind,
-    get_driver_spec,
+    get_instrument_driver_spec,
     validate_instrument_entries,
 )
 from cryodaq.gui import first_run_config as cfg
@@ -245,7 +245,7 @@ class _InstrumentsPage(QWizardPage):
         for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
                 raise DriverRegistryError(f"instruments[{index}] must be a mapping")
-            spec = get_driver_spec(entry.get("type"))
+            spec = get_instrument_driver_spec(entry.get("type"))
             name = entry.get("name")
             if not isinstance(name, str) or not name:
                 raise DriverRegistryError(f"instruments[{index}].name must be a non-empty string")

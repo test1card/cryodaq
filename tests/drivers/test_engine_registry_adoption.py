@@ -213,6 +213,50 @@ def test_all_entries_validate_before_any_factory_runs(
     assert calls == []
 
 
+def test_health_node_under_instruments_is_rejected_before_any_factory_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_config(
+        tmp_path,
+        {
+            "instruments": [
+                {
+                    "type": "deterministic_health_node",
+                    "name": "compressor.primary",
+                    "component_type": "compressor",
+                }
+            ]
+        },
+    )
+    calls: list[object] = []
+    monkeypatch.setattr(engine_module, "construct_driver", lambda *args: calls.append(args))
+
+    with pytest.raises(DriverRegistryError, match=r"instruments\[0\].*not an instrument driver"):
+        _load_drivers(path, mock=True, data_dir=tmp_path)
+
+    assert calls == []
+
+
+def test_health_nodes_root_is_visibly_rejected_until_production_wiring_exists(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path,
+        {
+            "instruments": [],
+            "health_nodes": [
+                {
+                    "type": "deterministic_health_node",
+                    "name": "compressor.primary",
+                    "component_type": "compressor",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(DriverRegistryError, match="health_nodes.*not supported by the production engine"):
+        _load_drivers(path, mock=True, data_dir=tmp_path)
+
+
 def test_multiple_reviewed_sources_fail_before_any_factory_runs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
