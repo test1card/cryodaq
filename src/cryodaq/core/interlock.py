@@ -262,7 +262,10 @@ class InterlockEngine:
             actions={"emergency_off": keithley.emergency_off,
                      "stop_source": keithley.stop_source},
         )
-        engine.load_config(Path("config/interlocks.yaml"))
+        engine.load_config(
+            Path("config/interlocks.yaml"),
+            poll_intervals_s_by_instrument={"LS218_1": 2.0, "LS218_2": 2.0},
+        )
         await engine.start()
         # ...
         await engine.stop()
