@@ -13,8 +13,8 @@ than the production path: once the guard measured the writer only, and once
 five migrated GUI selectors could each be reverted with every guard still
 passing. Both were found in review, after the work was called done.
 
-FOURTEEN WAYS THIS TOOL COULD HAVE LIED, each closed here after review found it --
-and every one of them was found by review rather than by the author, which is
+FAILURE CLASSES THIS TOOL COULD HAVE LIED THROUGH, each enforced here after
+review found it -- and each found by review rather than by the author, which is
 the same asymmetry the tool exists to exploit:
 
 * **A dirty control.** If the suite already fails, every reverted artifact
@@ -61,13 +61,22 @@ the same asymmetry the tool exists to exploit:
   could describe a FOREIGN repository while the writes still landed here.
   Queries are bound to this checkout with that environment stripped.
 * **A custom filter erased runtime artifacts.** `--include src/` replaced rather
-  than extended the default roster, silently dropping `tsp/` and `plugins/`;
-  `--suffix .py` could similarly drop the watchdog's `.lua`. Both are additive.
-* **A hanging mutant stranded the worktree.** Every pytest child now has a
-  120-second timeout, and restore intent is persisted before the rewrite so the
-  next invocation can recover after its parent is killed.
-* **A killed restore could truncate the candidate.** Candidate bytes are
-  restored through an atomic same-volume replacement.
+  than extended the default roster, silently dropping runtime roots. Default
+  roots now derive from both Git trees by excluding only the severity floor's
+  explicit non-production categories; custom includes and suffixes are additive.
+* **One artifact concealed independent edits.** Whole-file reversion cannot
+  attribute separate behaviours within a file, so every content change refuses
+  certification; only identity-only changes can be measured honestly.
+* **Transaction state changed the measured checkout.** Recovery intent and all
+  staging objects live outside the checkout on the same filesystem volume.
+* **A hanging mutant stranded descendants.** Timed pytest runs execute inside a
+  Windows Job or Linux subreaper boundary, and restoration begins only after the
+  entire process tree is verified settled.
+* **A killed write could truncate the candidate.** Both mutant and restore
+  identities are fully materialized in external same-volume staging, then
+  exposed through one atomic replacement.
+* **A mutation created persistent structure.** A rename whose former parent no
+  longer exists is refused instead of creating a directory recovery did not own.
 * **One flaky red counted as coverage.** A mutant failure must repeat exactly,
   then the same node must disappear on the restored candidate in this invocation.
 
@@ -88,6 +97,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -97,6 +107,12 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from tools.ci_active_checkout_runner import (
+    CandidateProcessSettlementError,
+    CandidateProcessUnsettledError,
+    _run_candidate_process,
+)
 
 # Production artifacts are not only Python, and not only this repository's own
 # process. The severity floor counts tracked runtime configuration -- interlock
@@ -124,6 +140,7 @@ _DEFAULT_SUFFIXES = (".py", ".pyw", ".yaml", ".yml", ".json", ".toml", ".lua")
 _NON_RUNTIME_TOP_LEVELS = frozenset({".github", "build_scripts", "docs", "governance", "scripts", "tests", "tools"})
 _PYTEST_TIMEOUT_SECONDS = 120
 _RECOVERY_NAME = ".audit-unguarded-production-recovery.json"
+_STATE_DIRECTORY_NAME = "cryodaq-unguarded-production-files"
 
 
 @dataclass(frozen=True)
@@ -214,14 +231,33 @@ def restore_path(path: Path, identity: PathIdentity) -> None:
             lchmod(path, identity.mode)
 
 
+def _state_directory(root: Path) -> Path:
+    """Return stable, same-volume transaction state outside the measured checkout."""
+
+    canonical_root = root.resolve(strict=True)
+    temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    if temporary_root == canonical_root or temporary_root.is_relative_to(canonical_root):
+        raise MeasurementError("temporary state root is inside the measured checkout")
+    if os.stat(temporary_root).st_dev != os.stat(canonical_root).st_dev:
+        raise MeasurementError("temporary state root is not on the measured checkout volume")
+    identity = hashlib.sha256(os.fsencode(os.path.normcase(str(canonical_root)))).hexdigest()
+    state = temporary_root / _STATE_DIRECTORY_NAME / identity
+    state.mkdir(parents=True, exist_ok=True)
+    state = state.resolve(strict=True)
+    if state.is_relative_to(canonical_root):
+        raise MeasurementError("transaction state resolved inside the measured checkout")
+    if os.stat(state).st_dev != os.stat(canonical_root).st_dev:
+        raise MeasurementError("transaction state resolved onto another volume")
+    return state
+
+
 def restore_path_atomically(root: Path, path: Path, identity: PathIdentity) -> None:
     """Restore through a same-volume replacement so a killed writer cannot truncate the target."""
 
     if identity.kind == "absent":
         path.unlink(missing_ok=True)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-restore-", dir=root)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-restore-", dir=_state_directory(root))
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
@@ -358,6 +394,10 @@ class MeasurementError(RuntimeError):
     """A suite run whose result cannot be read as evidence either way."""
 
 
+class UnsettledProcessTree(MeasurementError):
+    """A candidate process tree could not be proven terminated."""
+
+
 class SuiteInputDrift(MeasurementError):
     """The candidate or a possible suite input changed between observations."""
 
@@ -387,7 +427,7 @@ def capture_suite_inputs(root: Path) -> SuiteInputs:
 
 
 def assert_suite_inputs_unchanged(expected: SuiteInputs, root: Path, *, excluded: tuple[str, ...] = ()) -> None:
-    omitted = {*excluded, _RECOVERY_NAME, f"{_RECOVERY_NAME}.tmp"}
+    omitted = set(excluded)
     first = _suite_inputs_once(root, omitted)
     second = _suite_inputs_once(root, omitted)
     if first != second:
@@ -444,7 +484,7 @@ def path_matches_git_entry(path: Path, entry: GitEntry | None) -> bool:
     return executable == (entry.mode == "100755")
 
 
-def materialize_git_entry(path: Path, entry: GitEntry) -> None:
+def _materialize_git_entry(path: Path, entry: GitEntry) -> None:
     """Put one tree entry on disk, or refuse if this host cannot represent it."""
 
     path.unlink(missing_ok=True)
@@ -461,6 +501,21 @@ def materialize_git_entry(path: Path, entry: GitEntry) -> None:
         else:
             desired = current & ~0o111
         os.chmod(path, desired)
+    if not path_matches_git_entry(path, entry):
+        raise MeasurementError(f"{path} Git mode {entry.mode} cannot be represented on this host")
+
+
+def materialize_git_entry(root: Path, path: Path, entry: GitEntry) -> None:
+    """Atomically replace one candidate path from external same-volume staging."""
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-mutant-", dir=_state_directory(root))
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        _materialize_git_entry(temporary, entry)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     if not path_matches_git_entry(path, entry):
         raise MeasurementError(f"{path} Git mode {entry.mode} cannot be represented on this host")
 
@@ -509,7 +564,20 @@ def _entry_from_json(payload: object) -> GitEntry | None:
 
 
 def _recovery_path(root: Path) -> Path:
-    return root / _RECOVERY_NAME
+    return _state_directory(root) / _RECOVERY_NAME
+
+
+def _write_recovery_payload(journal: Path, payload: dict[str, object]) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f"{_RECOVERY_NAME}.", suffix=".tmp", dir=journal.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, journal)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def arm_recovery(root: Path, records: tuple[tuple[str, PathIdentity, GitEntry | None], ...]) -> None:
@@ -518,19 +586,28 @@ def arm_recovery(root: Path, records: tuple[tuple[str, PathIdentity, GitEntry | 
     journal = _recovery_path(root)
     if journal.exists():
         raise MeasurementError(f"pending recovery journal already exists at {journal}")
-    payload = {
+    payload: dict[str, object] = {
         "version": 1,
         "paths": [
             {"path": path, "original": _identity_json(original), "mutant": _entry_json(mutant)}
             for path, original, mutant in records
         ],
     }
-    temporary = journal.with_suffix(journal.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-        json.dump(payload, stream, sort_keys=True)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, journal)
+    _write_recovery_payload(journal, payload)
+
+
+def block_recovery(root: Path, reason: str) -> None:
+    """Persist that automatic restore is unsafe after an unverified process settlement."""
+
+    journal = _recovery_path(root)
+    try:
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("paths"), list):
+            raise ValueError("invalid recovery journal schema")
+    except (OSError, TypeError, ValueError) as exc:
+        raise MeasurementError(f"recovery journal could not be blocked safely: {exc}") from exc
+    payload["restore_blocked"] = reason.splitlines()[0]
+    _write_recovery_payload(journal, payload)
 
 
 def clear_recovery(root: Path) -> None:
@@ -547,6 +624,11 @@ def recover_pending(root: Path) -> bool:
         payload = json.loads(journal.read_text(encoding="utf-8"))
         if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("paths"), list):
             raise ValueError("invalid recovery journal schema")
+        restore_blocked = payload.get("restore_blocked")
+        if restore_blocked is not None:
+            if not isinstance(restore_blocked, str) or not restore_blocked:
+                raise ValueError("invalid blocked-recovery reason")
+            raise MeasurementError(f"automatic recovery is blocked after an unverified process tree: {restore_blocked}")
         records: list[tuple[Path, PathIdentity, GitEntry | None]] = []
         for record in payload["paths"]:
             if not isinstance(record, dict) or set(record) != {"path", "original", "mutant"}:
@@ -584,14 +666,22 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     found: list[str] = []
     for suite in suites:
         try:
-            run = _run(
-                [sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"],
-                env=env,
+            run = _run_candidate_process(
+                (sys.executable, "-m", "pytest", suite, "-q", "--no-header", "-rf", "-p", "no:cacheprovider"),
+                root=repository_root(),
+                environment=env,
+                capture_output=True,
                 timeout=_PYTEST_TIMEOUT_SECONDS,
             )
+        except CandidateProcessUnsettledError as exc:
+            raise UnsettledProcessTree(f"pytest process tree over {suite!r} did not settle: {exc}") from exc
+        except CandidateProcessSettlementError as exc:
+            raise MeasurementError(f"pytest process boundary over {suite!r} failed safely: {exc}") from exc
         except subprocess.TimeoutExpired as exc:
             raise MeasurementError(f"pytest over {suite!r} exceeded {_PYTEST_TIMEOUT_SECONDS} seconds") from exc
-        parsed = [line.split("::")[-1].strip() for line in run.stdout.splitlines() if line.startswith("FAILED")]
+        stdout = str(run.stdout or "")
+        stderr = str(run.stderr or "")
+        parsed = [line.split("::")[-1].strip() for line in stdout.splitlines() if line.startswith("FAILED")]
         # A CRASHED suite prints no `FAILED` lines, so parsing stdout alone
         # reads a native fault, an internal error, a usage error or an empty
         # collection as "nothing failed" -- and in the CONTROL run that is a
@@ -601,7 +691,7 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
         # measurement did not happen. An exit of 1 with no parsable FAILED
         # line is the same situation wearing the expected exit code.
         if run.returncode not in (0, 1) or (run.returncode == 1 and not parsed):
-            tail = "\n".join((run.stdout + run.stderr).splitlines()[-15:])
+            tail = "\n".join((stdout + stderr).splitlines()[-15:])
             raise MeasurementError(f"pytest over {suite!r} exited {run.returncode} with no readable result:\n{tail}")
         found += parsed
     return found
@@ -719,6 +809,7 @@ def main() -> int:
             old_mutant: PathIdentity | None = None
             new_mutant: PathIdentity | None = None
             drift_error: SuiteInputDrift | None = None
+            unsettled_error: UnsettledProcessTree | None = None
             try:
                 if (
                     before is None
@@ -728,6 +819,12 @@ def main() -> int:
                 ):
                     unmeasured.append(target.label)
                     print(f"| `{target.label}` | **NOT MEASURED** — rename pair has an unreadable identity |")
+                    continue
+                if not old.parent.is_dir() or not old.parent.resolve().is_relative_to(root.resolve()):
+                    unmeasured.append(target.label)
+                    print(
+                        f"| `{target.label}` | **NOT MEASURED** - rename source parent is absent or outside checkout |"
+                    )
                     continue
                 if path_identity(old) != old_original or path_identity(new) != new_original:
                     clobbered.append(target.label)
@@ -741,14 +838,16 @@ def main() -> int:
                     ),
                 )
                 armed = True
-                old.parent.mkdir(parents=True, exist_ok=True)
-                materialize_git_entry(old, before)
+                materialize_git_entry(root, old, before)
                 old_mutant = path_identity(old)
                 new.unlink()
                 new_mutant = path_identity(new)
                 try:
                     introduced = sorted(set(repeated_mutant_failures(suites)) - set(control))
                     assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
+                except UnsettledProcessTree as unsettled:
+                    unsettled_error = unsettled
+                    introduced = []
                 except SuiteInputDrift as drift:
                     drift_error = drift
                     introduced = []
@@ -757,20 +856,27 @@ def main() -> int:
                     print(f"| `{target.label}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
                     continue
             finally:
-                old_unchanged = old_mutant is not None and path_identity(old) == old_mutant
-                new_unchanged = new_mutant is not None and path_identity(new) == new_mutant
-                concurrent = old_mutant is not None and not (old_unchanged and new_unchanged)
-                if old_unchanged:
-                    restore_path_atomically(root, old, old_original)
-                if new_unchanged:
-                    restore_path_atomically(root, new, new_original)
-                if concurrent:
-                    clobbered.append(target.label)
-                    print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed during the run |")
-                if armed and (
-                    concurrent or (path_identity(old) == old_original and path_identity(new) == new_original)
-                ):
-                    clear_recovery(root)
+                if unsettled_error is not None:
+                    if armed:
+                        block_recovery(root, str(unsettled_error))
+                else:
+                    old_unchanged = old_mutant is not None and path_identity(old) == old_mutant
+                    new_unchanged = new_mutant is not None and path_identity(new) == new_mutant
+                    concurrent = old_mutant is not None and not (old_unchanged and new_unchanged)
+                    if old_unchanged:
+                        restore_path_atomically(root, old, old_original)
+                    if new_unchanged:
+                        restore_path_atomically(root, new, new_original)
+                    if concurrent:
+                        clobbered.append(target.label)
+                        print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed during the run |")
+                    if armed and (
+                        concurrent or (path_identity(old) == old_original and path_identity(new) == new_original)
+                    ):
+                        clear_recovery(root)
+            if unsettled_error is not None:
+                print(f"REFUSING: {unsettled_error}; the mutant and blocked recovery journal were left intact")
+                return 2
             if drift_error is not None:
                 print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
                 return 2
@@ -798,6 +904,7 @@ def main() -> int:
         armed = False
         mutant: PathIdentity | None = None
         drift_error: SuiteInputDrift | None = None
+        unsettled_error: UnsettledProcessTree | None = None
         try:
             if before is None:
                 if candidate is None or original.kind == "absent":
@@ -834,11 +941,14 @@ def main() -> int:
                     continue
                 arm_recovery(root, ((path, original, before),))
                 armed = True
-                materialize_git_entry(source, before)
+                materialize_git_entry(root, source, before)
                 mutant = path_identity(source)
             try:
                 introduced = sorted(set(repeated_mutant_failures(suites)) - set(control))
                 assert_suite_inputs_unchanged(suite_inputs, root, excluded=target.paths)
+            except UnsettledProcessTree as unsettled:
+                unsettled_error = unsettled
+                introduced = []
             except SuiteInputDrift as drift:
                 drift_error = drift
                 introduced = []
@@ -847,19 +957,26 @@ def main() -> int:
                 print(f"| `{path}` | **NOT MEASURED** — {str(unreadable).splitlines()[0]} |")
                 continue
         finally:
-            # WINDOW TWO. Another worker may have written while pytest ran. If
-            # what is on disk is no longer the mutant we placed there, those are
-            # someone else's bytes: leave them, and say so. An unconditional
-            # restore here would erase work this tool never owned.
-            concurrent = mutant is not None and path_identity(source) != mutant
-            if concurrent:
-                clobbered.append(path)
-                print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
+            if unsettled_error is not None:
+                if armed:
+                    block_recovery(root, str(unsettled_error))
             else:
-                restore_path_atomically(root, source, original)
-                assert path_identity(source) == original, f"{path} was NOT restored with its complete identity"
-            if armed and (concurrent or path_identity(source) == original):
-                clear_recovery(root)
+                # WINDOW TWO. Another worker may have written while pytest ran. If
+                # what is on disk is no longer the mutant we placed there, those are
+                # someone else's bytes: leave them, and say so. An unconditional
+                # restore here would erase work this tool never owned.
+                concurrent = mutant is not None and path_identity(source) != mutant
+                if concurrent:
+                    clobbered.append(path)
+                    print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
+                else:
+                    restore_path_atomically(root, source, original)
+                    assert path_identity(source) == original, f"{path} was NOT restored with its complete identity"
+                if armed and (concurrent or path_identity(source) == original):
+                    clear_recovery(root)
+        if unsettled_error is not None:
+            print(f"REFUSING: {unsettled_error}; the mutant and blocked recovery journal were left intact")
+            return 2
         if drift_error is not None:
             print(f"REFUSING: suite inputs drifted before mutation attribution: {drift_error}")
             return 2

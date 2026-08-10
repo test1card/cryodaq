@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from tools import unguarded_production_files as subject
@@ -121,7 +124,7 @@ def test_main_reverts_a_rename_as_one_source_destination_mutation(tmp_path: Path
     assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
 
 
-def test_main_restores_rename_when_old_parent_is_absent(tmp_path: Path, monkeypatch) -> None:
+def test_main_refuses_rename_when_old_parent_is_absent(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     old = repository / "src" / "oldpkg" / "mod.py"
     new = repository / "src" / "mod.py"
@@ -133,14 +136,23 @@ def test_main_restores_rename_when_old_parent_is_absent(tmp_path: Path, monkeypa
     _git(repository, "mv", "src/oldpkg/mod.py", "src/mod.py")
     old.parent.rmdir()
     _git(repository, "commit", "-qm", "rename out of removed directory")
+    runs = 0
+
+    def green(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        return []
 
     monkeypatch.chdir(repository)
-    monkeypatch.setattr(subject, "failures", lambda _suites, _cache: [])
+    monkeypatch.setattr(subject, "failures", green)
     monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
 
     assert subject.main() == 1
+    assert runs == 1
+    assert not old.parent.exists()
     assert not old.exists()
     assert new.read_bytes() == b"VALUE = 'guarded'\n"
+    assert "rename source parent is absent" in capsys.readouterr().out
 
 
 def test_main_never_skips_a_mode_only_production_change_as_identical(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -457,6 +469,35 @@ def test_failures_times_out_a_hanging_pytest_process(tmp_path: Path, monkeypatch
         subject.failures([str(hanging)], tmp_path / "cache")
 
 
+def test_failures_settles_the_entire_pytest_process_tree_on_timeout(tmp_path: Path, monkeypatch) -> None:
+    pid_path = tmp_path / "pytest-grandchild.pid"
+    hanging = tmp_path / "test_process_tree.py"
+    hanging.write_text(
+        "import pathlib, subprocess, sys, time\n\n"
+        "def test_hangs_after_spawning_a_child():\n"
+        "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"    pathlib.Path({str(pid_path)!r}).write_text(str(child.pid), encoding='ascii')\n"
+        "    time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(subject, "_PYTEST_TIMEOUT_SECONDS", 10.0)
+
+    with pytest.raises(subject.MeasurementError, match="exceeded 10.0 seconds"):
+        subject.failures([str(hanging)], tmp_path / "cache")
+
+    assert pid_path.exists(), "the real pytest test did not reach its child-process boundary"
+    grandchild_pid = int(pid_path.read_text(encoding="ascii"))
+    deadline = time.monotonic() + 1.0
+    while psutil.pid_exists(grandchild_pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    survived = psutil.pid_exists(grandchild_pid)
+    if survived:
+        process = psutil.Process(grandchild_pid)
+        process.kill()
+        process.wait(timeout=5)
+    assert not survived, "pytest grandchild survived the measurement timeout"
+
+
 def test_next_main_invocation_recovers_an_interrupted_mutation(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
@@ -472,13 +513,19 @@ def test_next_main_invocation_recovers_an_interrupted_mutation(tmp_path: Path, m
     original = subject.path_identity(source)
     mutant = subject.git_entry(base, "src/production.py")
     subject.arm_recovery(repository, (("src/production.py", original, mutant),))
+    journal = subject._recovery_path(repository)
+    assert journal.exists()
+    assert not journal.resolve().is_relative_to(repository.resolve())
+    assert os.stat(journal).st_dev == os.stat(repository).st_dev
+    assert not (repository / subject._RECOVERY_NAME).exists()
     assert mutant is not None
-    subject.materialize_git_entry(source, mutant)
+    subject.materialize_git_entry(repository, source, mutant)
 
     monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", "HEAD"])
 
     assert subject.main() == 0
     assert source.read_text(encoding="utf-8") == "VALUE = 'candidate'\n"
+    assert not journal.exists()
     assert not (repository / subject._RECOVERY_NAME).exists()
     assert "recovered the candidate from an interrupted mutation" in capsys.readouterr().out
 
@@ -497,5 +544,144 @@ def test_recovery_never_overwrites_bytes_written_after_the_mutant(tmp_path: Path
     with pytest.raises(subject.MeasurementError, match="neither the recorded candidate nor mutant"):
         subject.recover_pending(repository)
 
+    journal = subject._recovery_path(repository)
     assert source.read_text(encoding="utf-8") == "VALUE = 'another writer'\n"
-    assert (repository / subject._RECOVERY_NAME).exists()
+    assert journal.exists()
+    assert not journal.resolve().is_relative_to(repository.resolve())
+    assert not (repository / subject._RECOVERY_NAME).exists()
+    subject.clear_recovery(repository)
+
+
+def test_recovery_journal_is_not_visible_to_the_measured_suite(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    old = repository / "src" / "before.py"
+    new = repository / "src" / "after.py"
+    old.parent.mkdir()
+    old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
+    _git(repository, "add", "src/before.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "mv", "src/before.py", "src/after.py")
+    _git(repository, "commit", "-qm", "candidate rename")
+    runs = 0
+
+    def detect_checkout_journal(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        return ["test_checkout_has_no_measurement_state"] if (repository / subject._RECOVERY_NAME).exists() else []
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", detect_checkout_journal)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 1
+    assert runs == 3
+    assert not old.exists()
+    assert new.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
+    assert not (repository / subject._RECOVERY_NAME).exists()
+    assert not subject._recovery_path(repository).exists()
+
+
+def test_mutant_materialization_is_crash_atomic_and_external(tmp_path: Path, monkeypatch) -> None:
+    repository = tmp_path / "candidate"
+    target = repository / "src" / "production.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"CANDIDATE-CONTENT\n")
+    entry = subject.GitEntry("100644", "blob", "0" * 40, b"BASE-CONTENT\n")
+    staging_paths: list[Path] = []
+
+    def interrupt_staging(staging: Path, staged_entry: subject.GitEntry) -> None:
+        staging_paths.append(staging)
+        assert not staging.resolve().is_relative_to(repository.resolve())
+        assert os.stat(staging.parent).st_dev == os.stat(repository).st_dev
+        staging.write_bytes(staged_entry.content[:5])
+        raise RuntimeError("simulated interruption during mutant staging")
+
+    monkeypatch.setattr(subject, "_materialize_git_entry", interrupt_staging)
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        subject.materialize_git_entry(repository, target, entry)
+
+    assert target.read_bytes() == b"CANDIDATE-CONTENT\n"
+    assert len(staging_paths) == 1
+    assert not staging_paths[0].exists()
+
+
+def test_atomic_restore_replaces_only_from_complete_external_staging(tmp_path: Path, monkeypatch) -> None:
+    repository = tmp_path / "candidate"
+    target = repository / "src" / "production.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"MUTANT\n")
+    original = subject.PathIdentity("file", b"CANDIDATE\n", 0o644)
+    real_replace = subject.os.replace
+    staging_paths: list[Path] = []
+
+    def inspect_replace(staging: Path, destination: Path) -> None:
+        staging = Path(staging)
+        staging_paths.append(staging)
+        assert destination == target
+        assert staging.read_bytes() == b"CANDIDATE\n"
+        assert not staging.resolve().is_relative_to(repository.resolve())
+        assert os.stat(staging).st_dev == os.stat(repository).st_dev
+        real_replace(staging, destination)
+
+    monkeypatch.setattr(subject.os, "replace", inspect_replace)
+
+    subject.restore_path_atomically(repository, target, original)
+
+    assert target.read_bytes() == b"CANDIDATE\n"
+    assert len(staging_paths) == 1
+    assert not staging_paths[0].exists()
+
+
+def test_unverified_process_tree_blocks_restore_and_automatic_recovery(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    _git(repository, "config", "core.autocrlf", "false")
+    old = repository / "src" / "before.py"
+    new = repository / "src" / "after.py"
+    old.parent.mkdir()
+    old.write_text("VALUE = 'guarded'\n", encoding="utf-8")
+    _git(repository, "add", "src/before.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "mv", "src/before.py", "src/after.py")
+    _git(repository, "commit", "-qm", "candidate rename")
+    process_runs = 0
+
+    def lose_settlement(command, **_kwargs):
+        nonlocal process_runs
+        process_runs += 1
+        if process_runs == 1:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise subject.CandidateProcessUnsettledError("simulated unverified descendant")
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "_run_candidate_process", lose_settlement)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+    journal = subject._recovery_path(repository)
+
+    try:
+        assert subject.main() == 2
+        first_output = capsys.readouterr().out
+        assert process_runs == 2
+        assert old.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
+        assert not new.exists()
+        assert journal.exists()
+        assert '"restore_blocked"' in journal.read_text(encoding="utf-8")
+        assert "mutant and blocked recovery journal were left intact" in first_output
+
+        monkeypatch.setattr(
+            subject,
+            "_run_candidate_process",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("blocked recovery must precede pytest")),
+        )
+        assert subject.main() == 2
+        second_output = capsys.readouterr().out
+        assert "automatic recovery is blocked after an unverified process tree" in second_output
+        assert old.read_text(encoding="utf-8") == "VALUE = 'guarded'\n"
+        assert not new.exists()
+    finally:
+        subject.clear_recovery(repository)
+        old.unlink(missing_ok=True)
+        new.write_text("VALUE = 'guarded'\n", encoding="utf-8")
