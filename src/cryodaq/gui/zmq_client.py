@@ -278,6 +278,7 @@ def _metadata_with_transport_age(d: dict[str, Any]) -> object:
         public["source_age_s"] = total_age_s
     return public
 
+
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
     """Reconstruct a Reading from a plain dict (received via mp.Queue)."""
     return Reading(

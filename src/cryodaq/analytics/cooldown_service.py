@@ -695,8 +695,7 @@ class CooldownService:
         now_monotonic = time.monotonic()
         required_channels = (self._channel_cold, self._channel_warm)
         if any(
-            now_monotonic - self._last_required_input_monotonic.get(channel, float("-inf"))
-            > freshness_horizon_s
+            now_monotonic - self._last_required_input_monotonic.get(channel, float("-inf")) > freshness_horizon_s
             for channel in required_channels
         ):
             logger.warning("Cooldown prediction withheld because a required input is stale")
