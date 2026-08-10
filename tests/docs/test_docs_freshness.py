@@ -164,12 +164,12 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
 # property of the sweep. This guard runs on ONE interpreter and cannot measure
 # another; pinning the figure here means the row and the constant have to move
 # together, and moving them requires re-running the sweep on that interpreter.
-# RE-MEASURED 2026-08-08 after the OC-030 migration removed nine registrations
-# and added one, taking the sweep from 135 challenges to 127: 94 errors, via
-# `uv run --python 3.12 --with pytest --no-project`, interpreter 3.12.13,
-# counting through `_registry_errors` exactly as the note above prescribes. The
-# row moved with it in the same commit.
-_RECORDED_MINIMUM_INTERPRETER_ERRORS = 94
+# RE-MEASURED 2026-08-10 after merging the OC-023 interlock registrations with
+# the OC-030 migration: 92 errors over 126 challenges, via
+# `uv run --offline --no-project --python 3.12 --with pytest --with pyyaml`,
+# interpreter 3.12.13, counting through `_registry_errors` exactly as the note
+# above prescribes. The row moved with it in the same candidate.
+_RECORDED_MINIMUM_INTERPRETER_ERRORS = 92
 
 
 @cache

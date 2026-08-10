@@ -60,6 +60,7 @@ def load_housekeeping_config(config_path: Path) -> tuple[dict[str, Any], Physica
 def load_protected_channel_patterns(
     *config_paths: Path,
     snapshots: dict[Path, bytes] | None = None,
+    descriptor_catalog: Any | None = None,
 ) -> list[str]:
     patterns: list[str] = []
     for path in config_paths:
@@ -72,6 +73,26 @@ def load_protected_channel_patterns(
         raw = yaml.safe_load(snapshot) or {}
         for key in ("alarms", "interlocks"):
             for item in raw.get(key, []):
+                if "channel_bindings" in item:
+                    if descriptor_catalog is None:
+                        raise HousekeepingConfigError("interlock bindings require the active descriptor catalog")
+                    from cryodaq.core.interlock import resolve_interlock_channel_ids
+
+                    try:
+                        channel_ids = resolve_interlock_channel_ids(
+                            item,
+                            config_path=path,
+                            descriptor_catalog=descriptor_catalog,
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise HousekeepingConfigError(
+                            f"protected-channel config at {path}: invalid interlock binding — "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+                    for channel_id in channel_ids:
+                        emitted_channel = descriptor_catalog.emitted_channel_for_channel_id(channel_id)
+                        patterns.append(rf"^{re.escape(emitted_channel)}$")
+                    continue
                 pattern = str(item.get("channel_pattern", "")).strip()
                 if pattern:
                     patterns.append(pattern)
@@ -82,9 +103,9 @@ def load_protected_channel_patterns(
 # Phase 2b H.1: alarms_v3.yaml integration
 # --------------------------------------------------------------------------
 #
-# The legacy ``load_protected_channel_patterns`` only knows the old top-level
-# ``alarms`` / ``interlocks`` schema (with explicit ``channel_pattern`` fields).
-# Production now uses ``alarms_v3.yaml`` with a richer schema:
+# ``load_protected_channel_patterns`` reads the top-level ``alarms`` /
+# ``interlocks`` schema, including exact descriptor-resolved interlock bindings.
+# Production also uses ``alarms_v3.yaml`` with a richer schema:
 #
 #     channel_groups:
 #       calibrated: [Т11, Т12]

@@ -773,17 +773,6 @@ _REGISTRY_ROWS = (
         "archive retention policy accepts channel regexes instead of descriptor selectors",
     ),
     (
-        "C2-028",
-        _Challenge(
-            "src/cryodaq/core/interlock.py",
-            "InterlockCondition.matches_channel",
-            "regular expression match() over identity",
-            "412dc0c2c14cee74dc26",
-        ),
-        "BLOCKED-ON-SCHEMA",
-        "interlock configuration lacks verified descriptor selector",
-    ),
-    (
         "C2-029",
         _Challenge(
             "src/cryodaq/core/rate_estimator.py",

@@ -6544,6 +6544,7 @@ async def _run_engine(
     legacy_patterns = load_protected_channel_patterns(
         interlocks_cfg,
         snapshots=None if interlocks_snapshot is None else {interlocks_cfg: interlocks_snapshot},
+        descriptor_catalog=live_descriptor_catalog,
     )
     alarms_v3_path = _CONFIG_DIR / "alarms_v3.yaml"
     v3_patterns = load_critical_channels_from_alarms_v3(alarms_v3_path)
@@ -6562,7 +6563,8 @@ async def _run_engine(
         descriptor_catalog=live_descriptor_catalog,
         interlocks_config_path=interlocks_cfg,
         safety_manager=safety_manager,
-        adaptive_throttle_patterns=merged_patterns,
+        adaptive_throttle_patterns=v3_patterns,
+        adaptive_throttle_raw_patterns=legacy_patterns,
     )
     adaptive_throttle = AdaptiveThrottle(
         housekeeping_raw.get("adaptive_throttle", {}),
@@ -6677,7 +6679,11 @@ async def _run_engine(
     )
     _log_physical_policy_receipt(
         "interlocks",
-        interlock_engine.load_config(interlocks_cfg, snapshot=interlocks_snapshot),
+        interlock_engine.load_config(
+            interlocks_cfg,
+            snapshot=interlocks_snapshot,
+            descriptor_catalog=live_descriptor_catalog,
+        ),
     )
 
     # ExperimentManager
