@@ -20,6 +20,7 @@ import pytest
 import zmq
 
 from cryodaq.core.zmq_bridge import _bind_with_retry as _production_bind_with_retry
+from cryodaq.replay_engine.server import _check_port_available as _production_check_port_available
 
 _REPLAY_PORT_ATTEMPTS = 5
 
@@ -68,21 +69,23 @@ def _retryable_generated_port_collision(
             "--force-replay to override."
             for address in endpoints.addresses
         )
-        return str(cause) in messages
-
-    if not isinstance(cause, zmq.ZMQError) or cause.errno not in {
+        if str(cause) not in messages:
+            return False
+        production_code = _production_check_port_available.__code__
+        address_local = "addr"
+    elif isinstance(cause, zmq.ZMQError) and cause.errno in {
         errno.EADDRINUSE,
         zmq.EADDRINUSE,
     }:
+        production_code = _production_bind_with_retry.__code__
+        address_local = "address"
+    else:
         return False
 
     traceback = cause.__traceback__
     while traceback is not None:
         frame = traceback.tb_frame
-        if (
-            frame.f_code is _production_bind_with_retry.__code__
-            and frame.f_locals.get("address") in endpoints.addresses
-        ):
+        if frame.f_code is production_code and frame.f_locals.get(address_local) in endpoints.addresses:
             return True
         traceback = traceback.tb_next
     return False

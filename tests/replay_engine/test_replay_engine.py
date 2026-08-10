@@ -1011,15 +1011,24 @@ async def _stop_engine(engine, source_task) -> None:
 @pytest.mark.asyncio
 async def test_replay_port_fixture_retries_exact_generated_collision(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     start_replay_engine,
 ) -> None:
     import socket
 
-    from cryodaq.replay_engine.server import ReplayEngine
+    from cryodaq.core import zmq_bridge
+    from cryodaq.replay_engine import server as replay_server
 
     source = tmp_path / "curve.json"
     _write_curve_json(source)
     attempts = 0
+    collisions: list[RuntimeError] = []
+    monkeypatch.setattr(replay_server, "_check_port_available", lambda *_args, **_kwargs: None)
+
+    async def no_wait(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(zmq_bridge.asyncio, "sleep", no_wait)
 
     class OccupyFirstGeneratedEndpoint:
         def __init__(self, engine, address: str) -> None:
@@ -1032,14 +1041,18 @@ async def test_replay_port_fixture_retries_exact_generated_collision(
             try:
                 holder.bind((host.rsplit("//", 1)[1], int(port)))
                 holder.listen()
-                await self._engine.start()
+                try:
+                    await self._engine.start()
+                except RuntimeError as error:
+                    collisions.append(error)
+                    raise
             finally:
                 holder.close()
 
     def factory(ports):
         nonlocal attempts
         attempts += 1
-        engine = ReplayEngine(
+        engine = replay_server.ReplayEngine(
             source,
             speed=0.0,
             pub_addr=ports.pub_addr,
@@ -1053,8 +1066,49 @@ async def test_replay_port_fixture_retries_exact_generated_collision(
     engine, _endpoints = await start_replay_engine(factory)
     try:
         assert attempts == 2
+        cause = collisions[0].__context__
+        assert isinstance(cause, zmq.ZMQError)
+        traceback = cause.__traceback__
+        while traceback is not None and traceback.tb_frame.f_code is not zmq_bridge._bind_with_retry.__code__:
+            traceback = traceback.tb_next
+        assert traceback is not None
     finally:
         await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_replay_port_fixture_does_not_retry_unrelated_matching_runtimeerror(
+    start_replay_engine,
+) -> None:
+    attempts = 0
+
+    class UnrelatedFailure:
+        def __init__(self, message: str) -> None:
+            self._message = message
+
+        async def start(self) -> None:
+            try:
+                raise RuntimeError(self._message)
+            except RuntimeError:
+                raise RuntimeError("replay startup failed")
+
+    def factory(ports):
+        nonlocal attempts
+        attempts += 1
+        address = ports.pub_addr
+        port = address.rsplit(":", 1)[1]
+        message = (
+            f"[spec Q1] Port {port} ({address}) is already in use — "
+            "another engine is likely running. Stop the real engine first, or pass "
+            "--force-replay to override."
+        )
+        return UnrelatedFailure(message)
+
+    with pytest.raises(RuntimeError, match="replay startup failed") as exc_info:
+        await start_replay_engine(factory)
+
+    assert attempts == 1
+    assert type(exc_info.value.__context__) is RuntimeError
 
 
 @pytest.mark.asyncio

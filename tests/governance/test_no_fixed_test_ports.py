@@ -1,9 +1,11 @@
 """Fail closed when tests introduce a fixed network bind.
 
-The sweep is intentionally syntactic.  It catches literal or locally constant
-ports passed to direct bind APIs and to started CryoDAQ ZMQ owners.  Dynamic
-values and port zero remain allowed.  Binder-shaped tests that deliberately
-stop before a real bind or use a fake socket are registered explicitly below.
+The sweep is intentionally intra-scope and syntactic.  It catches literal or
+locally constant ports passed to direct bind APIs and to started CryoDAQ ZMQ
+owners.  It does not follow imports, helper returns, fixture injection, or other
+interprocedural data flow; that coverage class remains open.  Dynamic values and
+port zero remain allowed.  Binder-shaped tests that deliberately stop before a
+real bind or use a fake socket are registered explicitly below.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ _FIXED_PORT_EXCEPTIONS = (
             "test_bind_with_retry_retries_on_eaddrinuse_then_succeeds",
             "_bind_with_retry",
             "tcp://127.0.0.1:5555",
-            "2ed298c1a1ee68142aae",
+            "764b984201302a0a1113",
         ),
         "The production retry helper receives a MagicMock socket; no network bind occurs.",
     ),
@@ -54,7 +56,7 @@ _FIXED_PORT_EXCEPTIONS = (
             "test_bind_with_retry_raises_after_max_attempts",
             "_bind_with_retry",
             "tcp://127.0.0.1:5555",
-            "e8da5726d9c3ce723c7e",
+            "310e70e3047d7a027a67",
         ),
         "The exhaustion control injects EADDRINUSE through a MagicMock socket.",
     ),
@@ -64,7 +66,7 @@ _FIXED_PORT_EXCEPTIONS = (
             "test_publisher_rejects_wildcard_bind",
             "ZMQPublisher.start",
             "tcp://0.0.0.0:5561",
-            "b95f3c76632581c5f0fa",
+            "a949ef1da3fde9f8cff6",
         ),
         "Production rejects the wildcard address before it reaches socket.bind().",
     ),
@@ -74,7 +76,7 @@ _FIXED_PORT_EXCEPTIONS = (
             "test_command_server_partial_start_rolls_back_and_allows_clean_retry",
             "ZMQCommandServer.start",
             "tcp://127.0.0.1:5556",
-            "2aeefc4ef68290982d8e",
+            "915734db37da68f9e188",
         ),
         "The test replaces _open_bound_socket with a deterministic fake owner.",
     ),
@@ -84,7 +86,7 @@ _FIXED_PORT_EXCEPTIONS = (
             "test_command_server_rejects_wildcard_bind",
             "ZMQCommandServer.start",
             "tcp://0.0.0.0:5560",
-            "00b7d6e627cc3cac3528",
+            "210c388aa7637bf2b53a",
         ),
         "Production rejects this parameterized wildcard before socket.bind().",
     ),
@@ -94,7 +96,7 @@ _FIXED_PORT_EXCEPTIONS = (
             "test_command_server_rejects_wildcard_bind",
             "ZMQCommandServer.start",
             "tcp://*:5560",
-            "00b7d6e627cc3cac3528",
+            "210c388aa7637bf2b53a",
         ),
         "Production rejects this parameterized wildcard before socket.bind().",
     ),
@@ -104,7 +106,7 @@ _FIXED_PORT_EXCEPTIONS = (
             "test_command_server_rejects_wildcard_bind",
             "ZMQCommandServer.start",
             "tcp://[::]:5560",
-            "00b7d6e627cc3cac3528",
+            "210c388aa7637bf2b53a",
         ),
         "Production rejects this parameterized wildcard before socket.bind().",
     ),
@@ -218,7 +220,7 @@ def _bindings(nodes: tuple[ast.AST, ...], inherited: dict[str, Any]) -> dict[str
 
 
 def _scope_fingerprint(root: ast.AST) -> str:
-    normalized = ast.dump(root, annotate_fields=True, include_attributes=False)
+    normalized = ast.unparse(root)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
 
 
