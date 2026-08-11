@@ -18,6 +18,7 @@ from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog, lo
 ROOT = Path(__file__).resolve().parents[2]
 INTERLOCKS_PATH = ROOT / "config" / "interlocks.yaml"
 DESCRIPTORS_PATH = ROOT / "config" / "channel_descriptors.yaml"
+_INTERLOCK_POLL_INTERVALS = {"LS218_1": 2.0, "LS218_2": 2.0}
 
 
 def _physical_reading(
@@ -73,7 +74,11 @@ async def test_interlock_rejects_direct_publisher_with_colliding_bound_channel_i
         broker=broker,
         actions={"emergency_off": _emergency_off, "stop_source": lambda: None},
     )
-    engine.load_config(interlocks_path, descriptor_catalog=catalog)
+    engine.load_config(
+        interlocks_path,
+        descriptor_catalog=catalog,
+        poll_intervals_s_by_instrument=_INTERLOCK_POLL_INTERVALS,
+    )
     await engine.start()
     try:
         await broker.publish(
