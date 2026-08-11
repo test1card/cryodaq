@@ -659,7 +659,11 @@ def verify_allowlisted_driver_imports() -> tuple[str, ...]:
             ) from exc
         implementation = getattr(module, spec.class_name, None)
         if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
-            valid_implementation = isinstance(implementation, type) and implementation.__module__ == spec.module
+            valid_implementation = (
+                isinstance(implementation, type)
+                and implementation is spec.implementation_type
+                and implementation.__module__ == spec.module
+            )
             if valid_implementation:
                 try:
                     _StaticHealthTelemetryAllowlistEntry(spec.type_name, implementation)
