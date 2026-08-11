@@ -16,7 +16,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
-from cryodaq.agents.assistant.query.router import QueryRouter
+import pytest
+
+from cryodaq.agents.assistant.query.router import QueryRouter, QueryUnavailableError
 from cryodaq.agents.assistant.query.schemas import (
     AlarmStatusResult,
     CompositeStatus,
@@ -101,9 +103,7 @@ async def test_router_dispatches_knowledge_query_with_raw_query_text() -> None:
 async def test_router_forwards_target_source_kind_to_adapter() -> None:
     rag = MagicMock()
     rag.is_available = True
-    rag.search = AsyncMock(
-        return_value=KnowledgeQueryResult(query="q", hits=[], total_hits=0)
-    )
+    rag.search = AsyncMock(return_value=KnowledgeQueryResult(query="q", hits=[], total_hits=0))
 
     adapters = _make_adapters(rag=rag)
     router = QueryRouter(adapters)
@@ -145,7 +145,7 @@ async def test_router_returns_none_when_rag_adapter_not_available() -> None:
     rag.search.assert_not_awaited()
 
 
-async def test_router_swallows_rag_adapter_exception() -> None:
+async def test_router_rag_adapter_exception_is_unavailable() -> None:
     rag = MagicMock()
     rag.is_available = True
     rag.search = AsyncMock(side_effect=RuntimeError("boom"))
@@ -154,10 +154,8 @@ async def test_router_swallows_rag_adapter_exception() -> None:
     router = QueryRouter(adapters)
     intent = QueryIntent(category=QueryCategory.KNOWLEDGE_QUERY)
 
-    out = await router.fetch(intent, "anything")
-
-    # Router-level try/except converts to {} on adapter raise.
-    assert out == {}
+    with pytest.raises(QueryUnavailableError, match="knowledge_query query unavailable"):
+        await router.fetch(intent, "anything")
 
 
 # ---------------------------------------------------------------------------
