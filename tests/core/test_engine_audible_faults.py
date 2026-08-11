@@ -19,7 +19,12 @@ import asyncio
 import pytest
 
 from cryodaq.core.event_bus import EventBus
-from cryodaq.engine import _dispatch_alarm_notification, _should_dispatch_dead_channel_alarm
+from cryodaq.engine import (
+    _dispatch_alarm_notification,
+    _interlock_dead_channel_recovery_handler,
+    _InterlockHandlerContext,
+    _should_dispatch_dead_channel_alarm,
+)
 
 # ---------------------------------------------------------------------------
 # Part (a): _dispatch_alarm_notification
@@ -177,6 +182,37 @@ def test_channels_are_independent() -> None:
     assert _should_dispatch_dead_channel_alarm("a", False, sent) is True
     assert _should_dispatch_dead_channel_alarm("b", False, sent) is True
     assert sent == {"a", "b"}
+
+
+def test_usable_recovery_rearms_idle_dead_channel_alarm_episode() -> None:
+    class SafetyProbe:
+        def __init__(self) -> None:
+            self.recovered: list[tuple[str, str]] = []
+
+        def on_interlock_channel_recovered(self, condition_name: str, channel: str) -> None:
+            self.recovered.append((condition_name, channel))
+
+    class Condition:
+        name = "overheat_cryostat"
+
+    class Reading:
+        channel = "LS218_1/T1"
+
+    key = f"{Condition.name}:{Reading.channel}"
+    sibling_key = f"detector_warmup:{Reading.channel}"
+    safety = SafetyProbe()
+    context = _InterlockHandlerContext(
+        safety_manager=safety,
+        alarm_dispatch_tasks=set(),
+        dead_channel_alarm_sent={key, sibling_key},
+    )
+
+    _interlock_dead_channel_recovery_handler(Condition(), Reading(), context=context)
+
+    assert safety.recovered == [(Condition.name, Reading.channel)]
+    assert context.dead_channel_alarm_sent == set()
+    assert _should_dispatch_dead_channel_alarm(key, False, context.dead_channel_alarm_sent) is True
+    assert _should_dispatch_dead_channel_alarm(sibling_key, False, context.dead_channel_alarm_sent) is True
 
 
 if __name__ == "__main__":

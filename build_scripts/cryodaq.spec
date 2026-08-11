@@ -127,6 +127,7 @@ FROZEN_DRIVER_MODULES = (
     "cryodaq.drivers.instruments.lakeshore_218s",
     "cryodaq.drivers.instruments.thyracont_vsp63d",
     "cryodaq.drivers.passive_extensions.asc_reference_tcp",
+    "cryodaq.health.simulator",
 )
 
 
@@ -136,6 +137,8 @@ def _is_non_driver_application_module(name):
         or name.startswith("cryodaq.drivers.instruments.")
         or name == "cryodaq.drivers.passive_extensions"
         or name.startswith("cryodaq.drivers.passive_extensions.")
+        or name == "cryodaq.health.simulator"
+        or name.startswith("cryodaq.health.simulator.")
     )
 
 

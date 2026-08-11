@@ -30,6 +30,7 @@ class DriverAuthority(StrEnum):
 
 class DriverCapability(StrEnum):
     PASSIVE_SENSOR = "passive_sensor"
+    HEALTH_TELEMETRY_DEVICE = "health_telemetry_device"
     CALIBRATABLE_SENSOR = "calibratable_sensor"
     BURST_SENSOR = "burst_sensor"
     SHARED_BUS_DEVICE = "shared_bus_device"
@@ -111,6 +112,11 @@ _BUILTIN_DRIVER_METADATA_ROWS: Final = (
         capabilities=frozenset({DriverCapability.PASSIVE_SENSOR}),
     ),
     DriverTypeMetadata(
+        type_name="deterministic_health_node",
+        authority=DriverAuthority.PASSIVE_EXTENSION,
+        capabilities=frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE}),
+    ),
+    DriverTypeMetadata(
         type_name="keithley_2604b",
         authority=DriverAuthority.REVIEWED_SOURCE,
         capabilities=frozenset(
@@ -125,4 +131,12 @@ _BUILTIN_DRIVER_METADATA_ROWS: Final = (
 
 BUILTIN_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = MappingProxyType(
     {metadata.type_name: metadata for metadata in _BUILTIN_DRIVER_METADATA_ROWS}
+)
+
+INSTRUMENT_DRIVER_METADATA: Final[Mapping[str, DriverTypeMetadata]] = MappingProxyType(
+    {
+        type_name: metadata
+        for type_name, metadata in BUILTIN_DRIVER_METADATA.items()
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE not in metadata.capabilities
+    }
 )

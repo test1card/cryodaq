@@ -394,7 +394,7 @@ def _parse_strict_yaml(text: str) -> object:
     shape requires the attacker to already be executing arbitrary Python inside
     the operator's process -- and such an attacker does not need YAML at all.
     What the boundary actually rests on is ``schema.py``, which re-derives
-    instrument authority from ``BUILTIN_DRIVER_METADATA`` rather than trusting
+    instrument authority from ``INSTRUMENT_DRIVER_METADATA`` rather than trusting
     the parsed document: with the parser fully replaced as above, forging a
     ``keithley_2604b`` still raises ``ActuationBoundaryError``.  That property
     has its own guard and is the one worth defending.

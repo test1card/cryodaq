@@ -58,7 +58,13 @@ EXACT_SIX_COMMAND = (
     "-p",
     "no:cacheprovider",
     "-q",
-    "tests/integration/test_periodic_png_multiprocess.py",
+    "tests/integration/test_periodic_png_multiprocess.py::test_real_loopback_publisher_rep_and_adapter_startup_hydration_alarm_seals",
+    "tests/integration/test_periodic_png_multiprocess.py::test_publisher_restart_changes_session_and_fresh_adapter_recovers",
+    "tests/integration/test_periodic_png_multiprocess.py::test_subscriber_disconnect_monitor_invalidates_and_callbacks_stop",
+    "tests/integration/test_periodic_png_multiprocess.py::test_two_assistants_one_leader_per_domain",
+    "tests/integration/test_periodic_png_multiprocess.py::test_killed_elected_assistant_replacement_makes_one_forward_result",
+    "tests/integration/test_periodic_png_multiprocess.py::test_killed_rendering_leader_promotes_then_authorizes_one_delivery",
+    "tests/integration/test_periodic_png_multiprocess.py::test_replay_exact_off_child_creates_no_periodic_resources",
 )
 EXACT_SIX_RESULT_SCHEMA = "cryodaq-exact-six-result/v1"
 SOURCE_COMMAND_TAIL = ("-m", "cryodaq.launcher", "--mock", "--tray")
@@ -2620,13 +2626,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     selected = profile(args.profile)
+    if selected.name != "short":
+        print(
+            f"soak profile {selected.name!r} is defined but not activated: "
+            "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
+            "long-duration evidence remains open",
+            file=sys.stderr,
+        )
+        return 3
     from scripts import soak_mock_stack_runner as runner
 
     try:
         runner._PosixSoakRunner.require_platform()
     except runner._RunnerActivationDisabled:
-        return 2
-    if selected.name != "short":
         return 2
     try:
         evidence = Evidence(args.evidence_dir or _default_evidence_dir(selected))
