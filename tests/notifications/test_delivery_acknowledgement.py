@@ -303,12 +303,12 @@ STRICTLY_INVALID_ACKNOWLEDGEMENTS = [
 """Periodic-Telegram strict JSON rejects these before acknowledgement use."""
 
 
-async def test_send_reports_delivered_when_a_message_id_is_acknowledged(
+async def test_send_reports_service_delivered_when_a_message_id_is_acknowledged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sender, session = _sender(_Response(200, _acknowledged()), monkeypatch)
 
-    assert await sender._send(4242, "text") == "delivered"
+    assert await sender._send(4242, "text") == "service_reported_delivered"
     assert session.requests == ["https://api.telegram.org/bottoken/sendMessage"]
 
 

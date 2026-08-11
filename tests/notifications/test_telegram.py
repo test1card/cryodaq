@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
+import re
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +16,7 @@ import yaml
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.notifications.telegram import TelegramNotifier
+from cryodaq.notifications.telegram_commands import _HELP_TEXT
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -135,6 +138,22 @@ def _tg_msg(
         "from": {"id": 9, "username": username, "first_name": "Test"},
     }
 
+
+
+def _extract_required_form_from_handler_error(text: str, command: str) -> str:
+    normalized = html.unescape(text)
+    pattern = rf"{re.escape(command)}\s+<[^\n>]+(?:\s+<[^\n>]+)?"
+    match = re.search(pattern, normalized)
+    assert match is not None, f"handler rejection for {command} did not include a full required form"
+    return match.group(0).strip()
+
+
+def _help_line_from_text(help_text: str, command: str) -> str:
+    for line in html.unescape(help_text).splitlines():
+        normalized = line.strip()
+        if normalized.startswith(f"{command} "):
+            return normalized.split("—", 1)[0].strip()
+    raise AssertionError(f"help text is missing {command}")
 
 def _capability_response(token: str = "token-1") -> dict:
     return {
@@ -342,6 +361,25 @@ async def test_cmd_log_empty_text_returns_error() -> None:
     assert reply.encode("utf-8").decode("utf-8") == reply
     assert "\ufffd" not in reply
 
+
+
+
+@pytest.mark.parametrize(
+    ("message", "command"),
+    [
+        ("/log text", "/log"),
+        ("/phase cooling", "/phase"),
+    ],
+)
+async def test_help_text_reflects_current_command_requirements(message: str, command: str) -> None:
+    bot = _make_bot()
+    await bot._handle_message(_tg_msg(message))
+    rejection = bot._send.call_args[0][1]
+
+    required = _extract_required_form_from_handler_error(rejection, command)
+    help_line = _help_line_from_text(_HELP_TEXT, command)
+
+    assert required == help_line
 
 async def test_cmd_phase_advances() -> None:
     """Phase 2c I.2: legacy 'cooling' alias canonicalises to the
