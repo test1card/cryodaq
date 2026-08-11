@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from importlib import import_module
+
 import pytest
 
 from cryodaq.drivers.base import ChannelStatus, Reading
 from plugins.thermal_calculator import ThermalCalculator
+
+thermal_calculator = import_module("plugins.thermal_calculator")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -21,8 +26,19 @@ def _make_reading(channel: str, value: float, status: ChannelStatus = ChannelSta
 
 
 def _make_heater_reading(value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
-    return Reading.now(
-        channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status
+    return Reading.now(channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status)
+
+
+def _make_timed_reading(
+    channel: str, value: float, timestamp: datetime, *, status: ChannelStatus = ChannelStatus.OK
+) -> Reading:
+    return Reading(
+        timestamp=timestamp,
+        instrument_id="test",
+        channel=channel,
+        value=value,
+        unit="K",
+        status=status,
     )
 
 
@@ -174,3 +190,78 @@ async def test_metric_has_correct_metadata():
     assert meta["hot_T"] == pytest.approx(T_hot)
     assert meta["cold_T"] == pytest.approx(T_cold)
     assert meta["P"] == pytest.approx(P)
+
+
+async def test_replay_domain_keeps_publishing_in_slow_arrival(monkeypatch) -> None:
+    """Healthy replay with 2 source-seconds per 20 wall-seconds must still publish."""
+    plugin = _configured_plugin()
+    base_source_ts = datetime.fromtimestamp(0.0, tz=UTC)
+
+    arrivals_wall_s = [0.0, 20.0, 40.0, 60.0, 80.0]
+    source_offsets_s = [0.0, 2.0, 4.0, 6.0, 8.0]
+
+    for wall_sec, source_sec in zip(arrivals_wall_s, source_offsets_s):
+        source_ts = base_source_ts + timedelta(seconds=source_sec)
+
+        monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda _t=wall_sec: _t)
+        monkeypatch.setattr(thermal_calculator.time, "time", lambda _t=wall_sec: _t)
+
+        metrics = await plugin.process(
+            [
+                _make_timed_reading(HOT_CH, 30.0, source_ts),
+                _make_timed_reading(COLD_CH, 20.0, source_ts),
+                _make_timed_reading(HEATER_CH, 5.0, source_ts),
+            ]
+        )
+
+        assert len(metrics) == 1
+        assert metrics[0].value == pytest.approx(2.0)
+
+
+async def test_stopped_feed_stops_republishing_without_recent_arrival(monkeypatch) -> None:
+    """Stop-hot/cold updates eventually suppress cached output when arrival-age exceeds threshold."""
+    plugin = _configured_plugin()
+
+    base_source_ts = datetime.fromtimestamp(0.0, tz=UTC)
+
+    warmup_wall_s = [0.0, 20.0, 40.0]
+    warmup_source_s = [0.0, 2.0, 4.0]
+    for wall_sec, source_sec in zip(warmup_wall_s, warmup_source_s):
+        ts = base_source_ts + timedelta(seconds=source_sec)
+        monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda _t=wall_sec: _t)
+        monkeypatch.setattr(thermal_calculator.time, "time", lambda _t=wall_sec: _t)
+        metrics = await plugin.process(
+            [
+                _make_timed_reading(HOT_CH, 40.0, ts),
+                _make_timed_reading(COLD_CH, 10.0, ts),
+                _make_timed_reading(HEATER_CH, 10.0, ts),
+            ]
+        )
+        assert len(metrics) == 1
+
+    held_arrivals = [
+        (60.0, 6.0),
+        (100.0, 8.0),
+        (160.0, 10.0),
+    ]
+    for idx, (wall_sec, source_sec) in enumerate(held_arrivals):
+        ts = base_source_ts + timedelta(seconds=source_sec)
+        monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda _t=wall_sec: _t)
+        monkeypatch.setattr(thermal_calculator.time, "time", lambda _t=wall_sec: _t)
+
+        metrics = await plugin.process([_make_timed_reading(HEATER_CH, 10.0, ts)])
+        if idx < 2:
+            assert len(metrics) == 1
+        else:
+            assert metrics == []
+
+    monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 180.0)
+    monkeypatch.setattr(thermal_calculator.time, "time", lambda: 180.0)
+    metrics = await plugin.process(
+        [
+            _make_timed_reading(HOT_CH, 40.0, base_source_ts + timedelta(seconds=14.0)),
+            _make_timed_reading(COLD_CH, 10.0, base_source_ts + timedelta(seconds=14.0)),
+            _make_timed_reading(HEATER_CH, 10.0, base_source_ts + timedelta(seconds=14.0)),
+        ]
+    )
+    assert len(metrics) == 1
