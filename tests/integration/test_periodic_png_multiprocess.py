@@ -13,8 +13,9 @@ import zlib
 from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import psutil
 import pytest
 
 from cryodaq.agents.assistant.periodic_delivery import (
@@ -47,11 +48,18 @@ from cryodaq.notifications._secrets import SecretStr
 from cryodaq.periodic_config import PeriodicPngConfig, PeriodicPngConfigLoad
 from cryodaq.periodic_state import (
     PERIODIC_LEADER_LOCK,
+    PERIODIC_RENDER_LOCK,
     PeriodicArtifact,
     load_periodic_state,
+    periodic_generation_dir,
+    periodic_staging_dir,
     periodic_telegram_destination_fingerprint,
 )
-from cryodaq.report_process import PeriodicRenderResult
+from cryodaq.report_process import (
+    PeriodicRenderResult,
+    ReportProcessRunner,
+    read_periodic_artifact_bytes,
+)
 from cryodaq.storage.archive_reader import (
     BoundedReadingQueryResult,
     BoundedReadingRow,
@@ -248,6 +256,11 @@ class _Clock:
         await asyncio.Event().wait()
 
 
+class _TakeoverClock(_Clock):
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+
 def _write_durable(path: Path, payload: str, *, exclusive: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -280,6 +293,180 @@ def _wait_for_path(path: Path) -> None:
         time.sleep(0.01)
     if not path.exists():
         raise TimeoutError(f"durable stop marker not observed: {path}")
+
+
+def _install_periodic_child_observer(
+    hook_dir: Path,
+    data_dir: Path,
+    staging_marker: Path,
+    render_release: Path,
+    promotion_marker: Path,
+    promotion_release: Path,
+) -> None:
+    hook_dir.mkdir()
+    staging_parent = periodic_staging_dir(data_dir, "a" * 32).parent.resolve()
+    generations_parent = periodic_generation_dir(data_dir, "a" * 32).parent.resolve()
+    source = [
+        "import os",
+        "import time",
+        "from pathlib import Path",
+        "",
+        f"_STAGING_PARENT = Path({str(staging_parent)!r})",
+        f"_GENERATIONS_PARENT = Path({str(generations_parent)!r})",
+        f"_STAGING_MARKER = Path({str(staging_marker.resolve())!r})",
+        f"_RENDER_RELEASE = Path({str(render_release.resolve())!r})",
+        f"_PROMOTION_MARKER = Path({str(promotion_marker.resolve())!r})",
+        f"_PROMOTION_RELEASE = Path({str(promotion_release.resolve())!r})",
+        "_REAL_MKDIR = os.mkdir",
+        "_REAL_RENAME = os.rename",
+        "",
+        "def _publish(path):",
+        "    temporary = path.with_name(path.name + '.' + str(os.getpid()) + '.tmp')",
+        "    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)",
+        "    try:",
+        "        os.write(fd, (str(os.getpid()) + '\\n').encode('ascii'))",
+        "        os.fsync(fd)",
+        "    finally:",
+        "        os.close(fd)",
+        "    try:",
+        "        os.link(temporary, path)",
+        "    except FileExistsError:",
+        "        return False",
+        "    finally:",
+        "        temporary.unlink()",
+        "    return True",
+        "",
+        "def _wait(path):",
+        "    deadline = time.monotonic() + 30.0",
+        "    while not path.exists():",
+        "        if time.monotonic() >= deadline:",
+        "            raise TimeoutError('periodic child observation gate timed out')",
+        "        time.sleep(0.005)",
+        "",
+        "def _mkdir(path, mode=0o777, *, dir_fd=None):",
+        "    if dir_fd is None:",
+        "        result = _REAL_MKDIR(path, mode)",
+        "    else:",
+        "        result = _REAL_MKDIR(path, mode, dir_fd=dir_fd)",
+        "    if dir_fd is None and Path(path).resolve().parent == _STAGING_PARENT:",
+        "        if _publish(_STAGING_MARKER):",
+        "            _wait(_RENDER_RELEASE)",
+        "    return result",
+        "",
+        "def _rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None):",
+        "    kwargs = {}",
+        "    if src_dir_fd is not None:",
+        "        kwargs['src_dir_fd'] = src_dir_fd",
+        "    if dst_dir_fd is not None:",
+        "        kwargs['dst_dir_fd'] = dst_dir_fd",
+        "    result = _REAL_RENAME(src, dst, **kwargs)",
+        "    if not kwargs and Path(dst).resolve().parent == _GENERATIONS_PARENT:",
+        "        if _publish(_PROMOTION_MARKER):",
+        "            _wait(_PROMOTION_RELEASE)",
+        "    return result",
+        "",
+        "os.mkdir = _mkdir",
+        "os.rename = _rename",
+    ]
+    (hook_dir / "sitecustomize.py").write_text("\n".join(source) + "\n", encoding="utf-8")
+
+
+def _require_periodic_render_process(process: psutil.Process, generation_id: str) -> None:
+    expected_generation = f"--generation-id={generation_id}"
+    command = process.cmdline()
+    module_child = command[1:4] == ["-m", "cryodaq.reporting", "periodic"]
+    frozen_child = command[1:3] == ["--mode=report-render", "periodic"]
+    assert expected_generation in command and (module_child or frozen_child)
+
+
+def _observed_process_is_settled(process: psutil.Process) -> bool:
+    """True only when the process is gone, or a zombie awaiting collection.
+
+    A re-parented process that init has not collected yet IS dead, but
+    ``psutil.wait()`` polls ``pid_exists()`` for a non-child and keeps seeing it,
+    so a wait alone would time out on a corpse.
+    """
+
+    try:
+        return process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def _reap_observed_process(process: psutil.Process) -> None:
+    """Leave no observed renderer alive when the test ends.
+
+    ``ChildProcessError`` means only that THIS caller has no child with that
+    PID. Once the renderer's supervisor is killed the renderer is re-parented,
+    so that is permanently true of a process that may still be running, holding
+    ``PERIODIC_RENDER_LOCK`` and writing artifacts. Every path that sees it
+    therefore re-checks liveness instead of reporting the process reaped; only
+    ``NoSuchProcess`` and a zombie status are evidence of death.
+    """
+
+    if _observed_process_is_settled(process):
+        return
+    try:
+        process.wait(timeout=_PROCESS_TIMEOUT_S)
+        return
+    except psutil.NoSuchProcess:
+        return
+    except (psutil.TimeoutExpired, ChildProcessError):
+        pass
+    if _observed_process_is_settled(process):
+        return
+    try:
+        process.kill()
+    except psutil.NoSuchProcess:
+        return
+    deadline = time.monotonic() + _PROCESS_TIMEOUT_S
+    while True:
+        if _observed_process_is_settled(process):
+            return
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            return
+        except psutil.NoSuchProcess:
+            return
+        except (psutil.TimeoutExpired, ChildProcessError):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+    try:
+        status = process.status()
+    except psutil.Error as error:  # pragma: no cover - diagnostic only
+        status = f"<unreadable: {error!r}>"
+    raise AssertionError(f"observed process {process.pid} survived kill() for {_PROCESS_TIMEOUT_S}s; status={status!r}")
+
+
+class _LiveNonChildProcess:
+    """A process that is alive but is no longer this caller's child.
+
+    ``wait()`` raises ``ChildProcessError`` exactly as ``waitpid`` does for a PID
+    the caller does not own -- which is what the orphaned renderer becomes the
+    moment its supervisor is killed -- while the process keeps running.
+    """
+
+    def __init__(self) -> None:
+        self.pid = -1
+        self.killed = False
+
+    def status(self) -> str:
+        return psutil.STATUS_ZOMBIE if self.killed else psutil.STATUS_RUNNING
+
+    def wait(self, timeout: float | None = None) -> int:
+        raise ChildProcessError("no child processes")
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_reaping_a_live_non_child_process_kills_it_instead_of_reporting_it_reaped() -> None:
+    """ChildProcessError is not evidence that the renderer terminated."""
+
+    process = _LiveNonChildProcess()
+    _reap_observed_process(cast(psutil.Process, process))
+    assert process.killed, "a live non-child renderer must be killed, not reported reaped"
 
 
 def _cut(sequence: int) -> LiveSourceCut:
@@ -434,9 +621,22 @@ class _Telegram:
         self,
         photo: bytes,
         caption: str,
-        _context: PeriodicDeliveryContext,
+        context: PeriodicDeliveryContext,
     ) -> PeriodicDeliveryResult:
         result = await self.send_photo(photo, caption)
+        self._messages.put(
+            (
+                "delivery_context",
+                os.getpid(),
+                context.slot_id,
+                context.generation_id,
+                context.owner_token,
+                context.artifact_sha256,
+                context.artifact_size,
+                context.caption_sha256,
+                context.caption_size,
+            )
+        )
         return PeriodicDeliveryResult(
             PeriodicDeliveryOutcome.ACCEPTED,
             PeriodicDeliveryReceipt("telegram", str(result.message_id), None),
@@ -456,27 +656,61 @@ async def _run_supervisor_child(
     messages: Any,
     takeover_dir: Path | None,
     stop_path: Path | None,
+    joined_dir: Path | None,
 ) -> None:
     config = _config()
-    clock = _Clock(poll=takeover_dir is not None)
+    clock = _TakeoverClock(poll=True) if joined_dir is not None else _Clock(poll=takeover_dir is not None)
 
     def coordinator_factory(observed: PeriodicPngConfig) -> PeriodicPngCoordinator:
         assert observed == config
-        if takeover_dir is None:
+        if joined_dir is not None:
+            _write_durable(joined_dir / f"factory-{os.getpid()}.pid", str(os.getpid()))
+            try:
+                _write_durable(joined_dir / "initial-leader.pid", str(os.getpid()), exclusive=True)
+            except FileExistsError:
+                _wait_for_path(joined_dir / "takeover-release")
+        elif takeover_dir is None:
             messages.put(("factory", os.getpid()))
         else:
             _write_durable(takeover_dir / f"factory-{os.getpid()}.pid", str(os.getpid()))
+
+        def authorized_read(data_path: Path, artifact: PeriodicArtifact) -> bytes:
+            photo = read_periodic_artifact_bytes(data_path, artifact)
+            active = load_periodic_state(data_path).payload["active"]
+            assert isinstance(active, dict)
+            messages.put(
+                (
+                    "authorized_read",
+                    os.getpid(),
+                    artifact.path,
+                    artifact.sha256,
+                    artifact.size,
+                    artifact.width,
+                    artifact.height,
+                    hashlib.sha256(photo).hexdigest(),
+                    active["generation_id"],
+                    active["slot_id"],
+                    active["owner_token"],
+                )
+            )
+            return photo
+
         return PeriodicPngCoordinator(
             data_dir=data_dir,
             config=observed,
             live_sources=_ProcessLive(messages, takeover_dir),
             alarm_query=_ProcessAlarm(),
             archive_query=_Archive(),
-            runner=_Runner(data_dir, messages),
+            runner=(
+                ReportProcessRunner(data_dir, timeout_s=observed.render_timeout_s)
+                if joined_dir is not None
+                else _Runner(data_dir, messages)
+            ),
             delivery=_Telegram(data_dir, messages),
             destination_fingerprint=DESTINATION_FINGERPRINT,
             expected_delivery_kind="telegram",
             clock=clock,
+            artifact_reader=(authorized_read if joined_dir is not None else read_periodic_artifact_bytes),
         )
 
     def config_loader(_config_dir: Path) -> PeriodicPngConfigLoad:
@@ -518,6 +752,7 @@ def _supervisor_child(
     messages: Any,
     takeover_dir: str | None = None,
     stop_path: str | None = None,
+    joined_dir: str | None = None,
 ) -> None:
     try:
         _run_child(
@@ -527,6 +762,7 @@ def _supervisor_child(
                 messages,
                 Path(takeover_dir) if takeover_dir is not None else None,
                 Path(stop_path) if stop_path is not None else None,
+                Path(joined_dir) if joined_dir is not None else None,
             )
         )
     except BaseException as exc:
@@ -1194,6 +1430,226 @@ def test_killed_elected_assistant_replacement_makes_one_forward_result(
     h3_fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=data_dir)
     assert h3_fd is not None
     release_lock(h3_fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=data_dir)
+
+
+@pytest.mark.timeout(60)
+def test_killed_rendering_leader_promotes_then_authorizes_one_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "joined-takeover"
+    data_dir.mkdir()
+    joined_dir = tmp_path / "joined-evidence"
+    joined_dir.mkdir()
+    stop_path = joined_dir / "stop"
+    takeover_release = joined_dir / "takeover-release"
+    initial_path = joined_dir / "initial-leader.pid"
+    staging_marker = joined_dir / "render-staging-ready"
+    render_release = joined_dir / "render-release"
+    promotion_marker = joined_dir / "promotion-complete"
+    promotion_release = joined_dir / "promotion-release"
+    hook_dir = tmp_path / "child-observer"
+    _install_periodic_child_observer(
+        hook_dir,
+        data_dir,
+        staging_marker,
+        render_release,
+        promotion_marker,
+        promotion_release,
+    )
+    inherited_pythonpath = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        str(hook_dir) + (os.pathsep + inherited_pythonpath if inherited_pythonpath else ""),
+    )
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(tmp_path / "child-pycache"))
+    messages = _SPAWN.Queue()
+    contenders = [
+        _SPAWN.Process(
+            target=_supervisor_child,
+            args=(
+                str(data_dir),
+                None,
+                messages,
+                None,
+                str(stop_path),
+                str(joined_dir),
+            ),
+        )
+        for _ in range(2)
+    ]
+    started: list[multiprocessing.Process] = []
+    stash: list[tuple[Any, ...]] = []
+    killed: multiprocessing.Process | None = None
+    render_processes: list[psutil.Process] = []
+    rendering: dict[str, Any] | None = None
+    promoted_recovered: PeriodicRenderResult | None = None
+    old_promoted = False
+    state: dict[str, Any] | None = None
+    observed: list[tuple[Any, ...]] = []
+    try:
+        for process in contenders:
+            process.start()
+            started.append(process)
+
+        _wait_for_path(staging_marker)
+        render_process = psutil.Process(int(staging_marker.read_text(encoding="ascii")))
+        render_processes.append(render_process)
+        candidate = load_periodic_state(data_dir).payload.get("active")
+        assert isinstance(candidate, dict) and candidate.get("status") == "RENDERING"
+        rendering = dict(candidate)
+        assert initial_path.exists()
+        initial_pid = int(initial_path.read_text(encoding="ascii"))
+        prekill_factory_pids = {int(path.read_text(encoding="ascii")) for path in joined_dir.glob("factory-*.pid")}
+        assert prekill_factory_pids == {initial_pid}
+        killed = next(process for process in contenders if process.pid == initial_pid)
+        assert killed.is_alive()
+
+        _require_periodic_render_process(render_process, str(rendering["generation_id"]))
+        assert render_process.ppid() == initial_pid
+        staging = periodic_staging_dir(data_dir, str(rendering["generation_id"]))
+        interrupted_final = periodic_generation_dir(data_dir, str(rendering["generation_id"]))
+        assert staging.is_dir()
+        assert not os.path.lexists(interrupted_final)
+
+        killed.kill()
+        _reap(killed, expected=None)
+
+        deadline = time.monotonic() + _IPC_TIMEOUT_S
+        takeover_factory_pids = prekill_factory_pids
+        while len(takeover_factory_pids) != 2 and time.monotonic() < deadline:
+            takeover_factory_pids = {int(path.read_text(encoding="ascii")) for path in joined_dir.glob("factory-*.pid")}
+            time.sleep(0.01)
+        assert takeover_factory_pids == {process.pid for process in contenders}
+
+        _write_durable(render_release, "continue")
+        deadline = time.monotonic() + 25.0
+        while not promotion_marker.exists() and time.monotonic() < deadline:
+            try:
+                if not render_process.is_running() or render_process.status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.Error:
+                break
+            time.sleep(0.01)
+        old_promoted = promotion_marker.exists()
+        assert old_promoted is (os.name != "nt"), (
+            "interrupted renderer violated the platform lifecycle contract: "
+            f"os.name={os.name!r}, old_promoted={old_promoted}"
+        )
+
+        if old_promoted:
+            assert int(promotion_marker.read_text(encoding="ascii")) == render_process.pid
+            promoted_active = rendering
+            promoted_final = interrupted_final
+        else:
+            assert not os.path.lexists(interrupted_final)
+            _write_durable(takeover_release, "continue")
+            _wait_for_path(promotion_marker)
+            promoted_process = psutil.Process(int(promotion_marker.read_text(encoding="ascii")))
+            render_processes.append(promoted_process)
+            promoted_state = load_periodic_state(data_dir).payload.get("active")
+            assert isinstance(promoted_state, dict) and promoted_state.get("status") == "RENDERING"
+            promoted_active = dict(promoted_state)
+            promoted_final = periodic_generation_dir(data_dir, str(promoted_active["generation_id"]))
+            _require_periodic_render_process(promoted_process, str(promoted_active["generation_id"]))
+
+        assert promoted_final.is_dir()
+        promoted_recovered = ReportProcessRunner(data_dir, timeout_s=20.0).recover_periodic(
+            str(promoted_active["generation_id"]),
+            expected_slot_id=str(promoted_active["slot_id"]),
+            expected_owner_token=str(promoted_active["owner_token"]),
+        )
+        assert promoted_recovered is not None
+
+        if old_promoted:
+            _write_durable(takeover_release, "continue")
+            send = _message(messages, "send", stash=stash, timeout=25.0)
+            assert render_process.is_running()
+            _write_durable(promotion_release, "continue")
+        else:
+            _write_durable(promotion_release, "continue")
+            send = _message(messages, "send", stash=stash, timeout=25.0)
+        stash.append(send)
+        assert send[1] != initial_pid
+        state = _wait_terminal(data_dir)
+    finally:
+        _write_durable(render_release, "continue")
+        _write_durable(promotion_release, "continue")
+        _write_durable(takeover_release, "continue")
+        _write_durable(stop_path, "stop")
+        for process in render_processes:
+            _reap_observed_process(process)
+        for process in started:
+            if process is killed or process.pid is None:
+                continue
+            _reap(process)
+        observed = stash + _drain(messages)
+
+    child_errors = [item for item in observed if item[0] == "error"]
+    reads = [item for item in observed if item[0] == "authorized_read"]
+    sends = [item for item in observed if item[0] == "send"]
+    contexts = [item for item in observed if item[0] == "delivery_context"]
+    assert not child_errors, f"child failed: {child_errors!r}"
+    assert len(reads) == 1
+    assert len(sends) == 1
+    assert len(contexts) == 1
+    assert reads[0][1] == sends[0][1]
+    assert sends[0][2] == "DELIVERING"
+    assert sends[0][3:5] == (reads[0][9], reads[0][8])
+    assert reads[0][3] == "sha256:" + sends[0][5]
+    assert reads[0][7] == sends[0][5]
+    assert contexts[0][1:7] == (
+        reads[0][1],
+        reads[0][9],
+        reads[0][8],
+        reads[0][10],
+        reads[0][3],
+        reads[0][4],
+    )
+    caption_raw = sends[0][6].encode("utf-8", errors="strict")
+    assert contexts[0][7:] == (
+        "sha256:" + hashlib.sha256(caption_raw).hexdigest(),
+        len(caption_raw),
+    )
+
+    assert rendering is not None
+    interrupted_final = periodic_generation_dir(data_dir, str(rendering["generation_id"]))
+
+    assert state is not None
+    terminal = state["last_terminal"]
+    assert terminal["status"] == "SUCCEEDED"
+    assert terminal["generation_id"] == reads[0][8]
+    assert terminal["slot_id"] == reads[0][9]
+    assert promoted_recovered is not None
+    assert terminal["generation_id"] == promoted_recovered.generation_id
+    if old_promoted:
+        assert terminal["generation_id"] == rendering["generation_id"]
+    else:
+        assert not os.path.lexists(interrupted_final)
+        assert terminal["generation_id"] != rendering["generation_id"]
+    artifact = PeriodicArtifact(
+        path=reads[0][2],
+        sha256=reads[0][3],
+        size=reads[0][4],
+        width=reads[0][5],
+        height=reads[0][6],
+        mime="image/png",
+    )
+    delivered = read_periodic_artifact_bytes(data_dir, artifact)
+    assert artifact.path == f"periodic/generations/{reads[0][8]}/periodic.png"
+    assert artifact.size == len(delivered)
+    assert hashlib.sha256(delivered).hexdigest() == reads[0][7]
+    assert artifact == promoted_recovered.artifact
+
+    factory_pids = {int(path.read_text(encoding="ascii")) for path in joined_dir.glob("factory-*.pid")}
+    assert factory_pids == {process.pid for process in contenders}
+    assert {reads[0][1], sends[0][1]} == factory_pids - {initial_pid}
+    h3_fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=data_dir)
+    assert h3_fd is not None
+    release_lock(h3_fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=data_dir)
+    h4_fd = try_acquire_lock(PERIODIC_RENDER_LOCK, lock_dir=data_dir)
+    assert h4_fd is not None
+    release_lock(h4_fd, PERIODIC_RENDER_LOCK, unlink=False, lock_dir=data_dir)
 
 
 @pytest.mark.timeout(30)
