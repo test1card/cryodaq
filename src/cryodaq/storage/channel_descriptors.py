@@ -1,4 +1,4 @@
-"""Verified append-only channel descriptor storage for daily SQLite files.
+﻿"""Verified append-only channel descriptor storage for daily SQLite files.
 
 This module owns metadata persistence only.  It does not activate drivers,
 publish readings, infer vendor semantics, or grant source/control authority.

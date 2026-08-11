@@ -1,4 +1,4 @@
-"""Головной процесс CryoDAQ Engine (безголовый).
+﻿"""Головной процесс CryoDAQ Engine (безголовый).
 
 Запуск:
     cryodaq-engine          # через entry point
