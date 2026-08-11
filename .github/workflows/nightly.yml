@@ -89,14 +89,12 @@ jobs:
     # The WHOLE-STACK soak driver, distinct from the mock-ENGINE soak above.
     # Linux only, by the driver's own contract: _PosixSoakRunner.require_platform()
     # demands signal.pthread_sigmask, and EXACT_SIX_COMMAND is pinned to
-    # ".venv/bin/python", so the job must create that exact interpreter rather
-    # than run the conda python directly.
+    # ".venv/bin/python".
     #
     # This job makes the SHORT profile leave a receipt. It does NOT make the 12h
     # or 72h profiles reachable: the CLI refuses every profile except short by
     # deliberate activation gating, and this job does not touch that.
     runs-on: ubuntu-latest
-    timeout-minutes: 35
     env:
       PYTHONUTF8: "1"
     defaults:
@@ -111,17 +109,35 @@ jobs:
           environment-file: environment.yml
           channel-priority: strict
 
-      - name: Install dependencies in the exact stack interpreter
+      - name: Install dependencies
         run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install -r requirements-lock.txt
-          .venv/bin/python -m pip install -e . --no-deps --no-build-isolation
-          .venv/bin/python -m pip check
+          python -m pip install -r requirements-lock.txt
+          python -m pip install -e . --no-deps --no-build-isolation
+          python -m pip check
 
       - name: Verify safe SQLite runtime
-        run: .venv/bin/python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version"
+        run: python -c "from cryodaq.storage._sqlite import is_safe_version, sqlite_version_info; version = sqlite_version_info(); assert is_safe_version(version), version"
+
+      # Same alias binding main.yml uses for H4 evidence. The stack driver pins
+      # EXACT_SIX_COMMAND to ".venv/bin/python", so that path must exist and must
+      # BE the conda interpreter -- not a second environment with its own
+      # site-packages, which would run the soak against different bytes than the
+      # ones this job installed and verified above.
+      - name: Bind the reviewed interpreter alias
+        run: |
+          if [ -e .venv ] || [ -L .venv ]; then
+            echo "refusing to reuse an ambient .venv for soak evidence" >&2
+            exit 1
+          fi
+          mkdir -m 700 -p .venv/bin
+          ln -s -- "$(command -v python)" .venv/bin/python
+          python -c "from pathlib import Path; alias = Path('.venv/bin/python').resolve(strict=True); running = Path('/proc/self/exe').resolve(strict=True); assert alias == running, (alias, running)"
 
       - name: Run short mock-stack soak
+        # Timeout on the STEP, not the job, so a soak that overruns still leaves
+        # the upload step below a budget to run in. A job-level timeout cancels
+        # the whole job and the evidence goes with it.
+        timeout-minutes: 30
         run: |
           mkdir -p artifacts/mock-stack-soak
           .venv/bin/python -m scripts.soak_mock_stack \
@@ -129,11 +145,14 @@ jobs:
             --evidence-dir "artifacts/mock-stack-soak/${GITHUB_SHA}"
 
       - name: Upload short-soak evidence
-        # Unconditional: a failed run still leaves the summary and logs that say why.
+        # Unconditional: a failed or timed-out run still leaves the summary and
+        # logs that say why. The name carries the run ATTEMPT because a re-run
+        # keeps the same run id and SHA, and a colliding artifact name would
+        # either fail the upload or hide which attempt produced the evidence.
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mock-stack-short-soak-${{ github.sha }}
+          name: mock-stack-short-soak-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: artifacts/mock-stack-soak/
           if-no-files-found: error
           retention-days: 14
