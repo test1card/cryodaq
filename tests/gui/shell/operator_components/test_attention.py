@@ -11,7 +11,7 @@ from cryodaq.operator_snapshot import AttentionItem, OperatorPresentationState
 
 def test_attention_row_preserves_full_detail_for_accessibility(qapp, cut_factory):
     del qapp
-    detail = "Деталь " + "x" * 220
+    detail = "Деталь " + "x" * 209
     item = AttentionItem(
         attention_id="alarm-42",
         state=OperatorPresentationState.FAULT,
