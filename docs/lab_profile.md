@@ -96,7 +96,7 @@ declaration fails.
 
 A lab profile never declares capabilities. It declares instruments, and
 `src/cryodaq/lab_profile/capabilities.py` derives everything else by reading
-**only** `BUILTIN_DRIVER_METADATA` from
+**only** `INSTRUMENT_DRIVER_METADATA` from
 `src/cryodaq/drivers/capability_metadata.py` — a deliberately authority-free
 module that owns the trust taxonomy and the inert capability table. The
 registry *consumes* that table and re-derives it from its live specs at
@@ -119,7 +119,7 @@ and the third adds `burst_sensor`. The derived `LabCapabilities` is therefore:
 - `grants_control_authority`: `False` — a profile is data, not authority
 
 `LabCapabilities.__post_init__` independently recomputes that union from the
-inert metadata table (`BUILTIN_DRIVER_METADATA` in
+inert metadata table (`INSTRUMENT_DRIVER_METADATA` in
 `src/cryodaq/drivers/capability_metadata.py`) -- **not** from the registry,
 which this package never imports, as stated above. It rejects any instance — derived or hand-built — whose values
 disagree with it, whose instrument types leave the closed allowlist, or that
@@ -172,7 +172,7 @@ The boundary above is enforced by tests, not by prose:
 - `tests/lab_profile/test_downstream_readonly.py` — an AST scan proves the
   package imports only stdlib, `yaml`, the inert
   `cryodaq.drivers.capability_metadata` symbols, and the
-  `BUILTIN_DRIVER_METADATA` projection — with dynamic/reflective access
+  `INSTRUMENT_DRIVER_METADATA` projection — with dynamic/reflective access
   (`importlib`, `__import__`, `.modules`, `inspect`, `gc`) treated as a
   violation; running the whole hostile corpus leaves the registry and the
   tracked incumbent config files byte-identical; the package exposes no

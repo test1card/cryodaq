@@ -7,6 +7,8 @@ authority; only a binding on the reviewed-source roster below can do so.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import logging
 import math
 import re
@@ -22,6 +24,7 @@ from typing import Final, TypeGuard
 from cryodaq.drivers.base import InstrumentDriver
 from cryodaq.drivers.capability_metadata import (
     BUILTIN_DRIVER_METADATA,
+    INSTRUMENT_DRIVER_METADATA,
     DriverAuthority,
     DriverCapability,
     build_driver_metadata_projection,
@@ -33,6 +36,18 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     _bounded_identifier,
     _issue_registry_runtime_binding,
+)
+from cryodaq.health.contract import (
+    HealthTelemetryError,
+    HealthTelemetryReader,
+    _identifier,
+    _issue_health_telemetry_reader,
+    _IssuedHealthTelemetryReader,
+    _StaticHealthTelemetryAllowlistEntry,
+)
+from cryodaq.health.simulator import (
+    MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
+    DeterministicHealthTelemetryNode,
 )
 
 DRIVER_REGISTRY_COMPAT_VERSION: Final = 1
@@ -150,6 +165,8 @@ class DriverConstructionContext:
     keithley_watchdog: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if type(self.mock) is not bool:
+            raise DriverRegistryError("DriverConstructionContext.mock must be an exact boolean")
         object.__setattr__(self, "data_dir", Path(self.data_dir))
         normalized = _normalize_keithley_watchdog(self.keithley_watchdog, path="keithley.watchdog")
         object.__setattr__(self, "keithley_watchdog", MappingProxyType(normalized))
@@ -215,7 +232,7 @@ class ValidatedInstrumentConfig:
 
 
 ConfigNormalizer = Callable[[dict[str, object], str], dict[str, object]]
-DriverFactory = Callable[[ValidatedInstrumentConfig, DriverConstructionContext], InstrumentDriver]
+DriverFactory = Callable[[ValidatedInstrumentConfig, DriverConstructionContext], object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +248,7 @@ class DriverSpec:
     normalizer: ConfigNormalizer
     factory: DriverFactory
     reviewed_source_binding: ReviewedSourceBinding | None = None
+    implementation_type: type[object] | None = None
 
     def __post_init__(self) -> None:
         capabilities = frozenset(self.capabilities)
@@ -247,6 +265,22 @@ class DriverSpec:
             DriverCapability.CONTROLLED_SOURCE,
             DriverCapability.VERIFIED_OFF_SOURCE,
         }
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE in capabilities:
+            if (
+                capabilities != frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE})
+                or self.authority is not DriverAuthority.PASSIVE_EXTENSION
+                or self.reviewed_source_binding is not None
+            ):
+                raise ValueError("health telemetry must be an authority-free passive extension")
+            implementation_type = self.implementation_type
+            if type(implementation_type) is not type:
+                raise TypeError("health telemetry requires an exact implementation_type")
+            if self.module != implementation_type.__module__ or self.class_name != implementation_type.__name__:
+                raise ValueError("health telemetry module/class must match the exact implementation_type")
+            _StaticHealthTelemetryAllowlistEntry(self.type_name, implementation_type)
+            return
+        if self.implementation_type is not None:
+            raise ValueError("implementation_type is reserved for health telemetry")
         if self.authority in {
             DriverAuthority.PASSIVE_MEASUREMENT,
             DriverAuthority.PASSIVE_EXTENSION,
@@ -264,6 +298,24 @@ class DriverSpec:
 
 
 def _identity_normalizer(values: dict[str, object], _path: str) -> dict[str, object]:
+    return values
+
+
+def _deterministic_health_normalizer(values: dict[str, object], path: str) -> dict[str, object]:
+    cadence = float(values["cadence_hz"])
+    if cadence <= 0:
+        raise DriverRegistryError(f"{path}.cadence_hz must be > 0")
+    stale_after_s = float(values["stale_after_s"])
+    if stale_after_s <= 0:
+        raise DriverRegistryError(f"{path}.stale_after_s must be > 0")
+    disconnected_after_s = float(values["disconnected_after_s"])
+    if disconnected_after_s <= stale_after_s:
+        raise DriverRegistryError(f"{path}.disconnected_after_s must be greater than stale_after_s")
+    start = float(values["start_time_s"])
+    tick_s = 1.0 / cadence
+    horizon_s = start + (MAX_DETERMINISTIC_HEALTH_NODE_FRAMES - 1) * tick_s
+    if not math.isfinite(horizon_s) or start + tick_s <= start or math.ulp(horizon_s) > tick_s:
+        raise DriverRegistryError(f"{path}.start_time_s must yield finite, distinct cadence ticks")
     return values
 
 
@@ -365,6 +417,24 @@ def _construct_asc_reference_tcp(
         read_timeout_s=float(values["read_timeout_s"]),
         close_timeout_s=float(values["close_timeout_s"]),
         max_frame_bytes=int(values["max_frame_bytes"]),
+    )
+
+
+def _construct_deterministic_health_node(
+    config: ValidatedInstrumentConfig,
+    context: DriverConstructionContext,
+) -> object:
+    if not context.mock:
+        raise DriverRegistryError("deterministic health telemetry is simulation-only")
+    values = config.values
+    return DeterministicHealthTelemetryNode(
+        device_id=config.name,
+        component_type=str(values["component_type"]),
+        cadence_hz=float(values["cadence_hz"]),
+        start_time_s=float(values["start_time_s"]),
+        heartbeat_frames=int(values["heartbeat_frames"]),
+        stale_after_s=float(values["stale_after_s"]),
+        disconnected_after_s=float(values["disconnected_after_s"]),
     )
 
 
@@ -483,6 +553,40 @@ _PASSIVE_SPECS = {
         normalizer=_identity_normalizer,
         factory=_construct_asc_reference_tcp,
     ),
+    "deterministic_health_node": DriverSpec(
+        type_name="deterministic_health_node",
+        module="cryodaq.health.simulator",
+        class_name="DeterministicHealthTelemetryNode",
+        authority=DriverAuthority.PASSIVE_EXTENSION,
+        capabilities=frozenset({DriverCapability.HEALTH_TELEMETRY_DEVICE}),
+        config_fields={
+            "type": ConfigField(ValueKind.STRING, required=True, setup_visible=False),
+            "name": ConfigField(ValueKind.STRING, required=True),
+            "component_type": ConfigField(
+                ValueKind.STRING,
+                required=True,
+                choices=("compressor", "pump_station", "cryocooler", "support_node"),
+            ),
+            "cadence_hz": ConfigField(ValueKind.NUMBER, default=2.0, maximum=2.0),
+            "start_time_s": ConfigField(ValueKind.NUMBER, default=10.0, minimum=0.0),
+            "heartbeat_frames": ConfigField(
+                ValueKind.INTEGER,
+                default=MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
+                minimum=1,
+                maximum=MAX_DETERMINISTIC_HEALTH_NODE_FRAMES,
+            ),
+            "stale_after_s": ConfigField(ValueKind.NUMBER, default=1.0, minimum=0.0, maximum=3_600.0),
+            "disconnected_after_s": ConfigField(
+                ValueKind.NUMBER,
+                default=5.0,
+                minimum=0.0,
+                maximum=86_400.0,
+            ),
+        },
+        normalizer=_deterministic_health_normalizer,
+        factory=_construct_deterministic_health_node,
+        implementation_type=DeterministicHealthTelemetryNode,
+    ),
 }
 
 _SOURCE_SPECS = {
@@ -519,10 +623,70 @@ REVIEWED_SOURCE_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
 BUILTIN_DRIVER_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
     {spec.type_name: spec for spec in _CANONICAL_DRIVER_SPECS}
 )
+INSTRUMENT_DRIVER_SPECS: Final[Mapping[str, DriverSpec]] = MappingProxyType(
+    {
+        type_name: spec
+        for type_name, spec in BUILTIN_DRIVER_SPECS.items()
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE not in spec.capabilities
+    }
+)
 del _PASSIVE_SPECS, _SOURCE_SPECS
 ALLOWLISTED_DRIVER_MODULES: Final[tuple[str, ...]] = tuple(
     sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values())
 )
+
+
+def verify_allowlisted_driver_imports() -> tuple[str, ...]:
+    """Import every registered driver and resolve its declared implementation class.
+
+    This is deliberately opt-in so importing the registry remains inert during
+    ordinary startup. The frozen entry point also calls this verifier from a
+    dedicated smoke mode, where a missing PyInstaller hidden import becomes a
+    process failure instead of a silently unavailable instrument.
+    """
+
+    verified: list[str] = []
+    seen_modules: set[str] = set()
+    for type_name, spec in BUILTIN_DRIVER_SPECS.items():
+        if spec.module in seen_modules:
+            raise DriverRegistryError(f"allowlisted driver module is duplicated: {spec.module!r}")
+        seen_modules.add(spec.module)
+        try:
+            module = importlib.import_module(spec.module)
+        except Exception as exc:
+            raise DriverRegistryError(
+                f"allowlisted driver {type_name!r} failed to import {spec.module!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+        implementation = getattr(module, spec.class_name, None)
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
+            valid_implementation = (
+                isinstance(implementation, type)
+                and spec.implementation_type not in implementation.__mro__[1:]
+                and implementation.__module__ == spec.module
+            )
+            if valid_implementation:
+                try:
+                    _StaticHealthTelemetryAllowlistEntry(spec.type_name, implementation)
+                except (HealthTelemetryError, TypeError):
+                    valid_implementation = False
+            expected = "the exact declared health telemetry implementation class"
+        else:
+            valid_implementation = (
+                isinstance(implementation, type)
+                and implementation is not InstrumentDriver
+                and issubclass(implementation, InstrumentDriver)
+                and not inspect.isabstract(implementation)
+                and implementation.__module__ == spec.module
+            )
+            expected = "a concrete InstrumentDriver class"
+        if not valid_implementation:
+            raise DriverRegistryError(
+                f"allowlisted driver {type_name!r} does not resolve "
+                f"{spec.module}.{spec.class_name} to {expected} defined by that module"
+            )
+        verified.append(spec.module)
+    return tuple(sorted(verified))
+
 
 # The authoritative inert capability table lives in
 # cryodaq.drivers.capability_metadata so downstream consumers can import
@@ -540,7 +704,17 @@ if _derived_metadata != BUILTIN_DRIVER_METADATA:
     raise DriverRegistryError(
         "driver capability metadata drift between the registry specs and the inert table: " + ", ".join(_drift)
     )
-del _derived_metadata
+_derived_instrument_metadata = build_driver_metadata_projection(INSTRUMENT_DRIVER_SPECS.values())
+if _derived_instrument_metadata != INSTRUMENT_DRIVER_METADATA:
+    _drift = sorted(set(_derived_instrument_metadata) ^ set(INSTRUMENT_DRIVER_METADATA)) or sorted(
+        key
+        for key in _derived_instrument_metadata
+        if _derived_instrument_metadata[key] != INSTRUMENT_DRIVER_METADATA.get(key)
+    )
+    raise DriverRegistryError(
+        "instrument capability metadata drift between the registry partition and the inert table: " + ", ".join(_drift)
+    )
+del _derived_metadata, _derived_instrument_metadata
 
 
 def _normalize_keithley_watchdog(value: object, *, path: str) -> dict[str, object]:
@@ -576,6 +750,69 @@ def get_driver_spec(type_name: object) -> DriverSpec:
         return BUILTIN_DRIVER_SPECS[type_name]
     except KeyError as exc:
         raise UnknownDriverTypeError(f"unknown instrument type {type_name!r}") from exc
+
+
+def get_instrument_driver_spec(type_name: object) -> DriverSpec:
+    """Resolve one generic instrument while excluding other capability classes."""
+
+    spec = get_driver_spec(type_name)
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
+        raise UnknownDriverTypeError(f"registered type {type_name!r} is not an instrument driver")
+    return spec
+
+
+def get_health_telemetry_spec(type_name: object) -> DriverSpec:
+    """Resolve one health capability from the canonical built-in registry."""
+
+    try:
+        spec = get_driver_spec(type_name)
+    except UnknownDriverTypeError as exc:
+        raise UnknownDriverTypeError(f"unknown health telemetry type {type_name!r}") from exc
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE not in spec.capabilities:
+        raise UnknownDriverTypeError(f"registered type {type_name!r} is not health telemetry")
+    return spec
+
+
+def _require_construction_context(
+    context: object,
+    *,
+    operation: str,
+) -> DriverConstructionContext:
+    if not isinstance(context, DriverConstructionContext):
+        raise DriverRegistryError(f"{operation} requires a DriverConstructionContext")
+    if type(getattr(context, "mock", None)) is not bool:
+        raise DriverRegistryError("DriverConstructionContext.mock must be an exact boolean")
+    return context
+
+
+def construct_health_telemetry_reader(
+    config: ValidatedInstrumentConfig,
+    context: DriverConstructionContext,
+) -> HealthTelemetryReader:
+    """Construct from canonical validation and bind the exact reader identity."""
+
+    if (
+        not isinstance(config, ValidatedInstrumentConfig)
+        or getattr(config, "_provenance", None) is not _VALIDATION_PROVENANCE
+    ):
+        raise DriverRegistryError("construct_health_telemetry_reader requires validated configuration")
+    context = _require_construction_context(context, operation="construct_health_telemetry_reader")
+    spec = get_health_telemetry_spec(config.spec.type_name)
+    if config.spec is not spec:
+        raise DriverRegistryError("validated health config does not reference a canonical registry spec")
+    candidate = spec.factory(config, context)
+    implementation_type = spec.implementation_type
+    if implementation_type is None or type(candidate) is not implementation_type:
+        raise DriverRegistryError("health telemetry factory returned a non-exact implementation")
+    descriptor = candidate.health_descriptor  # type: ignore[attr-defined]
+    entry = _StaticHealthTelemetryAllowlistEntry(
+        device_id=descriptor.device_id,
+        implementation_type=implementation_type,
+    )
+    reader = _issue_health_telemetry_reader(candidate, entry=entry)
+    with _HEALTH_TELEMETRY_BINDINGS_LOCK:
+        _HEALTH_TELEMETRY_BINDINGS[reader] = spec
+    return reader
 
 
 def _validate_number(
@@ -705,7 +942,7 @@ def _revalidate_canonical_values(*, spec: DriverSpec, name: str, values: Mapping
     checked_name = checked.get("name")
     if not isinstance(name, str) or name != checked_name:
         raise DriverRegistryError("validated config.name does not match its identity")
-    checked["name"] = _validate_instrument_identity(name, path="validated config.name")
+    checked["name"] = _validate_registry_identity(spec, name, path="validated config.name")
     return checked
 
 
@@ -728,15 +965,29 @@ def _validate_instrument_identity(name: object, *, path: str) -> str:
     return stable_name
 
 
-def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") -> ValidatedInstrumentConfig:
-    """Validate and normalize one complete instrument entry."""
+def _validate_registry_identity(spec: DriverSpec, name: object, *, path: str) -> str:
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
+        try:
+            name = _identifier(name, field_name=path)
+        except (HealthTelemetryError, TypeError) as exc:
+            raise DriverRegistryError(str(exc)) from exc
+    return _validate_instrument_identity(name, path=path)
+
+
+def _validate_registry_entry(
+    entry: object,
+    *,
+    path: str,
+    resolve_spec: Callable[[object], DriverSpec],
+) -> ValidatedInstrumentConfig:
+    """Validate one complete entry against a capability-specific resolver."""
 
     if not isinstance(entry, Mapping):
         raise DriverRegistryError(f"{path} must be a mapping")
     if any(not isinstance(key, str) for key in entry):
         raise DriverRegistryError(f"{path} keys must be strings")
     try:
-        spec = get_driver_spec(entry.get("type"))
+        spec = resolve_spec(entry.get("type"))
     except UnknownDriverTypeError as exc:
         raise UnknownDriverTypeError(f"{path}.type: {exc}") from exc
     unknown = sorted(set(entry) - set(spec.config_fields))
@@ -755,10 +1006,25 @@ def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") ->
     values = spec.normalizer(values, path)
     name = values["name"]
     assert isinstance(name, str)
-    stable_name = _validate_instrument_identity(name, path=f"{path}.name")
+    stable_name = _validate_registry_identity(spec, name, path=f"{path}.name")
     values["name"] = stable_name
-    name = stable_name
-    return ValidatedInstrumentConfig._from_validated(spec=spec, name=name, values=values)
+    return ValidatedInstrumentConfig._from_validated(spec=spec, name=stable_name, values=values)
+
+
+def validate_instrument_entry(entry: object, *, path: str = "instruments[0]") -> ValidatedInstrumentConfig:
+    """Validate and normalize one generic instrument entry."""
+
+    return _validate_registry_entry(entry, path=path, resolve_spec=get_instrument_driver_spec)
+
+
+def validate_health_telemetry_entry(
+    entry: object,
+    *,
+    path: str = "health_nodes[0]",
+) -> ValidatedInstrumentConfig:
+    """Validate and normalize one allowlisted health telemetry entry."""
+
+    return _validate_registry_entry(entry, path=path, resolve_spec=get_health_telemetry_spec)
 
 
 def validate_instrument_entries(entries: object) -> tuple[ValidatedInstrumentConfig, ...]:
@@ -785,11 +1051,12 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
         or getattr(config, "_provenance", None) is not _VALIDATION_PROVENANCE
     ):
         raise DriverRegistryError("construct_driver requires output from validate_instrument_entry")
-    if not isinstance(context, DriverConstructionContext):
-        raise DriverRegistryError("construct_driver requires a DriverConstructionContext")
-    canonical = get_driver_spec(config.spec.type_name)
+    context = _require_construction_context(context, operation="construct_driver")
+    canonical = get_instrument_driver_spec(config.spec.type_name)
     if config.spec is not canonical:
         raise DriverRegistryError("validated config does not reference a canonical registry spec")
+    if DriverCapability.HEALTH_TELEMETRY_DEVICE in canonical.capabilities:
+        raise DriverRegistryError("health telemetry must use construct_health_telemetry_reader")
     driver = canonical.factory(config, context)
     if not isinstance(driver, InstrumentDriver):
         raise DriverRegistryError(f"factory for {canonical.type_name!r} returned an invalid driver")
@@ -802,6 +1069,26 @@ def construct_driver(config: ValidatedInstrumentConfig, context: DriverConstruct
 _GPIB_RESOURCE = re.compile(r"^(GPIB[0-9]+)::[0-9]+::INSTR$", re.IGNORECASE)
 _RUNTIME_BINDINGS: weakref.WeakKeyDictionary[InstrumentDriver, DriverRuntimeBinding] = weakref.WeakKeyDictionary()
 _RUNTIME_BINDINGS_LOCK = threading.Lock()
+_HEALTH_TELEMETRY_BINDINGS: weakref.WeakKeyDictionary[_IssuedHealthTelemetryReader, DriverSpec] = (
+    weakref.WeakKeyDictionary()
+)
+_HEALTH_TELEMETRY_BINDINGS_LOCK = threading.Lock()
+
+
+def health_telemetry_spec_for_reader(reader: object) -> DriverSpec | None:
+    """Return canonical provenance for an exact registry-constructed reader."""
+
+    if type(reader) is not _IssuedHealthTelemetryReader:
+        return None
+    with _HEALTH_TELEMETRY_BINDINGS_LOCK:
+        spec = _HEALTH_TELEMETRY_BINDINGS.get(reader)
+    if spec is None:
+        return None
+    try:
+        canonical = get_health_telemetry_spec(spec.type_name)
+    except UnknownDriverTypeError:
+        return None
+    return spec if spec is canonical else None
 
 
 def _runtime_binding(

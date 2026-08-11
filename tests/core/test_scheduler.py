@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker
+from cryodaq.core.interlock import InterlockCondition, InterlockConfigError, InterlockEngine
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager, SafetyState
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler
 from cryodaq.drivers import registry as driver_registry
-from cryodaq.drivers.base import InstrumentDriver, Reading
+from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.drivers.contracts import (
     AcquisitionTiming,
     BusDescriptor,
@@ -17,6 +21,9 @@ from cryodaq.drivers.contracts import (
     DriverTrustClass,
     _issue_registry_runtime_binding,
 )
+from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
+from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+from cryodaq.storage.sqlite_writer import SQLiteWriter
 
 # ---------------------------------------------------------------------------
 # Concrete mock driver for use in all scheduler tests
@@ -56,6 +63,89 @@ def _bus_binding(driver: InstrumentDriver, bus_id: str, poll_interval_s: float) 
     with driver_registry._RUNTIME_BINDINGS_LOCK:
         driver_registry._RUNTIME_BINDINGS[driver] = binding
     return binding
+
+
+_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+_LS218_1_LABELS = {
+    1: "Т1 Криостат верх",
+    2: "Т2 Криостат низ",
+    3: "Т3 Радиатор 1",
+    4: "Т4 Радиатор 2",
+    5: "Т5 Экран 77К",
+    6: "Т6 Экран 4К",
+    7: "Т7 Детектор",
+    8: "Т8 Калибровка",
+}
+_LS218_2_LABELS = {
+    1: "Т9 Компрессор вход",
+    2: "Т10 Компрессор выход",
+    3: "Т11 Теплообменник 1",
+    4: "Т12 Теплообменник 2",
+    5: "Т13 Труба подачи",
+    6: "Т14 Труба возврата",
+    7: "Т15 Вакуумный кожух",
+    8: "Т16 Фланец",
+}
+
+
+def _write_oc041_interlock_config(
+    tmp_path: Path,
+    *,
+    poll_interval_s: float,
+    min_samples: int = 5,
+    min_duration_s: float | None = None,
+    filename: str = "interlocks.yaml",
+) -> tuple[Path, float]:
+    duration_s = poll_interval_s * (min_samples - 1) if min_duration_s is None else min_duration_s
+    config_path = tmp_path / filename
+    config_path.write_text(
+        f"""interlocks:
+  - name: overheat_cryostat
+    description: Cryostat overheat
+    channel_bindings:
+      - instrument_id: LS218_1
+        source_key: input.1.temperature
+    threshold: 350.0
+    comparison: \">\"
+    action: emergency_off
+nonusable_escalation:
+  min_duration_s: {duration_s!r}
+  min_samples: {min_samples}
+""",
+        encoding="utf-8",
+    )
+    return config_path, duration_s
+
+
+async def _wait_for_safety_state(manager: SafetyManager, state: SafetyState) -> None:
+    if manager.state is state:
+        return
+    reached = asyncio.Event()
+
+    def observe_state(_old: SafetyState, new: SafetyState, _reason: str) -> None:
+        if new is state:
+            reached.set()
+
+    manager.on_state_change(observe_state)
+    if manager.state is state:
+        reached.set()
+    await reached.wait()
+
+
+async def _take_readings(queue: asyncio.Queue[Reading], count: int) -> list[Reading]:
+    return [await queue.get() for _ in range(count)]
+
+
+async def _wait_for_channel_count(
+    queue: asyncio.Queue[Reading],
+    channel: str,
+    count: int,
+) -> None:
+    observed = 0
+    while observed < count:
+        reading = await queue.get()
+        if reading.channel == channel:
+            observed += 1
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +377,531 @@ async def test_gpib_sequential_connect(broker: DataBroker) -> None:
     assert max_concurrent == 1, (
         f"GPIB connects must be sequential (max concurrent=1), got {max_concurrent}. connect_order={connect_order}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OC-041: shared-bus silence must remain persistence-first and fail closed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("persistence_outcome", ("rejection", "exception"))
+async def test_failed_poll_persistence_failure_latches_safety(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persistence_outcome: str,
+) -> None:
+    """Only the exact instrument's committed publication can clear its block."""
+
+    class RecoverableTemperatureDriver(LakeShore218S):
+        def __init__(self) -> None:
+            super().__init__(
+                "LS218_1",
+                "GPIB0::12::INSTR",
+                channel_labels=_LS218_1_LABELS,
+                mock=True,
+            )
+            self.read_calls = 0
+            self.failure_reading_calls = 0
+            self.fail_reads = True
+
+        async def read_channels(self) -> list[Reading]:
+            self.read_calls += 1
+            if self.fail_reads:
+                raise OSError("simulated GPIB read failure")
+            return await super().read_channels()
+
+        def failure_readings(self) -> list[Reading]:
+            self.failure_reading_calls += 1
+            return super().failure_readings()
+
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    writer = SQLiteWriter(tmp_path / "writer", channel_catalog=catalog)
+    await writer.start_immediate()
+    original_write_live_batch = writer._write_live_batch
+
+    def persistence_failure(_batch: object) -> None:
+        if persistence_outcome == "rejection":
+            return None
+        raise RuntimeError("synthetic non-disk persistence failure")
+
+    monkeypatch.setattr(writer, "_write_live_batch", persistence_failure)
+
+    broker = DataBroker()
+    ls1_probe = await broker.subscribe(
+        "oc041_ls1_persistence_probe",
+        maxsize=32,
+        filter_fn=lambda reading: reading.instrument_id == "LS218_1",
+    )
+    ls2_probe = await broker.subscribe(
+        "oc041_ls2_persistence_probe",
+        maxsize=32,
+        filter_fn=lambda reading: reading.instrument_id == "LS218_2",
+    )
+    safety_broker = SafetyBroker()
+    safety_probe = safety_broker.subscribe("oc041_safety_probe", maxsize=32)
+    safety = SafetyManager(safety_broker, keithley_driver=None, mock=True)
+    safety._config.require_keithley_for_run = False
+    safety._config.critical_channels = []
+    safety._config.cooldown_before_rearm_s = 0.0
+    await safety.start()
+
+    driver = RecoverableTemperatureDriver()
+    scheduler = Scheduler(
+        broker,
+        safety_broker=safety_broker,
+        sqlite_writer=writer,
+        failed_poll_persistence_handler=safety.on_failed_poll_persistence_failure,
+        failed_poll_persistence_recovery_handler=safety.on_failed_poll_persistence_recovered,
+    )
+    scheduler.add(
+        InstrumentConfig(
+            driver=driver,
+            runtime_binding=_bus_binding(driver, "GPIB0", 2.0),
+        )
+    )
+    control_scheduler: Scheduler | None = None
+    try:
+        await scheduler.start()
+        await asyncio.wait_for(
+            _wait_for_safety_state(safety, SafetyState.FAULT_LATCHED),
+            timeout=2.0,
+        )
+        await scheduler.stop()
+
+        assert driver.failure_reading_calls == 1
+        assert ls1_probe.empty(), "rejected failed-poll evidence must not bypass persistence into DataBroker"
+        assert ls2_probe.empty()
+        assert safety_probe.empty(), "rejected failed-poll evidence must not bypass persistence into SafetyBroker"
+        assert "failed-poll" in safety.fault_reason
+        assert set(safety._failed_poll_persistence_blockers) == {"LS218_1"}
+
+        acknowledged = await safety.acknowledge_fault("persistent failed-poll persistence failure")
+        assert acknowledged == {"ok": True, "state": SafetyState.MANUAL_RECOVERY.value}
+        await safety._run_checks()
+        assert safety.state is SafetyState.MANUAL_RECOVERY
+        preconditions_ok, refusal = safety._check_preconditions()
+        assert preconditions_ok is False
+        assert "LS218_1" in refusal
+        unresolved = safety.snapshot_operator_safety()
+        assert "failed_poll_persistence_unresolved" in {blocker.code for blocker in unresolved.blockers}
+        persistence_fact = next(fact for fact in unresolved.plant_health if fact.subsystem_id == "persistence")
+        assert persistence_fact.reason_code == "failed_poll_persistence_unresolved"
+
+        blocked = await safety.request_run(0.5, 40.0, 1.0)
+        assert blocked["ok"] is False
+        assert blocked["state"] == SafetyState.MANUAL_RECOVERY.value
+        assert driver.failure_reading_calls == 1, "no second failed-poll callback supplied the block"
+
+        monkeypatch.setattr(writer, "_write_live_batch", original_write_live_batch)
+        control_driver = LakeShore218S(
+            "LS218_2",
+            "GPIB0::13::INSTR",
+            channel_labels=_LS218_2_LABELS,
+            mock=True,
+        )
+        control_scheduler = Scheduler(
+            broker,
+            safety_broker=safety_broker,
+            sqlite_writer=writer,
+            failed_poll_persistence_handler=safety.on_failed_poll_persistence_failure,
+            failed_poll_persistence_recovery_handler=safety.on_failed_poll_persistence_recovered,
+        )
+        control_scheduler.add(
+            InstrumentConfig(
+                driver=control_driver,
+                runtime_binding=_bus_binding(control_driver, "GPIB0-control", 2.0),
+            )
+        )
+        await control_scheduler.start()
+        control_reading = await asyncio.wait_for(ls2_probe.get(), timeout=5.0)
+        ls2_probe.task_done()
+        assert control_reading.metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] is True
+        await control_scheduler.stop()
+
+        assert set(safety._failed_poll_persistence_blockers) == {"LS218_1"}
+        still_blocked = safety.snapshot_operator_safety()
+        assert "failed_poll_persistence_unresolved" in {blocker.code for blocker in still_blocked.blockers}
+        persistence_fact = next(fact for fact in still_blocked.plant_health if fact.subsystem_id == "persistence")
+        assert persistence_fact.reason_code == "failed_poll_persistence_unresolved"
+        preconditions_ok, refusal = safety._check_preconditions()
+        assert preconditions_ok is False
+        assert "LS218_1" in refusal
+
+        driver.fail_reads = False
+        await scheduler.start()
+        recovered_reading = await asyncio.wait_for(ls1_probe.get(), timeout=5.0)
+        ls1_probe.task_done()
+        assert recovered_reading.metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] is True
+        assert safety._failed_poll_persistence_blockers == {}
+        cleared = safety.snapshot_operator_safety()
+        assert "failed_poll_persistence_unresolved" not in {blocker.code for blocker in cleared.blockers}
+        persistence_fact = next(fact for fact in cleared.plant_health if fact.subsystem_id == "persistence")
+        assert persistence_fact.reason_code == "persistence_fault_absent"
+        await asyncio.wait_for(
+            _wait_for_safety_state(safety, SafetyState.READY),
+            timeout=2.0,
+        )
+    finally:
+        if control_scheduler is not None:
+            await control_scheduler.stop()
+        await scheduler.stop()
+        await safety.stop()
+        await writer.stop()
+
+
+async def test_descriptor_dual_broker_requires_failed_poll_persistence_handlers(tmp_path: Path) -> None:
+    """A production-shaped scheduler requires both latch and recovery routes."""
+
+    async def report_failure(_instrument_name: str, _reason: str) -> None:
+        return None
+
+    def report_recovery(_instrument_name: str) -> None:
+        return None
+
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    writer = SQLiteWriter(tmp_path / "writer", channel_catalog=catalog)
+    missing_one_handler = (
+        {"failed_poll_persistence_recovery_handler": report_recovery},
+        {"failed_poll_persistence_handler": report_failure},
+    )
+    try:
+        for callbacks in missing_one_handler:
+            scheduler = Scheduler(
+                DataBroker(),
+                safety_broker=SafetyBroker(),
+                sqlite_writer=writer,
+                **callbacks,
+            )
+            with pytest.raises(RuntimeError, match="failure and recovery safety handlers"):
+                await scheduler.start()
+    finally:
+        await writer.stop()
+
+
+async def test_shared_bus_read_failure_faults_interlock_protected_zone(tmp_path: Path) -> None:
+    """A mature idle failure blocks RUN, recovery clears it, and recurrence faults."""
+
+    class FailingTemperatureDriver(LakeShore218S):
+        def __init__(self) -> None:
+            super().__init__(
+                "LS218_1",
+                "GPIB0::12::INSTR",
+                channel_labels=_LS218_1_LABELS,
+                mock=True,
+            )
+            self.read_calls = 0
+            self._mode = "failing"
+            self.recovery_read_returned = asyncio.Event()
+            self.resume_failures = asyncio.Event()
+
+        def recover_once(self) -> None:
+            self._mode = "recover_once"
+
+        async def read_channels(self) -> list[Reading]:
+            self.read_calls += 1
+            if self._mode == "recover_once":
+                self._mode = "wait_for_recurrence"
+                readings = await super().read_channels()
+                self.recovery_read_returned.set()
+                return readings
+            if self._mode == "wait_for_recurrence":
+                await self.resume_failures.wait()
+                self._mode = "failing"
+            raise OSError("simulated GPIB read failure")
+
+    poll_interval_s = 0.01
+    config_path, _min_duration_s = _write_oc041_interlock_config(
+        tmp_path,
+        poll_interval_s=poll_interval_s,
+    )
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    broker = DataBroker()
+    safety_broker = SafetyBroker()
+    safety = SafetyManager(safety_broker, keithley_driver=None, mock=True)
+    safety._config.require_keithley_for_run = False
+    safety._config.critical_channels = []
+    await safety.start()
+
+    mature_dead_window = asyncio.Event()
+    recovered_channel = asyncio.Event()
+    fault_latched = asyncio.Event()
+
+    async def dead_channel_handler(condition: InterlockCondition, reading: Reading) -> bool:
+        latched = await safety.on_interlock_dead_channel(condition.name, reading.channel, value=reading.value)
+        mature_dead_window.set()
+        if latched:
+            fault_latched.set()
+        return latched
+
+    async def recovery_handler(condition: InterlockCondition, reading: Reading) -> None:
+        safety.on_interlock_channel_recovered(condition.name, reading.channel)
+        recovered_channel.set()
+
+    async def no_op() -> None:
+        return None
+
+    interlocks = InterlockEngine(
+        broker,
+        actions={"emergency_off": no_op},
+        dead_channel_handler=dead_channel_handler,
+        dead_channel_recovery_handler=recovery_handler,
+    )
+    interlocks.load_config(
+        config_path,
+        descriptor_catalog=catalog,
+        poll_intervals_s_by_instrument={"LS218_1": poll_interval_s},
+    )
+    await interlocks.start()
+
+    writer = SQLiteWriter(tmp_path / "writer", channel_catalog=catalog)
+    writer.set_event_loop(asyncio.get_running_loop())
+    writer.set_persistence_failure_callback(safety.on_persistence_failure)
+    await writer.start_immediate()
+    driver = FailingTemperatureDriver()
+    scheduler = Scheduler(broker, sqlite_writer=writer)
+    scheduler.add(
+        InstrumentConfig(
+            driver=driver,
+            runtime_binding=_bus_binding(driver, "GPIB0", poll_interval_s),
+        )
+    )
+    try:
+        await scheduler.start()
+
+        await asyncio.wait_for(mature_dead_window.wait(), timeout=8.0)
+        assert safety.state is not SafetyState.FAULT_LATCHED
+        blocked = await safety.request_run(0.5, 40.0, 1.0)
+        assert blocked["ok"] is False
+        assert "Persistently unusable interlock channel" in blocked["error"]
+
+        driver.recover_once()
+        await asyncio.wait_for(driver.recovery_read_returned.wait(), timeout=8.0)
+        await asyncio.wait_for(recovered_channel.wait(), timeout=8.0)
+        run_result = await safety.request_run(0.5, 40.0, 1.0)
+        assert run_result["ok"] is True
+        assert safety.state is SafetyState.RUNNING
+
+        driver.resume_failures.set()
+        await asyncio.wait_for(fault_latched.wait(), timeout=8.0)
+        assert safety.state is SafetyState.FAULT_LATCHED
+    finally:
+        driver.resume_failures.set()
+        await scheduler.stop()
+        await interlocks.stop()
+        await safety.stop()
+        await writer.stop()
+
+
+async def test_shared_bus_healthy_slow_poll_does_not_escalate(tmp_path: Path) -> None:
+    """A healthy slow poll uses its configured cadence and never looks silent."""
+    poll_interval_s = 0.06
+    min_samples = 5
+    config_path, min_duration_s = _write_oc041_interlock_config(
+        tmp_path,
+        poll_interval_s=poll_interval_s,
+        filename="slow-interlocks.yaml",
+    )
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    broker = DataBroker()
+    healthy_probe = await broker.subscribe("oc041_slow_probe", maxsize=128)
+    escalated = asyncio.Event()
+
+    async def dead_channel_handler(_condition: InterlockCondition, _reading: Reading) -> bool:
+        escalated.set()
+        return True
+
+    async def no_op() -> None:
+        return None
+
+    interlocks = InterlockEngine(
+        broker,
+        actions={"emergency_off": no_op},
+        dead_channel_handler=dead_channel_handler,
+    )
+    interlocks.load_config(
+        config_path,
+        descriptor_catalog=catalog,
+        poll_intervals_s_by_instrument={"LS218_1": poll_interval_s},
+    )
+    await interlocks.start()
+
+    class SlowHealthyDriver(LakeShore218S):
+        def __init__(self) -> None:
+            super().__init__(
+                "LS218_1",
+                "GPIB0::12::INSTR",
+                channel_labels=_LS218_1_LABELS,
+                mock=True,
+            )
+            self.read_calls = 0
+
+        async def read_channels(self) -> list[Reading]:
+            self.read_calls += 1
+            return await super().read_channels()
+
+    writer = SQLiteWriter(tmp_path / "writer", channel_catalog=catalog)
+    await writer.start_immediate()
+    driver = SlowHealthyDriver()
+    scheduler = Scheduler(broker, sqlite_writer=writer)
+    scheduler.add(
+        InstrumentConfig(
+            driver=driver,
+            runtime_binding=_bus_binding(driver, "GPIB0", poll_interval_s),
+        )
+    )
+    try:
+        await scheduler.start()
+        await asyncio.wait_for(
+            _wait_for_channel_count(healthy_probe, "Т1", min_samples),
+            timeout=8.0,
+        )
+        assert driver.read_calls >= min_samples
+        assert not escalated.is_set(), "healthy configured slow polls must not be treated as instrument silence"
+        assert min_duration_s == poll_interval_s * (min_samples - 1)
+    finally:
+        await scheduler.stop()
+        await interlocks.stop()
+        await writer.stop()
+
+
+def test_selected_nonusable_escalation_is_cadence_bounded() -> None:
+    """The shipped 10 s / 5-sample policy is accepted against its 2 s polls."""
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    engine = InterlockEngine(
+        DataBroker(),
+        actions={"emergency_off": lambda: None, "stop_source": lambda: None},
+    )
+    engine.load_config(
+        _CONFIG_DIR / "interlocks.yaml",
+        descriptor_catalog=catalog,
+        poll_intervals_s_by_instrument={"LS218_1": 2.0, "LS218_2": 2.0},
+    )
+
+
+@pytest.mark.parametrize(
+    ("min_duration_s", "min_samples", "message"),
+    (
+        (10.01, 5, "cadence bound"),
+        (10.0, 6, "reviewed maximum"),
+    ),
+)
+def test_nonusable_escalation_rejects_windows_beyond_configured_cadence(
+    tmp_path: Path,
+    min_duration_s: float,
+    min_samples: int,
+    message: str,
+) -> None:
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    config_path, _duration = _write_oc041_interlock_config(
+        tmp_path,
+        poll_interval_s=2.0,
+        min_duration_s=min_duration_s,
+        min_samples=min_samples,
+    )
+    engine = InterlockEngine(DataBroker(), actions={"emergency_off": lambda: None})
+    with pytest.raises(InterlockConfigError, match=message):
+        engine.load_config(
+            config_path,
+            descriptor_catalog=catalog,
+            poll_intervals_s_by_instrument={"LS218_1": 2.0},
+        )
+
+
+def test_nonusable_escalation_requires_protected_instrument_cadence(tmp_path: Path) -> None:
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    config_path, _duration = _write_oc041_interlock_config(tmp_path, poll_interval_s=2.0)
+    engine = InterlockEngine(DataBroker(), actions={"emergency_off": lambda: None})
+    with pytest.raises(InterlockConfigError, match="requires configured poll intervals"):
+        engine.load_config(config_path, descriptor_catalog=catalog)
+
+
+async def test_ls218_2_single_failed_poll_faults_mandatory_critical_inputs(tmp_path: Path) -> None:
+    """One LS218_2 timeout remains stronger than the interlock debounce policy."""
+
+    class SingleFailureDriver(LakeShore218S):
+        def __init__(self) -> None:
+            super().__init__(
+                "LS218_2",
+                "GPIB0::14::INSTR",
+                channel_labels=_LS218_2_LABELS,
+                mock=True,
+            )
+            self.read_calls = 0
+            self.failure_reading_calls = 0
+            self.allow_failure = asyncio.Event()
+            self.hold_after_failure = asyncio.Event()
+
+        async def read_channels(self) -> list[Reading]:
+            self.read_calls += 1
+            if self.read_calls == 1:
+                return await super().read_channels()
+            if self.failure_reading_calls == 0:
+                await self.allow_failure.wait()
+                raise OSError("one LS218_2 whole-poll failure")
+            await self.hold_after_failure.wait()
+            return []
+
+        def failure_readings(self) -> list[Reading]:
+            self.failure_reading_calls += 1
+            return super().failure_readings()
+
+    catalog = load_live_channel_descriptor_catalog(_CONFIG_DIR / "channel_descriptors.yaml")
+    broker = DataBroker()
+    safety_broker = SafetyBroker()
+    safety_probe = safety_broker.subscribe("oc041_critical_probe", maxsize=32)
+    safety = SafetyManager(safety_broker, keithley_driver=None, mock=True)
+    safety.load_config(_CONFIG_DIR / "safety.yaml")
+    safety._config.require_keithley_for_run = False
+    await safety.start()
+
+    writer = SQLiteWriter(tmp_path / "writer", channel_catalog=catalog)
+    writer.set_event_loop(asyncio.get_running_loop())
+    writer.set_persistence_failure_callback(safety.on_persistence_failure)
+    await writer.start_immediate()
+    driver = SingleFailureDriver()
+    scheduler = Scheduler(
+        broker,
+        safety_broker=safety_broker,
+        sqlite_writer=writer,
+        failed_poll_persistence_handler=safety.on_failed_poll_persistence_failure,
+        failed_poll_persistence_recovery_handler=safety.on_failed_poll_persistence_recovered,
+    )
+    scheduler.add(
+        InstrumentConfig(
+            driver=driver,
+            runtime_binding=_bus_binding(driver, "GPIB0", 0.01),
+        )
+    )
+    try:
+        await scheduler.start()
+        healthy = await asyncio.wait_for(_take_readings(safety_probe, 8), timeout=8.0)
+        assert all(reading.status is ChannelStatus.OK for reading in healthy)
+        assert {reading.channel for reading in healthy} >= {
+            _LS218_2_LABELS[3],
+            _LS218_2_LABELS[4],
+        }
+
+        run_result = await safety.request_run(0.5, 40.0, 1.0)
+        assert run_result["ok"] is True
+        assert safety.state is SafetyState.RUNNING
+
+        driver.allow_failure.set()
+        failed = await asyncio.wait_for(_take_readings(safety_probe, 8), timeout=8.0)
+        assert driver.failure_reading_calls == 1
+        critical_failed = [reading for reading in failed if reading.channel in {_LS218_2_LABELS[3], _LS218_2_LABELS[4]}]
+        assert len(critical_failed) == 2
+        assert all(reading.status is ChannelStatus.TIMEOUT for reading in critical_failed)
+
+        await asyncio.wait_for(
+            _wait_for_safety_state(safety, SafetyState.FAULT_LATCHED),
+            timeout=2.0,
+        )
+        assert driver.failure_reading_calls == 1, "critical-input policy must fault before five failed polls"
+    finally:
+        driver.hold_after_failure.set()
+        await scheduler.stop()
+        await safety.stop()
+        await writer.stop()
 
 
 # ---------------------------------------------------------------------------
