@@ -59,9 +59,7 @@ def _opt_float(v: Any) -> float | None:
     return None if v is None else float(v)
 
 
-def _first_time_at_or_below(
-    t_hours: Sequence[float], T_cold: Sequence[float], threshold: float
-) -> float | None:
+def _first_time_at_or_below(t_hours: Sequence[float], T_cold: Sequence[float], threshold: float) -> float | None:
     """First t_hours where T_cold <= threshold, else None."""
     for ti, tc in zip(t_hours, T_cold):
         if float(tc) <= threshold:
@@ -131,12 +129,13 @@ def load_fingerprint(path: Path) -> CooldownFingerprint:
     return CooldownFingerprint.from_dict(data)
 
 
-def list_fingerprints(history_dir: Path) -> list[CooldownFingerprint]:
+def list_fingerprints(history_dir: Path) -> tuple[list[CooldownFingerprint], int]:
     """All fingerprints under ``history_dir`` (excludes the baseline pointer)."""
     history_dir = Path(history_dir)
     if not history_dir.exists():
-        return []
+        return [], 0
     out: list[CooldownFingerprint] = []
+    unreadable_files = 0
     for p in sorted(history_dir.glob("*.json")):
         if p.name == BASELINE_POINTER:
             continue
@@ -144,8 +143,9 @@ def list_fingerprints(history_dir: Path) -> list[CooldownFingerprint]:
             out.append(load_fingerprint(p))
         except (OSError, ValueError, KeyError):
             # Skip corrupt / partial files — listing must never raise.
+            unreadable_files += 1
             continue
-    return out
+    return out, unreadable_files
 
 
 def set_baseline(fingerprint_id: str, history_dir: Path) -> None:
@@ -154,21 +154,26 @@ def set_baseline(fingerprint_id: str, history_dir: Path) -> None:
     atomic_write_text(path, json.dumps({"fingerprint_id": fingerprint_id}))
 
 
-def get_baseline(history_dir: Path) -> CooldownFingerprint | None:
-    """Return the pinned golden fingerprint, or None if unset/missing."""
+def get_baseline(history_dir: Path) -> tuple[CooldownFingerprint | None, int]:
+    """Return the pinned golden fingerprint and unreadable-file count.
+
+    The second tuple element is ``1`` when the baseline is present but unreadable,
+    ``0`` when unset or valid.
+    """
     pointer = Path(history_dir) / BASELINE_POINTER
     if not pointer.exists():
-        return None
+        return None, 0
     try:
-        fid = json.loads(pointer.read_text(encoding="utf-8")).get("fingerprint_id")
-    except (OSError, ValueError):
-        return None
+        data = json.loads(pointer.read_text(encoding="utf-8"))
+        fid = data.get("fingerprint_id")
+    except (OSError, ValueError, AttributeError):
+        return None, 1
     if not fid:
-        return None
+        return None, 1
     fp_path = Path(history_dir) / f"{fid}.json"
     if not fp_path.exists():
-        return None
+        return None, 1
     try:
-        return load_fingerprint(fp_path)
+        return load_fingerprint(fp_path), 0
     except (OSError, ValueError, KeyError):
-        return None
+        return None, 1

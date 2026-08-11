@@ -110,7 +110,7 @@ def test_pin_selected_writes_baseline_pointer(tmp_path: Path) -> None:
     card.select_fingerprint("cd_1000")
     card._on_pin_clicked()
     assert (tmp_path / BASELINE_POINTER).exists()
-    base = get_baseline(tmp_path)
+    base, _ = get_baseline(tmp_path)
     assert base is not None and base.fingerprint_id == "cd_1000"
 
 
@@ -173,9 +173,7 @@ def test_badge_reflects_ok_verdict(tmp_path: Path) -> None:
 
 def _write_cfg(tmp_path: Path, enabled_value: str) -> Path:
     cfg = tmp_path / "plugins.yaml"
-    cfg.write_text(
-        f"cooldown_baseline:\n  enabled: {enabled_value}\n", encoding="utf-8"
-    )
+    cfg.write_text(f"cooldown_baseline:\n  enabled: {enabled_value}\n", encoding="utf-8")
     return cfg
 
 
@@ -243,3 +241,33 @@ def test_badge_throttles_reads_within_window(tmp_path: Path, monkeypatch) -> Non
     assert first >= 1  # ctor reads
     badge.refresh()  # immediate second refresh is throttled
     assert calls["n"] == first
+
+
+def test_card_shows_unreadable_when_all_files_corrupt(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "bad_1.json").write_text("{", encoding="utf-8")
+    (tmp_path / "bad_2.json").write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    assert card._empty_label.isVisibleTo(card)
+    assert card._empty_label.text() == "История недоступна (2 файлов не читается)."
+    assert card._delta_label.text() == "—"
+
+
+def test_card_shows_baseline_unset_message(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    card.select_fingerprint("cd_2000")
+    assert card._delta_label.text() == "Эталонное охлаждение не задано."
+
+
+def test_card_shows_baseline_unreadable_message_when_pointer_corrupt(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    card.select_fingerprint("cd_2000")
+    assert card._delta_label.text() == "Эталонное охлаждение недоступно (1 файлов не читается)."
