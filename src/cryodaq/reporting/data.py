@@ -277,6 +277,11 @@ class ReportDataExtractor:
                     _ReadingsState.UNAVAILABLE_INCONSISTENT,
                     detail="finalized metadata declares measured values incomplete",
                 )
+            if summary.get("measured_values_truncated") is True:
+                return _ReadingsResolution(
+                    _ReadingsState.UNAVAILABLE_INCONSISTENT,
+                    detail="finalized metadata declares measured values truncated",
+                )
             if summary.get("measured_values_issues"):
                 return _ReadingsResolution(
                     _ReadingsState.UNAVAILABLE_INCONSISTENT,
