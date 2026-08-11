@@ -6,7 +6,7 @@ from typing import Any
 
 from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, DataBroker, PublishedReading
 from cryodaq.core.scheduler import InstrumentConfig, Scheduler, _InstrumentState
-from cryodaq.drivers.base import InstrumentDriver, Reading
+from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 
 
 class _Driver(InstrumentDriver):
@@ -94,6 +94,79 @@ async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading(
     assert paired.reading.channel == "probe.1"
     assert paired.reading.value == 1.0
     assert paired.descriptor_envelope == b'{"channel_id":"probe.1"}'
+
+
+async def test_descriptor_scheduler_accepts_exact_nan_commit_payload() -> None:
+    """A persisted non-usable Reading remains publishable despite NaN != NaN."""
+    broker = DataBroker()
+    queue = await broker.subscribe("nan_observer")
+    original = replace(
+        _reading(float("nan"), metadata={"scheduler_failure": "whole_poll"}),
+        channel="emitted-probe-label",
+        status=ChannelStatus.TIMEOUT,
+    )
+    committed = replace(original, channel="probe.1")
+    receipt = object()
+
+    class _Writer:
+        descriptor_authoritative = True
+        is_disk_full = False
+
+        async def write_committed(self, readings: list[Reading]) -> object:
+            assert len(readings) == 1 and readings[0] is original
+            return receipt
+
+        def entries_from_commit(self, candidate: object) -> list[_Entry]:
+            assert candidate is receipt
+            return [_Entry(committed)]
+
+    scheduler = Scheduler(broker, sqlite_writer=_Writer())
+    state = _InstrumentState(InstrumentConfig(driver=_Driver("probe", mock=True)))
+
+    delivered = await scheduler._process_readings(state, [original], successful_poll=False)
+
+    assert delivered is True
+    published = queue.get_nowait()
+    assert published.channel == "probe.1"
+    assert published.status is ChannelStatus.TIMEOUT
+    assert published.value != published.value
+
+
+async def test_descriptor_scheduler_nan_equivalence_does_not_accept_other_tampering() -> None:
+    """Paired NaNs cannot mask a changed unit, metadata, status, or identity."""
+    broker = DataBroker()
+    queue = await broker.subscribe("nan_tamper_observer")
+    original = replace(
+        _reading(float("nan"), metadata={"scheduler_failure": "whole_poll"}),
+        channel="emitted-probe-label",
+        status=ChannelStatus.TIMEOUT,
+    )
+    tampered = replace(original, channel="probe.1", unit="V")
+
+    class _Writer:
+        descriptor_authoritative = True
+        is_disk_full = False
+
+        async def write_committed(self, _readings: list[Reading]) -> object:
+            return object()
+
+        def entries_from_commit(self, _candidate: object) -> list[_Entry]:
+            return [_Entry(tampered)]
+
+    ambiguous: list[bool] = []
+    scheduler = Scheduler(
+        broker,
+        sqlite_writer=_Writer(),
+        persistence_ambiguity_observer=lambda: ambiguous.append(True),
+    )
+    state = _InstrumentState(InstrumentConfig(driver=_Driver("probe", mock=True)))
+
+    delivered = await scheduler._process_readings(state, [original], successful_poll=False)
+
+    assert delivered is False
+    assert queue.empty()
+    assert ambiguous == [True]
+    assert state.total_errors == 1
 
 
 async def test_descriptor_scheduler_publishes_nothing_without_commit_receipt() -> None:
