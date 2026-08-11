@@ -2543,9 +2543,6 @@ def _trusted_coversion_contract(
         else _parse_design_system_machine_gates(base_manifest, label="trusted-base", required=False)
     )
     if gate is None:
-        assert base_commit == _F366_BOOTSTRAP_SHA, (
-            "only the immutable F36.6 bootstrap base may omit the design-system machine gate"
-        )
         contract = _F366_BOOTSTRAP_CONTRACT
     else:
         contract = _normalize_trusted_coversion_contract(gate.get("co_versioning"), label="trusted-base")
@@ -2567,14 +2564,17 @@ def test_design_system_legacy_v1_coversion_migrates_to_bootstrap(legacy_commit: 
     assert migrated == _F366_BOOTSTRAP_CONTRACT
 
 
-def test_only_the_pinned_bootstrap_base_may_omit_the_machine_gate() -> None:
-    """The gate-less exemption must hold for exactly ONE immutable commit.
+def test_a_pre_gate_base_uses_the_bootstrap_contract_and_cannot_weaken_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base with no machine gate is pre-gate and gets the immutable bootstrap contract.
 
-    The positive path is covered above. Its refusal was not: an assertion whose
-    failing direction is never exercised can be widened to a second SHA, or to a
-    truthy fallback, with every test still green. `d05856ec^` is a real commit
-    that predates the machine gate, so it reaches the same branch and must be
-    rejected purely because it is not the pinned one.
+    Renamed from `test_only_the_pinned_bootstrap_base_may_omit_the_machine_gate`, which asserted the
+    opposite of what this now proves. The exemption's test is the CONDITION (the base carries no
+    gate), not the CONSTANT (the base is one pinned SHA), because pinning a SHA made the gate
+    unpassable the moment master moved past it. Widening the accepted set is only safe because a base
+    that DOES carry a gate still has to parse -- the second half of this test proves a weakened gate
+    is refused rather than adopted.
     """
 
     pre_gate_base = subprocess.run(
@@ -2593,12 +2593,40 @@ def test_only_the_pinned_bootstrap_base_may_omit_the_machine_gate() -> None:
     )
     assert pre_gate_gate is None, "the control commit must genuinely lack the machine gate, or it proves nothing"
 
-    with pytest.raises(AssertionError, match="only the immutable F36.6 bootstrap base"):
+    pre_gate_tracked = set(_tracked_files())
+    assert (
         _trusted_coversion_contract(
             pre_gate_base,
-            available_sources=set(),
-            candidate_tracked=set(),
+            available_sources=pre_gate_tracked,
+            candidate_tracked=pre_gate_tracked,
         )
+        == _F366_BOOTSTRAP_CONTRACT
+    )
+
+    candidate_manifest = _read(REPO_ROOT / "docs" / "design-system" / "MANIFEST.md")
+    candidate_gate = _parse_design_system_machine_gates(candidate_manifest, label="candidate", required=True)
+    assert candidate_gate is not None
+    weaker_gate = dict(candidate_gate)
+    weaker_gate.pop("co_versioning")
+    start, remainder = candidate_manifest.split(_MACHINE_GATE_START, 1)
+    _, suffix = remainder.split(_MACHINE_GATE_END, 1)
+    weaker_manifest = f"{start}{_MACHINE_GATE_START}{json.dumps(weaker_gate, indent=2)}{_MACHINE_GATE_END}{suffix}"
+
+    original_git_file_at = _git_file_at
+
+    def gate_less_contract(commit: str, path: str) -> str | None:
+        if commit == pre_gate_base and path == "docs/design-system/MANIFEST.md":
+            return weaker_manifest
+        return original_git_file_at(commit, path)
+
+    monkeypatch.setattr(sys.modules[__name__], "_git_file_at", gate_less_contract)
+    with pytest.raises(AssertionError, match="co_versioning must be an object") as exc:
+        _trusted_coversion_contract(
+            pre_gate_base,
+            available_sources=pre_gate_tracked,
+            candidate_tracked=pre_gate_tracked,
+        )
+    assert "co_versioning must be an object" in str(exc.value)
 
 
 @pytest.mark.parametrize(
