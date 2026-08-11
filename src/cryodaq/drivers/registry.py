@@ -661,7 +661,7 @@ def verify_allowlisted_driver_imports() -> tuple[str, ...]:
         if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities:
             valid_implementation = (
                 isinstance(implementation, type)
-                and implementation is spec.implementation_type
+                and spec.implementation_type not in implementation.__mro__[1:]
                 and implementation.__module__ == spec.module
             )
             if valid_implementation:
