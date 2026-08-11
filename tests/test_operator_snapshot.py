@@ -10,6 +10,7 @@ import pytest
 
 import cryodaq.operator_snapshot as protocol
 from cryodaq.operator_snapshot import (
+    MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES,
     MAX_ATTENTION_ITEMS,
     MAX_BUNDLE_ENTRIES,
     MAX_CHANNELS,
@@ -768,6 +769,18 @@ def test_receiver_closes_recursion_memory_and_json_failures(monkeypatch: pytest.
         load_operator_snapshot("{")
 
 
+def test_attention_item_detail_rejects_one_byte_over_bound() -> None:
+    snapshot = _snapshot()
+    with pytest.raises(ValueError, match="UTF-8 bytes"):
+        AttentionItem(
+            "attention",
+            OperatorPresentationState.WARNING,
+            "warning",
+            "D" * (MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES + 1),
+            snapshot.cut.observed_at,
+        )
+
+
 def test_pre_json_wire_budget_accepts_exact_and_rejects_one_over(monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = _snapshot()
     envelope = encode_operator_snapshot(snapshot)
@@ -918,6 +931,7 @@ def test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap() -> None:
     max_reasons = tuple(f"reason-{index}-" + "r" * (MAX_REASON_UTF8_BYTES - 9) for index in range(MAX_REASON_CODES))
     max_transport = ("transport_disconnected",)
     max_text = "t" * MAX_TEXT_UTF8_BYTES
+    max_detail = "t" * MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES
 
     def associated_channel_id(index: int) -> str:
         prefix = f"node-{index % MAX_FLEET_DEVICES:03d}/channel-{index:04d}/"
@@ -950,7 +964,7 @@ def test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap() -> None:
             f"attention-{i:04d}/" + "a" * (MAX_ID_UTF8_BYTES - 15),
             OperatorPresentationState.WARNING,
             max_text,
-            max_text,
+            max_detail,
             snapshot.cut.observed_at,
             max_transport,
         )

@@ -86,6 +86,7 @@ MAX_ID_UTF8_BYTES = 128
 MAX_LIVE_SOURCES_PER_SESSION = 8
 MAX_REASON_UTF8_BYTES = 128
 MAX_TEXT_UTF8_BYTES = 256
+MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES = 224
 MAX_PATH_UTF8_BYTES = 256
 MAX_NONNEGATIVE_INT = 2**63 - 1
 MAX_WIRE_BYTES = 8 * 1024 * 1024
@@ -120,6 +121,7 @@ __all__ = [
     "MAX_PATH_UTF8_BYTES",
     "MAX_REASON_CODES",
     "MAX_REASON_UTF8_BYTES",
+    "MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES",
     "MAX_TEXT_UTF8_BYTES",
     "MAX_TRANSPORT_REASON_CODES",
     "MAX_WIRE_BYTES",
@@ -479,7 +481,11 @@ class AttentionItem:
         if not isinstance(self.state, OperatorPresentationState) or self.state is OperatorPresentationState.OK:
             raise ValueError("attention state must be a non-ok presentation state")
         object.__setattr__(self, "title", _non_empty(self.title, field_name="title"))
-        object.__setattr__(self, "detail", _non_empty(self.detail, field_name="detail"))
+        object.__setattr__(
+            self,
+            "detail",
+            _non_empty(self.detail, field_name="detail", max_bytes=MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES),
+        )
         if not isinstance(self.observed_at, datetime):
             raise TypeError("observed_at must be a datetime")
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
