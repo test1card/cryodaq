@@ -33,6 +33,15 @@ import yaml
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 _TEST_FILE: Final = "tests/integration/test_periodic_png_multiprocess.py"
+_EXACT_NODE_IDS: Final = (
+    f"{_TEST_FILE}::test_real_loopback_publisher_rep_and_adapter_startup_hydration_alarm_seals",
+    f"{_TEST_FILE}::test_publisher_restart_changes_session_and_fresh_adapter_recovers",
+    f"{_TEST_FILE}::test_subscriber_disconnect_monitor_invalidates_and_callbacks_stop",
+    f"{_TEST_FILE}::test_two_assistants_one_leader_per_domain",
+    f"{_TEST_FILE}::test_killed_elected_assistant_replacement_makes_one_forward_result",
+    f"{_TEST_FILE}::test_killed_rendering_leader_promotes_then_authorizes_one_delivery",
+    f"{_TEST_FILE}::test_replay_exact_off_child_creates_no_periodic_resources",
+)
 _COLLECTION_ARGV: Final = (
     ".venv/bin/python",
     "-m",
@@ -45,7 +54,7 @@ _COLLECTION_ARGV: Final = (
     "no:cacheprovider",
     "--collect-only",
     "-q",
-    _TEST_FILE,
+    *_EXACT_NODE_IDS,
 )
 _EXECUTION_ARGV: Final = (
     ".venv/bin/python",
@@ -58,21 +67,13 @@ _EXECUTION_ARGV: Final = (
     "-p",
     "no:cacheprovider",
     "-q",
-    _TEST_FILE,
-)
-_EXACT_NODE_IDS: Final = (
-    f"{_TEST_FILE}::test_real_loopback_publisher_rep_and_adapter_startup_hydration_alarm_seals",
-    f"{_TEST_FILE}::test_publisher_restart_changes_session_and_fresh_adapter_recovers",
-    f"{_TEST_FILE}::test_subscriber_disconnect_monitor_invalidates_and_callbacks_stop",
-    f"{_TEST_FILE}::test_two_assistants_one_leader_per_domain",
-    f"{_TEST_FILE}::test_killed_elected_assistant_replacement_makes_one_forward_result",
-    f"{_TEST_FILE}::test_replay_exact_off_child_creates_no_periodic_resources",
+    *_EXACT_NODE_IDS,
 )
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
-_SUMMARY_RE = re.compile(r"6 passed in [0-9]+(?:\.[0-9]+)?s\Z")
-_COLLECTION_SUMMARY_RE = re.compile(r"6 tests collected in [0-9]+(?:\.[0-9]+)?s\Z")
-_PROGRESS_RE = re.compile(r"\.{6}\s+\[100%\]\Z")
+_SUMMARY_RE = re.compile(r"7 passed in [0-9]+(?:\.[0-9]+)?s\Z")
+_COLLECTION_SUMMARY_RE = re.compile(r"7 tests collected in [0-9]+(?:\.[0-9]+)?s\Z")
+_PROGRESS_RE = re.compile(r"\.{7}\s+\[100%\]\Z")
 _FORBIDDEN_PYTEST_MARKERS: Final = (" skipped", " deselected", " xfailed", " xpassed", " error")
 _MAX_STREAM_BYTES: Final = 8 * 1024 * 1024
 _MAX_SNAPSHOT_ARCHIVE_BYTES: Final = 32 * 1024 * 1024
@@ -2445,6 +2446,21 @@ def _decode_complete_output(stdout: _StreamEvidence, payload: bytes) -> str:
         raise _RunnerFoundationError("pytest output is not strict UTF-8") from exc
 
 
+_DIAGNOSTIC_OUTPUT_LIMIT = 4096
+
+
+def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
+    def bounded(payload: bytes) -> str:
+        text = payload.decode("utf-8", errors="replace")
+        if len(text) > _DIAGNOSTIC_OUTPUT_LIMIT:
+            text = text[:_DIAGNOSTIC_OUTPUT_LIMIT] + "\n...[truncated]"
+        return text if text else "<empty>"
+
+    return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
+        stderr
+    )
+
+
 def _parse_exact_collection(
     *,
     stdout_evidence: _StreamEvidence,
@@ -2454,7 +2470,9 @@ def _parse_exact_collection(
     exit_code: int,
 ) -> tuple[str, ...]:
     if exit_code != 0:
-        raise _RunnerFoundationError("exact-six collection exit code is nonzero")
+        raise _RunnerFoundationError(
+            "exact-six collection execution failed: " + _child_failure_message(exit_code, stdout, stderr)
+        )
     out = _decode_complete_output(stdout_evidence, stdout)
     err = _decode_complete_output(stderr_evidence, stderr)
     if err.strip():
@@ -2481,7 +2499,7 @@ def _validate_exact_execution(
     exit_code: int,
 ) -> None:
     if exit_code != 0:
-        raise _RunnerFoundationError("exact-six execution exit code is nonzero")
+        raise _RunnerFoundationError("exact-six execution failed: " + _child_failure_message(exit_code, stdout, stderr))
     out = _decode_complete_output(stdout_evidence, stdout)
     err = _decode_complete_output(stderr_evidence, stderr)
     if err.strip():
