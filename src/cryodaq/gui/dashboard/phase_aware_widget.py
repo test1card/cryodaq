@@ -40,21 +40,6 @@ _BUTTON_HEIGHT_PX = 28
 _DURATION_UPDATE_MS = 1000
 
 
-_CONTEXT_METRIC_SUFFIXES = (
-    ("/cooldown_eta", "eta"),
-    ("/R_thermal", "r_thermal"),
-    ("/pressure", "pressure"),
-)
-
-
-def _context_metric_key(channel: str) -> str | None:
-    """Map an analytics channel to the inline-context metric it feeds."""
-    for suffix, key in _CONTEXT_METRIC_SUFFIXES:
-        if channel.endswith(suffix):
-            return key
-    return None
-
-
 def _metadata_duration_s(reading, key: str, *, positive: bool = False) -> float | None:
     metadata = getattr(reading, "metadata", None)
     value = metadata.get(key) if type(metadata) is dict else None
@@ -411,24 +396,36 @@ class PhaseAwareWidget(QWidget):
             logger.warning("PhaseAwareWidget on_status_update failed", exc_info=True)
 
     def on_reading(self, reading) -> None:
-        """Route analytics readings to cached values for inline context."""
-        key = _context_metric_key(reading.channel)
-        if key is None:
-            return
+        """Route analytics readings to cached values for inline context.
+
+        An unusable update is EVIDENCE THAT THE FEED IS BROKEN, not an absence of
+        news. This used to return early before the channel test, leaving the
+        previous freshness stamp intact, so the last value kept rendering as
+        CURRENT until the cadence horizon expired -- up to another 90 s for the
+        default ETA -- after the backend had already declared the feed unusable.
+
+        The channel tests now run FIRST and the usable test second, so an
+        unusable update reaches the metric it belongs to and invalidates it.
+        The last legible value is retained: marked, not hidden, which is the
+        rule the stale badge exists to enforce.
+        """
+        channel = reading.channel
         value = reading.value
-        if not reading.is_usable() or not isinstance(value, (int, float)) or not math.isfinite(value):
-            # An unusable update is EVIDENCE THAT THE FEED IS BROKEN, not an
-            # absence of news. This used to return early and leave the previous
-            # freshness stamp intact, so the last value kept rendering as
-            # CURRENT until the cadence horizon expired -- up to another 90 s
-            # for the default ETA -- even though the backend had already
-            # declared the feed unusable.
-            #
-            # Invalidate the stamp now and keep the last legible value: marked,
-            # not hidden, the same rule the stale badge exists to enforce.
+        usable = reading.is_usable() and isinstance(value, (int, float)) and math.isfinite(value)
+        if channel.endswith("/cooldown_eta"):
+            self._apply_context_reading("eta", reading, usable)
+        elif channel.endswith("/R_thermal"):
+            self._apply_context_reading("r_thermal", reading, usable)
+        elif channel.endswith("/pressure"):
+            self._apply_context_reading("pressure", reading, usable)
+
+    def _apply_context_reading(self, key: str, reading, usable: bool) -> None:
+        """Cache a usable value, or invalidate freshness when it is not."""
+        if not usable:
             self._cached_at[key] = None
             self._refresh_context_label()
             return
+        value = reading.value
         if key == "eta":
             self._cached_eta_s = value * 3600 if value > 0 else None
         elif key == "r_thermal":
