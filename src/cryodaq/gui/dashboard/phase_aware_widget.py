@@ -40,6 +40,21 @@ _BUTTON_HEIGHT_PX = 28
 _DURATION_UPDATE_MS = 1000
 
 
+_CONTEXT_METRIC_SUFFIXES = (
+    ("/cooldown_eta", "eta"),
+    ("/R_thermal", "r_thermal"),
+    ("/pressure", "pressure"),
+)
+
+
+def _context_metric_key(channel: str) -> str | None:
+    """Map an analytics channel to the inline-context metric it feeds."""
+    for suffix, key in _CONTEXT_METRIC_SUFFIXES:
+        if channel.endswith(suffix):
+            return key
+    return None
+
+
 def _metadata_duration_s(reading, key: str, *, positive: bool = False) -> float | None:
     metadata = getattr(reading, "metadata", None)
     value = metadata.get(key) if type(metadata) is dict else None
@@ -397,24 +412,31 @@ class PhaseAwareWidget(QWidget):
 
     def on_reading(self, reading) -> None:
         """Route analytics readings to cached values for inline context."""
-        if not reading.is_usable():
+        key = _context_metric_key(reading.channel)
+        if key is None:
             return
-        channel = reading.channel
         value = reading.value
-        if not isinstance(value, (int, float)):
+        if not reading.is_usable() or not isinstance(value, (int, float)) or not math.isfinite(value):
+            # An unusable update is EVIDENCE THAT THE FEED IS BROKEN, not an
+            # absence of news. This used to return early and leave the previous
+            # freshness stamp intact, so the last value kept rendering as
+            # CURRENT until the cadence horizon expired -- up to another 90 s
+            # for the default ETA -- even though the backend had already
+            # declared the feed unusable.
+            #
+            # Invalidate the stamp now and keep the last legible value: marked,
+            # not hidden, the same rule the stale badge exists to enforce.
+            self._cached_at[key] = None
+            self._refresh_context_label()
             return
-        if channel.endswith("/cooldown_eta"):
+        if key == "eta":
             self._cached_eta_s = value * 3600 if value > 0 else None
-            self._remember_freshness("eta", reading)
-            self._refresh_context_label()
-        elif channel.endswith("/R_thermal"):
+        elif key == "r_thermal":
             self._cached_r_thermal = value
-            self._remember_freshness("r_thermal", reading)
-            self._refresh_context_label()
-        elif channel.endswith("/pressure"):
+        else:
             self._cached_pressure = value
-            self._remember_freshness("pressure", reading)
-            self._refresh_context_label()
+        self._remember_freshness(key, reading)
+        self._refresh_context_label()
 
     # ------------------------------------------------------------------
     # State application
