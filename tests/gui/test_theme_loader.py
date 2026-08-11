@@ -686,3 +686,54 @@ def test_taupe_quiet_accent_decoupled_from_status_ok():
     with a «by design» comment; III.A decoupled."""
     pack = loader._load_theme_pack("taupe_quiet")
     assert pack["ACCENT"] != pack["STATUS_OK"], "taupe_quiet ACCENT == STATUS_OK — III.A decoupling lost"
+
+
+# Measured 2026-08-11 across all 12 bundled packs; every pack exposes exactly this many tokens.
+_EXPECTED_THEME_TOKEN_COUNT = 29
+
+
+def test_bundled_theme_key_sets_are_identical_and_complete(real_themes_dir):
+    pack_files = sorted(real_themes_dir.glob("*.yaml"))
+    assert pack_files, "no bundled theme packs found"
+
+    reference_name = pack_files[0].stem
+    reference_pack = loader.validate_theme_pack(reference_name)
+    reference_keys = set(reference_pack.keys())
+
+    for pack_file in pack_files[1:]:
+        pack = loader.validate_theme_pack(pack_file.stem)
+        pack_keys = set(pack.keys())
+        if pack_keys == reference_keys:
+            continue
+        missing = sorted(reference_keys - pack_keys)
+        extra = sorted(pack_keys - reference_keys)
+        details = []
+        if missing:
+            details.append(f"missing={missing}")
+        if extra:
+            details.append(f"extra={extra}")
+        raise AssertionError(f"{pack_file.stem} has mismatched key set vs {reference_name}: {'; '.join(details)}")
+
+    # Anchor the count itself. Comparing the reference pack against a reload of ITSELF cannot fail,
+    # and pack-to-pack parity alone cannot see every pack drifting together.
+    assert len(reference_keys) == _EXPECTED_THEME_TOKEN_COUNT, (
+        f"{reference_name} exposes {len(reference_keys)} tokens, expected "
+        f"{_EXPECTED_THEME_TOKEN_COUNT}. Re-derive this number from the packs; never edit it to match."
+    )
+
+
+def test_loader_selection_uses_requested_pack_for_every_bundled_theme(monkeypatch, tmp_path, real_themes_dir):
+    theme_ids = sorted(path.stem for path in real_themes_dir.glob("*.yaml"))
+    assert theme_ids, "no bundled theme ids discovered"
+    settings_file = tmp_path / "settings.local.yaml"
+    monkeypatch.setattr(loader, "SETTINGS_FILE", settings_file)
+
+    expected_keys = sorted(loader.validate_theme_pack(theme_ids[0]).keys())
+
+    for theme_id in theme_ids:
+        settings_file.write_text(f"theme: {theme_id}\n", encoding="utf-8")
+        resolved_id, pack = loader.resolve_theme()
+        assert resolved_id == theme_id, f"{theme_id} did not load as requested (resolved {resolved_id})"
+        assert sorted(pack.keys()) == expected_keys, (
+            f"{theme_id} did not load a complete key map: expected {len(expected_keys)} keys"
+        )
