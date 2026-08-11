@@ -1,4 +1,4 @@
-"""OC-028 — the alarm-narration ledger must have a floor as well as a ceiling.
+﻿"""OC-028 вЂ” the alarm-narration ledger must have a floor as well as a ceiling.
 
 The dedup gate solved a real problem: a flapping alarm produced one narrative
 per re-fire and buried the operator.  It solved it without a floor.  ``_seen``
@@ -124,6 +124,51 @@ def test_a_continuously_flapping_critical_is_re_narrated_not_silenced_forever(cl
     assert min(gaps) >= ESCALATE, f"re-narrated after only {min(gaps):.0f}s -- the spam bound is gone"
 
 
+def test_critical_flap_every_20_seconds_is_re_narrated_over_620_seconds(clock) -> None:
+    """Reproducer from field: sustained 20 s refires should not hold silence forever."""
+
+    ledger = _ledger()
+    event_id = "alarm:sustained"
+    start = 1000.0
+
+    clock.return_value = start
+    assert ledger.should_dispatch(event_id) is True
+    ledger.note_outcome(event_id, delivered=True)
+    last_seen = ledger._seen[event_id]
+
+    admitted = 1
+    for step in range(1, 32):  # 620 seconds at 20 s cadence
+        clock.return_value = start + step * 20.0
+        admitted_now = ledger.should_dispatch(event_id)
+        if admitted_now:
+            admitted += 1
+            ledger.note_outcome(event_id, delivered=True)
+            last_seen = ledger._seen[event_id]
+            continue
+        assert ledger._seen[event_id] == last_seen, (
+            f"suppressed refire at {clock.return_value} extended the silence window"
+        )
+
+    assert admitted > 1, "sustained flap did not re-escalate at all"
+
+
+def test_critical_flap_every_40_seconds_admits_every_refire(clock) -> None:
+    """Positive control: once refires exceed the 30 s window they all admit."""
+
+    ledger = _ledger()
+    event_id = "alarm:quiet_gap"
+
+    admitted = 0
+    start = 1000.0
+    for step in range(10):  # 10 attempts over 360 s, every 40 s
+        clock.return_value = start + step * 40.0
+        assert ledger.should_dispatch(event_id) is True
+        ledger.note_outcome(event_id, delivered=True)
+        admitted += 1
+
+    assert admitted == 10
+
+
 def test_the_dedup_window_still_suppresses_an_ordinary_flap_burst(clock) -> None:
     """The original problem must stay fixed; this is the regression direction."""
 
@@ -235,7 +280,7 @@ def test_bookkeeping_does_not_grow_without_bound(clock) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Round 2 — four findings against 7efd6879, two of them P1.
+# Round 2 вЂ” four findings against 7efd6879, two of them P1.
 # ---------------------------------------------------------------------------
 
 
@@ -1733,3 +1778,7 @@ async def test_cancellation_before_the_handler_first_runs_is_reported() -> None:
     assert "alarm:vacuum_loss" in agent._dedup._undelivered, (
         "a handler cancelled before it ever ran left the gate advanced with no outcome recorded"
     )
+
+
+
+
