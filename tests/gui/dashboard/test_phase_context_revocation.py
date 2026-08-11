@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import queue
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -357,3 +358,38 @@ def test_unusable_analytics_reading_does_not_refresh_freshness(
     text = view._phase_widget._context_label.text()
     assert "2ч" in text, "the last usable ETA should remain visible"
     assert STALE_MARK in text, f"unusable {status.value} reading refreshed a live freshness stamp"
+
+
+def test_an_unusable_update_invalidates_freshness_immediately(app, tmp_path, monkeypatch) -> None:
+    """A feed that reports ITSELF broken must not keep reading as current.
+
+    The cadence horizon covers a producer that goes QUIET. It does not cover one
+    that publishes `SENSOR_ERROR`/`TIMEOUT` with the NaN sentinel: that update
+    used to hit an early `return` which left the previous freshness stamp
+    intact, so the last good value kept rendering as current for up to another
+    cadence window -- 90 s at the default ETA cadence -- after the backend had
+    already declared the feed unusable.
+
+    MARKED, NOT HIDDEN: the last legible value stays on screen with the stale
+    chrome. That is the same rule the badge itself exists to enforce.
+    """
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+
+    fresh = _eta_reading(datetime.now(UTC), cadence_s=30.0)
+    view.on_reading(fresh)
+    text = view._phase_widget._context_label.text()
+    assert "ETA" in text, "the production dashboard route did not render the cooldown ETA"
+    assert STALE_MARK not in text, "a freshly published ETA was already marked stale"
+
+    # Production shape: a non-OK status always carries a non-finite sentinel.
+    broken = replace(fresh, status=ChannelStatus.SENSOR_ERROR, value=float("nan"))
+    assert not broken.is_usable(), "the control reading must be unusable, or it proves nothing"
+    view.on_reading(broken)
+
+    text = view._phase_widget._context_label.text()
+    assert STALE_MARK in text, (
+        "an unusable update left the freshness stamp intact, so the previous ETA still reads as current"
+    )
+    assert "2ч" in text, "the last legible ETA was hidden instead of marked"
