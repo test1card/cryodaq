@@ -738,3 +738,86 @@ def test_unverified_process_tree_blocks_restore_and_automatic_recovery(tmp_path:
         subject.clear_recovery(repository)
         old.unlink(missing_ok=True)
         new.write_text("VALUE = 'guarded'\n", encoding="utf-8")
+
+
+def test_main_refuses_non_green_control_suite(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_bytes(b"VALUE = 'base'\n")
+    _git(repository, "add", "src/production.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_bytes(b"VALUE = 'candidate'\n")
+    _git(repository, "commit", "-qam", "candidate")
+
+    calls = 0
+
+    def green_control(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal calls
+        calls += 1
+        return ["tests/test_guard.py::test_guard"]
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", green_control)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 2
+    assert calls == 1
+    assert "control run is not green" in capsys.readouterr().out
+
+
+def test_failures_refuses_crashed_pytest_return_codes(monkeypatch, tmp_path: Path) -> None:
+    suite = tmp_path / "tests" / "crashed.py"
+
+    def crashed_pytest(command, root=None, **_kwargs) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, 4, b"", b"internal error")
+
+    monkeypatch.setattr(subject, "_run_candidate_process", crashed_pytest)
+    monkeypatch.setattr(subject, "repository_root", lambda: tmp_path)
+
+    with pytest.raises(subject.MeasurementError, match="exited 4 with no readable result"):
+        subject.failures([str(suite)], tmp_path / "cache")
+
+
+def test_failures_uses_a_fresh_pyc_cache_prefix_for_each_mutation_run(monkeypatch, tmp_path: Path) -> None:
+    suite = ["tests"]
+    captured: list[str] = []
+
+    def capture_prefix(command, root=None, **kwargs) -> subprocess.CompletedProcess[bytes]:
+        environment = kwargs.get("environment", {})
+        captured.append(environment.get("PYTHONPYCACHEPREFIX", ""))
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(subject, "_run_candidate_process", capture_prefix)
+    monkeypatch.setattr(subject, "repository_root", lambda: tmp_path)
+
+    assert subject.failures(suite, tmp_path / "first") == []
+    assert subject.failures(suite, tmp_path / "second") == []
+    assert len(captured) == 2
+    assert captured[0] != ""
+    assert captured[1] != ""
+    assert captured[0] != captured[1]
+
+
+def test_git_queries_strip_git_environment_from_repository_commands(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, str | None] = {}
+
+    def capture_run(args: list[str], env=None, timeout=None):
+        captured.update(
+            {key: (None if env is None else env.get(key)) for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
+        )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subject, "_run", capture_run)
+
+    with monkeypatch.context() as m:
+        m.setenv("GIT_DIR", str(tmp_path / "alt.git"))
+        m.setenv("GIT_WORK_TREE", str(tmp_path / "work"))
+        m.setenv("GIT_INDEX_FILE", str(tmp_path / "index"))
+        subject._git(["status", "--porcelain"])
+
+    assert captured["GIT_DIR"] is None
+    assert captured["GIT_WORK_TREE"] is None
+    assert captured["GIT_INDEX_FILE"] is None
