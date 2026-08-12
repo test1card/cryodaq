@@ -2788,3 +2788,70 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "no supported production health-node configuration" in section
     assert "::BUILTIN_DRIVER_SPECS" not in section
     assert "::get_driver_spec" not in section
+
+
+# Mojibake signatures from a cp1251/UTF-8 confusion.  Measured against the real
+# incident: 26 of 26 sequences on the damaged register, and 1 of 1 on a later
+# recurrence in ``tests/``.  Measured against the clean tree: zero hits across
+# every tracked file, which is why this runs repo-wide instead of over one path.
+# Written as escapes so this module contains ASCII only and cannot match itself.
+_MOJIBAKE_SIGNATURES = (
+    "\u0412\u00b7",
+    "\u0432\u0402\u00a6",
+    "\u0432\u0402\u045a",
+    "\u0432\u0402\u045c",
+    "\u0432\u0402\u201c",
+    "\u0432\u0402\u201d",
+)
+
+
+def _mojibake_hits(text: str) -> int:
+    """Count known mojibake sequences in one decoded document."""
+    return sum(text.count(signature) for signature in _MOJIBAKE_SIGNATURES)
+
+
+def test_mojibake_detector_is_bound_to_the_damage_it_names() -> None:
+    """Positive control: the detector must fire on the exact damage shape.
+
+    Without this, a detector that matched nothing would pass the sweep below and
+    read as evidence the tree is clean.  The sample is inline, not a commit
+    reference, so it still resolves in a fresh clone after the branch is gone.
+    """
+    for signature in _MOJIBAKE_SIGNATURES:
+        assert _mojibake_hits(f"prefix {signature} suffix") == 1, signature
+
+    damaged = " ".join(f"row {signature} end" for signature in _MOJIBAKE_SIGNATURES)
+    assert _mojibake_hits(damaged) == len(_MOJIBAKE_SIGNATURES)
+
+    # Genuine Russian must not fire: a Cyrillic letter followed by the guillemet
+    # or an ellipsis is ordinary text here, and a rule broad enough to catch it
+    # was measured at 107 false-positive files.
+    assert _mojibake_hits("\u043a\u0430\u043d\u0430\u043b \u00ab\u0422\u0031\u00bb\u2026") == 0
+    assert _mojibake_hits("plain ASCII text with an em dash \u2014 and a quote \u201d") == 0
+
+
+def test_tracked_text_carries_no_known_mojibake() -> None:
+    """No tracked text file may contain a known cp1251/UTF-8 mojibake sequence.
+
+    This is deliberately narrow.  It catches the signature family that has
+    actually damaged this repository twice; it does NOT catch novel mojibake from
+    a different codepage pair, ASCII-only corruption, replacement characters, or
+    damage inside binary files.  A new variant needs its signature added here when
+    it is first seen, and the control above keeps the detector honest meanwhile.
+    """
+    damaged: dict[str, int] = {}
+    for relative in _tracked_files():
+        path = REPO_ROOT / relative
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except (UnicodeDecodeError, FileNotFoundError, OSError):
+            continue  # binary, or a path this platform cannot open
+        hits = _mojibake_hits(text)
+        if hits:
+            damaged[relative] = hits
+
+    assert not damaged, (
+        "tracked files carry known cp1251/UTF-8 mojibake: "
+        f"{sorted(damaged.items())}. Repair with "
+        "text.encode('cp1251').decode('utf-8') and verify no ASCII skeleton changed."
+    )
