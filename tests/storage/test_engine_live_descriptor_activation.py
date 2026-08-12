@@ -43,6 +43,9 @@ async def test_descriptor_authority_selection_and_parse_run_off_event_loop(
         def require_exact_instruments(self, instrument_ids: object) -> None:
             observed["instruments"] = instrument_ids
 
+        def require_exact_channels(self, configured_channels: object) -> None:
+            observed["channels"] = configured_channels
+
     def _load(base: Path, *, local_path: Path | None = None) -> _Owner:
         observed["thread"] = threading.get_ident()
         observed["base"] = base
@@ -62,6 +65,16 @@ async def test_descriptor_authority_selection_and_parse_run_off_event_loop(
     assert observed["base"] == tmp_path / "channel_descriptors.yaml"
     assert observed["local"] == (tmp_path / expected_local if expected_local else None)
     assert observed["instruments"] == ("probe", "source")
+    assert observed["channels"] == {"probe": (), "source": ()}
+
+
+def test_startup_channel_completeness_names_missing_emitted_channel() -> None:
+    owner = load_live_channel_descriptor_catalog(
+        Path(__file__).resolve().parents[2] / "config" / "channel_descriptors.yaml"
+    )
+
+    with pytest.raises(ChannelDescriptorStorageError, match="missing-configured-channel"):
+        owner.require_exact_channels({"LS218_1": ("missing-configured-channel",)})
 
 
 async def test_missing_local_descriptor_replacement_fails_startup_without_base_fallback(
@@ -109,6 +122,9 @@ async def test_descriptor_loader_does_not_block_event_loop(
 
     class _Owner:
         def require_exact_instruments(self, _instrument_ids: object) -> None:
+            return None
+
+        def require_exact_channels(self, _configured_channels: object) -> None:
             return None
 
     def _load(_base: Path, *, local_path: Path | None = None) -> _Owner:
