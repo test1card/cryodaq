@@ -1012,11 +1012,11 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             "`src/cryodaq/gui/shell/views/analytics_widgets.py:1626`",
         ),
         (
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:167`",
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:166`",
+            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:171`",
+            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:170`",
         ),
         ("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`", "`src/cryodaq/gui/dashboard/temp_plot_widget.py:135`"),
-        ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
+        ("`src/cryodaq/gui/shell/top_watch_bar.py:1090`", "`src/cryodaq/gui/shell/top_watch_bar.py:1089`"),
         ("at all seven sites", "at all six sites"),
         (
             "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:109`",
