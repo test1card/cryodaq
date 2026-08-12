@@ -276,12 +276,35 @@ async def test_single_sample_bootstrap_expires(monkeypatch) -> None:
 
 
 async def test_outage_gap_does_not_expand_freshness_horizon(monkeypatch) -> None:
-    """A long outage must not become the next accepted cadence interval."""
+    """A long outage must not become the next accepted cadence interval.
+
+    HOT and COLD are deliberately refreshed at the instant of the assertion, so an empty batch can
+    only come from the HEATER being judged stale.  Without that isolation the assertion is
+    satisfied by HOT/COLD expiring instead, and it stays green with the guard removed -- which is
+    what the first version of this test did.
+    """
     plugin = _configured_plugin()
-    for wall_sec in (0.0, 1.0):
+
+    def _at(wall_sec: float) -> None:
         monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda _t=wall_sec: _t)
-        await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
-    monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 601.0)
-    await plugin.process([_make_heater_reading(10.0)])
-    monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 605.0)
-    assert await plugin.process([_make_heater_reading(10.0)]) == []
+
+    for wall_sec in (0.0, 1.0):
+        _at(wall_sec)
+        await plugin.process(
+            [_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)]
+        )
+
+    assert plugin._freshness_horizon_s(HEATER_CH) == pytest.approx(3.0)
+
+    # A 600 s outage, then every channel reports again.
+    _at(601.0)
+    await plugin.process(
+        [_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)]
+    )
+    assert plugin._freshness_horizon_s(HEATER_CH) == pytest.approx(3.0), (
+        "the outage gap was accepted as a cadence sample"
+    )
+
+    # HOT and COLD are fresh here; only the heater is 4 s old, which exceeds its 3 s horizon.
+    _at(605.0)
+    assert await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0)]) == []
