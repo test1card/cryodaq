@@ -80,6 +80,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: local_mutation_of_tracked_sweep_enumeration_to_empty_slice_left_all_existing_mojibake_guards_green_while_a_damaged_file_was_not_read_pending_immutable_capture
     green_evidence: pending_local_execution_after_addition
+  - id: MOJIBAKE-LIVE-INVENTORY-ENUMERATION-FALSE-GREEN-343
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_live_tracked_inventory
+    ci_partition: remaining
+    red_evidence: live_inventory_guard_used_a_mocked_tracked_file_list_and_could_not_detect_git_enumeration_dropping_a_tracked_path_pending_immutable_capture
+    green_evidence: pending_local_execution_after_addition
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -6424,6 +6432,8 @@ records:
       - node: tests/docs/test_docs_freshness.py::test_tracked_text_carries_no_known_mojibake
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_its_pinned_digest
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_live_tracked_inventory
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_mojibake_derivation_matches_its_pinned_mapping
         ci_partition: remaining

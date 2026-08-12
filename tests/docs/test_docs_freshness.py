@@ -3122,7 +3122,8 @@ def test_tracked_text_carries_no_known_mojibake() -> None:
 def test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file(tmp_path, monkeypatch) -> None:
     damaged = tmp_path / "damaged.md"
     damaged.write_text(_cp1251_mojibake("\u2014"), encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", damaged.name], cwd=tmp_path, check=True)
     monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(sys.modules[__name__], "_tracked_files", lambda: ["damaged.md"])
 
     assert _tracked_mojibake_hits() == {"damaged.md": 1}
