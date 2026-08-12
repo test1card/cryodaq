@@ -270,8 +270,10 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
 
 До поездки в лабораторию закрываются безопасные software-side задачи:
 
-1. H3/H4: integrated runtime/lifecycle slice `026bf50` прошёл detached
-   clean-SHA gate (4 939 passed / 11 skipped / 1 deselected). H4 R3a
+1. H3/H4: для integrated runtime/lifecycle slice на коммите
+   `026bf50b158f019953e3667026bc35b7fe935330`, который не является предком
+   default-ветки `master`, выполнен detached clean-SHA gate (4 939 passed /
+   11 skipped / 1 deselected). H4 R3a
    provider-neutral delivery receipt и durable state-v2 committed. H4 R3b
    активирован для POSIX source-mode short profile: registry единолично
    запускает owned execution, проверяет process/artifact/receipt cut, выдаёт и
