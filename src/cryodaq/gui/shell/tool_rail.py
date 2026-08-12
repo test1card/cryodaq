@@ -169,6 +169,7 @@ class ToolRailButton(QToolButton):
         self._name = name
         self._active = False
         self._hover = False
+        self._popup_keyboard_focus: bool | None = None
         self._icon_path = icon_path
         self.setFixedSize(_RAIL_WIDTH, _BUTTON_SIZE)
         self.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
@@ -215,20 +216,29 @@ class ToolRailButton(QToolButton):
 
     def focusInEvent(self, event):  # noqa: ANN001
         super().focusInEvent(event)
+        if event.reason() is Qt.FocusReason.PopupFocusReason:
+            popup_focus = self._popup_keyboard_focus
+            self._popup_keyboard_focus = None
+            self._set_keyboard_focus(True if popup_focus is None else popup_focus)
+            return
         self._set_keyboard_focus(
             event.reason()
             in {
                 Qt.FocusReason.TabFocusReason,
                 Qt.FocusReason.BacktabFocusReason,
-                Qt.FocusReason.PopupFocusReason,
             }
         )
 
     def focusOutEvent(self, event):  # noqa: ANN001
+        if event.reason() is Qt.FocusReason.PopupFocusReason:
+            self._popup_keyboard_focus = bool(self.property("keyboardFocus"))
+        else:
+            self._popup_keyboard_focus = None
         self._set_keyboard_focus(False)
         super().focusOutEvent(event)
 
     def mousePressEvent(self, event):  # noqa: ANN001
+        self._popup_keyboard_focus = False
         self._set_keyboard_focus(False)
         super().mousePressEvent(event)
 

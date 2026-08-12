@@ -4,7 +4,7 @@ keywords: status-bar, bottom-bar, connection, safety-state, uptime, disk, data-r
 applies_to: bottom chrome strip showing passive system-level evidence
 status: active
 implements: src/cryodaq/gui/shell/bottom_status_bar.py
-last_updated: 2026-07-20
+last_updated: 2026-08-12
 references: rules/color-rules.md, rules/data-display-rules.md, rules/content-voice-rules.md, governance/change-impact.md
 ---
 
@@ -67,11 +67,13 @@ pushed to the far edge by a stretch.
    muted; they never become green.
 4. `running` and `run_permitted` use `ACCENT`, because activity or permission is
    not evidence of health. `ready` uses `STATUS_INFO`.
-5. Any safety state containing `fault` uses `STATUS_FAULT`.
+5. Any safety state containing `fault` uses neutral `MUTED_FOREGROUND` body text
+   with a `STATUS_FAULT` left border. The fault color is kept out of body text.
    Exact `fault_latched` also sounds immediately and repeats the application
    beep every three seconds until the state changes or becomes unavailable.
-6. Disk free space below 10 GiB uses `STATUS_FAULT`; 10 GiB through less than
-   50 GiB uses `STATUS_CAUTION`; 50 GiB or more is muted technical information.
+6. Disk free space below 10 GiB uses neutral `MUTED_FOREGROUND` body text with
+   a `STATUS_FAULT` left border; 10 GiB through less than 50 GiB uses
+   `STATUS_CAUTION`; 50 GiB or more is muted technical information.
 7. Connected and disconnected states include both text and a dot glyph. The
    connected color is `STATUS_OK`; disconnected is `STATUS_FAULT`.
 8. “Connected” currently means the host has recent-reading evidence. It is not
@@ -90,7 +92,7 @@ pushed to the far edge by a stretch.
 | Backend text | Token | Meaning |
 |---|---|---|
 | missing/empty | `TEXT_MUTED` | no current safety evidence |
-| contains `fault` | `STATUS_FAULT` | fault evidence; exact `fault_latched` repeats the beep |
+| contains `fault` | `MUTED_FOREGROUND` text + `STATUS_FAULT` left border | fault evidence; exact `fault_latched` repeats the beep |
 | contains `running` | `ACCENT` | current activity, not health |
 | contains `permitted` | `ACCENT` | authorization, not health |
 | contains `ready` | `STATUS_INFO` | informational readiness, not health |
@@ -155,8 +157,8 @@ Better:
 
 Worse or still open:
 
-- status color is applied to body text rather than to a separate high-contrast
-  shape; physical contrast/NVDA evidence remains open;
+- fault color is carried by a left border while body text remains neutral;
+  physical contrast/NVDA evidence remains open;
 - the clock is proportional, has no timezone, and may jitter;
 - the rate can remain last-known without its own explicit stale cue;
 - disk evidence still depends on the backend monitor and GUI transport path;

@@ -6,7 +6,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QFocusEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui import theme
@@ -123,6 +124,28 @@ def test_popup_focus_return_preserves_keyboard_focus_ring() -> None:
     button.setFocus(Qt.FocusReason.PopupFocusReason)
     app.processEvents()
     assert button.property("keyboardFocus") is True
+
+
+def test_mouse_popup_focus_return_does_not_restore_keyboard_focus_ring() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
+    app.processEvents()
+    button = rail._buttons["home"]
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    button.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    button.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut, Qt.FocusReason.PopupFocusReason))
+    button.focusInEvent(QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.PopupFocusReason))
+    assert button.property("keyboardFocus") is False
 
 
 def test_rail_width_matches_design_token() -> None:
