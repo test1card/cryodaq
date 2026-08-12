@@ -19,6 +19,8 @@ from cryodaq.drivers.base import ChannelStatus, Reading
 
 _log = logging.getLogger(__name__)
 
+_BOOTSTRAP_FRESHNESS_HORIZON_S = 30.0
+
 
 class ThermalCalculator(AnalyticsPlugin):
     """Расчёт теплового сопротивления между двумя точками криостата.
@@ -111,7 +113,7 @@ class ThermalCalculator(AnalyticsPlugin):
 
         horizon = self._freshness_horizon_s(channel)
         if horizon is None:
-            return False
+            return (now_monotonic - last_arrival) > _BOOTSTRAP_FRESHNESS_HORIZON_S
 
         return (now_monotonic - last_arrival) > horizon
 
@@ -150,7 +152,9 @@ class ThermalCalculator(AnalyticsPlugin):
             if intervals is not None and previous_arrival is not None:
                 arrival_interval = now_monotonic - previous_arrival
                 if arrival_interval > 0.0:
-                    intervals.append(arrival_interval)
+                    established_horizon = self._freshness_horizon_s(reading.channel)
+                    if established_horizon is None or arrival_interval <= established_horizon:
+                        intervals.append(arrival_interval)
             self._last_required_input_arrival_monotonic[reading.channel] = now_monotonic
 
         # Проверить, что все три канала известны
