@@ -33,7 +33,7 @@ from cryodaq.agents.assistant.query.prompts import (
     FORMAT_RESPONSE_SYSTEM,
     FORMAT_UNKNOWN_USER,
 )
-from cryodaq.agents.assistant.query.router import QueryRouter
+from cryodaq.agents.assistant.query.router import QueryRouter, QueryUnavailableError
 from cryodaq.agents.assistant.query.ru_labels import (
     phase_display_name,
     ru_bool,
@@ -177,6 +177,9 @@ class AssistantQueryAgent:
                 errors.append("format_llm_truncated_or_empty")
             else:
                 response = result.text.strip()
+        except QueryUnavailableError as exc:
+            logger.warning("AssistantQueryAgent: query unavailable for %r: %s", query[:80], exc)
+            errors.append(f"query_unavailable: {exc}")
         except Exception as exc:
             logger.warning("AssistantQueryAgent: pipeline error for %r: %s", query[:80], exc)
             errors.append(f"unexpected: {exc}")
