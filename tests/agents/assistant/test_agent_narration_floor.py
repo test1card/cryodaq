@@ -1,4 +1,4 @@
-﻿"""OC-028 вЂ” the alarm-narration ledger must have a floor as well as a ceiling.
+"""OC-028 вЂ” the alarm-narration ledger must have a floor as well as a ceiling.
 
 The dedup gate solved a real problem: a flapping alarm produced one narrative
 per re-fire and buried the operator.  It solved it without a floor.  ``_seen``
@@ -1778,7 +1778,3 @@ async def test_cancellation_before_the_handler_first_runs_is_reported() -> None:
     assert "alarm:vacuum_loss" in agent._dedup._undelivered, (
         "a handler cancelled before it ever ran left the gate advanced with no outcome recorded"
     )
-
-
-
-
