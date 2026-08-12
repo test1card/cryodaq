@@ -969,6 +969,7 @@ class AlarmStateManager:
             triggered_at=time.time(),
             channels=[channel_id],
             values={channel_id: age_seconds},
+            experiment_id=self._bound_experiment_id,
         )
         self._activation_sequence += 1
         event.activation_id = self._activation_sequence

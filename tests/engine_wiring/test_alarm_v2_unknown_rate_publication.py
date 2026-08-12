@@ -383,3 +383,35 @@ async def test_cooldown_loop_publishes_clear_after_non_tick_mutation() -> None:
         emitted.append(published.get_nowait())
     assert [event.event_type for event in emitted] == ["alarm_fired", "alarm_cleared"]
     assert emitted[-1].experiment_id == "experiment-clear"
+
+
+@pytest.mark.asyncio
+async def test_cooldown_loop_ignores_non_cooldown_alarm_clear() -> None:
+    state_mgr = AlarmStateManager()
+    state_mgr.bind_experiment_id("experiment-clear")
+    state_mgr.publish_diagnostic_alarm(_CHANNEL, "warning", 300.0)
+    event_bus = EventBus()
+    published = await event_bus.subscribe("cooldown-ignores-diagnostic-clear")
+
+    class _CooldownAlarm:
+        calls = 0
+
+        async def tick(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                state_mgr.clear_diagnostic_alarm(_CHANNEL)
+                return None
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await cooldown_alarm_tick_loop(
+            cooldown_cfg={"eval_interval_s": 0},
+            cooldown_alarm=_CooldownAlarm(),
+            state_mgr=state_mgr,
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=SimpleNamespace(active_experiment_id="experiment-clear"),
+        )
+
+    assert published.empty()

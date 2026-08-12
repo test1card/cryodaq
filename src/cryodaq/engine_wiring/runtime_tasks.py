@@ -590,7 +590,12 @@ async def cooldown_alarm_tick_loop(
                     alarm_dispatch_tasks.add(_pt)
                     _pt.add_done_callback(alarm_dispatch_tasks.discard)
                 await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
-        cleared_ids = set(last_active) - set(state_mgr.get_active())
+        active_after = state_mgr.get_active()
+        cleared_ids = {
+            alarm_id
+            for alarm_id in ("cooldown_alarm", "cooldown_watchdog")
+            if alarm_id in last_active and alarm_id not in active_after
+        }
         if transition == "CLEARED":
             cleared_ids.add(_last_triggered_id)
         for cleared_id in sorted(cleared_ids):
@@ -602,7 +607,7 @@ async def cooldown_alarm_tick_loop(
                     timestamp=datetime.now(UTC),
                 )
             )
-        last_active = state_mgr.get_active()
+        last_active = active_after
 
 
 async def vacuum_guard_tick_loop(
