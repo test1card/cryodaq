@@ -220,6 +220,7 @@ class ToolRailButton(QToolButton):
             in {
                 Qt.FocusReason.TabFocusReason,
                 Qt.FocusReason.BacktabFocusReason,
+                Qt.FocusReason.PopupFocusReason,
             }
         )
 

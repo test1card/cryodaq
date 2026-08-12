@@ -102,6 +102,29 @@ def test_keyboard_focus_changes_real_tool_rail_pixels_and_coexists_with_selectio
     assert focused_selected.pixelColor(1, button.height() // 2).name().lower() == accent
 
 
+def test_popup_focus_return_preserves_keyboard_focus_ring() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
+    app.processEvents()
+
+    button = rail._buttons["home"]
+    other = rail._buttons["new_experiment"]
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is True
+
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is False
+
+    button.setFocus(Qt.FocusReason.PopupFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is True
+
+
 def test_rail_width_matches_design_token() -> None:
     # DESIGN: invariant TOOL_RAIL_WIDTH (56), couples to HEADER_HEIGHT.
     _app()

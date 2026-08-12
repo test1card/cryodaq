@@ -24,12 +24,12 @@ the design-system-specific definitions of "breaking" from
   ACCENT ring at 6.41:1 on SURFACE_PANEL, independent of the 3 px selected
   left rail. The generic FOCUS_RING pair measures 2.58:1 there and is refused.
 - Required custom enabled-button QSS to include an object-specific disabled
-  selector and mode/authority reason.
+  selector and a generic unavailability explanation.
 
 ### Corrected
 
 - Replaced the false generic claim that MUTED_FOREGROUND passed on any
-  background with five explicit, computed Warm Stone pair claims.
+  background with six explicit, computed Warm Stone pair claims.
 - Kept fault colour on dots, borders, icons, or filled badges while rendering
   the BottomStatusBar and New Experiment validation body labels with neutral,
   legible text.
