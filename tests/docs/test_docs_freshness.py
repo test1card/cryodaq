@@ -3007,11 +3007,18 @@ _MOJIBAKE_MAPPING_DIGEST = "sha256:a013c8446e3dd13bf48760927feb8b792f666b6c8eb6b
 def test_mojibake_derivation_matches_its_pinned_mapping() -> None:
     """The source-to-signature mapping may not change without changing this literal.
 
-    Independent of the derivation: the expected value is written by hand, so a wrong
-    image fails here instead of certifying itself through the tests that consume it.
+    Hashes ``_MOJIBAKE_SIGNATURES`` -- the tuple ``_mojibake_hits`` actually consumes --
+    rather than recomputing the images from ``_cp1251_mojibake``.  Measured reason: with
+    the digest bound to the helper, diverging one tuple entry from it left all five
+    mojibake nodes green while the real corruption for that character produced ZERO hits.
+    A control that recomputes a parallel value cannot see the data path it is guarding.
     """
+    assert len(_MOJIBAKE_SIGNATURES) == len(_MOJIBAKE_AT_RISK_SOURCES)
     observed = hashlib.sha256(
-        "\x1f".join(f"{source}\x1e{_cp1251_mojibake(source)}" for source in _MOJIBAKE_AT_RISK_SOURCES).encode("utf-8")
+        "\x1f".join(
+            f"{source}\x1e{signature}"
+            for source, signature in zip(_MOJIBAKE_AT_RISK_SOURCES, _MOJIBAKE_SIGNATURES, strict=True)
+        ).encode("utf-8")
     ).hexdigest()
     assert f"sha256:{observed}" == _MOJIBAKE_MAPPING_DIGEST, (
         "the cp1251 source-to-signature mapping changed. If that is intended, re-derive it "
