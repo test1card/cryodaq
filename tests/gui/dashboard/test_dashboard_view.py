@@ -460,6 +460,22 @@ def test_telemetry_does_not_enable_mutations(app):
     assert not view._quick_log._send_btn.isEnabled()
 
 
+def test_celsius_temperature_is_not_buffered_on_kelvin_dashboard(app, tmp_path):
+    target = tmp_path / "channels.yaml"
+    target.write_text(
+        "default_quantity: temperature\nchannels:\n  Т1:\n    name: celsius\n    visible: true\n",
+        encoding="utf-8",
+    )
+    manager = ChannelManager(target)
+    from types import SimpleNamespace
+
+    manager.set_descriptor_authority({"Т1": SimpleNamespace(quantity="temperature", unit="°C")})
+    view = DashboardView(manager)
+    view.on_reading(Reading.now("Т1", 20.0, "°C"))
+
+    assert view._buffer_store.get_history("Т1") == []
+
+
 def test_dashboard_presentation_tick_is_bounded_to_two_hz(app):
     mgr = ChannelManager()
     view = DashboardView(mgr)

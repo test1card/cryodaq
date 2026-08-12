@@ -261,7 +261,7 @@ class DashboardView(QScrollArea):
             return
         timestamp_epoch = reading.timestamp.timestamp()
 
-        if self._channel_mgr.is_temperature_channel(channel):
+        if self._channel_mgr.is_kelvin_temperature_channel(channel) and reading.unit == "K":
             short_id = channel.split(" ")[0]
             self._buffer_store.append(short_id, timestamp_epoch, float(value))
             if self._sensor_grid is not None:

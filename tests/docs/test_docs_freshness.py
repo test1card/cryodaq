@@ -3028,7 +3028,13 @@ def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None
         leaf = path.rsplit("/", 1)[-1]
         if called & set(list_helpers):
             measured[leaf] = "list"
-        elif "is_temperature_channel" in called:
+        elif called & {"is_temperature_channel", "is_kelvin_temperature_channel"}:
+            # `is_kelvin_temperature_channel` is a NARROWING of the predicate, not an escape from
+            # it: it calls `is_temperature_channel` first and then additionally requires the
+            # descriptor unit to be K, so a file using it still selects by declared quantity. It
+            # was added so Celsius temperature channels stop reaching Kelvin-only surfaces. This
+            # widens the guard's VOCABULARY by one named symbol and relaxes nothing -- a file that
+            # calls neither predicate still falls through to `selects_nothing` below.
             measured[leaf] = "predicate"
         elif uses_archive_catalog_sort_rank(tree):
             measured[leaf] = "archive_catalog"

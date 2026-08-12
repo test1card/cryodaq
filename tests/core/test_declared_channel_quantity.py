@@ -161,6 +161,63 @@ def test_a_malformed_default_quantity_is_refused(tmp_path: Path, bad: object) ->
         ChannelManager(target).load()
 
 
+@pytest.mark.parametrize("field", ["default_quantity", "quantity"])
+def test_an_unknown_quantity_is_refused_before_commit(tmp_path: Path, field: str) -> None:
+    payload = {"channels": {"Т1": {"name": "one"}}}
+    if field == "default_quantity":
+        payload[field] = "temperatue"
+    else:
+        payload["default_quantity"] = "temperature"
+        payload["channels"]["Т1"][field] = "temperatue"
+    target = tmp_path / "channels.yaml"
+    target.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
+
+    # Bind the three things the operator needs, not the sentence. A refusal that only says
+    # "unsupported" leaves them guessing: the message must name the offending value, say what the
+    # consequence would have been, and list what is accepted.
+    with pytest.raises(ChannelConfigError) as raised:
+        ChannelManager(target).load()
+    message = str(raised.value)
+    assert "temperatue" in message
+    assert "not a known physical quantity" in message
+    assert "temperature" in message and "resistance" in message, "the accepted values must be listed"
+
+
+def test_successful_reload_notifies_subscribers(tmp_path: Path) -> None:
+    target = tmp_path / "channels.yaml"
+    target.write_text(
+        yaml.safe_dump({"default_quantity": "temperature", "channels": {"Т1": {"name": "one"}}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    manager = ChannelManager(target)
+    calls: list[int] = []
+    manager.on_change(lambda: calls.append(1))
+
+    target.write_text(
+        yaml.safe_dump({"default_quantity": "temperature", "channels": {"Т2": {"name": "two"}}}, allow_unicode=True),
+        encoding="utf-8",
+    )
+    manager.load()
+
+    assert calls == [1]
+    assert list(manager.get_all()) == ["Т2"]
+
+
+def test_descriptor_authority_controls_quantity_and_kelvin_surfaces() -> None:
+    from types import SimpleNamespace
+
+    manager = ChannelManager()
+    manager.set_descriptor_authority(
+        {
+            "Т1": SimpleNamespace(quantity="temperature", unit="°C"),
+            "Т2": SimpleNamespace(quantity="temperature", unit="K"),
+        }
+    )
+
+    assert manager.get_quantity("Т1") == "temperature"
+    assert manager.get_visible_temperature_channels() == ["Т2"]
+
+
 def test_saving_channel_edits_preserves_the_declaration(tmp_path: Path) -> None:
     """The defect a review found in this migration, stated as a behaviour.
 

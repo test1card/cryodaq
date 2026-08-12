@@ -476,6 +476,24 @@ _REGISTRY_ROWS = (
         "declared quantity is operator-owned in config/channels.yaml, not descriptor-derived",
     ),
     (
+        # Same expression and therefore the same AST fingerprint as C2-145 above; only the scope
+        # differs. The declaring authority is NAMED, which is what this registry requires before a
+        # site may be called legitimate: the split produces a LOOKUP KEY into the active
+        # channel-descriptor catalog that `MainWindowV2` installs via `set_descriptor_authority`,
+        # and the catalog then declares the quantity and unit. Nothing here infers a ROLE from
+        # spelling -- an unknown key returns None and the caller refuses to classify, which is the
+        # opposite of the `startswith("Т")` behaviour OC-030 exists to remove.
+        "C2-146",
+        _Challenge(
+            "src/cryodaq/core/channel_manager.py",
+            "ChannelManager._descriptor_for",
+            "computed membership over identity",
+            "158f4568e2f6f782d7f8",
+        ),
+        "BLOCKED-ON-SCHEMA",
+        "short-id lookup key into the descriptor catalog, which is itself the declaring authority",
+    ),
+    (
         "C2-001",
         _Challenge(
             "src/cryodaq/agents/assistant/live/context_builder.py",

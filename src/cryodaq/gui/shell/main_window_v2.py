@@ -226,6 +226,7 @@ class MainWindowV2(QMainWindow):
 
         self._channel_mgr = get_channel_manager()
         self._active_channel_descriptors = _active_channel_descriptors()
+        self._channel_mgr.set_descriptor_authority(dict(self._active_channel_descriptors))
         self._declared_cold_stage_descriptor: ChannelDescriptorV1 | None = None
         # D7.1b: descriptor identity store — GUI-thread-owned, lives for one session.
         self._descriptor_store = DescriptorStore()

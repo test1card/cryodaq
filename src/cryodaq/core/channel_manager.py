@@ -23,6 +23,21 @@ class ChannelConfigError(RuntimeError):
 
 
 _DEFAULT_CONFIG = _get_config_dir() / "channels.yaml"
+_SUPPORTED_QUANTITIES = frozenset(
+    {
+        "temperature",
+        "pressure",
+        "voltage",
+        "current",
+        "resistance",
+        "power",
+        "length",
+        "relative_humidity",
+        "raw_sensor",
+        "derived",
+        "event_state",
+    }
+)
 
 # Стандартные имена (если channels.yaml не существует)
 _DEFAULT_CHANNELS: dict[str, dict[str, Any]] = {
@@ -73,6 +88,7 @@ class ChannelManager:
         # ChannelManager() construction (tests, GUI standalone) keeps
         # working without an alarms file.
         self._landmarks: dict[str, dict[str, Any]] = {}
+        self._descriptor_authority: dict[str, Any] | None = None
         self._config_path: Path = config_path or _DEFAULT_CONFIG
         self._callbacks: list[Any] = []
         self.load()
@@ -114,6 +130,25 @@ class ChannelManager:
         declared_default = raw.get("default_quantity")
         if declared_default is not None and not isinstance(declared_default, str):
             raise ChannelConfigError(f"channels.yaml at {candidate_path}: default_quantity must be a string")
+        quantities = {
+            channel_id: info.get("quantity")
+            for channel_id, info in channels.items()
+            if isinstance(info, dict) and "quantity" in info
+        }
+        for field_name, quantity in (("default_quantity", declared_default), *quantities.items()):
+            if quantity is not None and quantity not in _SUPPORTED_QUANTITIES:
+                # Say WHAT is wrong, WHY it matters, and WHICH values are accepted. The operator
+                # cannot act on "unsupported quantity 'temperatue'" alone, and the consequence of
+                # this exact typo is that every temperature surface goes SILENTLY empty -- which is
+                # why the load refuses instead of continuing quietly.
+                supported = ", ".join(sorted(_SUPPORTED_QUANTITIES))
+                raise ChannelConfigError(
+                    f"channels.yaml at {candidate_path}: {field_name} declares quantity {quantity!r}, "
+                    f"which is not a known physical quantity. Channels resolving to it would be "
+                    f"treated as no declared quantity at all, so the dashboard grid, temperature "
+                    f"plot, watch bar and conductivity selector would show nothing for them. "
+                    f"Use one of: {supported}."
+                )
         # EVERY CHECK BEFORE ANY MUTATION. `self._channels` used to be replaced
         # on the line above this validation, so a RELOAD of a file with valid
         # `channels` and a malformed `default_quantity` raised only after the
@@ -124,6 +159,7 @@ class ChannelManager:
         self._config_path = candidate_path
         self._channels = channels
         self._default_quantity = declared_default
+        self._notify()
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
 
     def save(self, path: Path | None = None) -> None:
@@ -303,6 +339,17 @@ class ChannelManager:
     # OC-030 — declared quantity, replacing role inference from spelling
     # ------------------------------------------------------------------
 
+    def set_descriptor_authority(self, descriptors: dict[str, Any]) -> None:
+        """Use the active descriptor catalog as the quantity/unit authority."""
+
+        self._descriptor_authority = descriptors
+
+    def _descriptor_for(self, channel_id: str) -> Any | None:
+        if self._descriptor_authority is None:
+            return None
+        short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        return self._descriptor_authority.get(short_id)
+
     def get_quantity(self, channel_id: str) -> str | None:
         """Return the DECLARED physical quantity of a channel, or None.
 
@@ -321,6 +368,12 @@ class ChannelManager:
         """
 
         short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        descriptor = self._descriptor_for(channel_id)
+        if self._descriptor_authority is not None:
+            if descriptor is None:
+                return None
+            quantity = getattr(descriptor.quantity, "value", descriptor.quantity)
+            return quantity if isinstance(quantity, str) else None
         info = self._channels.get(short_id)
         if info is None:
             return None
@@ -328,6 +381,16 @@ class ChannelManager:
         if isinstance(declared, str) and declared:
             return declared
         return self._default_quantity
+
+    def is_kelvin_temperature_channel(self, channel_id: str) -> bool:
+        """True only for authoritative temperature channels measured in K."""
+
+        if not self.is_temperature_channel(channel_id):
+            return False
+        descriptor = self._descriptor_for(channel_id)
+        if descriptor is None:
+            return self._descriptor_authority is None
+        return descriptor.unit == "K"
 
     def is_temperature_channel(self, channel_id: str) -> bool:
         """True only when the channel DECLARES itself a temperature."""
@@ -337,7 +400,7 @@ class ChannelManager:
     def get_temperature_channels(self) -> list[str]:
         """Every channel declared as a temperature, in configuration order."""
 
-        return [ch_id for ch_id in self._channels if self.is_temperature_channel(ch_id)]
+        return [ch_id for ch_id in self._channels if self.is_kelvin_temperature_channel(ch_id)]
 
     def get_visible_temperature_channels(self) -> list[str]:
         """Visible AND declared-temperature, preserving visible ordering."""
