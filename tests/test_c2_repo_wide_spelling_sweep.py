@@ -1945,6 +1945,18 @@ _REGISTRY_ROWS = (
         "LEGITIMATE",
         "steady-state widget matches exact identities from its declared landmark roster",
     ),
+    (
+        "C2-145",
+        _Challenge(
+            "src/cryodaq/engine.py",
+            "_configured_descriptor_channels",
+            "identity indexing or slicing",
+            "40249cc85e5768983154",
+        ),
+        "LEGITIMATE",
+        "reads the `channel_id` key the validated instrument-config schema declares, "
+        "rather than inferring an identity from its spelling",
+    ),
 )
 
 _REGISTRY = tuple(_Registration(*row) for row in _REGISTRY_ROWS)
