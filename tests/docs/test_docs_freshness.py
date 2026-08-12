@@ -2994,6 +2994,31 @@ def test_mojibake_source_set_matches_its_pinned_digest() -> None:
     )
 
 
+# Hand-pinned digest over the derived MAPPING: every source paired with the exact
+# sequence it becomes.  The source digest above cannot see a DERIVATION error -- the
+# sources stay identical while the image changes -- and the exercise test below builds
+# its samples from `_cp1251_mojibake`, so it would verify a broken value against itself.
+# Measured before this anchor existed: returning a dynamically assembled bogus signature
+# for a single source left all four guard nodes green, and the real corruption for that
+# character escaped the repository sweep.
+_MOJIBAKE_MAPPING_DIGEST = "sha256:a013c8446e3dd13bf48760927feb8b792f666b6c8eb6b6cfafffdcc847588993"
+
+
+def test_mojibake_derivation_matches_its_pinned_mapping() -> None:
+    """The source-to-signature mapping may not change without changing this literal.
+
+    Independent of the derivation: the expected value is written by hand, so a wrong
+    image fails here instead of certifying itself through the tests that consume it.
+    """
+    observed = hashlib.sha256(
+        "\x1f".join(f"{source}\x1e{_cp1251_mojibake(source)}" for source in _MOJIBAKE_AT_RISK_SOURCES).encode("utf-8")
+    ).hexdigest()
+    assert f"sha256:{observed}" == _MOJIBAKE_MAPPING_DIGEST, (
+        "the cp1251 source-to-signature mapping changed. If that is intended, re-derive it "
+        "and update _MOJIBAKE_MAPPING_DIGEST in the same commit, stating why in the message."
+    )
+
+
 def test_every_derived_signature_is_exercised() -> None:
     """Every signature must actually detect, not merely be declared.
 
