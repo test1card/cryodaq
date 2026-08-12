@@ -2969,6 +2969,20 @@ def _cp1251_mojibake(source: str) -> str:
 _MOJIBAKE_SIGNATURES = tuple(_cp1251_mojibake(source) for source in _MOJIBAKE_AT_RISK_SOURCES)
 
 
+def _tracked_mojibake_hits() -> dict[str, int]:
+    damaged: dict[str, int] = {}
+    for relative in _tracked_files():
+        path = REPO_ROOT / relative
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except (UnicodeDecodeError, FileNotFoundError, OSError):
+            continue  # binary, or a path this platform cannot open
+        hits = _mojibake_hits(text)
+        if hits:
+            damaged[relative] = hits
+    return damaged
+
+
 def _mojibake_hits(text: str) -> int:
     """Count known mojibake sequences in one decoded document."""
     return sum(text.count(signature) for signature in _MOJIBAKE_SIGNATURES)
@@ -2979,6 +2993,27 @@ def _mojibake_hits(text: str) -> int:
 # would leave every test green -- the vacuous-pass condition, one entry at a time.  Any
 # removal, addition or substitution changes this digest.
 _MOJIBAKE_SOURCE_DIGEST = "sha256:ae867bafde9155d8f4f8c7f6724f025df77fdc4b7d34f21742482023eacc1fff"
+
+
+def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
+    """The pinned source set must cover every eligible character in tracked text."""
+    eligible: set[str] = set()
+    for relative in _tracked_files():
+        try:
+            text = (REPO_ROOT / relative).read_bytes().decode("utf-8")
+        except (UnicodeDecodeError, FileNotFoundError, OSError):
+            continue
+        for character in text:
+            if ord(character) <= 0x7F or 0x0400 <= ord(character) <= 0x052F or character == "\u00bb":
+                continue
+            try:
+                _cp1251_mojibake(character)
+            except UnicodeDecodeError:
+                continue
+            eligible.add(character)
+    assert _MOJIBAKE_AT_RISK_SOURCES == tuple(sorted(eligible, key=ord)), (
+        "the mojibake source tuple is stale; re-derive it from tracked UTF-8 text"
+    )
 
 
 def test_mojibake_source_set_matches_its_pinned_digest() -> None:
@@ -3075,19 +3110,19 @@ def test_tracked_text_carries_no_known_mojibake() -> None:
     from a different codepage pair, ASCII-only corruption, replacement characters, damage
     inside binary files, or a corrupted U+00BB, which is excluded above by measurement.
     """
-    damaged: dict[str, int] = {}
-    for relative in _tracked_files():
-        path = REPO_ROOT / relative
-        try:
-            text = path.read_bytes().decode("utf-8")
-        except (UnicodeDecodeError, FileNotFoundError, OSError):
-            continue  # binary, or a path this platform cannot open
-        hits = _mojibake_hits(text)
-        if hits:
-            damaged[relative] = hits
+    damaged = _tracked_mojibake_hits()
 
     assert not damaged, (
         "tracked files carry cp1251/UTF-8 mojibake: "
         f"{sorted(damaged.items())}. Repair with "
         "text.encode('cp1251').decode('utf-8') and verify no ASCII skeleton changed."
     )
+
+
+def test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file(tmp_path, monkeypatch) -> None:
+    damaged = tmp_path / "damaged.md"
+    damaged.write_text(_cp1251_mojibake("\u2014"), encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_tracked_files", lambda: ["damaged.md"])
+
+    assert _tracked_mojibake_hits() == {"damaged.md": 1}
