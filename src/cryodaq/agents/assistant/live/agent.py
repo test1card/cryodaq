@@ -459,6 +459,10 @@ class _EventDedup:
             # must be treated as one everywhere.
             last_seen = None
             last_allowed = None
+        elif last_activity is not None and last_activity < now - self._window_s:
+            # A quiet gap ends the suppressed occurrence even when it is too
+            # short for full retirement.
+            self._suppressed.discard(event_id)
 
         self._activity[event_id] = now
         self._prune(now)
@@ -665,6 +669,7 @@ class _EventDedup:
             # corrected clock below is useless if an earlier branch never
             # consults it.
             self._seen[event_id] = now
+            self._activity[event_id] = now
             # THE ESCALATION CLOCK STARTS WHEN THE OPERATOR WAS TOLD, not when
             # the gate admitted the attempt.  Generation can take up to
             # ``timeout_s``, and stamping at admission makes the silence the

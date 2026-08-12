@@ -707,6 +707,29 @@ def test_a_slow_delivery_does_not_leave_the_quiet_branch_armed(clock) -> None:
     )
 
 
+def test_a_quiet_gap_clears_suppression_before_escalation_retirement(clock) -> None:
+    ledger = _ledger()
+    assert ledger.should_dispatch("alarm:quietgap") is True
+    ledger.note_outcome("alarm:quietgap", delivered=True)
+
+    clock.return_value = 1010.0
+    assert ledger.should_dispatch("alarm:quietgap") is False
+
+    clock.return_value = 1041.0
+    assert ledger.should_dispatch("alarm:quietgap") is True
+
+
+def test_confirmed_delivery_refreshes_activity_for_retirement(clock) -> None:
+    ledger = _ledger()
+    assert ledger.should_dispatch("alarm:delayed") is True
+    attempt = ledger.current_attempt("alarm:delayed")
+
+    clock.return_value = 1400.0
+    ledger.note_outcome("alarm:delayed", delivered=True, attempt=attempt)
+    clock.return_value = 1401.0
+    assert ledger.should_dispatch("alarm:delayed") is False
+
+
 def test_an_outstanding_attempt_keeps_its_settled_identity(clock) -> None:
     """Idempotence cannot be bounded by id distance when delivery is unbounded.
 
