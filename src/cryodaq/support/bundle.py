@@ -494,6 +494,15 @@ def _identifier(value: object, *, field: str) -> str:
             and _PUBLIC_TECHNICAL_SEGMENT_RE.fullmatch(segment) is None
             for segment in segments
         )
+        # A canonical UUID is settled before the private-name heuristics run. Those heuristics read
+        # "every segment contains a letter and none is a known technical word" as a personal name,
+        # which is true of `alice.smith` and false of `01890f3c-7b3c-8cc0-98c8-123456789abc`: hex
+        # segments contain a-f, so a valid UUID satisfies the same test. The sentinel is ONE string
+        # for every caller by design, so two UUIDs collapsed onto it collide and `_collect_health`
+        # drops the whole section as an identity conflict. A UUID carries no personal content, so
+        # it is returned as issued.
+        if _UUID_RE.fullmatch(value) is not None:
+            return value
         if (
             has_private_role_segment
             or (
@@ -507,7 +516,7 @@ def _identifier(value: object, *, field: str) -> str:
             or re.fullmatch(r"[a-z]{3,}\d{4,}", value.casefold())
         ):
             return "redacted-private"
-        if _UUID_RE.fullmatch(value) is None and has_unknown_alpha_segment:
+        if has_unknown_alpha_segment:
             return f"redacted-id-{hashlib.sha256(value.casefold().encode('utf-8')).hexdigest()[:24]}"
     return value
 
@@ -809,6 +818,12 @@ def _validate_snapshot_relationships(kind: str, payload: dict[str, object]) -> N
             raise ValueError("ok integrity state requires available storage")
         if state == "ok" and ("dropped_records" not in payload or payload["dropped_records"] != 0):
             raise ValueError("ok integrity state requires explicit zero dropped records")
+        # `persisted_revision` and `pending_records` are non-optional on the authoritative
+        # DataIntegritySummary, unlike `archive_revision`. Without them an available section
+        # establishes neither its durable position nor whether a backlog exists, so it would
+        # present as available while saying nothing about what is actually persisted.
+        if storage == "available" and not {"persisted_revision", "pending_records"} <= payload.keys():
+            raise ValueError("available integrity evidence requires persisted_revision and pending_records")
         if state in {"stale", "disconnected"} and storage != "unknown":
             raise ValueError("stale/disconnected integrity state requires unknown storage")
 

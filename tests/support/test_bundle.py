@@ -25,6 +25,7 @@ from cryodaq.support.bundle import (
 
 NOW = datetime(2026, 7, 12, 7, 8, 9, 123456, tzinfo=UTC)
 HASH = "a" * 64
+OBSERVED_AT = "2026-07-12T07:08:08.123456Z"
 
 
 def _snapshot_fields(*, role: str = "summary") -> dict[str, object]:
@@ -69,10 +70,22 @@ def test_identical_detached_inputs_are_byte_stable_and_sorted() -> None:
         _capture(
             records=(
                 EvidenceRecord.from_payload(
-                    "log", {"event_id": "log-2", "event_code": "worker.stopped", "level": "info"}
+                    "log",
+                    {
+                        "event_id": "log-2",
+                        "event_code": "worker.stopped",
+                        "level": "info",
+                        "observed_at": OBSERVED_AT,
+                    },
                 ),
                 EvidenceRecord.from_payload(
-                    "audit", {"event_id": "audit-1", "event_code": "bundle.requested", "outcome": "accepted"}
+                    "audit",
+                    {
+                        "event_id": "audit-1",
+                        "event_code": "bundle.requested",
+                        "outcome": "accepted",
+                        "observed_at": OBSERVED_AT,
+                    },
                 ),
             )
         )
@@ -81,10 +94,22 @@ def test_identical_detached_inputs_are_byte_stable_and_sorted() -> None:
         _capture(
             records=(
                 EvidenceRecord.from_payload(
-                    "audit", {"outcome": "accepted", "event_code": "bundle.requested", "event_id": "audit-1"}
+                    "audit",
+                    {
+                        "observed_at": OBSERVED_AT,
+                        "outcome": "accepted",
+                        "event_code": "bundle.requested",
+                        "event_id": "audit-1",
+                    },
                 ),
                 EvidenceRecord.from_payload(
-                    "log", {"level": "info", "event_code": "worker.stopped", "event_id": "log-2"}
+                    "log",
+                    {
+                        "observed_at": OBSERVED_AT,
+                        "level": "info",
+                        "event_code": "worker.stopped",
+                        "event_id": "log-2",
+                    },
                 ),
             )
         )
@@ -264,7 +289,12 @@ def test_inputs_are_immutable_and_reject_subclasses_callables_and_mutation() -> 
     with pytest.raises(FrozenInstanceError):
         version.version = "2"  # type: ignore[misc]
 
-    source = {"event_id": "log-1", "event_code": "log.engine.entry", "level": "info"}
+    source = {
+        "event_id": "log-1",
+        "event_code": "log.engine.entry",
+        "level": "info",
+        "observed_at": OBSERVED_AT,
+    }
     record = EvidenceRecord.from_payload("log", source)
     source["event_id"] = "log-2"
     assert b"log-1" in record.payload_json
@@ -275,6 +305,29 @@ def test_inputs_are_immutable_and_reject_subclasses_callables_and_mutation() -> 
 def test_control_and_unbounded_data_kinds_are_not_in_the_contract(kind: str) -> None:
     with pytest.raises(ValueError):
         EvidenceRecord.from_payload(kind, {"value": 1})
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        ("audit", {"event_id": "audit-1", "event_code": "bundle.requested", "outcome": "accepted"}),
+        ("log", {"event_id": "log-1", "event_code": "worker.started", "level": "info"}),
+    ],
+)
+def test_audit_and_log_evidence_without_a_timestamp_is_refused(kind: str, payload: dict[str, object]) -> None:
+    """A detached audit or log record must carry its observation time, or it cannot be dated.
+
+    Such a record states only that an event happened, never when, so it can neither substantiate
+    that the evidence is recent nor be placed on a diagnostic timeline beside the snapshot records.
+    The production collector always supplies ``observed_at``; only a detached or deserialized
+    payload can omit it, which is why the schema and not the collector is the place to refuse it.
+    Without this case the requirement can be deleted from ``_RECORD_SCHEMAS`` and every other test
+    in this module still passes, because they all supply the field.
+    """
+    with pytest.raises(ValueError, match="observed_at"):
+        EvidenceRecord.from_payload(kind, payload)
+
+    EvidenceRecord.from_payload(kind, {**payload, "observed_at": OBSERVED_AT})
 
 
 def test_nonfinite_values_depth_and_count_are_bounded() -> None:
@@ -455,6 +508,8 @@ def test_dedicated_digest_field_and_canonical_uuid_id_are_not_guessed_as_secrets
             "storage": "available",
             "digest_sha256": HASH,
             "dropped_records": 0,
+            "pending_records": 0,
+            "persisted_revision": 1,
             **_snapshot_fields(),
         },
     )
@@ -496,7 +551,8 @@ def test_bundle_is_stable_across_hash_seeds() -> None:
     script = """
 from datetime import UTC, datetime
 from cryodaq.support.bundle import *
-r = EvidenceRecord.from_payload('log', {'level':'info','event_code':'worker.started','event_id':'log-1'})
+r = EvidenceRecord.from_payload('log', {'level':'info','event_code':'worker.started','event_id':'log-1',
+    'observed_at':'2026-07-12T07:08:08.123456Z'})
 u = ('attention', 'health', 'integrity')
 s = tuple(UnavailableSource(name, 'source_not_provided') for name in u)
 c = BundleCapture('bundle-1', datetime(2026,1,1,tzinfo=UTC), (SoftwareVersion('cryodaq','1'),),

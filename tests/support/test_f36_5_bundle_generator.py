@@ -1865,6 +1865,8 @@ def test_production_snapshot_identifiers_survive_the_bundle_schema(source_id: st
             "state": ("fault" if mode == "replay" else "ok"),
             "storage": ("unknown" if mode == "replay" else "available"),
             "dropped_records": 0,
+            "pending_records": 0,
+            "persisted_revision": 42,
             **_snapshot_record_fields(mode=mode, source_id=source_id, producer_id=source_id),
         },
     )
@@ -2163,6 +2165,8 @@ def _complete_integrity_provenance() -> dict[str, object]:
         "source_age_us": 0,
         "transport_age_us": 0,
         "dropped_records": 0,
+        "pending_records": 0,
+        "persisted_revision": 42,
     }
 
 
@@ -2172,6 +2176,25 @@ def test_integrity_schema_rejects_ok_state_with_unavailable_storage() -> None:
 
     with pytest.raises(ValueError, match="storage"):
         EvidenceRecord.from_payload("integrity", payload)
+
+
+@pytest.mark.parametrize("omitted", ["pending_records", "persisted_revision"])
+def test_available_integrity_evidence_requires_persistence_counters(omitted: str) -> None:
+    """Integrity evidence cannot present as available without stating what is durable.
+
+    ``persisted_revision`` and ``pending_records`` are non-optional on the authoritative
+    ``DataIntegritySummary``, unlike ``archive_revision``.  Omitting either lets a record seal as
+    available while establishing neither its durable position nor whether a backlog exists, so an
+    operator reads the section as healthy storage on evidence that never says so.  The production
+    collector always supplies both, so only a detached or deserialized payload can omit them.
+    """
+    payload = _complete_integrity_provenance()
+    del payload[omitted]
+
+    with pytest.raises(ValueError, match=omitted):
+        EvidenceRecord.from_payload("integrity", payload)
+
+    EvidenceRecord.from_payload("integrity", _complete_integrity_provenance())
 
 
 def test_snapshot_schema_rejects_mode_and_structured_source_mismatch() -> None:
@@ -2234,7 +2257,7 @@ def test_integrity_schema_requires_every_snapshot_truth_field(missing_field: str
 
 def test_bundle_capture_rejects_snapshot_records_from_mixed_cuts() -> None:
     integrity_payload = _complete_integrity_provenance()
-    excluded_integrity_fields = {"storage", "dropped_records"}
+    excluded_integrity_fields = {"storage", "dropped_records", "pending_records", "persisted_revision"}
     health_payload = {key: value for key, value in integrity_payload.items() if key not in excluded_integrity_fields}
     health_payload.update(source_id="plant-health-summary", state="caution")
     health_payload.update(
