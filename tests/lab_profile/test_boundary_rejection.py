@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from cryodaq.drivers.registry import DriverAuthority, DriverCapability
@@ -9,6 +14,7 @@ from cryodaq.lab_profile import (
     ActuationBoundaryError,
     LabCapabilities,
     LabProfileError,
+    ProfileInstrument,
     load_lab_profile,
     parse_lab_profile,
 )
@@ -49,6 +55,10 @@ def _unknown_driver_text() -> str:
 
 def _keithley_text() -> str:
     return _base().replace("type: lakeshore_218s", "type: keithley_2604b")
+
+
+def _health_node_text() -> str:
+    return _base().replace("type: lakeshore_218s", "type: deterministic_health_node")
 
 
 def _alias_text() -> str:
@@ -120,6 +130,36 @@ def test_unknown_driver_type_is_rejected() -> None:
 def test_source_authority_instrument_is_rejected() -> None:
     with pytest.raises(ActuationBoundaryError, match="hazardous actuator"):
         parse_lab_profile(_keithley_text())
+
+
+def test_health_telemetry_metadata_is_not_a_direct_profile_instrument() -> None:
+    with pytest.raises(LabProfileError, match="instrument"):
+        ProfileInstrument("deterministic_health_node", "compressor.primary")
+
+
+def test_health_telemetry_yaml_is_not_a_profile_instrument() -> None:
+    with pytest.raises(LabProfileError, match="instrument"):
+        parse_lab_profile(_health_node_text())
+
+
+def test_health_telemetry_cli_rejects_profile_with_exit_two(tmp_path) -> None:
+    profile_path = tmp_path / "health-node.yaml"
+    profile_path.write_text(_health_node_text(), encoding="utf-8")
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+    completed = subprocess.run(
+        [sys.executable, "-B", "-m", "cryodaq.lab_profile", str(profile_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=repo_root,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 2, completed.stdout
+    assert "LAB PROFILE ERROR:" in completed.stderr
 
 
 @pytest.mark.parametrize("surface", ["safety", "thresholds", "interlocks", "overrides"])
@@ -230,7 +270,7 @@ def test_lab_capabilities_must_equal_the_registry_derivation() -> None:
         capabilities=frozenset({DriverCapability.CALIBRATABLE_SENSOR}),
         trust_classes=frozenset({DriverAuthority.PASSIVE_MEASUREMENT}),
     )
-    with pytest.raises(LabProfileError, match="derived from BUILTIN_DRIVER_METADATA"):
+    with pytest.raises(LabProfileError, match="derived from INSTRUMENT_DRIVER_METADATA"):
         LabCapabilities(**invented)
     unknown_type = dict(
         instrument_types=("not_a_driver",),

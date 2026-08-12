@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
 
 from cryodaq.engine_wiring.operator_snapshot_authorities import (
@@ -236,15 +235,19 @@ class ReaderPoolHealthAuthority(_CachedHealthAuthority):
 
     __slots__ = ("_readers",)
 
-    def __init__(self, readers: Sequence[HealthTelemetryReader]) -> None:
+    def __init__(self, readers: tuple[HealthTelemetryReader, ...]) -> None:
+        if type(readers) is not tuple:
+            raise TypeError("readers must be an exact bounded tuple")
+        if not readers:
+            raise ValueError("reader pool must contain at least one reader")
         if len(readers) > MAX_FLEET_DEVICES:
             raise ValueError(f"reader pool exceeds MAX_FLEET_DEVICES ({MAX_FLEET_DEVICES})")
-        readers_tuple = tuple(readers)
-        if len(readers_tuple) != len(readers):
-            raise ValueError("reader pool changed during construction")
+        readers_tuple = readers
+        from cryodaq.drivers.registry import health_telemetry_spec_for_reader
+
         for reader in readers_tuple:
-            if type(reader) is not _IssuedHealthTelemetryReader:
-                raise TypeError("each reader must be factory-issued by issue_health_telemetry_reader")
+            if type(reader) is not _IssuedHealthTelemetryReader or health_telemetry_spec_for_reader(reader) is None:
+                raise TypeError("each reader must be registry-issued by the canonical built-in driver registry")
             # These accessors re-check the issuer key and per-entry issuance token.
             if reader.grants_control_authority:
                 raise ValueError("health reader must not grant control authority")

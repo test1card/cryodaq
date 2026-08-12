@@ -35,6 +35,7 @@ from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog, lo
 ROOT = Path(__file__).resolve().parents[2]
 INTERLOCKS_PATH = ROOT / "config" / "interlocks.yaml"
 DESCRIPTORS_PATH = ROOT / "config" / "channel_descriptors.yaml"
+_INTERLOCK_POLL_INTERVALS = {"LS218_1": 2.0, "LS218_2": 2.0}
 
 # Canonical channel_ids each Т-interlock must protect post-F1 — mirrors the
 # pre-F1 raw-label coverage exactly (proof: interlock_canonical_fix.md).
@@ -116,7 +117,10 @@ async def test_canonical_channel_ids_trip_every_configured_t_interlock() -> None
         broker=broker,
         actions={"emergency_off": _emergency_off, "stop_source": _stop_source},
     )
-    engine.load_config(INTERLOCKS_PATH)
+    engine.load_config(
+        INTERLOCKS_PATH,
+        poll_intervals_s_by_instrument=_INTERLOCK_POLL_INTERVALS,
+    )
     await engine.start()
     try:
         for interlock_name, channels in INTERLOCK_CHANNELS.items():
@@ -167,7 +171,10 @@ async def test_raw_companion_channel_does_not_trip_interlock() -> None:
         broker=broker,
         actions={"emergency_off": _emergency_off, "stop_source": _stop_source},
     )
-    engine.load_config(INTERLOCKS_PATH)
+    engine.load_config(
+        INTERLOCKS_PATH,
+        poll_intervals_s_by_instrument=_INTERLOCK_POLL_INTERVALS,
+    )
     await engine.start()
     try:
         instrument_id, emitted_channel = _instrument_for("Т1.raw", catalog)
@@ -223,7 +230,10 @@ async def test_interlock_follows_declared_sensor_binding_after_canonical_id_rena
         broker=broker,
         actions={"emergency_off": _emergency_off, "stop_source": _stop_source},
     )
-    engine.load_config(interlocks_path)
+    engine.load_config(
+        interlocks_path,
+        poll_intervals_s_by_instrument=_INTERLOCK_POLL_INTERVALS,
+    )
     await engine.start()
     try:
         instrument_id, emitted_channel = _instrument_for(renamed_id, catalog)
