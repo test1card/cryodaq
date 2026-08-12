@@ -17,10 +17,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class QueryUnavailableError(RuntimeError):
+    """Raised when the router cannot establish an authoritative query result."""
+
+
 class QueryRouter:
     """Dispatches a classified QueryIntent to the appropriate ServiceAdapter.
 
-    Returns a data dict with the fetched result, or None if dispatch failed.
+    Returns a category-specific data dict when dispatch succeeds, including
+    authoritative empty results. Raises QueryUnavailableError when dispatch fails.
     The data dict is category-specific and is passed to the format LLM in Phase C.
     """
 
@@ -74,7 +79,7 @@ class QueryRouter:
         intent: QueryIntent,
         query: str,
     ) -> dict[str, Any]:
-        """Fetch data for a classified intent. Never raises.
+        """Fetch authoritative data for a classified intent.
 
         Returns a dict with category-specific fields. Out-of-scope and unknown
         categories return an empty dict (no data fetch needed — format LLM handles it).
@@ -109,7 +114,7 @@ class QueryRouter:
             return {}
         except Exception as exc:
             logger.warning("QueryRouter.fetch failed for %s: %s", cat.value, exc)
-            return {}
+            raise QueryUnavailableError(f"{cat.value} query unavailable") from exc
 
     async def _fetch_current_value(self, intent: QueryIntent) -> dict[str, Any]:
         channels = self._resolve_target_channels(intent) or []
