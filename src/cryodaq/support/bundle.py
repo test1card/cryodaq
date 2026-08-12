@@ -45,6 +45,7 @@ _PUBLIC_TECHNICAL_SEGMENT_RE = re.compile(r"(?:\d+|[fv]\d+|\d{8}t\d{12}z)\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _UUID_RE = re.compile(r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _PUBLIC_PROJECTION_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\.public\.v[1-9][0-9]*\Z")
+_PROTOCOL_MAX_INT: Final = 2**63 - 1
 _RECORD_KINDS: Final = frozenset({"health", "attention", "audit", "log", "integrity"})
 _UNAVAILABLE_FIELDS: Final = frozenset(
     {"versions", "config_fingerprints", "health", "attention", "audit", "log", "integrity"}
@@ -360,11 +361,11 @@ _RECORD_SCHEMAS: Final = {
         ),
     },
     "audit": {
-        "required": frozenset({"event_id", "event_code", "outcome"}),
+        "required": frozenset({"event_id", "event_code", "outcome", "observed_at"}),
         "allowed": frozenset({"event_id", "event_code", "outcome", "source_id", "observed_at", "revision"}),
     },
     "log": {
-        "required": frozenset({"event_id", "event_code", "level"}),
+        "required": frozenset({"event_id", "event_code", "level", "observed_at"}),
         "allowed": frozenset(
             {"event_id", "event_code", "level", "source_id", "observed_at", "revision", "occurrences"}
         ),
@@ -470,6 +471,10 @@ def _exact_text(value: object, *, field: str, max_bytes: int = 512) -> str:
 
 def _identifier(value: object, *, field: str) -> str:
     value = _exact_text(value, field=field, max_bytes=128)
+    if re.fullmatch(r"redacted-id-[0-9a-f]{24}", value) is not None:
+        return value
+    if value in frozenset().union(*_SUMMARY_IDENTITIES.values()):
+        return value
     if field in {"snapshot_source_id", "snapshot_producer_id"} and (
         _LIVE_SNAPSHOT_ID_RE.fullmatch(value) is not None or _REPLAY_SNAPSHOT_ID_RE.fullmatch(value) is not None
     ):
@@ -489,8 +494,21 @@ def _identifier(value: object, *, field: str) -> str:
             and _PUBLIC_TECHNICAL_SEGMENT_RE.fullmatch(segment) is None
             for segment in segments
         )
-        if has_private_role_segment or (_UUID_RE.fullmatch(value) is None and has_unknown_alpha_segment):
+        if (
+            has_private_role_segment
+            or (
+                len(segments) > 1
+                and all(
+                    any(char.isalpha() for char in segment) and segment not in _PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS
+                    for segment in segments
+                )
+            )
+            or (has_unknown_alpha_segment and len(segment_set.intersection(_PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS)) > 0)
+            or re.fullmatch(r"[a-z]{3,}\d{4,}", value.casefold())
+        ):
             return "redacted-private"
+        if _UUID_RE.fullmatch(value) is None and has_unknown_alpha_segment:
+            return f"redacted-id-{hashlib.sha256(value.casefold().encode('utf-8')).hexdigest()[:24]}"
     return value
 
 
@@ -607,12 +625,13 @@ def _safe_text(
         _PRIVATE_NAME_RE.search(security_screened) or _PRIVATE_NAME_ONLY_RE.fullmatch(screened_stripped)
     ):
         return "<redacted:private>"
-    for candidate in _OPAQUE_TOKEN_RE.findall(security_screened):
-        if not (
-            (allow_uuid and _UUID_RE.fullmatch(candidate) is not None)
-            or (allow_sha256 and _SHA256_RE.fullmatch(candidate) is not None)
-        ):
-            raise ValueError("opaque encoded token candidate is not permitted")
+    if not allow_identifier:
+        for candidate in _OPAQUE_TOKEN_RE.findall(security_screened):
+            if not (
+                (allow_uuid and _UUID_RE.fullmatch(candidate) is not None)
+                or (allow_sha256 and _SHA256_RE.fullmatch(candidate) is not None)
+            ):
+                raise ValueError("opaque encoded token candidate is not permitted")
     if len(normalized.encode("utf-8")) > MAX_STRING_BYTES:
         raise ValueError(f"transformed string exceeds {MAX_STRING_BYTES} UTF-8 bytes")
     return normalized
@@ -784,6 +803,8 @@ def _validate_snapshot_relationships(kind: str, payload: dict[str, object]) -> N
     if kind == "integrity":
         state = payload["state"]
         storage = payload["storage"]
+        if mode == "replay" and storage != "unknown":
+            raise ValueError("replay integrity evidence requires unknown storage")
         if state == "ok" and storage != "available":
             raise ValueError("ok integrity state requires available storage")
         if state == "ok" and ("dropped_records" not in payload or payload["dropped_records"] != 0):
@@ -817,8 +838,8 @@ def _validated_record_payload(kind: str, payload: object) -> dict[str, object]:
         elif field in _IDENTIFIER_RECORD_FIELDS:
             validated[field] = _identifier(value, field=field)
         elif field in _COUNT_RECORD_FIELDS:
-            if type(value) is not int or value < 0:
-                raise ValueError(f"{field} must be an exact non-negative int")
+            if type(value) is not int or not 0 <= value <= _PROTOCOL_MAX_INT:
+                raise ValueError(f"{field} must be an exact protocol-range int")
             validated[field] = value
         elif field in {"observed_at", "received_at"}:
             validated[field] = _record_timestamp(value, field=field)
@@ -871,8 +892,19 @@ def _safe_version_text(value: str) -> str:
     safe = _safe_text(value)
     if _VERSION_CREDENTIAL_RE.search(value):
         raise ValueError("credential-shaped version text is not permitted")
+    encoded = value
+    for _ in range(MAX_DEPTH):
+        decoded_encoding = unquote(encoded)
+        if decoded_encoding == encoded:
+            break
+        encoded = decoded_encoding
+    if len(encoded) % 4 == 1:
+        encoded = ""
+    elif encoded:
+        encoded += "=" * (-len(encoded) % 4)
+    encoded = encoded.translate(str.maketrans("-_", "+/"))
     try:
-        decoded = base64.b64decode(value, validate=True).decode("utf-8")
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8") if encoded else ""
     except (ValueError, UnicodeDecodeError):
         decoded = ""
     if decoded and _VERSION_CREDENTIAL_RE.search(decoded):
@@ -1013,6 +1045,13 @@ class BundleCapture:
         }
         if len(snapshot_cuts) > 1:
             raise ValueError("snapshot records do not share one coherent snapshot cut")
+        observed_cuts = {
+            payload["observed_at"]
+            for kind, payload in decoded_records
+            if kind in {"health", "integrity"} or (kind == "attention" and payload["record_role"] == "summary")
+        }
+        if len(observed_cuts) > 1:
+            raise ValueError("snapshot records do not share one coherent observation time")
         snapshot_records = tuple(payload for kind, payload in decoded_records if kind in _SNAPSHOT_RECORD_KINDS)
         transport_ages = {payload["transport_age_us"] for payload in snapshot_records}
         if len(transport_ages) > 1:

@@ -610,7 +610,15 @@ def test_redaction_category_nested_credentials_are_rejected() -> None:
 
 def test_manifest_stability_identical_inputs_produce_byte_identical_manifest() -> None:
     """Identical BundleCapture instances must produce byte-identical manifests."""
-    record = EvidenceRecord.from_payload("log", {"event_id": "log-1", "event_code": "worker.started", "level": "info"})
+    record = EvidenceRecord.from_payload(
+        "log",
+        {
+            "event_id": "log-1",
+            "event_code": "worker.started",
+            "level": "info",
+            "observed_at": "2026-07-14T11:59:00.000000Z",
+        },
+    )
     capture_a = _minimal_capture(records=(record,))
     capture_b = _minimal_capture(records=(record,))
 
@@ -627,7 +635,9 @@ def test_manifest_stability_across_hash_seeds_via_subprocess() -> None:
     script = (
         "from datetime import UTC, datetime\n"
         "from cryodaq.support.bundle import *\n"
-        "r = EvidenceRecord.from_payload('log', {'level':'info','event_code':'engine.started','event_id':'log-1'})\n"
+        "r = EvidenceRecord.from_payload("
+        "'log', {'level':'info','event_code':'engine.started','event_id':'log-1',"
+        "'observed_at':'2026-07-14T11:59:00.000000Z'})\n"
         "u = ('attention', 'health', 'integrity')\n"
         "s = tuple(UnavailableSource(name, 'source_not_provided') for name in u)\n"
         "c = BundleCapture('f36-5-seed-test', datetime(2026,7,14,tzinfo=UTC),\n"
@@ -1853,7 +1863,7 @@ def test_production_snapshot_identifiers_survive_the_bundle_schema(source_id: st
         {
             "source_id": "data-integrity",
             "state": ("fault" if mode == "replay" else "ok"),
-            "storage": "available",
+            "storage": ("unknown" if mode == "replay" else "available"),
             "dropped_records": 0,
             **_snapshot_record_fields(mode=mode, source_id=source_id, producer_id=source_id),
         },
@@ -1914,6 +1924,18 @@ def test_recent_evidence_requires_kind_specific_semantics(kind: str, required_fi
         EvidenceRecord.from_payload(kind, {"event_id": f"{kind}-1", "event_code": f"{kind}.entry"})
 
 
+@pytest.mark.parametrize("kind", ("audit", "log"))
+def test_recent_evidence_requires_observation_timestamp(kind: str) -> None:
+    payload = {
+        "event_id": f"{kind}-1",
+        "event_code": f"{kind}.entry",
+        "outcome" if kind == "audit" else "level": "accepted" if kind == "audit" else "info",
+    }
+
+    with pytest.raises(ValueError, match="observed_at"):
+        EvidenceRecord.from_payload(kind, payload)
+
+
 def test_schema_v1_is_explicitly_rejected_as_unreleased_and_pre_redaction() -> None:
     import hashlib
 
@@ -1966,7 +1988,12 @@ def test_recent_evidence_semantics_use_closed_public_vocabularies(
     other_field: str | None,
     other_value: str | None,
 ) -> None:
-    payload = {"event_id": f"{kind}-1", "event_code": f"{kind}.entry", field: "alice.operator"}
+    payload = {
+        "event_id": f"{kind}-1",
+        "event_code": f"{kind}.entry",
+        field: "alice.operator",
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+    }
     if other_field is not None:
         payload[other_field] = other_value
 
@@ -2425,6 +2452,8 @@ def test_valid_older_attention_item_preserves_capture_and_event_time() -> None:
         "Alice S.",
         "Alice O'Neil",
         "cGFzc3dvcmQ9aHVudGVyMg==",
+        "QWxpY2UgU21pdGg",
+        "QWxpY2UgU21pdGg%3D",
         "password&#x3d;hunter2",
         "Alice;Smith",
         "Alice:Smith",
@@ -2448,6 +2477,40 @@ def test_integrity_ok_cannot_claim_dropped_records() -> None:
     payload.update(state="ok", storage="available", dropped_records=1)
 
     with pytest.raises(ValueError, match="dropped"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_replay_integrity_requires_unknown_storage_even_when_not_ok() -> None:
+    payload = _complete_integrity_provenance()
+    replay_id = "replay/operator-v1/" + "a" * 32 + "/" + "b" * 32 + "/0000000000000001"
+    payload.update(snapshot_mode="replay", snapshot_source_id=replay_id, snapshot_producer_id=replay_id)
+
+    with pytest.raises(ValueError, match="replay integrity.*unknown storage"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_snapshot_summaries_require_one_coherent_observation_time() -> None:
+    fields = _snapshot_record_fields(source_id="engine-v1", producer_id="engine-v1")
+    first = EvidenceRecord.from_payload("health", {"source_id": "plant-health-summary", "state": "caution", **fields})
+    second = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "infrastructure-summary",
+            "state": "caution",
+            **dict(fields, observed_at="2026-07-14T11:58:00.000000Z"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="coherent observation time"):
+        _minimal_capture(records=(first, second))
+
+
+@pytest.mark.parametrize("field", ("revision", "record_count", "persisted_revision"))
+def test_record_counters_reject_values_above_protocol_range(field: str) -> None:
+    payload = _complete_integrity_provenance()
+    payload[field] = 2**63
+
+    with pytest.raises(ValueError, match="protocol-range"):
         EvidenceRecord.from_payload("integrity", payload)
 
 
