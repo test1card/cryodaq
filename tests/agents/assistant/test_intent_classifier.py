@@ -6,11 +6,13 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from cryodaq.agents.assistant.query.intent_classifier import (
     IntentClassifier,
     _parse_intent,
 )
-from cryodaq.agents.assistant.query.router import QueryRouter
+from cryodaq.agents.assistant.query.router import QueryRouter, QueryUnavailableError
 from cryodaq.agents.assistant.query.schemas import (
     AlarmStatusResult,
     CompositeStatus,
@@ -460,12 +462,12 @@ async def test_router_dispatches_range_stats() -> None:
     adapters.sqlite.range_stats.assert_awaited_once_with("T_cold", 60)
 
 
-async def test_router_never_raises_on_adapter_exception() -> None:
-    """Router swallows adapter exceptions and returns {}."""
+async def test_router_adapter_exception_is_unavailable() -> None:
+    """Router exposes adapter failure as unavailable, never authoritative empty."""
     adapters = _make_adapters()
     adapters.cooldown.eta = AsyncMock(side_effect=RuntimeError("service down"))
 
     router = QueryRouter(adapters)
     intent = QueryIntent(category=QueryCategory.ETA_COOLDOWN)
-    result = await router.fetch(intent, "ETA охлаждения?")
-    assert result == {}
+    with pytest.raises(QueryUnavailableError, match="eta_cooldown query unavailable"):
+        await router.fetch(intent, "ETA ?????????????")
