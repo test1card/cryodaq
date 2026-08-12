@@ -202,7 +202,7 @@ async def test_physical_alarm_publication_captures_pre_tick_experiment_and_canon
     class _CooldownAlarm:
         calls = 0
 
-        async def tick(self) -> str:
+        async def tick(self, experiment_id: str | None = None) -> str:
             self.calls += 1
             if self.calls > 1:
                 raise asyncio.CancelledError
@@ -346,7 +346,7 @@ async def test_cooldown_loop_publishes_clear_after_non_tick_mutation() -> None:
     class _CooldownAlarm:
         calls = 0
 
-        async def tick(self) -> None:
+        async def tick(self, experiment_id: str | None = None) -> None:
             self.calls += 1
             if self.calls == 1:
                 state_mgr.process(
@@ -396,7 +396,7 @@ async def test_cooldown_loop_ignores_non_cooldown_alarm_clear() -> None:
     class _CooldownAlarm:
         calls = 0
 
-        async def tick(self) -> None:
+        async def tick(self, experiment_id: str | None = None) -> None:
             self.calls += 1
             if self.calls == 1:
                 state_mgr.clear_diagnostic_alarm(_CHANNEL)

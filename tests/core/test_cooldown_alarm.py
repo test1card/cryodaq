@@ -377,7 +377,9 @@ async def test_watchdog_t_cold_in_range_does_not_fire():
         await alarm.tick()
 
     # process called with event=None (no alarm)
-    alarm_mgr.process.assert_called_once_with("cooldown_watchdog", None, {"sustained_s": None, "hysteresis": None})
+    alarm_mgr.process.assert_called_once_with(
+        "cooldown_watchdog", None, {"sustained_s": None, "hysteresis": None}, experiment_id=None
+    )
     assert alarm.state == CooldownState.WATCHDOG
 
 
@@ -428,7 +430,9 @@ async def test_watchdog_fired_clears_when_t_cold_recovers():
 
     assert alarm.state == CooldownState.WATCHDOG
     # process called with event=None (clear)
-    alarm_mgr.process.assert_called_once_with("cooldown_watchdog", None, {"sustained_s": None, "hysteresis": None})
+    alarm_mgr.process.assert_called_once_with(
+        "cooldown_watchdog", None, {"sustained_s": None, "hysteresis": None}, experiment_id=None
+    )
 
 
 @pytest.mark.asyncio
@@ -588,4 +592,4 @@ async def test_quasi_steady_clears_active_fired():
 
     assert alarm.state == CooldownState.WATCHING
     assert alarm._sustained_count == 0
-    alarm_mgr.process.assert_any_call("cooldown_alarm", None, {})
+    alarm_mgr.process.assert_any_call("cooldown_alarm", None, {}, experiment_id=None)

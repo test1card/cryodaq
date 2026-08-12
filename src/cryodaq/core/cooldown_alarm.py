@@ -12,6 +12,7 @@ WATCHDOG → DISARMED via operator disarm() or experiment.finalized notification
 All data reads are fresh per tick from ChannelStateTracker (LATE BINDING).
 Graceful degradation: model absent → arm() returns False, alarm stays DISARMED.
 """
+
 from __future__ import annotations
 
 import collections
@@ -37,12 +38,12 @@ _RATE_MIN_HISTORY_H = 0.5  # minimum elapsed hours before deviation logic activa
 
 class CooldownState(enum.Enum):
     DISARMED = "DISARMED"
-    ARMED = "ARMED"               # collecting baseline (< RATE_MIN_HISTORY_H elapsed)
-    WATCHING = "WATCHING"         # evaluating trajectory
-    FIRED = "FIRED"               # trajectory alarm active
-    AUTO_DISARMED = "AUTO_DISARMED"   # cooldown complete; momentary if watchdog_enabled
-    WATCHDOG = "WATCHDOG"         # monitoring T_cold post-cooldown
-    WATCHDOG_FIRED = "WATCHDOG_FIRED" # warming detected
+    ARMED = "ARMED"  # collecting baseline (< RATE_MIN_HISTORY_H elapsed)
+    WATCHING = "WATCHING"  # evaluating trajectory
+    FIRED = "FIRED"  # trajectory alarm active
+    AUTO_DISARMED = "AUTO_DISARMED"  # cooldown complete; momentary if watchdog_enabled
+    WATCHDOG = "WATCHDOG"  # monitoring T_cold post-cooldown
+    WATCHDOG_FIRED = "WATCHDOG_FIRED"  # warming detected
 
 
 class CooldownAlarm:
@@ -115,13 +116,11 @@ class CooldownAlarm:
         # terminal state with watchdog default off. Skip arm() when the
         # cold channel is already in [base, base + cold_start_skip_margin_K]
         # AND (if available) SteadyStatePredictor reports quasi-steady.
-        self._cold_start_skip_margin_K: float = float(
-            cfg.get("cold_start_skip_margin_K", 5.0)
-        )
+        self._cold_start_skip_margin_K: float = float(cfg.get("cold_start_skip_margin_K", 5.0))
         self._cold_start_skipped: bool = False
 
         self._state = CooldownState.DISARMED
-        self._model = None               # EnsembleModel — loaded on arm()
+        self._model = None  # EnsembleModel — loaded on arm()
         self._t_armed: float | None = None
         self._sustained_count: int = 0
         self._watchdog_sustained_count: int = 0
@@ -136,9 +135,7 @@ class CooldownAlarm:
         self._cycle_generation: int = 0
 
         # Circular buffer of (wall_time, eta_h) for slip computation
-        self._eta_history: collections.deque = collections.deque(
-            maxlen=int(self._eta_slip_window_min * 2 + 10)
-        )
+        self._eta_history: collections.deque = collections.deque(maxlen=int(self._eta_slip_window_min * 2 + 10))
 
     @property
     def state(self) -> CooldownState:
@@ -201,9 +198,7 @@ class CooldownAlarm:
         # gas-desorption drift / late-evening recovery shouldn't count.
         if self._steady_state_predictor is not None:
             try:
-                ss_pred = self._steady_state_predictor.get_prediction(
-                    self._cold_ch
-                )
+                ss_pred = self._steady_state_predictor.get_prediction(self._cold_ch)
             except Exception:
                 return False
             if ss_pred is None or not getattr(ss_pred, "is_quasi_steady", False):
@@ -220,15 +215,10 @@ class CooldownAlarm:
         if self._is_cold_start():
             cold_state = self._state_tracker.get(self._cold_ch)
             warm_state = self._state_tracker.get(self._warm_ch)
-            cold_str = (
-                f"{cold_state.value:.2f}" if cold_state is not None else "?"
-            )
-            warm_str = (
-                f"{warm_state.value:.2f}" if warm_state is not None else "?"
-            )
+            cold_str = f"{cold_state.value:.2f}" if cold_state is not None else "?"
+            warm_str = f"{warm_state.value:.2f}" if warm_state is not None else "?"
             logger.info(
-                "CooldownAlarm: cold-start detected (T_cold=%s K, T_warm=%s K, "
-                "base=[%.1f, %.1f]) — skipping auto-arm",
+                "CooldownAlarm: cold-start detected (T_cold=%s K, T_warm=%s K, base=[%.1f, %.1f]) — skipping auto-arm",
                 cold_str,
                 warm_str,
                 self._base_temp_K,
@@ -262,10 +252,12 @@ class CooldownAlarm:
                 return False
             try:
                 from cryodaq.analytics.cooldown_predictor import load_model
+
                 self._model = load_model(self._model_dir)
                 logger.info(
                     "CooldownAlarm: модель загружена (%d кривых, %.1f ч среднее)",
-                    self._model.n_curves, self._model.duration_mean,
+                    self._model.n_curves,
+                    self._model.duration_mean,
                 )
             except Exception as exc:
                 logger.warning("CooldownAlarm: ошибка загрузки модели: %s", exc)
@@ -333,7 +325,7 @@ class CooldownAlarm:
         # that resumes will detect the stale cycle and abort.
         self.disarm()
 
-    async def tick(self) -> None:
+    async def tick(self, experiment_id: str | None = None) -> None:
         """Evaluate trajectory. Called every eval_interval_s by engine."""
         # v0.55.12 — capture cycle generation; re-checked before any
         # destructive emit (alarm-state publish, latch_fault) to detect
@@ -352,7 +344,7 @@ class CooldownAlarm:
 
         # WATCHDOG has its own tick path (predictor not running)
         if self._state in (CooldownState.WATCHDOG, CooldownState.WATCHDOG_FIRED):
-            return await self._watchdog_tick()
+            return await self._watchdog_tick(experiment_id)
 
         # --- ARMED / WATCHING / FIRED path (predictor active) ---
 
@@ -375,11 +367,10 @@ class CooldownAlarm:
         # --- Auto-disarm check ---
         auto_disarm_base = self._base_temp_K + self._base_epsilon_K
         if T_cold <= auto_disarm_base or (
-            self._current_progress is not None
-            and self._current_progress >= self._auto_disarm_progress
+            self._current_progress is not None and self._current_progress >= self._auto_disarm_progress
         ):
             self._state = CooldownState.AUTO_DISARMED
-            transition = self._alarm_state_mgr.process(ALARM_ID, None, {})
+            transition = self._alarm_state_mgr.process(ALARM_ID, None, {}, experiment_id=experiment_id)
             await self._publish_state_event()
             logger.info(
                 "CooldownAlarm: AUTO_DISARMED (T_холод=%.2f K, прогресс=%s)",
@@ -420,7 +411,7 @@ class CooldownAlarm:
                 if self._state == CooldownState.FIRED:
                     self._state = CooldownState.WATCHING
                     self._sustained_count = 0
-                    self._alarm_state_mgr.process(ALARM_ID, None, {})
+                    self._alarm_state_mgr.process(ALARM_ID, None, {}, experiment_id=experiment_id)
                     await self._publish_state_event()
                     logger.info(
                         "CooldownAlarm: quasi-steady — FIRED → WATCHING (T_cold=%.2f K)",
@@ -433,6 +424,7 @@ class CooldownAlarm:
         # --- Predictor evaluation ---
         try:
             from cryodaq.analytics.cooldown_predictor import predict as _predict
+
             pred = _predict(self._model, T_cold, T_warm, t_elapsed=t_elapsed_h)
         except Exception as exc:
             logger.warning("CooldownAlarm: ошибка предиктора: %s", exc)
@@ -472,10 +464,7 @@ class CooldownAlarm:
             eta_slip_h = eta_h - (eta_1h_ago - self._eta_slip_window_min / 60.0)
 
         # --- Fire condition ---
-        in_deviation = (
-            deviation > self._k_p * sigma_p
-            and T_cold > auto_disarm_base
-        )
+        in_deviation = deviation > self._k_p * sigma_p and T_cold > auto_disarm_base
 
         if in_deviation:
             self._sustained_count += 1
@@ -488,9 +477,7 @@ class CooldownAlarm:
         if self._sustained_count >= self._sustained_min:
             slip_msg = ""
             if eta_slip_h is not None and eta_slip_h > self._eta_slip_threshold_h:
-                slip_msg = (
-                    f" ETA сдвинулась на +{eta_slip_h:.1f} ч за последний час."
-                )
+                slip_msg = f" ETA сдвинулась на +{eta_slip_h:.1f} ч за последний час."
             event: AlarmEvent | None = AlarmEvent(
                 alarm_id=ALARM_ID,
                 level="CRITICAL",
@@ -498,8 +485,7 @@ class CooldownAlarm:
                     f"Захолаживание не идёт по плану. "
                     f"Прогресс {p_actual:.0%} вместо ожидаемых {p_expected:.0%} "
                     f"(отклонение {deviation / max(sigma_p, 0.01):.1f}σ). "
-                    f"{self._cold_ch} = {T_cold:.1f} K."
-                    + slip_msg
+                    f"{self._cold_ch} = {T_cold:.1f} K." + slip_msg
                 ),
                 triggered_at=time.time(),
                 channels=[self._cold_ch, self._warm_ch],
@@ -529,7 +515,10 @@ class CooldownAlarm:
             return None
 
         transition = self._alarm_state_mgr.process(
-            ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
+            ALARM_ID,
+            event,
+            {"sustained_s": None, "hysteresis": None},
+            experiment_id=experiment_id,
         )
 
         # v0.55.12 — escalate CRITICAL to SafetyManager via the public
@@ -562,7 +551,7 @@ class CooldownAlarm:
 
         return transition
 
-    async def _watchdog_tick(self) -> None:
+    async def _watchdog_tick(self, experiment_id: str | None = None) -> None:
         """Tick logic for WATCHDOG / WATCHDOG_FIRED states (predictor not running)."""
         cold_state = self._state_tracker.get(self._cold_ch)
         if cold_state is None or cold_state.is_stale:
@@ -602,11 +591,15 @@ class CooldownAlarm:
             event = None
 
         return self._alarm_state_mgr.process(
-            WATCHDOG_ALARM_ID, event, {"sustained_s": None, "hysteresis": None}
+            WATCHDOG_ALARM_ID,
+            event,
+            {"sustained_s": None, "hysteresis": None},
+            experiment_id=experiment_id,
         )
 
     async def _publish_state_event(self) -> None:
         from cryodaq.core.event_bus import EngineEvent
+
         try:
             await self._event_bus.publish(
                 EngineEvent(

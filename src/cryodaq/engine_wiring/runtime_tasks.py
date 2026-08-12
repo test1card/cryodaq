@@ -120,14 +120,18 @@ def _alarm_origin(event: AlarmEvent | None, fallback: str | None) -> str | None:
 async def _await_settled(awaitable: Any) -> tuple[Any, bool]:
     """Finish a mutation-bearing awaitable before propagating cancellation."""
     task = asyncio.ensure_future(awaitable)
-    try:
-        return await asyncio.shield(task), False
-    except asyncio.CancelledError:
+    cancellation_pending = False
+    while True:
         try:
-            result = await task
+            return await asyncio.shield(task), cancellation_pending
         except asyncio.CancelledError:
-            result = None
-        return result, True
+            cancellation_pending = True
+            if not task.done():
+                continue
+            try:
+                return task.result(), True
+            except asyncio.CancelledError:
+                return None, True
 
 
 async def _alarm_v2_feed_loop(
@@ -589,7 +593,7 @@ async def cooldown_alarm_tick_loop(
         active_before = state_mgr.get_active()
         cancellation_pending = False
         try:
-            transition, cancellation_pending = await _await_settled(cooldown_alarm.tick())
+            transition, cancellation_pending = await _await_settled(cooldown_alarm.tick(experiment_id))
         except Exception as exc:
             logger.error("CooldownAlarm tick error: %s", exc)
             continue

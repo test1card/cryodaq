@@ -100,6 +100,7 @@ class AlarmCanonicalSnapshot:
 
 
 _ALARM_SNAPSHOT_MAX_ACTIVE = 128
+_EXPERIMENT_ID_UNSET = object()
 _ALARM_SNAPSHOT_MAX_CHANNELS = 64
 _ALARM_SNAPSHOT_MAX_TEXT = 256
 _ALARM_SNAPSHOT_MAX_CANONICAL_BYTES = 60 * 1024
@@ -704,6 +705,8 @@ class AlarmStateManager:
         alarm_id: str,
         event: AlarmEvent | None,
         config: dict,
+        *,
+        experiment_id: str | None | object = _EXPERIMENT_ID_UNSET,
     ) -> AlarmTransition | None:
         """Обработать результат evaluate.
 
@@ -755,7 +758,9 @@ class AlarmStateManager:
 
             stored_event = _copy_alarm_event(event)
             if stored_event.experiment_id is None:
-                stored_event.experiment_id = self._bound_experiment_id
+                stored_event.experiment_id = (
+                    self._bound_experiment_id if experiment_id is _EXPERIMENT_ID_UNSET else experiment_id
+                )
             self._activation_sequence += 1
             stored_event.activation_id = self._activation_sequence
             self._active[alarm_id] = stored_event
