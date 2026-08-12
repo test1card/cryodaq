@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: MOJIBAKE-DERIVATION-ESCAPE-FALSE-GREEN-341
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_derivation_matches_its_pinned_mapping
+    ci_partition: remaining
+    red_evidence: local_executed_on_commit_65c9654ae0d91192b19776f40d32878edacba292_tree_8925458a417a8924fd9190419cc4e5e9caafa497_guard_blob_8600a9155953a507690227e0daa23ecff168cd8e_python_3_14_3_with_MOJIBAKE_SIGNATURES_diverged_from_cp1251_mojibake_for_the_single_source_U_00A7_exact_node_selected_1_failed_exit_1_pinned_mapping_mismatch_where_before_this_control_hashed_the_helper_and_all_five_nodes_stayed_green_while_the_real_corruption_produced_zero_hits_stdout_stderr_sha256_3b7cd59b3dfb4bf132f0fe81cadbeffa899fd637d7e82c0d558f198dc6fe4688
+    green_evidence: local_executed_on_commit_65c9654ae0d91192b19776f40d32878edacba292_tree_8925458a417a8924fd9190419cc4e5e9caafa497_guard_blob_8600a9155953a507690227e0daa23ecff168cd8e_python_3_14_3_exact_node_selected_1_passed_exit_0_digest_taken_over_the_consumed_signature_tuple_stdout_stderr_sha256_5b19689a97d618d5cdfce632de67285a8efa3c57100a80350a5bb7ca9e05ae34_pending_sealed_hosted_remaining_artifact
   - id: MOJIBAKE-DETECTOR-CONTROL-FALSE-GREEN-340
     status: open
     scope: repository
@@ -6408,6 +6416,8 @@ records:
       - node: tests/docs/test_docs_freshness.py::test_tracked_text_carries_no_known_mojibake
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_its_pinned_digest
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_derivation_matches_its_pinned_mapping
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_every_derived_signature_is_exercised
         ci_partition: remaining
