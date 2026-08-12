@@ -266,6 +266,7 @@ async def test_stopped_feed_stops_republishing_without_recent_arrival(monkeypatc
     )
     assert len(metrics) == 1
 
+
 async def test_single_sample_bootstrap_expires(monkeypatch) -> None:
     """A channel with no learned cadence must not stay fresh forever."""
     plugin = _configured_plugin()
@@ -290,17 +291,13 @@ async def test_outage_gap_does_not_expand_freshness_horizon(monkeypatch) -> None
 
     for wall_sec in (0.0, 1.0):
         _at(wall_sec)
-        await plugin.process(
-            [_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)]
-        )
+        await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
 
     assert plugin._freshness_horizon_s(HEATER_CH) == pytest.approx(3.0)
 
     # A 600 s outage, then every channel reports again.
     _at(601.0)
-    await plugin.process(
-        [_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)]
-    )
+    await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
     assert plugin._freshness_horizon_s(HEATER_CH) == pytest.approx(3.0), (
         "the outage gap was accepted as a cadence sample"
     )
