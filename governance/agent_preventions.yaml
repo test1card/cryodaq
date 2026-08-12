@@ -6427,6 +6427,8 @@ records:
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_mojibake_derivation_matches_its_pinned_mapping
         ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file
+        ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_every_derived_signature_is_exercised
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_mojibake_detector_fires_on_independently_specified_damage
