@@ -1,4 +1,4 @@
-﻿"""AssistantLiveAgent — local LLM agent observing engine events.
+"""AssistantLiveAgent — local LLM agent observing engine events.
 
 Service named Гемма (after the underlying Gemma 4 model via Ollama).
 Subscribes to EventBus, generates Russian-language operator insights,
@@ -316,6 +316,7 @@ class _EventDedup:
 
         horizon = now - max(self._window_s, self._escalate_after_s)
         self._activity = {key: stamp for key, stamp in self._activity.items() if stamp >= horizon}
+        self._seen = {key: stamp for key, stamp in self._seen.items() if key in self._activity}
         self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in self._activity}
         self._undelivered &= set(self._activity)
         self._suppressed &= set(self._activity)
@@ -403,6 +404,7 @@ class _EventDedup:
                 del self._pending_alarm[orphan]
                 self._abandoned.append(orphan)
         self._last_allowed[event_id] = now
+        self._seen[event_id] = now
         self._activity[event_id] = now
         self._admitted_at[event_id] = now
         self._next_attempt += 1
@@ -434,7 +436,8 @@ class _EventDedup:
 
     def should_dispatch(self, event_id: str) -> bool:
         now = time.monotonic()
-        last_seen = self._seen.get(event_id)`r`n        last_activity = self._activity.get(event_id)
+        last_seen = self._seen.get(event_id)
+        last_activity = self._activity.get(event_id)
         last_allowed = self._last_allowed.get(event_id)
 
         # RETIRE THIS ALARM'S OWN STALE STATE FIRST.  `_prune` runs after
