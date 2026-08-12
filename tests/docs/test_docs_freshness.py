@@ -31,15 +31,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _tracked_files() -> list[str]:
-    """Return Git-tracked repo-relative paths; missing Git evidence is fatal."""
+    """Return Git-tracked repo-relative paths; missing Git evidence is fatal.
+
+    Uses ``-z`` because the line-oriented form applies ``core.quotePath``, which is
+    on by default: a tracked path containing a non-ASCII byte comes back as an
+    octal-escaped quoted literal such as ``"caf\303\251.md"``.  A caller then opens
+    a path that does not exist and, if it swallows the error, skips the file
+    silently.  NUL-delimited output is the raw name.
+    """
     out = subprocess.run(
-        ["git", "ls-files"],
+        ["git", "ls-files", "-z"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
     ).stdout
-    return [line for line in out.splitlines() if line]
+    return [name for name in out.split("\0") if name]
 
 
 def _pyproject() -> dict:
@@ -2965,6 +2972,39 @@ _MOJIBAKE_SIGNATURES = tuple(_cp1251_mojibake(source) for source in _MOJIBAKE_AT
 def _mojibake_hits(text: str) -> int:
     """Count known mojibake sequences in one decoded document."""
     return sum(text.count(signature) for signature in _MOJIBAKE_SIGNATURES)
+
+
+# Hand-pinned digest over the whole at-risk source set.  The samples in the control
+# below exercise only a handful of signatures, so without this a single deleted source
+# would leave every test green -- the vacuous-pass condition, one entry at a time.  Any
+# removal, addition or substitution changes this digest.
+_MOJIBAKE_SOURCE_DIGEST = "sha256:ae867bafde9155d8f4f8c7f6724f025df77fdc4b7d34f21742482023eacc1fff"
+
+
+def test_mojibake_source_set_matches_its_pinned_digest() -> None:
+    """The at-risk source set may not change without changing this literal.
+
+    Independent by construction: the expected value is written by hand, so weakening
+    the production tuple fails here rather than silently shrinking the oracle.
+    """
+    observed = hashlib.sha256("".join(_MOJIBAKE_AT_RISK_SOURCES).encode("utf-8")).hexdigest()
+    assert f"sha256:{observed}" == _MOJIBAKE_SOURCE_DIGEST, (
+        "the mojibake at-risk source set changed. If that is intended, re-derive it and "
+        "update _MOJIBAKE_SOURCE_DIGEST in the same commit, stating why in the message."
+    )
+
+
+def test_every_derived_signature_is_exercised() -> None:
+    """Every signature must actually detect, not merely be declared.
+
+    The digest above proves the set is intact; this proves each member works.
+    """
+    assert len(_MOJIBAKE_SIGNATURES) == len(_MOJIBAKE_AT_RISK_SOURCES)
+    assert len(set(_MOJIBAKE_SIGNATURES)) == len(_MOJIBAKE_SIGNATURES), "duplicate signature"
+    for source, signature in zip(_MOJIBAKE_AT_RISK_SOURCES, _MOJIBAKE_SIGNATURES, strict=True):
+        assert _mojibake_hits(f"before {signature} after") == 1, (
+            f"signature derived from U+{ord(source):04X} does not detect its own damage"
+        )
 
 
 def test_mojibake_detector_fires_on_independently_specified_damage() -> None:
