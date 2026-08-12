@@ -1,6 +1,5 @@
-from pathlib import Path
 import re
-
+from pathlib import Path
 
 CHECKLIST = Path(__file__).parents[2] / "docs" / "new_lab_acceptance_checklist.md"
 GATE_RE = re.compile(r"^G([0-9]+\.[0-9]+):$")
