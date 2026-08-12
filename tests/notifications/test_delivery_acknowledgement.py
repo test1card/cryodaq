@@ -589,7 +589,7 @@ async def test_send_photo_records_an_unparseable_body(
 @pytest.mark.parametrize(
     ("body_size", "expected"),
     [
-        pytest.param(65_536, "delivered", id="exact-limit"),
+        pytest.param(65_536, "service_reported_delivered", id="exact-limit"),
         pytest.param(65_537, "outcome_unknown", id="one-byte-over"),
     ],
 )

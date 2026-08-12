@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import html
 import json
-import re
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -139,10 +139,9 @@ def _tg_msg(
     }
 
 
-
 def _extract_required_form_from_handler_error(text: str, command: str) -> str:
     normalized = html.unescape(text)
-    pattern = rf"{re.escape(command)}\s+<[^\n>]+(?:\s+<[^\n>]+)?"
+    pattern = rf"{re.escape(command)}\s+(?:<[^>]+>\s*)+"
     match = re.search(pattern, normalized)
     assert match is not None, f"handler rejection for {command} did not include a full required form"
     return match.group(0).strip()
@@ -154,6 +153,7 @@ def _help_line_from_text(help_text: str, command: str) -> str:
         if normalized.startswith(f"{command} "):
             return normalized.split("—", 1)[0].strip()
     raise AssertionError(f"help text is missing {command}")
+
 
 def _capability_response(token: str = "token-1") -> dict:
     return {
@@ -362,8 +362,6 @@ async def test_cmd_log_empty_text_returns_error() -> None:
     assert "\ufffd" not in reply
 
 
-
-
 @pytest.mark.parametrize(
     ("message", "command"),
     [
@@ -380,6 +378,7 @@ async def test_help_text_reflects_current_command_requirements(message: str, com
     help_line = _help_line_from_text(_HELP_TEXT, command)
 
     assert required == help_line
+
 
 async def test_cmd_phase_advances() -> None:
     """Phase 2c I.2: legacy 'cooling' alias canonicalises to the
