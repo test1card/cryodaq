@@ -2790,19 +2790,176 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "::get_driver_spec" not in section
 
 
-# Mojibake signatures from a cp1251/UTF-8 confusion.  Measured against the real
-# incident: 26 of 26 sequences on the damaged register, and 1 of 1 on a later
-# recurrence in ``tests/``.  Measured against the clean tree: zero hits across
-# every tracked file, which is why this runs repo-wide instead of over one path.
-# Written as escapes so this module contains ASCII only and cannot match itself.
-_MOJIBAKE_SIGNATURES = (
-    "\u0412\u00b7",
-    "\u0432\u0402\u00a6",
-    "\u0432\u0402\u045a",
-    "\u0432\u0402\u045c",
-    "\u0432\u0402\u201c",
-    "\u0432\u0402\u201d",
+# Mojibake produced by reading UTF-8 bytes as cp1251.  DERIVED, not enumerated: every
+# non-ASCII character present in tracked text is at risk, and the image of a NON-Cyrillic
+# source is a sequence that genuine Russian does not produce.  Cyrillic sources are
+# excluded because their images begin with a Cyrillic letter that Russian text produces
+# normally.  U+00BB is excluded for the same reason -- its image is Cyrillic Ve followed
+# by a closing guillemet, which occurs genuinely here, including "V = <<B>>" where B is
+# the Russian symbol for volts.  Measured: 26 of 26 sequences on the damaged register,
+# and zero hits across every tracked file on a clean tree.
+_MOJIBAKE_AT_RISK_SOURCES = (
+    "\u00a7",
+    "\u00ab",
+    "\u00ad",
+    "\u00b0",
+    "\u00b1",
+    "\u00b2",
+    "\u00b3",
+    "\u00b5",
+    "\u00b7",
+    "\u00b9",
+    "\u00bc",
+    "\u00bd",
+    "\u00d7",
+    "\u00e9",
+    "\u00f3",
+    "\u0301",
+    "\u0304",
+    "\u0308",
+    "\u0394",
+    "\u03a3",
+    "\u03a9",
+    "\u03b1",
+    "\u03b2",
+    "\u03b5",
+    "\u03bc",
+    "\u03c3",
+    "\u03c4",
+    "\u0660",
+    "\u0667",
+    "\u06f0",
+    "\u0966",
+    "\u200b",
+    "\u2013",
+    "\u2014",
+    "\u2019",
+    "\u201c",
+    "\u201d",
+    "\u2022",
+    "\u2026",
+    "\u202e",
+    "\u203a",
+    "\u2076",
+    "\u2079",
+    "\u207b",
+    "\u2080",
+    "\u2081",
+    "\u2082",
+    "\u2099",
+    "\u2116",
+    "\u2139",
+    "\u2190",
+    "\u2191",
+    "\u2192",
+    "\u2193",
+    "\u2194",
+    "\u2195",
+    "\u21b5",
+    "\u21d2",
+    "\u21d4",
+    "\u2208",
+    "\u2212",
+    "\u2213",
+    "\u221a",
+    "\u221e",
+    "\u222a",
+    "\u2248",
+    "\u2260",
+    "\u2264",
+    "\u2265",
+    "\u226a",
+    "\u226b",
+    "\u2273",
+    "\u22ef",
+    "\u2500",
+    "\u2502",
+    "\u250c",
+    "\u2510",
+    "\u2514",
+    "\u251c",
+    "\u2524",
+    "\u252c",
+    "\u2534",
+    "\u253c",
+    "\u2550",
+    "\u2551",
+    "\u2554",
+    "\u2557",
+    "\u255a",
+    "\u255d",
+    "\u2571",
+    "\u2572",
+    "\u2588",
+    "\u2591",
+    "\u2592",
+    "\u2593",
+    "\u25a0",
+    "\u25a1",
+    "\u25a3",
+    "\u25aa",
+    "\u25ac",
+    "\u25b2",
+    "\u25b6",
+    "\u25ba",
+    "\u25bc",
+    "\u25c0",
+    "\u25c6",
+    "\u25c7",
+    "\u25cb",
+    "\u25cf",
+    "\u2699",
+    "\u26a0",
+    "\u26a1",
+    "\u2705",
+    "\u2713",
+    "\u2715",
+    "\u2717",
+    "\u2726",
+    "\u2744",
+    "\u274c",
+    "\u27e6",
+    "\u27e7",
+    "\u27f2",
+    "\u27fa",
+    "\u2b0d",
+    "\u2b1c",
+    "\u2b24",
+    "\ufe0f",
+    "\uff0b",
+    "\uff0d",
+    "\uff0e",
+    "\uff10",
+    "\uff11",
+    "\uff21",
+    "\ufffd",
+    "\U0001f3db",
+    "\U0001f3e0",
+    "\U0001f4ca",
+    "\U0001f4cb",
+    "\U0001f4d3",
+    "\U0001f4d6",
+    "\U0001f4da",
+    "\U0001f4f8",
+    "\U0001f514",
+    "\U0001f527",
+    "\U0001f52c",
+    "\U0001f534",
+    "\U0001f535",
+    "\U0001f6a8",
+    "\U0001f7ac",
+    "\U0001f7e1",
+    "\U0001f916",
+    "\U0001f989",
 )
+
+
+def _cp1251_mojibake(source: str) -> str:
+    """Return the sequence a character becomes when its UTF-8 bytes are read as cp1251."""
+    return source.encode("utf-8").decode("cp1251")
+
+
+_MOJIBAKE_SIGNATURES = tuple(_cp1251_mojibake(source) for source in _MOJIBAKE_AT_RISK_SOURCES)
 
 
 def _mojibake_hits(text: str) -> int:
@@ -2810,34 +2967,41 @@ def _mojibake_hits(text: str) -> int:
     return sum(text.count(signature) for signature in _MOJIBAKE_SIGNATURES)
 
 
-def test_mojibake_detector_is_bound_to_the_damage_it_names() -> None:
-    """Positive control: the detector must fire on the exact damage shape.
+def test_mojibake_detector_fires_on_independently_specified_damage() -> None:
+    """Positive control bound to LITERALS, never to the production signature set.
 
-    Without this, a detector that matched nothing would pass the sweep below and
-    read as evidence the tree is clean.  The sample is inline, not a commit
-    reference, so it still resolves in a fresh clone after the branch is gone.
+    An earlier version of this control looped over ``_MOJIBAKE_SIGNATURES`` and asserted
+    ``len(_MOJIBAKE_SIGNATURES)``.  Emptying that tuple therefore satisfied the control
+    while the repository sweep below matched nothing -- the oracle shrank with the thing
+    it was meant to test.  Every sample and count here is written out by hand so that
+    weakening the production set fails this test.
     """
-    for signature in _MOJIBAKE_SIGNATURES:
-        assert _mojibake_hits(f"prefix {signature} suffix") == 1, signature
+    samples = (
+        ("register row \u0432\u0402\u201d end", 1),
+        ("print RED \u0432\u0402\u201d tail", 1),
+        ("it\u0432\u0402\u2122s", 1),
+        ("bullet \u0412\u00b7 item", 1),
+        ("ellipsis \u0432\u0402\u00a6 tail", 1),
+        ("two \u0432\u0402\u201d and \u0412\u00b7", 2),
+    )
+    for text, expected in samples:
+        assert _mojibake_hits(text) == expected, text
 
-    damaged = " ".join(f"row {signature} end" for signature in _MOJIBAKE_SIGNATURES)
-    assert _mojibake_hits(damaged) == len(_MOJIBAKE_SIGNATURES)
-
-    # Genuine Russian must not fire: a Cyrillic letter followed by the guillemet
-    # or an ellipsis is ordinary text here, and a rule broad enough to catch it
-    # was measured at 107 false-positive files.
-    assert _mojibake_hits("\u043a\u0430\u043d\u0430\u043b \u00ab\u0422\u0031\u00bb\u2026") == 0
-    assert _mojibake_hits("plain ASCII text with an em dash \u2014 and a quote \u201d") == 0
+    # Genuine Russian must stay silent.  The third case is the measured reason U+00BB is
+    # excluded: a word ending in Ve before a closing guillemet is ordinary text.
+    assert _mojibake_hits("\u043a\u0430\u043d\u0430\u043b \u00ab\u04221\u00bb") == 0
+    assert _mojibake_hits("plain ASCII \u2014 with real punctuation \u201d\u2026") == 0
+    assert _mojibake_hits("V = \u00ab\u0412\u00bb, I = \u00ab\u0410\u00bb") == 0
+    assert _mojibake_hits("\u00ab\u0410\u0420\u0425\u0418\u0412 \u041e\u0412\u00bb title") == 0
 
 
 def test_tracked_text_carries_no_known_mojibake() -> None:
-    """No tracked text file may contain a known cp1251/UTF-8 mojibake sequence.
+    """No tracked text file may contain a cp1251/UTF-8 mojibake sequence.
 
-    This is deliberately narrow.  It catches the signature family that has
-    actually damaged this repository twice; it does NOT catch novel mojibake from
-    a different codepage pair, ASCII-only corruption, replacement characters, or
-    damage inside binary files.  A new variant needs its signature added here when
-    it is first seen, and the control above keeps the detector honest meanwhile.
+    Limits, stated because a guard whose limits are unstated invites the belief that it
+    covers more: this catches the cp1251 round-trip only.  It does not catch mojibake
+    from a different codepage pair, ASCII-only corruption, replacement characters, damage
+    inside binary files, or a corrupted U+00BB, which is excluded above by measurement.
     """
     damaged: dict[str, int] = {}
     for relative in _tracked_files():
@@ -2851,7 +3015,7 @@ def test_tracked_text_carries_no_known_mojibake() -> None:
             damaged[relative] = hits
 
     assert not damaged, (
-        "tracked files carry known cp1251/UTF-8 mojibake: "
+        "tracked files carry cp1251/UTF-8 mojibake: "
         f"{sorted(damaged.items())}. Repair with "
         "text.encode('cp1251').decode('utf-8') and verify no ASCII skeleton changed."
     )
