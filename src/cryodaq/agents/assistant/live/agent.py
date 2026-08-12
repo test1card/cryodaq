@@ -1629,16 +1629,3 @@ def _format_age(age_s: float | None) -> str:
     if m > 0:
         return f"{m}м {s}с"
     return f"{s}с"
-
-
-
-
-
-
-
-
-
-
-
-
-
