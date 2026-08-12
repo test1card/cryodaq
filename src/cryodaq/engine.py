@@ -27,7 +27,7 @@ import signal
 import stat
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, MutableMapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -2301,34 +2301,8 @@ def _configured_descriptor_channels(driver_load: DriverLoadResult) -> dict[str, 
 
     configured: dict[str, tuple[str, ...]] = {}
     for instrument in driver_load.validated_configs:
-        values = getattr(instrument, "values", {})
-        type_name = getattr(getattr(instrument, "spec", None), "type_name", None)
-        if type_name == "lakeshore_218s":
-            channels = values["channels"]
-            assert isinstance(channels, Mapping)
-            emitted = tuple(str(channel) for channel in channels.values())
-        elif type_name == "etalon_multiline":
-            selected = values.get("channels")
-            if selected is None:
-                count = values["channel_count"]
-                assert isinstance(count, int)
-                selected = tuple(range(1, count + 1))
-            assert isinstance(selected, tuple)
-            numbers = tuple(int(channel) for channel in selected)
-            emitted = tuple(
-                [
-                    *(f"{instrument.name}/length_ch{channel}" for channel in numbers),
-                    f"{instrument.name}/env_temperature",
-                    f"{instrument.name}/env_pressure",
-                    f"{instrument.name}/env_humidity",
-                ]
-            )
-        elif type_name == "asc_reference_tcp":
-            channels = values["channels"]
-            assert isinstance(channels, tuple)
-            emitted = tuple(str(channel["channel_id"]) for channel in channels)
-        else:
-            emitted = ()
+        projection = getattr(getattr(instrument, "spec", None), "emitted_channels", None)
+        emitted = projection(instrument) if projection is not None else ()
         configured[instrument.name] = emitted
     return configured
 

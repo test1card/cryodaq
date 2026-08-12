@@ -84,6 +84,23 @@ _IV_FIELDS = (
     ("power", "W"),
 )
 
+
+def measurement_channel_label(instrument_name: str, channel: SmuChannel, field: str) -> str:
+    """Return one emitted measurement label."""
+
+    return f"{instrument_name}/{channel}/{field}"
+
+
+def emitted_channel_labels(instrument_name: str) -> tuple[str, ...]:
+    """Declare the complete measurement roster emitted by one configured driver."""
+
+    return tuple(
+        measurement_channel_label(instrument_name, channel, field)
+        for channel in SMU_CHANNELS
+        for field, _unit in _IV_FIELDS
+    )
+
+
 _OUTPUT_STATE_NUMBER_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
 _OUTPUT_STATE_MAX_CHARS = 64
 _PROTOCOL_TRIM_CHARS = " \t\r\n"
@@ -2184,7 +2201,7 @@ class Keithley2604B(InstrumentDriver):
             finite = math.isfinite(value)
             readings.append(
                 Reading.now(
-                    channel=f"{self.name}/{channel}/{field}",
+                    channel=measurement_channel_label(self.name, channel, field),
                     value=value if finite else float("nan"),
                     unit=unit,
                     instrument_id=self.name,
@@ -2291,7 +2308,7 @@ class Keithley2604B(InstrumentDriver):
             metadata["reported_compliance_response"] = repr(compliance_evidence[:256])
         return [
             Reading.now(
-                channel=f"{self.name}/{channel}/{field}",
+                channel=measurement_channel_label(self.name, channel, field),
                 value=float("nan"),
                 unit=unit,
                 instrument_id=self.name,

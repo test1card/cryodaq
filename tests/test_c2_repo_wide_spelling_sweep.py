@@ -1948,13 +1948,13 @@ _REGISTRY_ROWS = (
     (
         "C2-145",
         _Challenge(
-            "src/cryodaq/engine.py",
-            "_configured_descriptor_channels",
+            "src/cryodaq/drivers/registry.py",
+            "_asc_reference_emitted_channels",
             "identity indexing or slicing",
             "40249cc85e5768983154",
         ),
         "LEGITIMATE",
-        "reads the `channel_id` key the validated instrument-config schema declares, "
+        "the registry projection reads the `channel_id` key its validated instrument-config schema declares, "
         "rather than inferring an identity from its spelling",
     ),
 )

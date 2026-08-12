@@ -37,6 +37,18 @@ _V1_VALUE_RE = re.compile(r"[0-9]{6}\Z", re.ASCII)
 _V1_ADDRESS_RE = re.compile(r"[0-9]{3}\Z", re.ASCII)
 
 
+def pressure_channel_label(instrument_name: str) -> str:
+    """Return the driver's sole emitted channel label."""
+
+    return f"{instrument_name}/pressure"
+
+
+def emitted_channel_labels(instrument_name: str) -> tuple[str, ...]:
+    """Declare the complete channel roster emitted by one configured driver."""
+
+    return (pressure_channel_label(instrument_name),)
+
+
 class ThyracontVSP63D(InstrumentDriver):
     """Вакуумметр Thyracont VSP63D / VSM77DL.
 
@@ -288,7 +300,7 @@ class ThyracontVSP63D(InstrumentDriver):
             Показание давления с соответствующим статусом.
         """
         response_stripped = response.strip()
-        channel = f"{self.name}/pressure"
+        channel = pressure_channel_label(self.name)
 
         try:
             parts = response_stripped.split(",", 1)
@@ -404,7 +416,7 @@ class ThyracontVSP63D(InstrumentDriver):
         Reading
             Показание давления.
         """
-        channel = f"{self.name}/pressure"
+        channel = pressure_channel_label(self.name)
         response_stripped = response.strip()
 
         # Validate checksum if enabled and response has expected structure
@@ -488,7 +500,7 @@ class ThyracontVSP63D(InstrumentDriver):
 
         return [
             Reading.now(
-                channel=f"{self.name}/pressure",
+                channel=pressure_channel_label(self.name),
                 value=value,
                 unit="mbar",
                 instrument_id=self.name,
