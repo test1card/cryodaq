@@ -1,9 +1,9 @@
-﻿"""Regression tests for IV.6 per-command ephemeral REQ socket.
+"""Regression tests for IV.6 per-command ephemeral REQ socket.
 
 After B1 root cause was traced to a single long-lived REQ socket that
 accumulated state until it became unrecoverable, ``cmd_forward_loop``
 now creates, uses, and closes a fresh REQ socket per command. These
-tests lock in that lifecycle at the unit level Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ they stub out
+tests lock in that lifecycle at the unit level — they stub out
 ``zmq.Context`` so the loop runs without any real TCP bind / connect
 and we can inspect every socket-factory and setsockopt call directly.
 """
@@ -48,7 +48,7 @@ def _make_mock_context(
 ):
     """Build a zmq.Context replacement that hands out tracked sockets.
 
-    Every ``ctx.socket(zmq.REQ)`` (or any socket type Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ the
+    Every ``ctx.socket(zmq.REQ)`` (or any socket type — the
     sub_drain_loop also calls ``ctx.socket(zmq.SUB)``) appends a fresh
     MagicMock to ``sockets`` and returns it. Tests inspect the list to
     count creations, record setsockopt calls, and drive send/recv
@@ -62,7 +62,7 @@ def _make_mock_context(
 
     def _make_socket(*args, **kwargs):
         # Intrinsic identity: remember which socket type the production code
-        # asked for. Creation *order* is not stable Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ sub_drain and the command
+        # asked for. Creation *order* is not stable — sub_drain and the command
         # forwarders run on independently started threads.
         socket_type = args[0] if args else kwargs.get("socket_type")
         with factory_lock:
@@ -93,15 +93,14 @@ def _make_mock_context(
     return ctx
 
 
+def _assert_expected_reply_count(observed: Sequence[object], expected_reply_count: int) -> None:
+    """Assert that the observed reply ids match the shared publication-count contract."""
+    assert _replies_meet_expected_count(observed, expected_reply_count)
+
 
 def _replies_meet_expected_count(replies: Sequence[object], expected_reply_count: int) -> bool:
     """Return whether the reply collector has exactly the expected reply count."""
     return len(replies) == expected_reply_count
-
-
-def _assert_expected_reply_count(observed: Sequence[object], expected_reply_count: int) -> None:
-    """Assert that the observed reply ids matched the shared publication-count contract."""
-    assert _replies_meet_expected_count(observed, expected_reply_count)
 
 
 def _run_cmd_forward(
@@ -120,7 +119,7 @@ def _run_cmd_forward(
     consumed and replies drained. Returns ``(replies, control_messages)``.
 
     Uses stdlib queues (not mp.Queue) because the loop is driven in-
-    process Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ no subprocess, no inter-process transport. The cmd_forward
+    process — no subprocess, no inter-process transport. The cmd_forward
     code path only calls ``.get(timeout=...)``, ``.put(..., timeout=...)``,
     and ``.put_nowait(...)`` on the queues, all of which stdlib queue
     supplies with identical semantics.
@@ -194,7 +193,7 @@ def _run_cmd_forward(
 
         fake_zmq.ZMQError = _FakeZMQError
         fake_zmq.Again = _FakeZMQError  # subclass not needed for these tests
-        # Sentinel attributes read via setsockopt Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ any value is fine.
+        # Sentinel attributes read via setsockopt — any value is fine.
         for attr in (
             "LINGER",
             "RCVTIMEO",
@@ -395,7 +394,7 @@ def _select_req_sockets(sockets: list[MagicMock]) -> list[MagicMock]:
     forwarder thread creates them one command at a time.
 
     Use this (rather than ``_select_command_req_socket``) when the test asserts
-    on *which address* the request socket connected to Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ matching on the address
+    on *which address* the request socket connected to — matching on the address
     as well would make that assertion tautological.
     """
     return [socket for socket in sockets if getattr(socket, "created_socket_type", None) == _FAKE_REQ_SOCKET_TYPE]
@@ -418,9 +417,9 @@ def _select_command_req_sockets(
 ) -> list[MagicMock]:
     """Return every REQ socket the command lane connected to ``command_addr``.
 
-    Selection is by two intrinsic properties recorded on the socket itself Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ
+    Selection is by two intrinsic properties recorded on the socket itself —
     the ``ctx.socket(...)`` type argument and the address passed to
-    ``connect()`` Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ never by position in ``sockets``. ``zmq_bridge_main``
+    ``connect()`` — never by position in ``sockets``. ``zmq_bridge_main``
     starts ``zmq-sub-drain`` and ``zmq-cmd-forward`` as separate threads, so
     the SUB socket can be created before *or* after the first REQ socket and
     any ordinal index is a race.
@@ -473,7 +472,7 @@ def test_cmd_forward_creates_fresh_socket_per_command(_sockets):
     assert all(socket.close.call_count == 1 for socket in req_sockets)
     # 1 SUB socket (sub_drain_loop) + 5 REQ sockets (one per command).
     assert len(_sockets) == 6, (
-        f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)} Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ ephemeral REQ lifecycle regressed"
+        f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)}; ephemeral REQ lifecycle regressed"
     )
 
 
@@ -516,7 +515,9 @@ def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
             producer_complete=producer_complete,
             diagnostics=diagnostics,
         )
-        _assert_expected_reply_count(diagnostics['collected_reply_ids'], len(cmds))
+
+    with pytest.raises(AssertionError):
+        _assert_expected_reply_count(diagnostics["collected_reply_ids"], len(cmds))
 
     assert reply_queue.published_reply_ids == ["r0"]
     assert diagnostics["req_sockets_created"] == 5
@@ -1388,7 +1389,7 @@ def test_assistant_protocol_discovery_routes_and_normalizes_command(_sockets):
     replies, _control = _run_cmd_forward(commands, sockets=_sockets)
 
     assert replies == [{"ok": True, "_rid": "version-1"}]
-    # Select by socket type only Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ the connect address is what this test asserts
+    # Select by socket type only — the connect address is what this test asserts
     # on, so it must not also be the matching criterion.
     request = _select_req_socket(_sockets)
     request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
@@ -1413,7 +1414,7 @@ def test_assistant_reads_route_only_to_assistant_endpoint(_sockets, command):
 
     assert replies == [{"ok": True, "_rid": request_id}]
     assert len(_sockets) == 2
-    # Select by socket type only Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ the assistant endpoint is the assertion here,
+    # Select by socket type only — the assistant endpoint is the assertion here,
     # so it must not double as the matcher.
     request = _select_req_socket(_sockets)
     request.connect.assert_called_once_with("tcp://127.0.0.1:5557")
@@ -1470,7 +1471,7 @@ def test_assistant_read_with_mutation_envelope_is_rejected_before_req_socket(_so
 
 
 def test_cmd_forward_closes_socket_after_zmq_error(_sockets):
-    """The timeout path must still close the REQ socket Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ otherwise the
+    """The timeout path must still close the REQ socket — otherwise the
     ctx.term() at shutdown would hang on an unclosed socket."""
     import sys
 
@@ -1594,7 +1595,7 @@ def test_cmd_timeout_emits_structured_message(_sockets):
 
         def _factory(*args, **kwargs):
             sock = original_side_effect(*args, **kwargs)
-            # Keyed on socket type, not creation order Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ the SUB socket is not
+            # Keyed on socket type, not creation order — the SUB socket is not
             # guaranteed to be created before the command REQ socket.
             if sock.created_socket_type == _FAKE_REQ_SOCKET_TYPE:
                 sock.recv_string.side_effect = _FakeZMQError("failure\r\nsecret=TOP-SECRET-DO-NOT-LEAK")
@@ -1763,9 +1764,7 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
         shutdown.set()
         thread.join(timeout=5.0)
 
-    assert len(replies) == 3, (
-        f"expected 3 replies across 3 timeouts, got {len(replies)} Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎСљ shared-state poisoning across ephemeral sockets"
-    )
+    assert len(replies) == 3, f"expected 3 replies across 3 timeouts, got {len(replies)}; shared-state poisoning"
     # 1 SUB + 3 REQ (one per command); the SUB is not necessarily _sockets[0].
     req_sockets = _select_command_req_sockets(_sockets)
     assert len(req_sockets) == 3
@@ -1779,4 +1778,3 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
         if isinstance(msg, dict) and msg.get("__type") == "cmd_timeout":
             cmd_timeouts.append(msg)
     assert len(cmd_timeouts) == 3
-

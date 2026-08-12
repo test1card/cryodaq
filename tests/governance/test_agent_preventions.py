@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import ast
 import copy
@@ -91,7 +91,6 @@ def _qualified_name(node: ast.expr) -> tuple[str, ...] | None:
     return tuple(reversed(parts))
 
 
-
 def _call_signature(call: ast.Call) -> tuple[str, str] | None:
     if not isinstance(call.func, ast.Attribute) or not isinstance(call.func.value, ast.Name):
         return None
@@ -131,7 +130,9 @@ def _discovery_wait_get_aliases(function: ast.AST) -> set[str]:
             value = node.value
         else:
             continue
-        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "get":
+        if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "get") or (
+            isinstance(value, ast.Attribute) and value.attr == "get"
+        ):
             aliases.add(target.id)
     return aliases
 
@@ -154,6 +155,7 @@ def _is_publication_discovery_wait(call: ast.Call, queue_get_aliases: set[str]) 
 
 def _swallows_timeout_handler(handler: ast.ExceptHandler) -> bool:
     return not all(isinstance(stmt, ast.Raise) for stmt in handler.body)
+
 
 def _sqlite_import_bindings(
     tree: ast.Module,
@@ -1106,7 +1108,9 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
             f"{name} awaits fallible work before cleanup authority"
         )
         writer_starts = [
-            node for node in ast.walk(function) if isinstance(node, ast.Call) and _call_signature(node) == ("writer", "start")
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and _call_signature(node) == ("writer", "start")
         ]
         assert len(writer_starts) == 1 and writer_starts[0] in protected, (
             f"{name} does not own the complete durable-writer lifetime"
@@ -1265,22 +1269,13 @@ async def under_test(queue: asyncio.Queue):
     aliases = _discovery_wait_get_aliases(function)
     assert aliases == {"getter"}
     discovery_waits = [
-        node for node in ast.walk(function)
+        node
+        for node in ast.walk(function)
         if isinstance(node, ast.Call) and _is_publication_discovery_wait(node, aliases)
     ]
     assert len(discovery_waits) == 1
 
+
 def test_all_repository_python_sources_compile_before_pytest_evidence() -> None:
     manifest = compile_python_tree(ROOT)
     assert manifest
-
-
-
-
-
-
-
-
-
-
-
