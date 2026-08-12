@@ -97,7 +97,16 @@ def _safety(cut: CommonCut) -> SafetyReadinessReceipt:
 def _attention(cut: CommonCut) -> AlarmAttentionReceipt:
     return AlarmAttentionReceipt(
         **_base(cut),
-        alarms=(AlarmEvidence("pressure_high", "WARNING", cut.observed_at, False, ("sensor.main",)),),
+        alarms=(
+            AlarmEvidence(
+                "pressure_high",
+                "WARNING",
+                cut.observed_at,
+                False,
+                ("sensor.main",),
+                experiment_id="exp-1",
+            ),
+        ),
         attention=(
             AttentionEvidence(
                 "inspect-vacuum",
@@ -228,7 +237,7 @@ async def test_missing_attention_history_keeps_canonical_critical_visible() -> N
     def degraded_attention(cut: CommonCut) -> AlarmAttentionReceipt:
         return AlarmAttentionReceipt(
             **_base(cut),
-            alarms=(AlarmEvidence("temperature_high", "CRITICAL", cut.observed_at, False),),
+            alarms=(AlarmEvidence("temperature_high", "CRITICAL", cut.observed_at, False, experiment_id="exp-1"),),
             history_revision=None,
         )
 
@@ -518,3 +527,31 @@ print(json.dumps(forbidden))
         check=True,
     )
     assert completed.stdout.strip() == "[]"
+
+
+@pytest.mark.asyncio
+async def test_attention_filters_origin_experiment_and_marks_evaluator_failure() -> None:
+    def attention(cut: CommonCut) -> AlarmAttentionReceipt:
+        return AlarmAttentionReceipt(
+            **_base(cut),
+            alarms=(
+                AlarmEvidence("old", "CRITICAL", cut.observed_at, False, experiment_id="experiment-old"),
+                AlarmEvidence(
+                    "held",
+                    "WARNING",
+                    cut.observed_at,
+                    False,
+                    evaluator_error=True,
+                    experiment_id="exp-1",
+                ),
+            ),
+        )
+
+    snapshot = await _composer(
+        _Allocator([SnapshotRevision(44, NOW + timedelta(seconds=2))]),
+        attention=attention,
+    ).compose(NOW)
+
+    assert tuple(item.detail for item in snapshot.attention.items) == ("held (evaluator failure)",)
+    assert snapshot.attention.items[0].state is OperatorPresentationState.FAULT
+    assert snapshot.attention.items[0].title == "Alarm evaluation unavailable"

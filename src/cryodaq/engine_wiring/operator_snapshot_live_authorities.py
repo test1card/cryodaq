@@ -403,6 +403,8 @@ class LiveAlarmAttentionAuthority:
                     "channels",
                     "acknowledged",
                     "acknowledged_at",
+                    "evaluator_error",
+                    "experiment_id",
                 }:
                     raise ValueError("canonical active alarm item is invalid")
                 alarms.append(
@@ -412,6 +414,8 @@ class LiveAlarmAttentionAuthority:
                         datetime.fromtimestamp(item["triggered_at"], UTC),
                         item["acknowledged"],
                         tuple(item["channels"]),
+                        item["evaluator_error"],
+                        item["experiment_id"],
                     )
                 )
             payload = json.dumps(

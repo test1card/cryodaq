@@ -317,14 +317,20 @@ class OperatorSnapshotComposer:
 
         attention_items: list[AttentionItem] = []
         if receipts.attention.availability is AuthorityAvailability.AVAILABLE:
+            experiment_id = receipts.experiment.experiment_id or "no-active-experiment"
             for alarm in receipts.attention.alarms:
+                if alarm.experiment_id != experiment_id:
+                    continue
                 alarm_key = hashlib.sha256(alarm.alarm_id.encode()).hexdigest()[:32]
+                alarm_state = OperatorPresentationState.FAULT if alarm.evaluator_error else _ALARM_STATE[alarm.level]
+                alarm_title = "Alarm evaluation unavailable" if alarm.evaluator_error else f"Active {alarm.level} alarm"
+                alarm_detail = f"{alarm.alarm_id} (evaluator failure)" if alarm.evaluator_error else alarm.alarm_id
                 attention_items.append(
                     AttentionItem(
                         f"alarm:{alarm_key}",
-                        _ALARM_STATE[alarm.level],
-                        f"Active {alarm.level} alarm",
-                        alarm.alarm_id,
+                        alarm_state,
+                        alarm_title,
+                        alarm_detail,
                         alarm.triggered_at,
                         channel_ids=alarm.channel_ids,
                         canonical_acknowledged=alarm.acknowledged,

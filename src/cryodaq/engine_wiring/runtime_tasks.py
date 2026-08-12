@@ -107,6 +107,16 @@ def _canonical_alarm_severity_changed_event(
     )
 
 
+def _bind_alarm_experiment(state_mgr: Any, experiment_id: str | None) -> None:
+    binder = getattr(state_mgr, "bind_experiment_id", None)
+    if callable(binder):
+        binder(experiment_id)
+
+
+def _alarm_origin(event: AlarmEvent | None, fallback: str | None) -> str | None:
+    return event.experiment_id if event is not None and event.experiment_id is not None else fallback
+
+
 async def _alarm_v2_feed_loop(
     queue: asyncio.Queue[Reading],
     state_tracker: Any,
@@ -311,6 +321,7 @@ async def _alarm_v2_tick_configs(
             # Capture the experiment identity before the canonical mutation;
             # publication must not resample it after an await.
             experiment_id = experiment_manager.active_experiment_id
+            _bind_alarm_experiment(state_mgr, experiment_id)
             active_before = state_mgr.get_active().get(alarm_cfg.alarm_id)
             # Phase-filter -> evaluate -> process. Shared with tests via
             # cryodaq.core.alarm_v2.tick_alarm so suppression is covered
@@ -335,7 +346,7 @@ async def _alarm_v2_tick_configs(
                 await event_bus.publish(
                     _canonical_alarm_cleared_event(
                         active_before,
-                        experiment_id,
+                        _alarm_origin(active_before, experiment_id),
                         timestamp=datetime.now(UTC),
                     )
                 )
@@ -554,9 +565,11 @@ async def cooldown_alarm_tick_loop(
     """Independent tick for CooldownAlarm at its own configured cadence (F-X v3)."""
     interval = float(cooldown_cfg.get("eval_interval_s", 30))
     _last_triggered_id = "cooldown_alarm"
+    last_active: dict[str, AlarmEvent] = {}
     while True:
         await asyncio.sleep(interval)
         experiment_id = experiment_manager.active_experiment_id
+        _bind_alarm_experiment(state_mgr, experiment_id)
         active_before = state_mgr.get_active()
         try:
             transition = await cooldown_alarm.tick()
@@ -577,14 +590,19 @@ async def cooldown_alarm_tick_loop(
                     alarm_dispatch_tasks.add(_pt)
                     _pt.add_done_callback(alarm_dispatch_tasks.discard)
                 await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
-        elif transition == "CLEARED":
+        cleared_ids = set(last_active) - set(state_mgr.get_active())
+        if transition == "CLEARED":
+            cleared_ids.add(_last_triggered_id)
+        for cleared_id in sorted(cleared_ids):
+            cleared_event = last_active.get(cleared_id) or active_before.get(cleared_id)
             await event_bus.publish(
                 _canonical_alarm_cleared_event(
-                    active_before.get(_last_triggered_id),
-                    experiment_id,
+                    cleared_event,
+                    _alarm_origin(cleared_event, experiment_id),
                     timestamp=datetime.now(UTC),
                 )
             )
+        last_active = state_mgr.get_active()
 
 
 async def vacuum_guard_tick_loop(
@@ -602,6 +620,7 @@ async def vacuum_guard_tick_loop(
     while True:
         await asyncio.sleep(interval)
         experiment_id = experiment_manager.active_experiment_id
+        _bind_alarm_experiment(state_mgr, experiment_id)
         active_before = state_mgr.get_active().get("vacuum_guard")
         try:
             transition = await vacuum_guard.tick()

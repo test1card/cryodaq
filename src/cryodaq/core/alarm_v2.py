@@ -76,6 +76,7 @@ class AlarmEvent:
     # This distinguishes a held alarm with a broken evaluator from a normally
     # evaluated active hazard on operator-facing surfaces.
     evaluator_error: bool = False
+    experiment_id: str | None = None
     transition: Literal["TRIGGERED", "SEVERITY_UPGRADED", "CLEARED"] = "TRIGGERED"
     transition_at: float = 0.0
     audit_revision: int = 0
@@ -121,6 +122,7 @@ def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
         acknowledgement_request_id=event.acknowledgement_request_id,
         activation_id=event.activation_id,
         evaluator_error=event.evaluator_error,
+        experiment_id=event.experiment_id,
         transition=event.transition,
         transition_at=event.transition_at,
         audit_revision=event.audit_revision,
@@ -679,6 +681,7 @@ class AlarmStateManager:
         self._sustained_since: dict[str, float] = {}
         self._state_revision = 0
         self._activation_sequence = 0
+        self._bound_experiment_id: str | None = None
         # Ограниченный deque предотвращает утечку памяти при длительной работе.
         self._history: deque[dict] = deque(maxlen=1000)
 
@@ -689,6 +692,12 @@ class AlarmStateManager:
 
     def _mark_active_mutation(self) -> None:
         self._state_revision += 1
+
+    def bind_experiment_id(self, experiment_id: str | None) -> None:
+        """Bind subsequent activations to the engine's current experiment."""
+        if experiment_id is not None and (type(experiment_id) is not str or not experiment_id):
+            raise ValueError("experiment_id must be non-empty text or None")
+        self._bound_experiment_id = experiment_id
 
     def process(
         self,
@@ -745,6 +754,8 @@ class AlarmStateManager:
                 return None  # Уже активен, не re-notify
 
             stored_event = _copy_alarm_event(event)
+            if stored_event.experiment_id is None:
+                stored_event.experiment_id = self._bound_experiment_id
             self._activation_sequence += 1
             stored_event.activation_id = self._activation_sequence
             self._active[alarm_id] = stored_event
@@ -836,8 +847,10 @@ class AlarmStateManager:
                     channels.append(channel)
                 channels = sorted(set(channels))
 
-                if type(event.acknowledged) is not bool:
+                if type(event.acknowledged) is not bool or type(event.evaluator_error) is not bool:
                     raise AlarmSnapshotUnavailableError
+                experiment_id = event.experiment_id or "no-active-experiment"
+                self._validate_snapshot_text(experiment_id)
                 acknowledged_at: float | None = None
                 if event.acknowledged:
                     acknowledged_at = self._validate_snapshot_number(event.acknowledged_at)
@@ -848,6 +861,8 @@ class AlarmStateManager:
                     "channels": channels,
                     "acknowledged": event.acknowledged,
                     "acknowledged_at": acknowledged_at,
+                    "evaluator_error": event.evaluator_error,
+                    "experiment_id": experiment_id,
                 }
 
             canonical = json.dumps(

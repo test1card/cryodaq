@@ -115,6 +115,8 @@ def test_canonical_token_is_order_independent_and_mapping_is_exact() -> None:
         "channels": ["T1", "T2"],
         "acknowledged": False,
         "acknowledged_at": None,
+        "evaluator_error": False,
+        "experiment_id": "no-active-experiment",
     }
     canonical = json.dumps(
         left_snapshot.active,
@@ -143,6 +145,8 @@ def test_acknowledged_snapshot_has_only_minimal_public_fields() -> None:
         "channels",
         "acknowledged",
         "acknowledged_at",
+        "evaluator_error",
+        "experiment_id",
     }
     assert public["acknowledged"] is True
     assert isinstance(public["acknowledged_at"], float)
@@ -296,7 +300,7 @@ def _manager_with_exact_canonical_size(extra_channel_chars: int) -> AlarmStateMa
         channels = []
         for channel_index in range(16):
             extra = "y" if ordinal < extra_channel_chars else ""
-            channels.append(f"{channel_index:02d}-" + "x" * 17 + extra)
+            channels.append(f"{channel_index:02d}-" + "x" * 13 + extra)
             ordinal += 1
         alarm_id = f"a{alarm_index:03d}"
         manager._active[alarm_id] = _event(alarm_id, channels=channels)
@@ -304,10 +308,10 @@ def _manager_with_exact_canonical_size(extra_channel_chars: int) -> AlarmStateMa
 
 
 def test_canonical_json_exact_60_kib_allowed_and_larger_rejected() -> None:
-    at_limit = _manager_with_exact_canonical_size(895)
+    at_limit = _manager_with_exact_canonical_size(1023)
     assert at_limit.snapshot_active_canonical().state_token.startswith("sha256:")
 
-    over_limit = _manager_with_exact_canonical_size(896)
+    over_limit = _manager_with_exact_canonical_size(1024)
     with pytest.raises(AlarmSnapshotUnavailableError):
         over_limit.snapshot_active_canonical()
 
@@ -316,3 +320,17 @@ def test_snapshot_dataclass_is_frozen() -> None:
     snapshot = AlarmStateManager().snapshot_active_canonical()
     with pytest.raises(AttributeError):
         replace(snapshot, state_revision=1).state_revision = 2  # type: ignore[misc]
+
+
+def test_canonical_snapshot_preserves_experiment_binding_and_evaluator_failure() -> None:
+    manager = AlarmStateManager()
+    manager.bind_experiment_id("experiment-7")
+    event = _event("held")
+    assert manager.process("held", event, {}) == "TRIGGERED"
+    held = _event("held")
+    held.evaluator_error = True
+    assert manager.process("held", held, {}) is None
+
+    item = manager.snapshot_active_canonical().active["held"]
+    assert item["experiment_id"] == "experiment-7"
+    assert item["evaluator_error"] is True

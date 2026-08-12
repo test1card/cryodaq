@@ -335,3 +335,51 @@ async def test_diagnostic_transition_kinds_do_not_create_duplicate_incidents() -
     assert [event.payload.get("activation_id") for event in emitted] == [7, 7, 7, 7]
     assert emitted[1].payload.get("audit_revision") == 12
     assert emitted[-1].timestamp == datetime.fromtimestamp(cleared.transition_at, UTC)
+
+
+@pytest.mark.asyncio
+async def test_cooldown_loop_publishes_clear_after_non_tick_mutation() -> None:
+    state_mgr = AlarmStateManager()
+    event_bus = EventBus()
+    published = await event_bus.subscribe("cooldown-clear-after-disarm")
+
+    class _CooldownAlarm:
+        calls = 0
+
+        async def tick(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                state_mgr.process(
+                    "cooldown_alarm",
+                    AlarmEvent(
+                        alarm_id="cooldown_alarm",
+                        level="WARNING",
+                        message="held",
+                        triggered_at=100.0,
+                        channels=[_CHANNEL],
+                        values={_CHANNEL: 80.0},
+                    ),
+                    {},
+                )
+                return "TRIGGERED"
+            state_mgr.process("cooldown_alarm", None, {})
+            if self.calls > 2:
+                raise asyncio.CancelledError
+            return None
+
+    with pytest.raises(asyncio.CancelledError):
+        await cooldown_alarm_tick_loop(
+            cooldown_cfg={"eval_interval_s": 0},
+            cooldown_alarm=_CooldownAlarm(),
+            state_mgr=state_mgr,
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=SimpleNamespace(active_experiment_id="experiment-clear"),
+        )
+
+    emitted = []
+    while not published.empty():
+        emitted.append(published.get_nowait())
+    assert [event.event_type for event in emitted] == ["alarm_fired", "alarm_cleared"]
+    assert emitted[-1].experiment_id == "experiment-clear"

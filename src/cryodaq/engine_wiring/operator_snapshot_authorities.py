@@ -284,6 +284,8 @@ class AlarmEvidence:
     triggered_at: datetime
     acknowledged: bool
     channel_ids: tuple[str, ...] = ()
+    evaluator_error: bool = False
+    experiment_id: str = "no-active-experiment"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -294,6 +296,13 @@ class AlarmEvidence:
         object.__setattr__(self, "triggered_at", _utc(self.triggered_at, field="triggered_at"))
         if type(self.acknowledged) is not bool:
             raise TypeError("acknowledged must be exact bool")
+        if type(self.evaluator_error) is not bool:
+            raise TypeError("evaluator_error must be exact bool")
+        object.__setattr__(
+            self,
+            "experiment_id",
+            _bounded_text(self.experiment_id, field="experiment_id", max_bytes=MAX_ID_UTF8_BYTES),
+        )
         if type(self.channel_ids) is not tuple or len(self.channel_ids) > MAX_CHANNELS:
             raise TypeError("channel_ids must be a bounded exact tuple")
         channel_ids = tuple(
