@@ -38,14 +38,21 @@ def _tracked_files() -> list[str]:
     octal-escaped quoted literal such as ``"caf\303\251.md"``.  A caller then opens
     a path that does not exist and, if it swallows the error, skips the file
     silently.  NUL-delimited output is the raw name.
+
+    ``text=True`` would undo the point of ``-z``.  It decodes with the LOCALE codec, and on this
+    project's Windows gate that is a non-UTF-8 ANSI codepage, so a tracked ``café.md`` comes back
+    mojibake-decoded and both mojibake loops then open a path that does not exist and skip it
+    through their ``OSError`` handlers -- silently, which is the failure this helper exists to stop.
+    Capture BYTES and decode with the filesystem encoding, with ``surrogateescape`` so an
+    undecodable byte round-trips to ``open()`` instead of raising.
     """
-    out = subprocess.run(
+    raw = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=REPO_ROOT,
         capture_output=True,
-        text=True,
         check=True,
     ).stdout
+    out = raw.decode(sys.getfilesystemencoding(), errors="surrogateescape")
     return [name for name in out.split("\0") if name]
 
 
