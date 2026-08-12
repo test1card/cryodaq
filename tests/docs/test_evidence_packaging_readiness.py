@@ -12,13 +12,19 @@ def test_acceptance_checklist_has_exact_gate_set_and_fields():
         for group, item_count in ((0, 4), (1, 7), (2, 4), (3, 4), (4, 6), (5, 4), (6, 1), (7, 3), (8, 3))
         for item in range(1, item_count + 1)
     }
-    gate_indexes = [index for index, line in enumerate(lines) if GATE_RE.match(line)]
-    gate_ids = [GATE_RE.match(lines[index]).group(1) for index in gate_indexes]
-    comment_end = next(index for index in range(gate_indexes[-1] + 1, len(lines)) if lines[index] == "-->")
+    opener = "<!-- G4-PROCEDURES"
+    assert lines.count(opener) == 1
+    comment_start = lines.index(opener)
+    comment_end = next(index for index in range(comment_start + 1, len(lines)) if lines[index] == "-->")
+    procedure_lines = lines[comment_start + 1 : comment_end]
+    gate_indexes = [index for index, line in enumerate(procedure_lines) if GATE_RE.match(line)]
+    gate_ids = [GATE_RE.match(procedure_lines[index]).group(1) for index in gate_indexes]
     assert len(gate_indexes) == len(expected)
     assert len(gate_ids) == len(set(gate_ids))
     gates = {
-        gate_id: lines[index + 1 : gate_indexes[position + 1] if position + 1 < len(gate_indexes) else comment_end]
+        gate_id: procedure_lines[
+            index + 1 : gate_indexes[position + 1] if position + 1 < len(gate_indexes) else len(procedure_lines)
+        ]
         for position, (index, gate_id) in enumerate(zip(gate_indexes, gate_ids))
     }
 
