@@ -907,27 +907,38 @@ def _safe_version_text(value: str) -> str:
     safe = _safe_text(value)
     if _VERSION_CREDENTIAL_RE.search(value):
         raise ValueError("credential-shaped version text is not permitted")
-    encoded = value
+    # Screen EVERY encoding layer, not just the first. One decode used to be enough to reach the
+    # screening, so a doubly-encoded value passed straight through: `UVd4cFkyVWdVMjFwZEdnPQ==`
+    # decodes to another base64 string, which decodes to a personal name, and the sealed bundle
+    # kept the outer text verbatim. Each layer goes through the SAME checks the first one did, so
+    # nesting cannot buy an attacker a weaker screen -- only a deeper one, bounded by MAX_DEPTH.
+    current = value
     for _ in range(MAX_DEPTH):
-        decoded_encoding = unquote(encoded)
-        if decoded_encoding == encoded:
+        encoded = current
+        for _ in range(MAX_DEPTH):
+            decoded_encoding = unquote(encoded)
+            if decoded_encoding == encoded:
+                break
+            encoded = decoded_encoding
+        if len(encoded) % 4 == 1:
+            encoded = ""
+        elif encoded:
+            encoded += "=" * (-len(encoded) % 4)
+        encoded = encoded.translate(str.maketrans("-_", "+/"))
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8") if encoded else ""
+        except (ValueError, UnicodeDecodeError):
+            decoded = ""
+        if not decoded or decoded == current:
             break
-        encoded = decoded_encoding
-    if len(encoded) % 4 == 1:
-        encoded = ""
-    elif encoded:
-        encoded += "=" * (-len(encoded) % 4)
-    encoded = encoded.translate(str.maketrans("-_", "+/"))
-    try:
-        decoded = base64.b64decode(encoded, validate=True).decode("utf-8") if encoded else ""
-    except (ValueError, UnicodeDecodeError):
-        decoded = ""
-    if decoded and _VERSION_CREDENTIAL_RE.search(decoded):
-        raise ValueError("encoded credential-shaped version text is not permitted")
-    if decoded:
+        if _VERSION_CREDENTIAL_RE.search(decoded):
+            raise ValueError("encoded credential-shaped version text is not permitted")
         decoded_safe = _safe_text(decoded)
         if decoded_safe != decoded:
             return decoded_safe
+        if _VERSION_PERSON_RE.fullmatch(decoded.strip()) is not None:
+            return "<redacted:private>"
+        current = decoded
     if _VERSION_PERSON_RE.fullmatch(value.strip()) is not None:
         return "<redacted:private>"
     return safe
@@ -1116,13 +1127,17 @@ class BundleCapture:
                 ]
                 if attention_summaries:
                     summary_cut = attention_summaries[0]["observed_at"]
+                    summary_source_age = attention_summaries[0]["source_age_us"]
                     for kind, payload in decoded_records:
-                        if (
-                            kind == "attention"
-                            and payload["record_role"] == "child"
-                            and payload["observed_at"] > summary_cut
-                        ):
+                        if kind != "attention" or payload["record_role"] != "child":
+                            continue
+                        if payload["observed_at"] > summary_cut:
                             raise ValueError("attention child observed_at exceeds summary cut")
+                        # Same reasoning as the health case below: the attention summary and its
+                        # children are produced from one snapshot-fields call, so a child claiming
+                        # a different source age cannot have come from the snapshot it names.
+                        if payload["source_age_us"] != summary_source_age:
+                            raise ValueError("attention child source_age_us disagrees with its summary")
             if snapshot_kind == "health":
                 summary_by_id = {
                     payload["source_id"]: payload
@@ -1141,6 +1156,13 @@ class BundleCapture:
                         and _STATE_RANK[payload["state"]] > _STATE_RANK[parent_summary["state"]]
                     ):
                         raise ValueError("health summary understate parent-bound child evidence")
+                    # A child and its OWNING summary come from one `_summary_snapshot_fields` call
+                    # in the production collectors, so they cannot honestly disagree about how old
+                    # the source reading is. Two different summaries may legitimately carry
+                    # different ages, which is why this compares each child against ITS parent
+                    # rather than demanding one age across the whole record set.
+                    if parent_summary is not None and payload["source_age_us"] != parent_summary["source_age_us"]:
+                        raise ValueError("health child source_age_us disagrees with its parent summary")
         if tuple(sorted(set(self.unavailable_fields))) != self.unavailable_fields:
             raise ValueError("unavailable_fields must be sorted and unique")
         if any(item not in _UNAVAILABLE_FIELDS for item in self.unavailable_fields):

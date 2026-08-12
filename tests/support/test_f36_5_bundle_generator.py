@@ -13,6 +13,7 @@ Tests are grouped by acceptance criterion:
 
 from __future__ import annotations
 
+import base64
 import inspect
 import json
 import os
@@ -1607,6 +1608,31 @@ def test_review_hostile_versions_never_reach_sealed_evidence(hostile_version: st
         assert version in {"<redacted:path>", "<redacted:private>"}
 
 
+@pytest.mark.parametrize("layers", [1, 2])
+def test_private_version_text_is_screened_at_every_encoding_layer(layers: int) -> None:
+    """One decode is not enough: a doubly-encoded name used to pass through verbatim.
+
+    ``QWxpY2UgU21pdGg=`` decodes to a personal name and was redacted, but
+    ``UVd4cFkyVWdVMjFwZEdnPQ==`` decodes to *that* string and was sealed unchanged, because the
+    screen stopped after the first successful decode.  Both depths must reach the same screening,
+    or nesting buys an attacker a weaker check rather than a deeper one.  Parametrised so the
+    single-layer case stays covered too -- it is the one that was already working, and a fix here
+    must not trade one depth for another.
+    """
+    encoded = b"Alice Smith"
+    for _ in range(layers):
+        encoded = base64.b64encode(encoded)
+    probe = encoded.decode("ascii")
+
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"probe": probe})
+
+    assert b"Alice Smith" not in sealed
+    assert probe.encode() not in sealed, "the encoded form was sealed verbatim, so it was never screened"
+    if "versions" not in evidence["unavailable_fields"]:
+        version = next(item["version"] for item in evidence["versions"] if item["component"] == "probe")
+        assert version == "<redacted:private>"
+
+
 def test_distinct_public_dotted_components_remain_distinct() -> None:
     evidence, _ = _sealed_evidence(
         snapshot=None,
@@ -1734,6 +1760,58 @@ def test_bundle_capture_rejects_duplicate_record_identities() -> None:
 
     with pytest.raises(ValueError, match="record identities"):
         _minimal_capture(records=(first, second))
+
+
+def test_health_child_source_age_must_match_its_parent_summary() -> None:
+    """A child and its owning summary come from ONE snapshot-fields call, so they cannot disagree.
+
+    A child claiming a different `source_age_us` from the summary it names presents two conflicting
+    freshness stories for the same claimed snapshot, and the production collectors cannot emit that
+    combination.  The pairing is per-parent on purpose: two DIFFERENT summaries may legitimately
+    carry different ages, so this must not collapse into one age across the whole record set.
+    """
+    # BOTH canonical health summaries are required, and an `ok` summary must own at least one
+    # child, so a thinner fixture fails for an unrelated reason and the control below would pass
+    # without testing anything. Each summary therefore gets its own agreeing child.
+    summaries = tuple(
+        EvidenceRecord.from_payload(
+            "health",
+            {"source_id": identity, "state": "ok", **_snapshot_record_fields()},
+        )
+        for identity in ("infrastructure-summary", "plant-health-summary")
+    )
+    infra_child = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "infra-node",
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="infrastructure-summary"),
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "plant",
+            "state": "ok",
+            **{
+                **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+                "source_age_us": 99,
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="source_age_us"):
+        _minimal_capture(records=(*summaries, infra_child, child))
+
+    agreeing = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "plant",
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
+    )
+    _minimal_capture(records=(*summaries, infra_child, agreeing))
 
 
 def _recut_snapshot(snapshot: OperatorSnapshot, cut: SnapshotCut) -> OperatorSnapshot:
