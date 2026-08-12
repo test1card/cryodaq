@@ -6370,3 +6370,45 @@ records:
     automation_limit: Local red and green executions are bound below to immutable commit 3212ae30fe750903ec0f43ed9fbb197c8e183e8a and tree a90afb824701c3064e0fb930d971e89473aa25e4, but no sealed hosted core artifact can be produced without network access; this record therefore remains open.
     red_evidence: local_executed_on_commit_3212ae30fe750903ec0f43ed9fbb197c8e183e8a_tree_a90afb824701c3064e0fb930d971e89473aa25e4_python_3_14_3_after_staging_assistant_bootstrap_blob_04d9938c96d8f4f221667029ac65ac14df95e510_with_periodic_report_tick_ownership_declaration_removed_exact_node_selected_1_failed_exit_1_runtimeerror_periodic_reporter_inventory_mismatch_expected_without_periodic_report_tick_observed_with_periodic_report_tick_stdout_stderr_sha256_97cbd0bb4ba3b1f01bfbbb7be04ce05a4fd02412ff1b39f8b20fcc17ebf275c7
     green_evidence: local_executed_on_commit_3212ae30fe750903ec0f43ed9fbb197c8e183e8a_tree_a90afb824701c3064e0fb930d971e89473aa25e4_guard_blob_792063e6ddc00cd0858a7338eb047f7bc794f691_python_3_14_3_exact_node_selected_1_passed_exit_0_stdout_stderr_sha256_4bb6cd0e69f8ab59f6e5fae98042adf7deaaa13b49ccf067044e603f0668e07d_pending_sealed_hosted_core_artifact
+  - id: MOJIBAKE-ENCODING-GUARD-340
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every tracked text file, checked for the sequences produced when UTF-8 bytes are read as cp1251.
+    classification: coverage_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: >-
+      A cp1251/UTF-8 round-trip silently rewrites every em dash, ellipsis, curly quote and middle dot in a
+      tracked file. It did so twice. The first instance replaced 26 sequences inside docs/OBLIGATIONS.md,
+      within the row that holds an owner direction VERBATIM, and a gate on row count, row IDs and
+      byte-identical status cells passed all three, because structure cannot see bytes. The second landed in
+      tests/test_ci_candidate_evidence.py from a PowerShell Out-File round-trip and arrived with a UTF-8 BOM
+      and two literal escape sequences that broke ast.parse. Without this guard the damage reaches review as
+      ordinary-looking text.
+    invariant: >-
+      No tracked text file contains a cp1251/UTF-8 mojibake sequence, and the detector that decides this is
+      provably able to detect damage. The signature set is DERIVED from every non-ASCII character present in
+      tracked text, restricted to non-Cyrillic sources because a Cyrillic source produces a Cyrillic-initial
+      image that genuine Russian also produces; U+00BB is excluded on the same measured ground, its image
+      being Cyrillic Ve before a closing guillemet, which occurs genuinely including in the volts symbol.
+      The positive control asserts hand-written damaged samples and expected counts, never the production
+      signature tuple, so emptying that tuple fails the control instead of satisfying it.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_tracked_text_carries_no_known_mojibake
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_detector_fires_on_independently_specified_damage
+        ci_partition: remaining
+    automation_limit: >-
+      Local red and green executions are bound below to an immutable commit, tree and guard blob, but no
+      sealed hosted remaining artifact can be produced without network access, so this record stays open.
+      Stated coverage limits: the guard detects the cp1251 round-trip only. It does not detect mojibake from
+      a different codepage pair, ASCII-only corruption, replacement characters, damage inside binary files,
+      or a corrupted U+00BB, which is excluded by measurement. A new variant needs its source character added
+      to the at-risk tuple when first seen.
+    red_evidence: local_executed_on_commit_751248c30be45bcd2feae813458f11cf4a254cc7_tree_5282e0dc24bf9965c54bf88abb04e237ce07114f_guard_blob_703c7a5567ce185ab16267e330c7b3dfb3b90dd9_python_3_14_3_with_MOJIBAKE_AT_RISK_SOURCES_emptied_exact_node_selected_1_failed_exit_1_assertionerror_positive_control_no_longer_detects_hand_written_damaged_samples_while_the_repository_sweep_still_exits_0_stdout_stderr_sha256_22337c60d52776e80482e3fe043a225ff49f975c307be1d5c2f2984cb2b4769b
+    green_evidence: local_executed_on_commit_751248c30be45bcd2feae813458f11cf4a254cc7_tree_5282e0dc24bf9965c54bf88abb04e237ce07114f_guard_blob_703c7a5567ce185ab16267e330c7b3dfb3b90dd9_python_3_14_3_both_exact_nodes_selected_2_passed_exit_0_152_unique_signatures_stdout_stderr_sha256_beaf6608b19ad2d85bc14e3beb41d879318e72c73ea2f25378f7225699c76452_pending_sealed_hosted_remaining_artifact
