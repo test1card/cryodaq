@@ -323,8 +323,8 @@ class OperatorSnapshotComposer:
                     continue
                 alarm_key = hashlib.sha256(alarm.alarm_id.encode()).hexdigest()[:32]
                 alarm_state = OperatorPresentationState.FAULT if alarm.evaluator_error else _ALARM_STATE[alarm.level]
-                alarm_title = "Alarm evaluation unavailable" if alarm.evaluator_error else f"Active {alarm.level} alarm"
-                alarm_detail = f"{alarm.alarm_id} (evaluator failure)" if alarm.evaluator_error else alarm.alarm_id
+                alarm_title = "Оценка тревоги недоступна" if alarm.evaluator_error else f"Active {alarm.level} alarm"
+                alarm_detail = f"{alarm.alarm_id} (ошибка оценки)" if alarm.evaluator_error else alarm.alarm_id
                 attention_items.append(
                     AttentionItem(
                         f"alarm:{alarm_key}",

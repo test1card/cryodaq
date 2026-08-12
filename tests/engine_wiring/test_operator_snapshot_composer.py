@@ -552,6 +552,6 @@ async def test_attention_filters_origin_experiment_and_marks_evaluator_failure()
         attention=attention,
     ).compose(NOW)
 
-    assert tuple(item.detail for item in snapshot.attention.items) == ("held (evaluator failure)",)
+    assert tuple(item.detail for item in snapshot.attention.items) == ("held (ошибка оценки)",)
     assert snapshot.attention.items[0].state is OperatorPresentationState.FAULT
-    assert snapshot.attention.items[0].title == "Alarm evaluation unavailable"
+    assert snapshot.attention.items[0].title == "Оценка тревоги недоступна"

@@ -117,6 +117,19 @@ def _alarm_origin(event: AlarmEvent | None, fallback: str | None) -> str | None:
     return event.experiment_id if event is not None and event.experiment_id is not None else fallback
 
 
+async def _await_settled(awaitable: Any) -> tuple[Any, bool]:
+    """Finish a mutation-bearing awaitable before propagating cancellation."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        return await asyncio.shield(task), False
+    except asyncio.CancelledError:
+        try:
+            result = await task
+        except asyncio.CancelledError:
+            result = None
+        return result, True
+
+
 async def _alarm_v2_feed_loop(
     queue: asyncio.Queue[Reading],
     state_tracker: Any,
@@ -441,6 +454,9 @@ async def sensor_diag_tick(
         await asyncio.sleep(interval)
         try:
             experiment_id = experiment_manager.active_experiment_id
+            binder = getattr(sensor_diag, "bind_experiment_id", None)
+            if callable(binder):
+                binder(experiment_id)
             new_events = sensor_diag.update()
             notifiable_events = [
                 event for event in new_events if getattr(event, "transition", "TRIGGERED") != "CLEARED"
@@ -564,50 +580,66 @@ async def cooldown_alarm_tick_loop(
 ) -> None:
     """Independent tick for CooldownAlarm at its own configured cadence (F-X v3)."""
     interval = float(cooldown_cfg.get("eval_interval_s", 30))
-    _last_triggered_id = "cooldown_alarm"
+    _last_triggered_id: str | None = None
     last_active: dict[str, AlarmEvent] = state_mgr.get_active()
     while True:
         await asyncio.sleep(interval)
         experiment_id = experiment_manager.active_experiment_id
         _bind_alarm_experiment(state_mgr, experiment_id)
         active_before = state_mgr.get_active()
+        cancellation_pending = False
         try:
-            transition = await cooldown_alarm.tick()
+            transition, cancellation_pending = await _await_settled(cooldown_alarm.tick())
         except Exception as exc:
             logger.error("CooldownAlarm tick error: %s", exc)
             continue
+        _active = state_mgr.get_active()
+        triggered_event = None
         if transition == "TRIGGERED":
-            _active = state_mgr.get_active()
             # CooldownAlarm fires under "cooldown_alarm" OR "cooldown_watchdog"
-            _ev = _active.get("cooldown_alarm") or _active.get("cooldown_watchdog")
-            if _ev is not None:
-                _last_triggered_id = _ev.alarm_id
-                if telegram_bot is not None:
-                    _pt = asyncio.create_task(
-                        telegram_bot._send_to_all(f"⚠ [{_ev.level}] {_ev.alarm_id}\n{_ev.message}"),
-                        name=f"phys_alarm_tg_{_ev.alarm_id}",
-                    )
-                    alarm_dispatch_tasks.add(_pt)
-                    _pt.add_done_callback(alarm_dispatch_tasks.discard)
-                await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
+            triggered_event = _active.get("cooldown_alarm") or _active.get("cooldown_watchdog")
+        else:
+            added_ids = [alarm_id for alarm_id in _active if alarm_id not in active_before]
+            if added_ids:
+                triggered_event = _active[sorted(added_ids)[0]]
+        if triggered_event is not None:
+            _last_triggered_id = triggered_event.alarm_id
+            if telegram_bot is not None:
+                _pt = asyncio.create_task(
+                    telegram_bot._send_to_all(
+                        f"⚠ [{triggered_event.level}] {triggered_event.alarm_id}\n{triggered_event.message}"
+                    ),
+                    name=f"phys_alarm_tg_{triggered_event.alarm_id}",
+                )
+                alarm_dispatch_tasks.add(_pt)
+                _pt.add_done_callback(alarm_dispatch_tasks.discard)
+            _published, publish_cancelled = await _await_settled(
+                event_bus.publish(_canonical_alarm_fired_event(triggered_event, experiment_id))
+            )
+            cancellation_pending |= publish_cancelled
         active_after = state_mgr.get_active()
         cleared_ids = {
             alarm_id
             for alarm_id in ("cooldown_alarm", "cooldown_watchdog")
             if alarm_id in last_active and alarm_id not in active_after
         }
-        if transition == "CLEARED":
+        if transition == "CLEARED" and (_last_triggered_id in last_active or _last_triggered_id in active_before):
             cleared_ids.add(_last_triggered_id)
         for cleared_id in sorted(cleared_ids):
             cleared_event = last_active.get(cleared_id) or active_before.get(cleared_id)
-            await event_bus.publish(
-                _canonical_alarm_cleared_event(
-                    cleared_event,
-                    _alarm_origin(cleared_event, experiment_id),
-                    timestamp=datetime.now(UTC),
+            _published, publish_cancelled = await _await_settled(
+                event_bus.publish(
+                    _canonical_alarm_cleared_event(
+                        cleared_event,
+                        _alarm_origin(cleared_event, experiment_id),
+                        timestamp=datetime.now(UTC),
+                    )
                 )
             )
+            cancellation_pending |= publish_cancelled
         last_active = active_after
+        if cancellation_pending:
+            raise asyncio.CancelledError
 
 
 async def vacuum_guard_tick_loop(

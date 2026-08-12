@@ -268,6 +268,12 @@ class SensorDiagnosticsEngine:
             self._cold_start_grace_s = float(cold_start_grace_s)
         self._engine_started_mono: float | None = None
 
+    def bind_experiment_id(self, experiment_id: str | None) -> None:
+        """Bind the diagnostic alarm publisher before its next mutation."""
+        binder = getattr(self._alarm_publisher, "bind_experiment_id", None)
+        if callable(binder):
+            binder(experiment_id)
+
     def mark_engine_started(self) -> None:
         """Stamp the cold-start anchor; subsequent alarms wait out the grace."""
         self._engine_started_mono = time.monotonic()
