@@ -565,7 +565,7 @@ async def cooldown_alarm_tick_loop(
     """Independent tick for CooldownAlarm at its own configured cadence (F-X v3)."""
     interval = float(cooldown_cfg.get("eval_interval_s", 30))
     _last_triggered_id = "cooldown_alarm"
-    last_active: dict[str, AlarmEvent] = {}
+    last_active: dict[str, AlarmEvent] = state_mgr.get_active()
     while True:
         await asyncio.sleep(interval)
         experiment_id = experiment_manager.active_experiment_id
