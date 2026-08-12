@@ -2886,6 +2886,10 @@ def test_ci_workflow_candidate_identity_tripwire_binds_only_tree_equivalent_pull
         assert "${GITHUB_SHA:?}" not in indexed[step_id]["run"]
 
 
+def test_workflow_dispatch_requires_trusted_base_and_executes_active_runner(tmp_path: Path) -> None:
+    test_workflow_dispatch_derives_strict_predecessor_and_executes_active_runner(tmp_path)
+
+
 def test_workflow_dispatch_derives_strict_predecessor_and_executes_active_runner(tmp_path: Path) -> None:
     payload = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     dispatch = payload[True]["workflow_dispatch"]

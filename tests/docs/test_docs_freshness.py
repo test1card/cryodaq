@@ -2543,6 +2543,17 @@ def _trusted_coversion_contract(
         else _parse_design_system_machine_gates(base_manifest, label="trusted-base", required=False)
     )
     if gate is None:
+        historical = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base_commit, _F366_BOOTSTRAP_SHA],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert historical.returncode == 0, (
+            "a markerless trusted base must be in the historical pre-gate region; "
+            f"git merge-base returned {historical.returncode}: {historical.stderr.strip()}"
+        )
         contract = _F366_BOOTSTRAP_CONTRACT
     else:
         contract = _normalize_trusted_coversion_contract(gate.get("co_versioning"), label="trusted-base")
@@ -2627,6 +2638,18 @@ def test_a_pre_gate_base_uses_the_bootstrap_contract_and_cannot_weaken_it(
             candidate_tracked=pre_gate_tracked,
         )
     assert "co_versioning must be an object" in str(exc.value)
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_git_file_at",
+        lambda commit, path: None if path == "docs/design-system/MANIFEST.md" else original_git_file_at(commit, path),
+    )
+    with pytest.raises(AssertionError, match="historical pre-gate region"):
+        _trusted_coversion_contract(
+            "HEAD",
+            available_sources=pre_gate_tracked,
+            candidate_tracked=pre_gate_tracked,
+        )
 
 
 @pytest.mark.parametrize(

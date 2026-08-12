@@ -627,6 +627,9 @@ def test_machine_accessibility_contrast_contract_matches_all_real_themes(real_th
                 )
 
     assert set(by_case) <= set(case_by_id)
+    assert set(exception_by_id) == set(_REQUIRED_EXCEPTION_RATIO_FLOORS), (
+        "new contrast exceptions require trusted-base approval before they can be registered"
+    )
 
 
 def test_machine_accessibility_non_color_states_match_real_runtime_contract():

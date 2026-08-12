@@ -38,7 +38,7 @@ the design-system-specific definitions of "breaking" from
 - Exact-checkout F36.6 enforcement in
   `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned`.
   It loads the strict-ancestor trusted contract, permits only the immutable
-  first-release bootstrap to lack a marker, rejects candidate narrowing or
+  historical pre-gate bases to lack a marker, rejects markerless post-gate bases, candidate narrowing or
   repointing, accumulates every overlapping exact route, and requires the
   applicable specifications plus `VERSION` and `CHANGELOG.md` changes.
 - Real-pack accessibility checks in `tests/gui/test_theme_loader.py` covering
