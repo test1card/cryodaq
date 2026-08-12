@@ -767,16 +767,17 @@ def test_main_refuses_non_green_control_suite(tmp_path: Path, monkeypatch, capsy
     assert "control run is not green" in capsys.readouterr().out
 
 
-def test_failures_refuses_crashed_pytest_return_codes(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("returncode", [2, 3, 4, 5])
+def test_failures_refuses_crashed_pytest_return_codes(monkeypatch, tmp_path: Path, returncode: int) -> None:
     suite = tmp_path / "tests" / "crashed.py"
 
     def crashed_pytest(command, root=None, **_kwargs) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(command, 4, b"", b"internal error")
+        return subprocess.CompletedProcess(command, returncode, b"", b"internal error")
 
     monkeypatch.setattr(subject, "_run_candidate_process", crashed_pytest)
     monkeypatch.setattr(subject, "repository_root", lambda: tmp_path)
 
-    with pytest.raises(subject.MeasurementError, match="exited 4 with no readable result"):
+    with pytest.raises(subject.MeasurementError, match=f"exited {returncode} with no readable result"):
         subject.failures([str(suite)], tmp_path / "cache")
 
 
@@ -792,8 +793,18 @@ def test_failures_uses_a_fresh_pyc_cache_prefix_for_each_mutation_run(monkeypatc
     monkeypatch.setattr(subject, "_run_candidate_process", capture_prefix)
     monkeypatch.setattr(subject, "repository_root", lambda: tmp_path)
 
-    assert subject.failures(suite, tmp_path / "first") == []
-    assert subject.failures(suite, tmp_path / "second") == []
+    allocated: list[Path] = []
+
+    def allocate(prefix: str) -> str:
+        path = tmp_path / f"{prefix}{len(allocated)}"
+        path.mkdir()
+        allocated.append(path)
+        return str(path)
+
+    monkeypatch.setattr(subject.tempfile, "mkdtemp", allocate)
+
+    assert subject.fresh_failures(suite, "first-") == []
+    assert subject.fresh_failures(suite, "second-") == []
     assert len(captured) == 2
     assert captured[0] != ""
     assert captured[1] != ""
@@ -801,13 +812,17 @@ def test_failures_uses_a_fresh_pyc_cache_prefix_for_each_mutation_run(monkeypatc
 
 
 def test_git_queries_strip_git_environment_from_repository_commands(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, str | None] = {}
+    names = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE")
+    captured: list[dict[str, str | None]] = []
 
     def capture_run(args: list[str], env=None, timeout=None):
-        captured.update(
-            {key: (None if env is None else env.get(key)) for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")}
-        )
+        captured.append({key: (None if env is None else env.get(key)) for key in names})
         return subprocess.CompletedProcess(args, 0, "", "")
+
+    def capture_bytes_run(args: list[str], **kwargs):
+        env = kwargs.get("env")
+        captured.append({key: (None if env is None else env.get(key)) for key in names})
+        return subprocess.CompletedProcess(args, 0, b"", b"")
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(subject, "_run", capture_run)
@@ -816,8 +831,24 @@ def test_git_queries_strip_git_environment_from_repository_commands(monkeypatch,
         m.setenv("GIT_DIR", str(tmp_path / "alt.git"))
         m.setenv("GIT_WORK_TREE", str(tmp_path / "work"))
         m.setenv("GIT_INDEX_FILE", str(tmp_path / "index"))
+        m.setenv("GIT_GRAFT_FILE", str(tmp_path / "grafts"))
+        m.setenv("GIT_REPLACE_REF_BASE", "refs/replace/")
         subject._git(["status", "--porcelain"])
+        monkeypatch.setattr(subject.subprocess, "run", capture_bytes_run)
+        subject._git_bytes(["status", "--porcelain"])
 
-    assert captured["GIT_DIR"] is None
-    assert captured["GIT_WORK_TREE"] is None
-    assert captured["GIT_INDEX_FILE"] is None
+    assert len(captured) == 4
+    assert all(all(value is None for value in environment.values()) for environment in captured)
+
+
+def test_failures_refuses_exit_one_without_a_failed_node(monkeypatch, tmp_path: Path) -> None:
+    suite = tmp_path / "tests" / "unreadable.py"
+
+    def unreadable_pytest(command, root=None, **_kwargs) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, 1, b"pytest could not report a result", b"")
+
+    monkeypatch.setattr(subject, "_run_candidate_process", unreadable_pytest)
+    monkeypatch.setattr(subject, "repository_root", lambda: tmp_path)
+
+    with pytest.raises(subject.MeasurementError, match="exited 1 with no readable result"):
+        subject.failures([str(suite)], tmp_path / "cache")

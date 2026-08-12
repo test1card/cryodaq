@@ -133,7 +133,9 @@ def closure_semantics_sha256(entry: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
-def disposition_state(record: Mapping[str, Any]) -> str:
+def disposition_state(
+    record: Mapping[str, Any], *, runtime_records: Mapping[str, Mapping[str, Any]] | None = None
+) -> str:
     """Read the record's lifecycle state without treating evidence as completion.
 
     `record_evidence_semantics` declares that green evidence is appended after
@@ -163,6 +165,11 @@ def disposition_state(record: Mapping[str, Any]) -> str:
     # unreadable for them.
     if status not in {"open", "reopened"}:
         return "unknown"
+    runtime_id = record.get("runtime_prevention_id")
+    if runtime_id is not None:
+        runtime = None if runtime_records is None else runtime_records.get(runtime_id)
+        if runtime is None or runtime.get("status") not in {"closed", "expired"}:
+            return "incomplete"
     green = record.get("green_evidence")
     # Guard registration and red prose are enforcement evidence, not evidence
     # that the correction itself is done. They also differ structurally between

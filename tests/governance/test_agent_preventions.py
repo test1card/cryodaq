@@ -1154,7 +1154,8 @@ def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -
     payload = _registry()
     records = payload["records"]
 
-    states = {record["id"]: disposition_state(record) for record in records}
+    runtime_records = {record["id"]: record for record in records}
+    states = {record["id"]: disposition_state(record, runtime_records=runtime_records) for record in records}
     assert set(states.values()) <= {"closed", "expired", "awaiting_green_sweep", "evidence_complete", "incomplete"}, (
         sorted(set(states.values()))
     )
@@ -1172,7 +1173,7 @@ def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -
     pair = copy.deepcopy(payload["false_green_pairs"][0])
     pair["correction_complete"] = True
     assert disposition_state(runtime) == "incomplete"
-    assert disposition_state(pair) == "incomplete"
+    assert disposition_state(pair, runtime_records=runtime_records) == "incomplete"
 
     immutable_red = {
         "locator": "git:0123456789abcdef0123456789abcdef01234567",
@@ -1181,7 +1182,8 @@ def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -
     runtime["red_evidence"] = copy.deepcopy(immutable_red)
     pair["red_evidence"] = copy.deepcopy(immutable_red)
     assert disposition_state(runtime) == "awaiting_green_sweep"
-    assert disposition_state(pair) == "awaiting_green_sweep"
+    closed_runtime = {pair["runtime_prevention_id"]: {"status": "closed"}}
+    assert disposition_state(pair, runtime_records=closed_runtime) == "awaiting_green_sweep"
 
     for invalid_green in (
         "pending_immutable_capture",
