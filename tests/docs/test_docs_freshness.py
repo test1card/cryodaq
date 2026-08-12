@@ -39,10 +39,9 @@ def _tracked_files() -> list[str]:
     a path that does not exist and, if it swallows the error, skips the file
     silently.  NUL-delimited output is the raw name.
 
-    ``text=True`` would undo the point of ``-z``.  It decodes with the LOCALE codec, and on this
-    project's Windows gate that is a non-UTF-8 ANSI codepage, so a tracked ``café.md`` comes back
-    mojibake-decoded and both mojibake loops then open a path that does not exist and skip it
-    through their ``OSError`` handlers -- silently, which is the failure this helper exists to stop.
+    ``text=True`` would undo the point of ``-z``.  It decodes with the LOCALE codec.
+    The repository's Windows CI gate enables ``PYTHONUTF8=1``; this remains a
+    failure mode for local/default environments that do not enable UTF-8 mode.
     Capture BYTES and decode with the filesystem encoding, with ``surrogateescape`` so an
     undecodable byte round-trips to ``open()`` instead of raising.
     """
@@ -2826,6 +2825,9 @@ _MOJIBAKE_AT_RISK_SOURCES = (
     "\u00bc",
     "\u00bd",
     "\u00d7",
+    # Pinned independently: its cp1251 image begins with Cyrillic and is
+    # therefore invisible to the live inventory filter.
+    "\u00e1",
     "\u00e9",
     "\u00f3",
     "\u0301",
@@ -2999,7 +3001,7 @@ def _mojibake_hits(text: str) -> int:
 # below exercise only a handful of signatures, so without this a single deleted source
 # would leave every test green -- the vacuous-pass condition, one entry at a time.  Any
 # removal, addition or substitution changes this digest.
-_MOJIBAKE_SOURCE_DIGEST = "sha256:ae867bafde9155d8f4f8c7f6724f025df77fdc4b7d34f21742482023eacc1fff"
+_MOJIBAKE_SOURCE_DIGEST = "sha256:96f50b4f3bfc94479ddfeefec13b9628e322418fd75a2088d0fefffdf4f5031f"
 
 
 def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
@@ -3018,7 +3020,8 @@ def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
             except UnicodeDecodeError:
                 continue
             eligible.add(character)
-    assert _MOJIBAKE_AT_RISK_SOURCES == tuple(sorted(eligible, key=ord)), (
+    expected = tuple(sorted(eligible | {"\u00e1"}, key=ord))
+    assert _MOJIBAKE_AT_RISK_SOURCES == expected, (
         "the mojibake source tuple is stale; re-derive it from tracked UTF-8 text"
     )
 
@@ -3043,7 +3046,7 @@ def test_mojibake_source_set_matches_its_pinned_digest() -> None:
 # Measured before this anchor existed: returning a dynamically assembled bogus signature
 # for a single source left all four guard nodes green, and the real corruption for that
 # character escaped the repository sweep.
-_MOJIBAKE_MAPPING_DIGEST = "sha256:a013c8446e3dd13bf48760927feb8b792f666b6c8eb6b6cfafffdcc847588993"
+_MOJIBAKE_MAPPING_DIGEST = "sha256:dbf0f9dfbedc9faeeded903eefbd95654b33e6a51ee5243a7b2308a43a2b6d27"
 
 
 def test_mojibake_derivation_matches_its_pinned_mapping() -> None:
@@ -3134,3 +3137,14 @@ def test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file(tmp_path, monke
     monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
 
     assert _tracked_mojibake_hits() == {"damaged.md": 1}
+
+
+def test_tracked_files_preserves_non_ascii_paths_without_utf8_mode(tmp_path, monkeypatch) -> None:
+    tracked = tmp_path / "café.md"
+    tracked.write_text("plain", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", tracked.name], cwd=tmp_path, check=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("PYTHONUTF8", "0")
+
+    assert "café.md" in _tracked_files()

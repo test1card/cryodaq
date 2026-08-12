@@ -80,6 +80,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: local_mutation_of_tracked_sweep_enumeration_to_empty_slice_left_all_existing_mojibake_guards_green_while_a_damaged_file_was_not_read_pending_immutable_capture
     green_evidence: pending_local_execution_after_addition
+  - id: MOJIBAKE-LIVE-INVENTORY-FALSE-GREEN-343
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_live_tracked_inventory
+    ci_partition: remaining
+    red_evidence: a_cp1251_mojibake_source_whose_image_begins_with_Cyrillic_was_excluded_from_the_live_inventory_and_left_the_sweep_green_pending_immutable_capture
+    green_evidence: pending_local_execution_after_independent_source_anchor
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
