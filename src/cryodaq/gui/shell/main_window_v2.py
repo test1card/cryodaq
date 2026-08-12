@@ -155,8 +155,14 @@ def _engine_applied_cold_stage_channel(reading: Reading) -> str | None:
     return channel.strip()
 
 
-def _active_channel_descriptors() -> Mapping[str, ChannelDescriptorV1]:
-    """Load the same whole-file descriptor authority selected by the engine."""
+def _load_channel_descriptor_authority() -> Mapping[str, ChannelDescriptorV1] | None:
+    """The descriptor authority, or None when it could not be LOADED.
+
+    None and an empty mapping are different answers and the caller must be able to tell them
+    apart. A catalog that loaded and declares nothing is authoritative; a catalog that failed to
+    load is not, and installing the failure as an authority would silently reclassify EVERY
+    channel as undeclared and empty the operator's surfaces.
+    """
     config_dir = get_config_dir()
     local_path = (
         config_dir / "channel_descriptors.local.yaml" if (config_dir / "instruments.local.yaml").exists() else None
@@ -168,8 +174,14 @@ def _active_channel_descriptors() -> Mapping[str, ChannelDescriptorV1]:
         )
     except (OSError, ChannelDescriptorStorageError) as exc:
         logger.warning("cold-stage descriptor authority unavailable; error=%s", exc)
-        return {}
+        return None
     return owner.storage_catalog_snapshot().by_channel_id
+
+
+def _active_channel_descriptors() -> Mapping[str, ChannelDescriptorV1]:
+    """Load the same whole-file descriptor authority selected by the engine."""
+    catalog = _load_channel_descriptor_authority()
+    return {} if catalog is None else catalog
 
 
 class MainWindowV2(QMainWindow):
@@ -225,8 +237,21 @@ class MainWindowV2(QMainWindow):
         self.setMinimumSize(1280, 800)
 
         self._channel_mgr = get_channel_manager()
-        self._active_channel_descriptors = _active_channel_descriptors()
-        self._channel_mgr.set_descriptor_authority(dict(self._active_channel_descriptors))
+        _descriptor_authority = _load_channel_descriptor_authority()
+        self._active_channel_descriptors = {} if _descriptor_authority is None else _descriptor_authority
+        if _descriptor_authority is None:
+            # PROCEED, and say exactly what is wrong and what it costs. Installing the failed load
+            # as the authority would make `get_quantity` return None for every channel, emptying
+            # the grid, plot, watch bar and conductivity selector -- a blank screen whose cause is
+            # invisible. Leaving the authority uninstalled keeps the previous channels.yaml
+            # classification, which is stated here rather than silently assumed.
+            logger.error(
+                "channel descriptor authority failed to load; GUI quantity routing is NOT "
+                "descriptor-bound and falls back to channels.yaml. Live routing and persistence may "
+                "therefore disagree about a channel's quantity until the manifest is readable."
+            )
+        else:
+            self._channel_mgr.set_descriptor_authority(dict(_descriptor_authority))
         self._declared_cold_stage_descriptor: ChannelDescriptorV1 | None = None
         # D7.1b: descriptor identity store — GUI-thread-owned, lives for one session.
         self._descriptor_store = DescriptorStore()

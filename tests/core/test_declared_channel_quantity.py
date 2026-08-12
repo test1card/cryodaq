@@ -365,3 +365,19 @@ def test_a_refused_reload_does_not_adopt_the_rejected_path(tmp_path: Path) -> No
     assert manager._config_path == original_path, "a refused reload adopted the rejected path"
     # And the refusal must not have disturbed what the manager serves.
     assert list(manager.get_all()) == ["Т1"]
+
+
+@pytest.mark.parametrize("bad", [["temperature"], {"kind": "temperature"}])
+def test_a_non_string_quantity_is_refused_as_a_configuration_error(tmp_path: Path, bad: object) -> None:
+    """An unhashable quantity must not escape as TypeError from the membership test.
+
+    `quantity: [temperature]` is a YAML sequence, and asking whether it is in a frozenset raises
+    TypeError, which bypasses the ChannelConfigError path the engine handles and reaches the
+    operator as a bare startup traceback instead of an actionable refusal.
+    """
+    payload = {"default_quantity": "temperature", "channels": {"Т1": {"name": "one", "quantity": bad}}}
+    target = tmp_path / "channels.yaml"
+    target.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
+
+    with pytest.raises(ChannelConfigError, match="must be a string"):
+        ChannelManager(target).load()

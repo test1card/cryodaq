@@ -136,6 +136,14 @@ class ChannelManager:
             if isinstance(info, dict) and "quantity" in info
         }
         for field_name, quantity in (("default_quantity", declared_default), *quantities.items()):
+            # Type BEFORE membership. `quantity: [temperature]` is a YAML sequence, and asking
+            # whether an unhashable value is in a frozenset raises TypeError, which escapes the
+            # ChannelConfigError path entirely and reaches the operator as a startup traceback
+            # instead of the actionable refusal below.
+            if quantity is not None and not isinstance(quantity, str):
+                raise ChannelConfigError(
+                    f"channels.yaml at {candidate_path}: {field_name} must be a string, got {type(quantity).__name__}"
+                )
             if quantity is not None and quantity not in _SUPPORTED_QUANTITIES:
                 # Say WHAT is wrong, WHY it matters, and WHICH values are accepted. The operator
                 # cannot act on "unsupported quantity 'temperatue'" alone, and the consequence of

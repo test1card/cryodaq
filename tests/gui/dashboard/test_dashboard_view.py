@@ -476,6 +476,34 @@ def test_celsius_temperature_is_not_buffered_on_kelvin_dashboard(app, tmp_path):
     assert view._buffer_store.get_history("Т1") == []
 
 
+def test_celsius_temperature_still_reaches_its_sensor_cell(app, tmp_path):
+    """Kelvin-only BUFFERING must not also suppress the unit-agnostic cell dispatch.
+
+    `DynamicSensorGrid` builds a cell for every DECLARED temperature channel, so gating dispatch on
+    the Kelvin predicate left a Celsius channel owning a cell that could never update: it sat at
+    "Нет данных" while current readings arrived. The plot buffer stays Kelvin-only because that
+    axis is fixed to K, but the cell is not a plot.
+    """
+    target = tmp_path / "channels.yaml"
+    target.write_text(
+        "default_quantity: temperature\nchannels:\n  Т1:\n    name: celsius\n    visible: true\n",
+        encoding="utf-8",
+    )
+    manager = ChannelManager(target)
+    from types import SimpleNamespace
+
+    manager.set_descriptor_authority({"Т1": SimpleNamespace(quantity="temperature", unit="°C")})
+    view = DashboardView(manager)
+
+    dispatched: list[object] = []
+    view._sensor_grid = SimpleNamespace(dispatch_reading=lambda reading, status: dispatched.append(reading))
+    reading = Reading.now("Т1", 20.0, "°C")
+    view.on_reading(reading)
+
+    assert view._buffer_store.get_history("Т1") == [], "the Kelvin-only plot buffer must stay empty"
+    assert [item.channel for item in dispatched] == ["Т1"], "the sensor cell never received the reading"
+
+
 def test_dashboard_presentation_tick_is_bounded_to_two_hz(app):
     mgr = ChannelManager()
     view = DashboardView(mgr)
