@@ -2,7 +2,7 @@
 title: Design System Changelog
 status: canonical
 last_updated: 2026-08-05
-version: 4.1.0
+version: 4.1.1
 ---
 
 # Design System Changelog
@@ -12,6 +12,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.1.1] — 2026-08-12
+
+### Fixed
+
+- Reconciled the canonical color-token specification and filled-pill contrast
+  evidence with the shipped `default_cool` `ON_PRIMARY #141210` value. The
+  affected pairs are measured explicitly in `accessibility/contrast-matrix.md`.
 
 ## [4.1.0] — 2026-08-05
 

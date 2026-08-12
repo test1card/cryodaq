@@ -4,7 +4,7 @@ keywords: color, token, palette, surface, status, text, plot, stone, accent, hex
 applies_to: all widgets
 enforcement: strict
 priority: critical
-last_updated: 2026-07-20
+last_updated: 2026-08-12
 status: canonical
 ---
 
@@ -126,7 +126,7 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 | `TEXT_SECONDARY` | `MUTED_FOREGROUND` | `#8a8f9b` | Secondary text, captions, timestamps |
 | `TEXT_MUTED` | `MUTED_FOREGROUND` | `#8a8f9b` | Same as SECONDARY, alias for muted semantic |
 | `TEXT_DISABLED` | literal | `#555a66` | Disabled controls, unreachable items |
-| `TEXT_INVERSE` | `ON_PRIMARY` | `#e8eaf0` | Reserved for light surfaces (we have none) |
+| `TEXT_INVERSE` | `ON_PRIMARY` | per-theme | Reserved for light surfaces and theme-specific inverse text |
 | `TEXT_ACCENT` | `ACCENT` | `#7c8cff` | Link color, selected item text, focused label |
 | `TEXT_OK` | `STATUS_OK` | `#4a8a5e` | Positive status inline (respect contrast constraint) |
 | `TEXT_WARNING` | `STATUS_CAUTION` | `#c4862e` | Legacy compatibility alias; do not create a separate visual step |
@@ -146,9 +146,9 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 | `SELECTION_BG` | per-theme | Selected-row background (neutral) | QTableWidget selected row highlight, selected list item background. Phase III.A neutral — decoupled from STATUS semantics so safety-green never signals "selected". |
 | `FOCUS_RING` | per-theme | Focused-element outline (neutral) | `:focus` QSS border on inputs / buttons when accent bleed would collide with surrounding UI chrome. |
 | `ON_ACCENT` | `#0d0e12` | Text color on ACCENT background | When ACCENT used as button/chip background. |
-| `ON_PRIMARY` | `#e8eaf0` | Text on PRIMARY surfaces | Reserved for inversion scenarios. |
+| `ON_PRIMARY` | per-theme (`default_cool` `#141210`) | Text on PRIMARY/status-filled surfaces | Theme-specific foreground selected for contrast-tested filled labels; `default_cool` uses dark text. |
 | `ON_SECONDARY` | `#e8eaf0` | Text on SECONDARY surfaces | Reserved for inversion scenarios. |
-| `ON_DESTRUCTIVE` | `#e8eaf0` | Text on destructive button background | АВАР. ОТКЛ. button label. |
+| `ON_DESTRUCTIVE` | per-theme | Text on destructive button background | АВАР. ОТКЛ. button label; use the pack value and its measured contrast pair. |
 
 **STATUS_OK — DO NOT use for UI activation** (Phase III.A decoupling,
 ADR 002):
@@ -212,7 +212,7 @@ All 8 colors share ~60% saturation ceiling — consistent with desaturated aesth
 | Token | Hex | Use |
 |---|---|---|
 | `DESTRUCTIVE` | `#c44545` | Destructive button background (e.g., АВАР. ОТКЛ.) — same hex as STATUS_FAULT |
-| `ON_DESTRUCTIVE` | `#e8eaf0` | Text color on destructive button |
+| `ON_DESTRUCTIVE` | per-theme | Text color on destructive button |
 | `DANGER_400` | `STATUS_FAULT` = `#c44545` | Alias, used in safety-specific context |
 
 `DESTRUCTIVE` has same visual appearance as `STATUS_FAULT` by design — destructive actions carry fault-level semantic weight. Button must include hold-to-confirm or modal confirmation pattern (see `patterns/destructive-actions.md`).
@@ -288,6 +288,9 @@ See `ANTI_PATTERNS.md` for historical regressions and their corrections.
 
 ## Changelog
 
+- 2026-08-12: Reconciled the canonical `ON_PRIMARY` documentation with the
+  shipped theme packs. `default_cool` uses `#141210` for contrast-tested
+  filled labels; see the accessibility contrast matrix for the measured pairs.
 - 2026-07-20: Reserved OK for independently demonstrated health; documented
   activity/progress as ACCENT and canonicalized the single caution rung.
 - 2026-04-17: Initial version from theme.py inventory at commit 53e258c (71 color tokens)
