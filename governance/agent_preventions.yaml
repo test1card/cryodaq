@@ -3232,6 +3232,15 @@ false_green_pairs:
     red_evidence: exact_9eeccabf_acknowledgement_suite_missed_an_early_stalled_200_body_that_held_send_photo_and_chart_shutdown_drain_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
+  - id: EVIDENCE-PACKAGING-READINESS-FALSE-GREEN-242
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-PACKAGING-READINESS-025
+    guard: tests/docs/test_evidence_packaging_readiness.py::test_acceptance_checklist_has_exact_gate_set_and_fields
+    ci_partition: remaining
+    red_evidence: the_gate_field_guard_sliced_the_final_G4_PROCEDURES_gate_through_EOF_so_moving_its_evidence_line_below_the_comment_terminator_left_the_real_block_empty_while_the_test_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending
+
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6370,3 +6379,22 @@ records:
     automation_limit: Local red and green executions are bound below to immutable commit 3212ae30fe750903ec0f43ed9fbb197c8e183e8a and tree a90afb824701c3064e0fb930d971e89473aa25e4, but no sealed hosted core artifact can be produced without network access; this record therefore remains open.
     red_evidence: local_executed_on_commit_3212ae30fe750903ec0f43ed9fbb197c8e183e8a_tree_a90afb824701c3064e0fb930d971e89473aa25e4_python_3_14_3_after_staging_assistant_bootstrap_blob_04d9938c96d8f4f221667029ac65ac14df95e510_with_periodic_report_tick_ownership_declaration_removed_exact_node_selected_1_failed_exit_1_runtimeerror_periodic_reporter_inventory_mismatch_expected_without_periodic_report_tick_observed_with_periodic_report_tick_stdout_stderr_sha256_97cbd0bb4ba3b1f01bfbbb7be04ce05a4fd02412ff1b39f8b20fcc17ebf275c7
     green_evidence: local_executed_on_commit_3212ae30fe750903ec0f43ed9fbb197c8e183e8a_tree_a90afb824701c3064e0fb930d971e89473aa25e4_guard_blob_792063e6ddc00cd0858a7338eb047f7bc794f691_python_3_14_3_exact_node_selected_1_passed_exit_0_stdout_stderr_sha256_4bb6cd0e69f8ab59f6e5fae98042adf7deaaa13b49ccf067044e603f0668e07d_pending_sealed_hosted_core_artifact
+  - id: EVIDENCE-PACKAGING-READINESS-025
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The acceptance-checklist gate inventory and required per-gate fields inside the bounded G4-PROCEDURES evidence block.
+    classification: coverage_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A malformed or incomplete acceptance gate can be reported PRESENT when the guard reads outside the actual metadata block, leaving evidence packaging readiness falsely green.
+    invariant: The checklist contains exactly the expected gate IDs, each exactly once, and each bounded gate block contains exactly one bound, abort, evidence, and result field before the G4-PROCEDURES terminator.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_evidence_packaging_readiness.py::test_acceptance_checklist_has_exact_gate_set_and_fields
+        ci_partition: remaining
+    red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending

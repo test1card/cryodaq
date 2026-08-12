@@ -14,10 +14,11 @@ def test_acceptance_checklist_has_exact_gate_set_and_fields():
     }
     gate_indexes = [index for index, line in enumerate(lines) if GATE_RE.match(line)]
     gate_ids = [GATE_RE.match(lines[index]).group(1) for index in gate_indexes]
+    comment_end = next(index for index in range(gate_indexes[-1] + 1, len(lines)) if lines[index] == "-->")
     assert len(gate_indexes) == len(expected)
     assert len(gate_ids) == len(set(gate_ids))
     gates = {
-        gate_id: lines[index + 1 : gate_indexes[position + 1] if position + 1 < len(gate_indexes) else len(lines)]
+        gate_id: lines[index + 1 : gate_indexes[position + 1] if position + 1 < len(gate_indexes) else comment_end]
         for position, (index, gate_id) in enumerate(zip(gate_indexes, gate_ids))
     }
 
