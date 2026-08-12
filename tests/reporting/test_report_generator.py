@@ -867,10 +867,53 @@ async def test_report_with_readable_measured_values_archive_remains_normal(
     if live_db.exists():
         live_db.unlink()
 
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata = json.loads((experiment_root / "metadata.json").read_text(encoding="utf-8"))
+    summary = metadata["summary_metadata"]
+    summary["measured_values_complete"] = True
+    summary["measured_values_truncated"] = False
+    summary["measured_values_issues"] = []
+    (experiment_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
     result = ReportGenerator(tmp_path).generate(exp_id)
 
     assert result.docx_path.exists()
     assert "4.30 \u041a" not in _doc_text(result.docx_path)
+
+
+async def test_report_with_readable_measured_values_archive_rejects_truncated_metadata(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    """A readable archive cannot be accepted once truncation is explicitly recorded."""
+    exp_id = manager.start_experiment(
+        name="Readable archive truncated",
+        title="Readable archive truncated",
+        operator="Operator",
+        template_id="cooldown_test",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    await _seed_experiment_data(tmp_path, exp_id)
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+
+    experiment_root = tmp_path / "experiments" / exp_id
+    metadata = json.loads((experiment_root / "metadata.json").read_text(encoding="utf-8"))
+    summary = metadata["summary_metadata"]
+    summary["measured_values_complete"] = True
+    summary["measured_values_truncated"] = True
+    summary["measured_values_issues"] = []
+    (experiment_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    archive_csv = experiment_root / "archive" / "tables" / "measured_values.csv"
+    assert archive_csv.exists()
+    assert len(archive_csv.read_text(encoding="utf-8").splitlines()) > 1
+
+    live_db = tmp_path / "data_2026-03-16.db"
+    if live_db.exists():
+        live_db.unlink()
+
+    with pytest.raises(ReportContractError, match="measurement data unavailable or inconsistent"):
+        ReportGenerator(tmp_path).generate(exp_id)
 
 
 async def test_report_generation_graceful_on_soffice_timeout(

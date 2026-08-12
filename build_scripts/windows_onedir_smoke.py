@@ -62,6 +62,18 @@ _KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS = frozenset(
 )
 _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
+_FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
+_REQUIRED_SMOKE_CELLS = (
+    "frozen_driver_imports",
+    "gui_startup_offscreen",
+    "report_render_unicode",
+    "windows_job_timeout",
+    "assistant_h2_agent_off",
+    "assistant_h2_agent_missing",
+    "assistant_replay_exact_off",
+    "assistant_h3_only_allowed_idle",
+    "assistant_h3_only_restart_lock_release",
+)
 
 
 def _json_bytes(payload: object) -> bytes:
@@ -382,6 +394,64 @@ def _seed_experiment(data_dir: Path, experiment_id: str) -> None:
     )
 
 
+def frozen_driver_import_command(executable: Path) -> list[str]:
+    if executable.name.lower() != "cryodaq.exe":
+        raise ValueError("smoke target must be CryoDAQ.exe")
+    return [str(executable), "--mode=verify-frozen-drivers"]
+
+
+def _expected_frozen_driver_import_payload() -> dict[str, object]:
+    from cryodaq.drivers.registry import ALLOWLISTED_DRIVER_MODULES, DRIVER_REGISTRY_COMPAT_VERSION
+
+    return {
+        "schema": 1,
+        "status": "PASS",
+        "registry_compat_version": DRIVER_REGISTRY_COMPAT_VERSION,
+        "modules": list(ALLOWLISTED_DRIVER_MODULES),
+    }
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"frozen driver import payload repeats field {key!r}")
+        payload[key] = value
+    return payload
+
+
+def _parse_frozen_driver_import_payload(stdout: bytes) -> dict[str, object]:
+    text = stdout.decode("utf-8", errors="strict")
+    records = [
+        line.removeprefix(_FROZEN_DRIVER_IMPORT_PREFIX)
+        for line in text.splitlines()
+        if line.startswith(_FROZEN_DRIVER_IMPORT_PREFIX)
+    ]
+    if len(records) != 1:
+        raise ValueError(f"frozen driver import emitted {len(records)} result records instead of one")
+    payload = json.loads(records[0], object_pairs_hook=_unique_json_object)
+    expected = _expected_frozen_driver_import_payload()
+    expected_fields = {"schema", "status", "registry_compat_version", "modules", "module_files"}
+    if not isinstance(payload, dict) or set(payload) != expected_fields:
+        raise ValueError("frozen driver import payload does not have the exact field set")
+    modules = payload["modules"]
+    module_files = payload["module_files"]
+    if (
+        type(payload["schema"]) is not int
+        or type(payload["status"]) is not str
+        or type(payload["registry_compat_version"]) is not int
+        or type(modules) is not list
+        or any(type(module) is not str for module in modules)
+        or type(module_files) is not dict
+        or set(module_files) != set(modules)
+        or any(type(path) is not str or not path for path in module_files.values())
+    ):
+        raise ValueError("frozen driver import payload does not have exact field types")
+    if {key: payload[key] for key in expected} != expected:
+        raise ValueError(f"frozen driver import payload does not match the source registry: {payload!r}")
+    return expected
+
+
 def frozen_report_command(executable: Path, experiment_id: str, generation_id: str) -> list[str]:
     if executable.name.lower() != "cryodaq.exe":
         raise ValueError("smoke target must be CryoDAQ.exe")
@@ -406,6 +476,42 @@ def _write_log(evidence_dir: Path, name: str, completed: subprocess.CompletedPro
         "stdout_sha256": _sha256(stdout),
         "stderr": stderr.name,
         "stderr_sha256": _sha256(stderr),
+    }
+
+
+def _run_frozen_driver_import_cell(
+    executable: Path,
+    root: Path,
+    evidence_dir: Path,
+) -> dict[str, Any]:
+    command = frozen_driver_import_command(executable)
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env.update({"CRYODAQ_ROOT": str(root), "PYTHONUTF8": "1"})
+    started = time.monotonic()
+    completed = subprocess.run(
+        command,
+        cwd=root,
+        env=env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    logs = _write_log(evidence_dir, "frozen_driver_imports", completed)
+    if completed.returncode != 0:
+        raise RuntimeError(f"frozen_driver_imports returned {completed.returncode}")
+    try:
+        validation = _parse_frozen_driver_import_payload(completed.stdout)
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"frozen_driver_imports produced invalid evidence: {exc}") from exc
+    return {
+        "name": "frozen_driver_imports",
+        "status": "PASS",
+        "duration_s": round(time.monotonic() - started, 3),
+        "argv": command,
+        "runtime": logs,
+        "validation": validation,
     }
 
 
@@ -804,6 +910,17 @@ def smoke_summary(cells: list[dict[str, Any]]) -> tuple[str, str | None]:
         return "FAIL", "REQUIRED_CELLS_NOT_RUN"
     if not cells or any(status != "PASS" for status in statuses):
         return "FAIL", "INVALID_CELL_STATUS"
+    if any(type(name) is not str or not name for name in _REQUIRED_SMOKE_CELLS) or len(_REQUIRED_SMOKE_CELLS) != len(
+        set(_REQUIRED_SMOKE_CELLS)
+    ):
+        return "FAIL", "INVALID_REQUIRED_CELL_ROSTER"
+    cell_names = tuple(cell.get("name") for cell in cells)
+    if any(type(name) is not str or not name for name in cell_names):
+        return "FAIL", "INVALID_CELL_NAME"
+    if len(cell_names) != len(set(cell_names)):
+        return "FAIL", "DUPLICATE_CELL_NAME"
+    if cell_names != _REQUIRED_SMOKE_CELLS:
+        return "FAIL", "REQUIRED_CELL_ROSTER_MISMATCH"
     return "PASS", None
 
 
@@ -829,6 +946,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         if executable.resolve() == source_exe.resolve():
             raise RuntimeError("UNICODE_COPY_NOT_USED")
 
+        cells.append(_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir))
         cells.append(_run_gui_startup_cell(executable, runtime_root, evidence_dir))
         cells.append(
             _run_report_cell(
