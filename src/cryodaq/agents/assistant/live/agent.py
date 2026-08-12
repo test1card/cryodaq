@@ -717,9 +717,11 @@ def _reached_any_recipient(outcomes: dict[str, Any]) -> bool:
     """
 
     for state in outcomes.values():
-        if state == "delivered":
+        if isinstance(state, str) and state in {"delivered", "service_reported_delivered"}:
             return True
-        if isinstance(state, dict) and any(recipient == "delivered" for recipient in state.values()):
+        if isinstance(state, dict) and any(
+            recipient in {"delivered", "service_reported_delivered"} for recipient in state.values()
+        ):
             return True
     return False
 
