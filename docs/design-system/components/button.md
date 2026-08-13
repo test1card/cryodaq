@@ -373,7 +373,7 @@ class HoldConfirmButton(QPushButton):
 | **Loading / Pending** | Disable button + replace text with pending verb ("Запуск...") + optionally small spinner icon |
 | **Success echo** (after accepted action) | 300ms `STATUS_OK` border flash, then revert. (RULE-INTER-007) |
 
-A custom object-specific button stylesheet that defines enabled foreground or
+The `#phaseCreateBtn` stylesheet that defines enabled foreground or
 fill **must also define its own :disabled selector**. Calling
 setEnabled(False) without the selector does not satisfy the visual state:
 the enabled fill can remain painted. The disabled control also carries an

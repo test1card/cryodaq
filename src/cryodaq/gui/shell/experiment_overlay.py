@@ -169,7 +169,7 @@ class ExperimentOverlay(QWidget):
         self._passport_label.setObjectName("expPassport")
         self._passport_label.setStyleSheet(
             f"#expPassport {{ "
-            f"color: {theme.TEXT_DISABLED}; "
+            f"color: {theme.MUTED_FOREGROUND}; "
             f"font-family: '{theme.FONT_MONO}'; "
             f"font-size: {theme.FONT_SIZE_SM}px; "
             f"}}"
@@ -213,7 +213,7 @@ class ExperimentOverlay(QWidget):
         self._phase_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._phase_status.setStyleSheet(
             f"#expPhaseStatus {{ "
-            f"color: {theme.TEXT_DISABLED}; "
+            f"color: {theme.MUTED_FOREGROUND}; "
             f"font-family: '{theme.FONT_BODY}'; "
             f"font-size: {theme.FONT_SIZE_BASE}px; "
             f"}}"
