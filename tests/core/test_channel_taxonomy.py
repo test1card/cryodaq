@@ -52,9 +52,7 @@ def test_get_thermal_zone_accepts_full_label(mgr: ChannelManager) -> None:
 def test_get_channels_in_zone_disconnected_reserve(mgr: ChannelManager) -> None:
     reserves = mgr.get_channels_in_zone("disconnected_reserve")
     # 8 reserve+optics channels (Т17..Т24) — assert exact membership, not just endpoints
-    assert set(reserves) == {f"Т{i}" for i in range(17, 25)}, (
-        f"Expected Т17..Т24, got {sorted(reserves)}"
-    )
+    assert set(reserves) == {f"Т{i}" for i in range(17, 25)}, f"Expected Т17..Т24, got {sorted(reserves)}"
 
 
 def test_get_channels_in_zone_cold_4k(mgr: ChannelManager) -> None:
@@ -114,9 +112,7 @@ def test_get_alarm_band_returns_none_for_uncategorized(mgr: ChannelManager) -> N
 
 def test_get_alarm_band_accepts_phase_case_insensitive(mgr: ChannelManager) -> None:
     """`phase="COOLDOWN"` resolves the same as `phase="cooldown"`."""
-    assert mgr.get_alarm_band("Т7", phase="COOLDOWN") == mgr.get_alarm_band(
-        "Т7", phase="cooldown"
-    )
+    assert mgr.get_alarm_band("Т7", phase="COOLDOWN") == mgr.get_alarm_band("Т7", phase="cooldown")
 
 
 def test_get_alarm_band_accepts_full_label(mgr: ChannelManager) -> None:
@@ -135,6 +131,7 @@ def test_get_alarm_band_handles_non_numeric_band(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",
@@ -143,7 +140,7 @@ def test_get_alarm_band_handles_non_numeric_band(tmp_path: Path) -> None:
                             "all_phases": ["not", "numeric"],
                         },
                     }
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -159,12 +156,13 @@ def test_get_alarm_band_handles_reversed_range(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",
                         "alarm_band": {"all_phases": [310.0, 285.0]},
                     }
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -179,12 +177,13 @@ def test_get_alarm_band_handles_wrong_length_list(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",
                         "alarm_band": {"all_phases": [285.0, 290.0, 300.0]},
                     }
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -201,12 +200,13 @@ def test_get_alarm_band_handles_alarm_band_not_dict(tmp_path: Path) -> None:
     cfg.write_text(
         yaml.safe_dump(
             {
+                "default_quantity": "temperature",
                 "channels": {
                     "Т_test": {
                         "name": "Test",
                         "alarm_band": "not a dict",
                     }
-                }
+                },
             }
         ),
         encoding="utf-8",

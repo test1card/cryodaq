@@ -12,7 +12,13 @@ from cryodaq.core.channel_manager import ChannelManager
 
 def _write_test_config(channels_dict: dict) -> Path:
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
-    yaml.safe_dump({"channels": channels_dict}, tmp, allow_unicode=True)
+    # A channel with no effective quantity is refused, so the fixture declares a valid default.
+    # These tests exercise cold-channel handling, not quantity declaration.
+    yaml.safe_dump(
+        {"default_quantity": "temperature", "channels": channels_dict},
+        tmp,
+        allow_unicode=True,
+    )
     tmp.close()
     return Path(tmp.name)
 
