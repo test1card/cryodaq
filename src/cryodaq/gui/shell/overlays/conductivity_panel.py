@@ -106,7 +106,7 @@ _POWER_CHANNELS: tuple[str, ...] = (
 def _get_temperature_channels() -> list[tuple[str, str]]:
     """List visible T-prefixed channels as (id, display_name) tuples."""
     mgr = get_channel_manager()
-    return [(ch_id, mgr.get_display_name(ch_id)) for ch_id in mgr.get_all_visible() if ch_id.startswith("Т")]
+    return [(ch_id, mgr.get_display_name(ch_id)) for ch_id in mgr.get_visible_temperature_channels()]
 
 
 def _pct_color(_pct: float) -> str:

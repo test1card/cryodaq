@@ -56,6 +56,174 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: DECLARED-QUANTITY-CELSIUS-DISPATCH-FALSE-GREEN-361
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/gui/dashboard/test_dashboard_view.py::test_celsius_temperature_still_reaches_its_sensor_cell
+    ci_partition: gui
+    red_evidence: the_prior_dashboard_dispatch_correction_gated_all_temperature_readings_on_kelvin_buffering_so_a_declared_celsius_channel_owned_a_sensor_cell_but_never_received_its_reading_the_existing_kelvin_regression_stayed_green_because_it_only_asserted_that_celsius_was_not_buffered_the_exact_cell_dispatch_guard_turns_red_when_the_production_unit_gate_is_restored_2026_08_13_pending_immutable_capture
+    green_evidence: pending
+  - id: DECLARED-QUANTITY-MALFORMED-VALUE-FALSE-GREEN-362
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_non_string_quantity_is_refused_as_a_configuration_error
+    ci_partition: core
+    red_evidence: non_string_per_channel_quantities_reached_the_frozenset_membership_test_as_unhashable_values_and_escaped_as_startup_TypeError_before_this_parametrized_guard_was_added_the_prior_quantity_suite_did_not_collect_this_malformed_per_channel_class_2026_08_13_pending_immutable_capture
+    green_evidence: pending
+  - id: DECLARED-QUANTITY-MISSING-EFFECTIVE-FALSE-GREEN-363
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_channel_without_an_effective_quantity_is_refused
+    ci_partition: core
+    red_evidence: a_channel_without_quantity_and_without_default_quantity_was_excluded_from_validation_so_load_succeeded_and_get_quantity_returned_none_while_operator_surfaces_omitted_the_channel_the_prior_suite_only_checked_unknown_runtime_ids_not_channels_declared_in_the_file_2026_08_13_pending_immutable_capture
+    green_evidence: pending
+  - id: CHANNEL-RELOAD-HALF-APPLY-FALSE-GREEN-346
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_leaves_the_live_channel_set_untouched
+    ci_partition: core
+    red_evidence: the_prior_green_quantity_suite_constructed_fresh_managers_only_and_never_reloaded_an_already_live_manager_after_a_valid_channels_mapping_was_parsed_so_load_replaced_self_channels_before_rejecting_a_malformed_default_quantity_leaving_the_live_manager_serving_new_channels_under_the_old_quantity_declaration_while_all_registered_nodes_stayed_green_the_new_production_path_node_loads_valid_state_then_attempts_the_malformed_reload_and_requires_both_channels_and_quantity_to_remain_unchanged_2026_08_09_pending_immutable_capture
+    green_evidence: pending
+  - id: ANALYTICS-CUTOFF-MEMBERSHIP-FALSE-GREEN-347
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_cutoff_changes_membership_not_only_order
+    ci_partition: gui
+    red_evidence: the_existing_production_guard_for_the_analytics_ordering_site_drove_only_THREE_channels_so_it_exercised_ORDER_and_never_the_twelve_slot_cutoff_and_both_the_guard_and_the_comment_beside_the_production_code_asserted_that_other_chs_catches_whatever_temp_chs_does_not_and_therefore_no_channel_is_ever_dropped_here_which_is_FALSE_past_the_limit_because_the_two_groups_are_concatenated_and_sliced_to_twelve_so_which_group_a_channel_lands_in_decides_whether_it_is_DISPLAYED_AT_ALL_and_reclassifying_a_channel_by_rename_or_by_declaring_it_a_non_temperature_changes_MEMBERSHIP_of_the_operator_summary_rather_than_only_its_order_the_new_node_puts_thirteen_channels_against_twelve_slots_and_the_control_reverting_the_selector_to_spelling_DISPLACES_the_renamed_temperature_and_gives_its_slot_to_the_cyrillic_te_pressure_channel_with_production_restored_byte_identical_2026_08_09_pending_immutable_capture
+    green_evidence: pending
+  - id: CHANNEL-RELOAD-REJECTED-PATH-FALSE-GREEN-348
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_does_not_adopt_the_rejected_path
+    ci_partition: core
+    red_evidence: the_first_atomic_reload_guard_asserted_only_that_the_live_channels_and_quantity_declaration_survived_a_refused_reload_so_load_could_still_adopt_the_rejected_config_path_and_every_registered_guard_stayed_green_the_exact_production_path_node_loads_valid_state_attempts_the_malformed_path_and_requires_self_config_path_to_remain_the_last_accepted_path_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: ANALYTICS-ARCHIVED-ABSENT-DESCRIPTOR-FALSE-GREEN-349
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_is_not_displaced_by_an_absent_declaration
+    ci_partition: gui
+    red_evidence: the_first_version_named_the_archived_channel_ARCHIVED_STAGE_7_which_sorted_before_the_twelve_declared_pressure_channels_so_alphabetical_order_kept_it_inside_the_cutoff_even_with_the_production_defect_restored_the_repaired_exact_node_names_it_ZZ_ARCHIVED_STAGE_7_so_only_the_archived_unknown_rank_can_keep_it_in_the_rendered_summary_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: ANALYTICS-LIVE-RECLASSIFICATION-FALSE-GREEN-350
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_ranking_uses_its_descriptor_after_live_reclassification
+    ci_partition: gui
+    red_evidence: the_absent_declaration_guard_only_covered_a_channel_missing_from_todays_configuration_so_the_widget_still_ranked_an_archived_channel_from_the_live_manager_when_the_same_identifier_remained_but_its_quantity_was_reclassified_the_exact_node_renders_thirteen_channels_then_changes_only_the_live_quantity_and_requires_the_real_production_widget_output_to_remain_byte_identical_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: ANALYTICS-MIGRATED-LEGACY-HISTORY-FALSE-GREEN-351
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_descriptor_history_keeps_migrated_legacy_rows_unknown
+    ci_partition: core
+    red_evidence: the_first_descriptor_carry_guard_wrote_only_a_declared_row_with_a_non_null_descriptor_hash_so_the_history_reader_unconditionally_resolved_the_referenced_hash_set_and_all_registered_nodes_stayed_green_when_a_migrated_database_contained_only_pre_descriptor_rows_an_empty_referenced_set_was_treated_as_a_malformed_catalog_and_the_existing_best_effort_file_boundary_dropped_the_entire_day_the_exact_production_path_node_writes_a_legacy_row_migrates_its_real_database_then_requires_descriptor_bearing_history_to_return_that_row_as_legacy_unknown_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-DESCRIPTOR-WIRE-BOUND-FALSE-GREEN-352
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_production_history_maximum_fits_wire_with_worst_case_finite_points
+    ci_partition: core
+    red_evidence: the_first_descriptor_carry_slice_kept_the_old_80305_row_limit_derived_for_data_only_replies_and_returned_a_full_metadata_mapping_for_every_descriptor_so_the_registered_max_reply_node_still_drove_only_data_and_stayed_green_while_a_real_history_reply_with_sixty_four_worst_case_channel_keys_exceeded_the_exact_four_MiB_production_encoder_limit_and_raised_ValueError_the_first_compact_replacement_then_used_negative_max_for_only_one_of_each_points_two_independently_reachable_floats_and_positive_max_for_the_other_undercounting_one_byte_per_row_so_78375_rows_still_raised_ValueError_the_exact_production_encoder_node_now_uses_negative_max_for_both_timestamp_and_value_and_proves_76867_rows_encode_to_4194257_bytes_while_the_identical_raw_76868_row_envelope_is_4194309_bytes_and_the_existing_plus_one_node_proves_production_refuses_it_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-UNFILTERED-CHANNEL-CAP-FALSE-GREEN-353
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_unfiltered_descriptor_history_enforces_channel_cap
+    ci_partition: core
+    red_evidence: the_input_validator_bounded_an_explicit_channels_filter_to_sixty_four_but_channels_None_bypassed_that_boundary_and_the_descriptor_bearing_reader_returned_sixty_five_distinct_hot_channels_while_every_registered_history_node_stayed_green_the_first_cap_guard_silently_selected_sixty_four_and_correlated_lexical_names_with_timestamp_order_the_corrected_exact_public_reader_node_refuses_more_than_sixty_four_retained_channels_and_parameterizes_both_insertion_orders_and_limit_per_channel_one_and_two_so_the_one_row_SQL_sentinel_must_expose_the_sixty_fifth_equal_timestamp_channel_before_any_partial_reply_can_escape_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-DESCRIPTOR-AUTHORITY-FAILURE-FALSE-GREEN-354
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_descriptor_history_refuses_an_unverifiable_hot_catalog
+    ci_partition: core
+    red_evidence: the_descriptor_bearing_reader_reused_the_data_only_best_effort_file_boundary_so_a_hot_database_with_a_persisted_descriptor_hash_but_no_verifiable_descriptor_catalog_was_logged_and_silently_returned_as_empty_or_partial_history_instead_of_refusing_the_false_archive_while_all_registered_nodes_stayed_green_the_exact_public_reader_node_constructs_that_real_storage_shape_and_requires_ChannelDescriptorStorageError_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-MIXED-LEGACY-PROMOTION-FALSE-GREEN-355
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_mixed_legacy_and_declared_history_remains_unknown
+    ci_partition: core
+    red_evidence: the_first_catalog_merge_allowed_a_later_declared_row_for_the_same_raw_channel_to_overwrite_legacy_unknown_so_a_mixed_pre_descriptor_and_descriptor_backed_history_was_presented_as_entirely_temperature_even_though_the_earlier_rows_could_not_be_attributed_and_every_registered_node_stayed_green_the_exact_public_reader_node_writes_both_eras_for_one_channel_and_requires_legacy_unknown_to_dominate_the_aggregate_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-COLD-DESCRIPTOR-WIRING-FALSE-GREEN-356
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_read_readings_history_unions_cold_archive
+    ci_partition: core
+    red_evidence: the_existing_hot_and_cold_union_node_created_cold_rows_without_a_descriptor_sidecar_and_asserted_only_numeric_data_so_removing_or_corrupting_the_cold_descriptor_merge_could_not_make_it_red_the_first_strengthening_then_repurposed_the_two_same_channel_rows_as_distinct_channels_making_its_original_union_and_ASC_order_contract_vacuous_the_final_exact_wrapper_node_preserves_same_channel_cold_then_hot_numeric_order_uses_cold_legacy_plus_hot_declared_to_require_legacy_unknown_and_also_writes_a_distinct_misleadingly_named_descriptor_backed_Parquet_row_and_sidecar_whose_persisted_temperature_quantity_must_reach_the_catalog_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-COLD-CHANNEL-OVERFLOW-FALSE-GREEN-357
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_unfiltered_descriptor_history_refuses_cold_channel_overflow
+    ci_partition: core
+    red_evidence: the_hot_unfiltered_channel_guard_never_exercised_ArchiveReader_so_a_sixty_five_channel_Parquet_source_reached_CHANNEL_LIMIT_before_the_post_union_cap_and_an_attempted_retry_claimed_the_incomplete_result_supplied_an_exact_sixty_four_channel_selection_even_though_single_source_discovery_returns_no_names_and_cross_source_names_are_not_newest_by_reading_the_exact_descriptor_bearing_cold_node_requires_the_production_path_to_fail_closed_with_CHANNEL_LIMIT_instead_of_returning_storage_or_spelling_order_dependent_membership_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-DESCRIPTOR-IDENTITY-FORK-FALSE-GREEN-358
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_cross_day_descriptor_identity_or_unit_fork_is_refused
+    ci_partition: core
+    red_evidence: compacting_the_wire_catalog_to_quantity_only_also_erased_the_internal_instrument_source_and_unit_state_so_two_individually_valid_daily_databases_for_one_raw_channel_but_different_instrument_source_or_temperature_unit_were_silently_aggregated_and_both_real_writer_parameter_cases_failed_with_DID_NOT_RAISE_the_exact_public_reader_node_now_requires_a_shared_internal_identity_tuple_and_refuses_both_forks_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-HOT-SQL-TIE-FALSE-GREEN-359
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_unfiltered_hot_history_channel_tie_break_is_insertion_independent
+    ci_partition: core
+    red_evidence: the_first_equal_timestamp_guard_wrote_one_row_per_channel_so_the_plus_one_sentinel_fetched_all_sixty_five_and_deleting_the_new_SQL_channel_tie_left_it_green_the_exact_node_adds_sixty_five_A_BUSY_rows_plus_one_row_for_each_of_sixty_four_B_channels_in_both_insertion_orders_and_the_local_control_removed_only_channel_DESC_then_one_parameter_failed_with_DID_NOT_RAISE_while_the_other_passed_proving_insertion_order_had_decided_whether_overflow_was_seen_production_restored_byte_identical_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: HISTORY-CROSS-TIER-DESCRIPTOR-STATE-FALSE-GREEN-360
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_readings_history.py::test_cross_tier_declared_descriptor_identity_fork_is_refused
+    ci_partition: core
+    red_evidence: every_same_channel_identity_collision_node_was_hot_only_so_resetting_or_separating_the_internal_descriptor_identity_state_at_the_Parquet_boundary_left_all_registered_guards_green_the_exact_node_writes_one_hot_SQLite_descriptor_and_one_indexed_cold_Parquet_sidecar_descriptor_for_the_same_misleadingly_named_channel_with_different_instrument_and_source_and_requires_the_real_combined_reader_to_refuse_the_cross_tier_fork_2026_08_10_pending_immutable_capture
+    green_evidence: pending
+  - id: OC030-COVERAGE-CLAIM-UNDERIVED-FALSE-GREEN-345
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
+    ci_partition: remaining
+    red_evidence: the_OC_030_evidence_cell_made_a_coverage_claim_about_the_migrated_GUI_files_TWICE_that_no_guard_derived_first_reporting_the_parity_as_24_for_24_which_is_a_true_number_about_get_temperature_channels_while_every_operator_screen_renders_the_16_that_get_visible_temperature_channels_returns_and_then_claiming_that_every_migrated_screen_calls_get_visible_temperature_channels_which_is_also_false_because_dashboard_view_and_dynamic_sensor_grid_and_analytics_widgets_call_ONLY_is_temperature_channel_and_never_touch_either_list_helper_so_the_quoted_parities_do_not_cover_them_and_both_claims_survived_the_entire_green_suite_because_nothing_derived_the_inventory_from_the_tree_two_controls_confirm_the_new_node_sees_both_directions_restating_the_claim_as_an_assertion_without_a_refutation_marker_and_removing_a_predicate_only_file_from_the_row_each_turn_it_red_AND_THREE_FURTHER_ESCAPES_IN_THE_SAME_NODE_FOUND_BY_LATER_REVIEW_first_the_node_read_the_OPEN_CELLS_row_from_the_live_worktree_while_measuring_source_files_from_the_frozen_index_so_a_stale_staged_row_could_be_validated_against_unstaged_sources_and_second_it_wrote_the_category_as_a_ternary_on_predicate_only_membership_so_a_migrated_file_calling_NEITHER_selector_was_labelled_list_which_is_exactly_what_reverting_a_list_site_to_get_all_visible_produces_and_the_row_still_matched_and_the_guard_stayed_green_through_the_regression_it_exists_to_catch_and_a_third_escape_classified_by_substring_so_the_local_helper_definition__get_temperature_channels_in_conductivity_panel_made_that_file_read_as_list_on_the_strength_of_its_own_function_name_rather_than_any_ChannelManager_call_all_three_now_carry_controls_that_go_red_2026_08_09_pending_immutable_capture
+    green_evidence: pending
+  - id: SHIPPED-ONLY-QUANTITY-CONTROL-FALSE-GREEN-343
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_the_shipped_selection_is_byte_for_byte_what_spelling_selected
+    ci_partition: core
+    red_evidence: restoring_is_temperature_channel_to_the_cyrillic_te_spelling_test_left_this_node_green_because_every_shipped_channel_deliberately_makes_declared_and_spelling_selection_identical_so_the_registered_guard_only_tested_the_compatibility_baseline_and_could_not_detect_the_runtime_regression_2026_08_09_pending_immutable_capture
+    green_evidence: pending
+  - id: DECLARED-QUANTITY-LOST-ON-SAVE-FALSE-GREEN-341
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_saving_channel_edits_preserves_the_declaration
+    ci_partition: core
+    red_evidence: the_nine_guards_that_shipped_with_the_migration_only_ever_LOADED_a_configuration_and_never_SAVED_one_so_save_serialising_only_the_channels_key_dropped_default_quantity_the_first_time_an_operator_renamed_or_hid_a_channel_and_every_shipped_channel_relies_on_that_default_so_the_next_restart_declared_no_temperature_at_all_and_the_grid_plot_watch_bar_and_conductivity_panel_all_came_up_EMPTY_which_is_the_0bea0449_failure_arriving_through_the_write_path_found_in_review_not_by_the_suite_2026_08_08_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -2895,7 +3063,7 @@ false_green_pairs:
     runtime_prevention_id: FALSE-GREEN-001
     guard: tests/docs/test_docs_freshness.py::test_open_cell_inventory_and_oc030_locator_match_live_tree
     ci_partition: remaining
-    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_docs_guard_passed_with_four_of_six_workflows_twelve_of_seventeen_governance_modules_and_OC_030_locator_1626_instead_of_live_1632_2026_08_01
+    red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_docs_guard_passed_with_four_of_six_workflows_twelve_of_seventeen_governance_modules_and_OC_030_locator_1626_instead_of_live_1632_2026_08_01_AND_2026_08_09_a_SECOND_escape_on_the_same_node_the_closed_state_branch_asserted_that_no_spelling_selection_site_exists_anywhere_under_the_gui_tree_while_recognising_only_the_literal_startswith_with_a_cyrillic_te_argument_measurement_shows_TEN_such_sites_remain_so_the_invariant_was_false_not_merely_narrow_and_equivalent_forms_evaded_it_entirely_it_also_read_paths_only_so_four_invented_symbols_passed_and_it_recognised_only_the_LIVE_C2_PRODUCT_DEFECT_bucket_which_is_empty_by_construction_so_a_reintroduction_registered_as_OPEN_ROUTING_DEBT_left_it_green_now_derived_from_the_AST_sweep_registry_with_symbols_resolved_and_the_surviving_set_pinned
     green_evidence: pending
   - id: MONTANA-REPORT-METRIC-FALSE-GREEN-234
     status: open
@@ -3233,6 +3401,93 @@ false_green_pairs:
     green_evidence: pending
 
 records:
+  - id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    status: reopened
+    scope: product_contract
+    authority_source: docs/OPEN_CELLS.md#oc-030
+    applies_to: Every operator-facing surface that decides which channels it shows by testing how a channel identifier is spelled, every descriptor-bearing hot or cold archived-history read and command reply that can consult mutable live classification or misstate persisted descriptor authority, and every ChannelManager reload that replaces the declared channel-role state, accepted configuration path, or both.
+    classification: silent_channel_omission
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Seven GUI sites decided whether a channel was a temperature channel by testing whether its identifier started with Cyrillic Te, so a legitimate rename silently removed a live reading from the dashboard, the plot, the watch bar or the conductivity panel, and a non-temperature channel spelled with that letter was silently added to them. The operator is not told either way - the channel simply is not there - and a reading absent from a screen is indistinguishable from a channel that is not reading. One site matched Latin T as well as Cyrillic Te, so the class was not even self-consistent. This is the failure shape behind revert 0bea0449, where a vanished pressure readout reached an operator. A second confirmed path replaced the live channel set before validating default_quantity, so a rejected reload left the running manager serving new channels under the old declaration even though no configuration file described that state, and a third adopted the rejected path despite preserving the served values. The archived analytics summary then consulted that mutable live manager, so reclassifying a still-present channel in today's configuration reordered and could truncate yesterday's recorded history. The first descriptor-carry implementation also treated a migrated day containing only pre-descriptor rows as a malformed empty catalog and dropped that day's history. Its first reply projection could exceed the four-MiB command boundary, its first compact wire guard undercounted one reachable byte per row by using a positive maximum for one coordinate, channels=None could exceed the channel boundary or make insertion and storage order decide membership, hot descriptor verification failure was swallowed as an empty or partial success, compacting the wire projection erased internal instrument/source/unit identity and could aggregate unrelated or unit-incompatible readings into one numeric series, a later declared row could promote unverifiable legacy rows for the same channel, and the cold descriptor merge had no guard that actually supplied a descriptor sidecar.
+    invariant: 'A live operator surface selects channels by DECLARED quantity, never by identifier spelling. `ChannelManager.get_quantity` returns the declared quantity or None; `is_temperature_channel` is true only for a channel whose declared quantity is temperature, and returns False rather than guessing when nothing is declared. An archived-history surface ranks from the persisted quantity catalog returned with those exact hot and cold readings and never from the live ChannelManager. That wire catalog is a compact channel-to-quantity projection, while a separate internal state requires each nonlegacy raw channel across hot and cold rows to preserve instrument_id, source_key, quantity and unit; any fork refuses the read, and any legacy row for a returned channel makes its projection legacy_unknown rather than being guessed from a later declaration, current configuration, or spelling. A referenced descriptor catalog that cannot be verified refuses the descriptor-bearing history command instead of returning empty or partial success. Whether or not the caller supplies a channel filter, the returned history has at most sixty-four distinct channels and 76867 rows; an unfiltered retained hot set or bounded cold discovery over sixty-four refuses instead of selecting by storage or spelling order, and equal-timestamp hot limits use stable timestamp/channel/id ordering plus a one-row sentinel so insertion order cannot hide overflow. The worst-case finite production reply at 76867 rows fits the exact four-MiB transport boundary while the identical raw 76868-row envelope is over it and production refuses that row count. A rejected reload is atomic: the live channel set, its quantity declaration, and the selected `_config_path` all remain unchanged. WHAT THIS RECORD DOES NOT CLAIM: live-screen declarations currently live in `config/channels.yaml` and are therefore OPERATOR-owned, not descriptor-derived. Binding those live selectors to `DescriptorStore.presentation_descriptor().quantity` is the next step and belongs with OC-008 rather than here.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/core/test_declared_channel_quantity.py::test_a_renamed_temperature_channel_is_still_selected
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_declared_non_temperature_is_excluded_however_it_is_spelled
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_an_unknown_channel_reports_no_quantity_rather_than_guessing
+        ci_partition: core
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_temperature_plot_draws_declared_temperatures_only
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_sensor_grid_builds_cells_for_declared_temperatures_only
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_watch_bar_counts_declared_temperatures_only
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_conductivity_channel_list_offers_declared_temperatures_only
+        ci_partition: gui
+      - node: tests/core/test_declared_channel_quantity.py::test_the_shipped_configuration_selects_exactly_what_spelling_selected
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_visible_temperature_channels_respect_visibility
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_full_channel_id_resolves_through_its_short_form
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_malformed_default_quantity_is_refused
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_non_string_quantity_is_refused_as_a_configuration_error
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_channel_without_an_effective_quantity_is_refused
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_saving_channel_edits_preserves_the_declaration
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_the_shipped_selection_is_byte_for_byte_what_spelling_selected
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_leaves_the_live_channel_set_untouched
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_refused_reload_does_not_adopt_the_rejected_path
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_descriptor_history_keeps_migrated_legacy_rows_unknown
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_unfiltered_descriptor_history_enforces_channel_cap
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_unfiltered_descriptor_history_refuses_cold_channel_overflow
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_unfiltered_hot_history_channel_tie_break_is_insertion_independent
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_descriptor_history_refuses_an_unverifiable_hot_catalog
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_mixed_legacy_and_declared_history_remains_unknown
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_cross_day_descriptor_identity_or_unit_fork_is_refused
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_read_readings_history_unions_cold_archive
+        ci_partition: core
+      - node: tests/core/test_readings_history.py::test_cross_tier_declared_descriptor_identity_fork_is_refused
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_production_history_maximum_fits_wire_with_worst_case_finite_points
+        ci_partition: core
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_manager_disagrees_with_spelling_in_both_directions
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_dashboard_buffers_only_declared_temperatures
+        ci_partition: gui
+      - node: tests/gui/dashboard/test_dashboard_view.py::test_celsius_temperature_still_reaches_its_sensor_cell
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_summary_orders_only_declared_temperatures
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_cutoff_changes_membership_not_only_order
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_is_not_displaced_by_an_absent_declaration
+        ci_partition: gui
+      - node: tests/gui/test_declared_quantity_production_sites.py::test_archived_history_ranking_uses_its_descriptor_after_live_reclassification
+        ci_partition: gui
+      - node: tests/docs/test_docs_freshness.py::test_oc030_states_which_selector_each_migrated_site_actually_calls
+        ci_partition: remaining
+    red_evidence: restoring_is_temperature_channel_to_the_spelling_test_against_real_production_turns_three_nodes_red_the_renamed_channel_the_declared_non_temperature_spelled_with_cyrillic_te_and_the_no_guessing_rule_with_the_control_verified_to_have_mutated_the_file_before_its_verdict_was_read_and_production_restored_byte_identical_afterwards_AND_the_confirmed_reload_ordering_defect_replaced_the_live_channel_set_before_rejecting_malformed_default_quantity_so_the_manager_served_new_channels_under_the_old_declaration_until_the_production_path_was_made_atomic_2026_08_09_pending_immutable_capture_AND_restoring_the_analytics_widget_live_manager_lookup_made_the_same_archived_result_drop_ZZ_ARCHIVED_TEMPERATURE_after_only_the_live_quantity_changed_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture_AND_unconditionally_resolving_an_empty_persisted_descriptor_reference_set_dropped_a_real_migrated_legacy_day_and_turned_the_exact_storage_node_red_with_production_restored_byte_identical_afterwards_2026_08_10_pending_immutable_capture_AND_the_first_descriptor_projection_made_seven_exact_production_path_nodes_red_for_wire_overflow_full_metadata_projection_unfiltered_sixty_five_channel_output_swallowed_hot_catalog_failure_mixed_legacy_promotion_and_unexercised_cold_descriptor_wiring_before_the_compact_fail_closed_bounded_projection_turned_all_seven_green_2026_08_10_pending_immutable_capture_AND_both_real_cross_day_descriptor_identity_and_unit_forks_failed_with_DID_NOT_RAISE_before_internal_identity_state_was_restored_AND_removing_only_the_hot_SQL_channel_tie_made_one_busy_channel_insertion_order_fail_with_DID_NOT_RAISE_while_the_other_passed_with_production_restored_byte_identical_2026_08_10_pending_immutable_capture
+    green_evidence: pending
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
     scope: product_contract

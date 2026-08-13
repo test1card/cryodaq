@@ -113,7 +113,7 @@ def test_weakening_an_open_record_without_reopening_is_rejected() -> None:
     """Content may not change under a stable id unless the entry is `reopened`."""
 
     poisoned = _registry()
-    target = poisoned["records"][0]
+    target = next(record for record in poisoned["records"] if record["status"] == "open")
     target["invariant"] = "weakened by an agent chasing a green suite"
     with pytest.raises(GovernanceContractError) as excinfo:
         validate_against_removal_baseline(poisoned, _baseline())

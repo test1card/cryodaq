@@ -4,7 +4,7 @@ keywords: sensor, cell, channel, temperature, pressure, reading, kelvin, tile, g
 applies_to: single-channel data cell widget
 status: active
 implements: src/cryodaq/gui/dashboard/sensor_cell.py; src/cryodaq/gui/dashboard/dynamic_sensor_grid.py (Phase B.3)
-last_updated: 2026-07-12
+last_updated: 2026-08-09
 references: rules/data-display-rules.md, rules/accessibility-rules.md, patterns/numeric-formatting.md
 ---
 
@@ -53,7 +53,13 @@ Minimum cell size: 160×80px (per `DynamicSensorGrid._MIN_CELL_WIDTH` / `_CELL_H
 
 ## Invariants
 
-1. **Channel ID uses Cyrillic Т (U+0422).** Never Latin T. (RULE-COPY-001)
+1. **Channel ID uses Cyrillic Т (U+0422).** Never Latin T. (RULE-COPY-001) This
+   is a NAMING convention for the shipped channels, and it is not a selection
+   rule: since the declared-quantity change (5.0.0) no code may infer what a
+   channel MEASURES from how it is spelled. Both hold at once — the lab names
+   channels this way, and a channel renamed away from it keeps appearing on the
+   surfaces its declaration entitles it to. An earlier reading of this invariant
+   as authority over selection is the defect OC-030 records.
 2. **Value format fixed per unit.** Temperature `{:.2f} K`, pressure `{:.2e} мбар`, voltage `{:.3f} В`. (RULE-DATA-004, RULE-COPY-006)
 3. **Tabular numbers.** FONT_MONO_VALUE with `tnum` feature. Digits don't shift width. (RULE-TYPO-003, RULE-DATA-003)
 4. **Atomic value updates.** No tween, no count-up animation. Snap. (RULE-DATA-001, RULE-DATA-009)
@@ -284,9 +290,20 @@ Phase B.3 implementation details to preserve:
   Grid reflows on every `resizeEvent`. When width is unavailable at first
   layout, falls back to `min(7, n_cells)` columns.
 - **Visible-channel filter.** Only channels from
-  `ChannelManager.get_all_visible()` whose id starts with Cyrillic Т
-  (U+0422) are rendered; hidden channels (channels.yaml `visible: false`)
-  are excluded at rebuild time, not hidden post-layout.
+  `ChannelManager.get_all_visible()` that DECLARE `quantity: temperature`
+  are rendered — `ChannelManager.is_temperature_channel()`, never the
+  identifier's spelling (OC-030). A channel renamed away from Cyrillic Т is
+  still rendered; a channel spelled with Т that declares another quantity is
+  not. Hidden channels (channels.yaml `visible: false`) are excluded at
+  rebuild time, not hidden post-layout.
+- **Every channel must have an effective declared quantity.** `channels.yaml`
+  needs a top-level `default_quantity` or a per-channel `quantity`; a channel
+  without either is refused before the configuration is committed. Unsupported
+  vocabulary and non-string values are also refused, so a typo or malformed
+  YAML value cannot silently empty the grid, temperature plot, watch bar or
+  conductivity list. The descriptor catalog is the GUI authority when loaded;
+  if it is unavailable, the persistent bottom status bar marks the
+  `channels.yaml` fallback and warns that Engine and GUI routing may disagree.
 - **Runtime rebuild on channel set change.** The grid subscribes to
   `ChannelManager.on_change` and rebuilds cells when the visible set
   changes; subscription is torn down via `off_change` on `closeEvent` and

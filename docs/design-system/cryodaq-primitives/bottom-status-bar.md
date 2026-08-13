@@ -119,6 +119,7 @@ class BottomStatusBar(QWidget):
         connected: bool,
         label: str | None = None,
     ) -> None: ...
+    def set_channel_authority_fallback(self, active: bool) -> None: ...
 ```
 
 There is no shipped `StatusItem`, `set_engine`, `set_safety`, `set_heartbeat`,

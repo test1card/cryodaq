@@ -4,7 +4,7 @@ keywords: tray, status, coarse, non-authoritative, alarm, unknown, provenance, s
 applies_to: system tray icon and tooltip
 status: canonical
 last_updated: 2026-07-20
-version: 4.1.0
+version: 5.0.0
 references: patterns/operator-evidence-and-retention.md, patterns/state-visualization.md, cryodaq-primitives/alarm-panel.md
 ---
 

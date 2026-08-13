@@ -12,15 +12,16 @@ from typing import Any
 
 COMMAND_REPLY_MAX_WIRE_BYTES = 4 * 1024 * 1024
 COMMAND_REPLY_MAX_JSON_DEPTH = 32
-# ``readings_history`` is the widest production reply.  The 80,305-row production
-# ceiling is derived from the actual compact encoder, not representative
-# fixture values: every point may contain the longest finite binary64
-# spellings, and a reply may contain all 64 channel keys at the 256-character
-# structural limit (including JSON's six-byte control-character escapes).
-# That complete envelope remains below 4 MiB.  Storage is bound to the same
-# total so a producer-valid history reply is always decoder-valid.
-COMMAND_REPLY_HISTORY_MAX_ROWS = 80_305
-COMMAND_REPLY_MAX_JSON_ITEMS = 4 * COMMAND_REPLY_HISTORY_MAX_ROWS + 64
+# ``readings_history`` is the widest production reply.  The 76,867-row
+# production ceiling is derived from the actual compact encoder, not
+# representative fixture values: every point may contain the longest finite
+# binary64 spellings, and both ``data`` and its persisted-quantity catalog may
+# contain all 64 channel keys at the 256-character structural limit (including
+# JSON's six-byte control-character escapes).  That complete envelope remains
+# below 4 MiB.  Storage is bound to the same total and channel count so a
+# producer-valid history reply is always decoder-valid.
+COMMAND_REPLY_HISTORY_MAX_ROWS = 76_867
+COMMAND_REPLY_MAX_JSON_ITEMS = 4 * COMMAND_REPLY_HISTORY_MAX_ROWS + (2 * 64)
 COMMAND_REPLY_MAX_JSON_KEY_CHARS = 256
 COMMAND_REPLY_MAX_INTEGER_DIGITS = 128
 

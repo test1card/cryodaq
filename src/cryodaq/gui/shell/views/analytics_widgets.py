@@ -1628,10 +1628,19 @@ class ExperimentSummaryWidget(_WorkerCleanupMixin, QWidget):
             return
 
         lines: list[str] = []
-        # Show temperature channels (K) first, then others
-        temp_chs = sorted(ch for ch in data if ch.startswith("Т") or ch.startswith("T"))
-        other_chs = sorted(ch for ch in data if ch not in temp_chs)
-        ordered = (temp_chs + other_chs)[:12]  # limit display
+        # This is archived history: rank from the descriptors persisted with
+        # those readings, never from today's mutable channel configuration.
+        descriptor_catalog = result.get("descriptor_catalog", {})
+
+        def _rank(channel: str) -> int:
+            quantity = descriptor_catalog.get(channel)
+            if type(quantity) is not str:
+                quantity = None
+            if quantity == "temperature":
+                return 0
+            return 1 if quantity in (None, "legacy_unknown") else 2
+
+        ordered = sorted(data, key=lambda ch: (_rank(ch), ch))[:12]  # limit display
 
         for ch in ordered:
             pts = data[ch]

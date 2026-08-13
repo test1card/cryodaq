@@ -181,7 +181,16 @@ def test_artifact_evidence_requires_receipt_tree_and_suite_binding() -> None:
     record = next(
         record
         for record in payload["records"]
-        if record["status"] == "open" and any(guard["ci_partition"] == "remaining" for guard in record["guards"])
+        # ALL, not ANY. This fixture attests `suite: "remaining"` and then
+        # requires validate_registry to ACCEPT it, which the suite-binding rule
+        # only allows when the record's guards span that one partition. `any`
+        # happened to select an all-remaining record until a record with guards
+        # in core, gui AND remaining was registered ahead of it, at which point
+        # this test failed on its own fixture rather than on the property it
+        # asserts. The mutations below are unchanged.
+        if record["status"] == "open"
+        and record["guards"]
+        and all(guard["ci_partition"] == "remaining" for guard in record["guards"])
     )
     record_id = record["id"]
     record["status"] = "closed"

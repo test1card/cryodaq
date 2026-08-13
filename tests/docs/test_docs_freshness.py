@@ -158,23 +158,18 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
 
 # A RECORDED measurement, not a re-derivable one: the number of C2 challenges
 # whose fingerprint the registry rejects on the declared minimum interpreter.
-# RE-MEASURED 2026-08-09 on the OC-023 tree: 108 errors over 134 challenges.
-# The previous 110-over-135 pair was taken before this branch registered the
-# interlock-binding sites, and BOTH halves had drifted -- the numerator is not
-# reusable across a changed sweep any more than the denominator is.
-#
-# The command, recorded because the last window failed to take this measurement
-# at all and wrongly reported the interpreter as absent: `py -3.12` cannot see
-# vendor-tagged registrations, so it answers "no suitable runtime" while
-# `py -0` lists Astral/CPython3.12.13. Use:
-#     uv run --no-project --python 3.12 --with pytest --with pyyaml python -B <probe>
-# where the probe imports tests/test_c2_repo_wide_spelling_sweep.py and counts
-# `_sites` / `_registry_errors`. Measured the same way: 3.13 and 3.14 give 0.
-#
-# This guard runs on ONE interpreter and cannot measure another; pinning the
-# figure here means the row and the constant move together, and moving them
-# requires re-running the sweep on that interpreter.
-_RECORDED_MINIMUM_INTERPRETER_ERRORS = 108
+# Measured 2026-08-05 by importing the sweep under Python 3.12 and counting
+# through `_registry_errors` -- an earlier attempt grepped pytest output and
+# reported 55, which was a truncation artifact of the measurement rather than a
+# property of the sweep. This guard runs on ONE interpreter and cannot measure
+# another; pinning the figure here means the row and the constant have to move
+# together, and moving them requires re-running the sweep on that interpreter.
+# RE-MEASURED 2026-08-10 after merging the OC-023 interlock registrations with
+# the OC-030 migration: 92 errors over 126 challenges, via
+# `uv run --offline --no-project --python 3.12 --with pytest --with pyyaml`,
+# interpreter 3.12.13, counting through `_registry_errors` exactly as the note
+# above prescribes. The row moved with it in the same candidate.
+_RECORDED_MINIMUM_INTERPRETER_ERRORS = 92
 
 
 @cache
@@ -964,12 +959,117 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         assert "registry/config references were swept" not in oc_012_lower
         assert "sha256:" + hashlib.sha256(manifest).hexdigest() in oc_012
         recorded = recorded_oc030_locators(oc_030)
-        assert recorded, "OC-030 must record at least one GUI locator"
-        assert recorded == live_oc030_locators(candidate_paths, candidate_contents), (
-            "OC-030 locators must match every live Cyrillic-Te spelling-selection site",
-            recorded,
-            live_oc030_locators(candidate_paths, candidate_contents),
-        )
+        live = live_oc030_locators(candidate_paths, candidate_contents)
+        # THE ASSERTION CHANGES WITH THE ROW'S STATE, and gets STRONGER when the
+        # row closes. While sites are live, the row must list them exactly --
+        # that is the original contract. Once the row reports the migration
+        # done, "record at least one locator" is unsatisfiable by construction:
+        # the locators are gone, and a line number that used to point at a
+        # `startswith` test now points at unrelated code. So the closed state
+        # asserts the thing actually worth asserting -- that NO live
+        # spelling-selection site exists anywhere under the GUI tree. That
+        # catches a site added in a file this row never named, which the
+        # recorded-equals-live form could not.
+        # KEYED ON WHAT THE ROW CLAIMS ABOUT THE CODE, not on its status tag.
+        # The row stays DEFECT / BLOCKS-DEPLOYMENT while its prevention record
+        # is open -- AGENTS.md:343-350 -- even once the sites are migrated, so
+        # the status column cannot tell these two states apart. The claim can.
+        migrated = "the seven sites are migrated" in oc_030
+        if migrated:
+            # THE EARLIER VERSION ASSERTED SOMETHING FALSE, and review caught
+            # it. It claimed "no spelling-selection site exists anywhere under
+            # the GUI tree" while recognising only the literal
+            # `.startswith("Т")`. Measured: TEN `identity spelling operation
+            # startswith()` sites remain under `src/cryodaq/gui/` doing other
+            # things, so the blanket claim was untrue -- and equivalent forms
+            # (`startswith(CYRILLIC_TE)`, `startswith(("Т",))`, `channel[:1] ==
+            # "Т"`) evaded the regex entirely.
+            #
+            # It is now derived from the AST sweep rather than a regex, and
+            # narrowed to what is actually true: every detected site is
+            # accounted for in the sweep registry, and none under the GUI is
+            # bucketed a live product defect. A reintroduction in ANY form the
+            # detector recognises -- startswith, endswith, slicing, indexing,
+            # regex, membership, equality -- becomes an unregistered detected
+            # site and fails here.
+            sys.path.insert(0, str(REPO_ROOT / "tests"))
+            try:
+                c2 = importlib.import_module("test_c2_repo_wide_spelling_sweep")
+            finally:
+                sys.path.remove(str(REPO_ROOT / "tests"))
+            # THE FINGERPRINT IS THE DISCRIMINATOR, AND IT STAYS. An earlier
+            # version of this block compared only (path, scope, reason) to make
+            # the assertion survive the declared 3.12 floor, where every
+            # challenge mismatches on fingerprint alone. That traded a TRUE
+            # failure for a FALSE PASS: 127 sites collapse to 94 distinct
+            # triples, 22 of them repeating, so replacing one policy with
+            # another at the same site -- `startswith("analytics/")` becoming
+            # `startswith("Т")` inside the same scope, with the same reason
+            # label -- left the multiset identical and this guard green. That
+            # substitution is exactly the escape OC-031 records, and the
+            # fingerprint is the only thing in a challenge that sees it.
+            #
+            # So whole challenges are compared again. On the 3.12 floor this
+            # node fails, and that failure is TRUE: the registry genuinely
+            # cannot be validated on an interpreter whose `ast.dump` text
+            # differs, which is OC-031's open defect and is pinned by its own
+            # node. Making this pass there would mean asserting a property
+            # nobody measured.
+            registry_errors = c2._registry_errors(c2._sites(REPO_ROOT))
+            assert registry_errors == [], (
+                "OC-030 reports the migration complete, but the C2 sweep registry is not exact: a detected "
+                "site is unregistered, a registration no longer has a site, or a registered site changed "
+                "policy shape. On Python 3.12 this also fires for OC-031's recorded fingerprint instability",
+                [str(error)[:160] for error in registry_errors],
+            )
+            # EVERY NON-LEGITIMATE BUCKET COUNTS, not just the live-defect one.
+            # `LIVE-C2-PRODUCT-DEFECT` is currently empty by construction, so
+            # filtering on it alone meant a reintroduced selector registered as
+            # `OPEN-ROUTING-DEBT` or `BLOCKED-ON-SCHEMA` left the sweep exact
+            # AND this list empty, while the row still claimed the seven sites
+            # were migrated. Scoped to the six migrated FILES: other GUI paths
+            # legitimately carry open debt that OC-030 never claimed to close.
+            migrated_paths = set(re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)`", oc_030))
+            # Bound to the migrated SCOPES, not the files. Those files carry
+            # other unresolved C2 challenges in other functions that OC-030
+            # never claimed to close; asserting per-file would fail on work
+            # this row is not about.
+            migrated_scopes = {
+                symbol.rsplit(".", 1)[-1]
+                for _path, symbol in re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030)
+            }
+            regressed = sorted(
+                registration.registration_id
+                for registration in c2._REGISTRY
+                if registration.bucket != "LEGITIMATE"
+                and registration.challenge.path.replace("\\", "/") in migrated_paths
+                and registration.challenge.scope.rsplit(".", 1)[-1] in migrated_scopes
+            )
+            # PINNED, not empty. Three unresolved challenges survive inside
+            # migrated scopes and are NOT the OC-030 class: they route
+            # ANALYTICS TOPICS by suffix or prefix -- `endswith("/pressure")`,
+            # `startswith("analytics/")` -- rather than deciding a channel's
+            # temperature role from its spelling. The sweep's reason vocabulary
+            # cannot tell those two apart, so the honest guard pins the exact
+            # set: any NEW unresolved challenge in a migrated scope fails here,
+            # and removing one of these fails too, which forces the row to be
+            # re-read rather than silently drifting.
+            assert regressed == ["C2-048", "C2-049", "C2-099"], (
+                "the unresolved C2 challenges inside OC-030's migrated scopes changed; a new one is a "
+                "reintroduction of the defect this row closed, and a removed one means this pin is stale",
+                regressed,
+            )
+            assert not recorded, (
+                "OC-030 is closed but still cites path:line locators; they no longer point at the code they describe",
+                recorded,
+            )
+        else:
+            assert recorded, "OC-030 must record at least one GUI locator"
+            assert recorded == live, (
+                "OC-030 locators must match every live Cyrillic-Te spelling-selection site",
+                recorded,
+                live,
+            )
         # The closure gate's prose count must agree with the locator set it
         # summarizes: a stale "all N sites" lets an implementer close the row
         # while leaving a live spelling-inference site unfixed.
@@ -987,12 +1087,42 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             11: "eleven",
             12: "twelve",
         }
-        total_locators = sum(len(lines) for lines in recorded.values())
-        assert total_locators in number_words
-        assert f"at all {number_words[total_locators]} sites" in oc_030.lower(), (
-            "OC-030 closure gate must name the exact live locator count",
-            total_locators,
-        )
+        if migrated:
+            # Closed: there is no live locator count to agree with, so the
+            # count that must not go stale is the MIGRATED one. The row has to
+            # name how many sites it converted, and that number has to match
+            # the files it lists -- otherwise "all seven migrated" survives a
+            # site being quietly dropped from the list.
+            migrated_files = set(migrated_paths)
+            assert migrated_files, "OC-030 reports the migration done but names no migrated file"
+            # EVERY NAMED SYMBOL MUST EXIST. Four invented symbols passed
+            # unnoticed because this extraction read paths only. Each
+            # `file.py` (`Class.method`) pair is now resolved in the live tree.
+            for path, symbol in re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)` \(`([A-Za-z_][A-Za-z0-9_.]*)`", oc_030):
+                blob = candidate_contents.get(path)
+                assert blob is not None, f"OC-030 names {path}, which is not in the frozen index"
+                leaf = symbol.rsplit(".", 1)[-1]
+                assert f"def {leaf}(" in blob.decode("utf-8"), (
+                    f"OC-030 names `{symbol}` in {path}, and no such definition exists there"
+                )
+            claimed = [word for count, word in number_words.items() if f"{word} sites" in oc_030.lower()]
+            assert len(claimed) == 1, ("OC-030 must state exactly one migrated-site count", claimed)
+            claimed_count = next(count for count, word in number_words.items() if word == claimed[0])
+            # Sites >= files, never fewer: one file held two of them. Deriving
+            # the site count from the file list is impossible, so this asserts
+            # the one relation that is always true and still catches a file
+            # being dropped from the list or the count being cut.
+            assert claimed_count >= len(migrated_files), (
+                f"OC-030 claims {claimed_count} migrated sites but lists {len(migrated_files)} files",
+                sorted(migrated_files),
+            )
+        else:
+            total_locators = sum(len(lines) for lines in recorded.values())
+            assert total_locators in number_words
+            assert f"at all {number_words[total_locators]} sites" in oc_030.lower(), (
+                "OC-030 closure gate must name the exact live locator count",
+                total_locators,
+            )
         return len(governance_modules), inventory_size
 
     governance_module_count, inventory_size = assert_current(text, tracked, contents)
@@ -1007,31 +1137,47 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
             "all 10 tracked workflow-referenced CI/governance runner modules",
             "all 9 tracked workflow-referenced CI/governance runner modules",
         ),
+        # OC-030 IS CLOSED, so the mutations below exercise the closed row's
+        # assertions rather than its old live-locator list. Re-citing a
+        # `path:line` must fail, and so must a site count cut below the number
+        # of files the row names.
         (
-            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1632`",
-            "`src/cryodaq/gui/shell/views/analytics_widgets.py:1626`",
+            "The seven sites are named by file and symbol",
+            "The seven sites are named by file and symbol, e.g. `src/cryodaq/gui/dashboard/temp_plot_widget.py:136`",
         ),
-        (
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:167`",
-            "`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py:166`",
-        ),
-        ("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`", "`src/cryodaq/gui/dashboard/temp_plot_widget.py:135`"),
-        ("`src/cryodaq/gui/shell/top_watch_bar.py:1194`", "`src/cryodaq/gui/shell/top_watch_bar.py:1193`"),
-        ("at all seven sites", "at all six sites"),
-        (
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:109`",
-            "`src/cryodaq/gui/shell/overlays/conductivity_panel.py:108`",
-        ),
+        ("seven sites", "three sites"),
     ):
         mutated = text.replace(old, replacement, 1)
         assert mutated != text
         with pytest.raises(AssertionError):
             assert_current(mutated, tracked, contents)
 
-    omitted_locator = text.replace("`src/cryodaq/gui/dashboard/temp_plot_widget.py:136`; ", "", 1)
-    assert omitted_locator != text
+    omitted_files = text.replace("`src/cryodaq/gui/dashboard/temp_plot_widget.py`", "the plot widget", 1)
+    assert omitted_files != text
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/dashboard/dashboard_view.py`", "the dashboard", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/dashboard/dynamic_sensor_grid.py`", "the grid", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/shell/overlays/conductivity_panel.py`", "the panel", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/shell/top_watch_bar.py`", "the watch bar", 1)
+    omitted_files = omitted_files.replace("`src/cryodaq/gui/shell/views/analytics_widgets.py`", "the widgets", 1)
     with pytest.raises(AssertionError):
-        assert_current(omitted_locator, tracked, contents)
+        assert_current(omitted_files, tracked, contents)
+
+    # WHERE THE REINTRODUCTION CHECK LIVES, and why it is not mutated here.
+    # An earlier version of this self-test appended `startswith("\u0422")` to a GUI
+    # blob and asserted the guard went red. That mutation proved less than it
+    # appeared: it exercised the ONE literal spelling the old regex knew, so a
+    # reintroduction as `startswith(CYRILLIC_TE)` or `channel[:1] == "\u0422"` would
+    # have passed it. The closed branch above no longer reads blobs at all --
+    # it consumes the AST sweep, which recognises startswith, endswith,
+    # slicing, indexing, regex, membership and equality forms alike, and fails
+    # on any DETECTED site that is unregistered.
+    #
+    # That sweep carries its own self-test for exactly this
+    # (`test_c2_repo_wide_spelling_sweep.py::
+    # test_c2_registry_rejects_a_new_gui_site_and_names_a_genuine_fix`), which
+    # builds a tmp tree and adds a site. Duplicating it against in-memory blobs
+    # here would mean re-implementing the detector, and a second detector is a
+    # second thing to be wrong.
 
     with pytest.raises(AssertionError):
         assert_current(text, [*tracked, ".github/workflows/new-drift.yml"], contents)
@@ -2777,6 +2923,169 @@ def test_architecture_generation_rolls_back_published_outputs_when_a_later_repla
         generator.generate()
     assert all((output / name).read_bytes() == b"original" for name in names)
     assert not metrics_path.exists()
+
+
+def test_oc030_states_which_selector_each_migrated_site_actually_calls() -> None:
+    """The call-site inventory, derived rather than asserted in prose.
+
+    OC-030's evidence cell twice made a coverage claim about the migrated GUI
+    files that nobody had measured. First it reported the parity as "24 for 24",
+    a true number about `get_temperature_channels()` while every operator screen
+    renders the 16 that `get_visible_temperature_channels()` returns. The
+    correction then claimed that "every migrated screen calls
+    `get_visible_temperature_channels()`" -- also false, and written without
+    running the command that refutes it. Both survived the whole green suite,
+    because nothing derived the inventory from the tree.
+
+    Two of the six migrated files call only the per-channel predicate, and one
+    archived-history site ranks from its persisted descriptor catalog, so the
+    two live-list parities the row quotes do not by themselves cover them. That distinction is what a reader needs in
+    order to know what the parity evidence proves, so it is measured here from
+    the frozen index and required to appear in the row.
+    """
+
+    # ONE SNAPSHOT FOR BOTH SIDES. An earlier version read the row from the live
+    # worktree while measuring the source files from the frozen Git index, so a
+    # stale staged row could be validated against unstaged sources -- or the
+    # reverse -- and the guard would certify a pairing that never existed as a
+    # single candidate. The candidate is what CI publishes, so the row is read
+    # from the same index the sources come from.
+    _snapshot, indexed_paths, contents = _architecture_inventory()
+    register_blob = contents.get("docs/OPEN_CELLS.md")
+    assert register_blob is not None, "docs/OPEN_CELLS.md is not in the frozen index"
+    text = register_blob.decode("utf-8")
+    oc_030 = next((line for line in text.splitlines() if line.startswith("| OC-030 |")), None)
+    assert oc_030 is not None, "OC-030 row is missing from the register"
+
+    migrated = sorted(set(re.findall(r"`(src/cryodaq/gui/[^`]+?\.py)`", oc_030)))
+    assert migrated, "OC-030 names no migrated GUI file, so this guard would prove nothing"
+
+    list_helpers = ("get_visible_temperature_channels", "get_temperature_channels")
+
+    def uses_archive_catalog_sort_rank(tree: ast.AST) -> bool:
+        """Recognize only ExperimentSummaryWidget's persisted-quantity rank path."""
+        classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "ExperimentSummaryWidget"]
+        methods = (
+            []
+            if len(classes) != 1
+            else [n for n in classes[0].body if isinstance(n, ast.FunctionDef) and n.name == "_on_stats_loaded"]
+        )
+        if len(methods) != 1:
+            return False
+        method = methods[0]
+        rendered = [ast.unparse(node) for node in method.body]
+        expected_rank_block = (
+            "descriptor_catalog = result.get('descriptor_catalog', {})",
+            "def _rank(channel: str) -> int:\n"
+            "    quantity = descriptor_catalog.get(channel)\n"
+            "    if type(quantity) is not str:\n"
+            "        quantity = None\n"
+            "    if quantity == 'temperature':\n"
+            "        return 0\n"
+            "    return 1 if quantity in (None, 'legacy_unknown') else 2",
+            "ordered = sorted(data, key=lambda ch: (_rank(ch), ch))[:12]",
+        )
+        try:
+            lines_index = rendered.index("lines: list[str] = []")
+            render_loop = method.body[lines_index + 4]
+        except (ValueError, IndexError):
+            return False
+        calls_spelling = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "startswith"
+            for n in ast.walk(method)
+        )
+        rank_block = tuple(rendered[lines_index + 1 : lines_index + 4])
+        loop_consumes_order = (
+            isinstance(render_loop, ast.For)
+            and isinstance(render_loop.target, ast.Name)
+            and render_loop.target.id == "ch"
+            and isinstance(render_loop.iter, ast.Name)
+            and render_loop.iter.id == "ordered"
+        )
+        return not calls_spelling and rank_block == expected_rank_block and loop_consumes_order
+
+    measured: dict[str, str] = {}
+    selects_nothing: list[str] = []
+    for path in migrated:
+        assert path in indexed_paths, f"OC-030 names {path}, which is not in the frozen index"
+        blob = contents.get(path)
+        assert blob is not None, f"no frozen-index blob for {path}"
+        # PARSED, NOT MATCHED. A substring test cannot tell a CALL from a
+        # definition: `conductivity_panel.py` defines a local
+        # `_get_temperature_channels` helper, which contains the list-helper
+        # name, so it was classified `list` on the strength of its own
+        # function name rather than on any ChannelManager call. It happens to
+        # call the real helper too, so the label was right for the wrong
+        # reason -- and would have stayed `list` if that call were removed.
+        # Only an ATTRIBUTE call on some object counts, which a local
+        # definition and a bare local call are not.
+        tree = ast.parse(blob.decode("utf-8"))
+        called = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        leaf = path.rsplit("/", 1)[-1]
+        if called & set(list_helpers):
+            measured[leaf] = "list"
+        elif called & {"is_temperature_channel", "is_kelvin_temperature_channel"}:
+            # `is_kelvin_temperature_channel` is a NARROWING of the predicate, not an escape from
+            # it: it calls `is_temperature_channel` first and then additionally requires the
+            # descriptor unit to be K, so a file using it still selects by declared quantity. It
+            # was added so Celsius temperature channels stop reaching Kelvin-only surfaces. This
+            # widens the guard's VOCABULARY by one named symbol and relaxes nothing -- a file that
+            # calls neither predicate still falls through to `selects_nothing` below.
+            measured[leaf] = "predicate"
+        elif uses_archive_catalog_sort_rank(tree):
+            measured[leaf] = "archive_catalog"
+        else:
+            # THE THIRD STATE, which an earlier version of this node folded into
+            # `list` by writing the category as a ternary on predicate-only
+            # membership. A migrated file that calls NEITHER selector has left
+            # the declared-quantity contract entirely -- reverting a list site to
+            # `get_all_visible()` produces exactly that -- and it was being
+            # relabelled `list`, matching the row and keeping this guard green
+            # through the regression it exists to catch.
+            selects_nothing.append(path)
+    assert not selects_nothing, (
+        "these migrated files call neither a temperature-list helper, `is_temperature_channel`, nor the "
+        "symbol-scoped persisted descriptor-catalog sort rank, so they "
+        f"no longer select by declared quantity at all: {selects_nothing}"
+    )
+
+    # The claim the row must not ASSERT again. The row is allowed to QUOTE it in
+    # order to record that it was false -- repudiating a past claim is what this
+    # register is for, and a guard that forbade the words outright would forbid
+    # the correction along with the error. So an occurrence is accepted only
+    # when the same sentence marks it false; a bare restatement is not.
+    claim = "every migrated screen calls `get_visible_temperature_channels()`"
+    for match in re.finditer(re.escape(claim), oc_030):
+        window = oc_030[match.end() : match.end() + 160]
+        assert "false" in window.lower(), (
+            "OC-030 asserts that every migrated screen calls the visible-list helper, without marking it "
+            "false within the same sentence. These call only the per-channel predicate: "
+            f"{sorted(leaf for leaf, kind in measured.items() if kind == 'predicate')}"
+        )
+
+    # ALL CATEGORIES, COMPARED EXACTLY. An earlier version of this node only
+    # required each predicate-only filename to appear SOMEWHERE in the row --
+    # and every migrated filename already appears there, in the migration
+    # inventory. So deleting the whole per-file breakdown left it green, and a
+    # file that started calling a list helper would not have moved it either.
+    # It asserted the presence of words rather than the truth of a claim.
+    #
+    # The row therefore carries an explicit inventory that this parses, and the
+    # two sides must agree in both directions. `list` means the file calls a
+    # list helper; `predicate` means it calls only `is_temperature_channel`;
+    # `archive_catalog` means the symbol-scoped persisted quantity rank feeds sorted.
+    declared = dict(re.findall(r"`([A-Za-z0-9_]+\.py)`=(list|predicate|archive_catalog)\b", oc_030))
+    assert declared == measured, (
+        "OC-030's selector inventory disagrees with the tree. A file marked `list` calls a list helper; "
+        "`predicate` means it calls only `is_temperature_channel`; "
+        "`archive_catalog` means the exact persisted-quantity rank feeds sorted, so the 16-for-16 "
+        "and 24-for-24 parities "
+        f"do not cover it. declared={declared}, measured={measured}"
+    )
 
 
 def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_claim() -> None:

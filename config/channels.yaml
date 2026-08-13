@@ -33,6 +33,20 @@
 # a cryogenic system — assume new channels are cryogenic until
 # explicitly marked otherwise).
 
+# OC-030 — DECLARED QUANTITY, replacing role inference from channel spelling.
+#
+#   quantity          — физическая величина канала. Одно из: temperature,
+#                       pressure, voltage, current, resistance, power, length,
+#                       relative_humidity, raw_sensor, derived.
+#   default_quantity  — величина для каналов этого файла, не объявивших свою.
+#
+# Раньше GUI определял «это температура» по префиксу «Т» в идентификаторе.
+# Переименование канала ломало отбор молча: показания исчезали с экрана или
+# попадали не туда. Это ОБЪЯВЛЕНИЕ, а не вывод из написания — канал с другой
+# величиной обязан объявить её сам, и тогда он не попадёт в температурные
+# выборки независимо от того, как он называется.
+default_quantity: temperature
+
 channels:
   Т1:
     name: Криостат верх

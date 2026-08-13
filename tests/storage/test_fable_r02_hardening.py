@@ -509,6 +509,20 @@ async def test_unfiltered_history_has_one_absolute_cross_file_row_budget(
         await writer.stop()
 
 
+async def test_unfiltered_history_rejects_older_channel_outside_row_budget(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path)
+    newest = datetime(2026, 7, 17, 12, tzinfo=UTC)
+    try:
+        rows = [_reading(newest + timedelta(seconds=i), channel=f"channel.{i % 64}") for i in range(65)]
+        rows.append(_reading(newest - timedelta(seconds=1), channel="channel.64"))
+        assert writer._write_batch(rows)
+
+        with pytest.raises(ValueError, match="more than 64 channels"):
+            writer._read_readings_history(limit_per_channel=1)
+    finally:
+        await writer.stop()
+
+
 async def test_filtered_hot_history_spends_deduplicated_deficits_newest_first(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

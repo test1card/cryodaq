@@ -23,6 +23,21 @@ class ChannelConfigError(RuntimeError):
 
 
 _DEFAULT_CONFIG = _get_config_dir() / "channels.yaml"
+_SUPPORTED_QUANTITIES = frozenset(
+    {
+        "temperature",
+        "pressure",
+        "voltage",
+        "current",
+        "resistance",
+        "power",
+        "length",
+        "relative_humidity",
+        "raw_sensor",
+        "derived",
+        "event_state",
+    }
+)
 
 # Стандартные имена (если channels.yaml не существует)
 _DEFAULT_CHANNELS: dict[str, dict[str, Any]] = {
@@ -67,11 +82,13 @@ class ChannelManager:
 
     def __init__(self, config_path: Path | None = None) -> None:
         self._channels: dict[str, dict[str, Any]] = {}
+        self._default_quantity: str | None = None
         # Hardware-pinned landmark channels (Т11/Т12) populated by the
         # engine from physical_alarms.yaml. Default empty so direct
         # ChannelManager() construction (tests, GUI standalone) keeps
         # working without an alarms file.
         self._landmarks: dict[str, dict[str, Any]] = {}
+        self._descriptor_authority: dict[str, Any] | None = None
         self._config_path: Path = config_path or _DEFAULT_CONFIG
         self._callbacks: list[Any] = []
         self.load()
@@ -86,41 +103,98 @@ class ChannelManager:
         Raises ChannelConfigError on missing file, malformed YAML, or
         missing 'channels' key. Fail-closed: no silent fallback to defaults.
         """
-        if path is not None:
-            self._config_path = path
+        # THE SELECTED PATH IS STATE TOO, and committing it early was the half of
+        # this defect my first fix missed. `self._config_path = path` ran before
+        # any validation, so a `load(new_path)` that REFUSED still left the
+        # manager pointing at the rejected file — the next argument-less
+        # `load()`, and every `save()`, would then target a configuration the
+        # instrument had already declined. Nothing is committed until the whole
+        # file validates.
+        candidate_path = self._config_path if path is None else path
 
-        if not self._config_path.exists():
+        if not candidate_path.exists():
             raise ChannelConfigError(
-                f"channels.yaml not found at {self._config_path} — refusing "
-                f"to start without channel configuration"
+                f"channels.yaml not found at {candidate_path} — refusing to start without channel configuration"
             )
         try:
-            with self._config_path.open(encoding="utf-8") as fh:
+            with candidate_path.open(encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh)
         except yaml.YAMLError as exc:
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: YAML parse error — {exc}"
-            ) from exc
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: YAML parse error — {exc}") from exc
 
         if not isinstance(raw, dict):
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: expected mapping, got {type(raw).__name__}"
-            )
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: expected mapping, got {type(raw).__name__}")
         channels = raw.get("channels")
         if not isinstance(channels, dict):
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: missing or invalid 'channels' key"
-            )
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: missing or invalid 'channels' key")
+        declared_default = raw.get("default_quantity")
+        if declared_default is not None and not isinstance(declared_default, str):
+            raise ChannelConfigError(f"channels.yaml at {candidate_path}: default_quantity must be a string")
+        quantities = {}
+        for channel_id, info in channels.items():
+            if not isinstance(info, dict):
+                raise ChannelConfigError(f"channels.yaml at {candidate_path}: channel {channel_id!r} must be a mapping")
+            quantity = info.get("quantity", declared_default)
+            if quantity is None:
+                raise ChannelConfigError(
+                    f"channels.yaml at {candidate_path}: channel {channel_id!r} has no effective quantity; "
+                    "declare quantity on the channel or set default_quantity"
+                )
+            quantities[channel_id] = quantity
+        for field_name, quantity in (("default_quantity", declared_default), *quantities.items()):
+            # Type BEFORE membership. `quantity: [temperature]` is a YAML sequence, and asking
+            # whether an unhashable value is in a frozenset raises TypeError, which escapes the
+            # ChannelConfigError path entirely and reaches the operator as a startup traceback
+            # instead of the actionable refusal below.
+            if quantity is not None and not isinstance(quantity, str):
+                raise ChannelConfigError(
+                    f"channels.yaml at {candidate_path}: {field_name} must be a string, got {type(quantity).__name__}"
+                )
+            if quantity is not None and quantity not in _SUPPORTED_QUANTITIES:
+                # Say WHAT is wrong, WHY it matters, and WHICH values are accepted. The operator
+                # cannot act on "unsupported quantity 'temperatue'" alone, and the consequence of
+                # this exact typo is that every temperature surface goes SILENTLY empty -- which is
+                # why the load refuses instead of continuing quietly.
+                supported = ", ".join(sorted(_SUPPORTED_QUANTITIES))
+                raise ChannelConfigError(
+                    f"channels.yaml at {candidate_path}: {field_name} declares quantity {quantity!r}, "
+                    f"which is not a known physical quantity. Channels resolving to it would be "
+                    f"treated as no declared quantity at all, so the dashboard grid, temperature "
+                    f"plot, watch bar and conductivity selector would show nothing for them. "
+                    f"Use one of: {supported}."
+                )
+        # EVERY CHECK BEFORE ANY MUTATION. `self._channels` used to be replaced
+        # on the line above this validation, so a RELOAD of a file with valid
+        # `channels` and a malformed `default_quantity` raised only after the
+        # live channel set had already been swapped: the manager kept serving
+        # the new channels under the old declaration, which is a configuration
+        # no file on disk describes. A reload that refuses must leave the
+        # running instrument exactly as it was.
+        self._config_path = candidate_path
         self._channels = channels
+        self._default_quantity = declared_default
+        self._notify()
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
 
     def save(self, path: Path | None = None) -> None:
         """Сохранить конфигурацию каналов в YAML."""
         save_path = path or self._config_path
         save_path.parent.mkdir(parents=True, exist_ok=True)
+        # THE DECLARATION MUST SURVIVE A SAVE. Writing only `channels` dropped
+        # `default_quantity` the first time an operator renamed or hid a
+        # channel through the editor -- and every shipped channel relies on
+        # that default rather than a per-channel `quantity`. On the next
+        # restart nothing declared a temperature, so the grid, the plot, the
+        # watch bar and the conductivity panel all came up EMPTY. That is the
+        # `0bea0449` failure the migration exists to prevent, reintroduced
+        # through the save path.
+        payload: dict[str, Any] = {}
+        if self._default_quantity is not None:
+            payload["default_quantity"] = self._default_quantity
+        payload["channels"] = self._channels
         with save_path.open("w", encoding="utf-8") as fh:
             yaml.dump(
-                {"channels": self._channels},
+                payload,
                 fh,
                 allow_unicode=True,
                 default_flow_style=False,
@@ -275,6 +349,79 @@ class ChannelManager:
         """
         return ch_ref.strip().translate(self._LATIN_TO_CYRILLIC)
 
+    # ------------------------------------------------------------------
+    # OC-030 — declared quantity, replacing role inference from spelling
+    # ------------------------------------------------------------------
+
+    def set_descriptor_authority(self, descriptors: dict[str, Any]) -> None:
+        """Use the active descriptor catalog as the quantity/unit authority."""
+
+        self._descriptor_authority = descriptors
+
+    def _descriptor_for(self, channel_id: str) -> Any | None:
+        if self._descriptor_authority is None:
+            return None
+        short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        return self._descriptor_authority.get(short_id)
+
+    def get_quantity(self, channel_id: str) -> str | None:
+        """Return the DECLARED physical quantity of a channel, or None.
+
+        The seven GUI sites this replaces asked ``channel.startswith("Т")`` and
+        treated the answer as "this is a temperature".  That is an inference
+        from the identifier's spelling: a legitimate rename silently changed
+        which channels appeared on an operator screen, and a non-temperature
+        channel whose name happened to start with the same letter was routed as
+        a temperature.
+
+        Returns None when nothing is declared -- callers must NOT fall back to
+        spelling, and must not silently drop the channel either.  See
+        ``docs/design-system/patterns/state-visualization.md``: an unclassified
+        reading renders marked, not hidden.  A vanished pressure readout is what
+        caused revert ``0bea0449``.
+        """
+
+        short_id = channel_id.split(" ")[0] if " " in channel_id else channel_id
+        descriptor = self._descriptor_for(channel_id)
+        if self._descriptor_authority is not None:
+            if descriptor is None:
+                return None
+            quantity = getattr(descriptor.quantity, "value", descriptor.quantity)
+            return quantity if isinstance(quantity, str) else None
+        info = self._channels.get(short_id)
+        if info is None:
+            return None
+        declared = info.get("quantity")
+        if isinstance(declared, str) and declared:
+            return declared
+        return self._default_quantity
+
+    def is_kelvin_temperature_channel(self, channel_id: str) -> bool:
+        """True only for authoritative temperature channels measured in K."""
+
+        if not self.is_temperature_channel(channel_id):
+            return False
+        descriptor = self._descriptor_for(channel_id)
+        if descriptor is None:
+            return self._descriptor_authority is None
+        return descriptor.unit == "K"
+
+    def is_temperature_channel(self, channel_id: str) -> bool:
+        """True only when the channel DECLARES itself a temperature."""
+
+        return self.get_quantity(channel_id) == "temperature"
+
+    def get_temperature_channels(self) -> list[str]:
+        """Every channel declared as a temperature, in configuration order."""
+
+        return [ch_id for ch_id in self._channels if self.is_kelvin_temperature_channel(ch_id)]
+
+    def get_visible_temperature_channels(self) -> list[str]:
+        """Visible AND declared-temperature, preserving visible ordering."""
+
+        declared = set(self.get_temperature_channels())
+        return [ch for ch in self.get_all_visible() if self.normalize_channel_id(ch) in declared or ch in declared]
+
     def get_cold_channels(self) -> list[str]:
         """Return list of channel IDs marked as cold (cryogenic).
 
@@ -351,14 +498,17 @@ class ChannelManager:
             high = float(candidate[1])
         except (TypeError, ValueError):
             logger.warning(
-                "ChannelManager: alarm_band for %s contains non-numeric "
-                "values (%r); ignoring", short_id, candidate,
+                "ChannelManager: alarm_band for %s contains non-numeric values (%r); ignoring",
+                short_id,
+                candidate,
             )
             return None
         if low > high:
             logger.warning(
-                "ChannelManager: alarm_band for %s is reversed [%s..%s]; "
-                "ignoring", short_id, low, high,
+                "ChannelManager: alarm_band for %s is reversed [%s..%s]; ignoring",
+                short_id,
+                low,
+                high,
             )
             return None
         return (low, high)
@@ -370,11 +520,7 @@ class ChannelManager:
         (e.g. "all warm-by-design channels"). Order matches YAML
         declaration order.
         """
-        return [
-            ch_id
-            for ch_id, info in self._channels.items()
-            if info.get("thermal_zone") == zone
-        ]
+        return [ch_id for ch_id, info in self._channels.items() if info.get("thermal_zone") == zone]
 
     def resolve_channel_reference(self, reference: str) -> str:
         """Resolve a channel reference to its canonical runtime label.
@@ -395,9 +541,7 @@ class ChannelManager:
         info = self._channels.get(short_id)
         if info is None:
             known = sorted(self._channels.keys())
-            raise ChannelConfigError(
-                f"unknown channel reference '{reference}' — known channels: {', '.join(known)}"
-            )
+            raise ChannelConfigError(f"unknown channel reference '{reference}' — known channels: {', '.join(known)}")
         name = info.get("name", "")
         return f"{short_id} {name}" if name else short_id
 

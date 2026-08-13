@@ -102,6 +102,37 @@ def test_protocol_maxima_fit_1280_with_full_evidence_in_accessible_detail() -> N
     bar.set_data_rate(1e300)
     bar.set_connected(False, "y" * 1_000)
     assert bar.set_disk_evidence(1e300, source="disk_monitor", state="ok")
+
+    bar._start_time -= 10**12
+    bar._tick()
+    bar.resize(1280, bar.height())
+    bar.show()
+    QApplication.processEvents()
+    assert bar.minimumSizeHint().width() <= 1280
+    for label in (
+        bar._safety_label,
+        bar._uptime_label,
+        bar._disk_label,
+        bar._rate_label,
+        bar._conn_label,
+        bar._time_label,
+    ):
+        assert label.geometry().right() <= bar.rect().right()
+    assert "x" * 100 in bar._safety_label.accessibleDescription()
+    assert "1e+300" in bar._disk_label.accessibleDescription()
+    assert "y" * 100 in bar._conn_label.accessibleDescription()
+    assert "д" in bar._uptime_label.accessibleDescription()
+
+
+def test_bottom_bar_keeps_descriptor_fallback_visible() -> None:
+    bar = _make_bar()
+
+    bar.set_channel_authority_fallback(True)
+
+    assert "fallback" in bar._safety_label.text()
+    assert "channels.yaml" in bar._safety_label.toolTip()
+    assert "расходиться" in bar._safety_label.accessibleDescription()
+    return
     bar._start_time -= 10**12
     bar._tick()
     bar.resize(1280, bar.height())

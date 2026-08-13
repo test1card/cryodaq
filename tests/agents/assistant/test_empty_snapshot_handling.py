@@ -44,7 +44,13 @@ async def _poll_until(cond, interval: float = 0.005) -> None:
 
 def _write_mgr(**channels: dict) -> ChannelManager:
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8")
-    yaml.safe_dump({"channels": channels}, tmp, allow_unicode=True)
+    # A channel with no effective quantity is refused; these tests exercise snapshot handling,
+    # not quantity declaration, so the fixture declares a valid default.
+    yaml.safe_dump(
+        {"default_quantity": "temperature", "channels": channels},
+        tmp,
+        allow_unicode=True,
+    )
     tmp.close()
     return ChannelManager(config_path=Path(tmp.name))
 

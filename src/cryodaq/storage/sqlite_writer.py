@@ -594,6 +594,37 @@ _HISTORY_COLD_MAX_RETAINED_BYTES = 32 * 1024 * 1024
 _HISTORY_COLD_MIN_RETAINED_BYTES = 64 * 1024
 _HISTORY_COLD_DEADLINE_S = 10.0
 _HISTORY_COLD_CHUNK = timedelta(hours=168)
+_HistoryDescriptorIdentity = tuple[str, str, str, str]
+
+
+def _merge_history_descriptor(
+    catalog: dict[str, str],
+    identities: dict[str, _HistoryDescriptorIdentity],
+    history_channel: str,
+    descriptor: Any,
+) -> None:
+    quantity = descriptor.quantity
+    identity = (
+        descriptor.instrument_id,
+        descriptor.source_key,
+        quantity,
+        descriptor.unit,
+    )
+    if any(type(value) is not str for value in identity):
+        raise ValueError("historical descriptor identity is not text")
+
+    if not descriptor.legacy:
+        existing_identity = identities.get(history_channel)
+        if existing_identity is not None and existing_identity != identity:
+            raise ValueError("historical channel descriptors disagree on identity or unit")
+        identities[history_channel] = identity
+
+    existing = catalog.get(history_channel)
+    if descriptor.legacy or existing == "legacy_unknown" or quantity == "legacy_unknown":
+        catalog[history_channel] = "legacy_unknown"
+        return
+    catalog[history_channel] = quantity
+
 
 # Range and backport-safe set live in cryodaq.storage._sqlite (single source,
 # also used to pick the sqlite3 implementation). Imported above.
@@ -9394,12 +9425,20 @@ class SQLiteWriter:
         limit_per_channel: int = 3600,
         _channel_row_caps: dict[str, int] | None = None,
         _cold_deadline_monotonic: float | None = None,
+        _descriptor_catalog: dict[str, str] | None = None,
+        _descriptor_identities: dict[str, _HistoryDescriptorIdentity] | None = None,
     ) -> dict[str, list[tuple[float, float]]]:
         """Read historical readings from SQLite.
 
         Returns {channel: [(unix_ts, value), ...]} sorted by time ASC.
         Scans all daily DB files that overlap [from_ts, to_ts].
         """
+        if _descriptor_catalog is not None:
+            if _descriptor_identities is None:
+                _descriptor_identities = {}
+        elif _descriptor_identities is not None:
+            raise ValueError("history descriptor identity state requires a catalog")
+
         # Trust-boundary clamp (see module constants): bound rows-per-channel
         # and channel-list length before touching the DB. Non-positive limits
         # floor to 1 (a zero limit would otherwise slice result[-0:] = the whole
@@ -9429,6 +9468,8 @@ class SQLiteWriter:
                         limit_per_channel=limit_per_channel,
                         _channel_row_caps=channel_caps,
                         _cold_deadline_monotonic=allocation_cold_deadline,
+                        _descriptor_catalog=_descriptor_catalog,
+                        _descriptor_identities=_descriptor_identities,
                     )
                     collected = sum(len(balanced.get(channel, ())) for channel in channels)
                     remaining = total_budget - collected
@@ -9481,6 +9522,7 @@ class SQLiteWriter:
         unfiltered_remaining = unfiltered_limit
 
         result: dict[str, list[tuple[float, float]]] = {}
+        descriptor_rows: dict[str, list[Any | None]] = {}
         db_files = sorted(self._data_dir.glob("data_????-??-??.db"))
 
         # Filter DB files by date range if possible
@@ -9505,6 +9547,38 @@ class SQLiteWriter:
                 continue
             selected_dbs.append(db_path)
 
+        if not channels:
+            # Check the complete hot range before applying the row budget; a
+            # bounded newest-row probe can hide an older 65th channel.
+            known_channels: set[str] = set()
+            overflow_time_clause = ""
+            overflow_time_params: list[Any] = []
+            if from_ts is not None:
+                overflow_time_clause += " AND timestamp >= ?"
+                overflow_time_params.append(from_ts)
+            if to_ts is not None:
+                overflow_time_clause += " AND timestamp <= ?"
+                overflow_time_params.append(to_ts)
+            for db_path in selected_dbs:
+                try:
+                    # closing(), not a bare `with sqlite3.connect(...)`:
+                    # Connection.__exit__ commits or rolls back but does NOT
+                    # close, so the handle survives the block. On Windows that
+                    # keeps the database file open and the next reader of the
+                    # same path can fail.
+                    with contextlib.closing(sqlite3.connect(str(db_path), timeout=5)) as conn:
+                        rows = conn.execute(
+                            "SELECT DISTINCT channel FROM readings WHERE 1=1" + overflow_time_clause + " LIMIT ?",
+                            [*overflow_time_params, _HISTORY_MAX_CHANNELS + 1],
+                        ).fetchall()
+                    known_channels.update(row[0] for row in rows)
+                    if len(known_channels) > _HISTORY_MAX_CHANNELS:
+                        raise ValueError("unfiltered history contains more than 64 channels")
+                except ValueError:
+                    raise
+                except Exception:
+                    continue
+
         # Newest files satisfy the retained tail first. Older files are opened
         # only while a requested channel (or the aggregate no-filter budget)
         # still has a deficit.
@@ -9517,9 +9591,43 @@ class SQLiteWriter:
                 break
             try:
                 conn = sqlite3.connect(str(db_path), timeout=5)
-                conn.row_factory = sqlite3.Row
                 try:
-                    base = "SELECT timestamp, channel, value, status FROM readings WHERE 1=1"
+                    descriptor_map: dict[str, Any] = {}
+                    has_descriptor_hash = False
+                    if _descriptor_catalog is not None:
+                        from cryodaq.storage.descriptor_archive import (
+                            MAX_ARCHIVE_DESCRIPTORS,
+                            load_referenced_descriptors,
+                            resolve_archived_descriptors,
+                            resolve_legacy_descriptor,
+                        )
+
+                        columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
+                        has_descriptor_hash = "descriptor_hash" in columns
+                        if has_descriptor_hash:
+                            verify_descriptor_storage(conn)
+                            descriptor_hash_rows = conn.execute(
+                                "SELECT DISTINCT descriptor_hash FROM readings "
+                                "WHERE descriptor_hash IS NOT NULL LIMIT ?",
+                                (MAX_ARCHIVE_DESCRIPTORS + 1,),
+                            ).fetchall()
+                            if len(descriptor_hash_rows) > MAX_ARCHIVE_DESCRIPTORS:
+                                raise ValueError("historical descriptor catalog exceeds bounds")
+                            referenced = {row[0] for row in descriptor_hash_rows}
+                            if any(type(value) is not str for value in referenced):
+                                raise ValueError("historical descriptor hash is not text")
+                            if referenced:
+                                descriptor_map = resolve_archived_descriptors(
+                                    load_referenced_descriptors(conn, referenced), referenced
+                                )
+                        descriptor_column = "descriptor_hash" if has_descriptor_hash else "NULL"
+                        base = (
+                            "SELECT timestamp, instrument_id, channel, value, unit, status, "
+                            f"{descriptor_column} AS descriptor_hash FROM readings WHERE 1=1"
+                        )
+                    else:
+                        base = "SELECT timestamp, channel, value, status FROM readings WHERE 1=1"
+                    conn.row_factory = sqlite3.Row
                     time_clause = ""
                     time_params: list[Any] = []
                     if from_ts is not None:
@@ -9530,9 +9638,24 @@ class SQLiteWriter:
                         time_params.append(to_ts)
 
                     def _collect(query: str, params: list[Any]) -> int:
-                        pending: list[tuple[str, float, float]] = []
+                        pending: list[tuple[str, float, float, Any | None]] = []
                         for row in conn.execute(query, params):
                             ch = row["channel"]
+                            descriptor: Any | None = None
+                            if _descriptor_catalog is not None:
+                                descriptor_hash = row["descriptor_hash"]
+                                if descriptor_hash is None:
+                                    descriptor = resolve_legacy_descriptor(row["instrument_id"], ch, row["unit"])
+                                else:
+                                    descriptor = descriptor_map.get(descriptor_hash)
+                                    if descriptor is None:
+                                        raise ValueError("historical descriptor hash is missing")
+                                    if (
+                                        descriptor.instrument_id != row["instrument_id"]
+                                        or descriptor.channel_id != ch
+                                        or descriptor.unit != row["unit"]
+                                    ):
+                                        raise ValueError("historical descriptor disagrees with reading")
                             # NaN-доктрина: mask sentinel / error / legacy ±inf at
                             # the read boundary — the GUI-reconnect history feed
                             # must not surface a non-physical number.
@@ -9541,14 +9664,17 @@ class SQLiteWriter:
                                     ch,
                                     float(row["timestamp"]),
                                     decode(float(row["value"]), row["status"]),
+                                    descriptor,
                                 )
                             )
                         # Keep each bounded file/channel query atomic. A malformed
                         # later row must not retain a partial prefix without also
                         # consuming its deficit, which could multiply memory by
                         # the number of retained daily files.
-                        for ch, timestamp, value in pending:
+                        for ch, timestamp, value, descriptor in pending:
                             result.setdefault(ch, []).append((timestamp, value))
+                            if _descriptor_catalog is not None:
+                                descriptor_rows.setdefault(ch, []).append(descriptor)
                         return len(pending)
 
                     if channels:
@@ -9563,7 +9689,7 @@ class SQLiteWriter:
                             if remaining <= 0:
                                 continue
                             collected = _collect(
-                                base + time_clause + " AND channel = ? ORDER BY timestamp DESC LIMIT ?",
+                                base + time_clause + " AND channel = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
                                 [*time_params, ch, remaining],
                             )
                             hot_deficits[ch] -= collected
@@ -9575,14 +9701,16 @@ class SQLiteWriter:
                         # daily files, newest first. A separate LIMIT per file
                         # would let retained history multiply this bound.
                         collected = _collect(
-                            base + time_clause + " ORDER BY timestamp DESC LIMIT ?",
-                            [*time_params, unfiltered_remaining],
+                            base + time_clause + " ORDER BY timestamp DESC, channel DESC, id DESC LIMIT ?",
+                            [*time_params, unfiltered_remaining + 1],
                         )
-                        unfiltered_remaining -= collected
+                        unfiltered_remaining = max(0, unfiltered_remaining - collected)
                 finally:
                     conn.close()
-            except Exception:
-                logger.warning("Ошибка чтения истории из %s", db_path)
+            except Exception as exc:
+                logger.warning("Ошибка чтения истории из %s: %s", db_path, exc)
+                if _descriptor_catalog is not None:
+                    raise
 
         # Cold path: a window reaching before the oldest hot day would silently
         # miss days already rotated to Parquet. Union those cold rows through
@@ -9780,6 +9908,8 @@ class SQLiteWriter:
                             for row in accepted:
                                 value = float("nan") if row.value is None else row.value
                                 result.setdefault(row.channel, []).append((row.timestamp, value))
+                                if _descriptor_catalog is not None:
+                                    descriptor_rows.setdefault(row.channel, []).append(row.descriptor)
                             cold_rows_remaining -= len(accepted)
                             if deficits is not None:
                                 assert channel is not None
@@ -9800,27 +9930,78 @@ class SQLiteWriter:
 
         if not channels:
             # The cold reader has its own date/source bounds but returns a
-            # channel mapping. Re-apply the same absolute newest-row cap to the
-            # hot+cold union so the public result cannot exceed the trust
-            # boundary even when the archive contributes the remaining rows.
+            # channel mapping. Refuse rather than silently choosing a subset:
+            # membership selected by row or spelling order can change when a
+            # day rotates from SQLite to Parquet.
+            retained_channels = {channel for channel, points in result.items() if points}
+            if len(retained_channels) > _HISTORY_MAX_CHANNELS:
+                raise ValueError("unfiltered history contains more than 64 channels")
+
+            # Re-apply the absolute newest-row cap to the hot+cold union so the
+            # public result cannot exceed the trust boundary even when the
+            # archive contributes the remaining rows.
             newest = sorted(
-                ((timestamp, channel, value) for channel, points in result.items() for timestamp, value in points),
-                key=lambda item: item[0],
+                (
+                    (timestamp, channel, value, descriptor)
+                    for channel, points in result.items()
+                    for (timestamp, value), descriptor in zip(
+                        points, descriptor_rows.get(channel, [None] * len(points))
+                    )
+                ),
+                key=lambda item: (item[0], item[1]),
                 reverse=True,
             )[:unfiltered_limit]
             result = {}
-            for timestamp, channel, value in newest:
+            descriptor_rows = {}
+            for timestamp, channel, value, descriptor in newest:
                 result.setdefault(channel, []).append((timestamp, value))
+                if _descriptor_catalog is not None:
+                    descriptor_rows.setdefault(channel, []).append(descriptor)
 
         # Sort ASC and truncate to limit_per_channel (keep latest). Rows arrive
         # newest-first and possibly interleaved across daily DB files.
         for ch in result:
-            result[ch].sort(key=lambda p: p[0])
+            paired = list(zip(result[ch], descriptor_rows.get(ch, [None] * len(result[ch]))))
+            paired.sort(key=lambda item: item[0][0])
             retained_cap = channel_caps.get(ch, 0) if channel_caps is not None else limit_per_channel
-            if len(result[ch]) > retained_cap:
-                result[ch] = result[ch][-retained_cap:]
+            paired = paired[-retained_cap:]
+            result[ch] = [point for point, _descriptor in paired]
+            if _descriptor_catalog is not None:
+                descriptor_rows[ch] = [descriptor for _point, descriptor in paired]
+                assert _descriptor_identities is not None
+                for _point, descriptor in paired:
+                    if descriptor is not None:
+                        _merge_history_descriptor(
+                            _descriptor_catalog,
+                            _descriptor_identities,
+                            ch,
+                            descriptor,
+                        )
+
+        if _descriptor_catalog is not None:
+            for channel in set(_descriptor_catalog).difference(result):
+                del _descriptor_catalog[channel]
 
         return result
+
+    def _read_readings_history_with_descriptors(
+        self,
+        *,
+        channels: list[str] | None = None,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        limit_per_channel: int = 3600,
+    ) -> tuple[dict[str, list[tuple[float, float]]], dict[str, str]]:
+        """Read points plus the persisted descriptor projection for those channels."""
+        descriptor_catalog: dict[str, str] = {}
+        data = self._read_readings_history(
+            channels=channels,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            limit_per_channel=limit_per_channel,
+            _descriptor_catalog=descriptor_catalog,
+        )
+        return data, descriptor_catalog
 
     async def read_readings_history(
         self,
@@ -9843,6 +10024,30 @@ class SQLiteWriter:
             task,
             read=True,
             name="sqlite_readings_history",
+        )
+        return await self._await_owned_task(owner)
+
+    async def read_readings_history_with_descriptors(
+        self,
+        *,
+        channels: list[str] | None = None,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        limit_per_channel: int = 3600,
+    ) -> tuple[dict[str, list[tuple[float, float]]], dict[str, str]]:
+        """Async descriptor-bearing history used by operator archive views."""
+        task = partial(
+            self._read_readings_history_with_descriptors,
+            channels=channels,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            limit_per_channel=limit_per_channel,
+        )
+        owner = self._owned_executor_task(
+            self._read_executor,
+            task,
+            read=True,
+            name="sqlite_readings_history_with_descriptors",
         )
         return await self._await_owned_task(owner)
 

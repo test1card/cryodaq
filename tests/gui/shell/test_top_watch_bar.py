@@ -41,8 +41,23 @@ def test_cold_start_channels_are_unavailable_until_real_reading() -> None:
     _app()
 
     class _FakeChannelMgr:
+        # DECLARED, not spelled.  Deriving this list with a `startswith` test
+        # would put the OC-030 inference back inside the guard, and the node
+        # would keep passing if production regressed to spelling.
+        _QUANTITY = {"Т1": "temperature", "Т2": "temperature", "Pressure": "pressure"}
+
         def get_all_visible(self) -> list[str]:
             return ["Т1", "Т2", "Pressure"]
+
+        def is_temperature_channel(self, channel_id: str) -> bool:
+            # Short-form resolution matters: drivers emit "Т1 <suffix>" while the
+            # manager keys on "Т1", so matching the full string would answer
+            # False for every real reading and pass for the wrong reason.
+            short = channel_id.split(" ")[0]
+            return self._QUANTITY.get(short) == "temperature"
+
+        def get_visible_temperature_channels(self) -> list[str]:
+            return [ch for ch in self.get_all_visible() if self.is_temperature_channel(ch)]
 
     bar = TopWatchBar(channel_manager=_FakeChannelMgr())  # type: ignore[arg-type]
     bar._fast_timer.stop()
@@ -71,8 +86,20 @@ def test_on_reading_stores_under_short_id() -> None:
     _app()
 
     class _FakeChannelMgr:
+        _QUANTITY = {"Т1": "temperature"}
+
         def get_all_visible(self) -> list[str]:
             return ["Т1"]
+
+        def is_temperature_channel(self, channel_id: str) -> bool:
+            # Short-form resolution matters: drivers emit "Т1 <suffix>" while the
+            # manager keys on "Т1", so matching the full string would answer
+            # False for every real reading and pass for the wrong reason.
+            short = channel_id.split(" ")[0]
+            return self._QUANTITY.get(short) == "temperature"
+
+        def get_visible_temperature_channels(self) -> list[str]:
+            return [ch for ch in self.get_all_visible() if self.is_temperature_channel(ch)]
 
     bar = TopWatchBar(channel_manager=_FakeChannelMgr())  # type: ignore[arg-type]
     bar._fast_timer.stop()
@@ -680,3 +707,48 @@ def test_mode_badge_cursor_is_pointing_hand() -> None:
     from PySide6.QtCore import Qt
 
     assert bar._mode_badge.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+def test_a_bar_built_without_a_channel_manager_still_ingests_readings() -> None:
+    """`channel_manager=None` is a supported construction mode, and it crashed.
+
+    Migrating the temperature test from spelling to declaration put
+    `self._channel_mgr.is_temperature_channel(...)` at the top of `on_reading`
+    with no None check, so every standalone consumer raised AttributeError on
+    the first reading — before control could reach the pressure branch below it.
+    The vitals refresh already guarded the same attribute, which is why this was
+    a regression rather than a missing feature.
+
+    Without a manager nothing DECLARES a quantity, so no reading may be claimed
+    as a temperature. Falling back to the spelling test would reintroduce the
+    defect this change exists to remove.
+    """
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    _app()
+    bar = TopWatchBar()
+    assert bar._channel_mgr is None, "this node is meaningless if a manager was injected"
+    bar._fast_timer.stop()
+    bar._slow_timer.stop()
+    bar._channel_refresh_timer.stop()
+
+    def _reading(channel: str, value: float, unit: str) -> Reading:
+        return Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="LS218_1",
+            channel=channel,
+            value=value,
+            unit=unit,
+            status=ChannelStatus.OK,
+        )
+
+    # A Cyrillic-Те channel in Kelvin: the shape that used to be inferred as a
+    # temperature by spelling. It must not raise, and must not be claimed.
+    bar.on_reading(_reading("Т1 Криостат верх", 4.2, "K"))
+    assert "Т1" not in bar._channel_last_seen, "nothing declares a quantity, so nothing is a temperature"
+
+    # The pressure path sits AFTER the crashing line, so this is what the
+    # unguarded dereference actually cost a standalone consumer.
+    bar.on_reading(_reading("VACUUM/pressure", 1.2e-5, "mbar"))

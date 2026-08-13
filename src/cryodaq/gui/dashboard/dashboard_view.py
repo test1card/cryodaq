@@ -261,9 +261,16 @@ class DashboardView(QScrollArea):
             return
         timestamp_epoch = reading.timestamp.timestamp()
 
-        if channel.startswith("\u0422"):  # cyrillic Т
-            short_id = channel.split(" ")[0]
-            self._buffer_store.append(short_id, timestamp_epoch, float(value))
+        if self._channel_mgr.is_temperature_channel(channel):
+            # TWO DIFFERENT QUESTIONS, and collapsing them stranded a cell. The plot buffer is
+            # Kelvin-only, because the temperature plot's axis is fixed to K and appending Celsius
+            # would render unconverted values. The sensor CELL is not: `DynamicSensorGrid`
+            # builds a cell for every declared temperature channel, so gating dispatch on the
+            # Kelvin predicate left a Celsius channel with a cell that exists and never updates --
+            # it sat at "Нет данных" while current readings were arriving.
+            if self._channel_mgr.is_kelvin_temperature_channel(channel) and reading.unit == "K":
+                short_id = channel.split(" ")[0]
+                self._buffer_store.append(short_id, timestamp_epoch, float(value))
             if self._sensor_grid is not None:
                 self._sensor_grid.dispatch_reading(reading, identity_status)
         elif channel.endswith("/pressure"):

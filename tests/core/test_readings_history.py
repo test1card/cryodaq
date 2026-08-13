@@ -12,9 +12,22 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.channels.descriptors import (
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
+from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage._sqlite import sqlite3
+from cryodaq.storage.channel_descriptors import (
+    ChannelDescriptorStorageError,
+    initialize_descriptor_storage,
+)
 from cryodaq.storage.sentinel import SENTINEL
-from cryodaq.storage.sqlite_writer import SQLiteWriter
+from cryodaq.storage.sqlite_writer import SCHEMA_READINGS, SQLiteWriter
 
 
 @pytest.fixture()
@@ -353,11 +366,26 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
     import pyarrow.parquet as pq
 
     os.environ.setdefault("CRYODAQ_ALLOW_BROKEN_SQLITE", "1")
-    writer = SQLiteWriter(tmp_path)
+    now = datetime.now(UTC)
+    hot_descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id="pressure.shared.opaque",
+        instrument_id="LS218_1",
+        source_key="input.hot.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Hot declared temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([hot_descriptor]))
     loop = asyncio.new_event_loop()
     loop.run_until_complete(writer.start_immediate())
     try:
-        now = datetime.now(UTC)
         # HOT: a row for today lands in data_<today>.db.
         hot_ts = now.timestamp() - 60
         loop.run_until_complete(
@@ -365,8 +393,8 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
                 [
                     Reading(
                         timestamp=datetime.fromtimestamp(hot_ts, tz=UTC),
-                        instrument_id="LS218_1",
-                        channel="Т1",
+                        instrument_id=hot_descriptor.instrument_id,
+                        channel=hot_descriptor.channel_id,
                         value=10.0,
                         unit="K",
                         status=ChannelStatus.OK,
@@ -377,24 +405,60 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
         # COLD: a row 3 days ago, only in the Parquet archive.
         cold_day = now - timedelta(days=3)
         cold_ts = cold_day.timestamp()
+        cold_descriptor = ChannelDescriptorV1(
+            schema_version=1,
+            channel_id="pressure.loop.opaque",
+            instrument_id="archived-thermometer",
+            source_key="input.1.temperature",
+            quantity=ChannelQuantity.TEMPERATURE,
+            unit="K",
+            role=ChannelRole.PRIMARY_MEASUREMENT,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="Cryostat",
+            display_name="Archived temperature",
+            visible_by_default=True,
+            display_order=1,
+            descriptor_revision=1,
+        )
+        envelope = PersistedChannelEnvelopeV1.from_descriptor(cold_descriptor)
         archive_dir = tmp_path / "archive"
         rel = f"year={cold_day:%Y}/month={cold_day:%m}/data_{cold_day.date().isoformat()}.db.parquet"
         ppath = archive_dir / rel
         ppath.parent.mkdir(parents=True, exist_ok=True)
+        cold_descriptor_ts = cold_ts + 1
         table = pa.table(
             {
                 "timestamp": pa.array(
-                    [datetime.fromtimestamp(cold_ts, tz=UTC)],
+                    [
+                        datetime.fromtimestamp(cold_ts, tz=UTC),
+                        datetime.fromtimestamp(cold_descriptor_ts, tz=UTC),
+                    ],
                     type=pa.timestamp("us", tz="UTC"),
                 ),
-                "instrument_id": pa.array(["LS218_1"]),
-                "channel": pa.array(["Т1"]),
-                "value": pa.array([5.0], type=pa.float64()),
-                "unit": pa.array(["K"]),
-                "status": pa.array(["ok"]),
+                "instrument_id": pa.array([hot_descriptor.instrument_id, cold_descriptor.instrument_id]),
+                "channel": pa.array([hot_descriptor.channel_id, cold_descriptor.channel_id]),
+                "value": pa.array([5.0, 4.2], type=pa.float64()),
+                "unit": pa.array(["K", cold_descriptor.unit]),
+                "status": pa.array(["ok", "ok"]),
+                "descriptor_hash": pa.array([None, cold_descriptor.descriptor_hash], type=pa.string()),
             }
         )
         pq.write_table(table, str(ppath))
+        sidecar_rel = Path(rel).with_name(Path(rel).stem + ".channel_descriptors.parquet")
+        sidecar = archive_dir / sidecar_rel
+        pq.write_table(
+            pa.table(
+                {
+                    "descriptor_hash": pa.array([cold_descriptor.descriptor_hash]),
+                    "channel_id": pa.array([cold_descriptor.channel_id]),
+                    "instrument_id": pa.array([cold_descriptor.instrument_id]),
+                    "source_key": pa.array([cold_descriptor.source_key]),
+                    "descriptor_revision": pa.array([cold_descriptor.descriptor_revision], type=pa.int32()),
+                    "envelope_json": pa.array([envelope.canonical_json], type=pa.binary()),
+                }
+            ),
+            sidecar,
+        )
         (archive_dir / "index.json").write_text(
             json.dumps(
                 {
@@ -408,6 +472,13 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
                                 ppath.read_bytes(),
                                 usedforsecurity=False,
                             ).hexdigest(),
+                            "channel_descriptors_path": sidecar_rel.as_posix(),
+                            "channel_descriptors_rows": 1,
+                            "channel_descriptors_checksum": hashlib.md5(
+                                sidecar.read_bytes(),
+                                usedforsecurity=False,
+                            ).hexdigest(),
+                            "channel_descriptors_size_bytes": sidecar.stat().st_size,
                         }
                     ]
                 }
@@ -415,16 +486,218 @@ def test_read_readings_history_unions_cold_archive(tmp_path: Path) -> None:
             encoding="utf-8",
         )
 
-        data = writer._read_readings_history(from_ts=cold_ts - 10, to_ts=now.timestamp())
-        vals = [v for _, v in data["Т1"]]
-        assert 5.0 in vals, "cold archived row must be unioned in"
-        assert 10.0 in vals, "hot row must remain"
-        # ASC order → cold (older) first, hot (newer) last.
-        assert data["Т1"][0][1] == 5.0
-        assert data["Т1"][-1][1] == 10.0
+        data, catalog = writer._read_readings_history_with_descriptors(
+            from_ts=cold_ts - 10,
+            to_ts=now.timestamp(),
+        )
+
+        assert data[hot_descriptor.channel_id] == [(cold_ts, 5.0), (hot_ts, 10.0)]
+        assert data[cold_descriptor.channel_id] == [(cold_descriptor_ts, 4.2)]
+        assert catalog[hot_descriptor.channel_id] == "legacy_unknown"
+        assert catalog[cold_descriptor.channel_id] == "temperature"
     finally:
         loop.run_until_complete(writer.stop())
         loop.close()
+
+
+def test_cross_tier_declared_descriptor_identity_fork_is_refused(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    now = datetime.now(UTC)
+    channel = "pressure.cross.tier"
+    hot_descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=channel,
+        instrument_id="hot-thermometer",
+        source_key="input.hot.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Cross-tier temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    cold_descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=channel,
+        instrument_id="cold-thermometer",
+        source_key="input.cold.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Cross-tier temperature",
+        visible_by_default=True,
+        display_order=2,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([hot_descriptor]))
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(writer.start_immediate())
+    try:
+        hot_ts = now.timestamp() - 60
+        loop.run_until_complete(
+            writer.write_immediate(
+                [
+                    Reading(
+                        timestamp=datetime.fromtimestamp(hot_ts, tz=UTC),
+                        instrument_id=hot_descriptor.instrument_id,
+                        channel=channel,
+                        value=4.0,
+                        unit="K",
+                        status=ChannelStatus.OK,
+                    )
+                ]
+            )
+        )
+
+        cold_day = now - timedelta(days=3)
+        cold_ts = cold_day.timestamp()
+        envelope = PersistedChannelEnvelopeV1.from_descriptor(cold_descriptor)
+        archive_dir = tmp_path / "archive"
+        rel = f"year={cold_day:%Y}/month={cold_day:%m}/data_{cold_day.date().isoformat()}.db.parquet"
+        ppath = archive_dir / rel
+        ppath.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.table(
+            {
+                "timestamp": pa.array(
+                    [datetime.fromtimestamp(cold_ts, tz=UTC)],
+                    type=pa.timestamp("us", tz="UTC"),
+                ),
+                "instrument_id": pa.array([cold_descriptor.instrument_id]),
+                "channel": pa.array([channel]),
+                "value": pa.array([5.0], type=pa.float64()),
+                "unit": pa.array(["K"]),
+                "status": pa.array(["ok"]),
+                "descriptor_hash": pa.array([cold_descriptor.descriptor_hash]),
+            }
+        )
+        pq.write_table(table, str(ppath))
+        sidecar_rel = Path(rel).with_name(Path(rel).stem + ".channel_descriptors.parquet")
+        sidecar = archive_dir / sidecar_rel
+        pq.write_table(
+            pa.table(
+                {
+                    "descriptor_hash": pa.array([cold_descriptor.descriptor_hash]),
+                    "channel_id": pa.array([channel]),
+                    "instrument_id": pa.array([cold_descriptor.instrument_id]),
+                    "source_key": pa.array([cold_descriptor.source_key]),
+                    "descriptor_revision": pa.array([1], type=pa.int32()),
+                    "envelope_json": pa.array([envelope.canonical_json], type=pa.binary()),
+                }
+            ),
+            sidecar,
+        )
+        (archive_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "files": [
+                        {
+                            "original_name": f"data_{cold_day.date().isoformat()}.db",
+                            "archive_path": rel,
+                            "row_count": 1,
+                            "size_bytes_archive": ppath.stat().st_size,
+                            "checksum_md5": hashlib.md5(
+                                ppath.read_bytes(),
+                                usedforsecurity=False,
+                            ).hexdigest(),
+                            "channel_descriptors_path": sidecar_rel.as_posix(),
+                            "channel_descriptors_rows": 1,
+                            "channel_descriptors_checksum": hashlib.md5(
+                                sidecar.read_bytes(),
+                                usedforsecurity=False,
+                            ).hexdigest(),
+                            "channel_descriptors_size_bytes": sidecar.stat().st_size,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="identity or unit"):
+            writer._read_readings_history_with_descriptors(
+                from_ts=cold_ts - 1,
+                to_ts=now.timestamp(),
+            )
+    finally:
+        loop.run_until_complete(writer.stop())
+        loop.close()
+
+
+def test_unfiltered_descriptor_history_refuses_cold_channel_overflow(tmp_path: Path) -> None:
+    pytest.importorskip("pyarrow")
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from cryodaq.storage.sqlite_writer import _HISTORY_MAX_CHANNELS
+
+    cold_day = datetime.now(UTC) - timedelta(days=3)
+    cold_ts = cold_day.timestamp()
+    channels = [
+        "ZZ_OLDEST",
+        *(f"C{index:02d}" for index in range(_HISTORY_MAX_CHANNELS - 1)),
+        "AA_NEWEST",
+    ]
+    archive_dir = tmp_path / "archive"
+    rel = f"year={cold_day:%Y}/month={cold_day:%m}/data_{cold_day.date().isoformat()}.db.parquet"
+    ppath = archive_dir / rel
+    ppath.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "timestamp": pa.array(
+                [datetime.fromtimestamp(cold_ts + index, tz=UTC) for index in range(len(channels))],
+                type=pa.timestamp("us", tz="UTC"),
+            ),
+            "instrument_id": pa.array(["legacy-thermometer"] * len(channels)),
+            "channel": pa.array(channels),
+            "value": pa.array([float(index) for index in range(len(channels))], type=pa.float64()),
+            "unit": pa.array(["K"] * len(channels)),
+            "status": pa.array(["ok"] * len(channels)),
+        }
+    )
+    pq.write_table(table, str(ppath))
+    (archive_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "original_name": f"data_{cold_day.date().isoformat()}.db",
+                        "archive_path": rel,
+                        "row_count": table.num_rows,
+                        "size_bytes_archive": ppath.stat().st_size,
+                        "checksum_md5": hashlib.md5(
+                            ppath.read_bytes(),
+                            usedforsecurity=False,
+                        ).hexdigest(),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    from cryodaq.storage.archive_reader import ArchiveUnavailableError, BoundedReadIssueCode
+
+    writer = SQLiteWriter(tmp_path)
+    with pytest.raises(ArchiveUnavailableError) as exc_info:
+        writer._read_readings_history_with_descriptors(
+            from_ts=cold_ts - 1,
+            to_ts=cold_ts + len(channels),
+            limit_per_channel=2,
+        )
+
+    assert exc_info.value.issue.code == BoundedReadIssueCode.CHANNEL_LIMIT
 
 
 def test_read_readings_history_unbounded_unions_cold_archive(tmp_path: Path) -> None:
@@ -526,3 +799,401 @@ async def test_async_read_readings_history(writer_with_data) -> None:
     assert async_data["Т1 Камера"] == sync_data["Т1 Камера"], (
         "Async wrapper must return identical data to sync implementation"
     )
+
+
+@pytest.mark.asyncio
+async def test_readings_history_carries_the_persisted_descriptor_catalog(tmp_path: Path) -> None:
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id="archive.temperature",
+        instrument_id="thermometer",
+        source_key="input.1.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Archived temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([descriptor]))
+    try:
+        assert await writer.write_immediate(
+            [
+                Reading(
+                    timestamp=datetime.now(UTC),
+                    instrument_id=descriptor.instrument_id,
+                    channel=descriptor.channel_id,
+                    value=4.2,
+                    unit=descriptor.unit,
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+    finally:
+        await writer.stop()
+
+    reader = SQLiteWriter(tmp_path)
+    try:
+        data, catalog = await reader.read_readings_history_with_descriptors()
+
+        assert list(data) == [descriptor.channel_id]
+        assert catalog[descriptor.channel_id] == "temperature"
+    finally:
+        await reader.stop()
+
+
+@pytest.mark.asyncio
+async def test_descriptor_history_keeps_migrated_legacy_rows_unknown(tmp_path: Path) -> None:
+    timestamp = datetime.now(UTC)
+    channel = "legacy.temperature"
+    writer = SQLiteWriter(tmp_path)
+    try:
+        assert await writer.write_immediate(
+            [
+                Reading(
+                    timestamp=timestamp,
+                    instrument_id="legacy-thermometer",
+                    channel=channel,
+                    value=5.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+    finally:
+        await writer.stop()
+
+    db_path = tmp_path / f"data_{timestamp.date().isoformat()}.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        initialize_descriptor_storage(conn)
+    finally:
+        conn.close()
+
+    reader = SQLiteWriter(tmp_path)
+    try:
+        data, catalog = await reader.read_readings_history_with_descriptors()
+
+        assert list(data) == [channel]
+        assert catalog[channel] == "legacy_unknown"
+    finally:
+        await reader.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit_per_channel", [1, 2])
+@pytest.mark.parametrize("reverse_insertion", [False, True])
+async def test_unfiltered_descriptor_history_enforces_channel_cap(
+    tmp_path: Path,
+    limit_per_channel: int,
+    reverse_insertion: bool,
+) -> None:
+    from cryodaq.storage.sqlite_writer import _HISTORY_MAX_CHANNELS
+
+    timestamp = datetime.now(UTC) - timedelta(seconds=_HISTORY_MAX_CHANNELS)
+    channels = [
+        "ZZ_OLDEST",
+        *(f"C{index:02d}" for index in range(_HISTORY_MAX_CHANNELS - 1)),
+        "AA_NEWEST",
+    ]
+    if reverse_insertion:
+        channels.reverse()
+    writer = SQLiteWriter(tmp_path)
+    try:
+        assert await writer.write_immediate(
+            [
+                Reading(
+                    timestamp=timestamp,
+                    instrument_id="legacy-thermometer",
+                    channel=channel,
+                    value=float(index),
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+                for index, channel in enumerate(channels)
+            ]
+        )
+
+        with pytest.raises(ValueError, match="more than 64 channels"):
+            await writer.read_readings_history_with_descriptors(limit_per_channel=limit_per_channel)
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("busy_first", [False, True])
+async def test_unfiltered_hot_history_channel_tie_break_is_insertion_independent(
+    tmp_path: Path,
+    busy_first: bool,
+) -> None:
+    from cryodaq.storage.sqlite_writer import _HISTORY_MAX_CHANNELS
+
+    timestamp = datetime.now(UTC)
+    busy = [
+        Reading(
+            timestamp=timestamp,
+            instrument_id="legacy-thermometer",
+            channel="A_BUSY",
+            value=float(index),
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+        for index in range(_HISTORY_MAX_CHANNELS + 1)
+    ]
+    sparse = [
+        Reading(
+            timestamp=timestamp,
+            instrument_id="legacy-thermometer",
+            channel=f"B{index:02d}",
+            value=float(index),
+            unit="K",
+            status=ChannelStatus.OK,
+        )
+        for index in range(_HISTORY_MAX_CHANNELS)
+    ]
+    readings = [*busy, *sparse] if busy_first else [*sparse, *busy]
+
+    writer = SQLiteWriter(tmp_path)
+    try:
+        assert await writer.write_immediate(readings)
+
+        with pytest.raises(ValueError, match="more than 64 channels"):
+            await writer.read_readings_history_with_descriptors(limit_per_channel=1)
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_descriptor_history_refuses_an_unverifiable_hot_catalog(tmp_path: Path) -> None:
+    timestamp = datetime.now(UTC)
+    db_path = tmp_path / f"data_{timestamp.date().isoformat()}.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(SCHEMA_READINGS)
+        conn.execute("ALTER TABLE readings ADD COLUMN descriptor_hash TEXT")
+        conn.execute(
+            "INSERT INTO readings "
+            "(timestamp, instrument_id, channel, value, unit, status, descriptor_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                timestamp.timestamp(),
+                "thermometer",
+                "archive.temperature",
+                4.2,
+                "K",
+                "ok",
+                "sha256:" + ("0" * 64),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    writer = SQLiteWriter(tmp_path)
+    try:
+        with pytest.raises(ChannelDescriptorStorageError):
+            await writer.read_readings_history_with_descriptors()
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.asyncio
+async def test_mixed_legacy_and_declared_history_remains_unknown(tmp_path: Path) -> None:
+    timestamp = datetime.now(UTC) - timedelta(seconds=2)
+    channel = "shared.temperature"
+    legacy_writer = SQLiteWriter(tmp_path)
+    try:
+        assert await legacy_writer.write_immediate(
+            [
+                Reading(
+                    timestamp=timestamp,
+                    instrument_id="legacy-thermometer",
+                    channel=channel,
+                    value=5.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+    finally:
+        await legacy_writer.stop()
+
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=channel,
+        instrument_id="declared-thermometer",
+        source_key="input.1.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Shared temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    declared_writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([descriptor]))
+    try:
+        assert await declared_writer.write_immediate(
+            [
+                Reading(
+                    timestamp=timestamp + timedelta(seconds=1),
+                    instrument_id=descriptor.instrument_id,
+                    channel=channel,
+                    value=4.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+    finally:
+        await declared_writer.stop()
+
+    reader = SQLiteWriter(tmp_path)
+    try:
+        data, catalog = await reader.read_readings_history_with_descriptors()
+
+        assert [value for _timestamp, value in data[channel]] == [5.0, 4.0]
+        projection = catalog[channel]
+        quantity = projection if isinstance(projection, str) else projection["quantity"]
+        assert quantity == "legacy_unknown"
+    finally:
+        await reader.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("later_instrument_id", "later_source_key", "later_unit"),
+    [
+        ("thermometer-2", "input.2.temperature", "K"),
+        ("thermometer-1", "input.1.temperature", "°C"),
+    ],
+)
+async def test_cross_day_descriptor_identity_or_unit_fork_is_refused(
+    tmp_path: Path,
+    later_instrument_id: str,
+    later_source_key: str,
+    later_unit: str,
+) -> None:
+    channel = "shared.temperature"
+    timestamps = [datetime.now(UTC) - timedelta(days=2), datetime.now(UTC) - timedelta(days=1)]
+    descriptors = [
+        ChannelDescriptorV1(
+            schema_version=1,
+            channel_id=channel,
+            instrument_id="thermometer-1",
+            source_key="input.1.temperature",
+            quantity=ChannelQuantity.TEMPERATURE,
+            unit="K",
+            role=ChannelRole.PRIMARY_MEASUREMENT,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="Cryostat",
+            display_name="Shared temperature",
+            visible_by_default=True,
+            display_order=1,
+            descriptor_revision=1,
+        ),
+        ChannelDescriptorV1(
+            schema_version=1,
+            channel_id=channel,
+            instrument_id=later_instrument_id,
+            source_key=later_source_key,
+            quantity=ChannelQuantity.TEMPERATURE,
+            unit=later_unit,
+            role=ChannelRole.PRIMARY_MEASUREMENT,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="Cryostat",
+            display_name="Shared temperature",
+            visible_by_default=True,
+            display_order=2,
+            descriptor_revision=1,
+        ),
+    ]
+    for timestamp, descriptor in zip(timestamps, descriptors, strict=True):
+        writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([descriptor]))
+        try:
+            assert await writer.write_immediate(
+                [
+                    Reading(
+                        timestamp=timestamp,
+                        instrument_id=descriptor.instrument_id,
+                        channel=channel,
+                        value=4.2,
+                        unit=descriptor.unit,
+                        status=ChannelStatus.OK,
+                    )
+                ]
+            )
+        finally:
+            await writer.stop()
+
+    reader = SQLiteWriter(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="identity or unit"):
+            await reader.read_readings_history_with_descriptors()
+    finally:
+        await reader.stop()
+
+
+@pytest.mark.asyncio
+async def test_unfiltered_descriptor_history_catalog_uses_retained_rows(tmp_path: Path) -> None:
+    channel = "shared.temperature"
+    old_timestamp = datetime.now(UTC) - timedelta(seconds=2)
+    retained_timestamp = datetime.now(UTC) - timedelta(seconds=1)
+
+    legacy_writer = SQLiteWriter(tmp_path)
+    try:
+        assert await legacy_writer.write_immediate(
+            [
+                Reading(
+                    timestamp=old_timestamp,
+                    instrument_id="legacy-thermometer",
+                    channel=channel,
+                    value=3.0,
+                    unit="K",
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+    finally:
+        await legacy_writer.stop()
+
+    descriptor = ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=channel,
+        instrument_id="declared-thermometer",
+        source_key="input.1.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Shared temperature",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([descriptor]))
+    try:
+        assert await writer.write_immediate(
+            [
+                Reading(
+                    timestamp=retained_timestamp,
+                    instrument_id=descriptor.instrument_id,
+                    channel=channel,
+                    value=4.0,
+                    unit=descriptor.unit,
+                    status=ChannelStatus.OK,
+                )
+            ]
+        )
+        data, catalog = await writer.read_readings_history_with_descriptors(limit_per_channel=1)
+    finally:
+        await writer.stop()
+
+    assert data[channel] == [(retained_timestamp.timestamp(), 4.0)]
+    assert catalog[channel] == "temperature"

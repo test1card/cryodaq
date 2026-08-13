@@ -213,6 +213,19 @@ class BottomStatusBar(QWidget):
         self._conn_label.setToolTip(detail)
         self._conn_label.setAccessibleDescription(detail)
 
+    def set_channel_authority_fallback(self, active: bool) -> None:
+        """Keep descriptor/catalog disagreement visible in the persistent chrome."""
+        if active:
+            text = "⚠ Количества: fallback"
+            detail = (
+                "Каталог дескрипторов каналов недоступен; маршрутизация количеств использует channels.yaml. "
+                "Живые данные и каталог Engine могут расходиться."
+            )
+            self._safety_label.setText(text)
+            self._safety_label.setStyleSheet(f"color: {theme.STATUS_CAUTION}; font-weight: bold;")
+            self._safety_label.setToolTip(detail)
+            self._safety_label.setAccessibleDescription(detail)
+
     def set_disk_evidence(self, value: float, *, source: str, state: str) -> bool:
         """Present backend-owned disk evidence; this widget never probes disk."""
         if source != "disk_monitor" or state not in {"ok", "caution", "fault"}:

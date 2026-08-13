@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-09
+version: 5.0.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [5.0.0] — 2026-08-09
+
+### Changed
+
+- **Operator surfaces select channels by DECLARED quantity, not by how the
+  identifier is spelled.** `SensorCell` consumers — the dashboard grid, the
+  temperature plot, the top watch bar and the conductivity source list — no
+  longer decide that a channel is a temperature because its identifier starts
+  with Cyrillic Те. `ChannelManager` exposes `get_quantity`,
+  `is_temperature_channel`, `get_temperature_channels` and
+  `get_visible_temperature_channels`, and the declaration lives in
+  `config/channels.yaml` as a top-level `default_quantity` plus an optional
+  per-channel `quantity`. A legitimate rename no longer removes a live reading
+  from an operator screen, and a non-temperature channel spelled with that
+  letter is no longer drawn among temperatures. Recorded in
+  `governance/change-impact.md` under "Declared-quantity channel selection".
+
+  **The declaration is load-bearing and validated.** Missing effective
+  quantities, unsupported vocabulary and non-string values are refused before
+  commit. If the descriptor catalog is unavailable, the GUI keeps the
+  `channels.yaml` fallback visible in the persistent status bar and warns that
+  Engine and GUI routing may disagree.
+
+  This is a MAJOR bump. `governance/versioning.md` reserves MAJOR for a rule
+  "significantly expanded such that existing compliant code becomes
+  non-compliant", and that is exactly what happened: a consumer that was
+  correct under the spelling rule is handed a different set of channels and
+  must change to stay correct. An earlier version of this entry called it
+  MINOR while its own next sentence described a breaking change.
 
 ## [4.1.0] — 2026-08-05
 

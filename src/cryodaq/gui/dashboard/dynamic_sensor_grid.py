@@ -161,11 +161,7 @@ class DynamicSensorGrid(QWidget):
         self._pending_readings.clear()
         self._refresh_identity_banner()
 
-        visible_ids = [
-            ch
-            for ch in self._channel_mgr.get_all_visible()
-            if ch.startswith("\u0422")  # cyrillic Т
-        ]
+        visible_ids = [ch for ch in self._channel_mgr.get_all_visible() if self._channel_mgr.is_temperature_channel(ch)]
 
         for ch_id in visible_ids:
             cell = SensorCell(ch_id, self._channel_mgr, self._buffer, self)

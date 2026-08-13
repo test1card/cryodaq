@@ -1282,31 +1282,54 @@ def test_every_server_valid_normal_history_reply_is_subprocess_decodable(point_c
     assert _decode_command_reply(wire) == {**reply, "proto": 2}
 
 
-def test_production_history_maximum_fits_wire_with_worst_case_finite_points() -> None:
+def test_production_history_maximum_fits_wire_with_worst_case_finite_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryodaq.core import command_reply_contract
     from cryodaq.core.command_reply_contract import (
         COMMAND_REPLY_HISTORY_MAX_ROWS,
         COMMAND_REPLY_MAX_JSON_KEY_CHARS,
     )
-    from cryodaq.core.zmq_bridge import encode_command_reply
+    from cryodaq.core.zmq_bridge import PROTOCOL_VERSION, encode_command_reply
     from cryodaq.core.zmq_subprocess import COMMAND_REPLY_MAX_WIRE_BYTES, _decode_command_reply
 
-    worst_finite = [-sys.float_info.max, sys.float_info.max]
+    worst_finite = -sys.float_info.max
     channel_count = 64
     per_channel, remainder = divmod(COMMAND_REPLY_HISTORY_MAX_ROWS, channel_count)
     reply = {
         "ok": True,
         "data": {
             ("\x1f" * (COMMAND_REPLY_MAX_JSON_KEY_CHARS - 2)) + f"{index:02x}": [
-                worst_finite[:] for _ in range(per_channel + (1 if index < remainder else 0))
+                [worst_finite, worst_finite] for _ in range(per_channel + (1 if index < remainder else 0))
             ]
+            for index in range(channel_count)
+        },
+        "descriptor_catalog": {
+            ("\x1f" * (COMMAND_REPLY_MAX_JSON_KEY_CHARS - 2)) + f"{index:02x}": "relative_humidity"
             for index in range(channel_count)
         },
     }
 
     wire = encode_command_reply(reply)
-
-    assert len(wire) <= COMMAND_REPLY_MAX_WIRE_BYTES
     assert _decode_command_reply(wire.decode("utf-8")) == {**reply, "proto": 2}
+
+    first_channel = next(iter(reply["data"]))
+    reply["data"][first_channel].append([worst_finite, worst_finite])
+    first_overflow_wire = json.dumps(
+        {**reply, "proto": PROTOCOL_VERSION},
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert len(wire) <= COMMAND_REPLY_MAX_WIRE_BYTES < len(first_overflow_wire)
+    monkeypatch.setattr(
+        command_reply_contract,
+        "COMMAND_REPLY_HISTORY_MAX_ROWS",
+        COMMAND_REPLY_HISTORY_MAX_ROWS + 1,
+    )
+    with pytest.raises(ValueError, match="command reply exceeds maximum size"):
+        encode_command_reply(reply)
 
 
 def test_history_shaped_reply_rejects_exact_production_max_plus_one() -> None:
