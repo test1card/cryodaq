@@ -6370,3 +6370,123 @@ records:
     automation_limit: Local red and green executions are bound below to immutable commit 3212ae30fe750903ec0f43ed9fbb197c8e183e8a and tree a90afb824701c3064e0fb930d971e89473aa25e4, but no sealed hosted core artifact can be produced without network access; this record therefore remains open.
     red_evidence: local_executed_on_commit_3212ae30fe750903ec0f43ed9fbb197c8e183e8a_tree_a90afb824701c3064e0fb930d971e89473aa25e4_python_3_14_3_after_staging_assistant_bootstrap_blob_04d9938c96d8f4f221667029ac65ac14df95e510_with_periodic_report_tick_ownership_declaration_removed_exact_node_selected_1_failed_exit_1_runtimeerror_periodic_reporter_inventory_mismatch_expected_without_periodic_report_tick_observed_with_periodic_report_tick_stdout_stderr_sha256_97cbd0bb4ba3b1f01bfbbb7be04ce05a4fd02412ff1b39f8b20fcc17ebf275c7
     green_evidence: local_executed_on_commit_3212ae30fe750903ec0f43ed9fbb197c8e183e8a_tree_a90afb824701c3064e0fb930d971e89473aa25e4_guard_blob_792063e6ddc00cd0858a7338eb047f7bc794f691_python_3_14_3_exact_node_selected_1_passed_exit_0_stdout_stderr_sha256_4bb6cd0e69f8ab59f6e5fae98042adf7deaaa13b49ccf067044e603f0668e07d_pending_sealed_hosted_core_artifact
+  - id: EVIDENCE-INVENTORY-BINDING-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Retirement, absence, and liveness claims about named facilities in repository evidence.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: An inventory claim can name a similarly named facility and miss the live facility under review.
+    invariant: A retirement claim names its exact facility identifier and proves that identifier is absent from the authoritative live inventory.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_guidance_cross_references.py::test_guard_rejects_missing_renamed_fenced_and_unmentioned_headings
+        ci_partition: remaining
+    automation_limit: The current guard validates registry identity and references, but an inventory-specific falsification guard is still required.
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-IMMUTABLE-MEASUREMENT-002
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Measurements used as evidence for repository, branch, and candidate claims.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A moving ref can change after measurement and leave the recorded evidence unreproducible.
+    invariant: Each evidence measurement records an immutable commit or tree object and never binds only a moving ref.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_candidate_evidence_binding.py::test_receipt_hashes_exact_output_bytes_without_unicode_replacement
+        ci_partition: remaining
+    automation_limit: Candidate execution binding exists, but a registry guard for moving-ref-only measurements is still required.
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-RETRIEVABLE-IDENTIFIER-003
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Evidence identifiers recorded in obligation discharge cells and prevention dispositions.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A DONE disposition can cite an object that a fresh clone cannot resolve.
+    invariant: Every identifier in a DONE discharge resolves in a fresh clone before the disposition can close.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_preventions.py::test_publication_receipt_records_real_nonapproval_and_disagreement
+        ci_partition: remaining
+    automation_limit: Artifact evidence binding is guarded, but a fresh-clone discharge-resolution guard is still required.
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-AUTHORIZATION-ORDERING-004
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Evidence that claims authorization or satisfies a manual ordering trigger.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: Artifact existence can be mistaken for permission or for evidence that an ordering condition fired.
+    invariant: An authorization or ordering disposition names its inputs, decision owner, required evidence, and fail-closed outcome.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_agent_context_contract.py::test_successor_requires_exact_increment_and_immutable_authority
+        ci_partition: remaining
+    automation_limit: Publication disposition binding exists, but the exact artifact-versus-authorization falsification guard is still required.
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-EXACT-CANDIDATE-005
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Invariant measurements reported for a reviewed candidate tree.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A correct measurement from another tree can be reported as evidence for the candidate under review.
+    invariant: Candidate and measured immutable commit or tree objects are recorded and must be equal.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_ci_partition_execution_proof.py::test_complete_matrix_records_nonzero_population_for_all_cells
+        ci_partition: remaining
+    automation_limit: Guard partition binding is checked, but a candidate-versus-measured-tree equality guard is still required.
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-PER-COMMIT-DIFF-006
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Claims about additions, deletions, or other changes across a commit range.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A final-tip diff can hide an intermediate delete-and-restore sequence.
+    invariant: A zero-deletion claim records a deletion result for every commit in the compared range.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_red_reproduction.py::test_live_red_reproduction_receipts_bind_executed_preserved_defects
+        ci_partition: remaining
+    automation_limit: Guard falsification authority is registered, but a per-commit deletion-result guard is still required.
+    red_evidence: pending
+    green_evidence: pending
