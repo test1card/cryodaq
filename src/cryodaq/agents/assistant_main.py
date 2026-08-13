@@ -538,7 +538,7 @@ class TelegramSender:
                     if _acknowledged_message_id(result, chat_id) is None:
                         logger.error("Telegram sendMessage 200 without an acknowledged message id")
                         return "outcome_unknown"
-                    return "delivered"
+                    return "service_reported_delivered"
         except TimeoutError:
             logger.error("Telegram sendMessage acknowledgement timed out; outcome unknown")
             return "outcome_unknown"
