@@ -450,7 +450,17 @@ class _EventDedup:
         # check and cleared the CURRENT occurrence's failure marker.  Retiring
         # here uses the PRE-REFRESH timestamp, which is the only moment the
         # gap is visible.
-        if last_activity is not None and last_activity < now - max(self._window_s, self._escalate_after_s):
+        last_told = self._last_told.get(event_id)
+        retirement_horizon = now - max(self._window_s, self._escalate_after_s)
+        if (
+            last_activity is not None
+            and last_activity < retirement_horizon
+            and not (
+                last_told is not None
+                and last_told >= retirement_horizon
+                and last_activity <= self._admitted_at.get(event_id, last_activity)
+            )
+        ):
             self._retire(event_id)
             # CLEAR THE LOCAL FIRST-SIGHTING STATE TOO.  `_retire` drops the
             # stored state, but this local still held the old timestamp -- so

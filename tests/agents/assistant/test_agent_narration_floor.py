@@ -549,6 +549,26 @@ def test_the_escalation_clock_starts_when_the_operator_was_told(clock) -> None:
     assert ledger.should_dispatch("alarm:latency") is True
 
 
+def test_late_delivery_preserves_freshness_without_rearming_the_source_clock(clock) -> None:
+    ledger = _ledger()
+    start = 1000.0
+
+    assert ledger.should_dispatch("alarm:late") is True
+    attempt = ledger.current_attempt("alarm:late")
+
+    clock.return_value = start + ESCALATE + WINDOW + 20.0
+    ledger.note_outcome("alarm:late", delivered=True, attempt=attempt)
+    assert ledger._activity["alarm:late"] == start
+
+    # No refire occurred before delivery, so delivery freshness must prevent
+    # retirement on the next source event.  `_activity` remains the source
+    # clock: delivery must not make a quiet-gap re-arm look non-quiet.
+    clock.return_value += 1.0
+    assert ledger.should_dispatch("alarm:late") is False
+    assert ledger.current_attempt("alarm:late") == attempt
+    assert ledger._activity["alarm:late"] == start + ESCALATE + WINDOW + 21.0
+
+
 def test_the_ledger_bounds_admissions_and_claims_nothing_about_delivery(clock) -> None:
     """Assert the bound this class OWNS, and refuse to assert the one it does not.
 
