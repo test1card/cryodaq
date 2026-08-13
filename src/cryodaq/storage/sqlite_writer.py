@@ -9561,7 +9561,12 @@ class SQLiteWriter:
                 overflow_time_params.append(to_ts)
             for db_path in selected_dbs:
                 try:
-                    with sqlite3.connect(str(db_path), timeout=5) as conn:
+                    # closing(), not a bare `with sqlite3.connect(...)`:
+                    # Connection.__exit__ commits or rolls back but does NOT
+                    # close, so the handle survives the block. On Windows that
+                    # keeps the database file open and the next reader of the
+                    # same path can fail.
+                    with contextlib.closing(sqlite3.connect(str(db_path), timeout=5)) as conn:
                         rows = conn.execute(
                             "SELECT DISTINCT channel FROM readings WHERE 1=1" + overflow_time_clause + " LIMIT ?",
                             [*overflow_time_params, _HISTORY_MAX_CHANNELS + 1],
