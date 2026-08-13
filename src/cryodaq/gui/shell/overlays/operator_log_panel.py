@@ -173,7 +173,7 @@ def _style_input(widget: QLineEdit | QPlainTextEdit) -> None:
         f" padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
         f"}}"
         f" QLineEdit:disabled, QPlainTextEdit:disabled {{"
-        f" color: {theme.MUTED_FOREGROUND};"
+        f" color: {theme.TEXT_DISABLED};"
         f"}}"
     )
 

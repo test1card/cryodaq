@@ -174,22 +174,22 @@ def apply_fusion_dark_palette(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.BrightText, QColor(theme.STATUS_FAULT))
     palette.setColor(QPalette.ColorRole.Link, QColor(theme.ACCENT))
 
-    # Disabled state — muted foreground so inactive text stays legible
-    # but clearly distinguishable from live text.
+    # Disabled state uses the dedicated disabled token, distinct from
+    # ordinary secondary text.
     palette.setColor(
         QPalette.ColorGroup.Disabled,
         QPalette.ColorRole.Text,
-        QColor(theme.MUTED_FOREGROUND),
+        QColor(theme.TEXT_DISABLED),
     )
     palette.setColor(
         QPalette.ColorGroup.Disabled,
         QPalette.ColorRole.ButtonText,
-        QColor(theme.MUTED_FOREGROUND),
+        QColor(theme.TEXT_DISABLED),
     )
     palette.setColor(
         QPalette.ColorGroup.Disabled,
         QPalette.ColorRole.WindowText,
-        QColor(theme.MUTED_FOREGROUND),
+        QColor(theme.TEXT_DISABLED),
     )
 
     app.setPalette(palette)

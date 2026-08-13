@@ -177,7 +177,7 @@ def _style_button(btn: QPushButton, variant: str) -> None:
         f"}}"
         f" QPushButton:disabled {{"
         f" background-color: {theme.SURFACE_MUTED};"
-        f" color: {theme.MUTED_FOREGROUND};"
+        f" color: {theme.TEXT_DISABLED};"
         f" border: 1px solid {theme.BORDER_SUBTLE};"
         f"}}"
     )
@@ -193,7 +193,7 @@ def _style_input(widget: QDoubleSpinBox | QSpinBox | QComboBox) -> None:
         f" padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
         f"}}"
         f" QDoubleSpinBox:disabled, QSpinBox:disabled, QComboBox:disabled {{"
-        f" color: {theme.MUTED_FOREGROUND};"
+        f" color: {theme.TEXT_DISABLED};"
         f"}}"
     )
 

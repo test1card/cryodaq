@@ -130,7 +130,7 @@ class BottomStatusBar(QWidget):
         self._conn_dot_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
         conn_layout.addWidget(self._conn_dot_label)
         self._conn_label = QLabel("Отключено")
-        self._conn_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+        self._conn_label.setStyleSheet(f"color: {theme.FOREGROUND};")
         conn_layout.addWidget(self._conn_label)
         layout.addWidget(conn_container)
 

@@ -162,7 +162,7 @@ class PhaseAwareWidget(QWidget):
             f"font-size: {theme.FONT_SIZE_SM}px; "
         )
         btn_hover = f"background-color: {theme.PRIMARY}; "
-        btn_disabled = f"color: {theme.MUTED_FOREGROUND}; background-color: {theme.MUTED}; "
+        btn_disabled = f"color: {theme.TEXT_DISABLED}; background-color: {theme.MUTED}; "
 
         self._back_btn = QPushButton(
             "\u041d\u0430\u0437\u0430\u0434"  # Назад

@@ -133,10 +133,7 @@ def _badge_verdict(
 ) -> str:
     """ok / degraded / unknown for the latest cooldown vs baseline."""
     cmp = compare(latest, baseline, thresholds=thresholds)
-    if (
-        cmp.time_to_base_verdict == "unknown"
-        and cmp.ultimate_vacuum_verdict == "unknown"
-    ):
+    if cmp.time_to_base_verdict == "unknown" and cmp.ultimate_vacuum_verdict == "unknown":
         return "unknown"
     return cmp.overall
 
@@ -178,7 +175,7 @@ def _style_pin_button(btn: QPushButton) -> None:
         f"}}"
         f" QPushButton:disabled {{"
         f" background-color: {theme.SURFACE_MUTED};"
-        f" color: {theme.MUTED_FOREGROUND};"
+        f" color: {theme.TEXT_DISABLED};"
         f" border: 1px solid {theme.BORDER_SUBTLE};"
         f"}}"
     )
@@ -207,9 +204,7 @@ class CooldownBaselineCard(QWidget):
         cfg = _load_baseline_cfg(config_path)
         # Strict-bool: a quoted YAML `enabled: "false"` must NOT enable the
         # card (mirrors the engine-side watchdog fix, commit b132fab).
-        self._enabled = (
-            cfg.get("enabled", False) is True if enabled is None else bool(enabled)
-        )
+        self._enabled = cfg.get("enabled", False) is True if enabled is None else bool(enabled)
         self._thresholds = {**DEFAULT_THRESHOLDS, **dict(cfg.get("thresholds") or {})}
         self._entries: list[CooldownFingerprint] = []
         self._baseline_id: str | None = None
@@ -249,10 +244,7 @@ class CooldownBaselineCard(QWidget):
 
         title = QLabel("ИСТОРИЯ ОХЛАЖДЕНИЙ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         root.addWidget(title)
 
         self._empty_label = QLabel("")
@@ -260,8 +252,7 @@ class CooldownBaselineCard(QWidget):
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
         self._empty_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-            f" border: none; padding: {theme.SPACE_4}px;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_4}px;"
         )
         root.addWidget(self._empty_label)
 
@@ -295,9 +286,7 @@ class CooldownBaselineCard(QWidget):
         self._delta_label = QLabel("—")
         self._delta_label.setFont(_label_font())
         self._delta_label.setWordWrap(True)
-        self._delta_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._delta_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         root.addWidget(self._delta_label)
 
         actions = QHBoxLayout()
@@ -358,9 +347,7 @@ class CooldownBaselineCard(QWidget):
         if self._table.rowCount() > 0:
             self._table.selectRow(0)
 
-    def _set_cell(
-        self, row: int, col: int, text: str, *, mono: bool = False, fid: str | None = None
-    ) -> None:
+    def _set_cell(self, row: int, col: int, text: str, *, mono: bool = False, fid: str | None = None) -> None:
         item = QTableWidgetItem(text)
         if mono:
             item.setFont(_mono_font())
@@ -471,9 +458,7 @@ class CooldownVerdictBadge(QLabel):
         self._history_dir = Path(history_dir) if history_dir else _default_history_dir()
         cfg = _load_baseline_cfg(config_path)
         # Strict-bool: quoted YAML `enabled: "false"` must NOT enable the badge.
-        self._enabled = (
-            cfg.get("enabled", False) is True if enabled is None else bool(enabled)
-        )
+        self._enabled = cfg.get("enabled", False) is True if enabled is None else bool(enabled)
         self._thresholds = {**DEFAULT_THRESHOLDS, **dict(cfg.get("thresholds") or {})}
         self._verdict: str | None = None
         self._last_read_ts: float | None = None
@@ -499,10 +484,7 @@ class CooldownVerdictBadge(QLabel):
 
     def refresh(self) -> None:
         now = time.monotonic()
-        if (
-            self._last_read_ts is not None
-            and now - self._last_read_ts < self._READ_THROTTLE_S
-        ):
+        if self._last_read_ts is not None and now - self._last_read_ts < self._READ_THROTTLE_S:
             return
         self._last_read_ts = now
         self._verdict = self._compute_verdict()

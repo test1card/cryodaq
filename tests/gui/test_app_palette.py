@@ -41,8 +41,7 @@ def test_apply_fusion_dark_palette_sets_fusion_style(app):
 
     # Helper must call app.setStyle("Fusion") — deleting that call must fail this test.
     assert "Fusion" in style_calls, (
-        f"apply_fusion_dark_palette must call app.setStyle('Fusion'); "
-        f"got style_calls={style_calls}"
+        f"apply_fusion_dark_palette must call app.setStyle('Fusion'); got style_calls={style_calls}"
     )
     # Intent flag also set.
     assert app.property("_cryodaq_fusion_applied") is True
@@ -51,9 +50,7 @@ def test_apply_fusion_dark_palette_sets_fusion_style(app):
 def test_apply_fusion_dark_palette_pins_window_role_to_background(app):
     apply_fusion_dark_palette(app)
     palette = app.palette()
-    assert palette.color(QPalette.ColorRole.Window).name().lower() == (
-        theme.BACKGROUND.lower()
-    )
+    assert palette.color(QPalette.ColorRole.Window).name().lower() == (theme.BACKGROUND.lower())
 
 
 def test_apply_fusion_dark_palette_pins_all_primary_roles(app):
@@ -83,12 +80,21 @@ def test_apply_fusion_dark_palette_pins_all_primary_roles(app):
     }
     for role, expected_hex in expected.items():
         assert p.color(role).name().lower() == expected_hex.lower(), (
-            f"palette role {role.name} = {p.color(role).name()!r}, "
-            f"expected {expected_hex!r}"
+            f"palette role {role.name} = {p.color(role).name()!r}, expected {expected_hex!r}"
         )
 
 
-def test_apply_fusion_dark_palette_muted_disabled_text(app):
+def test_apply_fusion_dark_palette_uses_the_disabled_token_not_muted(app):
+    """Disabled text uses the dedicated disabled token, not secondary text.
+
+    These are different roles and different values (measured: MUTED_FOREGROUND
+    #a59d94, TEXT_DISABLED #5a554f in the default pack), so the second
+    assertion is not a restatement of the first: it fails if the palette
+    regresses to the secondary-text token.
+    """
+    assert theme.TEXT_DISABLED.lower() != theme.MUTED_FOREGROUND.lower(), (
+        "the two tokens are equal in this pack, which would make the assertions below vacuous"
+    )
     apply_fusion_dark_palette(app)
     p = app.palette()
     for role in (
@@ -97,9 +103,11 @@ def test_apply_fusion_dark_palette_muted_disabled_text(app):
         QPalette.ColorRole.WindowText,
     ):
         color = p.color(QPalette.ColorGroup.Disabled, role)
-        assert color.name().lower() == theme.MUTED_FOREGROUND.lower(), (
-            f"disabled {role.name} = {color.name()!r}, expected "
-            f"{theme.MUTED_FOREGROUND!r}"
+        assert color.name().lower() == theme.TEXT_DISABLED.lower(), (
+            f"disabled {role.name} = {color.name()!r}, expected {theme.TEXT_DISABLED!r}"
+        )
+        assert color.name().lower() != theme.MUTED_FOREGROUND.lower(), (
+            f"disabled {role.name} regressed to the secondary-text token {theme.MUTED_FOREGROUND!r}"
         )
 
 
@@ -125,8 +133,7 @@ def test_apply_fusion_dark_palette_preserves_existing_stylesheet(app):
     apply_fusion_dark_palette(app)
     ss = app.styleSheet()
     assert sentinel in ss, (
-        "helper clobbered an existing app-level stylesheet — it must "
-        "concatenate with pre-existing contributions"
+        "helper clobbered an existing app-level stylesheet — it must concatenate with pre-existing contributions"
     )
     assert "QToolTip" in ss
 

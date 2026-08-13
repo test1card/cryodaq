@@ -485,10 +485,11 @@ def test_warm_stone_muted_body_text_passes_on_every_claimed_surface(real_themes_
             f"documented {foreground_token} vs {surface_token} ratio {documented_ratio:.2f}:1 "
             f"does not match loaded warm_stone ratio {ratio:.2f}:1"
         )
-        assert ratio >= threshold, (
+        assert threshold == 4.5, f"Warm Stone body-text threshold must remain the fixed AA floor: {threshold:.2f}:1"
+        assert ratio >= 4.5, (
             f"warm_stone.{foreground_token} {pack[foreground_token]} vs "
             f"{surface_token} {pack[surface_token]} contrast {ratio:.2f}:1 < "
-            f"{threshold:.2f}:1 claimed threshold"
+            "4.50:1 fixed AA floor"
         )
 
 

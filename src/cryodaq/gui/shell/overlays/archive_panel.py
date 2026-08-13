@@ -162,7 +162,7 @@ def _style_button(btn: QPushButton, variant: str) -> None:
         f"}}"
         f" QPushButton:disabled {{"
         f" background-color: {theme.SURFACE_MUTED};"
-        f" color: {theme.MUTED_FOREGROUND};"
+        f" color: {theme.TEXT_DISABLED};"
         f" border: 1px solid {theme.BORDER_SUBTLE};"
         f"}}"
     )
@@ -179,7 +179,7 @@ def _style_input(widget: QLineEdit | QPlainTextEdit | QComboBox | QDateEdit) -> 
         f"}}"
         f" QLineEdit:disabled, QPlainTextEdit:disabled,"
         f" QComboBox:disabled, QDateEdit:disabled {{"
-        f" color: {theme.MUTED_FOREGROUND};"
+        f" color: {theme.TEXT_DISABLED};"
         f"}}"
     )
 
