@@ -239,6 +239,7 @@ class MainWindowV2(QMainWindow):
         self._channel_mgr = get_channel_manager()
         _descriptor_authority = _load_channel_descriptor_authority()
         self._active_channel_descriptors = {} if _descriptor_authority is None else _descriptor_authority
+        self._channel_authority_fallback_active = _descriptor_authority is None
         if _descriptor_authority is None:
             # PROCEED, and say exactly what is wrong and what it costs. Installing the failed load
             # as the authority would make `get_quantity` return None for every channel, emptying
@@ -329,6 +330,7 @@ class MainWindowV2(QMainWindow):
         self._top_bar.set_replay_mode(self._replay_mode)
         self._tool_rail = ToolRail()
         self._bottom_bar = BottomStatusBar()
+        self._bottom_bar.set_channel_authority_fallback(self._channel_authority_fallback_active)
         # The only in-shell owner of engine annunciation sound.  Launcher
         # process-death sound remains deliberately separate.
         if not self._replay_mode:

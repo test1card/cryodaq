@@ -30,11 +30,11 @@ the design-system-specific definitions of "breaking" from
   letter is no longer drawn among temperatures. Recorded in
   `governance/change-impact.md` under "Declared-quantity channel selection".
 
-  **The declaration is load-bearing and is not yet validated.** A missing or
-  misspelled `default_quantity` loads cleanly and then empties every
-  temperature surface at once, with no diagnostic. Refusal of an unsupported
-  vocabulary word ships separately on `fix/oc-030b-config-validation`; until it
-  lands, treat the field as unchecked.
+  **The declaration is load-bearing and validated.** Missing effective
+  quantities, unsupported vocabulary and non-string values are refused before
+  commit. If the descriptor catalog is unavailable, the GUI keeps the
+  `channels.yaml` fallback visible in the persistent status bar and warns that
+  Engine and GUI routing may disagree.
 
   This is a MAJOR bump. `governance/versioning.md` reserves MAJOR for a rule
   "significantly expanded such that existing compliant code becomes

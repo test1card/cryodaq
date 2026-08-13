@@ -130,11 +130,17 @@ class ChannelManager:
         declared_default = raw.get("default_quantity")
         if declared_default is not None and not isinstance(declared_default, str):
             raise ChannelConfigError(f"channels.yaml at {candidate_path}: default_quantity must be a string")
-        quantities = {
-            channel_id: info.get("quantity")
-            for channel_id, info in channels.items()
-            if isinstance(info, dict) and "quantity" in info
-        }
+        quantities = {}
+        for channel_id, info in channels.items():
+            if not isinstance(info, dict):
+                raise ChannelConfigError(f"channels.yaml at {candidate_path}: channel {channel_id!r} must be a mapping")
+            quantity = info.get("quantity", declared_default)
+            if quantity is None:
+                raise ChannelConfigError(
+                    f"channels.yaml at {candidate_path}: channel {channel_id!r} has no effective quantity; "
+                    "declare quantity on the channel or set default_quantity"
+                )
+            quantities[channel_id] = quantity
         for field_name, quantity in (("default_quantity", declared_default), *quantities.items()):
             # Type BEFORE membership. `quantity: [temperature]` is a YAML sequence, and asking
             # whether an unhashable value is in a frozenset raises TypeError, which escapes the

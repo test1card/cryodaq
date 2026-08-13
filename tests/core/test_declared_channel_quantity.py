@@ -119,6 +119,17 @@ def test_an_unknown_channel_reports_no_quantity_rather_than_guessing(tmp_path: P
     assert manager.is_temperature_channel("Т99") is False
 
 
+def test_a_channel_without_an_effective_quantity_is_refused(tmp_path: Path) -> None:
+    target = tmp_path / "channels.yaml"
+    payload = {"channels": {"Т12": {"name": "2-я ступень"}}}
+    target.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
+
+    from cryodaq.core.channel_manager import ChannelConfigError
+
+    with pytest.raises(ChannelConfigError, match="effective quantity"):
+        ChannelManager(target).load()
+
+
 def test_a_full_channel_id_resolves_through_its_short_form(tmp_path: Path) -> None:
     """Runtime ids carry the display name; the declaration is keyed on the short id."""
 

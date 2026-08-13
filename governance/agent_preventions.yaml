@@ -56,6 +56,30 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: DECLARED-QUANTITY-CELSIUS-DISPATCH-FALSE-GREEN-361
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/gui/dashboard/test_dashboard_view.py::test_celsius_temperature_still_reaches_its_sensor_cell
+    ci_partition: gui
+    red_evidence: the_prior_dashboard_dispatch_correction_gated_all_temperature_readings_on_kelvin_buffering_so_a_declared_celsius_channel_owned_a_sensor_cell_but_never_received_its_reading_the_existing_kelvin_regression_stayed_green_because_it_only_asserted_that_celsius_was_not_buffered_the_exact_cell_dispatch_guard_turns_red_when_the_production_unit_gate_is_restored_2026_08_13_pending_immutable_capture
+    green_evidence: pending
+  - id: DECLARED-QUANTITY-MALFORMED-VALUE-FALSE-GREEN-362
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_non_string_quantity_is_refused_as_a_configuration_error
+    ci_partition: core
+    red_evidence: non_string_per_channel_quantities_reached_the_frozenset_membership_test_as_unhashable_values_and_escaped_as_startup_TypeError_before_this_parametrized_guard_was_added_the_prior_quantity_suite_did_not_collect_this_malformed_per_channel_class_2026_08_13_pending_immutable_capture
+    green_evidence: pending
+  - id: DECLARED-QUANTITY-MISSING-EFFECTIVE-FALSE-GREEN-363
+    status: open
+    scope: product_contract
+    runtime_prevention_id: OPERATOR-SURFACE-ROLE-FROM-SPELLING-340
+    guard: tests/core/test_declared_channel_quantity.py::test_a_channel_without_an_effective_quantity_is_refused
+    ci_partition: core
+    red_evidence: a_channel_without_quantity_and_without_default_quantity_was_excluded_from_validation_so_load_succeeded_and_get_quantity_returned_none_while_operator_surfaces_omitted_the_channel_the_prior_suite_only_checked_unknown_runtime_ids_not_channels_declared_in_the_file_2026_08_13_pending_immutable_capture
+    green_evidence: pending
   - id: CHANNEL-RELOAD-HALF-APPLY-FALSE-GREEN-346
     status: open
     scope: product_contract
@@ -3414,6 +3438,10 @@ records:
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_a_malformed_default_quantity_is_refused
         ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_non_string_quantity_is_refused_as_a_configuration_error
+        ci_partition: core
+      - node: tests/core/test_declared_channel_quantity.py::test_a_channel_without_an_effective_quantity_is_refused
+        ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_saving_channel_edits_preserves_the_declaration
         ci_partition: core
       - node: tests/core/test_declared_channel_quantity.py::test_the_shipped_selection_is_byte_for_byte_what_spelling_selected
@@ -3445,6 +3473,8 @@ records:
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_manager_disagrees_with_spelling_in_both_directions
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_dashboard_buffers_only_declared_temperatures
+        ci_partition: gui
+      - node: tests/gui/dashboard/test_dashboard_view.py::test_celsius_temperature_still_reaches_its_sensor_cell
         ci_partition: gui
       - node: tests/gui/test_declared_quantity_production_sites.py::test_the_analytics_summary_orders_only_declared_temperatures
         ci_partition: gui

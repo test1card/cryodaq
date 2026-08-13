@@ -296,18 +296,14 @@ Phase B.3 implementation details to preserve:
   still rendered; a channel spelled with Т that declares another quantity is
   not. Hidden channels (channels.yaml `visible: false`) are excluded at
   rebuild time, not hidden post-layout.
-- **A channel with no declared quantity is currently NOT refused, and that is a
-  live gap.** `channels.yaml` needs a top-level `default_quantity` or a
-  per-channel `quantity`, and every temperature surface selects on it. But
-  `ChannelManager.load()` on this branch accepts a missing or misspelled value
-  without raising: measured, a `default_quantity` of `temperatue` loads cleanly
-  and then makes `is_temperature_channel` answer False for every channel, so the
-  grid, the temperature plot, the watch bar and the conductivity list come up
-  silently empty at once — which is the failure behind revert `0bea0449`, not a
-  hypothetical. An earlier version of this bullet said `load()` raises
-  `ChannelConfigError` naming the channel. It does not; that validation lives on
-  `fix/oc-030b-config-validation` and is not in this change. Until it lands,
-  treat the declaration as load-bearing and unchecked.
+- **Every channel must have an effective declared quantity.** `channels.yaml`
+  needs a top-level `default_quantity` or a per-channel `quantity`; a channel
+  without either is refused before the configuration is committed. Unsupported
+  vocabulary and non-string values are also refused, so a typo or malformed
+  YAML value cannot silently empty the grid, temperature plot, watch bar or
+  conductivity list. The descriptor catalog is the GUI authority when loaded;
+  if it is unavailable, the persistent bottom status bar marks the
+  `channels.yaml` fallback and warns that Engine and GUI routing may disagree.
 - **Runtime rebuild on channel set change.** The grid subscribes to
   `ChannelManager.on_change` and rebuilds cells when the visible set
   changes; subscription is torn down via `off_change` on `closeEvent` and
