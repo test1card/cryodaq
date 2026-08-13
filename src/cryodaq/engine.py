@@ -2471,6 +2471,22 @@ async def _interlock_dead_channel_handler(
     return escalated
 
 
+def _interlock_dead_channel_recovery_handler(
+    condition: Any,
+    reading: Any,
+    *,
+    context: _InterlockHandlerContext,
+) -> None:
+    """Clear the exact blocker and alarm episode after usable evidence."""
+    context.safety_manager.on_interlock_channel_recovered(
+        condition.name,
+        reading.channel,
+    )
+    channel_suffix = f":{reading.channel}"
+    keys_to_clear = {key for key in context.dead_channel_alarm_sent if key.endswith(channel_suffix)}
+    context.dead_channel_alarm_sent.difference_update(keys_to_clear)
+
+
 async def _multiline_burst_auto_stop(
     driver_name: str,
     delay_s: float,
@@ -6638,6 +6654,8 @@ async def _run_engine(
         persistence_commit_observer=recording_lifecycle_feed.persistence_committed,
         persistence_rejection_observer=recording_lifecycle_feed.persistence_rejected,
         persistence_ambiguity_observer=recording_lifecycle_feed.persistence_ambiguous,
+        failed_poll_persistence_handler=safety_manager.on_failed_poll_persistence_failure,
+        failed_poll_persistence_recovery_handler=safety_manager.on_failed_poll_persistence_recovered,
     )
     for cfg in driver_configs:
         scheduler.add(cfg)
@@ -6681,6 +6699,10 @@ async def _run_engine(
             _interlock_dead_channel_handler,
             context=interlock_handler_context,
         ),
+        dead_channel_recovery_handler=functools.partial(
+            _interlock_dead_channel_recovery_handler,
+            context=interlock_handler_context,
+        ),
     )
     _log_physical_policy_receipt(
         "interlocks",
@@ -6688,6 +6710,7 @@ async def _run_engine(
             interlocks_cfg,
             snapshot=interlocks_snapshot,
             descriptor_catalog=live_descriptor_catalog,
+            poll_intervals_s_by_instrument={config.driver.name: config.poll_interval_s for config in driver_configs},
         ),
     )
 

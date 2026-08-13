@@ -199,6 +199,36 @@ class LakeShore218S(InstrumentDriver):
 
         return readings
 
+    def failure_readings(self) -> list[Reading]:
+        """Represent a failed whole-instrument poll for every temperature channel.
+
+        The configured channel inventory makes this pure object construction,
+        not a second transport operation. Scheduler persists and publishes the
+        samples through its ordinary path, so interlocks see GPIB failure as
+        non-usable measurements instead of silence.
+
+        For ``LS218_2`` the roster intentionally includes the mandatory T11/T12
+        critical inputs. One whole-poll TIMEOUT therefore remains direct
+        SafetyBroker evidence and latches the stronger critical-input fault
+        without waiting for InterlockEngine's multi-sample debounce. Suppressing
+        those two genuine sensor failures would weaken the existing safety policy.
+        """
+        return [
+            Reading.now(
+                self._channel_labels.get(index, f"CH{index}"),
+                float("nan"),
+                "K",
+                instrument_id=self.name,
+                status=ChannelStatus.TIMEOUT,
+                metadata={
+                    "raw_channel": index,
+                    "reading_kind": "temperature",
+                    "scheduler_failure": "whole_poll",
+                },
+            )
+            for index in range(1, 9)
+        ]
+
     async def _read_krdg_channels(self) -> list[Reading]:
         if self.mock:
             return self._mock_readings()

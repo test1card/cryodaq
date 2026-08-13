@@ -227,6 +227,15 @@ class SafetyManager:
         self._reviewed_source_off_evidence = self._unknown_global_off_evidence()
         self._safety_monitor_active = False
         self._persistence_fault_active = False
+        # Canonical interlock channels whose failed-sample windows have
+        # matured. SafetyManager owns this RUN blocker; only a later usable
+        # sample accepted by InterlockEngine may clear the exact channel.
+        self._mature_dead_interlock_channels: dict[str, str] = {}
+        # Instruments whose synthetic failed-poll samples could not obtain
+        # persistence-backed publication authority. Acknowledgment clears the
+        # fault latch, not this RUN blocker; only Scheduler-observed committed
+        # publication for the exact instrument clears it.
+        self._failed_poll_persistence_blockers: dict[str, str] = {}
         # P0 fail-open fix (MONTANA-SAFETY-CONFIG-EXACT-R3): cooldown
         # predictor model status, reported by a wired CooldownService via
         # set_cooldown_predictor_status(). None = no subsystem has ever
@@ -2626,6 +2635,35 @@ class SafetyManager:
         if critical_blocker is not None:
             blockers.append(critical_blocker)
 
+        if self._mature_dead_interlock_channels:
+            channels = ", ".join(sorted(self._mature_dead_interlock_channels))
+            plant.append(
+                PlantHealthFact(
+                    "interlock_channels",
+                    "Interlock channel availability",
+                    OperatorPresentationState.FAULT,
+                    "mature_dead_interlock_channel",
+                )
+            )
+            blockers.append(
+                SafetyBlocker(
+                    "mature_dead_interlock_channel",
+                    OperatorPresentationState.FAULT,
+                    f"Protected interlock channels are persistently unusable: {channels}",
+                    "Restore a usable persisted sample on every named protected channel",
+                )
+            )
+        else:
+            plant.append(
+                PlantHealthFact(
+                    "interlock_channels",
+                    "Interlock channel availability",
+                    OperatorPresentationState.OK,
+                    "interlock_channels_current",
+                )
+            )
+
+        unresolved_failed_poll_instruments = sorted(self._failed_poll_persistence_blockers)
         if self._persistence_fault_active:
             plant.append(
                 PlantHealthFact(
@@ -2641,6 +2679,24 @@ class SafetyManager:
                     OperatorPresentationState.FAULT,
                     "Persistence has an unacknowledged failure",
                     "Restore persistence and complete explicit fault recovery",
+                )
+            )
+        elif unresolved_failed_poll_instruments:
+            instruments = ", ".join(unresolved_failed_poll_instruments)
+            plant.append(
+                PlantHealthFact(
+                    "persistence",
+                    "Persistence",
+                    OperatorPresentationState.FAULT,
+                    "failed_poll_persistence_unresolved",
+                )
+            )
+            blockers.append(
+                SafetyBlocker(
+                    "failed_poll_persistence_unresolved",
+                    OperatorPresentationState.FAULT,
+                    f"Failed-poll persistence authority remains unresolved for: {instruments}",
+                    "Restore persistence-backed publication for every named instrument",
                 )
             )
         else:
@@ -3289,6 +3345,14 @@ class SafetyManager:
         if self._cooldown_predictor_available is False:
             return False, f"Cooldown predictor UNAVAILABLE: {self._cooldown_predictor_unavailable_reason}"
 
+        if self._failed_poll_persistence_blockers:
+            instruments = ", ".join(sorted(self._failed_poll_persistence_blockers))
+            return False, f"Failed-poll persistence authority unresolved for instrument(s): {instruments}"
+
+        if self._mature_dead_interlock_channels:
+            channels = ", ".join(sorted(self._mature_dead_interlock_channels))
+            return False, f"Persistently unusable interlock channel(s): {channels}"
+
         for declared, matches in self._critical_input_requirements():
             for (_instrument_id, ch), (ts, value, status) in matches:
                 age = now - ts
@@ -3695,9 +3759,9 @@ class SafetyManager:
           boundary. Т1–Т10 are protected ONLY by interlocks
           (critical_channels covers just Т11/Т12), so a heated, sourcing zone
           with a persistently dead sensor is fail-open without this.
-        - outside the active source lifecycle: log only, never fault — a
-          stale/dead sensor while idle must not block readiness recovery paths
-          (preconditions already gate readiness on channel health).
+        - outside the active source lifecycle: do not latch a fault, but retain
+          the mature canonical channel as a RUN/READY blocker until the
+          interlock observes a usable persisted sample for that same channel.
 
         Returns
         -------
@@ -3711,6 +3775,11 @@ class SafetyManager:
             sample after an active source lifecycle begins then faults, instead
             of the dead channel leaking through forever.
         """
+        previous_interlock = self._mature_dead_interlock_channels.get(channel)
+        self._mature_dead_interlock_channels[channel] = interlock_name
+        if previous_interlock != interlock_name:
+            self._refresh_operator_safety_snapshot()
+
         if self._state == SafetyState.FAULT_LATCHED:
             # Already latched (possibly by this very escalation on a prior
             # sample) — the window is correctly escalated, do not retry.
@@ -3729,6 +3798,37 @@ class SafetyManager:
             value=value,
         )
         return True
+
+    def on_interlock_channel_recovered(self, interlock_name: str, channel: str) -> None:
+        """Clear one mature canonical blocker after InterlockEngine sees recovery."""
+        recorded_interlock = self._mature_dead_interlock_channels.get(channel)
+        if recorded_interlock is None:
+            return
+        del self._mature_dead_interlock_channels[channel]
+        logger.warning(
+            "Интерлок-канал %s снова пригоден (блокировка %s, зарегистрирована %s).",
+            channel,
+            interlock_name,
+            recorded_interlock,
+        )
+        self._refresh_operator_safety_snapshot()
+
+    async def on_failed_poll_persistence_failure(self, instrument_name: str, reason: str) -> None:
+        """Latch a fault and retain an instrument-scoped RUN blocker."""
+        self._failed_poll_persistence_blockers[instrument_name] = reason
+        await self.on_persistence_failure(f"{instrument_name}: {reason}")
+
+    def on_failed_poll_persistence_recovered(self, instrument_name: str) -> None:
+        """Clear one blocker only after Scheduler publishes a committed batch."""
+        reason = self._failed_poll_persistence_blockers.pop(instrument_name, None)
+        if reason is None:
+            return
+        logger.warning(
+            "Failed-poll persistence authority restored for %s (prior failure: %s)",
+            instrument_name,
+            reason,
+        )
+        self._refresh_operator_safety_snapshot()
 
     async def on_persistence_failure(self, reason: str) -> None:
         """Called by SQLiteWriter when persistent storage fails (disk full etc).
