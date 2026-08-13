@@ -540,3 +540,59 @@ def test_local_non_windows_run_records_external_gate_not_a_fake_pass(tmp_path: P
     assert payload["status"] == "FAIL"
     assert payload["reason"] == "RuntimeError:WINDOWS_REQUIRED"
     assert payload["cells"] == []
+
+
+def test_check_warnings_prints_its_reason_not_only_the_json(tmp_path, capsys) -> None:
+    """A red gate must say WHY in the log, not only inside an artifact.
+
+    Both commands used to record `reason` solely in the JSON evidence file. CI
+    then showed nothing but `exit code 1`, and the reason needed the artifact --
+    which a rerun overwrites, so a transient failure became permanently
+    undiagnosable. This binds the log line to the same reason.
+    """
+    warn_file = tmp_path / "warn-cryodaq.txt"
+    warn_file.write_text(
+        "missing module named 'cryodaq.agents.assistant.periodic_runtime' - imported by z\n",
+        encoding="utf-8",
+    )
+    evidence = tmp_path / "pyinstaller-warnings.json"
+
+    code = smoke.check_warnings(warn_file, evidence)
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "check-warnings" in err
+    assert "FAIL" in err
+    assert "REQUIRED_MODULE_WARNING" in err
+    # The offending module must be nameable from the LOG alone.
+    assert "cryodaq.agents.assistant.periodic_runtime" in err
+    # And the log must agree with the evidence file rather than drift from it.
+    assert json.loads(evidence.read_text(encoding="utf-8"))["reason"] == "REQUIRED_MODULE_WARNING"
+
+
+def test_check_warnings_reports_a_missing_warning_file_in_the_log(tmp_path, capsys) -> None:
+    evidence = tmp_path / "pyinstaller-warnings.json"
+
+    code = smoke.check_warnings(tmp_path / "absent.txt", evidence)
+
+    assert code == 1
+    assert "PYINSTALLER_WARNING_FILE_MISSING" in capsys.readouterr().err
+
+
+def test_announce_names_each_failing_cell(capsys) -> None:
+    """The smoke verdict alone does not say WHICH cell failed."""
+    smoke._announce(
+        "smoke",
+        "FAIL",
+        "RuntimeError:gui_startup_offscreen exited before readiness observation (3)",
+        [
+            {"name": "frozen_driver_imports", "status": "PASS"},
+            {"name": "gui_startup_offscreen", "status": "FAIL"},
+        ],
+    )
+
+    err = capsys.readouterr().err
+    assert "gui_startup_offscreen exited before readiness observation" in err
+    assert "cell gui_startup_offscreen: FAIL" in err
+    # A passing cell must not be reported as a failure.
+    assert "cell frozen_driver_imports" not in err
