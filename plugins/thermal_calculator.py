@@ -9,12 +9,17 @@
 from __future__ import annotations
 
 import logging
+import math
 import statistics
 import time
 from collections import deque
 from typing import Any
 
-from cryodaq.analytics.base_plugin import AnalyticsPlugin, DerivedMetric
+from cryodaq.analytics.base_plugin import (
+    BROKER_INGRESS_MONOTONIC_METADATA_KEY,
+    AnalyticsPlugin,
+    DerivedMetric,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 
 _log = logging.getLogger(__name__)
@@ -58,6 +63,7 @@ class ThermalCalculator(AnalyticsPlugin):
         # Последние известные значения каналов: channel -> float
         self._last: dict[str, float] = {}
         self._last_required_input_arrival_monotonic: dict[str, float] = {}
+        self._last_required_input_ingress_monotonic: dict[str, float | None] = {}
         self._required_input_arrival_intervals: dict[str, deque[float]] = {}
 
     # ------------------------------------------------------------------
@@ -90,6 +96,7 @@ class ThermalCalculator(AnalyticsPlugin):
 
         self._last = {}
         self._last_required_input_arrival_monotonic = {}
+        self._last_required_input_ingress_monotonic = {}
         self._required_input_arrival_intervals = {
             self._hot_sensor: deque(maxlen=5),
             self._cold_sensor: deque(maxlen=5),
@@ -115,7 +122,13 @@ class ThermalCalculator(AnalyticsPlugin):
         if horizon is None:
             return (now_monotonic - last_arrival) > _BOOTSTRAP_FRESHNESS_HORIZON_S
 
-        return (now_monotonic - last_arrival) > horizon
+        if (now_monotonic - last_arrival) > horizon:
+            return True
+
+        ingress = self._last_required_input_ingress_monotonic.get(channel)
+        if ingress is None:
+            return False
+        return (now_monotonic - ingress) > horizon
 
     async def process(self, readings: list[Reading]) -> list[DerivedMetric]:
         """Обработать пакет показаний и вычислить тепловое сопротивление.
@@ -156,6 +169,17 @@ class ThermalCalculator(AnalyticsPlugin):
                     if established_horizon is None or arrival_interval <= established_horizon:
                         intervals.append(arrival_interval)
             self._last_required_input_arrival_monotonic[reading.channel] = now_monotonic
+            raw_ingress = reading.metadata.get(BROKER_INGRESS_MONOTONIC_METADATA_KEY)
+            if raw_ingress is None:
+                self._last_required_input_ingress_monotonic[reading.channel] = None
+            else:
+                try:
+                    ingress = float(raw_ingress)
+                except (TypeError, ValueError):
+                    ingress = math.nan
+                self._last_required_input_ingress_monotonic[reading.channel] = (
+                    ingress if math.isfinite(ingress) else None
+                )
 
         # Проверить, что все три канала известны
         missing = target_channels - self._last.keys()

@@ -305,3 +305,17 @@ async def test_outage_gap_does_not_expand_freshness_horizon(monkeypatch) -> None
     # HOT and COLD are fresh here; only the heater is 4 s old, which exceeds its 3 s horizon.
     _at(605.0)
     assert await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0)]) == []
+
+
+async def test_broker_ingress_age_does_not_reset_freshness(monkeypatch) -> None:
+    """A queued sample must retain its broker-ingress age when processed."""
+    plugin = _configured_plugin()
+    monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 0.0)
+    await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
+    monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 1.0)
+    await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
+    monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 3.9)
+    queued = [_make_heater_reading(10.0)]
+    for reading in queued:
+        reading.metadata["_broker_ingress_monotonic_s"] = -10.0
+    assert await plugin.process(queued) == []

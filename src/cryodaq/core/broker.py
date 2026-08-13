@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -45,6 +46,14 @@ class PublishedReading:
 
     reading: Reading
     descriptor_envelope: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class IngressReading:
+    """One subscriber-specific reading paired with broker ingress time."""
+
+    reading: Reading
+    ingress_monotonic_s: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +183,7 @@ class Subscription:
     # F35 D4: opt-in only. False (default) reproduces current behaviour
     # exactly — the subscriber's queue keeps carrying bare Reading.
     wants_descriptor_envelope: bool = False
+    wants_ingress_monotonic: bool = False
     required_publisher: bool = False
     dropped: int = field(default=0, init=False)
 
@@ -204,6 +214,7 @@ class DataBroker:
         policy: OverflowPolicy = OverflowPolicy.DROP_OLDEST,
         filter_fn: Callable[[Reading], bool] | None = None,
         wants_descriptor_envelope: bool = False,
+        wants_ingress_monotonic: bool = False,
         required_publisher: bool = False,
     ) -> asyncio.Queue[Any]:
         """Создать подписку. Возвращает очередь для чтения.
@@ -219,6 +230,10 @@ class DataBroker:
         When True, this subscriber's queue carries ``PublishedReading``
         (reading + descriptor envelope bytes) instead of a bare ``Reading``.
         Every other subscriber is unaffected.
+
+        ``wants_ingress_monotonic`` is an opt-in analytics companion. When
+        True, the queue carries an ``IngressReading`` wrapper; the bare
+        ``Reading`` remains unchanged.
         """
         if maxsize <= 0:
             raise ValueError(
@@ -240,6 +255,7 @@ class DataBroker:
                 policy=policy,
                 filter_fn=filter_fn,
                 wants_descriptor_envelope=wants_descriptor_envelope,
+                wants_ingress_monotonic=wants_ingress_monotonic,
                 required_publisher=required_publisher,
             )
             if required_publisher:
@@ -384,6 +400,7 @@ class DataBroker:
                 MAX_PERSISTED_ENVELOPE_BYTES,
             )
             descriptor_envelope = None
+        ingress_monotonic_s = time.monotonic()
         metadata = copy.deepcopy(reading.metadata)
         metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, None)
         if persistence_authoritative:
@@ -404,11 +421,15 @@ class DataBroker:
                     if not sub.filter_fn(filter_reading):
                         continue
                 subscriber_reading = replace(delivered, metadata=copy.deepcopy(delivered.metadata))
-                item: Reading | PublishedReading = (
-                    PublishedReading(reading=subscriber_reading, descriptor_envelope=descriptor_envelope)
-                    if sub.wants_descriptor_envelope
-                    else subscriber_reading
-                )
+                if sub.wants_ingress_monotonic:
+                    item: Reading | PublishedReading | IngressReading = IngressReading(
+                        reading=subscriber_reading,
+                        ingress_monotonic_s=ingress_monotonic_s,
+                    )
+                elif sub.wants_descriptor_envelope:
+                    item = PublishedReading(reading=subscriber_reading, descriptor_envelope=descriptor_envelope)
+                else:
+                    item = subscriber_reading
                 if sub.queue.full():
                     if sub.required_publisher:
                         # Ordinary telemetry may be dropped, but it must never
