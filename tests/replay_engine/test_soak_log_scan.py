@@ -12,7 +12,8 @@ from scripts import soak_mock_engine as soak
 
 
 def _line(level: str, msg: str, name: str = "cryodaq.engine") -> str:
-    return f"2026-07-09 16:00:00 │ {level:<8} │ {name} │ {msg}"
+    delimiter = chr(0x2502)
+    return f"2026-07-09 16:00:00 {delimiter} {level:<8} {delimiter} {name} {delimiter} {msg}"
 
 
 def test_scan_log_flags_error_line():
@@ -94,3 +95,34 @@ def test_scan_log_traceback_continuation_lines_do_not_double_count():
 
 def test_scan_log_empty_text_returns_no_violations():
     assert soak.scan_log("") == []
+
+
+def test_scan_log_rejects_non_empty_unreadable_log():
+    text = "literal escape " + chr(92) + "u2502 ERROR " + chr(92) + "u2502 message"
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert str(exc) == "could not read log: no structured lines parsed from non-empty log"
+    else:
+        raise AssertionError("unreadable non-empty log was accepted")
+
+
+def test_scan_log_clean_structured_log_is_readable():
+    assert soak.scan_log(_line("INFO", "engine started")) == []
+
+
+def test_run_soak_forces_child_utf8_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1251")
+    script = (
+        "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) + ' child ' + chr(0x2502) + ' Привет', flush=True)"
+    )
+    log_path = tmp_path / "child.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is True
+    assert "Привет" in log_path.read_text(encoding="utf-8")

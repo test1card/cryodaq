@@ -23,6 +23,7 @@ GitHub-hosted runners cap a job at 6h, so CI runs a short bounded window
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -43,6 +44,10 @@ DEFAULT_ALLOWLIST: tuple[str, ...] = (
 )
 
 
+class UnreadableLogError(RuntimeError):
+    """Raised when a non-empty log contains no structured log lines."""
+
+
 def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[str]:
     """Return ERROR/CRITICAL log lines not matched by ``allowlist``.
 
@@ -57,16 +62,21 @@ def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[st
     """
     compiled = [re.compile(p) for p in allowlist]
     violations = []
+    parsed_lines = 0
+    delimiter = chr(0x2502)
     for line in text.splitlines():
-        parts = line.split(" │ ")
+        parts = line.split(f" {delimiter} ")
         if len(parts) < 2:
             continue
+        parsed_lines += 1
         level = parts[1].strip()
         if level not in ("ERROR", "CRITICAL"):
             continue
         if any(p.search(line) for p in compiled):
             continue
         violations.append(line)
+    if text and parsed_lines == 0:
+        raise UnreadableLogError("could not read log: no structured lines parsed from non-empty log")
     return violations
 
 
@@ -78,10 +88,17 @@ class SoakResult:
     violations: list[str]
     log_path: Path
     duration_s: float
+    log_readable: bool
 
     @property
     def ok(self) -> bool:
-        return self.alive_before_shutdown and self.clean_shutdown and self.exit_code == 0 and not self.violations
+        return (
+            self.alive_before_shutdown
+            and self.clean_shutdown
+            and self.exit_code == 0
+            and self.log_readable
+            and not self.violations
+        )
 
 
 def _default_cmd() -> list[str]:
@@ -108,7 +125,16 @@ def run_soak(
     argv = list(cmd) if cmd is not None else _default_cmd()
 
     with log_path.open("w", encoding="utf-8") as log_fh:
-        proc = subprocess.Popen(argv, stdout=log_fh, stderr=subprocess.STDOUT, text=True)
+        child_env = os.environ.copy()
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=child_env,
+        )
         try:
             deadline = time.monotonic() + duration_s
             alive_before_shutdown = True
@@ -135,7 +161,13 @@ def run_soak(
                 proc.wait(timeout=10.0)
 
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
-    violations = scan_log(log_text, allowlist)
+
+    try:
+        violations = scan_log(log_text, allowlist)
+        log_readable = True
+    except UnreadableLogError:
+        violations = []
+        log_readable = False
 
     return SoakResult(
         alive_before_shutdown=alive_before_shutdown,
@@ -144,6 +176,7 @@ def run_soak(
         violations=violations,
         log_path=log_path,
         duration_s=duration_s,
+        log_readable=log_readable,
     )
 
 
@@ -194,8 +227,10 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"[soak] alive_before_shutdown={result.alive_before_shutdown} "
         f"clean_shutdown={result.clean_shutdown} exit_code={result.exit_code} "
-        f"violations={len(result.violations)}"
+        f"violations={len(result.violations)} log_readable={result.log_readable}"
     )
+    if not result.log_readable:
+        print("[soak] COULD NOT READ LOG — no structured lines parsed from non-empty log")
     if result.violations:
         print("[soak] VIOLATIONS (unexpected ERROR/CRITICAL log lines):")
         for line in result.violations[:50]:
