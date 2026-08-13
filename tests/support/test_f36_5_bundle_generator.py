@@ -417,6 +417,11 @@ def test_name_like_private_scalar_is_redacted_without_erasing_version(value: str
     assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
 
 
+@pytest.mark.parametrize("value", ("alice", "1.0+alice"))
+def test_lowercase_person_shaped_version_text_is_redacted(value: str) -> None:
+    assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
+
+
 @pytest.mark.parametrize(
     "value",
     (
@@ -706,7 +711,7 @@ def test_manifest_stability_across_hash_seeds_via_subprocess() -> None:
         "u = ('attention', 'health', 'integrity')\n"
         "s = tuple(UnavailableSource(name, 'source_not_provided') for name in u)\n"
         "c = BundleCapture('f36-5-seed-test', datetime(2026,7,14,tzinfo=UTC),\n"
-        "    (SoftwareVersion('cryodaq','0.64.1'),),\n"
+        "    (SoftwareVersion('alice','1.0'), SoftwareVersion('bob','2.0')),\n"
         "    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','b'*64),), (r,), u, s)\n"
         "print(build_support_bundle(c).manifest_sha256)"
     )

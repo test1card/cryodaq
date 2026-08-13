@@ -13,7 +13,6 @@ import base64
 import hashlib
 import json
 import re
-import secrets
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,7 +47,6 @@ _UUID_RE = re.compile(r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a
 _PUBLIC_PROJECTION_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\.public\.v[1-9][0-9]*\Z")
 _PSEUDONYM_RE = re.compile(r"redacted-id-[0-9a-f]{24}\Z")
 _PENDING_PSEUDONYM_RE = re.compile(r"redacted-pending-[0-9a-f]{24}\Z")
-_PSEUDONYM_KEY: Final = secrets.token_bytes(32)
 _PROTOCOL_MAX_INT: Final = 2**63 - 1
 _RECORD_KINDS: Final = frozenset({"health", "attention", "audit", "log", "integrity"})
 _UNAVAILABLE_FIELDS: Final = frozenset(
@@ -162,7 +160,8 @@ _DELIMITED_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:[-_.]+[
 _PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
 _DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
 _DOTTED_PHONE_RE: Final = re.compile(r"(?:\+?\d{1,3}\.)?\d{3}\.\d{3}\.\d{4}\Z")
-_VERSION_PERSON_RE: Final = re.compile(r"^[A-Z][^\W\d_]*(?:[ .,:;+\-\'?]+[A-Za-z][^\W\d_\'?]*)*[.,]?$")
+_VERSION_PERSON_RE: Final = re.compile(r"(?i)^[^\W\d_]+(?:[ .,:;+\-\'?]+[^\W\d_\'?]+)*[.,]?$")
+_VERSION_PERSON_SUFFIX_RE: Final = re.compile(r"(?i)^\d+(?:\.\d+)*(?:[+._-])[^\W\d_]+$")
 _VERSION_CREDENTIAL_RE: Final = re.compile(r"(?i)\b(?:password|pwd|token)(?:[ ._:=]+|\s*&#x3d;|\s*->)\s*\S+")
 _SERIALIZED_BLOB_RE: Final = re.compile(r"(?:\{[\s\S]*\}|\[[\s\S]*\])")
 _KNOWN_CREDENTIAL_RE: Final = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
@@ -527,11 +526,7 @@ def _identifier(value: object, *, field: str) -> str:
         ):
             return "redacted-private"
         if has_unknown_alpha_segment:
-            digest = hashlib.blake2s(
-                value.casefold().encode("utf-8"),
-                key=_PSEUDONYM_KEY,
-                digest_size=12,
-            ).hexdigest()
+            digest = hashlib.blake2s(value.casefold().encode("utf-8"), digest_size=12).hexdigest()
             return f"redacted-pending-{digest}"
     return value
 
@@ -951,10 +946,16 @@ def _safe_version_text(value: str) -> str:
         decoded_safe = _safe_text(decoded)
         if decoded_safe != decoded:
             return decoded_safe
-        if _VERSION_PERSON_RE.fullmatch(decoded.strip()) is not None:
+        if (
+            _VERSION_PERSON_RE.fullmatch(decoded.strip()) is not None
+            or _VERSION_PERSON_SUFFIX_RE.fullmatch(decoded.strip()) is not None
+        ):
             return "<redacted:private>"
         current = decoded
-    if _VERSION_PERSON_RE.fullmatch(value.strip()) is not None:
+    if (
+        _VERSION_PERSON_RE.fullmatch(value.strip()) is not None
+        or _VERSION_PERSON_SUFFIX_RE.fullmatch(value.strip()) is not None
+    ):
         return "<redacted:private>"
     return safe
 
