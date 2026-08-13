@@ -9547,6 +9547,33 @@ class SQLiteWriter:
                 continue
             selected_dbs.append(db_path)
 
+        if not channels:
+            # Check the complete hot range before applying the row budget; a
+            # bounded newest-row probe can hide an older 65th channel.
+            known_channels: set[str] = set()
+            overflow_time_clause = ""
+            overflow_time_params: list[Any] = []
+            if from_ts is not None:
+                overflow_time_clause += " AND timestamp >= ?"
+                overflow_time_params.append(from_ts)
+            if to_ts is not None:
+                overflow_time_clause += " AND timestamp <= ?"
+                overflow_time_params.append(to_ts)
+            for db_path in selected_dbs:
+                try:
+                    with sqlite3.connect(str(db_path), timeout=5) as conn:
+                        rows = conn.execute(
+                            "SELECT DISTINCT channel FROM readings WHERE 1=1" + overflow_time_clause + " LIMIT ?",
+                            [*overflow_time_params, _HISTORY_MAX_CHANNELS + 1],
+                        ).fetchall()
+                    known_channels.update(row[0] for row in rows)
+                    if len(known_channels) > _HISTORY_MAX_CHANNELS:
+                        raise ValueError("unfiltered history contains more than 64 channels")
+                except ValueError:
+                    raise
+                except Exception:
+                    continue
+
         # Newest files satisfy the retained tail first. Older files are opened
         # only while a requested channel (or the aggregate no-filter budget)
         # still has a deficit.
