@@ -11,8 +11,11 @@ Measured on Windows/CPython 3.14.3 before this guard existed:
     cooperative child (SIGTERM -> exit 0)  -> exit_code 1 after terminate()
     cooperative child (SIGBREAK -> exit 0) -> exit_code 0 after CTRL_BREAK_EVENT
 
-These tests are deterministic on every platform: they drive the dispatch
-directly rather than spawning a process.
+The tests drive the dispatch directly rather than spawning a process, so they
+do not depend on timing. The Windows case still requires a Windows host:
+``signal.CTRL_BREAK_EVENT`` does not exist on POSIX, so the assertion cannot be
+written there at all. It is skipped by capability rather than by platform name,
+and the Windows CI partition executes it.
 """
 
 from __future__ import annotations
@@ -39,6 +42,10 @@ class _RecordingProc:
         self.terminated += 1
 
 
+@pytest.mark.skipif(
+    not hasattr(signal, "CTRL_BREAK_EVENT"),
+    reason="CTRL_BREAK_EVENT does not exist on this platform, so the assertion cannot be expressed",
+)
 def test_windows_shutdown_uses_ctrl_break_not_terminate(monkeypatch: pytest.MonkeyPatch) -> None:
     """On Windows the driver must send CTRL_BREAK_EVENT, which is catchable."""
     monkeypatch.setattr("scripts.soak_mock_engine.sys.platform", "win32")
