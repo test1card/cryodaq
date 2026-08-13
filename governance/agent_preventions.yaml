@@ -6462,13 +6462,13 @@ records:
     status: open
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: Evidence identifiers recorded in obligation discharge cells and prevention dispositions.
+    applies_to: Every repository evidence identifier, in every register table cell and prevention record, including obligation discharge cells, pending or in-progress rows, and prevention dispositions.
     classification: evidence_misbinding
     correction_owner: reviewer
     guard_owner: reviewer
     disposition_owner: reviewer
     consequence: A DONE disposition can cite an object that a fresh clone cannot resolve.
-    invariant: Every identifier in a DONE discharge resolves in a fresh clone before the disposition can close.
+    invariant: Every repository evidence identifier resolves in a fresh clone; a DONE disposition may close only after every identifier in its discharge cell resolves.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
