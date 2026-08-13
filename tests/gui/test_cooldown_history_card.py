@@ -250,7 +250,7 @@ def test_card_shows_unreadable_when_all_files_corrupt(tmp_path: Path) -> None:
     card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
     _show(card)
     assert card._empty_label.isVisibleTo(card)
-    assert card._empty_label.text() == "История недоступна (2 файлов не читается)."
+    assert card._empty_label.text() == "История недоступна (2 файла не читаются)."
     assert card._delta_label.text() == "—"
 
 
@@ -270,4 +270,18 @@ def test_card_shows_baseline_unreadable_message_when_pointer_corrupt(tmp_path: P
     card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
     _show(card)
     card.select_fingerprint("cd_2000")
-    assert card._delta_label.text() == "Эталонное охлаждение недоступно (1 файлов не читается)."
+    assert card._delta_label.text() == "Эталонное охлаждение недоступно (1 файл не читается)."
+
+
+def test_card_marks_partial_history_and_unreadable_baseline(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / "bad.json").write_text("{", encoding="utf-8")
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    assert card._table.isVisibleTo(card)
+    assert card._table.rowCount() == 2
+    assert card._empty_label.isVisibleTo(card)
+    assert card._empty_label.text() == "История неполна (1 файл не читается)."
+    assert card._table.item(0, 4).text() == "эталон недоступен"

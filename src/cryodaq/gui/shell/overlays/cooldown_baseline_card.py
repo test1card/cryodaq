@@ -126,6 +126,18 @@ def _fmt_signed(v: float | None, unit: str) -> str:
     return "—" if v is None else f"{v:+.1f} {unit}"
 
 
+def _unreadable_message(count: int, prefix: str) -> str:
+    if count % 100 in (11, 12, 13, 14):
+        noun, verb = "файлов", "не читается"
+    elif count % 10 == 1:
+        noun, verb = "файл", "не читается"
+    elif count % 10 in (2, 3, 4):
+        noun, verb = "файла", "не читаются"
+    else:
+        noun, verb = "файлов", "не читается"
+    return f"{prefix} ({count} {noun} {verb})."
+
+
 def _badge_verdict(
     latest: CooldownFingerprint,
     baseline: CooldownFingerprint,
@@ -323,11 +335,14 @@ class CooldownBaselineCard(QWidget):
         self._baseline_id = base.fingerprint_id if base else None
         if not self._entries:
             if unreadable_files:
-                self._show_empty(f"История недоступна ({unreadable_files} файлов не читается).")
+                self._show_empty(_unreadable_message(unreadable_files, "История недоступна"))
             else:
                 self._show_empty("История охлаждений пуста.")
             return
         self._empty_label.setVisible(False)
+        if unreadable_files:
+            self._empty_label.setText(_unreadable_message(unreadable_files, "История неполна"))
+            self._empty_label.setVisible(True)
         self._table.setVisible(True)
         self._populate_table()
 
@@ -340,14 +355,14 @@ class CooldownBaselineCard(QWidget):
         self._pin_btn.setEnabled(False)
 
     def _populate_table(self) -> None:
-        baseline, _ = get_baseline(self._history_dir)
+        baseline, unreadable_baseline = get_baseline(self._history_dir)
         self._table.setRowCount(len(self._entries))
         for row, fp in enumerate(self._entries):
             self._set_cell(row, 0, _fmt_ts(fp.cooldown_start_ts), fid=fp.fingerprint_id)
             self._set_cell(row, 1, _fmt_h(fp.duration_h), mono=True)
             self._set_cell(row, 2, _fmt_k(fp.T_cold_final), mono=True)
             self._set_cell(row, 3, _fmt_h(fp.time_to_base_h), mono=True)
-            self._set_verdict_cell(row, 4, fp, baseline)
+            self._set_verdict_cell(row, 4, fp, baseline, unreadable_baseline)
         if self._table.rowCount() > 0:
             self._table.selectRow(0)
 
@@ -366,9 +381,13 @@ class CooldownBaselineCard(QWidget):
         col: int,
         fp: CooldownFingerprint,
         baseline: CooldownFingerprint | None,
+        unreadable_baseline: int = 0,
     ) -> None:
         if baseline is None:
-            text, color = "нет эталона", theme.MUTED_FOREGROUND
+            if unreadable_baseline:
+                text, color = "эталон недоступен", theme.STATUS_STALE
+            else:
+                text, color = "нет эталона", theme.MUTED_FOREGROUND
         elif fp.fingerprint_id == baseline.fingerprint_id:
             text, color = "ЭТАЛОН", theme.ACCENT
         else:
@@ -413,9 +432,7 @@ class CooldownBaselineCard(QWidget):
         baseline, unreadable_baseline = get_baseline(self._history_dir)
         if baseline is None:
             if unreadable_baseline:
-                self._delta_label.setText(
-                    f"Эталонное охлаждение недоступно ({unreadable_baseline} файлов не читается)."
-                )
+                self._delta_label.setText(_unreadable_message(unreadable_baseline, "Эталонное охлаждение недоступно"))
             else:
                 self._delta_label.setText("Эталонное охлаждение не задано.")
             return

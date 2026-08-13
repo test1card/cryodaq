@@ -2,7 +2,7 @@
 title: Design System Changelog
 status: canonical
 last_updated: 2026-08-05
-version: 4.1.0
+version: 4.1.1
 ---
 
 # Design System Changelog
@@ -12,6 +12,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.1.1] — 2026-08-13
+
+### Added
+
+- Cooldown history presentation contract for unreadable-baseline and
+  partial-history states, with Russian count forms and regression coverage.
 
 ## [4.1.0] — 2026-08-05
 

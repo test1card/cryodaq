@@ -141,7 +141,7 @@ def list_fingerprints(history_dir: Path) -> tuple[list[CooldownFingerprint], int
             continue
         try:
             out.append(load_fingerprint(p))
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
             # Skip corrupt / partial files — listing must never raise.
             unreadable_files += 1
             continue
@@ -175,5 +175,5 @@ def get_baseline(history_dir: Path) -> tuple[CooldownFingerprint | None, int]:
         return None, 1
     try:
         return load_fingerprint(fp_path), 0
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
         return None, 1

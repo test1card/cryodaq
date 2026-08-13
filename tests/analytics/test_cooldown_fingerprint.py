@@ -155,3 +155,11 @@ def test_get_baseline_returns_unreadable_when_pointer_is_corrupt(tmp_path: Path)
     base, unreadable = get_baseline(tmp_path)
     assert base is None
     assert unreadable == 1
+
+
+@pytest.mark.parametrize("payload", [None, {"duration_h": []}])
+def test_structurally_invalid_fingerprint_is_unreadable(tmp_path: Path, payload) -> None:
+    (tmp_path / "bad.json").write_text(json.dumps(payload), encoding="utf-8")
+    listed, unreadable = list_fingerprints(tmp_path)
+    assert listed == []
+    assert unreadable == 1

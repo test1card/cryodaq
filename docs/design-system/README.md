@@ -5,16 +5,25 @@ enforcement: strict
 priority: critical
 last_updated: 2026-07-20
 status: canonical
-version: 4.1.0
+version: 4.1.1
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.1.0`
+**Current design-system version:** `4.1.1`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
 ## Operator-first observability
+
+### Unreadable cooldown baseline and partial history
+
+The cooldown history card treats an unreadable baseline as a distinct
+unavailable state: valid rows show `эталон недоступен`, while the selected-row
+detail explains the unavailable baseline. If some history files cannot be
+parsed, the valid table remains visible with a persistent partial-history cue.
+Counts use Russian 1 / 2–4 / 5+ forms. Tests cover corrupt, structurally
+invalid, and mixed-history fixtures.
 
 The primary operating surface MUST preserve panoramic observability: current
 channel values, trends, experiment context, provenance, and explicit
