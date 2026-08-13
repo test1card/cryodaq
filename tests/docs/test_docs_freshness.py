@@ -2984,8 +2984,10 @@ def _tracked_mojibake_hits() -> dict[str, int]:
         path = REPO_ROOT / relative
         try:
             text = path.read_bytes().decode("utf-8")
-        except (UnicodeDecodeError, FileNotFoundError, OSError):
-            continue  # binary, or a path this platform cannot open
+        except UnicodeDecodeError:
+            continue  # binary
+        except OSError as exc:
+            raise OSError(f"unable to read tracked file {relative!r}") from exc
         hits = _mojibake_hits(text)
         if hits:
             damaged[relative] = hits
@@ -3010,8 +3012,10 @@ def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
     for relative in _tracked_files():
         try:
             text = (REPO_ROOT / relative).read_bytes().decode("utf-8")
-        except (UnicodeDecodeError, FileNotFoundError, OSError):
+        except UnicodeDecodeError:
             continue
+        except OSError as exc:
+            raise OSError(f"unable to read tracked file {relative!r}") from exc
         for character in text:
             if ord(character) <= 0x7F or 0x0400 <= ord(character) <= 0x052F or character == "\u00bb":
                 continue
@@ -3139,12 +3143,41 @@ def test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file(tmp_path, monke
     assert _tracked_mojibake_hits() == {"damaged.md": 1}
 
 
+def test_mojibake_inventory_fails_when_a_tracked_file_cannot_be_read(monkeypatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_tracked_files", lambda: ["locked.md"])
+
+    def locked_read(_path):
+        raise PermissionError("simulated locked tracked file")
+
+    monkeypatch.setattr(Path, "read_bytes", locked_read)
+    with pytest.raises(OSError, match="locked.md"):
+        _tracked_mojibake_hits()
+    with pytest.raises(OSError, match="locked.md"):
+        test_mojibake_source_set_matches_live_tracked_inventory()
+
+
 def test_tracked_files_preserves_non_ascii_paths_without_utf8_mode(tmp_path, monkeypatch) -> None:
     tracked = tmp_path / "café.md"
     tracked.write_text("plain", encoding="utf-8")
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "--", tracked.name], cwd=tmp_path, check=True)
+    child = (
+        "import sys; from pathlib import Path; "
+        "import test_docs_freshness as freshness; "
+        "assert sys.flags.utf8_mode == 0; "
+        "freshness.REPO_ROOT = Path.cwd(); "
+        "assert any(any(ord(character) > 127 for character in name) "
+        "for name in freshness._tracked_files())"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "0"
+    environment["PYTHONPATH"] = str(Path(__file__).parent)
+    subprocess.run(
+        [sys.executable, "-c", child],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+    )
     monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
-    monkeypatch.setenv("PYTHONUTF8", "0")
 
     assert "café.md" in _tracked_files()

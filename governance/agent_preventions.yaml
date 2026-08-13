@@ -88,6 +88,22 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: a_cp1251_mojibake_source_whose_image_begins_with_Cyrillic_was_excluded_from_the_live_inventory_and_left_the_sweep_green_pending_immutable_capture
     green_evidence: pending_local_execution_after_independent_source_anchor
+  - id: MOJIBAKE-NONUTF-STARTUP-FALSE-GREEN-344
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_tracked_files_preserves_non_ascii_paths_without_utf8_mode
+    ci_partition: remaining
+    red_evidence: the_parent_process_only_set_PYTHONUTF8_after_startup_so_the_guard_passed_without_proving_sys_flags_utf8_mode_0_pending_immutable_capture
+    green_evidence: pending_local_execution_in_a_child_interpreter_with_PYTHONUTF8_0
+  - id: MOJIBAKE-READ-ERROR-FALSE-GREEN-345
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_inventory_fails_when_a_tracked_file_cannot_be_read
+    ci_partition: remaining
+    red_evidence: both_inventory_readers_swallowed_a_simulated_PermissionError_and_returned_clean_evidence_pending_immutable_capture
+    green_evidence: pending_local_execution_after_fail_closed_read_guard
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -6442,6 +6458,10 @@ records:
       - node: tests/docs/test_docs_freshness.py::test_every_derived_signature_is_exercised
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_mojibake_detector_fires_on_independently_specified_damage
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_tracked_files_preserves_non_ascii_paths_without_utf8_mode
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_inventory_fails_when_a_tracked_file_cannot_be_read
         ci_partition: remaining
     automation_limit: >-
       Local red and green executions are bound below to an immutable commit, tree and guard blob, but no
