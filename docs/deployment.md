@@ -36,8 +36,10 @@ pip check
 `environment.yml` фиксирует безопасную версию SQLite, с которой связан Python.
 `requirements-lock.txt` фиксирует версии Python-пакетов для поддерживаемого
 набора build backend + base + dev + web. Это version-pinned inputs, но не побитовый artifact
-lock: файл не содержит hashes, а Conda environment не фиксирует Python patch,
-build strings и все transitive Conda artifacts.
+lock: файл не содержит hashes, а Conda environment не фиксирует build strings
+и все transitive Conda artifacts. Python patch зафиксирован точно
+(`python=3.14.6`), потому что patch-уровень влияет на поведение: 3.14.3
+аварийно завершает `tests/integration`.
 
 `pyarrow` входит в базовые зависимости; extra `[archive]` сохранён как no-op
 alias. `pysqlite3-binary` не устанавливается: опубликованные wheel-версии не
@@ -390,9 +392,11 @@ resolution. The Python-linked SQLite version is pinned by
 
 These files define the supported version-pinned inputs; they do not claim a
 bit-for-bit reproducible environment. The pip lock has no artifact hashes and
-the Conda file intentionally leaves Python patch/build and transitive artifacts
-to the solver. CI plus `pip check` verifies the resolved environment actually
-satisfies the project before tests or packaging.
+the Conda file leaves build strings and transitive artifacts to the solver.
+The Python **patch** is pinned exactly (`python=3.14.6`) and is not left to the
+solver: the patch level is behaviourally load-bearing, since 3.14.3 hard-crashes
+`tests/integration`. CI plus `pip check` verifies the resolved environment
+actually satisfies the project before tests or packaging.
 
 ### Regenerating the lockfile
 

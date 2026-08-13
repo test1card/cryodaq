@@ -11,6 +11,49 @@ ROOT = Path(__file__).resolve().parents[1]
 PINNED_MINICONDA = "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5"
 
 
+#: Patch releases known to break this project. 3.14.3 hard-crashes
+#: tests/integration after 28 tests. Kept as an explicit deny-list so a future
+#: bad patch is added here rather than discovered on the laboratory machine.
+KNOWN_BAD_PYTHON_PATCHES = ("3.14.3",)
+
+
+def _environment_python_spec() -> str:
+    """Return the `python=...` dependency verbatim from environment.yml.
+
+    Parsed as text rather than with a YAML loader: the guard must fail if the
+    entry is missing entirely, and a loader would just return None for that.
+    """
+    text = (ROOT / "environment.yml").read_text(encoding="utf-8")
+    specs = [
+        line.strip().lstrip("-").strip()
+        for line in text.splitlines()
+        if line.strip().lstrip("-").strip().startswith("python=")
+    ]
+    assert len(specs) == 1, f"environment.yml must pin python exactly once; found {specs}"
+    return specs[0]
+
+
+def test_environment_pins_an_exact_python_patch() -> None:
+    """A floating `python=3.14` would silently reopen resolution to a bad patch.
+
+    `test_supported_test_workflows_use_safe_tracked_runtime` only checks that
+    the workflows REFERENCE environment.yml; it never reads the interpreter
+    entry, so reverting the pin would leave it green. This is the guard that
+    actually binds the patch.
+    """
+    spec = _environment_python_spec()
+    version = spec.split("=", 1)[1]
+
+    assert version.count(".") == 2, (
+        f"environment.yml pins {spec!r}: the Python patch must be exact, not left to the solver. "
+        "A minor-only pin resolves to whatever conda-forge serves on the day the laboratory "
+        "machine is installed."
+    )
+    assert version not in KNOWN_BAD_PYTHON_PATCHES, (
+        f"environment.yml pins {spec!r}, which is a known-bad patch: {KNOWN_BAD_PYTHON_PATCHES}"
+    )
+
+
 def test_supported_test_workflows_use_safe_tracked_runtime() -> None:
     for relative in (
         ".github/workflows/main.yml",
