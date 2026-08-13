@@ -439,9 +439,11 @@ class _EventDedup:
         last_seen = self._seen.get(event_id)
         last_activity = self._activity.get(event_id)
         last_allowed = self._last_allowed.get(event_id)
+        source_quiet = last_activity is None or last_activity < now - self._window_s
+        quiet_gap_rearms = source_quiet and event_id in self._suppressed
 
         # RETIRE THIS ALARM'S OWN STALE STATE FIRST.  `_prune` runs after
-        # `_seen` is refreshed, so it can never retire the alarm currently
+        # `_activity` is refreshed, so it can never retire the alarm currently
         # firing -- and a lone CRITICAL, the only one qualifying, therefore kept
         # its `_attempt` and `_generation` across an arbitrarily long silence.
         # A success from that retired occurrence then passed the generation
@@ -515,7 +517,9 @@ class _EventDedup:
             # once.
             return False
 
-        if (last_seen is None or last_seen < now - self._window_s) and event_id not in self._suppressed:
+        if (
+            quiet_gap_rearms or last_seen is None or last_seen < now - self._window_s
+        ) and event_id not in self._suppressed:
             # Genuinely quiet for a full window: the original semantics.
             return self._allow(event_id, now)
         if last_allowed is None:
@@ -669,7 +673,6 @@ class _EventDedup:
             # corrected clock below is useless if an earlier branch never
             # consults it.
             self._seen[event_id] = now
-            self._activity[event_id] = now
             # THE ESCALATION CLOCK STARTS WHEN THE OPERATOR WAS TOLD, not when
             # the gate admitted the attempt.  Generation can take up to
             # ``timeout_s``, and stamping at admission makes the silence the

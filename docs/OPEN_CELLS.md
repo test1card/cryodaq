@@ -1,5 +1,7 @@
 # OPEN cells — Montana partial-checkpoint register
 
+OC-028 current narration guard collection: 48 nodes (`pytest --collect-only -q`).
+
 The Cycle 1 register body was verified against `e642cba4` plus the changes that
 landed with it. The Cycle 2 disposition is authored and awaiting the independent
 review and hosted proof required by the current plan. This register is the PR's

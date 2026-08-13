@@ -69,7 +69,7 @@ def _flap_quietly(
     """Refire continuously from ``frm`` to ``to`` and assert nothing was admitted.
 
     THIS EXISTS BECAUSE THE SAME MISTAKE HAS BEEN MADE THREE TIMES in this
-    file.  ``_seen`` is refreshed on every call, so a test that simply jumps the
+    file.  ``_activity`` is refreshed on every call, so a test that simply jumps the
     clock forward leaves the alarm looking QUIET -- and the ordinary
     quiet-for-a-full-window branch then admits the dispatch, while the branch
     actually under test is never reached.  The node passes, or fails, for a
@@ -719,15 +719,18 @@ def test_a_quiet_gap_clears_suppression_before_escalation_retirement(clock) -> N
     assert ledger.should_dispatch("alarm:quietgap") is True
 
 
-def test_confirmed_delivery_refreshes_activity_for_retirement(clock) -> None:
+def test_late_delivery_does_not_reset_source_activity_for_returning_alarm(clock) -> None:
     ledger = _ledger()
-    assert ledger.should_dispatch("alarm:delayed") is True
-    attempt = ledger.current_attempt("alarm:delayed")
+    event_id = "alarm:delayed"
+    assert ledger.should_dispatch(event_id) is True
+    attempt = ledger.current_attempt(event_id)
 
-    clock.return_value = 1400.0
-    ledger.note_outcome("alarm:delayed", delivered=True, attempt=attempt)
-    clock.return_value = 1401.0
-    assert ledger.should_dispatch("alarm:delayed") is False
+    clock.return_value = 1010.0
+    assert ledger.should_dispatch(event_id) is False
+    clock.return_value = 1035.0
+    ledger.note_outcome(event_id, delivered=True, attempt=attempt)
+    clock.return_value = 1041.0
+    assert ledger.should_dispatch(event_id) is True
 
 
 def test_an_outstanding_attempt_keeps_its_settled_identity(clock) -> None:
@@ -811,7 +814,7 @@ def test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one(cl
     old_attempt = ledger.current_attempt("alarm:generations")
 
     # The alarm goes quiet past the prune horizon.  `_prune` runs inside
-    # `should_dispatch` AFTER `_seen` is refreshed, so this alarm's own refire
+    # `should_dispatch` AFTER `_activity` is refreshed, so this alarm's own refire
     # can never prune it -- a DIFFERENT alarm has to fire in the gap.  That is
     # the production shape too: the ledger is shared across alarms.
     clock.return_value = start + ESCALATE + WINDOW + 60.0
@@ -1385,7 +1388,7 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles(cycles: i
             peak = saturated
             for cycle in range(cycles):
                 # The alarm stays active and keeps firing well past the
-                # escalation interval.  Each refire keeps `_seen` fresh, so the
+                # escalation interval.  Each refire keeps `_activity` fresh, so the
                 # escalation branch IS reached -- nothing else in this node
                 # would notice if the gate stopped refusing.
                 held = agent._dedup.current_attempt("alarm:cycling")
@@ -1560,7 +1563,7 @@ def test_a_pruned_occurrence_returning_under_backpressure_is_admitted(clock) -> 
     orphan = ledger.current_attempt("alarm:returning")
 
     # THE OTHERS KEEP FIRING while the target goes quiet. That is what makes
-    # this the prune path and not the retire path: `_seen` for the target ages
+    # this the prune path and not the retire path: `_activity` for the target ages
     # past the horizon and `_prune` drops it during someone else's dispatch,
     # so the target never reaches `_retire` at all.
     at = start + _MAX_OUTSTANDING_ATTEMPTS
@@ -1636,7 +1639,7 @@ def test_settled_state_costs_nothing_per_admission(clock) -> None:
 def test_a_lone_alarm_retires_its_own_stale_state(clock) -> None:
     """The same-id-only path, which no amount of pruning can reach.
 
-    `_prune` runs AFTER `_seen` is refreshed, so it can never retire the alarm
+    `_prune` runs AFTER `_activity` is refreshed, so it can never retire the alarm
     that is currently firing.  A lone CRITICAL -- the only one qualifying, which
     is the ordinary case on a quiet rig -- therefore kept its `_attempt` and
     `_generation` across an arbitrarily long silence, and a success from that
