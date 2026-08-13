@@ -14,9 +14,11 @@ Tests are grouped by acceptance criterion:
 from __future__ import annotations
 
 import base64
+import hashlib
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -490,6 +492,29 @@ def test_private_identifiers_are_redacted_across_bundle_schema_surfaces() -> Non
     assert evidence["versions"][0]["component"] == "redacted-private"
     assert evidence["config_fingerprints"][0]["config_id"] == "redacted-private"
     assert "alice" not in b"".join(artifact.content for artifact in bundle.artifacts).decode().casefold()
+
+
+def test_unknown_identifier_pseudonyms_cannot_be_recovered_from_sha256() -> None:
+    """Unknown identifiers use opaque pseudonyms, not reversible digest prefixes."""
+    capture = _minimal_capture(
+        bundle_id="bundle-v1",
+        versions=(SoftwareVersion("alice", "1.0"), SoftwareVersion("bob", "2.0")),
+    )
+    by_version = {item["version"]: item["component"] for item in _evidence(build_support_bundle(capture))["versions"]}
+    alice_pseudonym = by_version["1.0"]
+    bob_pseudonym = by_version["2.0"]
+    other_bundle = _minimal_capture(
+        bundle_id="bundle-v2",
+        versions=(SoftwareVersion("charlie", "1.0"),),
+    )
+    charlie_pseudonym = _evidence(build_support_bundle(other_bundle))["versions"][0]["component"]
+
+    assert alice_pseudonym != bob_pseudonym
+    assert alice_pseudonym != charlie_pseudonym
+    assert re.fullmatch(r"redacted-id-[0-9a-f]{24}", alice_pseudonym) is not None
+    assert re.fullmatch(r"redacted-id-[0-9a-f]{24}", bob_pseudonym) is not None
+    assert alice_pseudonym != f"redacted-id-{hashlib.sha256(b'alice').hexdigest()[:24]}"
+    assert bob_pseudonym != f"redacted-id-{hashlib.sha256(b'bob').hexdigest()[:24]}"
 
 
 def test_redaction_category_embedded_absolute_user_path_is_removed() -> None:

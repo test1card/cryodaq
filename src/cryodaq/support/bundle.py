@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import re
+import secrets
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,6 +46,9 @@ _PUBLIC_TECHNICAL_SEGMENT_RE = re.compile(r"(?:\d+|[fv]\d+|\d{8}t\d{12}z)\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _UUID_RE = re.compile(r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _PUBLIC_PROJECTION_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\.public\.v[1-9][0-9]*\Z")
+_PSEUDONYM_RE = re.compile(r"redacted-id-[0-9a-f]{24}\Z")
+_PENDING_PSEUDONYM_RE = re.compile(r"redacted-pending-[0-9a-f]{24}\Z")
+_PSEUDONYM_KEY: Final = secrets.token_bytes(32)
 _PROTOCOL_MAX_INT: Final = 2**63 - 1
 _RECORD_KINDS: Final = frozenset({"health", "attention", "audit", "log", "integrity"})
 _UNAVAILABLE_FIELDS: Final = frozenset(
@@ -471,7 +475,7 @@ def _exact_text(value: object, *, field: str, max_bytes: int = 512) -> str:
 
 def _identifier(value: object, *, field: str) -> str:
     value = _exact_text(value, field=field, max_bytes=128)
-    if re.fullmatch(r"redacted-id-[0-9a-f]{24}", value) is not None:
+    if _PSEUDONYM_RE.fullmatch(value) is not None:
         return value
     if value in frozenset().union(*_SUMMARY_IDENTITIES.values()):
         return value
@@ -517,7 +521,12 @@ def _identifier(value: object, *, field: str) -> str:
         ):
             return "redacted-private"
         if has_unknown_alpha_segment:
-            return f"redacted-id-{hashlib.sha256(value.casefold().encode('utf-8')).hexdigest()[:24]}"
+            digest = hashlib.blake2s(
+                value.casefold().encode("utf-8"),
+                key=_PSEUDONYM_KEY,
+                digest_size=12,
+            ).hexdigest()
+            return f"redacted-pending-{digest}"
     return value
 
 
@@ -1225,7 +1234,7 @@ class BundleArtifact:
 
 
 def _evidence_document(capture: BundleCapture) -> dict[str, object]:
-    return {
+    evidence: dict[str, object] = {
         "bundle_id": capture.bundle_id,
         "config_fingerprints": [
             {
@@ -1234,23 +1243,42 @@ def _evidence_document(capture: BundleCapture) -> dict[str, object]:
                 "provenance": item.provenance,
                 "sha256": item.sha256,
             }
-            for item in sorted(capture.config_fingerprints, key=lambda item: item.config_id)
+            for item in capture.config_fingerprints
         ],
         "created_at": _utc_timestamp(capture.created_at),
-        "records": [
-            {"kind": item.kind, "payload": json.loads(item.payload_json)}
-            for item in sorted(capture.records, key=lambda item: (item.kind, item.payload_json))
-        ],
+        "records": [{"kind": item.kind, "payload": json.loads(item.payload_json)} for item in capture.records],
         "schema_version": SCHEMA_VERSION,
         "unavailable_fields": list(capture.unavailable_fields),
         "unavailable_sources": [
             {"reason_code": item.reason_code, "source": item.source} for item in capture.unavailable_sources
         ],
-        "versions": [
-            {"component": item.component, "version": item.version}
-            for item in sorted(capture.versions, key=lambda item: item.component)
-        ],
+        "versions": [{"component": item.component, "version": item.version} for item in capture.versions],
     }
+    scope_id = (
+        "redacted-private" if _PENDING_PSEUDONYM_RE.fullmatch(capture.bundle_id) is not None else capture.bundle_id
+    )
+    scope = _canonical({"bundle_id": scope_id, "created_at": evidence["created_at"]})
+    pseudonyms: dict[str, str] = {}
+
+    def seal(value: object) -> object:
+        if type(value) is str and _PENDING_PSEUDONYM_RE.fullmatch(value) is not None:
+            if value not in pseudonyms:
+                ordinal = len(pseudonyms)
+                digest = hashlib.sha256(scope + ordinal.to_bytes(4, "big")).hexdigest()[:24]
+                pseudonyms[value] = f"redacted-id-{digest}"
+            return pseudonyms[value]
+        if type(value) is list:
+            return [seal(item) for item in value]
+        if type(value) is dict:
+            return {key: seal(item) for key, item in value.items()}
+        return value
+
+    sealed = seal(evidence)
+    assert type(sealed) is dict
+    sealed["config_fingerprints"].sort(key=lambda item: item["config_id"])
+    sealed["records"].sort(key=lambda item: (item["kind"], _canonical(item["payload"])))
+    sealed["versions"].sort(key=lambda item: item["component"])
+    return sealed
 
 
 def _capture_from_evidence_document(evidence: object) -> BundleCapture:
@@ -1438,6 +1466,8 @@ def build_support_bundle(capture: BundleCapture) -> SupportBundle:
     if type(capture) is not BundleCapture:
         raise TypeError("capture must be exact BundleCapture")
     evidence = _evidence_document(capture)
+    bundle_id = evidence["bundle_id"]
+    assert type(bundle_id) is str
     evidence_json = _canonical(evidence)
     if len(evidence_json) > MAX_EVIDENCE_BYTES:
         raise ValueError("support evidence exceeds byte budget")
@@ -1454,7 +1484,7 @@ def build_support_bundle(capture: BundleCapture) -> SupportBundle:
                 "size_bytes": len(evidence_artifact.content),
             }
         ],
-        "bundle_id": capture.bundle_id,
+        "bundle_id": bundle_id,
         "created_at": _utc_timestamp(capture.created_at),
         "schema_version": SCHEMA_VERSION,
     }
@@ -1467,7 +1497,7 @@ def build_support_bundle(capture: BundleCapture) -> SupportBundle:
     artifacts = (manifest_artifact, evidence_artifact)
     if sum(len(item.content) for item in artifacts) > MAX_BUNDLE_BYTES:
         raise ValueError("support bundle exceeds byte budget")
-    return SupportBundle(capture.bundle_id, artifacts, manifest_json, manifest_artifact.sha256)
+    return SupportBundle(bundle_id, artifacts, manifest_json, manifest_artifact.sha256)
 
 
 def plan_bundle_write(bundle: SupportBundle, relative_directory: str) -> BundleWritePlan:
