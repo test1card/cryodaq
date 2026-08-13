@@ -343,6 +343,55 @@ async def test_query_agent_out_of_scope_historical_response() -> None:
     rag.search.assert_not_awaited()
 
 
+async def test_query_agent_router_failure_cannot_be_formatted_as_empty() -> None:
+    """An alarm query failure must stop before the format LLM can claim no alarms."""
+    adapters = _make_adapters()
+    adapters.alarms.active = AsyncMock(side_effect=RuntimeError("service down"))
+    audit = _make_audit()
+
+    ollama = MagicMock()
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("alarm_status")),
+        ]
+    )
+
+    agent = _make_agent(ollama, adapters)
+    agent._audit = audit
+
+    response = await agent.handle_query("???? ?? ????????")
+
+    assert response == _FALLBACK
+    assert ollama.generate.await_count == 1
+    assert any("query_unavailable" in item for item in audit.log.call_args.kwargs["errors"])
+
+
+async def test_query_agent_authoritative_empty_alarm_result_is_ordinary() -> None:
+    """A successful, empty alarm result remains quiet normal-state evidence."""
+    adapters = _make_adapters(alarm_result=AlarmStatusResult())
+    audit = _make_audit()
+    ollama = MagicMock()
+    ollama.generate = AsyncMock(
+        side_effect=[
+            _make_gen_result(_intent_json("alarm_status")),
+            _make_gen_result("??? ???????? ??????."),
+        ]
+    )
+
+    agent = AssistantQueryAgent(
+        ollama_client=ollama,
+        audit_logger=audit,
+        config=_make_config(),
+        adapters=adapters,
+    )
+
+    response = await agent.handle_query("???? ?? ????????")
+
+    assert response == "??? ???????? ??????."
+    assert ollama.generate.await_count == 2
+    assert audit.log.call_args.kwargs["errors"] == []
+
+
 async def test_query_agent_handles_intent_classifier_failure() -> None:
     """When intent classifier LLM returns garbage, agent falls back gracefully."""
     adapters = _make_adapters()

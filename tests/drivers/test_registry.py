@@ -606,3 +606,25 @@ def test_reference_extension_rejects_non_local_host_during_validation() -> None:
                 "channels": [{"channel_id": "a", "unit": "K"}],
             }
         )
+
+
+def test_allowlist_refuses_a_slot_only_subclass_of_the_declared_class() -> None:
+    spec = next(
+        spec
+        for spec in registry_module._CANONICAL_DRIVER_SPECS
+        if DriverCapability.HEALTH_TELEMETRY_DEVICE in spec.capabilities
+    )
+    module = __import__(spec.module, fromlist=[spec.class_name])
+    original = getattr(module, spec.class_name)
+    replacement = type(
+        f"{spec.class_name}",
+        (original,),
+        {"__module__": spec.module, "__slots__": ()},
+    )
+
+    try:
+        setattr(module, spec.class_name, replacement)
+        with pytest.raises(registry_module.DriverRegistryError):
+            registry_module.verify_allowlisted_driver_imports()
+    finally:
+        setattr(module, spec.class_name, original)
