@@ -2811,7 +2811,44 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
 # by a closing guillemet, which occurs genuinely here, including "V = <<B>>" where B is
 # the Russian symbol for volts.  Measured: 26 of 26 sequences on the damaged register,
 # and zero hits across every tracked file on a clean tree.
-_MOJIBAKE_AT_RISK_SOURCES = (
+# These printable Latin-1 sources are pinned separately because their images consist
+# entirely of Cyrillic characters.  The live-inventory predicate below intentionally
+# excludes Cyrillic text, so a damaged file containing only such an image (for example
+# the two-character image of U+00E8, which is U+0413 U+0401) would otherwise be
+# invisible when its source character is absent
+# from the clean tree.
+_CYRILLIC_ONLY_MOJIBAKE_SOURCES = tuple(
+    chr(codepoint)
+    for codepoint in (
+        *range(0xA1, 0xA4),
+        0xA5,
+        0xA8,
+        0xAA,
+        0xAF,
+        *range(0xB2, 0xB5),
+        0xB8,
+        0xBA,
+        *range(0xBC, 0xC0),
+        0xC0,
+        0xC1,
+        0xC3,
+        0xCA,
+        *range(0xCC, 0xD1),
+        0xDA,
+        *range(0xDC, 0xE0),
+        *range(0xE1, 0xE4),
+        0xE5,
+        0xE8,
+        0xEA,
+        0xEF,
+        *range(0xF2, 0xF5),
+        0xF8,
+        0xFA,
+        *range(0xFC, 0x100),
+    )
+)
+
+_MOJIBAKE_BASE_SOURCES = (
     "\u00a7",
     "\u00ab",
     "\u00ad",
@@ -2825,9 +2862,6 @@ _MOJIBAKE_AT_RISK_SOURCES = (
     "\u00bc",
     "\u00bd",
     "\u00d7",
-    # Pinned independently: its cp1251 image begins with Cyrillic and is
-    # therefore invisible to the live inventory filter.
-    "\u00e1",
     "\u00e9",
     "\u00f3",
     "\u0301",
@@ -2968,6 +3002,7 @@ _MOJIBAKE_AT_RISK_SOURCES = (
     "\U0001f916",
     "\U0001f989",
 )
+_MOJIBAKE_AT_RISK_SOURCES = tuple(sorted(set(_MOJIBAKE_BASE_SOURCES) | set(_CYRILLIC_ONLY_MOJIBAKE_SOURCES), key=ord))
 
 
 def _cp1251_mojibake(source: str) -> str:
@@ -3003,7 +3038,7 @@ def _mojibake_hits(text: str) -> int:
 # below exercise only a handful of signatures, so without this a single deleted source
 # would leave every test green -- the vacuous-pass condition, one entry at a time.  Any
 # removal, addition or substitution changes this digest.
-_MOJIBAKE_SOURCE_DIGEST = "sha256:96f50b4f3bfc94479ddfeefec13b9628e322418fd75a2088d0fefffdf4f5031f"
+_MOJIBAKE_SOURCE_DIGEST = "sha256:2ce3e72088f179d36df00944fef9b96b15aeedbd75a6670b3a492b817e5136d6"
 
 
 def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
@@ -3024,7 +3059,7 @@ def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
             except UnicodeDecodeError:
                 continue
             eligible.add(character)
-    expected = tuple(sorted(eligible | {"\u00e1"}, key=ord))
+    expected = tuple(sorted(eligible | set(_CYRILLIC_ONLY_MOJIBAKE_SOURCES), key=ord))
     assert _MOJIBAKE_AT_RISK_SOURCES == expected, (
         "the mojibake source tuple is stale; re-derive it from tracked UTF-8 text"
     )
@@ -3050,7 +3085,7 @@ def test_mojibake_source_set_matches_its_pinned_digest() -> None:
 # Measured before this anchor existed: returning a dynamically assembled bogus signature
 # for a single source left all four guard nodes green, and the real corruption for that
 # character escaped the repository sweep.
-_MOJIBAKE_MAPPING_DIGEST = "sha256:dbf0f9dfbedc9faeeded903eefbd95654b33e6a51ee5243a7b2308a43a2b6d27"
+_MOJIBAKE_MAPPING_DIGEST = "sha256:cc6003bb7637ddf339d044461856b301ffdcd0a597ca40032c585eba1823041a"
 
 
 def test_mojibake_derivation_matches_its_pinned_mapping() -> None:
