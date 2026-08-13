@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import subprocess
 import sys
 import types
@@ -135,6 +136,47 @@ def test_frozen_dispatch_supports_report_render(
         module._dispatch()
     assert exc.value.code == 0
     assert called == [True]
+
+
+def test_frozen_driver_verification_refuses_source_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    import cryodaq._frozen_main as module
+
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+
+    with pytest.raises(RuntimeError, match="requires a PyInstaller executable"):
+        module.main_verify_frozen_drivers()
+
+
+def test_frozen_driver_verification_dispatches_live_imports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import cryodaq._frozen_main as module
+    from cryodaq.drivers.registry import ALLOWLISTED_DRIVER_MODULES, DRIVER_REGISTRY_COMPAT_VERSION
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(sys, "argv", ["CryoDAQ.exe", "--mode=verify-frozen-drivers"])
+    for module_name in ALLOWLISTED_DRIVER_MODULES:
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    module._dispatch()
+
+    records = [
+        line.removeprefix(module._FROZEN_DRIVER_IMPORT_PREFIX)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(module._FROZEN_DRIVER_IMPORT_PREFIX)
+    ]
+    assert len(records) == 1
+    payload = json.loads(records[0])
+    assert payload["schema"] == 1
+    assert payload["status"] == "PASS"
+    assert payload["registry_compat_version"] == DRIVER_REGISTRY_COMPAT_VERSION
+    assert payload["modules"] == list(ALLOWLISTED_DRIVER_MODULES)
+    assert set(payload["module_files"]) == set(ALLOWLISTED_DRIVER_MODULES)
+    assert all(isinstance(path, str) and path for path in payload["module_files"].values())
 
 
 def test_frozen_dispatch_forwards_periodic_argv_exactly(
