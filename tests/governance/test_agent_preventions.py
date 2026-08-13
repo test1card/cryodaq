@@ -129,6 +129,44 @@ def test_registry_schema_ids_and_references_are_exact() -> None:
     assert all(pair["runtime_prevention_id"] in record_ids for pair in payload["false_green_pairs"])
 
 
+def test_evidence_inventory_guard_binds_the_named_facility() -> None:
+    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
+    assert "Bind the evidence to the facility under review" in text
+    assert "quote the identifier the reviewed claim names" in text
+
+
+def test_evidence_measurement_guard_requires_immutable_identity() -> None:
+    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
+    assert "Bind a measurement to an immutable commit id" in text
+    assert "A branch name, `HEAD` or `origin/master` is not a binding" in text
+
+
+def test_evidence_retrieval_guard_covers_every_identifier() -> None:
+    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
+    assert (
+        "For every repository evidence identifier, verify retrievability in a fresh clone, regardless of cell or status"
+        in text
+    )
+
+
+def test_evidence_authorization_guard_rejects_artifact_substitution() -> None:
+    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
+    assert "Quote the authorisation when the trigger needs one" in text
+    assert "artifact existence is not permission to create it" in text
+
+
+def test_evidence_candidate_guard_requires_candidate_and_measured_equality() -> None:
+    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
+    assert "exact candidate tree under review" in text
+    assert "require them to be equal" in text
+
+
+def test_evidence_per_commit_guard_requires_each_commit_result() -> None:
+    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
+    assert "inspect every commit in the compared range" in text
+    assert "Record per-commit deletion results" in text
+
+
 def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidence() -> None:
     payload = _registry()
     validate_registry(payload)

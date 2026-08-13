@@ -56,6 +56,54 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: EVIDENCE-INVENTORY-BINDING-FALSE-GREEN-001
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-INVENTORY-BINDING-001
+    guard: tests/governance/test_agent_preventions.py::test_evidence_inventory_guard_binds_the_named_facility
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-IMMUTABLE-MEASUREMENT-FALSE-GREEN-002
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-IMMUTABLE-MEASUREMENT-002
+    guard: tests/governance/test_agent_preventions.py::test_evidence_measurement_guard_requires_immutable_identity
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-RETRIEVABLE-IDENTIFIER-FALSE-GREEN-003
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-RETRIEVABLE-IDENTIFIER-003
+    guard: tests/governance/test_agent_preventions.py::test_evidence_retrieval_guard_covers_every_identifier
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-AUTHORIZATION-ORDERING-FALSE-GREEN-004
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-AUTHORIZATION-ORDERING-004
+    guard: tests/governance/test_agent_preventions.py::test_evidence_authorization_guard_rejects_artifact_substitution
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-EXACT-CANDIDATE-FALSE-GREEN-005
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-EXACT-CANDIDATE-005
+    guard: tests/governance/test_agent_preventions.py::test_evidence_candidate_guard_requires_candidate_and_measured_equality
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+  - id: EVIDENCE-PER-COMMIT-DIFF-FALSE-GREEN-006
+    status: open
+    scope: repository
+    runtime_prevention_id: EVIDENCE-PER-COMMIT-DIFF-006
+    guard: tests/governance/test_agent_preventions.py::test_evidence_per_commit_guard_requires_each_commit_result
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -6385,9 +6433,9 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/governance/test_agent_guidance_cross_references.py::test_guard_rejects_missing_renamed_fenced_and_unmentioned_headings
+      - node: tests/governance/test_agent_preventions.py::test_evidence_inventory_guard_binds_the_named_facility
         ci_partition: remaining
-    automation_limit: The current guard validates registry identity and references, but an inventory-specific falsification guard is still required.
+    automation_limit: The guard binds the exact facility identifier named by a retirement or absence claim to the authoritative inventory wording; independent closure evidence remains required.
     red_evidence: pending
     green_evidence: pending
   - id: EVIDENCE-IMMUTABLE-MEASUREMENT-002
@@ -6405,9 +6453,9 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/governance/test_candidate_evidence_binding.py::test_receipt_hashes_exact_output_bytes_without_unicode_replacement
+      - node: tests/governance/test_agent_preventions.py::test_evidence_measurement_guard_requires_immutable_identity
         ci_partition: remaining
-    automation_limit: Candidate execution binding exists, but a registry guard for moving-ref-only measurements is still required.
+    automation_limit: The guard rejects moving-ref-only measurement language and requires immutable identity; independent closure evidence remains required.
     red_evidence: pending
     green_evidence: pending
   - id: EVIDENCE-RETRIEVABLE-IDENTIFIER-003
@@ -6425,9 +6473,9 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/governance/test_agent_preventions.py::test_publication_receipt_records_real_nonapproval_and_disagreement
+      - node: tests/governance/test_agent_preventions.py::test_evidence_retrieval_guard_covers_every_identifier
         ci_partition: remaining
-    automation_limit: Artifact evidence binding is guarded, but a fresh-clone discharge-resolution guard is still required.
+    automation_limit: The guard covers every evidence identifier regardless of register cell or status; fresh-clone resolution still requires independent closure evidence.
     red_evidence: pending
     green_evidence: pending
   - id: EVIDENCE-AUTHORIZATION-ORDERING-004
@@ -6445,9 +6493,9 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/governance/test_agent_context_contract.py::test_successor_requires_exact_increment_and_immutable_authority
+      - node: tests/governance/test_agent_preventions.py::test_evidence_authorization_guard_rejects_artifact_substitution
         ci_partition: remaining
-    automation_limit: Publication disposition binding exists, but the exact artifact-versus-authorization falsification guard is still required.
+    automation_limit: The guard requires quoted authorization and rejects artifact existence as a substitute; manual ordering remains a fail-closed human gate.
     red_evidence: pending
     green_evidence: pending
   - id: EVIDENCE-EXACT-CANDIDATE-005
@@ -6465,9 +6513,9 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/governance/test_ci_partition_execution_proof.py::test_complete_matrix_records_nonzero_population_for_all_cells
+      - node: tests/governance/test_agent_preventions.py::test_evidence_candidate_guard_requires_candidate_and_measured_equality
         ci_partition: remaining
-    automation_limit: Guard partition binding is checked, but a candidate-versus-measured-tree equality guard is still required.
+    automation_limit: The guard requires equality between candidate and measured immutable objects; independent closure evidence remains required.
     red_evidence: pending
     green_evidence: pending
   - id: EVIDENCE-PER-COMMIT-DIFF-006
@@ -6485,8 +6533,8 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/governance/test_red_reproduction.py::test_live_red_reproduction_receipts_bind_executed_preserved_defects
+      - node: tests/governance/test_agent_preventions.py::test_evidence_per_commit_guard_requires_each_commit_result
         ci_partition: remaining
-    automation_limit: Guard falsification authority is registered, but a per-commit deletion-result guard is still required.
+    automation_limit: The guard requires a result for every commit in the compared range; independent closure evidence remains required.
     red_evidence: pending
     green_evidence: pending
