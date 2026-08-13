@@ -2,10 +2,15 @@
 (nightly CI job) clean").
 
 Launches the engine's real entry point (``cryodaq-engine --mock``) headless,
-lets it run for a bounded window, sends SIGTERM, and asserts:
+lets it run for a bounded window, ASKS it to stop, and asserts:
 
   - the process was still alive right before shutdown was requested
-  - it exited within a grace period after SIGTERM (clean shutdown)
+  - it exited within a grace period after that request (clean shutdown)
+
+The shutdown request is SIGTERM on POSIX and CTRL_BREAK_EVENT on Windows.
+They are not interchangeable: ``Popen.terminate()`` on Windows is
+``Popen.kill()``, so it cannot be handled and the exit code is 1 whatever the
+engine would have done. See ``_request_shutdown``.
   - its captured log has zero ERROR/CRITICAL lines except a small documented
     allowlist of known by-design mock-startup events (e.g. the
     ``detector_warmup`` interlock trip — the mock LS218 driver starts Т12
@@ -25,6 +30,7 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -94,6 +100,31 @@ def _default_cmd() -> list[str]:
     return [sys.executable, "-m", "cryodaq.engine", "--mock"]
 
 
+#: Windows needs the child in its own process group before CTRL_BREAK_EVENT can
+#: be delivered to it. On POSIX this is 0 and changes nothing.
+_SHUTDOWN_CREATION_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
+def _request_shutdown(proc: subprocess.Popen[str]) -> None:
+    """ASK the engine to stop, on a channel it can actually hear.
+
+    ``Popen.terminate()`` is ``Popen.kill()`` on Windows: it calls
+    ``TerminateProcess(handle, 1)``, so the child dies unconditionally and its
+    exit code is 1 no matter how gracefully it would have exited. A
+    ``clean_shutdown = exit_code == 0`` assertion built on it can therefore
+    never pass on Windows, and reports the platform rather than the engine.
+    Measured: a child that installs a SIGTERM handler and calls ``sys.exit(0)``
+    still returns 1 after ``terminate()``, and returns 0 after
+    ``CTRL_BREAK_EVENT``.
+
+    On POSIX ``terminate()`` is a real SIGTERM and stays correct.
+    """
+    if sys.platform == "win32":
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        proc.terminate()
+
+
 def run_soak(
     duration_s: float,
     *,
@@ -108,7 +139,13 @@ def run_soak(
     argv = list(cmd) if cmd is not None else _default_cmd()
 
     with log_path.open("w", encoding="utf-8") as log_fh:
-        proc = subprocess.Popen(argv, stdout=log_fh, stderr=subprocess.STDOUT, text=True)
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+            creationflags=_SHUTDOWN_CREATION_FLAGS,
+        )
         try:
             deadline = time.monotonic() + duration_s
             alive_before_shutdown = True
@@ -121,7 +158,7 @@ def run_soak(
                     break
                 time.sleep(min(poll_interval_s, remaining))
 
-            proc.terminate()  # SIGTERM — same signal a real deploy sends
+            _request_shutdown(proc)
             try:
                 exit_code = proc.wait(timeout=grace_s)
                 clean_shutdown = exit_code == 0
