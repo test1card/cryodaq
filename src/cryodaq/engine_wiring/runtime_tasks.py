@@ -663,8 +663,9 @@ async def vacuum_guard_tick_loop(
         experiment_id = experiment_manager.active_experiment_id
         _bind_alarm_experiment(state_mgr, experiment_id)
         active_before = state_mgr.get_active().get("vacuum_guard")
+        cancellation_pending = False
         try:
-            transition = await vacuum_guard.tick()
+            transition, cancellation_pending = await _await_settled(vacuum_guard.tick())
         except Exception as exc:
             logger.error("VacuumGuard tick error: %s", exc)
             continue
@@ -679,15 +680,23 @@ async def vacuum_guard_tick_loop(
                     )
                     alarm_dispatch_tasks.add(_pt)
                     _pt.add_done_callback(alarm_dispatch_tasks.discard)
-                await event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
+                _published, publish_cancelled = await _await_settled(
+                    event_bus.publish(_canonical_alarm_fired_event(_ev, experiment_id))
+                )
+                cancellation_pending |= publish_cancelled
         elif transition == "CLEARED":
-            await event_bus.publish(
-                _canonical_alarm_cleared_event(
-                    active_before,
-                    experiment_id,
-                    timestamp=datetime.now(UTC),
+            _published, publish_cancelled = await _await_settled(
+                event_bus.publish(
+                    _canonical_alarm_cleared_event(
+                        active_before,
+                        experiment_id,
+                        timestamp=datetime.now(UTC),
+                    )
                 )
             )
+            cancellation_pending |= publish_cancelled
+        if cancellation_pending:
+            raise asyncio.CancelledError
 
 
 async def assistant_event_relay_loop(
