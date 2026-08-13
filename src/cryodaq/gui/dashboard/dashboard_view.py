@@ -268,9 +268,19 @@ class DashboardView(QScrollArea):
                 self._sensor_grid.dispatch_reading(reading, identity_status)
         elif channel.endswith("/pressure"):
             self._buffer_store.append(channel, timestamp_epoch, float(value))
+            # The phase widget needs the shipped pressure feed as well. Reusing
+            # THIS branch rather than adding a second condition keeps the
+            # identity spelled once: naming an instrument literally here (for
+            # example "VSP63D_1/pressure") would hardcode one gauge into the
+            # GUI and silently drop the feed if it were renamed or a second
+            # gauge added.
+            if self._phase_widget is not None:
+                self._phase_widget.on_reading(reading)
+                if self._read_only:
+                    self.set_read_only(True)
 
         # B.5.5: route analytics readings to phase widget
-        if (channel.startswith("analytics/") or channel == "VSP63D_1/pressure") and self._phase_widget is not None:
+        if channel.startswith("analytics/") and self._phase_widget is not None:
             self._phase_widget.on_reading(reading)
             if self._read_only:
                 self.set_read_only(True)
