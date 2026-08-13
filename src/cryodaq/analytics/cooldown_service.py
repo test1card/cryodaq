@@ -649,6 +649,8 @@ class CooldownService:
                 # NaN-доктрина: не годное показание (NaN/±inf или статус ошибки)
                 # не попадает в детектор/буфер — staleness всё равно обновлён.
                 if not reading.is_usable():
+                    if reading.channel in (self._channel_cold, self._channel_warm):
+                        self._last_required_input_monotonic[reading.channel] = None
                     continue
 
                 if reading.channel in (self._channel_cold, self._channel_warm):

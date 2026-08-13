@@ -270,7 +270,7 @@ class DashboardView(QScrollArea):
             self._buffer_store.append(channel, timestamp_epoch, float(value))
 
         # B.5.5: route analytics readings to phase widget
-        if channel.startswith("analytics/") and self._phase_widget is not None:
+        if (channel.startswith("analytics/") or channel == "VSP63D_1/pressure") and self._phase_widget is not None:
             self._phase_widget.on_reading(reading)
             if self._read_only:
                 self.set_read_only(True)

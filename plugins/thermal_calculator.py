@@ -127,7 +127,7 @@ class ThermalCalculator(AnalyticsPlugin):
 
         ingress = self._last_required_input_ingress_monotonic.get(channel)
         if ingress is None:
-            return False
+            return True
         return (now_monotonic - ingress) > horizon
 
     async def process(self, readings: list[Reading]) -> list[DerivedMetric]:
@@ -166,7 +166,8 @@ class ThermalCalculator(AnalyticsPlugin):
                 arrival_interval = now_monotonic - previous_arrival
                 if arrival_interval > 0.0:
                     established_horizon = self._freshness_horizon_s(reading.channel)
-                    if established_horizon is None or arrival_interval <= established_horizon:
+                    allowed_interval = established_horizon or _BOOTSTRAP_FRESHNESS_HORIZON_S
+                    if arrival_interval <= allowed_interval:
                         intervals.append(arrival_interval)
             self._last_required_input_arrival_monotonic[reading.channel] = now_monotonic
             raw_ingress = reading.metadata.get(BROKER_INGRESS_MONOTONIC_METADATA_KEY)

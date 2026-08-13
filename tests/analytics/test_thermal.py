@@ -22,11 +22,25 @@ HEATER_CH = "keithley/power"
 
 
 def _make_reading(channel: str, value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
-    return Reading.now(channel=channel, value=value, unit="K", instrument_id="test", status=status)
+    return Reading.now(
+        channel=channel,
+        value=value,
+        unit="K",
+        instrument_id="test",
+        status=status,
+        metadata={"_broker_ingress_monotonic_s": thermal_calculator.time.monotonic()},
+    )
 
 
 def _make_heater_reading(value: float, status: ChannelStatus = ChannelStatus.OK) -> Reading:
-    return Reading.now(channel=HEATER_CH, value=value, unit="W", instrument_id="test", status=status)
+    return Reading.now(
+        channel=HEATER_CH,
+        value=value,
+        unit="W",
+        instrument_id="test",
+        status=status,
+        metadata={"_broker_ingress_monotonic_s": thermal_calculator.time.monotonic()},
+    )
 
 
 def _make_timed_reading(
@@ -39,6 +53,7 @@ def _make_timed_reading(
         value=value,
         unit="K",
         status=status,
+        metadata={"_broker_ingress_monotonic_s": thermal_calculator.time.monotonic()},
     )
 
 
