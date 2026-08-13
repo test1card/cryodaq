@@ -216,7 +216,10 @@ class ToolRailButton(QToolButton):
 
     def focusInEvent(self, event):  # noqa: ANN001
         super().focusInEvent(event)
-        if event.reason() is Qt.FocusReason.PopupFocusReason:
+        if event.reason() in {
+            Qt.FocusReason.PopupFocusReason,
+            Qt.FocusReason.ActiveWindowFocusReason,
+        }:
             popup_focus = self._popup_keyboard_focus
             self._popup_keyboard_focus = None
             self._set_keyboard_focus(True if popup_focus is None else popup_focus)
@@ -230,7 +233,10 @@ class ToolRailButton(QToolButton):
         )
 
     def focusOutEvent(self, event):  # noqa: ANN001
-        if event.reason() is Qt.FocusReason.PopupFocusReason:
+        if event.reason() in {
+            Qt.FocusReason.PopupFocusReason,
+            Qt.FocusReason.ActiveWindowFocusReason,
+        }:
             self._popup_keyboard_focus = bool(self.property("keyboardFocus"))
         else:
             self._popup_keyboard_focus = None

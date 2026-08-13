@@ -126,6 +126,26 @@ def test_popup_focus_return_preserves_keyboard_focus_ring() -> None:
     assert button.property("keyboardFocus") is True
 
 
+def test_active_window_focus_return_preserves_keyboard_focus_ring() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
+    app.processEvents()
+
+    button = rail._buttons["home"]
+    other = rail._buttons["new_experiment"]
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is True
+
+    button.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut, Qt.FocusReason.ActiveWindowFocusReason))
+    assert button.property("keyboardFocus") is False
+    button.focusInEvent(QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.ActiveWindowFocusReason))
+    assert button.property("keyboardFocus") is True
+
+
 def test_mouse_popup_focus_return_does_not_restore_keyboard_focus_ring() -> None:
     app = _app()
     rail = ToolRail()

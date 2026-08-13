@@ -39,7 +39,7 @@ Label placement: ABOVE the field (not floating, not placeholder-as-label)
  bg: SURFACE_CARD, border 1px BORDER, radius RADIUS_SM
 
 ┌────────────────────────────────────┐   ◀── SPACE_1 below (for helper/error)
-│ ⚠ Имя уже занято                  │   ◀── helper/error (FONT_LABEL_SIZE, STATUS_*)
+│ Имя уже занято                    │   ◀── error (FONT_LABEL_SIZE, FOREGROUND; STATUS_FAULT border)
 └────────────────────────────────────┘
 ```
 

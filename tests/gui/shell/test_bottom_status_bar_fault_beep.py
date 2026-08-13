@@ -64,18 +64,18 @@ def test_fault_connection_keeps_coloured_dot_and_neutral_body_label() -> None:
 
     assert theme.STATUS_FAULT in bar._conn_dot_label.styleSheet()
     assert theme.STATUS_FAULT not in bar._conn_label.styleSheet()
-    assert theme.MUTED_FOREGROUND in bar._conn_label.styleSheet()
+    assert theme.FOREGROUND in bar._conn_label.styleSheet()
 
     bar.set_safety_state("fault_latched")
     safety_style = bar._safety_label.styleSheet()
     assert f"color: {theme.STATUS_FAULT}" not in safety_style
-    assert theme.MUTED_FOREGROUND in safety_style
+    assert theme.FOREGROUND in safety_style
     assert f"border-left: 3px solid {theme.STATUS_FAULT}" in safety_style
 
     assert bar.set_disk_evidence(1.0, source="disk_monitor", state="fault")
     disk_style = bar._disk_label.styleSheet()
     assert f"color: {theme.STATUS_FAULT}" not in disk_style
-    assert theme.MUTED_FOREGROUND in disk_style
+    assert theme.FOREGROUND in disk_style
     assert f"border-left: 3px solid {theme.STATUS_FAULT}" in disk_style
 
 

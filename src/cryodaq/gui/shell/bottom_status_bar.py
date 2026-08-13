@@ -181,7 +181,7 @@ class BottomStatusBar(QWidget):
         self._safety_label.setText(text)
         if "fault" in s and not stale:
             self._safety_label.setStyleSheet(
-                f"color: {theme.MUTED_FOREGROUND}; font-weight: bold; "
+                f"color: {theme.FOREGROUND}; font-weight: bold; "
                 f"border-left: 3px solid {theme.STATUS_FAULT}; padding-left: {theme.SPACE_1}px;"
             )
         else:
@@ -219,7 +219,7 @@ class BottomStatusBar(QWidget):
         visible = _bounded_visible(presentation, _MAX_VISIBLE_CONNECTION_CHARS)
         detail = f"Состояние связи: {presentation}"
         self._conn_label.setText(visible)
-        self._conn_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+        self._conn_label.setStyleSheet(f"color: {theme.FOREGROUND};")
         self._conn_dot_label.setStyleSheet(f"color: {theme.STATUS_OK if connected else theme.STATUS_FAULT};")
         for indicator in (self._conn_dot_label, self._conn_label):
             indicator.setToolTip(detail)
@@ -238,7 +238,7 @@ class BottomStatusBar(QWidget):
         self._disk_label.setText(f"Диск {visible} ГБ")
         if state == "fault":
             self._disk_label.setStyleSheet(
-                f"color: {theme.MUTED_FOREGROUND}; border-left: 3px solid {theme.STATUS_FAULT}; "
+                f"color: {theme.FOREGROUND}; border-left: 3px solid {theme.STATUS_FAULT}; "
                 f"padding-left: {theme.SPACE_1}px;"
             )
         else:
