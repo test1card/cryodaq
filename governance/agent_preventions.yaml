@@ -3731,6 +3731,8 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_checks_every_timeout_handler_exit
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_broad_timeout_handlers_as_timeout_handlers
+        ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_active_guard_execution_rejects_skip_xfail_deselection_collect_only_and_warnings
         ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_open_reopened_and_closed_guards_execute_while_expired_does_not
@@ -5882,6 +5884,8 @@ records:
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_restores_both_reply_queue_put_attributes_after_success
         ci_partition: core
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_terminal_drain_accounts_reply_published_during_owner_settlement
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
         ci_partition: core
     red_evidence: original_partial_return_error_path_queue_leak_permissive_identity_accounting_success_only_cleanup_safe_queue_cleanup_omission_prejoin_terminal_drain_and_exceptional_safe_queue_leak_mutants_failed_their_exact_behavioral_guards_2026_08_01_pending_immutable_capture
     green_evidence: pending
