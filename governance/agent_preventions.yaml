@@ -232,6 +232,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: the_t_0_admission_t_10_suppression_t_35_late_delivery_t_41_return_control_stayed_FALSE_when_confirmed_delivery_refreshed_activity_and_the_returning_source_event_was_lost_2026_08_13
     green_evidence: pending
+  - id: NARRATION-GUARD-QUIET-GAP-FALSE-GREEN-341
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_quiet_gap_clears_suppression_before_escalation_retirement
+    ci_partition: agents
+    red_evidence: the_quiet_gap_regression_was_green_with_the_suppression_defect_restored_so_the_suite_missed_that_a_quiet_gap_must_clear_suppression_before_escalation_retirement_2026_08_13
+    green_evidence: pending
   - id: ARCHIVE-LOADER-PATH-FALSE-GREEN-328
     status: open
     scope: product_contract
