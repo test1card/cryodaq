@@ -489,6 +489,12 @@ def _identifier(value: object, *, field: str) -> str:
     if _ID_RE.fullmatch(value) is None:
         raise ValueError(f"{field} contains unsupported characters")
     if field in _PRIVATE_IDENTIFIER_FIELDS:
+        if (
+            field == "bundle_id"
+            and re.fullmatch(r"[a-z]{3,}", value.casefold()) is not None
+            and value.casefold() not in _PUBLIC_TECHNICAL_IDENTIFIER_SEGMENTS
+        ):
+            raise ValueError("bundle_id cannot use an unrepresentable private identifier")
         segments = tuple(part for part in re.split(r"[._-]+", value.casefold()) if part)
         segment_set = frozenset(segments)
         has_private_role_segment = len(segments) > 1 and bool(segment_set.intersection(_PRIVATE_IDENTIFIER_SEGMENTS))
@@ -1259,13 +1265,36 @@ def _evidence_document(capture: BundleCapture) -> dict[str, object]:
     )
     scope = _canonical({"bundle_id": scope_id, "created_at": evidence["created_at"]})
     pseudonyms: dict[str, str] = {}
+    pending_values: set[str] = set()
+    reserved_pseudonyms: set[str] = set()
+
+    def collect_identifiers(value: object) -> None:
+        if type(value) is str:
+            if _PENDING_PSEUDONYM_RE.fullmatch(value) is not None:
+                pending_values.add(value)
+            elif _PSEUDONYM_RE.fullmatch(value) is not None:
+                reserved_pseudonyms.add(value)
+        elif type(value) is list:
+            for item in value:
+                collect_identifiers(item)
+        elif type(value) is dict:
+            for item in value.values():
+                collect_identifiers(item)
+
+    collect_identifiers(evidence)
+    ordinal = 0
+    for value in sorted(pending_values):
+        while True:
+            digest = hashlib.sha256(scope + ordinal.to_bytes(4, "big")).hexdigest()[:24]
+            ordinal += 1
+            pseudonym = f"redacted-id-{digest}"
+            if pseudonym not in reserved_pseudonyms:
+                pseudonyms[value] = pseudonym
+                reserved_pseudonyms.add(pseudonym)
+                break
 
     def seal(value: object) -> object:
         if type(value) is str and _PENDING_PSEUDONYM_RE.fullmatch(value) is not None:
-            if value not in pseudonyms:
-                ordinal = len(pseudonyms)
-                digest = hashlib.sha256(scope + ordinal.to_bytes(4, "big")).hexdigest()[:24]
-                pseudonyms[value] = f"redacted-id-{digest}"
             return pseudonyms[value]
         if type(value) is list:
             return [seal(item) for item in value]

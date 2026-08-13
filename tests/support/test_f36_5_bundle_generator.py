@@ -517,6 +517,45 @@ def test_unknown_identifier_pseudonyms_cannot_be_recovered_from_sha256() -> None
     assert bob_pseudonym != f"redacted-id-{hashlib.sha256(b'bob').hexdigest()[:24]}"
 
 
+def test_unknown_identifier_pseudonyms_are_independent_of_input_order() -> None:
+    first = _minimal_capture(
+        versions=(SoftwareVersion("alice", "1.0"), SoftwareVersion("bob", "2.0")),
+    )
+    reversed_order = _minimal_capture(
+        versions=(SoftwareVersion("bob", "2.0"), SoftwareVersion("alice", "1.0")),
+    )
+
+    first_bundle = build_support_bundle(first)
+    reversed_bundle = build_support_bundle(reversed_order)
+
+    assert first_bundle.manifest_sha256 == reversed_bundle.manifest_sha256
+    assert first_bundle.artifacts[1].content == reversed_bundle.artifacts[1].content
+
+
+@pytest.mark.parametrize("bundle_id", ("alice", "bob"))
+def test_unrepresentable_private_bundle_ids_are_rejected(bundle_id: str) -> None:
+    with pytest.raises(ValueError, match="unrepresentable private identifier"):
+        _minimal_capture(bundle_id=bundle_id)
+
+
+def test_raw_pseudonym_cannot_collide_with_generated_identifier() -> None:
+    scope = json.dumps(
+        {"bundle_id": "bundle-v1", "created_at": "2026-07-14T12:00:00.000000Z"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    reserved = f"redacted-id-{hashlib.sha256(scope + (0).to_bytes(4, 'big')).hexdigest()[:24]}"
+    capture = _minimal_capture(
+        bundle_id="bundle-v1",
+        versions=(SoftwareVersion("alice", "1.0"), SoftwareVersion(reserved, "2.0")),
+    )
+
+    evidence = _evidence(build_support_bundle(capture))
+
+    assert len({item["component"] for item in evidence["versions"]}) == 2
+    assert reserved in {item["component"] for item in evidence["versions"]}
+
+
 def test_redaction_category_embedded_absolute_user_path_is_removed() -> None:
     """Category: paths — an absolute user path stays redacted when glued to hostile text."""
     private_path = "/home/alice/private/run.log"
