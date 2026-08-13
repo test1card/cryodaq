@@ -23,6 +23,14 @@ from cryodaq.storage.cold_rotation import seconds_until_next
 logger = logging.getLogger("cryodaq.engine")
 
 
+class _SettledAwaitableError(asyncio.CancelledError):
+    """An awaitable failed after caller cancellation was recorded."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
 # ─────────────────────── Alarm-v2 feed + ring buffer ──────────────────────
 
 
@@ -132,6 +140,14 @@ async def _await_settled(awaitable: Any) -> tuple[Any, bool]:
                 return task.result(), True
             except asyncio.CancelledError:
                 return None, True
+            except Exception as exc:
+                raise _SettledAwaitableError(exc) from exc
+        except Exception as exc:
+            if cancellation_pending:
+                if task.done():
+                    task.exception()
+                raise _SettledAwaitableError(exc) from exc
+            raise
 
 
 async def _alarm_v2_feed_loop(

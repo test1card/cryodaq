@@ -7183,6 +7183,7 @@ async def _run_engine(
         label="durable_attention_history_feed",
         rollback=attention_history_feed.stop,
     )
+    alarm_v2_state_mgr.seed_activation_sequence(attention_history_feed.durable_activation_sequence or 0)
     # Called directly rather than through startup.call: two guards bind this site.
     # test_operator_snapshot_production requires the literal call in _run_engine's
     # source, and test_engine_b3_structure forbids nested callables there, so neither

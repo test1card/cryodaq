@@ -700,6 +700,14 @@ class AlarmStateManager:
             raise ValueError("experiment_id must be non-empty text or None")
         self._bound_experiment_id = experiment_id
 
+    def seed_activation_sequence(self, sequence: int) -> None:
+        """Restore the durable activation identity before producing alarms."""
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("activation sequence must be a non-negative integer")
+        if self._activation_sequence != 0:
+            raise RuntimeError("activation sequence is already in use")
+        self._activation_sequence = sequence
+
     def process(
         self,
         alarm_id: str,
