@@ -30,7 +30,7 @@ ACCENT_500: "#95a3ff"
 ACCENT_600: "#b8c0ff"
 
 # Text on colored backgrounds
-ON_PRIMARY: "#e8eaf0"
+ON_PRIMARY: "#141210"
 ON_DESTRUCTIVE: "#e8eaf0"
 
 # Status palette (LOCKED — identical across all bundled themes; one-time

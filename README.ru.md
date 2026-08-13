@@ -393,8 +393,10 @@ cryodaq-rag-search               # семантический поиск по б
 - `config/sinks.yaml.example` — sinks (vault-заметки, webhook) на finalize
 - `config/web.local.yaml.example` — шаблон токена FastAPI write-endpoint'ов
   (`web.local.yaml` — gitignored)
-- `config/themes/*.yaml` — bundled GUI theme packs; выбор хранится в gitignored
-  `config/settings.local.yaml`
+- `config/themes/*.yaml` — встроенные пакеты тем GUI; тема по умолчанию —
+  `default_cool`. Чтобы выбрать для этой установки другую тему со следующего
+  запуска, укажите `theme: warm_stone` (или ID другого пакета) в исключённом
+  из Git `config/settings.local.yaml`
 - `config/experiment_templates/*.yaml` — шаблоны типов экспериментов
 
 Большинство `*.local.yaml` переопределяет base-настройки. Для descriptors
