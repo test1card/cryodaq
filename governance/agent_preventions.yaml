@@ -3729,6 +3729,8 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_checks_every_timeout_handler_exit
+        ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_active_guard_execution_rejects_skip_xfail_deselection_collect_only_and_warnings
         ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_open_reopened_and_closed_guards_execute_while_expired_does_not

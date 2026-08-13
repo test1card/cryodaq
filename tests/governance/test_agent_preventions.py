@@ -159,21 +159,29 @@ def _is_publication_discovery_wait(call: ast.Call, queue_get_aliases: set[str]) 
 
 
 def _swallows_timeout_handler(handler: ast.ExceptHandler) -> bool:
-    def can_complete_normally(statements: list[ast.stmt]) -> bool:
-        if not statements:
-            return True
-        statement = statements[-1]
-        if isinstance(statement, ast.Raise):
-            return False
-        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
-            return _qualified_name(statement.value.func) != ("pytest", "fail")
-        if isinstance(statement, ast.If):
-            return can_complete_normally(statement.body) or (
-                can_complete_normally(statement.orelse) if statement.orelse else True
-            )
-        return True
+    def flow(statements: list[ast.stmt]) -> tuple[bool, bool]:
+        swallows = False
+        for statement in statements:
+            if isinstance(statement, ast.Raise):
+                return swallows, False
+            if isinstance(statement, ast.Return):
+                return True, False
+            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                if _qualified_name(statement.value.func) == ("pytest", "fail"):
+                    return swallows, False
+            elif isinstance(statement, ast.If):
+                body_swallows, body_falls_through = flow(statement.body)
+                else_swallows, else_falls_through = flow(statement.orelse) if statement.orelse else (False, True)
+                swallows |= body_swallows or else_swallows
+                if not body_falls_through and not else_falls_through:
+                    return swallows, False
+                continue
+            else:
+                continue
+        return swallows, True
 
-    return can_complete_normally(handler.body)
+    swallows, falls_through = flow(handler.body)
+    return swallows or falls_through
 
 
 def _sqlite_import_bindings(
@@ -1295,6 +1303,24 @@ async def under_test(queue: asyncio.Queue):
     assert len(discovery_waits) == 1
 
 
+def test_durable_ack_guard_tracks_keyword_future_in_discovery_timeout() -> None:
+    snippet = """import asyncio
+
+async def under_test(queue: asyncio.Queue):
+    try:
+        await asyncio.wait_for(fut=queue.get(), timeout=2.0)
+    except TimeoutError:
+        return
+"""
+    function = _first_function(ast.parse(snippet), "under_test")
+    discovery_waits = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and _is_publication_discovery_wait(node, set())
+    ]
+    assert len(discovery_waits) == 1
+
+
 def test_durable_ack_guard_treats_broad_timeout_handlers_as_timeout_handlers() -> None:
     for exception_clause in ("except Exception:", "except:"):
         function = _first_function(
@@ -1308,6 +1334,23 @@ def test_durable_ack_guard_treats_broad_timeout_handlers_as_timeout_handlers() -
         )
         handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
         assert "TimeoutError" in _caught_timeout_error_names(handler)
+
+
+def test_durable_ack_guard_checks_every_timeout_handler_exit() -> None:
+    function = _first_function(
+        ast.parse("""async def under_test():
+    try:
+        await asyncio.wait_for(queue.get(), timeout=5.0)
+    except TimeoutError:
+        if quiet:
+            return
+        logger.warning("waiting")
+        raise
+"""),
+        "under_test",
+    )
+    handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
+    assert _swallows_timeout_handler(handler)
 
 
 def test_durable_ack_guard_allows_diagnostic_timeout_reraise() -> None:
