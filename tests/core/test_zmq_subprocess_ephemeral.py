@@ -534,6 +534,10 @@ def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
     assert "bridge_owner_exceptions=[]" in str(failure.value)
 
 
+def test_reply_count_accepts_exact_expected_reply_set() -> None:
+    _assert_expected_reply_count(["r0", "r1", "r2"], 3)
+
+
 def test_reply_collector_returns_accounted_replies_drained_after_collection_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

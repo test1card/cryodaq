@@ -112,6 +112,8 @@ def _caught_timeout_error_names(handler: ast.ExceptHandler) -> set[str]:
                 _collect(item)
 
     _collect(handler.type)
+    if handler.type is None or names & {"Exception", "BaseException"}:
+        names.add("TimeoutError")
     return names
 
 
@@ -148,13 +150,30 @@ def _is_queue_get_call(node: ast.AST, queue_get_aliases: set[str]) -> bool:
 
 
 def _is_publication_discovery_wait(call: ast.Call, queue_get_aliases: set[str]) -> bool:
-    if _call_signature(call) != ("asyncio", "wait_for") or not call.args:
+    if _call_signature(call) != ("asyncio", "wait_for"):
         return False
-    return _is_queue_get_call(call.args[0], queue_get_aliases)
+    future = (
+        call.args[0] if call.args else next((keyword.value for keyword in call.keywords if keyword.arg == "fut"), None)
+    )
+    return _is_queue_get_call(future, queue_get_aliases) if future is not None else False
 
 
 def _swallows_timeout_handler(handler: ast.ExceptHandler) -> bool:
-    return not all(isinstance(stmt, ast.Raise) for stmt in handler.body)
+    def can_complete_normally(statements: list[ast.stmt]) -> bool:
+        if not statements:
+            return True
+        statement = statements[-1]
+        if isinstance(statement, ast.Raise):
+            return False
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            return _qualified_name(statement.value.func) != ("pytest", "fail")
+        if isinstance(statement, ast.If):
+            return can_complete_normally(statement.body) or (
+                can_complete_normally(statement.orelse) if statement.orelse else True
+            )
+        return True
+
+    return can_complete_normally(handler.body)
 
 
 def _sqlite_import_bindings(
@@ -1274,6 +1293,36 @@ async def under_test(queue: asyncio.Queue):
         if isinstance(node, ast.Call) and _is_publication_discovery_wait(node, aliases)
     ]
     assert len(discovery_waits) == 1
+
+
+def test_durable_ack_guard_treats_broad_timeout_handlers_as_timeout_handlers() -> None:
+    for exception_clause in ("except Exception:", "except:"):
+        function = _first_function(
+            ast.parse(f"""async def under_test():
+    try:
+        await asyncio.wait_for(queue.get(), timeout=5.0)
+    {exception_clause}
+        return
+"""),
+            "under_test",
+        )
+        handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
+        assert "TimeoutError" in _caught_timeout_error_names(handler)
+
+
+def test_durable_ack_guard_allows_diagnostic_timeout_reraise() -> None:
+    for statement in ('logger.warning("waiting"); raise', "pytest.fail('waiting')"):
+        function = _first_function(
+            ast.parse(f"""async def under_test():
+    try:
+        await asyncio.wait_for(queue.get(), timeout=5.0)
+    except TimeoutError:
+        {statement}
+"""),
+            "under_test",
+        )
+        handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
+        assert not _swallows_timeout_handler(handler)
 
 
 def test_all_repository_python_sources_compile_before_pytest_evidence() -> None:
