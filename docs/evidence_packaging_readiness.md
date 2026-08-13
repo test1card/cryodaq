@@ -26,7 +26,7 @@ Every template count in the Coverage column was re-derived from the immutable ch
 | 36 abort: lines | `git cat-file -p c6dc3aeb7523fa7c5e8478752573e5d2c44348a5 \| rg -c '^\s+abort:'` = 36 |
 | 36 evidence: lines | `git cat-file -p c6dc3aeb7523fa7c5e8478752573e5d2c44348a5 \| rg -c '^\s+evidence:'` = 36 |
 | 36 result: lines | `git cat-file -p c6dc3aeb7523fa7c5e8478752573e5d2c44348a5 \| rg -c '^\s+result:'` = 36; this remains a template count, not a stand count |
-| PHYSICAL gates | 24 template result markers; this remains a template count, not a stand count |
+| PHYSICAL gates | `git cat-file -p c6dc3aeb7523fa7c5e8478752573e5d2c44348a5 \| rg -c '^\s+result: PHYSICAL'` = 24, and the same command with `EXTERNALLY_EVIDENCED` = 12; 24 + 12 is exactly the 36 `result:` lines counted above, so the partition is complete and no marker is unaccounted for. The checked-in guard asserts that partition, not merely that one `result:` field exists per gate: tests/docs/test_evidence_packaging_readiness.py. This remains a template count, not a stand count |
 | Per-gate field shape | The checked-in guard checks the exact template gate set and every template block. |
 | Search for bundle execution adapter | `rg -n "def .*support.*bundle|BundleWritePlan|support.*bundle" src` returned 35 production matches, including GUI state, operator-snapshot, engine-wiring, package-export, and bundle-module surfaces. Those additional hits were inspected and are non-executing state, transport, wiring, export, or schema surfaces; no production executor was found. |
 

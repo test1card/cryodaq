@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,16 @@ def test_acceptance_checklist_has_exact_gate_set_and_fields():
     for gate_id, block in gates.items():
         for field in ("bound", "abort", "evidence", "result"):
             assert sum(line.startswith(f"  {field}:") for line in block) == 1, gate_id
+
+    # The readiness document states 24 PHYSICAL gates. Asserting only that each block
+    # carries ONE result: field leaves that number unreproducible from anything checked,
+    # which is what a reviewer found. Bind the PARTITION instead: the two result values
+    # must account for every gate, so a marker cannot be retyped without failing here.
+    results = Counter(
+        line.split(":", 1)[1].strip() for block in gates.values() for line in block if line.startswith("  result:")
+    )
+    assert sum(results.values()) == 36, results
+    assert results == Counter({"PHYSICAL": 24, "EXTERNALLY_EVIDENCED": 12}), results
 
 
 def test_procedure_parser_rejects_duplicate_opener_outside_bounded_block():
