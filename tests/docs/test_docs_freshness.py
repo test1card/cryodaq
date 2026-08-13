@@ -3129,7 +3129,8 @@ def test_tracked_text_carries_no_known_mojibake() -> None:
     assert not damaged, (
         "tracked files carry cp1251/UTF-8 mojibake: "
         f"{sorted(damaged.items())}. Repair with "
-        "text.encode('cp1251').decode('utf-8') and verify no ASCII skeleton changed."
+        "a targeted replacement of each reported mojibake signature, preserving "
+        "unaffected Unicode, and verify no ASCII skeleton changed."
     )
 
 
@@ -3166,8 +3167,7 @@ def test_tracked_files_preserves_non_ascii_paths_without_utf8_mode(tmp_path, mon
         "import test_docs_freshness as freshness; "
         "assert sys.flags.utf8_mode == 0; "
         "freshness.REPO_ROOT = Path.cwd(); "
-        "assert any(any(ord(character) > 127 for character in name) "
-        "for name in freshness._tracked_files())"
+        "assert 'café.md' in freshness._tracked_files()"
     )
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "0"
