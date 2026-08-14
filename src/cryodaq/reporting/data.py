@@ -559,7 +559,7 @@ class ReportDataExtractor:
                 unit=str(unit or ""),
                 status=str(status or ""),
             )
-            for raw_ts, instrument_id, channel, value, unit, status in rows
+            for raw_ts, instrument_id, channel, value, unit, status, *_ in rows
         ]
 
     def _load_operator_log(
