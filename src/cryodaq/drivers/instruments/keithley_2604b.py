@@ -19,7 +19,7 @@ from typing import Any
 
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
-from cryodaq.drivers.contracts import SourceOffResult, SourceSetpoint
+from cryodaq.drivers.contracts import CommandEvidence, CommandOutcome, SourceOffResult, SourceSetpoint
 from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
@@ -972,7 +972,7 @@ class Keithley2604B(InstrumentDriver):
         p_target: float,
         v_compliance: float,
         i_compliance: float,
-    ) -> None:
+    ) -> CommandOutcome:
         smu_channel = normalize_smu_channel(channel)
         runtime = self._channels[smu_channel]
 
@@ -1006,7 +1006,7 @@ class Keithley2604B(InstrumentDriver):
             if self.mock:
                 runtime.active = True
                 self._source_regulation_epoch[smu_channel] = start_token
-                return
+                return CommandOutcome(CommandEvidence.REQUESTED)
 
             # Every hazardous write is bracketed by an ownership check.  OFF
             # authority may supersede this start at any await boundary.
@@ -1041,6 +1041,7 @@ class Keithley2604B(InstrumentDriver):
             self._last_v[smu_channel] = 0.0
             self._compliance_count[smu_channel] = 0
             self._source_regulation_epoch[smu_channel] = start_token
+            return CommandOutcome(CommandEvidence.DEVICE_ACKNOWLEDGED)
         except BaseException as original_error:
             cleanup_exact = False
             cleanup_pending: asyncio.CancelledError | None = None
