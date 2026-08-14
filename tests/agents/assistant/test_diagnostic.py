@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 from cryodaq.agents.assistant.live.agent import AssistantConfig, AssistantLiveAgent
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder
 from cryodaq.agents.assistant.live.output_router import OutputRouter
+from cryodaq.agents.assistant.live.prompts import DIAGNOSTIC_SUGGESTION_USER
 from cryodaq.agents.assistant.shared.audit import AuditLogger
 from cryodaq.agents.assistant.shared.ollama_client import GenerationResult
 from cryodaq.core.event_bus import EngineEvent, EventBus
@@ -17,6 +18,22 @@ from cryodaq.core.event_bus import EngineEvent, EventBus
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_CHANNEL_HISTORY_BLOCK = "ИСТОРИЯ КАНАЛОВ (последние {lookback_min} минут):\n{channel_history}"
+
+
+def _channel_history_section(diagnostic_prompt: str, *, lookback_min: int = 60) -> str:
+    """Return exactly the rendered channel-history block of the diagnostic prompt.
+
+    The header literal is checked against the production template before it is
+    used: an assertion written against a header the template never renders
+    passes for the wrong reason and cannot fail in either direction.
+    """
+    assert _CHANNEL_HISTORY_BLOCK in DIAGNOSTIC_SUGGESTION_USER
+    header = _CHANNEL_HISTORY_BLOCK.split("{channel_history}")[0].format(lookback_min=lookback_min)
+    assert header in diagnostic_prompt, diagnostic_prompt
+    return diagnostic_prompt.split(header, 1)[1].split("\n\n", 1)[0]
 
 
 async def _drain_handler_tasks(agent: AssistantLiveAgent) -> None:
@@ -231,10 +248,33 @@ async def test_diagnostic_handles_missing_history_gracefully(tmp_path: Path) -> 
     # Both LLM calls still happen despite DB error
     assert ollama.generate.await_count == 2
     diagnostic_prompt = ollama.generate.call_args_list[1].args[0]
-    assert "данные недоступны" in diagnostic_prompt
-    assert "ИСТОРИЯ КАНАЛОВ (последние 60 мин):\nнет данных" not in diagnostic_prompt
+    assert _channel_history_section(diagnostic_prompt) == "данные недоступны"
     # Both dispatched to Telegram
     assert telegram._send_to_all.await_count == 2
+    await agent.stop()
+
+
+async def test_diagnostic_reports_authoritative_empty_history_as_no_data(tmp_path: Path) -> None:
+    """Successful but empty read → 'нет данных', the other side of the distinction.
+
+    Paired with test_diagnostic_handles_missing_history_gracefully: if either
+    branch of ContextBuilder._read_channel_history adopts the other's wording,
+    exactly one of the two nodes goes red, so the distinction cannot collapse
+    in either direction while the suite stays green.
+    """
+    empty_reader = MagicMock()
+    empty_reader.read_readings_history = AsyncMock(return_value={})
+
+    ollama = _two_call_ollama("Аларм summary.", "Диагноз: проверьте.")
+    agent, bus = _make_agent(ollama=ollama, reader=empty_reader, tmp_path=tmp_path)
+    await agent.start()
+
+    await bus.publish(_alarm_event())
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
+
+    assert ollama.generate.await_count == 2
+    diagnostic_prompt = ollama.generate.call_args_list[1].args[0]
+    assert _channel_history_section(diagnostic_prompt) == "нет данных"
     await agent.stop()
 
 
