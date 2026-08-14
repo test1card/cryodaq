@@ -414,6 +414,20 @@ async def test_c_authorized_critical_input_rename_still_works(tmp_path: Path) ->
         await manager.stop()
 
 
+def test_d_startup_rejects_misspelled_declared_critical_identity(tmp_path: Path) -> None:
+    descriptor_path, safety_path, interlocks_path = _write_fixture(
+        tmp_path,
+        critical_ids=["gaurd"],
+    )
+
+    with pytest.raises(SafetyConfigError) as exc_info:
+        _configured_manager(descriptor_path, safety_path, interlocks_path)
+
+    message = str(exc_info.value)
+    assert "gaurd" in message
+    assert "canonical identity resolution to raw emitted label" in message
+
+
 @pytest.mark.parametrize(
     ("critical_ids", "include_second_critical"),
     [
