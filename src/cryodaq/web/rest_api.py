@@ -34,13 +34,13 @@ import math
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-import yaml
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Security
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.core.alarm_ack_codec import (
     is_canonical_engine_instance_id,
     validate_alarm_ack_wire_result,
@@ -91,7 +91,7 @@ def _load_api_token() -> SecretStr | None:
     if not path.exists():
         return None
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raw = owned_safe_load(path.read_text(encoding="utf-8")) or {}
         web = raw.get("web") or {}
         token = web.get("api_token")
     except Exception:

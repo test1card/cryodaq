@@ -24,6 +24,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.core.atomic_write import atomic_write_text
 from cryodaq.instance_lock import release_lock, try_acquire_lock
 from cryodaq.report_process import ReportProcessError, ReportProcessRunner
@@ -146,7 +147,7 @@ def _read_yaml_mapping(path: Path) -> dict[str, Any] | None:
             raise ValueError("configuration file is oversized")
         if stat.st_mtime > time.time() + _FUTURE_SKEW_S:
             raise ValueError("configuration file timestamp is in the future")
-        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        payload = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
         if not isinstance(payload, dict):
             raise ValueError("configuration root must be a mapping")
         return payload

@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.channels.descriptors import ChannelRole, ChannelSafetyClass
 from cryodaq.core.housekeeping import _extract_channel_refs
 from cryodaq.core.interlock import InterlockCondition, resolve_interlock_channel_bindings
@@ -293,7 +294,7 @@ def _collect_dead_alarm_channel_refs(
         return []
     try:
         with alarms_config_path.open(encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+            data = owned_safe_load(handle) or {}
     except (OSError, yaml.YAMLError):
         return []
     if not isinstance(data, dict):
@@ -664,7 +665,7 @@ def _load_interlock_conditions(
     The validator needs only the resolved conditions, not action dispatch.
     """
     with config_path.open(encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
+        raw = owned_safe_load(handle) or {}
     entries = raw.get("interlocks", []) if isinstance(raw, dict) else []
     conditions: list[InterlockCondition] = []
     for entry in entries:

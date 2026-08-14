@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import yaml
 
-__all__ = ["OwnedSafeLoader"]
+__all__ = ["OwnedSafeLoader", "owned_safe_load"]
 
 
 class OwnedSafeLoader(yaml.SafeLoader):
@@ -55,3 +55,13 @@ class OwnedSafeLoader(yaml.SafeLoader):
     yaml_implicit_resolvers = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
     yaml_path_resolvers = dict(yaml.SafeLoader.yaml_path_resolvers)
     bool_values = dict(yaml.SafeLoader.bool_values)
+
+
+def owned_safe_load(stream: object) -> object:
+    """Parse with the package-owned SafeLoader snapshot."""
+
+    loader = OwnedSafeLoader(stream)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()

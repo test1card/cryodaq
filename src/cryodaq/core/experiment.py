@@ -22,8 +22,7 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.report_state import (
     ReportContractError,
     load_current_manifest,
@@ -1978,7 +1977,7 @@ class ExperimentManager:
         templates: dict[str, ExperimentTemplate] = {}
         for path in sorted(templates_dir.glob("*.yaml")):
             with path.open(encoding="utf-8") as handle:
-                raw = yaml.safe_load(handle) or {}
+                raw = owned_safe_load(handle) or {}
             template_id = str(raw.get("id", "")).strip()
             if not template_id:
                 raise ValueError(f"Experiment template {path} is missing 'id'.")
@@ -3002,7 +3001,7 @@ class ExperimentManager:
             return {}
         try:
             with self._instruments_config.open(encoding="utf-8") as handle:
-                return yaml.safe_load(handle) or {}
+                return owned_safe_load(handle) or {}
         except Exception as exc:
             logger.error("Failed to read instruments config: %s", exc)
             return {}

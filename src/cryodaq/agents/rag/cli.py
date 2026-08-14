@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.agents.assistant.shared.ollama_client import (
     OllamaModelMissingError,
     OllamaUnavailableError,
@@ -51,7 +52,7 @@ def _resolve_rag_config_path(override: Path | None) -> tuple[Path | None, str]:
 def _load_rag_config(path: Path | None) -> dict:
     if path is None or not path.exists():
         return {}
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
 
 
 def _find_latest_sqlite() -> Path | None:

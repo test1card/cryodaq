@@ -23,6 +23,7 @@ from typing import Any, Protocol
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.agents.assistant.report_coordinator import (
     ReportCoordinator,
     load_report_coordinator_config,
@@ -157,7 +158,7 @@ def _strict_agent_enabled(config_dir: Path) -> bool:
             raise ValueError("agent config is oversized")
         if stat.st_mtime > time.time() + _FUTURE_SKEW_S:
             raise ValueError("agent config timestamp is in the future")
-        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        payload = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
         if not isinstance(payload, dict):
             raise ValueError("agent config root must be a mapping")
         section = payload.get("agent", payload.get("gemma"))

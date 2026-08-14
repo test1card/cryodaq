@@ -22,6 +22,7 @@ from pathlib import Path
 
 import yaml
 
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.analytics.cross_experiment import (
     compute_trend,
     export_summaries_csv,
@@ -56,7 +57,7 @@ def _stage_channels(args: argparse.Namespace) -> tuple[str, str]:
     raw: object = {}
     if args.cold_channel is None or args.warm_channel is None:
         try:
-            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            raw = owned_safe_load(config_path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError) as exc:
             raise ValueError(
                 "stage channels are not configured; set cooldown.channel_cold and "

@@ -16,6 +16,8 @@ import numpy as np
 import yaml
 from numpy.polynomial import chebyshev as cheb
 
+from cryodaq._owned_yaml import owned_safe_load
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -806,7 +808,7 @@ class CalibrationStore:
     def _load_index(self) -> None:
         if self._index_path is None or not self._index_path.exists():
             return
-        payload = yaml.safe_load(self._index_path.read_text(encoding="utf-8")) or {}
+        payload = owned_safe_load(self._index_path.read_text(encoding="utf-8")) or {}
         runtime = payload.get("runtime", {})
         if isinstance(runtime, dict):
             global_mode = str(runtime.get("global_mode", "off") or "off").strip().lower()

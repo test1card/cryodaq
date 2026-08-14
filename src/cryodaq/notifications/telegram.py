@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-import yaml
 
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.notifications._secrets import SecretStr
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class TelegramNotifier:
             raise FileNotFoundError(f"Файл конфигурации уведомлений не найден: {config_path}")
 
         with config_path.open(encoding="utf-8") as fh:
-            raw: dict[str, Any] = yaml.safe_load(fh)
+            raw: dict[str, Any] = owned_safe_load(fh)
 
         tg = raw["telegram"]
         return cls(

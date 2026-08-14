@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.agents.assistant.shared.ollama_client import validate_loopback_origin
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ def load_intro_config() -> IntroConfig:
 
         agent_yaml = get_config_dir() / "agent.yaml"
         with agent_yaml.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = yaml.load(fh, Loader=OwnedSafeLoader)
         # Try agent.* namespace (v0.45.0+), fall back to gemma.* (legacy)
         if "agent" in raw:
             section = raw["agent"]

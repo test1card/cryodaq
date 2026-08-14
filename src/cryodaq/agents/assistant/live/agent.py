@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.agents.assistant.live.context_builder import ContextBuilder, normalize_sensor_health_summary
 from cryodaq.agents.assistant.live.output_router import OutputRouter, OutputTarget, _is_delivered_outcome
 from cryodaq.agents.assistant.live.prompts import (
@@ -175,7 +176,7 @@ class AssistantConfig:
         """Load from YAML string; handles agent.* and legacy gemma.* namespaces."""
         import yaml  # noqa: PLC0415
 
-        raw = yaml.safe_load(content) or {}
+        raw = yaml.load(content, Loader=OwnedSafeLoader) or {}
         return cls._from_raw(raw)
 
     @classmethod
@@ -183,7 +184,7 @@ class AssistantConfig:
         """Load from agent.yaml file; handles agent.* and legacy gemma.* namespaces."""
         import yaml  # noqa: PLC0415
 
-        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        raw = yaml.load(Path(path).read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
         return cls._from_raw(raw)
 
     @classmethod

@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.agents.rag.source_labels import prettify_source_label
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays._assistant_chat_widget import AssistantChatPanel
@@ -89,7 +90,7 @@ def _load_categories(config_path: Path | None = None) -> list[dict[str, Any]]:
     if not config_path.exists():
         return _builtin_categories()
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        raw = yaml.load(config_path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader) or {}
     except yaml.YAMLError:
         logger.warning("rag_categories.yaml: parse error, using built-ins", exc_info=True)
         return _builtin_categories()

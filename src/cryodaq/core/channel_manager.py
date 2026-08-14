@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.paths import get_config_dir as _get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ class ChannelManager:
             )
         try:
             with self._config_path.open(encoding="utf-8") as fh:
-                raw = yaml.safe_load(fh)
+                raw = owned_safe_load(fh)
         except yaml.YAMLError as exc:
             raise ChannelConfigError(
                 f"channels.yaml at {self._config_path}: YAML parse error — {exc}"

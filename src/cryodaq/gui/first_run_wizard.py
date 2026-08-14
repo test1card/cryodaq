@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 from yaml.tokens import AliasToken, AnchorToken
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.drivers.registry import (
     ConfigField,
     DriverAuthority,
@@ -192,7 +193,7 @@ def _bounded_compound_value(text: str, kind: ValueKind) -> object:
             for item in node.value
         ):
             raise DriverRegistryError("ожидается список плоских описаний каналов ASC")
-    return yaml.safe_load(text)
+    return yaml.load(text, Loader=OwnedSafeLoader)
 
 
 def _parse_field_value(widget: SetupWidget, schema: ConfigField) -> object:

@@ -27,6 +27,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.core.broker import DataBroker, PublishedReading
 from cryodaq.core.descriptor_transport import encode_descriptor_envelope
 from cryodaq.core.physical_policy import PhysicalPolicyReceipt, receipt_for_applied_policy
@@ -387,7 +388,7 @@ class InterlockEngine:
         if snapshot is None:
             snapshot = config_path.read_bytes()
         try:
-            raw: dict[str, Any] = yaml.safe_load(snapshot)
+            raw: dict[str, Any] = owned_safe_load(snapshot)
         except yaml.YAMLError as exc:
             raise InterlockConfigError(f"interlocks.yaml at {config_path}: YAML parse error — {exc}") from exc
 
