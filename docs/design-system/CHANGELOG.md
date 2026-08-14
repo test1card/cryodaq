@@ -23,8 +23,8 @@ the design-system-specific definitions of "breaking" from
 - Added the implemented ToolRail keyboard-focus state: a 2 px Warm Stone
   ACCENT ring at 6.41:1 on SURFACE_PANEL, independent of the 3 px selected
   left rail. The generic FOCUS_RING pair measures 2.58:1 there and is refused.
-- Required custom enabled-button QSS to include an object-specific disabled
-  selector and a generic unavailability explanation.
+- Required `#phaseCreateBtn` custom enabled-button QSS to include its own
+  disabled selector and a generic unavailability explanation.
 
 ### Corrected
 
