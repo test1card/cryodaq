@@ -166,6 +166,9 @@ python scripts/check_lock_drift.py
 - [ ] Терминология жизненного цикла карточки эксперимента синхронизирована
 - [ ] Терминология режимов `Эксперимент / Отладка` синхронизирована
 - [ ] Целевые названия отчётов `report_raw.pdf` / `report_editable.docx` синхронизированы
+- [ ] Запущен release gate; если он завершился с ошибкой, регенерировать производную пару
+      `docs/architecture-montana-important.svg` / `docs/current_candidate_metrics.md`, заново вывести
+      changed-Python count, закоммитить изменения и повторно запустить release gate
 
 Проверить:
 

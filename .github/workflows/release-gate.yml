@@ -1,0 +1,41 @@
+name: Release Gate
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  whole-tree-artifact-freshness:
+    name: whole-tree artifact freshness
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install pytest and the YAML parser
+        run: pip install "pytest>=8" "pyyaml>=6"
+
+      # KNOWN RESIDUAL, recorded deliberately rather than left silent (fable, 2026-08-14).
+      # This is PLAIN pytest.  It does NOT invoke `tools.ci_active_checkout_runner`, which is what
+      # `main.yml:103-113` runs for the `remaining` suite and what proves a registered guard was not
+      # skipped, xfailed or deselected.  Two of the tests below are REGISTERED guards, so a later
+      # skip marker on either would leave this gate GREEN -- the shape named by
+      # `guard_removed_skipped_xfailed_deselected_or_nondefault: reopen`.
+      #
+      # The plumbing exists: `DEFAULT_CI_SUITES` accepts `release` and `active_guard_specs` selects
+      # by `ci_partition`.  It is not wired here because the strict runner needs a revision and a
+      # trusted base, and on a TAG PUSH those are not the values `main.yml` uses for a pull request.
+      # Guessing them would produce a proof that looks stronger than it is.
+      #
+      # Until it is wired, this gate proves the artifacts are fresh; it does NOT prove the guards
+      # that check them ran unskipped.
+      - name: Verify whole-tree artifacts
+        run: pytest tests/release -v

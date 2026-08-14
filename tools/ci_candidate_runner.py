@@ -191,6 +191,7 @@ _SELECTIONS: dict[str, tuple[tuple[str, ...], ...]] = {
             "--ignore=tests/periodic",
             "--ignore=tests/reporting",
             "--ignore=tests/notifications",
+            "--ignore=tests/release",
         ),
     ),
 }

@@ -26,7 +26,13 @@ from tools.ci_execution_roots import checkout_execution_selection as _checkout_e
 from tools.governance_contract import validate_registry
 
 ACTIVE_GUARD_STATUSES = frozenset({"open", "reopened", "closed"})
-DEFAULT_CI_SUITES = ("agents", "core", "gui", "remaining")
+# OB-006 added "release", the tag-triggered job that runs the whole-tree artifact checks.
+# AUDITED BEFORE EXTENDING, because this tuple sits in the guard EXECUTION path rather than in
+# validation: every use is a membership test (:144, :170, :277) or an argparse `choices`
+# (:484), and NOTHING iterates it. So a name here is a permitted value and does not create a
+# per-pull-request obligation. If a site ever walks this tuple demanding evidence per suite,
+# that reasoning fails and the release entry must be reconsidered.
+DEFAULT_CI_SUITES = ("agents", "core", "gui", "remaining", "release")
 GUARD_PLATFORMS = frozenset({"posix", "windows"})
 FORBIDDEN_GUARD_MARKERS = frozenset({"skip", "timeout", "xfail"})
 RECEIPT_PREFIX = "CRYODAQ_ACTIVE_GUARD_RECEIPT "
@@ -102,6 +108,12 @@ def suite_for_node(node: str) -> str:
         return "gui"
     if path.startswith(("tests/agents/", "tests/periodic/", "tests/reporting/", "tests/notifications/")):
         return "agents"
+    if path.startswith("tests/release/"):
+        # OB-006.  The `remaining` selection carries `--ignore=tests/release`, so a node here must
+        # NOT resolve to `remaining`: that would declare a guard as running in a job which
+        # explicitly skips it, and the registry-versus-selection check exists to catch exactly
+        # that divergence.  `release` names the tag-triggered job that does run it.
+        return "release"
     if not path.startswith("tests/"):
         raise GuardExecutionError(f"candidate guard is not a pytest node: {node}")
     return "remaining"
