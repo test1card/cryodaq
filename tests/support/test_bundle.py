@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 import pytest
 
 from cryodaq.support import SCHEMA_VERSION, UnavailableSource
+from cryodaq.support import bundle as bundle_module
 from cryodaq.support.bundle import (
     BundleArtifact,
     BundleCapture,
@@ -198,6 +199,48 @@ def test_hostile_unicode_controls_and_formula_prefixes_are_neutralized() -> None
     assert SoftwareVersion("component", "ё").version == "ё"
 
 
+def test_pending_record_pseudonyms_are_idempotent_and_remain_distinct() -> None:
+    pending = "redacted-pending-" + "a" * 24
+    assert bundle_module._identifier(pending, field="event_id") == pending
+
+    records = tuple(
+        EvidenceRecord.from_payload(
+            "log",
+            {
+                "event_id": event_id,
+                "event_code": "worker.started",
+                "level": "info",
+                "observed_at": OBSERVED_AT,
+            },
+        )
+        for event_id in ("compressorx", "pumpx")
+    )
+
+    identities = tuple(json.loads(record.payload_json)["event_id"] for record in records)
+    assert identities[0].startswith("redacted-pending-")
+    assert identities[0] != identities[1]
+    assert _capture(records=records).records == records
+
+
+@pytest.mark.parametrize("version", ["al\u200bice", "1.0+al\u200bice"])
+def test_version_person_screening_uses_control_stripped_text(version: str) -> None:
+    assert SoftwareVersion("driver-pack", version).version == "<redacted:private>"
+
+
+def test_snapshot_records_reject_non_protocol_unavailable_state() -> None:
+    with pytest.raises(ValueError, match="state is not an allowed public value"):
+        EvidenceRecord.from_payload(
+            "integrity",
+            {
+                "source_id": "data-integrity",
+                "state": "unavailable",
+                "storage": "unavailable",
+                "reason_code": "database_locked",
+                **_snapshot_fields(),
+            },
+        )
+
+
 def test_degraded_capture_retains_explicit_unavailable_fields() -> None:
     bundle = build_support_bundle(
         _capture(
@@ -206,7 +249,7 @@ def test_degraded_capture_retains_explicit_unavailable_fields() -> None:
                     "integrity",
                     {
                         "source_id": "data-integrity",
-                        "state": "unavailable",
+                        "state": "fault",
                         "storage": "unavailable",
                         "reason_code": "database_locked",
                         **_snapshot_fields(),
@@ -386,7 +429,7 @@ def test_capture_rejects_mutable_timezone_without_invoking_it() -> None:
 def test_unavailable_fields_cannot_contradict_present_evidence() -> None:
     health = EvidenceRecord.from_payload(
         "health",
-        {"source_id": "engine", "state": "unavailable", **_snapshot_fields(role="child")},
+        {"source_id": "engine", "state": "fault", **_snapshot_fields(role="child")},
     )
     with pytest.raises(ValueError, match="cannot also contain"):
         BundleCapture(

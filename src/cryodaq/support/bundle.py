@@ -427,14 +427,13 @@ _ENUM_RECORD_FIELDS: Final = {
     "record_role": frozenset({"child", "summary"}),
     "severity": frozenset({"caution", "fault", "warning"}),
     "snapshot_mode": frozenset({"live", "replay"}),
-    "state": frozenset({"caution", "disconnected", "fault", "ok", "stale", "unavailable", "warning"}),
+    "state": frozenset({"caution", "disconnected", "fault", "ok", "stale", "warning"}),
     "storage": frozenset({"available", "unavailable", "unknown"}),
 }
 _STATE_RANK: Final = {
     "ok": 0,
     "stale": 1,
     "disconnected": 2,
-    "unavailable": 2,
     "caution": 3,
     "warning": 4,
     "fault": 5,
@@ -474,7 +473,7 @@ def _exact_text(value: object, *, field: str, max_bytes: int = 512) -> str:
 
 def _identifier(value: object, *, field: str) -> str:
     value = _exact_text(value, field=field, max_bytes=128)
-    if _PSEUDONYM_RE.fullmatch(value) is not None:
+    if _PSEUDONYM_RE.fullmatch(value) is not None or _PENDING_PSEUDONYM_RE.fullmatch(value) is not None:
         return value
     if value in frozenset().union(*_SUMMARY_IDENTITIES.values()):
         return value
@@ -913,6 +912,10 @@ def _canonical(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _version_privacy_screen_text(value: str) -> str:
+    return value.translate(str.maketrans("", "", "\u200b\u200c\u200d\ufeff"))
+
+
 def _safe_version_text(value: str) -> str:
     safe = _safe_text(value)
     if _VERSION_CREDENTIAL_RE.search(value):
@@ -943,18 +946,16 @@ def _safe_version_text(value: str) -> str:
             break
         if _VERSION_CREDENTIAL_RE.search(decoded):
             raise ValueError("encoded credential-shaped version text is not permitted")
-        decoded_safe = _safe_text(decoded)
-        if decoded_safe != decoded:
-            return decoded_safe
+        decoded_screened = _version_privacy_screen_text(decoded)
         if (
-            _VERSION_PERSON_RE.fullmatch(decoded.strip()) is not None
-            or _VERSION_PERSON_SUFFIX_RE.fullmatch(decoded.strip()) is not None
+            _VERSION_PERSON_RE.fullmatch(decoded_screened.strip()) is not None
+            or _VERSION_PERSON_SUFFIX_RE.fullmatch(decoded_screened.strip()) is not None
         ):
             return "<redacted:private>"
         current = decoded
     if (
-        _VERSION_PERSON_RE.fullmatch(value.strip()) is not None
-        or _VERSION_PERSON_SUFFIX_RE.fullmatch(value.strip()) is not None
+        _VERSION_PERSON_RE.fullmatch(_version_privacy_screen_text(value).strip()) is not None
+        or _VERSION_PERSON_SUFFIX_RE.fullmatch(_version_privacy_screen_text(value).strip()) is not None
     ):
         return "<redacted:private>"
     return safe

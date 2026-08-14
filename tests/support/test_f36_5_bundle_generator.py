@@ -381,7 +381,7 @@ def test_redaction_category_hostile_strings_neutralized() -> None:
         # Formula injection prefix
         ('  =HYPERLINK("x")', '  <formula>HYPERLINK("x")'),
         # Zero-width space (invisible separator)
-        ("nor​mal", "nor<U+200B>mal"),
+        ("nor​mal", "<redacted:private>"),
     ]
     for raw, expected in cases:
         sv = SoftwareVersion("component", raw)
