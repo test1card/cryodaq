@@ -45,8 +45,15 @@ class _Response:
     whichever pair came last.
     """
 
-    def __init__(self, payload: Any = None, status: int = 200, raw_text: str | None = None) -> None:
+    def __init__(
+        self,
+        payload: Any = None,
+        status: int = 200,
+        raw_text: str | None = None,
+        content_type: str = "application/json",
+    ) -> None:
         self.status = status
+        self.content_type = content_type
         self._text = raw_text if raw_text is not None else json.dumps(payload)
 
     async def __aenter__(self) -> _Response:
@@ -68,9 +75,15 @@ class _Session:
         return self._response
 
 
-def _notifier(payload: Any, monkeypatch: pytest.MonkeyPatch, *, raw_text: str | None = None) -> TelegramNotifier:
+def _notifier(
+    payload: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    raw_text: str | None = None,
+    content_type: str = "application/json",
+) -> TelegramNotifier:
     notifier = TelegramNotifier(bot_token="token", chat_id=REQUESTED_CHAT)
-    session = _Session(_Response(payload, raw_text=raw_text))
+    session = _Session(_Response(payload, raw_text=raw_text, content_type=content_type))
 
     async def _stub_session(self: TelegramNotifier) -> _Session:
         return session
@@ -134,18 +147,63 @@ async def test_the_upper_bound_the_sibling_sender_accepts_is_accepted_here_too(
     assert await notifier.send_message(REQUESTED_CHAT, "alarm") == "service_reported_delivered"
 
 
+DUPLICATE_AUTHORITY_ACKNOWLEDGEMENTS = [
+    pytest.param(
+        f'{{"ok": false, "ok": true, "result": {{"message_id": 7, "chat": {{"id": {REQUESTED_CHAT}}}}}}}',
+        id="duplicate-ok",
+    ),
+    pytest.param(
+        f'{{"ok": true, "result": {{"message_id": 0, "chat": {{"id": 222}}}}, '
+        f'"result": {{"message_id": 7, "chat": {{"id": {REQUESTED_CHAT}}}}}}}',
+        id="duplicate-result",
+    ),
+    pytest.param(
+        f'{{"ok": true, "result": {{"message_id": 0, "message_id": 7, "chat": {{"id": {REQUESTED_CHAT}}}}}}}',
+        id="duplicate-message-id",
+    ),
+    pytest.param(
+        f'{{"ok": true, "result": {{"message_id": 7, "chat": {{"id": 222}}, "chat": {{"id": {REQUESTED_CHAT}}}}}}}',
+        id="duplicate-chat",
+    ),
+    pytest.param(
+        f'{{"ok": true, "result": {{"message_id": 7, "chat": {{"id": 222, "id": {REQUESTED_CHAT}}}}}}}',
+        id="duplicate-chat-id",
+    ),
+    pytest.param(
+        f'{{"ok": true, "result": {{"message_id": 0, "message_id": 7, '
+        f'"chat": {{"id": 222, "id": {REQUESTED_CHAT}}}}}}}',
+        id="duplicate-message-id-and-chat-id-exploit",
+    ),
+]
+"""Every authority position on this path, each one delivery-shaped under last-key-wins.
+
+Drop the duplicate from any body here and it is a valid acknowledgement for `REQUESTED_CHAT`,
+which is exactly what makes each one a false-green candidate rather than a malformed body.
+The identifiers match `tests/notifications/test_delivery_acknowledgement.py`, which enumerates
+the same class for the two sibling sender methods; naming them identically is deliberate, so
+that a position covered there and missing here is visible by comparison.
+"""
+
+
 @pytest.mark.asyncio
-async def test_a_duplicate_destination_key_is_not_a_delivery_claim(
+@pytest.mark.parametrize("duplicated", DUPLICATE_AUTHORITY_ACKNOWLEDGEMENTS)
+async def test_a_duplicate_authority_key_is_not_a_delivery_claim(
     monkeypatch: pytest.MonkeyPatch,
+    duplicated: str,
 ) -> None:
-    """An acknowledgement that names the chat TWICE proves nothing about where the message went.
+    """An acknowledgement that names an authority key TWICE proves nothing about the delivery.
 
     `resp.json()` keeps the LAST value for a repeated key, so a body carrying
     `"chat": {"id": 222}, "chat": {"id": 111}` decodes to the requested chat and satisfies the
     destination check added for OC-026 -- while the acknowledgement itself is ambiguous.  The
     convenient reading won by default.
 
-    The sibling sender already refused this through
+    THE PARAMETERS ARE THE POINT, not one instance of it.  `ok`, `result`, `result.message_id`,
+    `result.chat` and `result.chat.id` are each load-bearing for the delivery claim, so a
+    decoder that special-cased only the repeated-`chat` spelling would keep a single-body guard
+    green while the other four positions still collapsed to the convenient last value.
+
+    The sibling sender already refused the whole class through
     `assistant_main._unique_telegram_acknowledgement_object`.  The two senders disagreeing about
     what counts as an acknowledgement is the defect OC-026 opened with, so this is the same
     finding recurring one layer down rather than a new hardening idea.
@@ -154,15 +212,76 @@ async def test_a_duplicate_destination_key_is_not_a_delivery_claim(
     message.  What is unknown is what the service did with it, and that tier exists to say so.
     """
 
-    duplicated = (
-        f'{{"ok": true, "result": {{"message_id": 7, "chat": {{"id": 222}}, "chat": {{"id": {REQUESTED_CHAT}}}}}}}'
-    )
     notifier = _notifier(None, monkeypatch, raw_text=duplicated)
 
     outcome = await notifier.send_message(REQUESTED_CHAT, "alarm")
 
     assert outcome == "transport_accepted", (
-        "a duplicate destination key resolved to a delivery claim; the acknowledgement cannot "
-        "establish which chat received the message, and an alarm notifier must not report that "
-        "the operator was told when nothing establishes it"
+        "a duplicate authority key resolved to a delivery claim; the acknowledgement cannot "
+        "establish that this message reached the requested chat, and an alarm notifier must not "
+        "report that the operator was told when nothing establishes it"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/html", "text/plain", "application/octet-stream", "text/json", ""],
+)
+async def test_a_non_json_media_type_is_not_a_delivery_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
+) -> None:
+    """A JSON-shaped body served under a non-JSON media type is not delivery evidence.
+
+    `await resp.json()` raises `aiohttp.ContentTypeError` for these responses, so before the
+    duplicate-key hook was introduced this sender answered `transport_accepted` for them.
+    Decoding the text directly is what the hook requires and it silently dropped that refusal,
+    which would let an HTTP 200 `text/html` page from an intervening proxy -- a captive portal,
+    an error page, anything that happens to carry an acknowledgement-shaped body -- resolve to
+    `service_reported_delivered`.  Hardening one ambiguity must not widen another.
+
+    `application/octet-stream` is here because that is what aiohttp reports when the response
+    carries no `Content-Type` header at all, and `text/json` because the accepted set is
+    anchored at `application/`, not a substring search for "json".
+    """
+
+    body = json.dumps(_ack({"message_id": 7, "chat": {"id": REQUESTED_CHAT}}))
+    notifier = _notifier(None, monkeypatch, raw_text=body, content_type=content_type)
+
+    outcome = await notifier.send_message(REQUESTED_CHAT, "alarm")
+
+    assert outcome == "transport_accepted", (
+        "a non-JSON media type resolved to a delivery claim; the same body under "
+        "`application/json` is the delivery case above, so what is being asserted is that the "
+        "media type still gates the decode"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/json", "application/vnd.api+json", "application/jsonx"],
+)
+async def test_the_json_media_types_aiohttp_accepts_are_still_accepted_here(
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
+) -> None:
+    """The control for the test above: the media-type gate must not have narrowed the set.
+
+    `aiohttp`'s own `resp.json()` accepts `application/json` and the `+json` structured-suffix
+    forms.  Without this the previous guard would also pass under a gate that refused every
+    body, which would break the notifier while looking like hardening.
+
+    `application/jsonx` IS ACCEPTED, and that is not an oversight to fix here.  aiohttp's
+    `json_re` is unanchored at its right edge, so `resp.json()` accepted that media type before
+    this branch existed; restoring the check means restoring exactly what it accepted, and
+    narrowing it instead would make this sender refuse acknowledgements the transport has always
+    honoured -- a behaviour change smuggled in under a hardening change.
+    """
+
+    notifier = _notifier(
+        _ack({"message_id": 7, "chat": {"id": REQUESTED_CHAT}}), monkeypatch, content_type=content_type
+    )
+
+    assert await notifier.send_message(REQUESTED_CHAT, "alarm") == "service_reported_delivered"

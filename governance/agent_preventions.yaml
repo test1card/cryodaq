@@ -3239,6 +3239,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: notification_suite_passed_while_TelegramNotifier_send_message_accepted_an_acknowledgement_for_the_wrong_chat_until_the_public_send_message_path_guard_was_added_pending_immutable_capture
     green_evidence: pending
+  - id: NOTIFIER-ACKNOWLEDGEMENT-DUPLICATE-AUTHORITY-FALSE-GREEN-340
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_notifier_delivery_binding.py::test_a_duplicate_authority_key_is_not_a_delivery_claim
+    ci_partition: agents
+    red_evidence: notification_suite_passed_while_TelegramNotifier_send_message_resolved_a_duplicate_ok_result_message_id_chat_or_chat_id_to_the_convenient_last_value_and_reported_a_delivery_claim_for_the_requested_chat_until_the_unique_key_decoder_was_added_2026_08_13_pending_immutable_capture
+    green_evidence: pending
 
   - id: EVIDENCE-PACKAGING-READINESS-FALSE-GREEN-242
     status: open
@@ -4923,6 +4931,10 @@ records:
       - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_bound_a_dribbling_200_acknowledgement_body
         ci_partition: agents
       - node: tests/notifications/test_notifier_delivery_binding.py::test_a_well_formed_acknowledgement_for_the_wrong_chat_is_not_delivery
+        ci_partition: agents
+      - node: tests/notifications/test_notifier_delivery_binding.py::test_a_duplicate_authority_key_is_not_a_delivery_claim
+        ci_partition: agents
+      - node: tests/notifications/test_notifier_delivery_binding.py::test_a_non_json_media_type_is_not_a_delivery_claim
         ci_partition: agents
     red_evidence: http_500_egress_before_audit_unwired_shutdown_aggregate_sender_and_query_chart_before_audit_reproductions_pending_immutable_capture
     green_evidence: pending

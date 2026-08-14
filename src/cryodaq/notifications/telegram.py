@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,15 @@ logger = logging.getLogger(__name__)
 
 # Telegram message ids are JSON integers; the live adapters accept 1..2**63-1.
 _MAX_JSON_INTEGER = 2**63 - 1
+
+# `await resp.json()` refuses a body whose media type is not JSON -- it raises
+# `aiohttp.ContentTypeError` and this sender then answers `transport_accepted`.  Decoding the
+# text ourselves is what the duplicate-key hook requires, and it drops that refusal unless the
+# check is made again here; otherwise an HTTP 200 carrying `text/html` or `text/plain` from
+# Telegram or an intervening proxy becomes delivery evidence.  This is `aiohttp.helpers.json_re`
+# verbatim, applied to `resp.content_type` (already lowercased, parameters stripped), so the
+# accepted set is the one this sender accepted before the hook was introduced.
+_JSON_ACKNOWLEDGEMENT_MEDIA_TYPE = re.compile(r"^application/(?:[\w.+-]+?\+)?json")
 
 
 def _reject_duplicate_acknowledgement_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -211,6 +221,8 @@ class TelegramNotifier:
                     return "failed" if not 300 <= resp.status < 400 else "outcome_unknown"
                 try:
                     body_text = await resp.text()
+                    if not _JSON_ACKNOWLEDGEMENT_MEDIA_TYPE.match(resp.content_type):
+                        raise ValueError(f"acknowledgement media type is not JSON: {resp.content_type!r}")
                     result = json.loads(body_text, object_pairs_hook=_reject_duplicate_acknowledgement_keys)
                 except Exception:
                     logger.warning("Telegram API accepted sendMessage without a parseable service acknowledgement")

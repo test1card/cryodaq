@@ -584,8 +584,12 @@ async def test_cmd_log_without_identity_is_rejected() -> None:
 
 
 class _TelegramResponse:
-    def __init__(self, status: int, body: str) -> None:
+    def __init__(self, status: int, body: str, content_type: str = "application/json") -> None:
         self.status = status
+        # `send_message` gates the acknowledgement decode on the media type, as `resp.json()`
+        # does; aiohttp always exposes `content_type`, defaulting to `application/octet-stream`
+        # when the response carries no `Content-Type` header.
+        self.content_type = content_type
         self._body = body
 
     async def text(self) -> str:
