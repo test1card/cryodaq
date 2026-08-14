@@ -1950,6 +1950,60 @@ _REGISTRY_ROWS = (
 _REGISTRY = tuple(_Registration(*row) for row in _REGISTRY_ROWS)
 _LIVE_PRODUCT_DEFECT_IDS = frozenset()
 
+# ---------------------------------------------------------------------------
+# WHAT THIS GUARD IS, AND WHAT IT IS NOT.  Read this before citing its numbers.
+#
+# OC-031 exists because an earlier claim -- that C2 was the one defect class a
+# repo-wide sweep could mechanise -- DOES NOT HOLD.  The hardening landed and the
+# registry is now exact, which creates the opposite hazard: an exact count reads
+# as coverage.  `N detected == N registered` says those detected SHAPES are all
+# accounted for.  It does not say every identity-dependent policy has been found.
+#
+# COVERED: Python files under `src/cryodaq`, `*.py` and `*.pyw`, parsed with
+# `ast`.  Identity is recognised from channel/instrument/source/identifier-shaped
+# names and selected GUI names, and propagated through selected assignments,
+# loop and comprehension targets, identity-keyed mappings, and local helpers that
+# visibly return an identity.  The operations are an ENUMERATED roster:
+# `startswith`/`endswith`; regex `search`/`match`/`fullmatch`; selected literal or
+# computed `in`/`not in`; string equality and inequality; split, slice and index
+# comparisons; literal-dict subscript dispatch; `match` dispatch; and the GUI-only
+# identifier rosters and spelling-bearing comparisons.
+#
+# NOT COVERED, each measured through this module's own `_sites()` and each
+# returning ZERO sites:
+#
+#   1. An identity extracted from a mapping, e.g.
+#          key = reading.get("channel", "")
+#          return key.startswith("T")
+#      `key` is not an identity word and `.get("channel")` is not recognised as an
+#      identity extraction.  BOUNDED-FIXABLE: recognise literal identity keys in
+#      `.get(...)` and subscript extraction, then propagate the assigned name.
+#
+#   2. A spelling operation outside the roster, e.g.
+#          return fnmatchcase(reading.channel, "T*")
+#      The identity argument is direct; the operation simply is not in `_reason`.
+#      BOUNDED-FIXABLE by widening the roster with red injections -- but the fix is
+#      ENUMERATIVE, so the next spelling API opens the next hole.
+#
+#   3. Equality against a value whose AUTHORITY is not established, e.g.
+#          selected = stand_config["critical_sensor"]
+#          return reading.channel == selected
+#      This is a C2 defect when that value is a stand-specific spelling roster and
+#      legitimate when it comes from a resolved binding -- IDENTICAL SYNTAX, opposite
+#      verdicts.  NOT FIXABLE HERE, and not scheduled.  Flagging every such equality
+#      would trade false negatives for false positives and would contradict this
+#      module's own negative control for resolved bindings.  Deciding it needs
+#      declaring-authority provenance: a typed descriptor or resolved-binding
+#      contract, and tests at the consumer boundary.
+#
+# Also outside by design: non-Python presentation code, and general inter-module
+# Python dataflow.
+#
+# So: this is a bounded AST inventory with a stated boundary, not repo-wide
+# mechanisation of C2.  Widen the roster when a sound bounded form exists.  Do not
+# claim authority provenance or semantic routing from it.
+# ---------------------------------------------------------------------------
+
 
 def _registry_errors(
     sites: list[_Site],
@@ -2298,3 +2352,50 @@ def test_c2_repo_wide_spelling_sweep_accepts_declared_identity_equalities(tmp_pa
         encoding="utf-8",
     )
     assert _sites(root) == []
+
+
+def _scope_statement() -> str:
+    """Return ONLY the scope comment block, delimited by its two rule lines.
+
+    The first version of the guard below read the WHOLE module.  Its own assertion messages
+    quote the labels it looks for, so the module contained them whether or not the scope
+    statement did -- and a control that deleted a label from the statement left the guard
+    green.  A guard satisfiable by its own source is worse than no guard, because it is cited
+    as coverage.  Reading a delimited region is what makes the assertions below load-bearing.
+    """
+
+    text = Path(__file__).read_text(encoding="utf-8")
+    rule = "# " + "-" * 75
+    first = text.index(rule)
+    second = text.index(rule, first + len(rule))
+    block = text[first:second]
+    assert len(block) > 1500, f"the scope block is only {len(block)} characters; it did not parse"
+    return block
+
+
+def test_c2_sweep_states_its_own_boundary() -> None:
+    """An exact registry reads as coverage unless the module says what it is over.
+
+    OC-031's finding was that a repo-wide C2 sweep could not be built as claimed.  The
+    hardening landed, the registry became exact, and the failure mode INVERTED: nothing in
+    the module said what the count was over, so `N detected == N registered` invited the
+    refuted claim to be re-made from the number alone.
+
+    This pins the three properties that stop that, rather than the prose that carries them:
+    the boundary is stated, the fixable and unfixable misses are DISTINGUISHED, and the
+    authority-provenance limit is named as out of reach rather than as future work.  A
+    boundary statement that lists only fixable gaps is the more dangerous kind, because it
+    reads as a roadmap to completeness that does not exist.
+    """
+
+    scope = _scope_statement()
+    assert "NOT COVERED" in scope, "the sweep does not state what it fails to cover"
+    assert "BOUNDED-FIXABLE" in scope, "the sweep states no fixable gap, so a reader cannot tell a widening from a wall"
+    assert "NOT FIXABLE HERE" in scope, (
+        "the sweep names no unfixable gap; a boundary listing only fixable gaps reads as a "
+        "roadmap to completeness that this matcher cannot reach"
+    )
+    assert "declaring-authority provenance" in scope, (
+        "the sweep does not name authority provenance as the property it cannot decide, which "
+        "is the exact claim OC-031 refuted"
+    )
