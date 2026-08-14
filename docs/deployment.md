@@ -347,9 +347,9 @@ a safe SQLite implementation.
 
 ### Windows and Linux
 
-Create the supported runtime from the tracked environment before installing
-CryoDAQ. It pins the Python-linked SQLite library to a known-safe version on both
-laboratory platforms:
+Create the supported runtime from the tracked environment before you install
+CryoDAQ. The environment pins the Python-linked SQLite library to a known-safe
+version on both laboratory platforms:
 
 ```bash
 conda env create --file environment.yml
@@ -365,10 +365,10 @@ pip install -e . --no-deps --no-build-isolation
 - both unsafe/absent → `SQLiteWriter` hard-fails at startup unless the operator
   explicitly sets `CRYODAQ_ALLOW_BROKEN_SQLITE=1`
 
-Do not mix direct `import sqlite3` connections with CryoDAQ storage code on the
-same DB. All runtime readers/writers must go through `cryodaq.storage._sqlite`.
-`CRYODAQ_SQLITE_SYNC=FULL` remains an emergency throughput tradeoff, not the
-normal deployment path.
+Do not use direct `import sqlite3` connections with CryoDAQ storage code on the
+same database. Route all runtime readers and writers through
+`cryodaq.storage._sqlite`. `CRYODAQ_SQLITE_SYNC=FULL` remains an emergency
+throughput tradeoff. It is not the normal deployment path.
 
 ### macOS — dev-only, not a lab runtime target
 
