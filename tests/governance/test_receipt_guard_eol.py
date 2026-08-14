@@ -90,3 +90,75 @@ def test_receipt_guard_blob_still_rejects_a_real_source_mismatch(tmp_path: Path)
 
     with pytest.raises(GovernanceContractError, match="receipt guard blob does not match registry guard file"):
         validate_registry(payload, root=tmp_path)
+
+
+# --- derived prevention baseline: the line separator ---------------------------------
+#
+# Measured 2026-08-14: `_write_removal_baseline` called `write_text` with no `newline`
+# argument, so it applied the platform separator and the same registry rendered as LF on
+# Linux and CRLF on Windows -- 490 carriage returns, byte-identical otherwise. The sync
+# guard then reports the registry out of date on a Windows checkout that changed nothing,
+# and the obvious response, regenerate and commit, writes carriage returns into a tracked
+# governance artifact.
+#
+# These live in this module rather than a new one deliberately: a new file under
+# tests/governance moves the tracked-module inventory that OC-012 pins by count and by a
+# 35-path digest, and bumping that count would extend its examination claim to a module
+# that examination never covered.
+
+BASELINE_ARTIFACT = ROOT / "governance" / "agent_preventions_baseline.json"
+GENERATOR_SOURCE = ROOT / "tools" / "governance_contract.py"
+
+
+def test_generated_baseline_artifact_contains_no_carriage_return() -> None:
+    """The tracked derived baseline is LF-only and carries no byte-order mark."""
+    raw = BASELINE_ARTIFACT.read_bytes()
+    assert raw, "the baseline artifact is empty"
+    # Counted from BYTES. A shell pattern for a carriage return has already lied in this
+    # repository by matching the letter "r", so the count never comes from a grep.
+    carriage_returns = raw.count(b"\r")
+    assert carriage_returns == 0, (
+        f"{BASELINE_ARTIFACT.name} carries {carriage_returns} carriage returns; it must be "
+        "LF-only. Regenerate with: python tools/governance_contract.py --write-baseline"
+    )
+    assert not raw.startswith(b"\xef\xbb\xbf"), "the baseline must not carry a byte-order mark"
+
+
+def test_baseline_generator_pins_the_line_separator_explicitly() -> None:
+    """The generator must pass an explicit newline instead of inheriting the platform.
+
+    Checked with ``ast`` rather than a substring search: a comment or docstring that merely
+    mentions the argument would satisfy a text match while the call stayed platform
+    dependent. This binds on every platform, including Linux CI -- an earlier draft
+    regenerated through a subprocess and could only fail on Windows, which made it vacuous
+    where it actually runs.
+    """
+    import ast
+
+    tree = ast.parse(GENERATOR_SOURCE.read_text(encoding="utf-8"), filename=str(GENERATOR_SOURCE))
+    writer = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_write_removal_baseline"
+        ),
+        None,
+    )
+    assert writer is not None, "_write_removal_baseline is gone; this guard needs re-aiming"
+
+    write_calls = [
+        node
+        for node in ast.walk(writer)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "write_text"
+    ]
+    assert write_calls, "_write_removal_baseline no longer calls write_text; re-aim this guard"
+
+    for call in write_calls:
+        keywords = {keyword.arg for keyword in call.keywords}
+        assert "newline" in keywords, (
+            "write_text in _write_removal_baseline must pass an explicit newline. Without it "
+            "the platform separator applies and the same registry renders as LF on Linux and "
+            "CRLF on Windows."
+        )
+        newline = next(keyword.value for keyword in call.keywords if keyword.arg == "newline")
+        assert isinstance(newline, ast.Constant) and newline.value == "\n", 'the explicit newline must be "\\n"'
