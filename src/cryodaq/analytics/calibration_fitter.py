@@ -127,7 +127,7 @@ class CalibrationFitter:
             reader = ArchiveReader(archive_dir / "__no_hot__", archive_dir)
             start_dt = datetime.fromtimestamp(start_ts, tz=UTC)
             end_dt = datetime.fromtimestamp(end_ts, tz=UTC) + timedelta(microseconds=1)
-            for ts, _inst, channel, value, _unit, _status in reader.query_rows(
+            for ts, _inst, channel, value, _unit, _status, *_ in reader.query_rows(
                 start_dt, end_dt, [reference_channel, raw_channel]
             ):
                 if channel == reference_channel:
