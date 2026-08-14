@@ -1253,6 +1253,14 @@ def _write_removal_baseline() -> None:
     (run from the repository root, or anywhere -- paths are resolved from this
     file's location). Rerunning with no registry changes produces byte-identical
     output.
+
+    ``newline="\\n"`` is required, not cosmetic. Without it ``write_text`` applies
+    the platform line separator, so the same registry regenerates as LF on Linux
+    and CRLF on Windows. The sync guard then reports the baseline out of date on
+    a Windows checkout that has changed nothing, and a Windows contributor who
+    commits the result puts 490 spurious carriage returns into a tracked
+    governance artifact. Measured three times on 2026-08-14, once by an
+    independent lane.
     """
     import yaml
 
@@ -1261,7 +1269,7 @@ def _write_removal_baseline() -> None:
         yaml.safe_load(registry_path.read_text(encoding="utf-8")),
         root=_REMOVAL_BASELINE_PATH.parent.parent,
     )
-    _REMOVAL_BASELINE_PATH.write_text(render_removal_baseline(payload), encoding="utf-8")
+    _REMOVAL_BASELINE_PATH.write_text(render_removal_baseline(payload), encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":
