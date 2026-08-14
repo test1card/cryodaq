@@ -184,9 +184,12 @@ class HDF5Exporter:
 
         # Группировка: instrument_id → channel → накопитель
         data: dict[str, dict[str, _ChannelData]] = {}
-        for raw_ts, inst_id, channel, value, unit, status, *_ in rows:
+        for raw_ts, inst_id, channel, value, unit, status, *identity in rows:
             ts = _parse_timestamp(raw_ts).timestamp()
-            data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(ts, value, status)
+            descriptor_hash = identity[0] if identity else None
+            data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(
+                ts, value, status, descriptor_hash
+            )
 
         # Запись в HDF5
         str_dt = h5py.string_dtype()
@@ -215,6 +218,14 @@ class HDF5Exporter:
                 ch_group.create_dataset(
                     "status",
                     data=ch_data.statuses,
+                    dtype=str_dt,
+                    chunks=True,
+                    compression="gzip",
+                    compression_opts=4,
+                )
+                ch_group.create_dataset(
+                    "descriptor_hash",
+                    data=ch_data.descriptor_hashes,
                     dtype=str_dt,
                     chunks=True,
                     compression="gzip",
@@ -304,18 +315,20 @@ class HDF5Exporter:
 class _ChannelData:
     """Накопитель данных одного канала для экспорта."""
 
-    __slots__ = ("unit", "timestamps", "values", "statuses")
+    __slots__ = ("unit", "timestamps", "values", "statuses", "descriptor_hashes")
 
     def __init__(self, unit: str) -> None:
         self.unit = unit
         self.timestamps: list[float] = []
         self.values: list[float] = []
         self.statuses: list[str] = []
+        self.descriptor_hashes: list[str] = []
 
-    def append(self, ts: float, value: float, status: str = "") -> None:
+    def append(self, ts: float, value: float, status: str = "", descriptor_hash: str | None = None) -> None:
         self.timestamps.append(ts)
         self.values.append(value)
         self.statuses.append(status)
+        self.descriptor_hashes.append(descriptor_hash or "")
 
 
 def _sanitize_name(name: str) -> str:

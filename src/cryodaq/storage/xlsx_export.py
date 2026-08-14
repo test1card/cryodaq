@@ -112,8 +112,14 @@ class XLSXExporter:
         # archive, so a plain SQLite scan would drop them silently.
         rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, None)
         all_rows: list[dict[str, Any]] = [
-            {"timestamp": raw_ts, "channel": channel, "value": value, "status": status}
-            for raw_ts, _instrument_id, channel, value, _unit, status, *_ in rows
+            {
+                "timestamp": raw_ts,
+                "channel": channel,
+                "value": value,
+                "status": status,
+                "descriptor_hash": descriptor_hash,
+            }
+            for raw_ts, _instrument_id, channel, value, _unit, status, descriptor_hash in rows
         ]
 
         if not all_rows:
@@ -126,7 +132,9 @@ class XLSXExporter:
 
         # Заголовок
         bold = Font(bold=True)
-        headers = ["Время"] + unique_channels
+        headers = ["Время"]
+        for channel in unique_channels:
+            headers.extend((channel, f"{channel} descriptor_hash"))
         for col, h in enumerate(headers, 1):
             cell = ws_data.cell(row=1, column=col, value=h)
             cell.font = bold
@@ -135,9 +143,12 @@ class XLSXExporter:
         # NaN-доктрина: decode at the read boundary — a sentinel / error / legacy
         # ±inf row surfaces as NaN and is left as an empty cell below, never as a
         # non-physical number in the operator's spreadsheet.
-        by_time: dict[str, dict[str, float]] = defaultdict(dict)
+        by_time: dict[object, dict[str, tuple[float, str | None]]] = defaultdict(dict)
         for r in all_rows:
-            by_time[r["timestamp"]][r["channel"]] = decode(r["value"], r["status"])
+            by_time[r["timestamp"]][r["channel"]] = (
+                decode(r["value"], r["status"]),
+                r["descriptor_hash"],
+            )
 
         row_num = 2
         for ts_str in sorted(by_time.keys(), key=_ts_sort_key):
@@ -160,16 +171,21 @@ class XLSXExporter:
                 ts_cell.number_format = "YYYY-MM-DD HH:MM:SS"
 
             channel_values = by_time[ts_str]
-            for col, ch in enumerate(unique_channels, 2):
-                v = channel_values.get(ch)
-                if v is not None and math.isfinite(v):
+            for channel_index, ch in enumerate(unique_channels):
+                reading = channel_values.get(ch)
+                if reading is None:
+                    continue
+                value, descriptor_hash = reading
+                value_col = 2 + channel_index * 2
+                if math.isfinite(value):
                     # Write the full float value (no pre-rounding): vacuum
                     # pressures span 1e-3..1e-9 mbar and were collapsed to 0.000
                     # by round(v, 3) + "0.000" format. "General" lets Excel pick
                     # a representation that preserves both small and wide-range
                     # magnitudes.
-                    cell = ws_data.cell(row=row_num, column=col, value=v)
+                    cell = ws_data.cell(row=row_num, column=value_col, value=value)
                     cell.number_format = "General"
+                ws_data.cell(row=row_num, column=value_col + 1, value=descriptor_hash)
 
             row_num += 1
 

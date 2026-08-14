@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from cryodaq.storage.sqlite_writer import SQLiteWriter
 # Helpers
 # ---------------------------------------------------------------------------
 
-_EXPECTED_HEADER = ["timestamp", "instrument_id", "channel", "value", "unit", "status"]
+_EXPECTED_HEADER = ["timestamp", "instrument_id", "channel", "value", "unit", "status", "descriptor_hash"]
 
 
 def _reading(
@@ -91,6 +92,44 @@ async def test_correct_columns(tmp_path: Path) -> None:
 
     header, _ = _read_csv(output_path)
     assert header == _EXPECTED_HEADER, f"Unexpected CSV header: {header}"
+
+
+def test_descriptor_hash_column_carries_reader_identity(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    descriptor_hash = "sha256:" + "a" * 64
+    _populate_db(data_dir, [_reading(ts=ts)])
+    with sqlite3.connect(data_dir / "data_2026-03-14.db") as connection:
+        connection.execute("UPDATE readings SET descriptor_hash = ?", (descriptor_hash,))
+
+    output_path = tmp_path / "out.csv"
+    CSVExporter(data_dir).export(output_path)
+
+    header, rows = _read_csv(output_path)
+    assert header == _EXPECTED_HEADER, f"Unexpected CSV header: {header}"
+    assert rows[0]["descriptor_hash"] == descriptor_hash
+
+
+def test_legacy_archive_without_descriptor_hash_exports_blank(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    with sqlite3.connect(data_dir / "data_2026-03-14.db") as connection:
+        connection.execute(
+            "CREATE TABLE readings "
+            "(timestamp REAL, instrument_id TEXT, channel TEXT, value REAL, unit TEXT, status TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?)",
+            (ts.timestamp(), "ls218s", "CH1", 4.5, "K", "ok"),
+        )
+
+    output_path = tmp_path / "out.csv"
+    CSVExporter(data_dir).export(output_path)
+
+    header, rows = _read_csv(output_path)
+    assert header == _EXPECTED_HEADER, f"Unexpected CSV header: {header}"
+    assert rows[0]["descriptor_hash"] == ""
 
 
 # ---------------------------------------------------------------------------
