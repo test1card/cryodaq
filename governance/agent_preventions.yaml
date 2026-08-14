@@ -267,7 +267,7 @@ false_green_pairs:
   - id: OBLIGATION-MARKER-TRIGGER-FIRES-ON-PROSE-FALSE-GREEN-337
     status: open
     scope: repository
-    runtime_prevention_id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    runtime_prevention_id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
     guard: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
     ci_partition: remaining
     red_evidence: roadmap_md_carried_the_phase_1_status_token_twice_the_real_marker_reading_IN_PROGRESS_and_the_comment_beneath_it_spelling_the_completed_value_so_ob_002_marker_trigger_fired_on_prose_while_the_descriptor_spine_was_unmerged_and_the_planned_ob_010_gate_would_have_reddened_for_a_sentence_with_the_cheap_repair_recording_a_phase_completion_that_never_happened_2026_08_14_pending_immutable_capture
@@ -3426,6 +3426,25 @@ records:
         ci_partition: core
     red_evidence: replacing_the_identity_argument_with_None_AT_THE_CALL_SITE_left_all_14_nodes_green_because_the_extracted_helper_stayed_correct_in_isolation_while_production_stopped_charging_for_what_it_persists_so_the_WIRING_is_now_asserted_by_driving_the_real_loader_and_recording_the_argument; and_dropping_the_identity_terms_from_the_retained_byte_accounting_leaves_every_other_mapped_guard_GREEN_because_reaching_the_32_MiB_cap_inline_required_an_archive_no_guard_builds_which_is_why_the_accounting_was_extracted_and_is_now_asserted_directly_2026_08_06_pending_immutable_capture; and_reverting_the_csv_header_and_the_loader_together_turns_6_of_the_7_writer_nodes_red_and_reverting_the_entire_loader_carry_turns_4_of_the_6_loader_nodes_red_while_all_7_writer_nodes_stay_GREEN_which_is_the_finding_that_the_writer_suite_cannot_observe_a_loader_regression_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every marker trigger declared in docs/OBLIGATIONS.md and the token it reads in its target file.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A marker token that also appears in prose, or a trigger keyed to a value the marker can never carry, makes the trigger answer a question about the text rather than about the work. On 2026-08-14 ROADMAP.md carried phase-1-status twice - the real marker reading IN_PROGRESS and the comment beneath it spelling the completed value - so OB-002 evaluated true while the descriptor spine was unmerged. The planned register guard turns a fired trigger on a PENDING row into a red docs gate, so this would have reddened for a sentence, and the cheap repair of flipping the row to DUE would have recorded a phase completion that never happened.
+    invariant: 'A marker trigger is resolvable from the register alone: the guard parses the file, token and expected value out of the Trigger cell rather than hardcoding them, the expected value belongs to the declared vocabulary, and the target file carries that token exactly once. A second occurrence fails whatever its value, because the ambiguity is the defect and a prose mention is how it returns.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
+        ci_partition: remaining
+    red_evidence: restoring_the_prose_mention_of_the_completed_value_turns_the_guard_red_with_two_occurrences_and_retargeting_the_trigger_cell_to_another_file_and_token_makes_the_guard_follow_it_and_fail_there_which_the_hardcoded_first_version_could_not_do_2026_08_14_pending_immutable_capture
+    green_evidence: pending
   - id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
     status: open
     scope: repository
@@ -3441,8 +3460,6 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
-        ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_sweep_counts_are_rederived_from_the_live_sweep
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_oc031_preserves_its_supported_interpreter_caveat

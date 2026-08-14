@@ -2790,20 +2790,29 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "::get_driver_spec" not in section
 
 
-def _ob_002_marker_trigger() -> tuple[str, str]:
-    """Return (file, token) parsed from OB-002's REGISTERED Trigger cell.
+_PHASE_MARKER_VALUES = frozenset({"IN_PROGRESS", "DONE"})
+
+
+def _ob_002_marker_trigger() -> tuple[str, str, str]:
+    """Return (file, token, expected value) parsed from OB-002's REGISTERED Trigger cell.
 
     The first version of the guard below hardcoded `ROADMAP.md` and `phase-1-status`.  Review
     caught that: if the Trigger cell were mistyped or retargeted, the guard would keep checking
     the obsolete marker and keep passing, while the ambiguity returned in the trigger an
     evaluator actually reads.  A guard for a register must exercise the register's own
     invocation path, not a copy of it.
+
+    THE EXPECTED VALUE IS PART OF THE MARKER, and the first repair dropped it.  Parsing only
+    the file and token, then hardcoding the accepted values, leaves a Trigger cell reading
+    `phase-1-status=DNOE` green: ROADMAP.md still carries one valid `DONE`, the guard accepts
+    it, and the registered trigger can never fire.  A typo in the register would have been
+    invisible to the guard written to protect the register.
     """
 
     register = _read(REPO_ROOT / "docs" / "OBLIGATIONS.md")
     row = next((line for line in register.splitlines() if line.startswith("| OB-002 |")), None)
     assert row is not None, "OB-002 is missing from the obligations register"
-    triggers = re.findall(r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=", row)
+    triggers = re.findall(r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=([A-Za-z0-9_-]+)", row)
     assert len(triggers) == 1, (
         f"OB-002 must declare exactly one marker trigger; parsed {triggers!r} from its row. "
         "A row carrying none or several leaves the evaluator with no single thing to read."
@@ -2831,7 +2840,13 @@ def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
     its value, because ambiguity is the defect and a prose mention is how it returns.
     """
 
-    marker_file, token = _ob_002_marker_trigger()
+    marker_file, token, expected = _ob_002_marker_trigger()
+    assert expected in _PHASE_MARKER_VALUES, (
+        f"OB-002's trigger expects the value {expected!r}, which is not in the declared "
+        f"vocabulary {sorted(_PHASE_MARKER_VALUES)}. A trigger keyed to a value the marker can "
+        "never carry answers 'not fired' forever, which is indistinguishable from work that is "
+        "genuinely incomplete."
+    )
     target = _read(REPO_ROOT / marker_file)
     occurrences = re.findall(rf"{re.escape(token)}=([A-Za-z_]+)", target)
     assert len(occurrences) == 1, (
@@ -2840,7 +2855,7 @@ def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
         "OB-002's marker trigger unresolvable, and a trigger that fires on prose puts the "
         "obligation register into a state its evidence does not support."
     )
-    assert occurrences[0] in {"IN_PROGRESS", "DONE"}, (
+    assert occurrences[0] in _PHASE_MARKER_VALUES, (
         f"{token} carries the unknown value {occurrences[0]!r}; OB-002 keys its trigger to "
         "this token, so an unrecognised value silently answers neither fired nor unfired"
     )
