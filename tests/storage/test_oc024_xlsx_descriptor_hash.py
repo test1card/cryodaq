@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -23,9 +24,11 @@ def _database(path: Path, *, channel: str, descriptor_hash: str | None, legacy: 
     )
     if not legacy:
         values += (descriptor_hash,)
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn:
         conn.execute(f"CREATE TABLE readings ({columns})")
         conn.execute(f"INSERT INTO readings VALUES ({','.join('?' for _ in values)})", values)
+        # closing() closes the handle; it does NOT commit.
+        conn.commit()
 
 
 def test_xlsx_exports_descriptor_hash_and_leaves_old_archive_empty(tmp_path: Path) -> None:

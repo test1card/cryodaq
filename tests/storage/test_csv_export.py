@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -99,8 +100,10 @@ def test_descriptor_hash_column_carries_reader_identity(tmp_path: Path) -> None:
     ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     descriptor_hash = "sha256:" + "a" * 64
     _populate_db(data_dir, [_reading(ts=ts)])
-    with sqlite3.connect(data_dir / "data_2026-03-14.db") as connection:
+    with closing(sqlite3.connect(data_dir / "data_2026-03-14.db")) as connection:
         connection.execute("UPDATE readings SET descriptor_hash = ?", (descriptor_hash,))
+        # closing() closes the handle; it does NOT commit.
+        connection.commit()
 
     output_path = tmp_path / "out.csv"
     CSVExporter(data_dir).export(output_path)
@@ -114,7 +117,7 @@ def test_legacy_archive_without_descriptor_hash_exports_blank(tmp_path: Path) ->
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
-    with sqlite3.connect(data_dir / "data_2026-03-14.db") as connection:
+    with closing(sqlite3.connect(data_dir / "data_2026-03-14.db")) as connection:
         connection.execute(
             "CREATE TABLE readings "
             "(timestamp REAL, instrument_id TEXT, channel TEXT, value REAL, unit TEXT, status TEXT)"
@@ -123,6 +126,8 @@ def test_legacy_archive_without_descriptor_hash_exports_blank(tmp_path: Path) ->
             "INSERT INTO readings VALUES (?, ?, ?, ?, ?, ?)",
             (ts.timestamp(), "ls218s", "CH1", 4.5, "K", "ok"),
         )
+        # closing() closes the handle; it does NOT commit.
+        connection.commit()
 
     output_path = tmp_path / "out.csv"
     CSVExporter(data_dir).export(output_path)
