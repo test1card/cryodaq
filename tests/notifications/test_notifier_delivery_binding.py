@@ -23,6 +23,7 @@ and the public method's returned tier is the assertion.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -34,11 +35,19 @@ REQUESTED_CHAT = -1001234567890
 
 
 class _Response:
-    """The minimum of aiohttp's response that `send_message` actually uses."""
+    """The minimum of aiohttp's response that `send_message` actually uses.
 
-    def __init__(self, payload: Any, status: int = 200) -> None:
+    IT SERVES TEXT, NOT AN OBJECT, and that is load-bearing.  `send_message` decodes the body
+    itself with a unique-key hook, so a stub returning an already-decoded dict would step over
+    the decoder under test and every assertion below would be about a path production does not
+    take.  `raw_text` exists because a duplicate key CANNOT be expressed as a Python dict -- by
+    the time the body is a dict the ambiguity has already been resolved, silently, in favour of
+    whichever pair came last.
+    """
+
+    def __init__(self, payload: Any = None, status: int = 200, raw_text: str | None = None) -> None:
         self.status = status
-        self._payload = payload
+        self._text = raw_text if raw_text is not None else json.dumps(payload)
 
     async def __aenter__(self) -> _Response:
         return self
@@ -46,11 +55,8 @@ class _Response:
     async def __aexit__(self, *_exc: object) -> None:
         return None
 
-    async def json(self) -> Any:
-        return self._payload
-
     async def text(self) -> str:
-        return "stub"
+        return self._text
 
 
 class _Session:
@@ -62,9 +68,9 @@ class _Session:
         return self._response
 
 
-def _notifier(payload: Any, monkeypatch: pytest.MonkeyPatch) -> TelegramNotifier:
+def _notifier(payload: Any, monkeypatch: pytest.MonkeyPatch, *, raw_text: str | None = None) -> TelegramNotifier:
     notifier = TelegramNotifier(bot_token="token", chat_id=REQUESTED_CHAT)
-    session = _Session(_Response(payload))
+    session = _Session(_Response(payload, raw_text=raw_text))
 
     async def _stub_session(self: TelegramNotifier) -> _Session:
         return session
@@ -126,3 +132,37 @@ async def test_the_upper_bound_the_sibling_sender_accepts_is_accepted_here_too(
     notifier = _notifier(_ack({"message_id": MAX_JSON_INTEGER, "chat": {"id": REQUESTED_CHAT}}), monkeypatch)
 
     assert await notifier.send_message(REQUESTED_CHAT, "alarm") == "service_reported_delivered"
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_destination_key_is_not_a_delivery_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An acknowledgement that names the chat TWICE proves nothing about where the message went.
+
+    `resp.json()` keeps the LAST value for a repeated key, so a body carrying
+    `"chat": {"id": 222}, "chat": {"id": 111}` decodes to the requested chat and satisfies the
+    destination check added for OC-026 -- while the acknowledgement itself is ambiguous.  The
+    convenient reading won by default.
+
+    The sibling sender already refused this through
+    `assistant_main._unique_telegram_acknowledgement_object`.  The two senders disagreeing about
+    what counts as an acknowledgement is the defect OC-026 opened with, so this is the same
+    finding recurring one layer down rather than a new hardening idea.
+
+    `transport_accepted` is the correct answer, not `failed`: the transport DID take the
+    message.  What is unknown is what the service did with it, and that tier exists to say so.
+    """
+
+    duplicated = (
+        f'{{"ok": true, "result": {{"message_id": 7, "chat": {{"id": 222}}, "chat": {{"id": {REQUESTED_CHAT}}}}}}}'
+    )
+    notifier = _notifier(None, monkeypatch, raw_text=duplicated)
+
+    outcome = await notifier.send_message(REQUESTED_CHAT, "alarm")
+
+    assert outcome == "transport_accepted", (
+        "a duplicate destination key resolved to a delivery claim; the acknowledgement cannot "
+        "establish which chat received the message, and an alarm notifier must not report that "
+        "the operator was told when nothing establishes it"
+    )

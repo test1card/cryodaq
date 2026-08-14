@@ -14,6 +14,7 @@ TelegramNotifier — транспорт для :class:`EscalationService`: ра�
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,31 @@ logger = logging.getLogger(__name__)
 
 # Telegram message ids are JSON integers; the live adapters accept 1..2**63-1.
 _MAX_JSON_INTEGER = 2**63 - 1
+
+
+def _reject_duplicate_acknowledgement_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Refuse an acknowledgement object that names any key twice.
+
+    `resp.json()` silently keeps the LAST value for a repeated key, so a body carrying
+    ``"chat": {"id": 222}, "chat": {"id": 111}`` decodes to the requested chat and passes the
+    destination check -- while the acknowledgement itself establishes nothing about where the
+    message went.  An ambiguous answer must not resolve to the convenient one.
+
+    Raising rather than returning a sentinel is deliberate: the caller already treats an
+    unparseable acknowledgement as `transport_accepted`, which is the honest tier for "the
+    transport took it and the service told us nothing we can rely on".
+
+    `cryodaq.agents.assistant_main._unique_telegram_acknowledgement_object` enforces the same
+    rule for the sibling sender.  FOLLOW-UP, not done here: there are now four near-copies of
+    this decoder across the notification surfaces, and they should be one.
+    """
+
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key in Telegram acknowledgement: {key!r}")
+        seen.add(key)
+    return dict(pairs)
 
 
 def _acknowledges_delivery(message: object, chat_id: int | str) -> bool:
@@ -184,7 +210,8 @@ class TelegramNotifier:
                     logger.error("Telegram API ответил %d: %s", resp.status, body[:200])
                     return "failed" if not 300 <= resp.status < 400 else "outcome_unknown"
                 try:
-                    result = await resp.json()
+                    body_text = await resp.text()
+                    result = json.loads(body_text, object_pairs_hook=_reject_duplicate_acknowledgement_keys)
                 except Exception:
                     logger.warning("Telegram API accepted sendMessage without a parseable service acknowledgement")
                     return "transport_accepted"
