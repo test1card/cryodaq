@@ -90,6 +90,22 @@ def _atomic_json(path: Path, payload: object) -> None:
     os.replace(temporary, path)
 
 
+def _announce(command: str, status: str, reason: object, cells: list[dict[str, Any]] | None = None) -> None:
+    """Print the verdict AND its reason to stderr, so a red run says why.
+
+    Both commands previously recorded `reason` only inside the JSON evidence
+    file. The CI log therefore showed nothing but `exit code 1`, and the reason
+    was unreadable without downloading the artifact — which a rerun overwrites,
+    so a transient failure became permanently undiagnosable. A gate that cannot
+    say what it observed is not a gate an operator can act on.
+    """
+    detail = "" if reason in (None, "") else f" — {reason}"
+    print(f"[onedir-smoke] {command}: {status}{detail}", file=sys.stderr)
+    for cell in cells or []:
+        if cell.get("status") != "PASS":
+            print(f"[onedir-smoke]   cell {cell.get('name')}: {cell.get('status')}", file=sys.stderr)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -123,6 +139,7 @@ def check_warnings(warn_file: Path, evidence_file: Path) -> int:
             "required_missing_modules": [],
         }
         _atomic_json(evidence_file, payload)
+        _announce("check-warnings", "FAIL", "PYINSTALLER_WARNING_FILE_MISSING")
         return 1
     raw = warn_file.read_bytes()
     text = raw.decode("utf-8", errors="replace")
@@ -136,6 +153,11 @@ def check_warnings(warn_file: Path, evidence_file: Path) -> int:
         "warning_file_sha256": _sha256(warn_file),
     }
     _atomic_json(evidence_file, payload)
+    _announce(
+        "check-warnings",
+        payload["status"],
+        f"{payload['reason']} {missing}" if missing else None,
+    )
     return int(bool(missing))
 
 
@@ -1055,6 +1077,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         "cells": cells,
     }
     _atomic_json(result_path, payload)
+    _announce("smoke", status, reason, cells)
     return 0 if status == "PASS" else 1
 
 
