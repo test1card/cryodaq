@@ -11,10 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PINNED_MINICONDA = "conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5"
 
 
-#: Patch releases known to break this project. 3.14.3 hard-crashes
-#: tests/integration after 28 tests. Kept as an explicit deny-list so a future
-#: bad patch is added here rather than discovered on the laboratory machine.
-KNOWN_BAD_PYTHON_PATCHES = ("3.14.3",)
+#: The exact patch measured by the supported-platform candidate run. A future
+#: patch requires its own evidence before this value can change.
+APPROVED_PYTHON_PATCH = "3.14.6"
 
 
 def _environment_python_spec() -> str:
@@ -49,8 +48,8 @@ def test_environment_pins_an_exact_python_patch() -> None:
         "A minor-only pin resolves to whatever conda-forge serves on the day the laboratory "
         "machine is installed."
     )
-    assert version not in KNOWN_BAD_PYTHON_PATCHES, (
-        f"environment.yml pins {spec!r}, which is a known-bad patch: {KNOWN_BAD_PYTHON_PATCHES}"
+    assert version == APPROVED_PYTHON_PATCH, (
+        f"environment.yml pins {spec!r}; the approved evidence-backed patch is python={APPROVED_PYTHON_PATCH}"
     )
 
 
