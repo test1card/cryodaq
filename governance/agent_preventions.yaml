@@ -264,6 +264,14 @@ false_green_pairs:
     ci_partition: core
     red_evidence: the_legacy_filter_runs_before_the_call_so_nothing_asserted_that_a_row_whose_identity_is_NOT_persisted_is_also_not_charged_an_over_charging_budget_is_a_different_defect_from_an_under_charging_one_but_it_is_still_a_wrong_bound_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: OBLIGATION-MARKER-TRIGGER-FIRES-ON-PROSE-FALSE-GREEN-337
+    status: open
+    scope: repository
+    runtime_prevention_id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    guard: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
+    ci_partition: remaining
+    red_evidence: roadmap_md_carried_the_phase_1_status_token_twice_the_real_marker_reading_IN_PROGRESS_and_the_comment_beneath_it_spelling_the_completed_value_so_ob_002_marker_trigger_fired_on_prose_while_the_descriptor_spine_was_unmerged_and_the_planned_ob_010_gate_would_have_reddened_for_a_sentence_with_the_cheap_repair_recording_a_phase_completion_that_never_happened_2026_08_14_pending_immutable_capture
+    green_evidence: pending
   - id: SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311
     status: open
     scope: repository
@@ -3433,6 +3441,8 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
+      - node: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
+        ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_sweep_counts_are_rederived_from_the_live_sweep
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_oc031_preserves_its_supported_interpreter_caveat

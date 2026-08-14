@@ -2790,6 +2790,27 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "::get_driver_spec" not in section
 
 
+def _ob_002_marker_trigger() -> tuple[str, str]:
+    """Return (file, token) parsed from OB-002's REGISTERED Trigger cell.
+
+    The first version of the guard below hardcoded `ROADMAP.md` and `phase-1-status`.  Review
+    caught that: if the Trigger cell were mistyped or retargeted, the guard would keep checking
+    the obsolete marker and keep passing, while the ambiguity returned in the trigger an
+    evaluator actually reads.  A guard for a register must exercise the register's own
+    invocation path, not a copy of it.
+    """
+
+    register = _read(REPO_ROOT / "docs" / "OBLIGATIONS.md")
+    row = next((line for line in register.splitlines() if line.startswith("| OB-002 |")), None)
+    assert row is not None, "OB-002 is missing from the obligations register"
+    triggers = re.findall(r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=", row)
+    assert len(triggers) == 1, (
+        f"OB-002 must declare exactly one marker trigger; parsed {triggers!r} from its row. "
+        "A row carrying none or several leaves the evaluator with no single thing to read."
+    )
+    return triggers[0]
+
+
 def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
     """OB-002's trigger token must be a MARKER, not a string that also appears in prose.
 
@@ -2810,16 +2831,16 @@ def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
     its value, because ambiguity is the defect and a prose mention is how it returns.
     """
 
-    roadmap = _read(REPO_ROOT / "ROADMAP.md")
-    occurrences = re.findall(r"phase-1-status=([A-Za-z_]+)", roadmap)
+    marker_file, token = _ob_002_marker_trigger()
+    target = _read(REPO_ROOT / marker_file)
+    occurrences = re.findall(rf"{re.escape(token)}=([A-Za-z_]+)", target)
     assert len(occurrences) == 1, (
-        "ROADMAP.md must carry the phase-1-status token exactly once; found "
+        f"{marker_file} must carry the {token} token exactly once; found "
         f"{len(occurrences)} occurrences with values {occurrences}. A second mention makes "
         "OB-002's marker trigger unresolvable, and a trigger that fires on prose puts the "
         "obligation register into a state its evidence does not support."
     )
     assert occurrences[0] in {"IN_PROGRESS", "DONE"}, (
-        f"phase-1-status carries the unknown value {occurrences[0]!r}; OB-002 keys its "
-        "trigger to this token, so an unrecognised value silently answers neither fired nor "
-        "unfired"
+        f"{token} carries the unknown value {occurrences[0]!r}; OB-002 keys its trigger to "
+        "this token, so an unrecognised value silently answers neither fired nor unfired"
     )
