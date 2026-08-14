@@ -130,6 +130,63 @@ def test_scan_log_clean_structured_log_is_readable():
     assert soak.scan_log(_line("INFO", "engine started")) == []
 
 
+def test_run_soak_reports_the_specific_unreadable_reason(tmp_path):
+    """The retained reason must name the cause that actually occurred.
+
+    A mixed log DID parse structured lines, so reporting "no structured lines parsed"
+    is false and points an operator at the wrong thing. `scan_log` already
+    distinguishes the two causes; this pins that the distinction survives to
+    `SoakResult` instead of being discarded by `run_soak`.
+    """
+    bar = chr(0x2502)
+    # The child must emit a LITERAL backslash then u2502, not the character that
+    # escape produces. Writing chr(92) in THIS file evaluates here and hands the
+    # child a real escape, which Python turns back into the delimiter -- giving a
+    # readable line and a test that quietly measures the empty-log case instead.
+    # So the text "chr(92)" is passed through unevaluated and the CHILD evaluates it.
+    backslash = "chr(92)"
+    script = (
+        "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) + ' child ' "
+        "+ chr(0x2502) + ' started', flush=True);"
+        "print('2026 ' + " + backslash + " + 'u2502 ERROR ' + " + backslash + " + 'u2502 broke', flush=True)"
+    )
+    log_path = tmp_path / "mixed.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+
+    # The INFO line really did parse, so this is the mixed case, not the empty one.
+    assert f" {bar} INFO" in log_path.read_text(encoding="utf-8")
+    assert result.log_readable is False
+    assert result.ok is False
+    # getattr, not attribute access: reverting production removes the field, and an
+    # AttributeError proves only that a symbol is missing. This must fail as an
+    # ASSERTION about what the driver reports.
+    reason = getattr(result, "unreadable_reason", None)
+    assert reason is not None, "run_soak discarded the reason scan_log raised"
+    assert "malformed ERROR/CRITICAL record" in reason, reason
+    assert "no structured lines parsed" not in reason, reason
+
+
+def test_run_soak_keeps_no_reason_when_the_log_is_readable(tmp_path):
+    """A readable log carries no reason, so the field cannot go stale."""
+    script = "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) + ' child " + chr(0x2502) + " ok', flush=True)"
+    result = soak.run_soak(
+        1.0,
+        log_path=tmp_path / "clean.log",
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+
+    assert result.log_readable is True
+    assert getattr(result, "unreadable_reason", None) is None
+
+
 def test_run_soak_forces_child_utf8_output(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONIOENCODING", "cp1251")
     script = (

@@ -109,6 +109,9 @@ class SoakResult:
     log_path: Path
     duration_s: float
     log_readable: bool
+    # The exact reason the log could not be read, or None when it was readable.
+    # scan_log distinguishes two causes and the command must report the right one.
+    unreadable_reason: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -185,9 +188,15 @@ def run_soak(
     try:
         violations = scan_log(log_text, allowlist)
         log_readable = True
-    except UnreadableLogError:
+        unreadable_reason = None
+    except UnreadableLogError as exc:
+        # Keep the exact reason. `scan_log` distinguishes "nothing parsed at all" from
+        # "a malformed ERROR record was found among readable lines", and discarding that
+        # here made the command report the first cause for both -- sending an operator
+        # investigating a failed long soak toward a log that had in fact parsed.
         violations = []
         log_readable = False
+        unreadable_reason = str(exc)
 
     return SoakResult(
         alive_before_shutdown=alive_before_shutdown,
@@ -197,6 +206,7 @@ def run_soak(
         log_path=log_path,
         duration_s=duration_s,
         log_readable=log_readable,
+        unreadable_reason=unreadable_reason,
     )
 
 
@@ -250,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         f"violations={len(result.violations)} log_readable={result.log_readable}"
     )
     if not result.log_readable:
-        print("[soak] COULD NOT READ LOG — no structured lines parsed from non-empty log")
+        print(f"[soak] COULD NOT READ LOG — {result.unreadable_reason or 'reason unavailable'}")
     if result.violations:
         print("[soak] VIOLATIONS (unexpected ERROR/CRITICAL log lines):")
         for line in result.violations[:50]:
