@@ -720,7 +720,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--revision", required=True)
-    parser.add_argument("--suite", choices=("remaining",), required=True)
+    # OB-006 added `release`, the tag-triggered suite. Both names are exact-checkout partitions
+    # declared in tools/ci_execution_roots.py; a suite absent from that registry selects nothing
+    # and would exit 0 without executing a guard, so this list must never widen past it.
+    parser.add_argument("--suite", choices=("release", "remaining"), required=True)
     parser.add_argument("--basetemp", type=Path, required=True)
     parser.add_argument("--trusted-base", required=True)
     parser.add_argument("--protected-producer-root", type=Path)

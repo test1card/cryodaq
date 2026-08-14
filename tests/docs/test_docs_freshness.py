@@ -2601,26 +2601,119 @@ def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None
         for step in job.get("steps", [])
         if isinstance(step, dict) and isinstance(step.get("run"), str)
     ]
-    selectors: list[str] = []
-    for command in commands:
-        tokens = shlex.split(command, posix=True)
-        if "pytest" not in tokens:
-            continue
-        selectors.extend(
-            token.rstrip("/") for token in tokens[tokens.index("pytest") + 1 :] if not token.startswith("-")
-        )
+
+    # Two of the tests in tests/release are REGISTERED guards, and plain pytest reports a
+    # skipped, xfailed or deselected guard as a pass.  The register's own
+    # `guard_removed_skipped_xfailed_deselected_or_nondefault: reopen` clause makes that shape a
+    # reopened obligation rather than a recordable residual, so the release nodes must go through
+    # the same strict active-guard runner `main.yml` uses for the `remaining` suite.
+    assert all("pytest" not in command.split() for command in commands), (
+        "release gate must not select release tests with plain pytest"
+    )
+    runners = [command for command in commands if "tools.ci_active_checkout_runner" in command]
+    assert len(runners) == 1, "release gate must invoke the strict active-guard runner exactly once"
+    runner = runners[0]
+    assert "--suite release" in runner
+    assert '--revision "${EVIDENCE_SHA:?}"' in runner
+    assert '--trusted-base "${TRUSTED_BASE_SHA:?}"' in runner
+
+    # The revision and trusted base are DERIVED by `candidate_identity`, never typed here.  That
+    # job's `bind` step is copied from `main.yml`, so silent byte drift between the two copies is
+    # the failure mode this comparison exists to catch.
+    ci = yaml.load(_read(REPO_ROOT / ".github" / "workflows" / "main.yml"), Loader=yaml.BaseLoader)
+
+    def _bind(document: dict) -> dict:
+        job = document["jobs"]["candidate_identity"]
+        return next(step for step in job["steps"] if step.get("id") == "bind")
+
+    assert _bind(workflow)["run"] == _bind(ci)["run"], "release-gate bind script drifted from main.yml"
+    assert _bind(workflow)["env"] == _bind(ci)["env"], "release-gate bind environment drifted from main.yml"
+    assert workflow["jobs"]["candidate_identity"]["outputs"] == ci["jobs"]["candidate_identity"]["outputs"]
+    gate = jobs["whole-tree-artifact-freshness"]
+    assert gate["needs"] == "candidate_identity"
+    assert gate["env"]["EVIDENCE_SHA"] == "${{ needs.candidate_identity.outputs.evidence_sha }}"
+    assert gate["env"]["TRUSTED_BASE_SHA"] == "${{ needs.candidate_identity.outputs.trusted_base_sha }}"
+
+    # Reachability is now a property of the runner's own registry, not of workflow text: the
+    # runner executes exactly `checkout_execution_selection`, so a module absent from it is a
+    # module the release gate silently never runs.
+    from tools.ci_candidate_runner import _SELECTIONS
+    from tools.ci_guard_execution import GUARD_PLATFORMS, active_guard_specs, checkout_execution_selection
 
     release_modules = sorted(
         path.relative_to(REPO_ROOT).as_posix() for path in (REPO_ROOT / "tests" / "release").rglob("test_*.py")
     )
     assert release_modules, "tests/release contains no test modules"
-    for module in release_modules:
-        reached = any(module == selector or module.startswith(f"{selector}/") for selector in selectors)
-        assert reached, f"release test module is unreached by release workflow pytest invocation: {module}"
+    selected_files, _selected_nodes = checkout_execution_selection(REPO_ROOT, "release")
+    assert sorted(selected_files) == release_modules, (
+        f"release modules unreached by the release exact-checkout selection: "
+        f"{sorted(set(release_modules) - set(selected_files))}"
+    )
 
-    from tools.ci_candidate_runner import _SELECTIONS
+    # An empty active set makes the strict command `None`, and the runner then exits 0 having
+    # executed nothing at all -- a green weaker than the plain pytest it replaced.
+    for platform in sorted(GUARD_PLATFORMS):
+        specs = active_guard_specs(REPO_ROOT, "release", platform=platform, execution_root="git-index")
+        assert specs, f"release suite has no active guard to prove on {platform}"
+        assert all(spec.node.split("::", 1)[0] in set(selected_files) for spec in specs)
 
     remaining = _SELECTIONS["remaining"]
     assert any("--ignore=tests/release" in selection for selection in remaining), (
         "remaining candidate selection must ignore tests/release"
     )
+
+
+def test_claim_corrections_cited_guard_nodes_resolve_and_name_their_real_cadence() -> None:
+    """A row naming a deleted node, or the wrong cadence for a live one, is a false claim.
+
+    OB-006 moved the changed-Python-count guard out of ``tests/docs`` and into the release
+    suite. The evidence row kept naming the deleted ``tests/docs`` node and kept claiming the
+    count was re-derived at every head, both of which the same commit made untrue. Nothing
+    caught either, because no check read the row's own citation.
+    """
+    from tools.ci_guard_execution import suite_for_node
+
+    corrections = _read(REPO_ROOT / "docs" / "CLAIM_CORRECTIONS.md")
+    node_reference = re.compile(r"tests/[\w/]+\.py::[\w.\-]+(?:\[[^\]\s]+\])?")
+
+    def assert_current(candidate: str) -> None:
+        references = sorted(set(node_reference.findall(candidate)))
+        assert references, "docs/CLAIM_CORRECTIONS.md cites no pytest node"
+        for reference in references:
+            path, _, name = reference.partition("::")
+            module = REPO_ROOT / path
+            assert module.is_file(), f"cited node's module does not exist: {reference}"
+            defined = {
+                node.name
+                for node in ast.walk(ast.parse(_read(module)))
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            assert name.split("[", 1)[0] in defined, f"cited node does not exist: {reference}"
+            if suite_for_node(reference) != "release":
+                continue
+            # The release suite runs on a `v*` tag, so a row citing one of its nodes may not
+            # describe the check as firing on each candidate head.
+            rows = [line for line in candidate.splitlines() if reference in line]
+            assert rows, reference
+            for row in rows:
+                lowered = row.lower()
+                assert "at release" in lowered, f"release-suite citation omits its cadence: {reference}"
+                assert "at every head" not in lowered, f"release-suite citation claims per-head cadence: {reference}"
+
+    assert_current(corrections)
+
+    live = "tests/release/test_whole_tree_artifact_freshness.py"
+    assert live in corrections
+    deleted_node = corrections.replace(live, "tests/docs/test_docs_freshness.py")
+    assert deleted_node != corrections
+    with pytest.raises(AssertionError, match="cited node does not exist"):
+        assert_current(deleted_node)
+
+    stale_cadence = corrections.replace(
+        "re-derives the count from the live index",
+        "re-derives the count from the live index at every head",
+        1,
+    )
+    assert stale_cadence != corrections
+    with pytest.raises(AssertionError, match="claims per-head cadence"):
+        assert_current(stale_cadence)
