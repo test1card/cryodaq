@@ -3430,7 +3430,7 @@ records:
     status: open
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: Every marker trigger declared in docs/OBLIGATIONS.md and the token it reads in its target file.
+    applies_to: OB-002's marker trigger declared in docs/OBLIGATIONS.md and the token it reads in its target file.
     classification: evidence_misbinding
     correction_owner: primary
     guard_owner: primary

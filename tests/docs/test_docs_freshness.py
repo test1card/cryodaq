@@ -2812,12 +2812,37 @@ def _ob_002_marker_trigger() -> tuple[str, str, str]:
     register = _read(REPO_ROOT / "docs" / "OBLIGATIONS.md")
     row = next((line for line in register.splitlines() if line.startswith("| OB-002 |")), None)
     assert row is not None, "OB-002 is missing from the obligations register"
-    triggers = re.findall(r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=([A-Za-z0-9_-]+)", row)
-    assert len(triggers) == 1, (
-        f"OB-002 must declare exactly one marker trigger; parsed {triggers!r} from its row. "
-        "A row carrying none or several leaves the evaluator with no single thing to read."
+    trigger_cell = row.split("|")[5].strip()
+    trigger = re.fullmatch(
+        r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=([A-Za-z0-9_-]+)", trigger_cell
     )
-    return triggers[0]
+    assert trigger is not None, (
+        "OB-002's Trigger cell must be exactly one marker expression; "
+        f"got {trigger_cell!r}."
+    )
+    return trigger.groups()
+
+
+def test_ob_002_marker_trigger_rejects_trailing_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registered marker expression must consume its complete Trigger cell."""
+
+    original_read = _read
+
+    def _read_with_trailing_trigger_text(path: Path) -> str:
+        text = original_read(path)
+        if path == REPO_ROOT / "docs" / "OBLIGATIONS.md":
+            return text.replace(
+                "marker:ROADMAP.md:phase-1-status=DONE",
+                "marker:ROADMAP.md:phase-1-status=DONE!",
+                1,
+            )
+        return text
+
+    monkeypatch.setitem(
+        _ob_002_marker_trigger.__globals__, "_read", _read_with_trailing_trigger_text
+    )
+    with pytest.raises(AssertionError, match="Trigger cell must be exactly one marker expression"):
+        _ob_002_marker_trigger()
 
 
 def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
