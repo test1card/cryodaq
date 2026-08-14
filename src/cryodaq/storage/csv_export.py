@@ -88,7 +88,7 @@ class CSVExporter:
             writer = csv.writer(fh)
             writer.writerow(["timestamp", "instrument_id", "channel", "value", "unit", "status"])
 
-            for raw_ts, instrument_id, channel, value, unit, status in rows:
+            for raw_ts, instrument_id, channel, value, unit, status, *_ in rows:
                 ts = _parse_timestamp(raw_ts)
                 # The value is already decoded; a non-finite (masked) reading is
                 # left blank — the status column carries the discriminator.
