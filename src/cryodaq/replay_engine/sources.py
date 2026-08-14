@@ -439,7 +439,7 @@ def _load_cold_day_rows(reader: ArchiveReader, day_iso: str) -> list[tuple[float
     full = reader.query_rows(day_start, day_end, None)
     rows = [
         (_parse_timestamp(ts).timestamp(), channel, value, unit, status, inst)
-        for ts, inst, channel, value, unit, status in full
+        for ts, inst, channel, value, unit, status, *_ in full
     ]
     return _validate_loaded_rows(rows, source=f"cold:{day_iso}")
 
