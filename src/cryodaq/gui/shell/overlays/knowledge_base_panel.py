@@ -206,10 +206,14 @@ class _RagSnippetPane(QWidget):
     def set_loading(self, label: str) -> None:
         self._title.setText(label)
         self._status.setText("Загрузка…")
+        self._status.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+        self._status.setAccessibleDescription("Выполняется текущий запрос к Engine")
         self._clear_cards()
 
     def set_results(self, label: str, results: list[dict[str, Any]]) -> None:
         self._title.setText(label)
+        self._status.setStyleSheet(f"color: {theme.MUTED_FOREGROUND};")
+        self._status.setAccessibleDescription("Текущие результаты подтверждены Engine")
         if not results:
             self._status.setText("Ничего не найдено.")
             self._clear_cards()
@@ -224,7 +228,32 @@ class _RagSnippetPane(QWidget):
         self._title.setText(label)
         self._status.setText(f"Ошибка: {message}")
         self._status.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+        self._status.setAccessibleDescription("Текущий запрос к Engine завершился ошибкой")
         self._clear_cards()
+
+    def mark_disconnected(self) -> None:
+        """Retain prior cards only with an explicit loss-of-authority cue."""
+        if self._scroll_layout.count() == 1:
+            self._status.setText("Нет связи с Engine · результатов для показа нет")
+            self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
+            self._status.setAccessibleDescription("Связь с Engine потеряна; сохранённых результатов нет")
+            return
+        self._status.setText("Нет связи с Engine · показаны последние результаты")
+        self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
+        self._status.setAccessibleDescription("Связь с Engine потеряна; показанные результаты не являются текущими")
+
+    def mark_reconnected(self) -> None:
+        """Require a successor query before retained cards become current."""
+        if self._scroll_layout.count() == 1:
+            self._status.setText("Требуется новый запрос · предыдущих результатов нет")
+            self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
+            self._status.setAccessibleDescription("Связь восстановлена; требуется новый запрос")
+            return
+        self._status.setText("Требуется новый запрос · показаны предыдущие результаты")
+        self._status.setStyleSheet(f"color: {theme.STATUS_STALE};")
+        self._status.setAccessibleDescription(
+            "Связь восстановлена; показанные результаты ещё не подтверждены новым запросом"
+        )
 
     def _clear_cards(self) -> None:
         # Iterate from the front and stop at the trailing stretch.
@@ -250,6 +279,7 @@ class KnowledgeBasePanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._connected = False
+        self._rag_generation = 0
         self._categories = categories if categories is not None else _load_categories(config_path)
         self._workers: list[ZmqCommandWorker] = []
         root = QVBoxLayout(self)
@@ -360,7 +390,15 @@ class KnowledgeBasePanel(QWidget):
     # ------------------------------------------------------------------
 
     def set_connected(self, connected: bool) -> None:
-        self._connected = bool(connected)
+        connected = bool(connected)
+        changed = connected != self._connected
+        self._connected = connected
+        if changed:
+            self._rag_generation += 1
+        if not connected:
+            self._snippet_pane.mark_disconnected()
+        elif changed:
+            self._snippet_pane.mark_reconnected()
 
     # ------------------------------------------------------------------
     # Internal handlers
@@ -377,11 +415,19 @@ class KnowledgeBasePanel(QWidget):
         if cat is None:
             return
         self._stack.setCurrentIndex(_PAGE_RAG)
+        if not self._connected:
+            self._snippet_pane.mark_disconnected()
+            return
         self._snippet_pane.set_loading(cat["label"])
         self._dispatch_rag_query(cat)
 
     def _dispatch_rag_query(self, cat: dict[str, Any]) -> None:
         """Fire `rag.search` via ZmqCommandWorker; results land in the snippet pane."""
+        if not self._connected:
+            self._snippet_pane.mark_disconnected()
+            return
+        self._rag_generation += 1
+        generation = self._rag_generation
         worker = ZmqCommandWorker(
             cmd={
                 "cmd": "rag.search",
@@ -398,6 +444,8 @@ class KnowledgeBasePanel(QWidget):
                 self._workers.remove(worker)
             except ValueError:
                 pass
+            if not self._connected or generation != self._rag_generation:
+                return
             if reply is None:
                 self._snippet_pane.set_error(cat["label"], "Engine не ответил.")
                 return

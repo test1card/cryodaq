@@ -16,6 +16,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
@@ -639,8 +640,9 @@ class TopWatchBar(QWidget):
         # ``replay`` additionally requires the exact launcher/bridge authority.
         self._expected_app_mode_domain = "live"
         self._replay_authority: ReplayStatusAuthority | None = None
+        self._live_status_generation = 0
         self._engine_alive: bool | None = None
-        self._last_experiment_full_text = "\u25cb Нет активного эксперимента"
+        self._last_experiment_full_text = ""
 
         self._build_ui()
         self._build_persistent_context()
@@ -676,6 +678,7 @@ class TopWatchBar(QWidget):
         # One in-flight worker per poll stream — skip tick if previous
         # request still running (Finding 2, Block A.9).
         self._experiment_worker = None
+        self._experiment_request_token = 0
 
     # ------------------------------------------------------------------
     # UI construction
@@ -694,9 +697,12 @@ class TopWatchBar(QWidget):
         layout.addWidget(self._make_zone_sep())
 
         # Zone 2: experiment + phase + elapsed (clickable) + time window echo
-        self._exp_label = _ClickableLabel(self._last_experiment_full_text)
+        initial_experiment_text = "Статус недоступен · принятых данных нет"
+        self._exp_label = _ClickableLabel(initial_experiment_text)
         self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
-        self._exp_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+        self._exp_label.setAccessibleDescription(initial_experiment_text)
+        self._exp_label.setStyleSheet(f"color: {theme.STATUS_CAUTION};")
+        self._exp_label.setToolTip(plain_text_tooltip("Статус эксперимента недоступен", "Принятых данных нет"))
         self._exp_label.setMaximumWidth(220)
         self._exp_label.clicked.connect(self.experiment_clicked.emit)
         layout.addWidget(self._exp_label, stretch=1)
@@ -759,18 +765,25 @@ class TopWatchBar(QWidget):
         elided = metrics.elidedText(full_text, Qt.TextElideMode.ElideRight, max_w)
         self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
         self._exp_label.setText(elided)
+        self._exp_label.setAccessibleDescription(full_text)
         self._exp_label.setToolTip(plain_text_tooltip(full_text))
 
     def _mark_experiment_status_unavailable(self) -> None:
-        """Retain last evidence while visibly revoking current authority."""
+        """Retain accepted evidence while visibly revoking current authority."""
 
+        if self._last_experiment_full_text:
+            visible = safe_plain_text(f"Статус недоступен · {self._last_experiment_full_text}")
+            evidence_detail = f"Последние принятые данные: {self._last_experiment_full_text}"
+        else:
+            visible = "Статус недоступен · принятых данных нет"
+            evidence_detail = "Принятых данных нет"
+        metrics = self._exp_label.fontMetrics()
+        elided = metrics.elidedText(visible, Qt.TextElideMode.ElideRight, self._exp_label.maximumWidth())
+        self._exp_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._exp_label.setText(elided)
+        self._exp_label.setAccessibleDescription(visible)
         self._exp_label.setStyleSheet(f"color: {theme.STATUS_CAUTION};")
-        self._exp_label.setToolTip(
-            plain_text_tooltip(
-                "Статус эксперимента недоступен",
-                f"Последние принятые данные: {self._last_experiment_full_text}",
-            )
-        )
+        self._exp_label.setToolTip(plain_text_tooltip("Статус эксперимента недоступен", evidence_detail))
         self._update_mode_badge(None)
 
     def _build_persistent_context(self) -> None:
@@ -1120,15 +1133,29 @@ class TopWatchBar(QWidget):
     # ------------------------------------------------------------------
 
     def _poll_fast(self) -> None:
-        """Poll experiment status (zone 2). Skips if previous still in flight."""
+        """Poll experiment status only with connected producer authority."""
+        if self._engine_alive is not True:
+            self._mark_experiment_status_unavailable()
+            return
+        if self._expected_app_mode_domain == "replay" and self._replay_authority is None:
+            self._mark_experiment_status_unavailable()
+            return
         if self._experiment_worker is not None and not self._experiment_worker.isFinished():
             return
         from cryodaq.gui.zmq_client import ZmqCommandWorker
 
         expected_replay_authority = self._replay_authority if self._expected_app_mode_domain == "replay" else None
+        expected_live_generation = self._live_status_generation if self._expected_app_mode_domain == "live" else None
+        self._experiment_request_token += 1
+        expected_request_token = self._experiment_request_token
         self._experiment_worker = ZmqCommandWorker({"cmd": "experiment_status"}, parent=self)
         self._experiment_worker.finished.connect(
-            lambda result, expected=expected_replay_authority: self._on_experiment_result(result, expected)
+            partial(
+                self._on_experiment_result,
+                expected_replay_authority=expected_replay_authority,
+                expected_live_generation=expected_live_generation,
+                expected_request_token=expected_request_token,
+            )
         )
         self._experiment_worker.start()
 
@@ -1136,7 +1163,22 @@ class TopWatchBar(QWidget):
         self,
         result: dict,
         expected_replay_authority: ReplayStatusAuthority | None = None,
+        expected_live_generation: int | None = None,
+        expected_request_token: int | None = None,
     ) -> None:
+        if expected_request_token is not None and expected_request_token != self._experiment_request_token:
+            return
+        if expected_live_generation is not None and (
+            self._expected_app_mode_domain != "live"
+            or self._engine_alive is not True
+            or expected_live_generation != self._live_status_generation
+        ):
+            return
+        if expected_replay_authority is not None and (
+            self._expected_app_mode_domain != "replay" or expected_replay_authority != self._replay_authority
+        ):
+            return
+
         accepted = decode_experiment_status(result)
         if accepted is None:
             self._mark_experiment_status_unavailable()
@@ -1146,6 +1188,7 @@ class TopWatchBar(QWidget):
         if accepted_domain != self._expected_app_mode_domain:
             self._mark_experiment_status_unavailable()
             return
+
         if self._expected_app_mode_domain == "replay":
             current_authority = self._replay_authority
             if (
@@ -1260,6 +1303,18 @@ class TopWatchBar(QWidget):
     # External setters (for direct injection from MainWindowV2 dispatchers)
     # ------------------------------------------------------------------
 
+    def _retire_live_status_authority(self) -> None:
+        """Invalidate every callback issued by the outgoing live producer."""
+        self._live_status_generation += 1
+        if self._expected_app_mode_domain == "live":
+            self._mark_experiment_status_unavailable()
+
+    def invalidate_engine_producer(self) -> None:
+        """Synchronously retire live status before engine replacement."""
+        if self._engine_alive is False:
+            self._retire_live_status_authority()
+        self.set_engine_state(False)
+
     def set_engine_state(self, alive: bool) -> None:
         """Update zone 1 from authoritative external source.
 
@@ -1267,7 +1322,12 @@ class TopWatchBar(QWidget):
         and by the launcher (which owns the engine subprocess lifecycle).
         Single source of truth — no internal polling for engine state.
         """
-        self._engine_alive = bool(alive)
+        alive = bool(alive)
+        if not alive:
+            self._channel_last_seen.clear()
+        if not alive and self._engine_alive is not False:
+            self._retire_live_status_authority()
+        self._engine_alive = alive
         if self._engine_alive:
             self._engine_label.setText("● Engine: работает")
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_OK};")
@@ -1276,13 +1336,17 @@ class TopWatchBar(QWidget):
             self._engine_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
         for key in (_PRESSURE_VITAL, SECOND_STAGE_CHANNEL, N2_PLATE_CHANNEL):
             self._render_vital(key)
+        self._refresh_channels()
 
     def set_replay_mode(self, replay: bool) -> None:
         """Pin archive/replay truth before the first asynchronous status poll."""
 
         if type(replay) is not bool:
             raise TypeError("replay mode must be an exact bool")
-        self._expected_app_mode_domain = "replay" if replay else "live"
+        domain = "replay" if replay else "live"
+        if domain != self._expected_app_mode_domain:
+            self._live_status_generation += 1
+        self._expected_app_mode_domain = domain
         self._replay_authority = None
         self._mark_experiment_status_unavailable()
 
@@ -1514,17 +1578,22 @@ class TopWatchBar(QWidget):
         self._alarm_count = max(0, int(n))
         if self._alarm_count == 0:
             self._alarms_label.setText("Тревоги: 0")
+            self._alarms_label.setAccessibleName(self._alarms_label.text())
             self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
         else:
             verb = ru_plural(self._alarm_count, "активна", "активны", "активны")
-            self._alarms_label.setText(f"Тревоги: {self._alarm_count} {verb}")
-            color = {
-                "INFO": theme.STATUS_INFO,
-                "CAUTION": theme.STATUS_CAUTION,
-                "CRITICAL": theme.STATUS_FAULT,
-                "UNKNOWN": theme.STATUS_FAULT,
-            }.get(str(worst_level).upper(), theme.STATUS_FAULT)
-            self._alarms_label.setStyleSheet(f"color: {color};")
+            marker, color = {
+                "INFO": ("ИНФО", theme.STATUS_INFO),
+                "CAUTION": ("ВНИМАНИЕ", theme.STATUS_CAUTION),
+                "CRITICAL": ("КРИТ", theme.STATUS_FAULT),
+                "UNKNOWN": ("НЕИЗВ", theme.STATUS_FAULT),
+            }.get(str(worst_level).upper(), ("НЕИЗВ", theme.STATUS_FAULT))
+            text = f"Тревоги: {self._alarm_count} {verb} · {marker}"
+            self._alarms_label.setText(text)
+            self._alarms_label.setAccessibleName(text)
+            self._alarms_label.setStyleSheet(
+                f"color: {theme.FOREGROUND}; border-left: 2px solid {color}; padding-left: {theme.SPACE_1}px;"
+            )
 
     def set_alarm_available(self, available: bool) -> None:
         if available:
@@ -1533,4 +1602,5 @@ class TopWatchBar(QWidget):
         self._alarms_label.setText(
             "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445"
         )
+        self._alarms_label.setAccessibleName(self._alarms_label.text())
         self._alarms_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")

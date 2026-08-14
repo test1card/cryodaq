@@ -695,3 +695,25 @@ def test_smua_start_dispatches_exact_command_dict(monkeypatch):
         assert stop_cmd["channel"] == "smua"
     finally:
         _stop_timers(w)
+
+
+def test_descriptor_retirement_synchronously_revokes_ready_dashboard_authority(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    """A real READY cut cannot remain mutation truth during bridge replacement."""
+    _app()
+    window = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        window._overview_panel.set_connected(True)
+        window.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
+        assert window._overview_panel._authority_valid is True
+        assert window._overview_panel._quick_log._mutation_enabled is True
+
+        window.invalidate_descriptor_transport()
+
+        assert window._overview_panel._connected is False
+        assert window._overview_panel._authority_valid is False
+        assert window._overview_panel._quick_log._mutation_enabled is False
+    finally:
+        _stop_timers(window)

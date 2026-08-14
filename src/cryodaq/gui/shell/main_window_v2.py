@@ -220,6 +220,8 @@ class MainWindowV2(QMainWindow):
         self._typed_safety_ready = False
         self._last_disk_observed_at: datetime | None = None
         self._accepted_disk_bridge_instance_id: str | None = None
+        self._reading_transport_invalidated = False
+        self._retired_reading_bridge_instance_id: str | None = None
 
         self.setWindowTitle("CryoDAQ")
         self.setMinimumSize(1280, 800)
@@ -649,6 +651,9 @@ class MainWindowV2(QMainWindow):
         if type(qualified) is not DescriptorQualifiedReading or type(qualified.reading) is not Reading:
             logger.warning("malformed descriptor-qualified reading dropped")
             return
+        if not MainWindowV2._accept_reading_bridge_authority(self, qualified.reading):
+            logger.debug("retired or foreign bridge reading dropped")
+            return
 
         view: DescriptorView | None = None
         result: IngestResult | None = None
@@ -681,27 +686,109 @@ class MainWindowV2(QMainWindow):
             self._instrument_panel.on_descriptor_reading(qualified.reading, view)
 
     def invalidate_descriptor_transport(self) -> None:
-        """Advance the store generation after a bridge death/restart.
+        """Retire every GUI consumer anchored to the outgoing bridge."""
+        self._reading_transport_invalidated = True
+        self._retired_reading_bridge_instance_id = self._current_bridge_instance_id()
+        failures: list[Exception] = []
 
-        Call this whenever the bridge is known to have died or restarted so
-        that stale legacy-absent readings arriving in the new session cannot
-        silently restore authoritative identity status.
-        """
+        def attempt(callback: Callable[[], None]) -> None:
+            try:
+                callback()
+            except Exception as exc:
+                failures.append(exc)
+
+        for attr in (
+            "_alarm_panel",
+            "_keithley_panel",
+            "_conductivity_panel",
+            "_multiline_panel",
+            "_knowledge_base_panel",
+            "_operator_log_panel",
+            "_instrument_panel",
+            "_archive_panel",
+            "_calibration_panel",
+            "_experiment_overlay",
+        ):
+            panel = getattr(self, attr, None)
+            set_connected = getattr(panel, "set_connected", None)
+            if callable(set_connected):
+                attempt(lambda set_connected=set_connected: set_connected(False))
+
+        unavailable_reason = (
+            "\u0421\u0442\u0430\u0442\u0443\u0441 "
+            "\u044d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442\u0430 "
+            "\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d: "
+            "\u043d\u0435\u0442 \u0441\u0432\u044f\u0437\u0438 \u0441 Engine"
+        )
+        if hasattr(self, "_latest_experiment_status"):
+            self._latest_experiment_status = None
+        if hasattr(self, "_analytics_last_exp_id"):
+            self._analytics_last_exp_id = None
+        analytics_snapshot = getattr(self, "_analytics_snapshot", None)
+        if isinstance(analytics_snapshot, dict):
+            analytics_snapshot.pop("set_experiment_status", None)
+        if hasattr(self, "_last_reading_time"):
+            self._last_reading_time = 0.0
+        if hasattr(self, "_rate_count"):
+            self._rate_count = 0
+        if hasattr(self, "_accepted_disk_bridge_instance_id"):
+            self._accepted_disk_bridge_instance_id = None
+        if hasattr(self, "_last_disk_observed_at"):
+            self._last_disk_observed_at = None
+        bottom_bar = getattr(self, "_bottom_bar", None)
+        if bottom_bar is not None:
+            attempt(lambda: bottom_bar.set_connected(False, "Engine потерян"))
+            attempt(lambda: bottom_bar.set_data_rate(float("nan")))
+            attempt(lambda: bottom_bar.mark_disk_stale(disconnected=True))
+            attempt(lambda: self._invalidate_safety_authority(unavailable_reason, disconnected=True))
+
+        overview = getattr(self, "_overview_panel", None)
+        if overview is not None:
+            attempt(lambda: overview.on_experiment_status({}))
+            phase_widget = getattr(overview, "_phase_widget", None)
+            if phase_widget is not None:
+                attempt(lambda: phase_widget.set_operation_state("unknown", unavailable_reason))
+                attempt(lambda: phase_widget.set_mutation_enabled(False))
+
+        experiment_overlay = getattr(self, "_experiment_overlay", None)
+        if experiment_overlay is not None:
+            attempt(lambda: experiment_overlay.set_templates([]))
+            attempt(lambda: experiment_overlay.set_experiment(None, []))
+
+        operator_log_panel = getattr(self, "_operator_log_panel", None)
+        if operator_log_panel is not None:
+            attempt(lambda: operator_log_panel.set_current_experiment(None))
+
+        analytics_view = getattr(self, "_analytics_view", None)
+        if analytics_view is not None:
+            attempt(lambda: analytics_view.set_experiment_status(None))
+            attempt(lambda: analytics_view.set_phase(None))
+
         descriptor_store = getattr(self, "_descriptor_store", None)
         if descriptor_store is not None:
-            descriptor_store.invalidate_transport()
+            attempt(descriptor_store.invalidate_transport)
         annunciation_controller = getattr(self, "_annunciation_controller", None)
         if annunciation_controller is not None:
-            annunciation_controller.invalidate_transport()
+            attempt(annunciation_controller.invalidate_transport)
         top_bar = getattr(self, "_top_bar", None)
-        if self._replay_mode and top_bar is not None:
-            top_bar.invalidate_replay_authority()
+        if top_bar is not None:
+            attempt(top_bar.invalidate_engine_producer)
+            if self._replay_mode:
+                attempt(top_bar.invalidate_replay_authority)
+        if overview is not None:
+            attempt(overview.invalidate_operator_snapshot_producer)
+
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup(
+                "multiple GUI bridge authority invalidations failed",
+                failures,
+            )
 
     def invalidate_engine_producer(self) -> None:
         """Retire every GUI consumer anchored to the outgoing engine."""
-
         self.invalidate_descriptor_transport()
-        self._overview_panel.invalidate_operator_snapshot_producer()
 
     def bind_replay_authority(
         self,
@@ -787,6 +874,25 @@ class MainWindowV2(QMainWindow):
                 self._operator_log_panel.on_reading(reading)
             if channel == "analytics/safety_state":
                 self._dispatch_safety_evidence(reading)
+
+    def _accept_reading_bridge_authority(self, reading: Reading) -> bool:
+        """Bind production qualified readings to the current bridge incarnation."""
+        if getattr(self, "_bridge", None) is None:
+            return True
+        current_bridge_instance_id = MainWindowV2._current_bridge_instance_id(self)
+        metadata = reading.metadata
+        if (
+            current_bridge_instance_id is None
+            or type(metadata) is not dict
+            or metadata.get("bridge_instance_id") != current_bridge_instance_id
+        ):
+            return False
+        if getattr(self, "_reading_transport_invalidated", False):
+            if current_bridge_instance_id == getattr(self, "_retired_reading_bridge_instance_id", None):
+                return False
+            self._reading_transport_invalidated = False
+            self._retired_reading_bridge_instance_id = None
+        return True
 
     def _current_bridge_instance_id(self) -> str | None:
         value = getattr(self._bridge, "bridge_instance_id", None)
@@ -1218,6 +1324,8 @@ class MainWindowV2(QMainWindow):
             self._conductivity_panel.set_connected(connected)
         if self._multiline_panel is not None:
             self._multiline_panel.set_connected(connected)
+        if self._knowledge_base_panel is not None:
+            self._knowledge_base_panel.set_connected(connected)
         # Phase II.7: mirror to Calibration overlay (same contract).
         if self._calibration_panel is not None:
             self._calibration_panel.set_connected(connected)
@@ -1465,6 +1573,7 @@ class MainWindowV2(QMainWindow):
         self._overview_panel.on_experiment_status(status)
         # Forward to overlay if it exists and is visible
         if self._experiment_overlay is not None:
+            self._experiment_overlay.set_templates(status.get("templates", []))
             exp = status.get("active_experiment")
             if exp is not None:
                 # Inject top-level fields into experiment dict for overlay

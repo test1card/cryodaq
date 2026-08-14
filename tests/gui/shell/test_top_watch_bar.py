@@ -159,35 +159,38 @@ def test_set_alarm_summary_updates_label() -> None:
     bar._stale_timer.stop()
     bar.set_alarm_summary(0, "NONE")
     assert bar._alarms_label.text() == "Тревоги: 0", f"Zero alarms text wrong: {bar._alarms_label.text()!r}"
+    assert bar._alarms_label.accessibleName() == bar._alarms_label.text()
     assert theme.TEXT_MUTED in bar._alarms_label.styleSheet(), (
         f"Zero alarms must use TEXT_MUTED: {bar._alarms_label.styleSheet()!r}"
     )
     bar.set_alarm_summary(3, "CRITICAL")
     # Text: "Тревоги: 3 активны" (3 → plural "активны")
-    assert bar._alarms_label.text() == "Тревоги: 3 активны", f"Three alarms text wrong: {bar._alarms_label.text()!r}"
+    assert bar._alarms_label.text() == "Тревоги: 3 активны · КРИТ", (
+        f"Three alarms text wrong: {bar._alarms_label.text()!r}"
+    )
     assert theme.STATUS_FAULT in bar._alarms_label.styleSheet(), (
         f"Nonzero alarms must use STATUS_FAULT: {bar._alarms_label.styleSheet()!r}"
     )
 
 
 @pytest.mark.parametrize(
-    ("level", "color"),
+    ("level", "marker", "color"),
     [
-        ("INFO", theme.STATUS_INFO),
-        ("CAUTION", theme.STATUS_CAUTION),
-        ("CRITICAL", theme.STATUS_FAULT),
-        ("UNKNOWN", theme.STATUS_FAULT),
+        ("INFO", "ИНФО", theme.STATUS_INFO),
+        ("CAUTION", "ВНИМАНИЕ", theme.STATUS_CAUTION),
+        ("CRITICAL", "КРИТ", theme.STATUS_FAULT),
+        ("UNKNOWN", "НЕИЗВ", theme.STATUS_FAULT),
     ],
 )
-def test_alarm_summary_uses_worst_severity(level: str, color: str) -> None:
+def test_alarm_summary_uses_worst_severity(level: str, marker: str, color: str) -> None:
     bar = _make_bar()
     bar.set_alarm_summary(1, level)
     assert bar._alarm_count == 1
-    assert (
-        bar._alarms_label.text()
-        == "\u0422\u0440\u0435\u0432\u043e\u0433\u0438: 1 \u0430\u043a\u0442\u0438\u0432\u043d\u0430"
-    )
-    assert color in bar._alarms_label.styleSheet()
+    assert bar._alarms_label.text() == f"Тревоги: 1 активна · {marker}"
+    style = bar._alarms_label.styleSheet()
+    assert f"border-left: 2px solid {color}" in style
+    assert theme.FOREGROUND in style
+    assert theme.TEXT_MUTED not in style
 
 
 def test_alarm_count_starts_and_returns_unavailable() -> None:
@@ -198,6 +201,7 @@ def test_alarm_count_starts_and_returns_unavailable() -> None:
     bar.set_alarm_available(False)
     assert bar._alarm_count is None
     assert "\u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445" in bar._alarms_label.text().lower()
+    assert bar._alarms_label.accessibleName() == bar._alarms_label.text()
 
 
 # --- B.6 Mode badge tests ---
@@ -362,6 +366,215 @@ def test_mode_badge_updates_when_experiment_active() -> None:
     bar._on_experiment_result(result)
     assert not bar._mode_badge.isHidden()
     assert "Эксперимент" in bar._mode_badge.text()
+
+
+def test_live_experiment_poll_rejects_outgoing_engine_reply_after_reconnect(monkeypatch) -> None:
+    """A deferred callback stays bound to its request and engine generation."""
+    import cryodaq.gui.zmq_client as zmq_client
+
+    class DeferredSignal:
+        def __init__(self) -> None:
+            self._callbacks: list = []
+
+        def connect(self, callback) -> None:
+            self._callbacks.append(callback)
+
+        def emit(self, result: dict) -> None:
+            for callback in tuple(self._callbacks):
+                callback(result)
+
+    class DeferredWorker:
+        instances: list = []
+
+        def __init__(self, cmd: dict, parent=None) -> None:
+            del parent
+            self.cmd = dict(cmd)
+            self.finished = DeferredSignal()
+            self._finished = False
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            return None
+
+        def isFinished(self) -> bool:  # noqa: N802
+            return self._finished
+
+        def finish(self, result: dict) -> None:
+            self._finished = True
+            self.finished.emit(result)
+
+    monkeypatch.setattr(zmq_client, "ZmqCommandWorker", DeferredWorker)
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    accepted = _live_experiment_status(name="accepted current engine")
+    same_generation_stale = _live_experiment_status(name="stale same-generation request")
+    same_generation_successor = _live_experiment_status(name="accepted same-generation successor")
+    outgoing = _live_experiment_status(name="stale outgoing engine")
+    successor = _live_experiment_status(name="accepted successor engine")
+    try:
+        bar.set_engine_state(True)
+        bar._poll_fast()
+        first_worker = DeferredWorker.instances[-1]
+        assert first_worker.cmd == {"cmd": "experiment_status"}
+        first_worker.finish(accepted)
+        assert emitted == [accepted]
+
+        bar._poll_fast()
+        same_generation_stale_worker = DeferredWorker.instances[-1]
+        same_generation_stale_worker._finished = True
+        bar._poll_fast()
+        same_generation_successor_worker = DeferredWorker.instances[-1]
+        assert same_generation_successor_worker is not same_generation_stale_worker
+        same_generation_successor_worker.finish(same_generation_successor)
+        same_generation_render = (
+            bar._exp_label.text(),
+            bar._exp_label.accessibleDescription(),
+            bar._exp_label.toolTip(),
+            bar._exp_label.styleSheet(),
+            bar._mode_badge.text(),
+            bar._mode_badge.isHidden(),
+            bar._last_experiment_full_text,
+        )
+
+        same_generation_stale_worker.finished.emit(same_generation_stale)
+
+        assert emitted == [accepted, same_generation_successor]
+        assert (
+            bar._exp_label.text(),
+            bar._exp_label.accessibleDescription(),
+            bar._exp_label.toolTip(),
+            bar._exp_label.styleSheet(),
+            bar._mode_badge.text(),
+            bar._mode_badge.isHidden(),
+            bar._last_experiment_full_text,
+        ) == same_generation_render
+
+        bar._poll_fast()
+        outgoing_worker = DeferredWorker.instances[-1]
+        assert outgoing_worker is not same_generation_successor_worker
+        bar.set_engine_state(False)
+
+        assert emitted == [accepted, same_generation_successor]
+        assert "accepted same-generation successor" in bar._last_experiment_full_text
+        assert "stale outgoing engine" not in bar._last_experiment_full_text
+        assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        assert "недоступен" in document.toPlainText().lower()
+
+        worker_count = len(DeferredWorker.instances)
+        bar._poll_fast()
+        assert len(DeferredWorker.instances) == worker_count
+
+        bar.set_engine_state(True)
+        outgoing_worker._finished = True
+        bar._poll_fast()
+        successor_worker = DeferredWorker.instances[-1]
+        assert successor_worker is not outgoing_worker
+        successor_worker.finish(successor)
+        assert emitted == [accepted, same_generation_successor, successor]
+        assert "accepted successor engine" in bar._last_experiment_full_text
+        assert theme.TEXT_PRIMARY in bar._exp_label.styleSheet()
+        successor_render = (
+            bar._exp_label.text(),
+            bar._exp_label.accessibleDescription(),
+            bar._exp_label.toolTip(),
+            bar._exp_label.styleSheet(),
+            bar._mode_badge.text(),
+            bar._mode_badge.isHidden(),
+            bar._last_experiment_full_text,
+        )
+
+        outgoing_worker.finished.emit(outgoing)
+
+        assert emitted == [accepted, same_generation_successor, successor]
+        assert (
+            bar._exp_label.text(),
+            bar._exp_label.accessibleDescription(),
+            bar._exp_label.toolTip(),
+            bar._exp_label.styleSheet(),
+            bar._mode_badge.text(),
+            bar._mode_badge.isHidden(),
+            bar._last_experiment_full_text,
+        ) == successor_render
+        assert "stale outgoing engine" not in bar._last_experiment_full_text
+    finally:
+        _dispose_bar(bar)
+
+
+def test_retired_replay_callback_cannot_clobber_successor_authority(tmp_path) -> None:
+    """A queued replay reply has no side effects after authority replacement."""
+    from cryodaq.replay_engine.replay_experiment_stub import ReplayExperimentStub
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    engine = ReplayEngine.__new__(ReplayEngine)
+    engine._source_path = tmp_path / "outgoing.sqlite"
+    engine._speed = 1.0
+    engine._launcher_session_id = "c" * 32
+    engine._phase = "preparation"
+    engine._exp_stub = ReplayExperimentStub(tmp_path)
+    engine._exp_stub.create_retroactive(
+        title="producer-backed replay experiment",
+        sample="sample-a",
+        operator="operator-a",
+        start_time="2026-07-23T00:00:00+00:00",
+    )
+    outgoing = _wire_from_handler(asyncio.run(engine._handle_command({"cmd": "experiment_status"})))
+    successor = copy.deepcopy(outgoing)
+    successor["replay_source"] = str(tmp_path / "successor.sqlite")
+    successor["replay_session_id"] = "d" * 32
+
+    bar = _make_bar()
+    emitted: list[dict] = []
+    bar.experiment_status_received.connect(emitted.append)
+    try:
+        bar.set_replay_mode(True)
+        bar.bind_replay_authority(
+            source=outgoing["replay_source"],
+            speed=outgoing["replay_speed"],
+            session_id=outgoing["replay_session_id"],
+            launcher_generation=7,
+            bridge_generation=3,
+        )
+        outgoing_authority = bar._replay_authority
+        assert outgoing_authority is not None
+
+        bar.invalidate_replay_authority()
+        bar.bind_replay_authority(
+            source=successor["replay_source"],
+            speed=successor["replay_speed"],
+            session_id=successor["replay_session_id"],
+            launcher_generation=7,
+            bridge_generation=4,
+        )
+        successor_authority = bar._replay_authority
+        assert successor_authority is not None
+        bar._on_experiment_result(successor, successor_authority)
+        successor_render = (
+            bar._exp_label.text(),
+            bar._exp_label.accessibleDescription(),
+            bar._exp_label.toolTip(),
+            bar._exp_label.styleSheet(),
+            bar._mode_badge.text(),
+            bar._mode_badge.isHidden(),
+            bar._last_experiment_full_text,
+        )
+
+        bar._on_experiment_result(outgoing, outgoing_authority)
+
+        assert emitted == [successor]
+        assert (
+            bar._exp_label.text(),
+            bar._exp_label.accessibleDescription(),
+            bar._exp_label.toolTip(),
+            bar._exp_label.styleSheet(),
+            bar._mode_badge.text(),
+            bar._mode_badge.isHidden(),
+            bar._last_experiment_full_text,
+        ) == successor_render
+    finally:
+        _dispose_bar(bar)
 
 
 def test_top_watch_accepts_live_experiment_manager_status_only_after_real_encoding(tmp_path) -> None:
@@ -546,15 +759,50 @@ def test_raw_experiment_handler_payload_without_transport_proto_is_not_authorita
     try:
         bar._on_experiment_result(accepted)
         last_known_text = bar._last_experiment_full_text
-        last_known_display = bar._exp_label.text()
 
         bar._on_experiment_result(raw_handler_payload)
 
         assert emitted == [accepted]
         assert bar._last_experiment_full_text == last_known_text
-        assert bar._exp_label.text() == last_known_display
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert last_known_text in bar._exp_label.accessibleDescription()
         assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
         assert bar._app_mode is None
+    finally:
+        _dispose_bar(bar)
+
+
+def test_unavailable_experiment_status_has_persistent_visible_text_cue() -> None:
+    """Unavailable status cannot rely on colour and a hover tooltip alone."""
+    bar = _make_bar()
+    accepted = _live_experiment_status(name="last-known experiment")
+    try:
+        bar._on_experiment_result(accepted)
+        bar._on_experiment_result({"ok": True})
+
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert "Статус недоступен" in bar._exp_label.accessibleDescription()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        assert "last-known experiment" in document.toPlainText()
+    finally:
+        _dispose_bar(bar)
+
+
+def test_experiment_status_cold_start_does_not_manufacture_retained_evidence() -> None:
+    """Before one accepted cut, unavailable means there are no retained data."""
+    bar = _make_bar()
+    try:
+        bar.set_engine_state(False)
+
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert "принятых данных нет" in bar._exp_label.accessibleDescription().lower()
+        document = QTextDocument()
+        document.setHtml(bar._exp_label.toolTip())
+        tooltip = document.toPlainText()
+        assert "Принятых данных нет" in tooltip
+        assert "Последние принятые данные" not in tooltip
+        assert "Нет активного эксперимента" not in tooltip
     finally:
         _dispose_bar(bar)
 
@@ -565,7 +813,6 @@ def test_experiment_status_decoder_retains_last_identity_but_revokes_invalid_aut
     bar.experiment_status_received.connect(emitted.append)
     valid = _live_experiment_status(name="known experiment")
     bar._on_experiment_result(valid)
-    last_known_text = bar._exp_label.text()
     last_known_full_text = bar._last_experiment_full_text
 
     wrong_proto = copy.deepcopy(valid)
@@ -578,7 +825,8 @@ def test_experiment_status_decoder_retains_last_identity_but_revokes_invalid_aut
     unknown_phase["current_phase"] = "made_up_phase"
     for invalid in ({"ok": True}, wrong_proto, extra_key, nonprintable_name, unknown_phase):
         bar._on_experiment_result(invalid)
-        assert bar._exp_label.text() == last_known_text
+        assert bar._exp_label.text().startswith("Статус недоступен")
+        assert last_known_full_text in bar._exp_label.accessibleDescription()
         assert bar._last_experiment_full_text == last_known_full_text
         assert bar._exp_label.textFormat() == Qt.TextFormat.PlainText
         assert theme.STATUS_CAUTION in bar._exp_label.styleSheet()
@@ -680,3 +928,99 @@ def test_mode_badge_cursor_is_pointing_hand() -> None:
     from PySide6.QtCore import Qt
 
     assert bar._mode_badge.cursor().shape() == Qt.CursorShape.PointingHandCursor
+
+
+def test_replay_poll_waits_for_bound_authority_before_request(monkeypatch) -> None:
+    """Replay cannot issue a status request without an exact producer cut."""
+    import cryodaq.gui.zmq_client as zmq_client
+
+    class DeferredSignal:
+        def __init__(self) -> None:
+            self.callback = None
+
+        def connect(self, callback) -> None:
+            self.callback = callback
+
+    class RecordingWorker:
+        instances: list = []
+
+        def __init__(self, cmd: dict, parent=None) -> None:
+            self.cmd = dict(cmd)
+            self.parent = parent
+            self.finished = DeferredSignal()
+            self.started = False
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def isFinished(self) -> bool:  # noqa: N802
+            return False
+
+    monkeypatch.setattr(zmq_client, "ZmqCommandWorker", RecordingWorker)
+    bar = _make_bar()
+    try:
+        bar.set_replay_mode(True)
+        bar.set_engine_state(True)
+
+        bar._poll_fast()
+
+        assert RecordingWorker.instances == []
+        assert bar._experiment_worker is None
+
+        bar.bind_replay_authority(
+            source="successor.sqlite",
+            speed=1.0,
+            session_id="d" * 32,
+            launcher_generation=7,
+            bridge_generation=4,
+        )
+        bar._poll_fast()
+
+        assert len(RecordingWorker.instances) == 1
+        assert RecordingWorker.instances[0].cmd == {"cmd": "experiment_status"}
+        assert RecordingWorker.instances[0].started is True
+    finally:
+        _dispose_bar(bar)
+
+
+def test_engine_retirement_synchronously_marks_channel_summary_unavailable() -> None:
+    """A lost producer cannot leave the last channel cut rendered as current OK."""
+    from datetime import UTC, datetime
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    class _OneChannelManager:
+        def get_all_visible(self) -> list[str]:
+            return ["Т1"]
+
+    _app()
+    bar = TopWatchBar(channel_manager=_OneChannelManager())  # type: ignore[arg-type]
+    try:
+        bar._fast_timer.stop()
+        bar._slow_timer.stop()
+        bar._channel_refresh_timer.stop()
+        bar._stale_timer.stop()
+        bar.set_engine_state(True)
+        bar.on_reading(
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="engine",
+                channel="Т1 Криостат верх",
+                value=4.2,
+                unit="K",
+                status=ChannelStatus.OK,
+            )
+        )
+        bar._refresh_channels()
+        assert bar._channel_label.text() == "● 1/1 норма"
+        assert theme.STATUS_OK in bar._channel_label.styleSheet()
+
+        bar.invalidate_engine_producer()
+
+        assert bar._channel_last_seen == {}
+        assert "Нет текущих данных" in bar._channel_label.text()
+        assert "норма" not in bar._channel_label.text()
+        assert theme.STATUS_STALE in bar._channel_label.styleSheet()
+    finally:
+        _dispose_bar(bar)

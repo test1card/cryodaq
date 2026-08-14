@@ -78,6 +78,64 @@ def test_set_active_marks_one_button() -> None:
     assert _inactive_border in rail._buttons["home"].styleSheet()
 
 
+def test_tool_rail_focus_ring_coexists_with_active_selection() -> None:
+    """Only keyboard focus paints the canonical ring; selection stays visible."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QWidget
+
+    app = _app()
+    rail = ToolRail()
+    rail.set_active("source")
+    button = rail._buttons["source"]
+    rail.show()
+    rail.activateWindow()
+    app.processEvents()
+
+    def right_edge_accent_pixels() -> int:
+        image = button.grab().toImage()
+        accent = QColor(theme.ACCENT).name().lower()
+        return sum(
+            image.pixelColor(x, y).name().lower() == accent
+            for x in range(image.width() - 3, image.width())
+            for y in range(image.height())
+        )
+
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    assert button.hasFocus()
+    keyboard_style = button.styleSheet()
+    assert f"border: 2px solid {theme.ACCENT}" in keyboard_style
+    assert f"border-left: 3px solid {theme.ACCENT_400}" in keyboard_style
+    assert right_edge_accent_pixels() > 0
+
+    other_window = QWidget()
+    other_window.show()
+    other_window.activateWindow()
+    app.processEvents()
+    assert not button.hasFocus()
+    assert f"border: 2px solid {theme.ACCENT}" not in button.styleSheet()
+    assert right_edge_accent_pixels() == 0
+
+    rail.activateWindow()
+    app.processEvents()
+    assert button.hasFocus()
+    restored_style = button.styleSheet()
+    assert f"border: 2px solid {theme.ACCENT}" in restored_style
+    assert f"border-left: 3px solid {theme.ACCENT_400}" in restored_style
+    assert right_edge_accent_pixels() > 0
+    other_window.close()
+
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    app.processEvents()
+    assert button.hasFocus()
+    mouse_style = button.styleSheet()
+    assert f"border: 2px solid {theme.ACCENT}" not in mouse_style
+    assert f"border-left: 3px solid {theme.ACCENT_400}" in mouse_style
+    assert right_edge_accent_pixels() == 0
+
+
 def test_rail_width_matches_design_token() -> None:
     # DESIGN: invariant TOOL_RAIL_WIDTH (56), couples to HEADER_HEIGHT.
     _app()

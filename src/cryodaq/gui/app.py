@@ -634,24 +634,39 @@ class _BridgeWatchdog:
         *,
         shutdown_first: bool,
     ) -> None:
-        """Invalidate authority within each restart lifecycle before ``start()``."""
+        """Invalidate all authority before one bridge replacement attempt."""
+        failures: list[Exception] = []
+        for invalidate in (
+            snapshot_ingress.invalidate_transport,
+            window.invalidate_descriptor_transport,
+        ):
+            try:
+                invalidate()
+            except Exception as exc:
+                failures.append(exc)
+
+        if failures:
+            self.latched = True
+            logger.critical(
+                "ZMQ bridge watchdog HOLD: GUI authority invalidation failed; automatic recovery is disabled"
+            )
+            if len(failures) == 1:
+                raise failures[0]
+            raise ExceptionGroup(
+                "multiple standalone GUI authority invalidations failed",
+                failures,
+            )
+
         start_attempted = False
         try:
             if shutdown_first:
-                snapshot_ingress.invalidate_transport()
-                window.invalidate_descriptor_transport()
                 bridge.shutdown()
-                start_attempted = True
-                bridge.start()
-            else:
-                snapshot_ingress.invalidate_transport()
-                window.invalidate_descriptor_transport()
+            elif bridge.is_alive():
                 # The caller observed a dead bridge.  If it came back in the
                 # meantime, settle it before replacing it.
-                if bridge.is_alive():
-                    bridge.shutdown()
-                start_attempted = True
-                bridge.start()
+                bridge.shutdown()
+            start_attempted = True
+            bridge.start()
         except Exception as exc:
             if not start_attempted:
                 raise

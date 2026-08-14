@@ -27,7 +27,7 @@ from cryodaq.channels.descriptors import (
 from cryodaq.core.descriptor_transport import DescriptorEnvelopeIssue, DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2
-from cryodaq.gui.state.descriptor_store import DescriptorStore
+from cryodaq.gui.state.descriptor_store import DescriptorStore, IdentityStatus, TransportState
 
 
 def _app() -> QApplication:
@@ -53,7 +53,7 @@ def _k_reading(channel: str, value: float = 1.0, instrument_id: str = "") -> Rea
     )
 
 
-def _qualified(reading: Reading) -> DescriptorQualifiedReading:
+def _qualified(reading: Reading, *, display_name: str = "Generic channel") -> DescriptorQualifiedReading:
     return DescriptorQualifiedReading(
         reading=reading,
         descriptor=ChannelDescriptorV1(
@@ -66,7 +66,7 @@ def _qualified(reading: Reading) -> DescriptorQualifiedReading:
             role=ChannelRole.PRIMARY_MEASUREMENT,
             safety_class=ChannelSafetyClass.OBSERVATIONAL,
             display_group="generic",
-            display_name="Generic channel",
+            display_name=display_name,
             visible_by_default=True,
             display_order=1,
             descriptor_revision=1,
@@ -221,3 +221,110 @@ def test_get_sensor_summary_text_callable_from_host():
         assert w._instrument_panel.get_sensor_summary_text() == "—"
     finally:
         _stop_timers(w)
+
+
+def test_bridge_retirement_marks_retained_instrument_evidence_disconnected() -> None:
+    """Retained cards and diagnostics lose current-truth status at the bridge cut."""
+    _app()
+    window = MainWindowV2()
+    try:
+        window._ensure_overlay("instruments")
+        panel = window._instrument_panel
+        assert panel is not None
+        panel.set_connected(True)
+        window.dispatch_qualified_reading(_qualified(_k_reading("opaque-channel", instrument_id="asc-reference-42")))
+        QCoreApplication.processEvents()
+        panel.set_diagnostics(
+            {"opaque-channel": {"channel_name": "Generic channel", "health_score": 95}},
+            {"healthy": 1, "warning": 0, "critical": 0},
+        )
+        card = panel._cards["asc-reference-42"]
+        assert card._status_label.text() == "Статус: Норма"
+        assert [chip.text() for chip in panel.sensor_diag_section._chip_widgets] == ["1 ОК"]
+
+        window.invalidate_descriptor_transport()
+
+        from cryodaq.gui import theme
+
+        assert card._name_label.text() == "asc-reference-42"
+        assert card.total_readings == 1
+        assert card._status_label.text() == "Статус: Нет связи · последнее состояние: Норма"
+        assert theme.STATUS_STALE in card.styleSheet()
+        assert panel.sensor_diag_section._summary_label.text() == "НЕТ СВЯЗИ · последнее: 1 ОК"
+    finally:
+        _stop_timers(window)
+
+
+def test_retired_bridge_reading_cannot_restore_live_truth_after_reconnect(live_zmq_bridge, monkeypatch) -> None:
+    """Only the current bridge incarnation may restore visible reading truth."""
+    _app()
+    old_bridge_id = live_zmq_bridge.bridge_instance_id
+    assert old_bridge_id is not None
+    process_type = type(live_zmq_bridge._process)
+    thread_type = type(live_zmq_bridge._reply_consumer)
+    window = MainWindowV2(bridge=live_zmq_bridge)
+
+    def bound_reading(value: float, bridge_id: str) -> Reading:
+        return Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="asc-reference-42",
+            channel="Т1",
+            value=value,
+            unit="K",
+            metadata={"bridge_instance_id": bridge_id},
+        )
+
+    try:
+        window._ensure_overlay("instruments")
+        window.dispatch_qualified_reading(_qualified(bound_reading(1.0, old_bridge_id)))
+        QCoreApplication.processEvents()
+        panel = window._instrument_panel
+        assert panel is not None
+        card = panel._cards["asc-reference-42"]
+        assert card.total_readings == 1
+        assert window._descriptor_store.view("Т1").transport_state is TransportState.CONNECTED
+        assert window._top_bar._channel_last_seen
+
+        window.invalidate_descriptor_transport()
+        assert card._status_label.text() == "Статус: Нет связи · последнее состояние: Норма"
+        assert window._descriptor_store.view("Т1").transport_state is TransportState.DISCONNECTED
+        assert window._top_bar._channel_last_seen == {}
+        assert window._last_reading_time == 0.0
+
+        window.dispatch_qualified_reading(_qualified(bound_reading(2.0, old_bridge_id)))
+        QCoreApplication.processEvents()
+        assert card.total_readings == 1
+        assert window._descriptor_store.view("Т1").transport_state is TransportState.DISCONNECTED
+        assert window._top_bar._channel_last_seen == {}
+        assert window._last_reading_time == 0.0
+
+        import cryodaq.gui.zmq_client as zmq_client
+
+        live_zmq_bridge.shutdown()
+        assert live_zmq_bridge.bridge_instance_id is None
+        with monkeypatch.context() as restart_patch:
+            restart_patch.setattr(zmq_client.mp, "Process", process_type)
+            restart_patch.setattr(zmq_client.threading, "Thread", thread_type)
+            live_zmq_bridge.start()
+        successor_bridge_id = live_zmq_bridge.bridge_instance_id
+        assert successor_bridge_id is not None
+        assert successor_bridge_id != old_bridge_id
+        window.dispatch_qualified_reading(_qualified(bound_reading(3.0, successor_bridge_id)))
+        QCoreApplication.processEvents()
+        assert card.total_readings == 2
+        assert window._descriptor_store.view("Т1").transport_state is TransportState.CONNECTED
+        assert window._descriptor_store.view("Т1").identity_status is IdentityStatus.AUTHORITATIVE
+        assert window._top_bar._channel_last_seen
+        accepted_last_reading_time = window._last_reading_time
+        accepted_channel_state = dict(window._top_bar._channel_last_seen)
+
+        window.dispatch_qualified_reading(
+            _qualified(bound_reading(4.0, old_bridge_id), display_name="Retired conflicting channel")
+        )
+        QCoreApplication.processEvents()
+        assert card.total_readings == 2
+        assert window._descriptor_store.view("Т1").identity_status is IdentityStatus.AUTHORITATIVE
+        assert window._last_reading_time == accepted_last_reading_time
+        assert window._top_bar._channel_last_seen == accepted_channel_state
+    finally:
+        _stop_timers(window)

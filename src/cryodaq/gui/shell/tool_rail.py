@@ -169,6 +169,7 @@ class ToolRailButton(QToolButton):
         self._name = name
         self._active = False
         self._hover = False
+        self._keyboard_focus_visible = False
         self._icon_path = icon_path
         self.setFixedSize(_RAIL_WIDTH, _BUTTON_SIZE)
         self.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
@@ -213,6 +214,36 @@ class ToolRailButton(QToolButton):
         self._refresh_icon()
         super().leaveEvent(event)
 
+    def mousePressEvent(self, event):  # noqa: ANN001, N802
+        self._keyboard_focus_visible = False
+        self._apply_style()
+        super().mousePressEvent(event)
+
+    def focusInEvent(self, event):  # noqa: ANN001, N802
+        super().focusInEvent(event)
+        reason = event.reason()
+        if reason in {
+            Qt.FocusReason.TabFocusReason,
+            Qt.FocusReason.BacktabFocusReason,
+            Qt.FocusReason.ShortcutFocusReason,
+        }:
+            self._keyboard_focus_visible = True
+        elif reason not in {
+            Qt.FocusReason.ActiveWindowFocusReason,
+            Qt.FocusReason.PopupFocusReason,
+        }:
+            self._keyboard_focus_visible = False
+        self._apply_style()
+
+    def focusOutEvent(self, event):  # noqa: ANN001, N802
+        super().focusOutEvent(event)
+        if event.reason() not in {
+            Qt.FocusReason.ActiveWindowFocusReason,
+            Qt.FocusReason.PopupFocusReason,
+        }:
+            self._keyboard_focus_visible = False
+        self._apply_style()
+
     @property
     def name(self) -> str:
         return self._name
@@ -227,11 +258,16 @@ class ToolRailButton(QToolButton):
     def _apply_style(self) -> None:
         if self._active:
             border = f"3px solid {theme.ACCENT_400}"
+            focused_selection = f" border-left: {border};"
         else:
             border = "3px solid transparent"
+            focused_selection = ""
+        if self.hasFocus() and self._keyboard_focus_visible:
+            border_rule = f"border: 2px solid {theme.ACCENT};{focused_selection}"
+        else:
+            border_rule = f"border: none; border-left: {border};"
         self.setStyleSheet(
-            f"QToolButton {{ background: transparent; border: none; "
-            f"border-left: {border}; padding: 0px; }}"
+            f"QToolButton {{ background: transparent; {border_rule} padding: 0px; }}"
             f"QToolButton:hover {{ background: {theme.SECONDARY}; }}"
         )
 

@@ -255,6 +255,7 @@ class _InstrumentCard(QFrame):
         self._total_readings: int = 0
         self._error_count: int = 0
         self._last_status: ChannelStatus = ChannelStatus.OK
+        self._transport_current = False
         self._intervals: deque[float] = deque(maxlen=20)
         self._timeout_s: float = _DEFAULT_TIMEOUT_S
 
@@ -317,11 +318,17 @@ class _InstrumentCard(QFrame):
         self._last_reading_time = now
         self._total_readings += 1
         self._last_status = reading.status
+        self._transport_current = True
         if reading.status != ChannelStatus.OK:
             self._error_count += 1
         self._refresh_display()
 
     def refresh_liveness(self) -> None:
+        self._refresh_display()
+
+    def invalidate_transport(self) -> None:
+        """Retain the last card evidence with an explicit disconnected cue."""
+        self._transport_current = False
         self._refresh_display()
 
     def _recompute_timeout(self) -> None:
@@ -337,6 +344,13 @@ class _InstrumentCard(QFrame):
         if self._last_reading_time == 0.0:
             color = theme.STATUS_STALE
             status_text = "Нет данных"
+        elif not self._transport_current:
+            color = theme.STATUS_STALE
+            if self._last_status is ChannelStatus.OK:
+                last_state = "Норма"
+            else:
+                last_state = f"Внимание: {_channel_status_operator_text(self._last_status)}"
+            status_text = f"Нет связи · последнее состояние: {last_state}"
         elif is_stale(self._last_reading_time, self._timeout_s, now=now):
             color = theme.STATUS_FAULT
             status_text = "Нет связи"
@@ -478,6 +492,23 @@ class _SensorDiagSection(QFrame):
         self._refresh_table()
         self._refresh_summary()
 
+    def mark_disconnected(self) -> None:
+        """Retain diagnostic rows only as explicitly historical evidence."""
+        summary = self.summary_plain_text()
+        for chip in self._chip_widgets:
+            chip.setParent(None)
+            chip.deleteLater()
+        self._chip_widgets = []
+        if summary == "—":
+            text = "НЕТ СВЯЗИ · подтверждённых данных нет"
+        else:
+            text = f"НЕТ СВЯЗИ · последнее: {summary}"
+        self._summary_label.setText(text)
+        self._summary_label.setStyleSheet(f"color: {theme.STATUS_STALE}; background: transparent; border: none;")
+        detail = "Диагностика приборов не текущая: связь с Engine потеряна"
+        self._summary_label.setAccessibleDescription(detail)
+        self._table.setAccessibleDescription(detail)
+
     def summary_plain_text(self) -> str:
         healthy = int(self._summary.get("healthy", 0))
         warning = int(self._summary.get("warning", 0))
@@ -546,6 +577,9 @@ class _SensorDiagSection(QFrame):
             chip.setParent(None)
             chip.deleteLater()
         self._chip_widgets = []
+        self._summary_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
+        self._summary_label.setAccessibleDescription("")
+        self._table.setAccessibleDescription("")
 
         healthy = int(self._summary.get("healthy", 0))
         warning = int(self._summary.get("warning", 0))
@@ -588,6 +622,7 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
         self._identity_issue_sticky = False
         self._identity_notice_state: str | None = None
         self._diag_poll_in_flight: bool = False
+        self._connection_generation = 0
 
         self.setObjectName("instrumentsPanel")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -691,18 +726,25 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
         self._reading_signal.emit(reading, view)
 
     def set_connected(self, connected: bool) -> None:
-        if not super().set_connected(connected):
-            return
-        if self._connected:
-            if not self._diag_poll_timer.isActive():
-                self._diag_poll_timer.start()
-            # Immediate first fetch on False → True so the K2 diagnostics
-            # table is not blank / stale for up to 10 s on open or
-            # reconnect. Same behavior the legacy v1 had via
-            # QTimer.singleShot(500, self._poll_diagnostics).
-            self._poll_diagnostics()
-        else:
+        changed = super().set_connected(connected)
+        if changed:
+            self._connection_generation += 1
+            self._diag_poll_in_flight = False
+        if not self._connected:
             self._diag_poll_timer.stop()
+            for card in self._cards.values():
+                card.invalidate_transport()
+            self._diag_section.mark_disconnected()
+            return
+        if not changed:
+            return
+        if not self._diag_poll_timer.isActive():
+            self._diag_poll_timer.start()
+        # Immediate first fetch on False → True so the K2 diagnostics
+        # table is not blank / stale for up to 10 s on open or
+        # reconnect. Same behavior the legacy v1 had via
+        # QTimer.singleShot(500, self._poll_diagnostics).
+        self._poll_diagnostics()
 
     def update_diagnostics(self, payload: dict) -> None:
         """Update diag table from a ``get_sensor_diagnostics`` payload.
@@ -849,10 +891,16 @@ class InstrumentsPanel(OverlayPanelBase, QWidget):
         if self._diag_poll_in_flight:
             return
         self._diag_poll_in_flight = True
+        generation = self._connection_generation
         worker = ZmqCommandWorker({"cmd": "get_sensor_diagnostics"}, parent=self)
-        self._register_worker(worker, self._on_diagnostics_received)
+        self._register_worker(
+            worker,
+            lambda result, generation=generation: self._on_diagnostics_received(result, generation),
+        )
 
-    def _on_diagnostics_received(self, result: dict) -> None:
+    def _on_diagnostics_received(self, result: dict, generation: int) -> None:
+        if not self._connected or generation != self._connection_generation:
+            return
         self._diag_poll_in_flight = False
         if not isinstance(result, dict):
             return
