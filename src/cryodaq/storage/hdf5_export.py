@@ -184,7 +184,7 @@ class HDF5Exporter:
 
         # Группировка: instrument_id → channel → накопитель
         data: dict[str, dict[str, _ChannelData]] = {}
-        for raw_ts, inst_id, channel, value, unit, status in rows:
+        for raw_ts, inst_id, channel, value, unit, status, *_ in rows:
             ts = _parse_timestamp(raw_ts).timestamp()
             data.setdefault(inst_id, {}).setdefault(channel, _ChannelData(unit=unit)).append(ts, value, status)
 

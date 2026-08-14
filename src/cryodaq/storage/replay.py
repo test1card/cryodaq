@@ -275,7 +275,7 @@ class ReplaySource:
         # query_rows already decoded value per NaN-доктрина — do NOT decode again.
         rows = [
             (_parse_timestamp(ts).timestamp(), inst, channel, value, unit, status)
-            for ts, inst, channel, value, unit, status in full
+            for ts, inst, channel, value, unit, status, *_ in full
         ]
         count = await self._replay_rows(rows)
         logger.info("Воспроизведение архива завершено: %d записей", count)
