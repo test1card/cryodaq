@@ -6367,11 +6367,23 @@ def _install_engine_signal_handlers(shutdown_event: asyncio.Event) -> Callable[[
 
         return remove
 
-    previous = signal.getsignal(signal.SIGINT)
+    previous_sigint = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, request_shutdown)
+    # Ctrl+C is not how a supervisor stops a service on Windows. A parent that
+    # calls Popen.terminate() there issues TerminateProcess, which cannot be
+    # handled at all, so SIGINT alone leaves the engine killable but never
+    # askable. CTRL_BREAK_EVENT arrives as SIGBREAK and is catchable, and it is
+    # the signal the assistant bootstrap already honours.
+    previous_sigbreak = signal.getsignal(signal.SIGBREAK)
+    try:
+        signal.signal(signal.SIGBREAK, request_shutdown)
+    except BaseException:
+        signal.signal(signal.SIGINT, previous_sigint)
+        raise
 
     def remove() -> None:
-        signal.signal(signal.SIGINT, previous)
+        signal.signal(signal.SIGBREAK, previous_sigbreak)
+        signal.signal(signal.SIGINT, previous_sigint)
 
     return remove
 
