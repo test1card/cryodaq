@@ -14,9 +14,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
+from cryodaq.channels.descriptors import (
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.notifications.telegram import TelegramNotifier
 from cryodaq.notifications.telegram_commands import _HELP_TEXT
+from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -123,6 +131,32 @@ def _make_bot(**kwargs):
     )
     bot._send = AsyncMock()
     return bot
+
+
+def _temperature_catalog(*readings: Reading) -> LiveChannelDescriptorCatalog:
+    descriptors = [
+        ChannelDescriptorV1(
+            schema_version=1,
+            channel_id=f"temperature.test_{order}",
+            instrument_id=reading.instrument_id,
+            source_key=f"input.test_{order}.temperature",
+            quantity=ChannelQuantity.TEMPERATURE,
+            unit=reading.unit,
+            role=ChannelRole.PRIMARY_MEASUREMENT,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="temperatures",
+            display_name=f"Test temperature {order}",
+            visible_by_default=True,
+            display_order=order,
+            descriptor_revision=1,
+        )
+        for order, reading in enumerate(readings)
+    ]
+    bindings = {
+        (reading.instrument_id, reading.channel): descriptor.channel_id
+        for reading, descriptor in zip(readings, descriptors, strict=True)
+    }
+    return LiveChannelDescriptorCatalog(ChannelCatalog(descriptors), bindings=bindings)
 
 
 def _tg_msg(
@@ -236,6 +270,7 @@ def test_cached_readings_render_stale_or_unavailable_truthfully() -> None:
             status=ChannelStatus.SENSOR_ERROR,
         ),
     }
+    bot._channel_descriptor_catalog = _temperature_catalog(bot._latest["Т1"], bot._latest["Т2"])
 
     temps = bot._cmd_temps()
     pressure = bot._cmd_pressure()
@@ -255,11 +290,64 @@ def test_fresh_cached_temperature_remains_a_normal_readout() -> None:
     bot._latest = {
         "Т1": Reading.now("Т1", 4.2, "K", instrument_id="LS218"),
     }
+    bot._channel_descriptor_catalog = _temperature_catalog(bot._latest["Т1"])
 
     rendered = bot._cmd_temps()
 
     assert "4.20 K" in rendered
     assert "устар" not in rendered and "недоступ" not in rendered
+
+
+def test_cmd_temps_uses_descriptor_quantity_not_channel_spelling() -> None:
+    renamed = Reading.now("renamed_probe", 4.2, "K", instrument_id="sensor")
+    deceptive = Reading.now("Т_fake", 5.1, "K", instrument_id="sensor")
+    descriptors = [
+        ChannelDescriptorV1(
+            schema_version=1,
+            channel_id="temperature.probe",
+            instrument_id="sensor",
+            source_key="input.probe.temperature",
+            quantity=ChannelQuantity.TEMPERATURE,
+            unit="K",
+            role=ChannelRole.PRIMARY_MEASUREMENT,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="temperatures",
+            display_name="Renamed probe",
+            visible_by_default=True,
+            display_order=0,
+            descriptor_revision=1,
+        ),
+        ChannelDescriptorV1(
+            schema_version=1,
+            channel_id="derived.fake",
+            instrument_id="sensor",
+            source_key="input.fake.derived",
+            quantity=ChannelQuantity.DERIVED,
+            unit="K",
+            role=ChannelRole.DERIVED,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="derived",
+            display_name="Deceptive non-temperature",
+            visible_by_default=True,
+            display_order=1,
+            descriptor_revision=1,
+        ),
+    ]
+    catalog = LiveChannelDescriptorCatalog(
+        ChannelCatalog(descriptors),
+        bindings={
+            ("sensor", "renamed_probe"): "temperature.probe",
+            ("sensor", "Т_fake"): "derived.fake",
+        },
+    )
+    bot = _make_bot()
+    bot._channel_descriptor_catalog = catalog
+    bot._latest = {reading.channel: reading for reading in (renamed, deceptive)}
+
+    rendered = bot._cmd_temps()
+
+    assert "renamed_probe" in rendered, "descriptor-declared temperature disappeared after a valid rename"
+    assert "Т_fake" not in rendered, "temperature-looking spelling overrode the descriptor quantity"
 
 
 async def test_cmd_log_writes_entry() -> None:

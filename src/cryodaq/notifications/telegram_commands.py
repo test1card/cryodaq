@@ -16,6 +16,7 @@ from typing import Any
 
 import aiohttp
 
+from cryodaq.channels.descriptors import ChannelQuantity
 from cryodaq.core.alarm_v2 import AlarmStateManager
 from cryodaq.core.broker import DataBroker
 
@@ -29,6 +30,7 @@ from cryodaq.core.ru_labels import phase_display_name
 from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
+from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError, LiveChannelDescriptorCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +117,7 @@ class TelegramCommandBot:
         commands_enabled: bool = True,
         query_agent: Any | None = None,
         photo_handler: Any | None = None,
+        channel_descriptor_catalog: LiveChannelDescriptorCatalog | None = None,
         verify_ssl: bool = True,
     ) -> None:
         # Phase 2b K.1: default-deny — empty allowlist with commands
@@ -132,6 +135,7 @@ class TelegramCommandBot:
         self._alarm_engine = alarm_engine
         self._query_agent = query_agent
         self._photo_handler = photo_handler
+        self._channel_descriptor_catalog = channel_descriptor_catalog
         # Phase 2b K.1: SecretStr wrapper.
         self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
         self._allowed_ids: set[int] = set(allowed_chat_ids or [])
@@ -515,7 +519,15 @@ class TelegramCommandBot:
         return "\n".join(lines)
 
     def _cmd_temps(self) -> str:
-        temps = {ch: r for ch, r in self._latest.items() if r.unit == "K" and ch.startswith("Т")}
+        temps: dict[str, Reading] = {}
+        if self._channel_descriptor_catalog is not None:
+            for channel, reading in self._latest.items():
+                try:
+                    descriptor = self._channel_descriptor_catalog.bind(reading).descriptor
+                except ChannelDescriptorStorageError:
+                    continue
+                if descriptor.quantity is ChannelQuantity.TEMPERATURE:
+                    temps[channel] = reading
 
         if not temps:
             return "Нет температурных данных."
@@ -523,7 +535,7 @@ class TelegramCommandBot:
         lines = ["<b>Температуры</b>", "<pre>"]
         for ch in sorted(temps):
             r = temps[ch]
-            lines.append(self._cached_value(f"{ch:<22s}", r, f"{r.value:>8.2f} K"))
+            lines.append(self._cached_value(f"{ch:<22s}", r, f"{r.value:>8.2f} {r.unit}"))
         lines.append("</pre>")
         return "\n".join(lines)
 
