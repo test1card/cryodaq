@@ -264,6 +264,14 @@ false_green_pairs:
     ci_partition: core
     red_evidence: the_legacy_filter_runs_before_the_call_so_nothing_asserted_that_a_row_whose_identity_is_NOT_persisted_is_also_not_charged_an_over_charging_budget_is_a_different_defect_from_an_under_charging_one_but_it_is_still_a_wrong_bound_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: SCOPE-STATEMENT-GUARD-SELF-SATISFYING-FALSE-GREEN-338
+    status: open
+    scope: repository
+    runtime_prevention_id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    guard: tests/test_c2_repo_wide_spelling_sweep.py::test_c2_sweep_states_its_own_boundary
+    ci_partition: remaining
+    red_evidence: the_guard_read_its_own_module_for_labels_that_its_own_assertion_messages_also_contain_so_deleting_NOT_FIXABLE_HERE_from_the_scope_statement_left_it_green_and_after_the_delimited_block_repair_a_second_escape_remained_because_rewriting_not_scheduled_to_scheduled_preserved_the_searched_label_while_presenting_an_unreachable_gap_as_future_work_2026_08_14_pending_immutable_capture
+    green_evidence: pending
   - id: SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311
     status: open
     scope: repository
@@ -3433,6 +3441,8 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
+      - node: tests/test_c2_repo_wide_spelling_sweep.py::test_c2_sweep_states_its_own_boundary
+        ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_sweep_counts_are_rederived_from_the_live_sweep
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_oc031_preserves_its_supported_interpreter_caveat
