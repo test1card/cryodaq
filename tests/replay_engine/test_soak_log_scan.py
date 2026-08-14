@@ -107,6 +107,25 @@ def test_scan_log_rejects_non_empty_unreadable_log():
         raise AssertionError("unreadable non-empty log was accepted")
 
 
+def test_scan_log_rejects_mixed_log_with_literal_escaped_error_record():
+    text = "\n".join(
+        [
+            _line("INFO", "engine started"),
+            "literal escape " + chr(92) + "u2502 ERROR " + chr(92) + "u2502 message",
+        ]
+    )
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        # The message must describe THIS cause. The mixed log did parse structured
+        # lines, so the all-unreadable message would state a property that was not
+        # measured, and a reader debugging a red soak would look for the wrong thing.
+        assert "malformed ERROR/CRITICAL record" in str(exc), str(exc)
+        assert "no structured lines parsed" not in str(exc), str(exc)
+    else:
+        raise AssertionError("mixed log with malformed ERROR record was accepted")
+
+
 def test_scan_log_clean_structured_log_is_readable():
     assert soak.scan_log(_line("INFO", "engine started")) == []
 

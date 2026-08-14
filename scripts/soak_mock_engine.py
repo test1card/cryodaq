@@ -45,7 +45,14 @@ DEFAULT_ALLOWLIST: tuple[str, ...] = (
 
 
 class UnreadableLogError(RuntimeError):
-    """Raised when a non-empty log contains no structured log lines."""
+    """Raised when a log cannot be scanned well enough to certify it clean.
+
+    Two distinct causes, each carrying its own message: a non-empty log in which
+    no line carries the structured level field at all, and a log that does parse
+    but contains a recognizably malformed ERROR/CRITICAL record. The second case
+    is the dangerous one — the readable lines can all be clean while the record
+    that would have failed the scan is the one the parser could not read.
+    """
 
 
 def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[str]:
@@ -63,10 +70,15 @@ def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[st
     compiled = [re.compile(p) for p in allowlist]
     violations = []
     parsed_lines = 0
+    malformed_error_record = False
     delimiter = chr(0x2502)
+    escaped_delimiter = r"\u2502"
     for line in text.splitlines():
         parts = line.split(f" {delimiter} ")
         if len(parts) < 2:
+            escaped_parts = line.split(f" {escaped_delimiter} ")
+            if len(escaped_parts) >= 2 and escaped_parts[1].strip() in ("ERROR", "CRITICAL"):
+                malformed_error_record = True
             continue
         parsed_lines += 1
         level = parts[1].strip()
@@ -75,8 +87,16 @@ def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[st
         if any(p.search(line) for p in compiled):
             continue
         violations.append(line)
+    # Order matters, and the more fundamental fact wins. A log in which nothing
+    # parsed is reported as such even when it also holds a malformed record: the
+    # mixed-log message would imply the rest of the log was read, and it was not.
     if text and parsed_lines == 0:
         raise UnreadableLogError("could not read log: no structured lines parsed from non-empty log")
+    if malformed_error_record:
+        raise UnreadableLogError(
+            "could not read log: a malformed ERROR/CRITICAL record was found, "
+            "so the readable lines do not establish a clean run"
+        )
     return violations
 
 
