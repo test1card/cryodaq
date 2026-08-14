@@ -99,17 +99,44 @@ def test_alarm_reading_finite_still_rendered(document, tmp_path: Path) -> None:
 
 
 def test_summary_counts_are_derived_from_loaded_report_collections(document, tmp_path: Path) -> None:
+    """Keys are the producer's: `_build_archive_snapshot` writes these three and no others."""
     dataset = ReportDataset(
         metadata={"experiment": {}, "template": {}},
         readings=[HistoricalReading(_TS, "meter", "input", 1.0, "V", "ok")],
         run_records=[{"status": "COMPLETED"}],
-        artifact_index=[{"role": "measured_values"}],
-        summary_metadata={"reading_count": 0, "run_count": 0, "artifact_count": 0},
+        artifact_index=[{"role": "measured_values"}, {"role": "summary_metadata"}],
+        summary_metadata={"measured_value_rows": 0, "run_record_count": 0, "artifact_count": 0},
     )
 
     render_experiment_metadata_section(document, dataset, tmp_path)
     text = _document_text(document)
 
-    assert "Измерений: 1" in text, "report rendered an unchecked reading_count claim"
-    assert "Прогонов: 1" in text, "report rendered an unchecked run_count claim"
-    assert "Артефактов: 1" in text, "report rendered an unchecked artifact_count claim"
+    assert "Измерений: 1" in text, "report rendered an unchecked measured_value_rows claim"
+    assert "Прогонов: 1" in text, "report rendered an unchecked run_record_count claim"
+    # The whole loaded index is shown; the stale record is shown beside it, not instead of it.
+    assert "Артефактов: 2 (в записи: 0)" in text, "report rendered an unchecked artifact_count claim"
+
+
+def test_summary_artifact_count_compares_the_membership_the_archive_counted(document, tmp_path: Path) -> None:
+    """A consistent archive must not be reported as stale.
+
+    `_build_archive_snapshot` records `artifact_count` before appending its own
+    summary_metadata artifact, so the loaded index of a fully consistent archive is exactly
+    one longer than the recorded number.  Comparing the two raw lengths announced a
+    one-artifact discrepancy for every normally finalized experiment.
+    """
+    dataset = ReportDataset(
+        metadata={"experiment": {}, "template": {}},
+        artifact_index=[
+            {"role": "measured_values"},
+            {"role": "run_results"},
+            {"role": "summary_metadata"},
+        ],
+        summary_metadata={"artifact_count": 2},
+    )
+
+    render_experiment_metadata_section(document, dataset, tmp_path)
+    text = _document_text(document)
+
+    assert "Артефактов: 3" in text
+    assert "в записи" not in text, f"a consistent archive was reported as stale:\n{text}"
