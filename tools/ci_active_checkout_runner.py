@@ -45,6 +45,10 @@ class CandidateProcessSettlementError(RuntimeError):
     """A candidate process boundary could not be created or fully settled."""
 
 
+class CandidateProcessUnsettledError(CandidateProcessSettlementError):
+    """The runner could not prove every candidate descendant terminated."""
+
+
 _POSIX_BOUNDARY_LOCK = threading.Lock()
 _POSIX_BOUNDARY_POISONED = False
 _PR_SET_CHILD_SUBREAPER = 36
@@ -324,6 +328,7 @@ def _run_candidate_process(
     root: Path,
     environment: dict[str, str],
     capture_output: bool,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run candidate code without protected authority and settle its entire process boundary."""
 
@@ -338,6 +343,7 @@ def _run_candidate_process(
     cleanup_errors: list[tuple[str, BaseException]] = []
     primary_error: BaseException | None = None
     returncode: int | None = None
+    deadline: float | None = None
 
     def drain(label: str, stream: Any) -> None:
         try:
@@ -350,6 +356,14 @@ def _run_candidate_process(
             operation()
         except BaseException as exc:
             cleanup_errors.append((label, exc))
+
+    def settle_process_tree(label: str, operation: Any) -> None:
+        try:
+            operation()
+        except BaseException as exc:
+            unsettled = CandidateProcessUnsettledError(f"{label} failed: {exc}")
+            unsettled.__cause__ = exc
+            cleanup_errors.append((label, unsettled))
 
     def close_streams() -> None:
         for label, stream in streams:
@@ -371,6 +385,8 @@ def _run_candidate_process(
             start_new_session=os.name != "nt",
             creationflags=0x00000004 if os.name == "nt" else 0,  # CREATE_SUSPENDED
         )
+        if timeout is not None:
+            deadline = time.monotonic() + timeout
         if capture_output:
             streams = [
                 (label, stream)
@@ -391,17 +407,23 @@ def _run_candidate_process(
         while returncode is None:
             if reader_errors:
                 raise reader_errors[0][1]
+            wait_seconds = 0.05
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                wait_seconds = min(wait_seconds, remaining)
             try:
-                returncode = process.wait(timeout=0.05)
+                returncode = process.wait(timeout=wait_seconds)
             except subprocess.TimeoutExpired:
                 continue
     except BaseException as exc:
         primary_error = exc
     finally:
         if job is not None:
-            record_cleanup_error("Windows job settlement", lambda: _settle_windows_job(job))
+            settle_process_tree("Windows job settlement", lambda: _settle_windows_job(job))
         elif boundary is not None and boundary_opened:
-            record_cleanup_error("Linux candidate settlement", lambda: boundary.settle(process))
+            settle_process_tree("Linux candidate settlement", lambda: boundary.settle(process))
 
         if process is not None and process.poll() is None:
             try:
@@ -434,12 +456,15 @@ def _run_candidate_process(
         if boundary is not None and boundary_opened:
             record_cleanup_error("Linux boundary close", boundary.close)
 
-    if primary_error is not None:
-        for label, error in cleanup_errors:
-            primary_error.add_note(f"{label}: {error!r}")
-        raise primary_error
     if cleanup_errors:
-        raise cleanup_errors[0][1]
+        settlement_error = cleanup_errors[0][1]
+        if primary_error is not None:
+            settlement_error.add_note(f"candidate primary error: {primary_error!r}")
+        for label, error in cleanup_errors[1:]:
+            settlement_error.add_note(f"{label}: {error!r}")
+        raise settlement_error
+    if primary_error is not None:
+        raise primary_error
     if returncode is None:
         raise CandidateProcessSettlementError("candidate process did not produce a return code")
     return subprocess.CompletedProcess(

@@ -21,6 +21,7 @@ from tools.governance_contract import (
     GovernanceContractError,
     _git_blob_id,
     closure_semantics_sha256,
+    disposition_state,
     validate_publication_disposition_receipts,
     validate_registry,
 )
@@ -1145,3 +1146,74 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
 def test_all_repository_python_sources_compile_before_pytest_evidence() -> None:
     manifest = compile_python_tree(ROOT)
     assert manifest
+
+
+def test_pending_green_evidence_is_distinguishable_from_an_incomplete_record() -> None:
+    """Only explicit correction completion makes pending green nonblocking."""
+
+    payload = _registry()
+    records = payload["records"]
+
+    runtime_records = {record["id"]: record for record in records}
+    states = {record["id"]: disposition_state(record, runtime_records=runtime_records) for record in records}
+    assert set(states.values()) <= {"closed", "expired", "awaiting_green_sweep", "evidence_complete", "incomplete"}, (
+        sorted(set(states.values()))
+    )
+
+    # Registered guards and red prose cannot prove the correction is complete.
+    authority = next(record for record in records if record["id"] == "GUARD-FALSIFICATION-AUTHORITY-029")
+    assert authority["guards"] and authority["red_evidence"] != "pending"
+    assert "automation_limit" in authority
+    assert disposition_state(authority) == "incomplete"
+
+    # The explicit signal is insufficient until red-before-fix evidence is
+    # immutable, for both runtime records and false-green pairs.
+    runtime = copy.deepcopy(next(record for record in records if record["status"] in {"open", "reopened"}))
+    runtime["correction_complete"] = True
+    pair = copy.deepcopy(payload["false_green_pairs"][0])
+    pair["correction_complete"] = True
+    assert disposition_state(runtime) == "incomplete"
+    assert disposition_state(pair, runtime_records=runtime_records) == "incomplete"
+
+    immutable_red = {
+        "locator": "git:0123456789abcdef0123456789abcdef01234567",
+        "sha256": "sha256:" + "1" * 64,
+    }
+    runtime["red_evidence"] = copy.deepcopy(immutable_red)
+    pair["red_evidence"] = copy.deepcopy(immutable_red)
+    assert disposition_state(runtime) == "awaiting_green_sweep"
+    closed_runtime = {pair["runtime_prevention_id"]: {"status": "closed"}}
+    assert disposition_state(pair, runtime_records=closed_runtime) == "awaiting_green_sweep"
+
+    for invalid_green in (
+        "pending_immutable_capture",
+        "arbitrary prose",
+        {"locator": "github-run:12345", "sha256": "not-a-digest"},
+    ):
+        runtime["green_evidence"] = invalid_green
+        assert disposition_state(runtime) == "awaiting_green_sweep"
+
+    runtime["green_evidence"] = {
+        "locator": "git:0123456789abcdef0123456789abcdef01234567",
+        "sha256": "sha256:" + "0" * 64,
+    }
+    assert disposition_state(runtime) == "evidence_complete"
+
+    valid = _registry()
+    valid["records"][0]["correction_complete"] = True
+    valid["false_green_pairs"][0]["correction_complete"] = False
+    validate_registry(valid)
+
+    invalid = _registry()
+    invalid["records"][0]["correction_complete"] = "yes"
+    with pytest.raises(GovernanceContractError, match="correction_complete must be boolean"):
+        validate_registry(invalid)
+    invalid_pair = _registry()
+    invalid_pair["false_green_pairs"][0]["correction_complete"] = "yes"
+    with pytest.raises(GovernanceContractError, match="correction_complete must be boolean"):
+        validate_registry(invalid_pair)
+
+    # And a terminal record never reports either open state.
+    for record in records:
+        if record["status"] in {"closed", "expired"}:
+            assert disposition_state(record) == record["status"], record["id"]

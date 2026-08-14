@@ -77,7 +77,30 @@ _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS = {
     "disposition_owner": "reviewer",
     "close_requires_runtime_closed": True,
     "close_requires_immutable_red_and_green_evidence": True,
+    # Green evidence names a MERGED head, which cannot exist before the merge it
+    # would gate, so requiring it to close made `open` permanent by
+    # construction. It is now appended by the post-merge sweep, and `pending` on
+    # an otherwise satisfied record neither reopens it nor blocks a disposition.
+    # The RED half is unchanged and still required before merge.
+    #
+    # NO COUNT IS RECORDED HERE. An earlier version cited "364 of 368 pairs",
+    # which was already false in the tree that shipped it -- the number moves
+    # with every PR, and a validator is the worst place to freeze one. Anyone
+    # who wants the current figure should count it from the registry rather
+    # than read it here: load the YAML and count entries whose
+    # `green_evidence` is `pending` against the total.
+    "green_evidence_bound_post_merge_by_sweep": True,
+    "pending_green_evidence_blocks_disposition": False,
     "guard_removed_skipped_xfailed_deselected_or_nondefault": "reopen",
+}
+# The SAME post-merge evidence semantics, for runtime prevention records. The
+# first version of this change declared them only for false-green pairs, while
+# the registry's runtime records carry `green_evidence: pending` in bulk for the
+# identical structural reason -- so the deadlock fix covered the bookkeeping and
+# not the above-floor preventions whose disposition the rule also unblocks.
+_EXPECTED_RECORD_EVIDENCE_SEMANTICS = {
+    "green_evidence_bound_post_merge_by_sweep": True,
+    "pending_green_evidence_blocks_disposition": False,
 }
 _CLASSIFICATION_CORPUS_REPEAT_THRESHOLD = 2
 _PUBLICATION_DISPOSITION_RECEIPTS_PATH = Path("governance/publication_disposition_receipts.json")
@@ -108,6 +131,68 @@ def closure_semantics_sha256(entry: Mapping[str, Any]) -> str:
     semantic = {key: entry[key] for key in sorted(entry) if key not in excluded}
     raw = json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"sha256:{hashlib.sha256(raw).hexdigest()}"
+
+
+def disposition_state(
+    record: Mapping[str, Any], *, runtime_records: Mapping[str, Mapping[str, Any]] | None = None
+) -> str:
+    """Read the record's lifecycle state without treating evidence as completion.
+
+    `record_evidence_semantics` declares that green evidence is appended after
+    merge by a batch sweep and that its absence blocks nothing. A consumer could
+    not act on that: a record whose correction and guard are done and is merely
+    waiting for the sweep looked exactly like one where nothing has been built --
+    both are `status: open` with `green_evidence: pending`. Anything enforcing
+    the declaration had to guess, so the declaration was unenforceable.
+
+    * ``closed`` / ``expired`` -- terminal, and already required to carry
+      immutable evidence on both sides.
+    * ``awaiting_green_sweep`` -- open with explicit correction completion and
+      only the post-merge green capture outstanding.
+    * ``incomplete`` -- open without explicit correction completion or
+      immutable red-before-fix evidence.
+    """
+
+    status = record.get("status")
+    if status in {"closed", "expired"}:
+        return str(status)
+    # `reopened` is an ACTIVE status, not a third thing. Measured on the live
+    # registry: statuses are `open` (85) and `reopened` (5), and a reopened
+    # record is in exactly the same position as an open one -- its correction is
+    # either built and guarded or it is not. An earlier version of this function
+    # recognised only `open` and reported every reopened record `unknown`, which
+    # would have made the very state this derivation exists to expose
+    # unreadable for them.
+    if status not in {"open", "reopened"}:
+        return "unknown"
+    runtime_id = record.get("runtime_prevention_id")
+    if runtime_id is not None:
+        runtime = None if runtime_records is None else runtime_records.get(runtime_id)
+        if runtime is None or runtime.get("status") not in {"closed", "expired"}:
+            return "incomplete"
+    green = record.get("green_evidence")
+    # Guard registration and red prose are enforcement evidence, not evidence
+    # that the correction itself is done. They also differ structurally between
+    # runtime records (`guards`) and false-green pairs (`guard`). Only the
+    # reviewer-owned explicit signal can make pending green bookkeeping the sole
+    # remaining work; absence fails closed for both shapes.
+    if record.get("correction_complete") is not True:
+        return "incomplete"
+    try:
+        _validate_immutable_evidence(record.get("red_evidence"), "red_evidence")
+    except GovernanceContractError:
+        return "incomplete"
+    # Measured on the live registry: SEVEN active records already carry captured
+    # green evidence. They are not waiting for the sweep -- it has run for them,
+    # and they stay open for their own residual reasons. Folding them into
+    # `awaiting_green_sweep` would have told a consumer to expect a capture that
+    # already happened, so they get their own state rather than a convenient
+    # bucket.
+    try:
+        _validate_immutable_evidence(green, "green_evidence")
+    except GovernanceContractError:
+        return "awaiting_green_sweep"
+    return "evidence_complete"
 
 
 def _validate_immutable_evidence(value: Any, field: str) -> None:
@@ -191,6 +276,7 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "automation_limit",
         "guard_source_blobs",
         "classification_corpus",
+        "correction_complete",
     }
 )
 
@@ -853,6 +939,7 @@ def validate_registry(
         "policy_refs",
         "default_ci_jobs",
         "false_green_pair_semantics",
+        "record_evidence_semantics",
         "false_green_pairs",
         "records",
     }
@@ -870,6 +957,8 @@ def validate_registry(
         raise GovernanceContractError("default CI jobs are not exact")
     if payload["false_green_pair_semantics"] != _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS:
         raise GovernanceContractError("false-green pair semantics are not exact")
+    if payload["record_evidence_semantics"] != _EXPECTED_RECORD_EVIDENCE_SEMANTICS:
+        raise GovernanceContractError("record evidence semantics are not exact")
     partitions = set(payload["default_ci_jobs"])
     if partitions != {"agents", "core", "gui", "remaining"}:
         raise GovernanceContractError("default CI partitions are not exact")
@@ -929,6 +1018,8 @@ def validate_registry(
             _nonempty(record["human_gate"], f"{record_id}.human_gate")
         if "automation_limit" in record:
             _nonempty(record["automation_limit"], f"{record_id}.automation_limit")
+        if "correction_complete" in record and not isinstance(record["correction_complete"], bool):
+            raise GovernanceContractError(f"{record_id}.correction_complete must be boolean")
         if record["status"] not in _STATUSES or record["scope"] not in _SCOPES:
             raise GovernanceContractError(f"record status or scope is invalid: {record_id}")
         for field in ("authority_source", "applies_to", "classification", "consequence", "invariant"):
@@ -1036,7 +1127,12 @@ def validate_registry(
     }
     pair_guards: set[str] = set()
     for pair in pairs:
-        optional_pair_fields = {"platform", "closure_semantics_sha256", "guard_source_blobs"}
+        optional_pair_fields = {
+            "platform",
+            "closure_semantics_sha256",
+            "guard_source_blobs",
+            "correction_complete",
+        }
         if (
             not isinstance(pair, Mapping)
             or not required_pair_fields <= set(pair)
@@ -1047,6 +1143,8 @@ def validate_registry(
         if _ID.fullmatch(pair_id) is None or pair_id in pair_ids or pair_id in record_ids:
             raise GovernanceContractError(f"false-green pair id is invalid or duplicate: {pair_id}")
         pair_ids.add(pair_id)
+        if "correction_complete" in pair and not isinstance(pair["correction_complete"], bool):
+            raise GovernanceContractError(f"{pair_id}.correction_complete must be boolean")
         runtime = record_by_id.get(pair["runtime_prevention_id"])
         if runtime is None:
             raise GovernanceContractError(f"{pair_id} has a dangling runtime prevention")
