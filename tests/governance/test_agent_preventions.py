@@ -112,7 +112,7 @@ def _caught_timeout_error_names(handler: ast.ExceptHandler) -> set[str]:
                 _collect(item)
 
     _collect(handler.type)
-    if handler.type is None or names & {"Exception", "BaseException"}:
+    if handler.type is None or names & {"Exception", "BaseException", "OSError"}:
         names.add("TimeoutError")
     return names
 
@@ -194,6 +194,18 @@ def _swallows_timeout_handler(handler: ast.ExceptHandler) -> bool:
                 swallows |= body_swallows or else_swallows
                 if not body_falls_through and not else_falls_through:
                     return swallows, False
+                continue
+            elif isinstance(statement, (ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While, ast.Try)):
+                nested_bodies = [statement.body]
+                if isinstance(statement, (ast.For, ast.AsyncFor, ast.While, ast.Try)):
+                    nested_bodies.append(statement.orelse)
+                if isinstance(statement, ast.Try):
+                    nested_bodies.extend(handler.body for handler in statement.handlers)
+                    nested_bodies.append(statement.finalbody)
+                for body in nested_bodies:
+                    nested_swallows, _ = flow(body)
+                    if nested_swallows:
+                        return True, False
                 continue
             else:
                 continue
@@ -1227,7 +1239,12 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
         ]
         for wait in discovery_waits:
             timeout = next((keyword.value for keyword in wait.keywords if keyword.arg == "timeout"), None)
-            if timeout is None and _call_signature(wait) in wait_for_signatures and len(wait.args) >= 2:
+            direct_wait_for = isinstance(wait.func, ast.Name) and (wait.func.id, "wait_for") in wait_for_signatures
+            if (
+                timeout is None
+                and (_call_signature(wait) in wait_for_signatures or direct_wait_for)
+                and len(wait.args) >= 2
+            ):
                 timeout = wait.args[1]
             assert isinstance(timeout, ast.Constant) and type(timeout.value) in {int, float}
             assert timeout.value >= 5.0, f"{name} uses a load-sensitive publication discovery timeout"
@@ -1410,15 +1427,50 @@ async def under_test(queue):
 
 
 def test_durable_ack_guard_accepts_positional_wait_for_timeout() -> None:
-    tree = ast.parse("""import asyncio
+    tree = ast.parse("""from asyncio import wait_for as wf
 
 async def under_test(queue):
-    await asyncio.wait_for(queue.get(), 5.0)
+    await wf(queue.get(), 5.0)
 """)
     function = _first_function(tree, "under_test")
     wait = next(node for node in ast.walk(function) if isinstance(node, ast.Call))
-    assert _is_publication_discovery_wait(wait, set(), _wait_for_signatures(tree))
-    assert isinstance(wait.args[1], ast.Constant) and wait.args[1].value == 5.0
+    signatures = _wait_for_signatures(tree)
+    assert _is_publication_discovery_wait(wait, set(), signatures)
+    timeout = next((keyword.value for keyword in wait.keywords if keyword.arg == "timeout"), None)
+    direct_wait_for = isinstance(wait.func, ast.Name) and (wait.func.id, "wait_for") in signatures
+    if timeout is None and (_call_signature(wait) in signatures or direct_wait_for) and len(wait.args) >= 2:
+        timeout = wait.args[1]
+    assert isinstance(timeout, ast.Constant) and timeout.value == 5.0
+
+
+def test_durable_ack_guard_flags_nested_timeout_handler_exit_as_swallow() -> None:
+    function = _first_function(
+        ast.parse("""async def under_test():
+    try:
+        await asyncio.wait_for(queue.get(), timeout=5.0)
+    except TimeoutError:
+        with diagnostics():
+            return
+        raise
+"""),
+        "under_test",
+    )
+    handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
+    assert _swallows_timeout_handler(handler)
+
+
+def test_durable_ack_guard_treats_os_error_handlers_as_timeout_handlers() -> None:
+    function = _first_function(
+        ast.parse("""async def under_test():
+    try:
+        await asyncio.wait_for(queue.get(), timeout=5.0)
+    except OSError:
+        return
+"""),
+        "under_test",
+    )
+    handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
+    assert "TimeoutError" in _caught_timeout_error_names(handler)
 
 
 def test_durable_ack_guard_allows_diagnostic_timeout_reraise() -> None:
