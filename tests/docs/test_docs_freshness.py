@@ -2788,3 +2788,38 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "no supported production health-node configuration" in section
     assert "::BUILTIN_DRIVER_SPECS" not in section
     assert "::get_driver_spec" not in section
+
+
+def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
+    """OB-002's trigger token must be a MARKER, not a string that also appears in prose.
+
+    Measured on `806795fd`: `ROADMAP.md` carried `phase-1-status=` twice -- the real
+    marker at line 837 reading `IN_PROGRESS`, and the instruction beneath it, which
+    spelled out the completed value it told a future editor to write.  A marker trigger
+    that searches the file for the completed token therefore fired while the descriptor
+    spine was plainly unmerged.
+
+    That is not a cosmetic collision.  The planned OB-010 guard turns a fired trigger on
+    a `PENDING` row into a red docs gate, so this would have reddened the gate for prose,
+    and the cheap repair -- flip OB-002 to `DUE` -- would have recorded a phase completion
+    that never happened.  An obligation register that can be pushed into a false state by
+    its own explanatory text is worse than one with no trigger at all.
+
+    So the property is pinned here rather than left to the wording: exactly one occurrence,
+    and its value drawn from the declared vocabulary.  A second occurrence fails, whatever
+    its value, because ambiguity is the defect and a prose mention is how it returns.
+    """
+
+    roadmap = _read(REPO_ROOT / "ROADMAP.md")
+    occurrences = re.findall(r"phase-1-status=([A-Za-z_]+)", roadmap)
+    assert len(occurrences) == 1, (
+        "ROADMAP.md must carry the phase-1-status token exactly once; found "
+        f"{len(occurrences)} occurrences with values {occurrences}. A second mention makes "
+        "OB-002's marker trigger unresolvable, and a trigger that fires on prose puts the "
+        "obligation register into a state its evidence does not support."
+    )
+    assert occurrences[0] in {"IN_PROGRESS", "DONE"}, (
+        f"phase-1-status carries the unknown value {occurrences[0]!r}; OB-002 keys its "
+        "trigger to this token, so an unrecognised value silently answers neither fired nor "
+        "unfired"
+    )
