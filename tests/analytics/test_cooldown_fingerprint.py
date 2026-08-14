@@ -163,3 +163,72 @@ def test_structurally_invalid_fingerprint_is_unreadable(tmp_path: Path, payload)
     listed, unreadable = list_fingerprints(tmp_path)
     assert listed == []
     assert unreadable == 1
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("fingerprint_id", []),
+        ("cooldown_start_ts", True),
+        ("duration_h", "12.5"),
+        ("time_to_base_h", False),
+        ("n_points", 1.5),
+    ],
+)
+def test_list_fingerprints_rejects_coercible_invalid_field_types(tmp_path: Path, field: str, value: object) -> None:
+    payload = CooldownFingerprint(
+        fingerprint_id="cd_valid",
+        cooldown_start_ts=1.0,
+        duration_h=2.0,
+        T_cold_final=3.0,
+        time_to_base_h=None,
+        time_to_50K_h=None,
+        ultimate_vacuum_mbar=None,
+        n_points=4,
+    ).to_dict()
+    payload[field] = value
+    (tmp_path / "bad.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    listed, unreadable = list_fingerprints(tmp_path)
+
+    assert listed == []
+    assert unreadable == 1
+
+
+def test_get_baseline_rejects_coercible_invalid_field_types(tmp_path: Path) -> None:
+    payload = CooldownFingerprint(
+        fingerprint_id="cd_bad",
+        cooldown_start_ts=1.0,
+        duration_h=2.0,
+        T_cold_final=3.0,
+        time_to_base_h=None,
+        time_to_50K_h=None,
+        ultimate_vacuum_mbar=None,
+        n_points=4,
+    ).to_dict()
+    payload["n_points"] = 1.5
+    (tmp_path / "cd_bad.json").write_text(json.dumps(payload), encoding="utf-8")
+    set_baseline("cd_bad", tmp_path)
+
+    baseline, unreadable = get_baseline(tmp_path)
+
+    assert baseline is None
+    assert unreadable == 1
+
+
+def test_get_baseline_returns_unreadable_when_pointer_access_is_denied(tmp_path: Path, monkeypatch) -> None:
+    pointer = tmp_path / BASELINE_POINTER
+    pointer.write_text("{}", encoding="utf-8")
+    original_exists = Path.exists
+
+    def denied_pointer_exists(path: Path) -> bool:
+        if path == pointer:
+            raise PermissionError("access denied")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", denied_pointer_exists)
+
+    baseline, unreadable = get_baseline(tmp_path)
+
+    assert baseline is None
+    assert unreadable == 1

@@ -331,9 +331,10 @@ class CooldownBaselineCard(QWidget):
             key=lambda fp: fp.cooldown_start_ts,
             reverse=True,
         )
-        base, _ = get_baseline(self._history_dir)
+        base, unreadable_baseline = get_baseline(self._history_dir)
         self._baseline_id = base.fingerprint_id if base else None
         if not self._entries:
+            unreadable_files += unreadable_baseline
             if unreadable_files:
                 self._show_empty(_unreadable_message(unreadable_files, "История недоступна"))
             else:

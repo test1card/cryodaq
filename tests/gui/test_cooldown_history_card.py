@@ -285,3 +285,13 @@ def test_card_marks_partial_history_and_unreadable_baseline(tmp_path: Path) -> N
     assert card._empty_label.isVisibleTo(card)
     assert card._empty_label.text() == "История неполна (1 файл не читается)."
     assert card._table.item(0, 4).text() == "эталон недоступен"
+
+
+def test_card_shows_unreadable_when_only_baseline_pointer_is_corrupt(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+
+    assert card._empty_label.isVisibleTo(card)
+    assert "1" in card._empty_label.text()

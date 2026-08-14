@@ -43,16 +43,33 @@ class CooldownFingerprint:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CooldownFingerprint:
+        _validate_fingerprint_dict(d)
         return cls(
-            fingerprint_id=str(d["fingerprint_id"]),
+            fingerprint_id=d["fingerprint_id"],
             cooldown_start_ts=float(d["cooldown_start_ts"]),
             duration_h=float(d["duration_h"]),
             T_cold_final=float(d["T_cold_final"]),
             time_to_base_h=_opt_float(d.get("time_to_base_h")),
             time_to_50K_h=_opt_float(d.get("time_to_50K_h")),
             ultimate_vacuum_mbar=_opt_float(d.get("ultimate_vacuum_mbar")),
-            n_points=int(d["n_points"]),
+            n_points=d["n_points"],
         )
+
+
+def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
+    if not isinstance(d, dict) or not isinstance(d.get("fingerprint_id"), str):
+        raise ValueError("invalid fingerprint record")
+    numeric_fields = ("cooldown_start_ts", "duration_h", "T_cold_final")
+    optional_numeric_fields = ("time_to_base_h", "time_to_50K_h", "ultimate_vacuum_mbar")
+    if any(not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool) for field in numeric_fields):
+        raise ValueError("invalid fingerprint record")
+    if any(
+        d.get(field) is not None and (not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool))
+        for field in optional_numeric_fields
+    ):
+        raise ValueError("invalid fingerprint record")
+    if not isinstance(d.get("n_points"), int) or isinstance(d.get("n_points"), bool):
+        raise ValueError("invalid fingerprint record")
 
 
 def _opt_float(v: Any) -> float | None:
@@ -161,9 +178,9 @@ def get_baseline(history_dir: Path) -> tuple[CooldownFingerprint | None, int]:
     ``0`` when unset or valid.
     """
     pointer = Path(history_dir) / BASELINE_POINTER
-    if not pointer.exists():
-        return None, 0
     try:
+        if not pointer.exists():
+            return None, 0
         data = json.loads(pointer.read_text(encoding="utf-8"))
         fid = data.get("fingerprint_id")
     except (OSError, ValueError, AttributeError):
