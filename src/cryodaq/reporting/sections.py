@@ -464,12 +464,28 @@ def render_experiment_metadata_section(document: Document, dataset: ReportDatase
     # Summary stats
     if summary:
         parts = []
+
+        # OC-015.  These printed the recorded summary verbatim, so a dataset carrying stale
+        # zero counts rendered zeros while loaded readings, runs and artifacts existed --
+        # an absence rendered as a fact.  The loaded count is now authoritative.
+        #
+        # `run_records` and `artifact_index` come from the SAME metadata mapping as the
+        # summary, so a disagreement there is staleness.  `readings` does NOT: it is bounded
+        # by the report window, so the loaded length answers "in this report" while the
+        # summary answers "in the experiment".  Neither number is discarded, and a
+        # disagreement is SHOWN rather than silently resolved.
+        def _counted(label: str, key: str, loaded: int) -> str:
+            recorded = summary.get(key)
+            if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded != loaded:
+                return f"{label}: {loaded:,} (в записи: {recorded:,})"
+            return f"{label}: {loaded:,}"
+
         if "reading_count" in summary:
-            parts.append(f"Измерений: {summary['reading_count']:,}")
+            parts.append(_counted("Измерений", "reading_count", len(dataset.readings)))
         if "run_count" in summary:
-            parts.append(f"Прогонов: {summary['run_count']}")
+            parts.append(_counted("Прогонов", "run_count", len(dataset.run_records)))
         if "artifact_count" in summary:
-            parts.append(f"Артефактов: {summary['artifact_count']}")
+            parts.append(_counted("Артефактов", "artifact_count", len(dataset.artifact_index)))
         if parts:
             document.add_paragraph(xml_safe(" │ ".join(parts)))
 

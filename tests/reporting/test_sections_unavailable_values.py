@@ -15,7 +15,11 @@ import docx
 import pytest
 
 from cryodaq.reporting.data import HistoricalReading, ReportDataset
-from cryodaq.reporting.sections import render_alarms_section, render_pressure_section
+from cryodaq.reporting.sections import (
+    render_alarms_section,
+    render_experiment_metadata_section,
+    render_pressure_section,
+)
 
 NAN = float("nan")
 _TS = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
@@ -92,3 +96,20 @@ def test_alarm_reading_finite_still_rendered(document, tmp_path: Path) -> None:
     text = _document_text(document)
 
     assert "12.5 mbar" in text
+
+
+def test_summary_counts_are_derived_from_loaded_report_collections(document, tmp_path: Path) -> None:
+    dataset = ReportDataset(
+        metadata={"experiment": {}, "template": {}},
+        readings=[HistoricalReading(_TS, "meter", "input", 1.0, "V", "ok")],
+        run_records=[{"status": "COMPLETED"}],
+        artifact_index=[{"role": "measured_values"}],
+        summary_metadata={"reading_count": 0, "run_count": 0, "artifact_count": 0},
+    )
+
+    render_experiment_metadata_section(document, dataset, tmp_path)
+    text = _document_text(document)
+
+    assert "Измерений: 1" in text, "report rendered an unchecked reading_count claim"
+    assert "Прогонов: 1" in text, "report rendered an unchecked run_count claim"
+    assert "Артефактов: 1" in text, "report rendered an unchecked artifact_count claim"
