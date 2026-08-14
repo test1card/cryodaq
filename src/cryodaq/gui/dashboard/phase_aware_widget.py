@@ -125,6 +125,11 @@ class PhaseAwareWidget(QWidget):
             f"font-family: '{theme.FONT_BODY}'; "
             f"font-size: {theme.FONT_SIZE_SM}px; "
             f"font-weight: {theme.FONT_WEIGHT_SEMIBOLD}; "
+            f"}} "
+            f"#phaseCreateBtn:disabled {{ "
+            f"background-color: {theme.SURFACE_CARD}; "
+            f"color: {theme.TEXT_DISABLED}; "
+            f"border: 1px solid {theme.BORDER}; "
             f"}}"
         )
         root.addWidget(self._create_btn)
@@ -157,7 +162,7 @@ class PhaseAwareWidget(QWidget):
             f"font-size: {theme.FONT_SIZE_SM}px; "
         )
         btn_hover = f"background-color: {theme.PRIMARY}; "
-        btn_disabled = f"color: {theme.MUTED_FOREGROUND}; background-color: {theme.MUTED}; "
+        btn_disabled = f"color: {theme.TEXT_DISABLED}; background-color: {theme.MUTED}; "
 
         self._back_btn = QPushButton(
             "\u041d\u0430\u0437\u0430\u0434"  # Назад
@@ -431,7 +436,12 @@ class PhaseAwareWidget(QWidget):
         self._refresh_context_label()
 
     def _update_control_enablement(self) -> None:
-        self._create_btn.setEnabled(self._mutation_enabled and not self._has_active_experiment)
+        create_enabled = self._mutation_enabled and not self._has_active_experiment
+        self._create_btn.setEnabled(create_enabled)
+        self._create_btn.setCursor(Qt.CursorShape.PointingHandCursor if create_enabled else Qt.CursorShape.ArrowCursor)
+        disabled_reason = "" if create_enabled else "Создание сейчас недоступно"
+        self._create_btn.setToolTip(disabled_reason)
+        self._create_btn.setAccessibleDescription(disabled_reason)
         self._jump_combo.setEnabled(self._mutation_enabled and self._has_active_experiment)
         if not self._mutation_enabled or not self._has_active_experiment:
             self._back_btn.setEnabled(False)

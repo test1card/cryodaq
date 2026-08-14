@@ -169,11 +169,14 @@ class ToolRailButton(QToolButton):
         self._name = name
         self._active = False
         self._hover = False
+        self._popup_keyboard_focus: bool | None = None
         self._icon_path = icon_path
         self.setFixedSize(_RAIL_WIDTH, _BUTTON_SIZE)
         self.setIconSize(QSize(_ICON_SIZE, _ICON_SIZE))
         self.setToolTip(tooltip)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setProperty("keyboardFocus", False)
         # IV.3 F4: Phosphor icons render from a font at runtime so
         # there is no path-on-disk existence check. Fall back to the
         # tooltip-prefix label only when the slot name has no
@@ -203,6 +206,48 @@ class ToolRailButton(QToolButton):
             return
         self.setIcon(_colored_icon(str(self._icon_path), color, _ICON_SIZE))
 
+    def _set_keyboard_focus(self, visible: bool) -> None:
+        if bool(self.property("keyboardFocus")) == visible:
+            return
+        self.setProperty("keyboardFocus", visible)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def focusInEvent(self, event):  # noqa: ANN001
+        super().focusInEvent(event)
+        if event.reason() in {
+            Qt.FocusReason.PopupFocusReason,
+            Qt.FocusReason.ActiveWindowFocusReason,
+        }:
+            popup_focus = self._popup_keyboard_focus
+            self._popup_keyboard_focus = None
+            self._set_keyboard_focus(True if popup_focus is None else popup_focus)
+            return
+        self._set_keyboard_focus(
+            event.reason()
+            in {
+                Qt.FocusReason.TabFocusReason,
+                Qt.FocusReason.BacktabFocusReason,
+            }
+        )
+
+    def focusOutEvent(self, event):  # noqa: ANN001
+        if event.reason() in {
+            Qt.FocusReason.PopupFocusReason,
+            Qt.FocusReason.ActiveWindowFocusReason,
+        }:
+            self._popup_keyboard_focus = bool(self.property("keyboardFocus"))
+        else:
+            self._popup_keyboard_focus = None
+        self._set_keyboard_focus(False)
+        super().focusOutEvent(event)
+
+    def mousePressEvent(self, event):  # noqa: ANN001
+        self._popup_keyboard_focus = False
+        self._set_keyboard_focus(False)
+        super().mousePressEvent(event)
+
     def enterEvent(self, event):  # noqa: ANN001
         self._hover = True
         self._refresh_icon()
@@ -229,10 +274,13 @@ class ToolRailButton(QToolButton):
             border = f"3px solid {theme.ACCENT_400}"
         else:
             border = "3px solid transparent"
+        focused_left_border = border if self._active else f"2px solid {theme.ACCENT}"
         self.setStyleSheet(
             f"QToolButton {{ background: transparent; border: none; "
             f"border-left: {border}; padding: 0px; }}"
             f"QToolButton:hover {{ background: {theme.SECONDARY}; }}"
+            f'QToolButton[keyboardFocus="true"] {{ border: 2px solid {theme.ACCENT}; '
+            f"border-left: {focused_left_border}; }}"
         )
 
 

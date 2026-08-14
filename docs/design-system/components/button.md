@@ -4,7 +4,7 @@ keywords: button, action, click, secondary, ghost, destructive, icon-only, hold-
 applies_to: interactive button widgets
 status: partial
 implements: legacy widgets in src/cryodaq/gui/widgets/* (variants scattered; formalization pending)
-last_updated: 2026-04-17
+last_updated: 2026-08-10
 references: rules/interaction-rules.md, rules/color-rules.md, tokens/colors.md
 ---
 
@@ -372,6 +372,13 @@ class HoldConfirmButton(QPushButton):
 | **Disabled** | Color → `TEXT_DISABLED`; background → `SURFACE_CARD`; cursor `ArrowCursor`. Opacity or separate disabled tokens both acceptable |
 | **Loading / Pending** | Disable button + replace text with pending verb ("Запуск...") + optionally small spinner icon |
 | **Success echo** (after accepted action) | 300ms `STATUS_OK` border flash, then revert. (RULE-INTER-007) |
+
+The `#phaseCreateBtn` stylesheet that defines enabled foreground or
+fill **must also define its own :disabled selector**. Calling
+setEnabled(False) without the selector does not satisfy the visual state:
+the enabled fill can remain painted. The disabled control also carries an
+generic operator-readable unavailability explanation through
+tooltip/accessibility text.
 
 ## Sizing
 

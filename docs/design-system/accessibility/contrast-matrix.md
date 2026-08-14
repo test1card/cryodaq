@@ -4,7 +4,7 @@ keywords: contrast, wcag, aa, aaa, ratios, measured, token-pairs, foreground, ba
 applies_to: WCAG contrast ratios for every token pair used in the product
 status: canonical
 references: tokens/colors.md, rules/accessibility-rules.md, rules/color-rules.md
-last_updated: 2026-04-17
+last_updated: 2026-08-10
 ---
 
 # Contrast Matrix
@@ -21,9 +21,9 @@ WCAG 2.x contrast ratio formula:
 
 where L is relative luminance, and L₁ ≥ L₂. Ratios ≥ 4.5:1 pass AA body text, ≥ 3:1 pass AA large text (≥18pt or ≥14pt bold), ≥ 7:1 pass AAA body text, ≥ 4.5:1 pass AAA large text.
 
-All ratios below computed against **BACKGROUND `#0d0e12`** (the canonical shell background) unless otherwise stated. Secondary backgrounds (CARD, SECONDARY, MUTED) have slightly different luminance; key differences noted inline.
+The legacy baseline tables below use the original default_cool palette. Pack-specific claims are identified explicitly and computed from shipped YAML; a background-only result never authorizes use on another surface.
 
-## Measured ratios vs BACKGROUND
+## Legacy baseline ratios vs BACKGROUND
 
 | Token | Hex | Contrast vs BACKGROUND | AA body (4.5:1) | AA large (3:1) | AAA body (7:1) | Verdict |
 |---|---|---|---|---|---|---|
@@ -67,7 +67,32 @@ sub-threshold pill text is never the sole readable signal. New or revised
 pills must prefer a contrast-tested foreground pair. See
 `patterns/state-visualization.md`.
 
-## Ratios vs SECONDARY surfaces
+## Warm Stone body-text claims (enforced)
+
+The active Warm Stone pack uses MUTED_FOREGROUND #a59d94 for 11–14 px
+secondary body text. The following exhaustive foreground/surface claims are
+computed from config/themes/warm_stone.yaml with the WCAG formula above.
+tests/gui/test_theme_loader.py::test_warm_stone_muted_body_text_passes_on_every_claimed_surface
+parses every row, loads the real production theme pack, checks the documented
+ratio, and requires the stated threshold. Adding a claimed row therefore adds
+a guard obligation automatically.
+
+<!-- BEGIN WARM_STONE_BODY_TEXT_CLAIMS -->
+| Foreground token | Surface token | Required threshold | Measured ratio |
+|---|---|---:|---:|
+| MUTED_FOREGROUND | BACKGROUND | 4.50:1 | **6.62:1** |
+| MUTED_FOREGROUND | SURFACE_PANEL | 4.50:1 | **6.13:1** |
+| MUTED_FOREGROUND | SURFACE_CARD | 4.50:1 | **5.54:1** |
+| MUTED_FOREGROUND | SURFACE_ELEVATED | 4.50:1 | **4.97:1** |
+| MUTED_FOREGROUND | SURFACE_MUTED | 4.50:1 | **5.91:1** |
+| MUTED_FOREGROUND | SURFACE_SUNKEN | 4.50:1 | **6.94:1** |
+<!-- END WARM_STONE_BODY_TEXT_CLAIMS -->
+
+SURFACE_ELEVATED is the limiting pair at 4.97:1. There is no lowered
+standard or exception: every claimed Warm Stone secondary-body pairing meets
+4.5:1.
+
+## Legacy baseline ratios vs SECONDARY surfaces
 
 When content sits on a secondary surface (CARD `#181a22`, SECONDARY `#22252f`, MUTED `#1d2028`) instead of BACKGROUND, contrast ratios shift slightly because luminance of the background is higher:
 
@@ -80,12 +105,12 @@ When content sits on a secondary surface (CARD `#181a22`, SECONDARY `#22252f`, M
 | STATUS_CAUTION / legacy WARNING | **5.62:1** | **4.95:1** | **5.27:1** |
 | STATUS_FAULT | **3.54:1** (fails AA body) | **3.12:1** (fails AA body) | **3.32:1** (fails AA body) |
 
-**Critical callout:** STATUS_OK and STATUS_FAULT fail AA body on every secondary surface. MUTED_FOREGROUND on SECONDARY (4.72:1) passes AA body but sits close to the threshold. This means:
+**Legacy-baseline callout:** STATUS_OK and STATUS_FAULT fail AA body on every listed secondary surface. The legacy #8a8f9b MUTED_FOREGROUND reaches 4.72:1 on SECONDARY. Warm Stone is governed separately by the exhaustive table above.
 
 - STATUS_OK as text color is unreliable on any surface other than BACKGROUND (where it reaches 4.67:1)
 - STATUS_FAULT as body text is unsafe on every surface; it passes only AA large (≥3:1) on BACKGROUND/CARD/MUTED and fails AA body everywhere
 - Status colors should carry their signal via border + icon + filled pill, NOT body text color (echoes RULE-A11Y-003)
-- MUTED_FOREGROUND remains safe as secondary text on any surface, but the SECONDARY pairing has the least headroom — prefer FOREGROUND for critical labels on SECONDARY-surfaced tiles
+- Do not transfer a MUTED_FOREGROUND result between theme packs or surfaces; use only a pack-specific pairing claimed and guarded above
 
 ## Non-text contrast (UI boundaries)
 
@@ -106,7 +131,7 @@ WCAG 1.4.11 requires ≥ 3:1 for UI component boundaries (borders, form outlines
 
 Safe (AA passes):
 - FOREGROUND on any background
-- MUTED_FOREGROUND on any background (SECONDARY is the tightest at 4.72:1)
+- Warm Stone MUTED_FOREGROUND on its six claimed surfaces (SURFACE_ELEVATED is tightest at 4.97:1); other packs require their own enumerated claims
 - ACCENT on any background
 - STATUS_OK on BACKGROUND only (4.67:1 — fails on CARD/SECONDARY/MUTED)
 - STATUS_CAUTION / legacy WARNING on any listed background (SECONDARY is the tightest at 4.95:1)
@@ -223,3 +248,4 @@ Any new token or background color added must go through this calculation + get a
 
 - 2026-04-17: Initial version. Measured ratios for all 13 primary text/accent tokens vs BACKGROUND. Filled-pill context ratios. Non-text contrast for UI borders. Documented AA gaps with rationale. Light theme deferred.
 - 2026-04-17: v1.0.1 — Recomputed all ratios from theme.py. Fixed stale ON_DESTRUCTIVE input. Corrected BORDER non-text contrast.
+- 2026-08-10 (v5.0.0): Replaced the false generic MUTED_FOREGROUND pass claim with six guarded Warm Stone token/surface measurements; no AA threshold exception.

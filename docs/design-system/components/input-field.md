@@ -4,7 +4,7 @@ keywords: input, field, text, form, qlineedit, numeric, validation, focus, disab
 applies_to: text and numeric input widgets
 status: partial
 implements: ad-hoc QLineEdit usage in legacy dialogs (formalization pending)
-last_updated: 2026-04-17
+last_updated: 2026-08-12
 references: rules/interaction-rules.md, rules/typography-rules.md, tokens/colors.md
 ---
 
@@ -39,7 +39,7 @@ Label placement: ABOVE the field (not floating, not placeholder-as-label)
  bg: SURFACE_CARD, border 1px BORDER, radius RADIUS_SM
 
 ┌────────────────────────────────────┐   ◀── SPACE_1 below (for helper/error)
-│ ⚠ Имя уже занято                  │   ◀── helper/error (FONT_LABEL_SIZE, STATUS_*)
+│ Имя уже занято                    │   ◀── error (FONT_LABEL_SIZE, FOREGROUND; STATUS_FAULT border)
 └────────────────────────────────────┘
 ```
 
@@ -50,7 +50,7 @@ Label placement: ABOVE the field (not floating, not placeholder-as-label)
 | **Label** | Yes | `QLabel` above the field, `FONT_LABEL_SIZE`, `MUTED_FOREGROUND` color |
 | **Field** | Yes | `QLineEdit`, `ROW_HEIGHT = 36`, `SURFACE_CARD` background |
 | **Helper text** | No | Hint or validation message below the field, `FONT_LABEL_SIZE` |
-| **Error message** | Conditional | Replaces helper text when invalid, `TEXT_FAULT` color + alert icon |
+| **Error message** | Conditional | Replaces helper text when invalid, `FOREGROUND` body text; the field border carries the `STATUS_FAULT` signal |
 | **Unit suffix** | Numeric fields | Inline right-aligned unit label (K, мбар, Вт) per RULE-COPY-006 |
 
 ## Invariants
@@ -59,7 +59,7 @@ Label placement: ABOVE the field (not floating, not placeholder-as-label)
 2. **Height = ROW_HEIGHT.** (RULE-SPACE-007)
 3. **Focus ring on `:focus`.** 2px `ACCENT` border replacing 1px `BORDER`. (RULE-INTER-001)
 4. **Unit always displayed for numeric fields.** Temperature field shows "K" suffix; pressure shows "мбар". (RULE-COPY-006, RULE-DATA-006)
-5. **Error state distinct from disabled.** Error: `STATUS_FAULT` border (or TEXT_FAULT for message). Disabled: reduced opacity, `TEXT_DISABLED` text color. Never overlap treatments.
+5. **Error state distinct from disabled.** Error: `STATUS_FAULT` border with a neutral `FOREGROUND` message. Disabled: reduced opacity, `TEXT_DISABLED` text color. Never overlap treatments.
 6. **Placeholder text is sentence case example, not instruction.** "Введите название" is a placeholder-as-label (bad). "calibration_run_042" is a placeholder example (good).
 7. **No raw hex.** (RULE-COLOR-001)
 

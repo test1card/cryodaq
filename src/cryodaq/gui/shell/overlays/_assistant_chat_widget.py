@@ -180,7 +180,7 @@ class AssistantChatPanel(QWidget):
             f" border-radius: {theme.RADIUS_SM}px;"
             f" padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
             f"}}"
-            f"QLineEdit:disabled {{ color: {theme.MUTED_FOREGROUND}; }}"
+            f"QLineEdit:disabled {{ color: {theme.TEXT_DISABLED}; }}"
         )
         self._input.returnPressed.connect(self._on_send_clicked)
         composer.addWidget(self._input, stretch=1)

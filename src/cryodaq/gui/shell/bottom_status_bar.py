@@ -121,10 +121,18 @@ class BottomStatusBar(QWidget):
 
         layout.addWidget(_separator())
 
-        self._conn_label = QLabel("● Отключено")
-        self._conn_label.setMaximumWidth(180)
-        self._conn_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
-        layout.addWidget(self._conn_label)
+        conn_container = QWidget(self)
+        conn_container.setMaximumWidth(180)
+        conn_layout = QHBoxLayout(conn_container)
+        conn_layout.setContentsMargins(0, 0, 0, 0)
+        conn_layout.setSpacing(theme.SPACE_1)
+        self._conn_dot_label = QLabel("●")
+        self._conn_dot_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
+        conn_layout.addWidget(self._conn_dot_label)
+        self._conn_label = QLabel("Отключено")
+        self._conn_label.setStyleSheet(f"color: {theme.FOREGROUND};")
+        conn_layout.addWidget(self._conn_label)
+        layout.addWidget(conn_container)
 
         layout.addStretch()
 
@@ -171,7 +179,13 @@ class BottomStatusBar(QWidget):
         # (matches engine FSM ID; operator learns these from logs).
         # runtime display rule: FSM states displayed lowercase.
         self._safety_label.setText(text)
-        self._safety_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        if "fault" in s and not stale:
+            self._safety_label.setStyleSheet(
+                f"color: {theme.FOREGROUND}; font-weight: bold; "
+                f"border-left: 3px solid {theme.STATUS_FAULT}; padding-left: {theme.SPACE_1}px;"
+            )
+        else:
+            self._safety_label.setStyleSheet(f"color: {color}; font-weight: bold;")
         self._safety_label.setToolTip(detail)
         self._safety_label.setAccessibleDescription(detail)
 
@@ -204,14 +218,12 @@ class BottomStatusBar(QWidget):
         presentation = label if type(label) is str and label else ("Подключено" if connected else "Отключено")
         visible = _bounded_visible(presentation, _MAX_VISIBLE_CONNECTION_CHARS)
         detail = f"Состояние связи: {presentation}"
-        if connected:
-            self._conn_label.setText("● " + visible)
-            self._conn_label.setStyleSheet(f"color: {theme.STATUS_OK};")
-        else:
-            self._conn_label.setText("● " + visible)
-            self._conn_label.setStyleSheet(f"color: {theme.STATUS_FAULT};")
-        self._conn_label.setToolTip(detail)
-        self._conn_label.setAccessibleDescription(detail)
+        self._conn_label.setText(visible)
+        self._conn_label.setStyleSheet(f"color: {theme.FOREGROUND};")
+        self._conn_dot_label.setStyleSheet(f"color: {theme.STATUS_OK if connected else theme.STATUS_FAULT};")
+        for indicator in (self._conn_dot_label, self._conn_label):
+            indicator.setToolTip(detail)
+            indicator.setAccessibleDescription(detail)
 
     def set_disk_evidence(self, value: float, *, source: str, state: str) -> bool:
         """Present backend-owned disk evidence; this widget never probes disk."""
@@ -224,7 +236,13 @@ class BottomStatusBar(QWidget):
         self._last_disk_evidence = (float(value), source, state)
         visible = f"{value:.1f}" if value < _MAX_VISIBLE_NUMERIC else "≥1e6"
         self._disk_label.setText(f"Диск {visible} ГБ")
-        self._disk_label.setStyleSheet(f"color: {_disk_space_color(float(value))};")
+        if state == "fault":
+            self._disk_label.setStyleSheet(
+                f"color: {theme.FOREGROUND}; border-left: 3px solid {theme.STATUS_FAULT}; "
+                f"padding-left: {theme.SPACE_1}px;"
+            )
+        else:
+            self._disk_label.setStyleSheet(f"color: {_disk_space_color(float(value))};")
         detail = f"Диск: {value!r} ГБ; источник: {source}; состояние: {state}"
         self._disk_label.setToolTip(detail)
         self._disk_label.setAccessibleDescription(detail)

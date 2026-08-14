@@ -6,10 +6,12 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QEvent, QPointF, Qt
+from PySide6.QtGui import QFocusEvent, QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.gui import theme
-from cryodaq.gui.shell.tool_rail import _MNEMONIC_SHORTCUTS, ToolRail
+from cryodaq.gui.shell.tool_rail import _MNEMONIC_SHORTCUTS, ToolRail, ToolRailButton
 
 
 def _app() -> QApplication:
@@ -76,6 +78,94 @@ def test_set_active_marks_one_button() -> None:
     rail.set_active("summary")
     assert _active_border in rail._buttons["more"].styleSheet()
     assert _inactive_border in rail._buttons["home"].styleSheet()
+
+
+def test_keyboard_focus_changes_real_tool_rail_pixels_and_coexists_with_selection() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.set_active("home")
+    rail.show()
+    app.processEvents()
+
+    button = rail._buttons["home"]
+    assert isinstance(button, ToolRailButton)
+    rail._buttons["new_experiment"].setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    assert not button.hasFocus()
+    before = button.grab().toImage()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    focused_selected = button.grab().toImage()
+
+    assert focused_selected != before, "Tab focus must visibly change ToolRailButton pixels"
+    accent = theme.ACCENT.lower()
+    assert focused_selected.pixelColor(button.width() // 2, 1).name().lower() == accent
+    assert focused_selected.pixelColor(1, button.height() // 2).name().lower() == accent
+
+
+def test_popup_focus_return_preserves_keyboard_focus_ring() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
+    app.processEvents()
+
+    button = rail._buttons["home"]
+    other = rail._buttons["new_experiment"]
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is True
+
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is False
+
+    button.setFocus(Qt.FocusReason.PopupFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is True
+
+
+def test_active_window_focus_return_preserves_keyboard_focus_ring() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
+    app.processEvents()
+
+    button = rail._buttons["home"]
+    other = rail._buttons["new_experiment"]
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is True
+
+    button.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut, Qt.FocusReason.ActiveWindowFocusReason))
+    assert button.property("keyboardFocus") is False
+    button.focusInEvent(QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.ActiveWindowFocusReason))
+    assert button.property("keyboardFocus") is True
+
+
+def test_mouse_popup_focus_return_does_not_restore_keyboard_focus_ring() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
+    app.processEvents()
+    button = rail._buttons["home"]
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    button.mousePressEvent(
+        QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+    )
+    button.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut, Qt.FocusReason.PopupFocusReason))
+    button.focusInEvent(QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.PopupFocusReason))
+    assert button.property("keyboardFocus") is False
 
 
 def test_rail_width_matches_design_token() -> None:

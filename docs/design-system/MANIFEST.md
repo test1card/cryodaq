@@ -1,15 +1,15 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.0
+last_updated: 2026-08-10
+version: 5.0.0
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-20
-**Session:** v4.0.3 operator-state semantic correction
-**Scope:** Design system v4.1.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-08-10
+**Session:** v5.0.0 measured focus and body-contrast correction
+**Scope:** Design system v5.0.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -206,7 +206,7 @@ Batch 6 — accessibility + governance:
 
 53. **WCAG 2.2 Level AA target** — AA floor with documented exceptions; AAA opportunistic not committed.
 54. **Out-of-scope AA criteria explicit** — 1.2.x (media), 1.4.4 (resize text beyond OS DPI), 2.5.5 (touch target) — not applicable for desktop-only industrial context.
-55. **Contrast matrix is the source of truth** — every token/surface combination measured. STATUS_FAULT 3.94:1 body text fails AA → border+icon carry signal, value stays FOREGROUND.
+55. **Contrast matrix is the source of truth** — every claimed token/surface combination is measured and guarded. Warm Stone MUTED_FOREGROUND passes all six claimed body-text surfaces (tightest 4.97:1); STATUS_FAULT body text remains forbidden, so border/icon/dot carry fault while labels stay neutral.
 56. **2px ACCENT focus ring is canonical** — uniform across all focusable widgets; selection chrome (3px left-bar) + focus ring (2px outer border) coexist, not collapsed.
 57. **No single-key shortcuts anywhere** — every shortcut uses Ctrl / Alt / Shift modifier. Function keys (F5, F11) OK as non-text-input.
 58. **Focus restoration mandatory** on overlay close — return to opener, not document start.
@@ -216,10 +216,10 @@ Batch 6 — accessibility + governance:
     requires implementation, discoverability, tests, and hazard review before
     becoming canonical.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in the current v4.0.3 line** — the v2.0.0
+62. **Design system remains flat-token in the current v5.0.0 line** — the v2.0.0
     instrument-identity major and v3.0.0 composition-contract major did not
     perform the separately reviewed future three-layer token migration.
-63. **STONE_* remains deprecated/read-only in the current v4.0.3 line** — neither
+63. **STONE_* remains deprecated/read-only in the current v5.0.0 line** — neither
     major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
@@ -248,7 +248,7 @@ F36 operator-snapshot additions:
 
 ## Status
 
-**Design system v4.0.3 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+**Design system v5.0.0 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
 83 rules (79 widget rules plus 4 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
 ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
 remain open.

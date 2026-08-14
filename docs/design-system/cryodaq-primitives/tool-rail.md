@@ -4,7 +4,7 @@ keywords: tool-rail, sidebar, left-rail, navigation, icon-only, vertical, chrome
 applies_to: left vertical icon-only navigation strip
 status: active
 implements: src/cryodaq/gui/shell/tool_rail.py (Phase 0)
-last_updated: 2026-07-15
+last_updated: 2026-08-10
 references: rules/interaction-rules.md, rules/color-rules.md, tokens/icons.md
 ---
 
@@ -302,7 +302,7 @@ class ToolRail(QWidget):
 | Default | MUTED_FOREGROUND | transparent | 3px transparent (reserved) |
 | Hover | FOREGROUND | MUTED | 3px transparent |
 | Selected | FOREGROUND | MUTED | 3px ACCENT |
-| Keyboard focus | FOREGROUND | MUTED | 3px ACCENT (same as selected) OR subtle dotted outline around icon |
+| Keyboard focus | State-dependent | State-dependent | 2px ACCENT outer border; selected retains its separate 3px ACCENT left border |
 | Disabled | TEXT_DISABLED | transparent | 3px transparent — cursor ArrowCursor |
 
 ## Keyboard shortcut policy
@@ -348,6 +348,8 @@ ToolRail registers both the canonical mnemonic and the numeric-fallback shortcut
 - `tokens/keyboard-shortcuts.md` — Shortcut registry
 
 ## Changelog
+
+- 2026-08-10 (v5.0.0): Aligned keyboard focus with the shipped 2px ACCENT outer border; selected slots retain the separate 3px ACCENT left rail.
 
 - 2026-07-12 (v1.2.0): Documented host-owned replay destination gating shared by mouse and mnemonic paths; mutating global routes are rejected and legacy operational panels open read-only.
 - 2026-04-17: Initial version. Documents Phase 0 implementation. 9 slot definitions confirmed. Slot 2+3 merge pending product decision. Ctrl+[1-9] shortcuts + Ctrl+L alias for Operator Log.

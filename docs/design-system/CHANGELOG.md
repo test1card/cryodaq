@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-10
+version: 5.0.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [5.0.0] — 2026-08-10
+
+### Changed
+
+- Raised Warm Stone MUTED_FOREGROUND from #7a7167 to #a59d94.
+  Secondary body text now passes 4.5:1 on every claimed Warm Stone surface;
+  the limiting SURFACE_ELEVATED pair measures 4.97:1.
+- Added the implemented ToolRail keyboard-focus state: a 2 px Warm Stone
+  ACCENT ring at 6.41:1 on SURFACE_PANEL, independent of the 3 px selected
+  left rail. The generic FOCUS_RING pair measures 2.58:1 there and is refused.
+- Required `#phaseCreateBtn` custom enabled-button QSS to include its own
+  disabled selector and a generic unavailability explanation.
+
+### Corrected
+
+- Replaced the false generic claim that MUTED_FOREGROUND passed on any
+  background with six explicit, computed Warm Stone pair claims.
+- Kept fault colour on dots, borders, icons, or filled badges while rendering
+  the BottomStatusBar and New Experiment validation body labels with neutral,
+  legible text.
+- Added the replay-disabled + Создать treatment using TEXT_DISABLED on
+  SURFACE_CARD with a neutral border and ArrowCursor.
+
+### Verification
+
+- The contrast guard parses every machine-readable Warm Stone body-text claim,
+  loads the real production theme pack, checks the documented ratio, and
+  enforces its stated threshold.
+- Real ToolRailButton rendering is compared before/after keyboard focus, with
+  focused + selected edge pixels asserted independently.
+
+Version bumped 4.1.0 → 5.0.0 because changing a token value that alters visible
+state is breaking under governance/versioning.md.
 
 ## [4.1.0] — 2026-08-05
 

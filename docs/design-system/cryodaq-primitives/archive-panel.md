@@ -199,7 +199,7 @@ class ArchivePanel(QWidget):
 6. **Forgetting to gate regenerate on `report_enabled`.** Some templates disable the report pipeline; the overlay must not spawn a worker the engine will immediately refuse.
 7. **Emitting `regenerate_requested` without an experiment_id.** Require the selected entry; fallback is a banner error, no signal.
 8. **Running multiple exports in parallel.** SQLite file contention. Gate with `_export_in_flight`.
-9. **Legacy token usage** (`TEXT_PRIMARY` / `TEXT_DISABLED` / etc.) or legacy helpers (`PanelHeader` / `StatusBanner` / `apply_*_style` / `setup_standard_table` / `add_form_rows`). All forbidden.
+9. **Legacy token usage** (`TEXT_PRIMARY` / etc.) or legacy helpers (`PanelHeader` / `StatusBanner` / `apply_*_style` / `setup_standard_table` / `add_form_rows`). All forbidden. `TEXT_DISABLED` remains permitted for disabled-control styling.
 10. **Adding export actions as command payloads.** Bulk export runs locally in the GUI process against SQLite directly; no ZMQ round-trip.
 
 ## Related components
@@ -212,4 +212,5 @@ class ArchivePanel(QWidget):
 
 ## Changelog
 
-- **2026-04-19 — Phase II.2 initial version.** Full rewrite from the former v1 archive widget. DS v1.0.1 tokens throughout; legacy helpers (`PanelHeader` / `StatusBanner` / `build_action_row` / `create_panel_root` / `setup_standard_table` / `add_form_rows` / `TEXT_DISABLED`) purged. Emoji in artifact roles replaced with ASCII bracketed tags. K6 bulk export migration: CSV / HDF5 / Excel card added with `QThread` workers wrapping existing exporter classes unchanged. Host Integration Contract wired via `MainWindowV2._tick_status` mirror + `_ensure_overlay("archive")` replay; `on_reading` is a contract no-op (no engine finalize event). The superseded widget was removed in the Montana cleanup.
+- **2026-04-19 — Phase II.2 initial version.** Full rewrite from the former v1 archive widget. DS v1.0.1 tokens throughout; legacy helpers (`PanelHeader` / `StatusBanner` / `build_action_row` / `create_panel_root` / `setup_standard_table` / `add_form_rows`) purged; `TEXT_DISABLED` is retained only for disabled-button styling. Emoji in artifact roles replaced with ASCII bracketed tags. K6 bulk export migration: CSV / HDF5 / Excel card added with `QThread` workers wrapping existing exporter classes unchanged. Host Integration Contract wired via `MainWindowV2._tick_status` mirror + `_ensure_overlay("archive")` replay; `on_reading` is a contract no-op (no engine finalize event). The superseded widget was removed in the Montana cleanup.
+- **2026-08-10 — DS v5 disabled-control token migration.** `TEXT_DISABLED` was added to disabled ArchivePanel control selectors, including disabled QLineEdit, QPlainTextEdit, QComboBox, and QDateEdit controls, alongside disabled buttons.

@@ -306,7 +306,7 @@ def _make_ack_button(severity: str, label: str = "ПОДТВЕРДИТЬ") -> QP
         f"}}"
         f" QPushButton:disabled {{"
         f" background-color: {theme.SURFACE_MUTED};"
-        f" color: {theme.MUTED_FOREGROUND};"
+        f" color: {theme.TEXT_DISABLED};"
         f"}}"
     )
     return btn
