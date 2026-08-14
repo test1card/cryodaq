@@ -113,7 +113,7 @@ class XLSXExporter:
         rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, None)
         all_rows: list[dict[str, Any]] = [
             {"timestamp": raw_ts, "channel": channel, "value": value, "status": status}
-            for raw_ts, _instrument_id, channel, value, _unit, status in rows
+            for raw_ts, _instrument_id, channel, value, _unit, status, *_ in rows
         ]
 
         if not all_rows:
