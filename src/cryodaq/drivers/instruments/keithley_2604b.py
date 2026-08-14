@@ -1041,7 +1041,7 @@ class Keithley2604B(InstrumentDriver):
             self._last_v[smu_channel] = 0.0
             self._compliance_count[smu_channel] = 0
             self._source_regulation_epoch[smu_channel] = start_token
-            return CommandOutcome(CommandEvidence.DEVICE_READBACK_CONFIRMED)
+            return CommandOutcome(CommandEvidence.DEVICE_ACKNOWLEDGED)
         except BaseException as original_error:
             cleanup_exact = False
             cleanup_pending: asyncio.CancelledError | None = None

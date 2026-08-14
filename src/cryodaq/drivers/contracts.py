@@ -274,6 +274,10 @@ class CommandOutcome:
 
     evidence: CommandEvidence
 
+    def __post_init__(self) -> None:
+        if type(self.evidence) is not CommandEvidence:
+            raise TypeError("evidence must be an exact CommandEvidence")
+
 
 @runtime_checkable
 class ControlledSource(Protocol):
