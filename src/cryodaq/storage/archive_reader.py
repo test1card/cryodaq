@@ -179,7 +179,7 @@ def validate_archive_index_authority(document: object) -> dict[str, object]:
 
 # Full row emitted by :meth:`ArchiveReader.query_rows` — value is already
 # decoded (NaN-доктрина); status is the raw discriminator string.
-FullRow = tuple[object, str, str, float, str, str]
+FullRow = tuple[object, str, str, float, str, str, str | None]
 
 # Raw operator_log row: (timestamp, experiment_id, author, source, message, tags).
 # timestamp is a raw epoch float, tags a raw JSON string; the caller applies the
@@ -2200,7 +2200,7 @@ class ArchiveReader:
             _index_snapshot=index_snapshot,
         )
         latest: dict[tuple[str, float], float] = {}
-        for timestamp, _instrument, channel, value, _unit, _status in rows:
+        for timestamp, _instrument, channel, value, _unit, _status, *_ in rows:
             epoch = _parse_timestamp(timestamp).timestamp()
             latest[(channel, epoch)] = value
         result: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -2299,7 +2299,8 @@ class ArchiveReader:
                     self._read_sqlite_rows(Path(ref), from_epoch, to_epoch, channel_set, instrument_set, source_rows)
                 source_latest: dict[tuple[object, str, str], FullRow] = {}
                 for row in source_rows:
-                    source_latest[(row[0], row[1], row[2])] = row
+                    identity = row[6] or row[2]
+                    source_latest[(row[0], row[1], identity)] = row
                 for key, row in source_latest.items():
                     day_rows.setdefault(key, row)
             out.extend(day_rows.values())
@@ -2753,7 +2754,14 @@ class ArchiveReader:
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
             try:
-                query = "SELECT timestamp, instrument_id, channel, value, unit, status FROM readings"
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}
+                has_descriptor_hash = "descriptor_hash" in columns
+                descriptor_expression = "descriptor_hash" if has_descriptor_hash else "NULL AS descriptor_hash"
+                query = (
+                    "SELECT timestamp, instrument_id, channel, value, unit, status, "
+                    + descriptor_expression
+                    + " FROM readings"
+                )
                 cond: list[str] = []
                 params: list[object] = []
                 # Only bound the range when asked — a numeric bound would drop
@@ -2784,6 +2792,7 @@ class ArchiveReader:
                             decode(float(row["value"]), row["status"]),
                             str(row["unit"]),
                             str(row["status"]),
+                            row["descriptor_hash"],
                         )
                     )
             finally:
@@ -2815,10 +2824,11 @@ class ArchiveReader:
                 operator_log=False,
                 deadline_monotonic=None,
             )
-            table = opened.parquet.read(
-                columns=["timestamp", "instrument_id", "channel", "value", "unit", "status"],
-                use_threads=False,
-            )
+            has_descriptor_hash = "descriptor_hash" in opened.parquet.schema_arrow.names
+            columns = ["timestamp", "instrument_id", "channel", "value", "unit", "status"]
+            if has_descriptor_hash:
+                columns.append("descriptor_hash")
+            table = opened.parquet.read(columns=columns, use_threads=False)
             self._verify_opened_indexed_parquet(
                 opened,
                 deadline_monotonic=None,
@@ -2831,8 +2841,13 @@ class ArchiveReader:
             val_list = table.column("value").to_pylist()
             unit_list = table.column("unit").to_pylist()
             status_list = table.column("status").to_pylist()
+            descriptor_hashes = (
+                table.column("descriptor_hash").to_pylist() if has_descriptor_hash else [None] * len(ts_us)
+            )
             staged: list[FullRow] = []
-            for ts_int, inst, ch, val, unit, status in zip(ts_us, inst_list, ch_list, val_list, unit_list, status_list):
+            for ts_int, inst, ch, val, unit, status, descriptor_hash in zip(
+                ts_us, inst_list, ch_list, val_list, unit_list, status_list, descriptor_hashes
+            ):
                 epoch = ts_int / 1_000_000.0
                 if from_epoch is not None and epoch < from_epoch:
                     continue
@@ -2842,7 +2857,9 @@ class ArchiveReader:
                     continue
                 if instruments is not None and inst not in instruments:
                     continue
-                staged.append((epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status)))
+                staged.append(
+                    (epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status), descriptor_hash)
+                )
             out.extend(staged)
         except FileNotFoundError:
             raise ArchiveUnavailableError(
