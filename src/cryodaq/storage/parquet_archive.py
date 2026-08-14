@@ -70,6 +70,7 @@ def export_experiment_readings_to_parquet(
             ("value", pa.float64()),
             ("unit", pa.string()),
             ("status", pa.string()),
+            ("descriptor_hash", pa.string()),
             ("experiment_id", pa.string()),
         ]
     )
@@ -134,9 +135,12 @@ def export_experiment_readings_to_parquet(
             conn = sqlite3.connect(str(db_path), timeout=5)
             conn.row_factory = sqlite3.Row
             try:
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(readings)")}
+                descriptor_expression = "descriptor_hash" if "descriptor_hash" in columns else "NULL AS descriptor_hash"
                 cursor = conn.execute(
-                    "SELECT timestamp, instrument_id, channel, value, unit, status "
-                    "FROM readings WHERE timestamp >= ? AND timestamp <= ? "
+                    "SELECT timestamp, instrument_id, channel, value, unit, status, "
+                    + descriptor_expression
+                    + " FROM readings WHERE timestamp >= ? AND timestamp <= ? "
                     "ORDER BY timestamp, rowid",
                     (start_epoch, end_epoch),
                 )
@@ -152,6 +156,7 @@ def export_experiment_readings_to_parquet(
                     values = []
                     units = []
                     statuses = []
+                    descriptor_hashes = []
                     exp_ids = []
 
                     for row in rows:
@@ -165,6 +170,7 @@ def export_experiment_readings_to_parquet(
                         values.append(decode(float(row["value"]), row["status"]))
                         units.append(row["unit"])
                         statuses.append(row["status"])
+                        descriptor_hashes.append(row["descriptor_hash"])
                         exp_ids.append(experiment_id)
 
                     batch = pa.table(
@@ -175,6 +181,7 @@ def export_experiment_readings_to_parquet(
                             "value": pa.array(values, type=pa.float64()),
                             "unit": pa.array(units),
                             "status": pa.array(statuses),
+                            "descriptor_hash": pa.array(descriptor_hashes),
                             "experiment_id": pa.array(exp_ids),
                         },
                         schema=schema,
@@ -270,6 +277,7 @@ def _write_cold_day(
                 "value": pa.array([r[3] for r in chunk], type=pa.float64()),
                 "unit": pa.array([r[4] for r in chunk]),
                 "status": pa.array([r[5] for r in chunk]),
+                "descriptor_hash": pa.array([r[6] for r in chunk], type=pa.string()),
                 # Cold rotation stores no experiment context → null column.
                 "experiment_id": pa.array([None] * len(chunk), type=pa.string()),
             },
