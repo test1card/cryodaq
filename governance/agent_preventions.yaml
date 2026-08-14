@@ -5649,6 +5649,7 @@ records:
         - retained_handle_loss
         - silent_failure
         - stale_authority
+        - unknown_as_clear
     red_evidence: registry_corpus_on_2026_07_26_contains_five_classifications_with_exactly_two_records_and_no_prior_class_level_disposition_or_enforcement
     green_evidence: pending
   - id: GUARD-DEPENDENCY-NEUTRALIZATION-031
@@ -6408,4 +6409,27 @@ records:
       - node: tests/docs/test_evidence_packaging_readiness.py::test_procedure_parser_rejects_duplicate_opener_outside_bounded_block
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending
+  - id: ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-340
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Assistant outcome vocabulary on two paths -- ContextBuilder._read_channel_history as consumed by AssistantLiveAgent._generate_diagnostic_suggestion -> build_diagnostic_suggestion_context -> DIAGNOSTIC_SUGGESTION_USER, and the Telegram settlement of OutputRouter.dispatch_detailed whose sole production producer is assistant_main._load_telegram_sender -> TelegramSender._send_to_all.
+    classification: unknown_as_clear
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The model writing an operator-facing diagnosis reads a failed SQLite history read as an authoritative "no readings in the last 60 minutes" and reasons from an absence that was never established; and a transport result the router cannot type is recorded in the audit as a delivery nobody acknowledged.
+    invariant: 'An assistant outcome that is not known is never rendered as a settled one. A failed channel-history read renders "данные недоступны" and an authoritative empty read renders "нет данных", each asserted from the exact rendered block of the diagnostic prompt so neither wording can absorb the other; and an untyped truthy Telegram result settles as outcome_unknown rather than a delivery claim. WHAT THIS RECORD DOES NOT CLAIM: the router''s boolean branch is NOT reachable from the sole production wiring -- TelegramSender._send_to_all returns a per-chat mapping and the only other repository implementation returns None -- so its guard is compatibility evidence, not proof of a production delivery defect. The reachable per-chat mapping path is settled by ASSISTANT-EGRESS-AUTHORITY-001.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_diagnostic.py::test_diagnostic_handles_missing_history_gracefully
+        ci_partition: agents
+      - node: tests/agents/assistant/test_diagnostic.py::test_diagnostic_reports_authoritative_empty_history_as_no_data
+        ci_partition: agents
+      - node: tests/agents/assistant/test_output_router.py::test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered
+        ci_partition: agents
+    red_evidence: measured_2026_08_14_on_71e995c5_rewriting_the_three_empty_read_returns_of_read_channel_history_to_dannye_nedostupny_42_bytes_added_left_that_heads_test_diagnostic_module_7_passed_exit_0_so_the_distinction_could_collapse_toward_unavailable_unobserved_and_the_paired_node_added_here_turns_the_same_control_1_failed_7_passed_while_rewriting_the_exception_branch_back_to_net_dannyh_14_bytes_removed_turns_the_failure_node_red_and_rewriting_the_router_boolean_back_to_delivered_6_bytes_removed_turns_its_node_red_every_control_asserted_to_have_moved_the_files_bytes_and_to_still_parse_before_the_run_and_restored_byte_identical_after_pending_immutable_capture
     green_evidence: pending
