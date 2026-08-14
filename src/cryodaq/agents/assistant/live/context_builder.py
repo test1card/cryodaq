@@ -331,7 +331,7 @@ class ContextBuilder:
             return "\n".join(lines) if lines else "нет данных"
         except Exception:
             logger.debug("ContextBuilder: channel history read failed", exc_info=True)
-            return "нет данных"
+            return "данные недоступны"
 
     async def _read_pressure_trend(self) -> str:
         """Read recent pressure readings from SQLite."""

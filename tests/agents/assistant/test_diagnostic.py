@@ -210,7 +210,7 @@ async def test_diagnostic_skipped_for_finalize(tmp_path: Path) -> None:
 
 
 async def test_diagnostic_handles_missing_history_gracefully(tmp_path: Path) -> None:
-    """SQLite reader failure → diagnostic still runs with 'нет данных' fallback."""
+    """SQLite reader failure → diagnostic identifies unavailable channel history."""
     failing_reader = MagicMock()
     failing_reader.read_readings_history = AsyncMock(side_effect=Exception("DB error"))
 
@@ -230,6 +230,9 @@ async def test_diagnostic_handles_missing_history_gracefully(tmp_path: Path) -> 
 
     # Both LLM calls still happen despite DB error
     assert ollama.generate.await_count == 2
+    diagnostic_prompt = ollama.generate.call_args_list[1].args[0]
+    assert "данные недоступны" in diagnostic_prompt
+    assert "ИСТОРИЯ КАНАЛОВ (последние 60 мин):\nнет данных" not in diagnostic_prompt
     # Both dispatched to Telegram
     assert telegram._send_to_all.await_count == 2
     await agent.stop()

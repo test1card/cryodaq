@@ -120,7 +120,10 @@ class OutputRouter:
                             else:
                                 outcomes["telegram"] = {str(chat_id): str(state) for chat_id, state in sent.items()}
                         elif sent is True:
-                            outcomes["telegram"] = "delivered"
+                            # A legacy boolean carries no Telegram acknowledgement tier.
+                            # In particular, it cannot prove that a truthy transport result
+                            # was service-reported delivery rather than an unknown outcome.
+                            outcomes["telegram"] = "outcome_unknown"
                         else:
                             outcomes["telegram"] = "failed"
                     else:
