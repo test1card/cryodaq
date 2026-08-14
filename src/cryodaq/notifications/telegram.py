@@ -25,6 +25,45 @@ from cryodaq.notifications._secrets import SecretStr
 
 logger = logging.getLogger(__name__)
 
+# Telegram message ids are JSON integers; the live adapters accept 1..2**63-1.
+_MAX_JSON_INTEGER = 2**63 - 1
+
+
+def _acknowledges_delivery(message: object, chat_id: int | str) -> bool:
+    """Return True only when the acknowledgement names OUR destination.
+
+    OC-026, second independent review. This sender previously accepted any 200
+    carrying ``ok: true`` and an integer ``result.message_id`` as
+    ``service_reported_delivered``. A message id proves that SOME message was
+    created, not that it reached the chat we asked for, so a body describing a
+    message posted to a different chat -- or naming no chat at all -- was reported
+    to the operator as delivered. For an alarm notifier that is the worst kind of
+    wrong answer: it says the operator was told when they were not.
+
+    THE RULES HERE ARE COPIED FROM THE ESTABLISHED CONTRACT, NOT INVENTED.
+    ``cryodaq.agents.assistant_main._acknowledged_message_id`` and the live
+    periodic adapter already bind the acknowledgement to the requested chat and
+    already accept ``1..2**63-1``. Its docstring states the reason plainly: two
+    senders disagreeing about what counts as an acknowledgement is itself a
+    defect. They disagreed until this change; now they do not.
+
+    ``type(...) is not int`` rather than ``isinstance`` because ``bool`` subclasses
+    ``int`` and ``True`` must not read as message 1.
+    """
+
+    if not isinstance(message, dict):
+        return False
+    message_id = message.get("message_id")
+    if type(message_id) is not int or not 1 <= message_id <= _MAX_JSON_INTEGER:
+        return False
+    chat = message.get("chat")
+    if not isinstance(chat, dict):
+        return False
+    if type(chat_id) is int:
+        return type(chat.get("id")) is int and chat.get("id") == chat_id
+    username = chat.get("username")
+    return type(username) is str and str(chat_id).startswith("@") and username.casefold() == str(chat_id)[1:].casefold()
+
 
 class TelegramNotifier:
     """Отправка сообщений через Telegram.
@@ -156,7 +195,7 @@ class TelegramNotifier:
                     logger.error("Telegram API rejected sendMessage: %s", result.get("description", "unknown error"))
                     return "failed"
                 message = result.get("result")
-                if result.get("ok") is True and isinstance(message, dict) and type(message.get("message_id")) is int:
+                if result.get("ok") is True and _acknowledges_delivery(message, chat_id):
                     return "service_reported_delivered"
                 logger.warning("Telegram API accepted sendMessage without a posted-message acknowledgement")
                 return "transport_accepted"
