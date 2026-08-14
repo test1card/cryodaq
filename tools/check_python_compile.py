@@ -7,12 +7,20 @@ import sys
 from pathlib import Path
 
 _SOURCE_DIRECTORIES = ("build_scripts", "plugins", "scripts", "src", "tests", "tools")
+_REQUIRED_SOURCE_DIRECTORIES = ("src", "tests", "tools")
 
 
 def python_sources(root: Path) -> tuple[Path, ...]:
     """Return repository Python sources in deterministic relative-path order."""
 
     resolved_root = root.resolve(strict=True)
+    missing = tuple(
+        directory_name
+        for directory_name in _REQUIRED_SOURCE_DIRECTORIES
+        if not (resolved_root / directory_name).is_dir()
+    )
+    if missing:
+        raise ValueError(f"required Python source directories are unavailable: {', '.join(missing)}")
     paths = [path for path in resolved_root.glob("*.py") if path.is_file()]
     for directory_name in _SOURCE_DIRECTORIES:
         directory = resolved_root / directory_name

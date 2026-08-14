@@ -860,6 +860,8 @@ def test_candidate_runner_executes_each_active_parameter_once_and_deselects_it_f
 ) -> None:
     root = tmp_path / "candidate"
     root.mkdir()
+    for directory_name in ("src", "tools"):
+        (root / directory_name).mkdir()
     node = "tests/test_guard_cases.py::test_guard"
     _write_registry(root, node)
     _write_test(
