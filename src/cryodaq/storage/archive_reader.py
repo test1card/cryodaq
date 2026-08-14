@@ -2200,7 +2200,7 @@ class ArchiveReader:
             _index_snapshot=index_snapshot,
         )
         latest: dict[tuple[str, float], float] = {}
-        for timestamp, _instrument, channel, value, _unit, _status in rows:
+        for timestamp, _instrument, channel, value, _unit, _status, *_ in rows:
             epoch = _parse_timestamp(timestamp).timestamp()
             latest[(channel, epoch)] = value
         result: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -2841,9 +2841,13 @@ class ArchiveReader:
             val_list = table.column("value").to_pylist()
             unit_list = table.column("unit").to_pylist()
             status_list = table.column("status").to_pylist()
-            descriptor_hashes = table.column("descriptor_hash").to_pylist() if has_descriptor_hash else [None] * len(ts_us)
+            descriptor_hashes = (
+                table.column("descriptor_hash").to_pylist() if has_descriptor_hash else [None] * len(ts_us)
+            )
             staged: list[FullRow] = []
-            for ts_int, inst, ch, val, unit, status, descriptor_hash in zip(ts_us, inst_list, ch_list, val_list, unit_list, status_list, descriptor_hashes):
+            for ts_int, inst, ch, val, unit, status, descriptor_hash in zip(
+                ts_us, inst_list, ch_list, val_list, unit_list, status_list, descriptor_hashes
+            ):
                 epoch = ts_int / 1_000_000.0
                 if from_epoch is not None and epoch < from_epoch:
                     continue
@@ -2853,7 +2857,9 @@ class ArchiveReader:
                     continue
                 if instruments is not None and inst not in instruments:
                     continue
-                staged.append((epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status), descriptor_hash))
+                staged.append(
+                    (epoch, str(inst), str(ch), decode(float(val), status), str(unit), str(status), descriptor_hash)
+                )
             out.extend(staged)
         except FileNotFoundError:
             raise ArchiveUnavailableError(

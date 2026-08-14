@@ -17,9 +17,7 @@ def _db(path: Path, rows: list[tuple[float, str, str]]) -> None:
         "CREATE TABLE readings (timestamp REAL, instrument_id TEXT, channel TEXT, "
         "value REAL, unit TEXT, status TEXT, descriptor_hash TEXT)"
     )
-    connection.executemany(
-        "INSERT INTO readings VALUES (?, ?, ?, 1.0, 'K', 'ok', ?)", rows
-    )
+    connection.executemany("INSERT INTO readings VALUES (?, ?, ?, 1.0, 'K', 'ok', ?)", rows)
     connection.commit()
     connection.close()
 
