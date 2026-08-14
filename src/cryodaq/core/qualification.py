@@ -329,9 +329,12 @@ def source_checkout_qualification_context(
         raise QualificationReceiptError("source build identity is unavailable") from exc
 
     package_root = project_root / "src" / "cryodaq"
+    plugins_root = project_root / "plugins"
     artifact_paths = [
         path
-        for path in package_root.rglob("*")
+        for root in (package_root, plugins_root)
+        if root.is_dir()
+        for path in root.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
     ]
     config_paths = [
@@ -340,7 +343,7 @@ def source_checkout_qualification_context(
     if not artifact_paths or not config_paths:
         raise QualificationReceiptError("source artifact or configuration manifest is empty")
 
-    artifact_sha256 = _manifest_digest(package_root, artifact_paths)
+    artifact_sha256 = _manifest_digest(project_root, artifact_paths)
     configuration_sha256 = _manifest_digest(config_directory, config_paths)
     binding_payload = _canonical_payload(
         {
