@@ -88,17 +88,36 @@ class EventBus:
         self._subscribers.pop(name, None)
 
     async def publish(self, event: EngineEvent) -> None:
-        """Persist through the retained observer, then fan out best-effort."""
+        """Persist through the retained observer, then fan out best-effort.
+
+        A persistence FAILURE propagates BEFORE the fan-out, so no subscriber ever
+        observes a transition that has no durable incident behind it. The previous
+        form captured every exception, fanned out anyway, and re-raised at the end --
+        which meant operator notifications could report an alarm that storage had
+        already refused.
+
+        CANCELLATION IS TREATED DIFFERENTLY, ON PURPOSE. The observer shields its
+        durable write, so a cancellation reported after that write means the incident
+        HAS settled. Aborting the fan-out there would withhold an alarm that storage
+        accepted -- a worse failure than the one this change prevents. So the
+        cancellation is held, the fan-out runs, and it is raised afterwards.
+        """
 
         if type(event) is not EngineEvent:
             raise TypeError("EventBus publication must be an exact EngineEvent")
-        observer_failure: BaseException | None = None
+        cancelled_after_persisting: asyncio.CancelledError | None = None
         required_observer = self._required_observer
         if required_observer is not None:
             try:
                 await required_observer(copy.deepcopy(event))
-            except (Exception, asyncio.CancelledError) as exc:
-                observer_failure = exc
+            except asyncio.CancelledError as exc:
+                # Cancellation is NOT a persistence failure, and the difference decides
+                # whether the operator hears about this alarm. The observer shields its
+                # durable write, so when it reports cancellation the incident has already
+                # settled -- there IS a durable record behind this transition. Withholding
+                # the fan-out would then hide an alarm that storage accepted. Fan out, then
+                # let the cancellation propagate to the caller.
+                cancelled_after_persisting = exc
         for name, q in list(self._subscribers.items()):
             try:
                 q.put_nowait(event)
@@ -108,8 +127,8 @@ class EventBus:
                     name,
                     event.event_type,
                 )
-        if observer_failure is not None:
-            raise observer_failure
+        if cancelled_after_persisting is not None:
+            raise cancelled_after_persisting
 
     async def publish_required(
         self,

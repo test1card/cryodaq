@@ -131,7 +131,7 @@ async def test_required_observer_settles_before_best_effort_fanout() -> None:
     assert queue.get_nowait() is event
 
 
-async def test_required_observer_failure_preserves_fanout_and_has_exact_owner() -> None:
+async def test_required_observer_failure_aborts_fanout_and_has_exact_owner() -> None:
     bus = EventBus()
     queue = await bus.subscribe("consumer")
 
@@ -141,7 +141,7 @@ async def test_required_observer_failure_preserves_fanout_and_has_exact_owner() 
     bus.retain_required_observer("attention_history", reject)
     with pytest.raises(RuntimeError, match="persistence rejected"):
         await bus.publish(_event("alarm_fired"))
-    assert queue.get_nowait().event_type == "alarm_fired"
+    assert queue.empty()
 
     with pytest.raises(RuntimeError, match="owner does not match"):
         bus.release_required_observer("wrong_owner")

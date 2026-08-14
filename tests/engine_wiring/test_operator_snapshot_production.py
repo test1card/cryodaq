@@ -522,17 +522,18 @@ async def test_attention_persistence_failure_preserves_alarm_fanout_and_latches_
         raise OSError("control database unavailable")
 
     monkeypatch.setattr(writer, "append_attention_event", reject_append)
-    await _dispatch_alarm_notification(
-        event_bus,
-        set(),
-        alarm_id="alarm.persistence",
-        level="CRITICAL",
-        message="Persistence failed",
-        experiment_id="experiment-stable-8",
-        channel="probe.1",
-    )
+    with pytest.raises(OSError, match="control database unavailable"):
+        await _dispatch_alarm_notification(
+            event_bus,
+            set(),
+            alarm_id="alarm.persistence",
+            level="CRITICAL",
+            message="Persistence failed",
+            experiment_id="experiment-stable-8",
+            channel="probe.1",
+        )
 
-    assert subscriber.get_nowait().payload["alarm_id"] == "alarm.persistence"
+    assert subscriber.empty()
     assert history_feed.current_revision is None
     receipt = LiveAlarmAttentionAuthority(alarm_owner, history_feed).snapshot_for_cut(
         CommonCut(1, f"cut-v1:1:{'a' * 64}", datetime.now(UTC))

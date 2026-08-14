@@ -22,7 +22,7 @@ from typing import Protocol
 from cryodaq.core.alarm_v2 import AlarmCanonicalSnapshot, AlarmStateManager
 from cryodaq.core.event_bus import EngineEvent
 from cryodaq.core.experiment import OperatorExperimentSnapshot
-from cryodaq.core.operator_log import AttentionHistoryItem
+from cryodaq.core.operator_log import AttentionHistoryCapacityError, AttentionHistoryItem
 from cryodaq.engine_wiring.experiment_recording_owner import (
     ExperimentOperation,
     ExperimentRecordingOwner,
@@ -220,6 +220,18 @@ class DurableAttentionHistoryFeed:
                 "Durable attention history unavailable; exception=%s",
                 type(persistence_failure).__name__,
             )
+            # Propagate so the caller aborts the fan-out: a subscriber must never see a
+            # transition that has no durable incident behind it.
+            #
+            # CAPACITY EXHAUSTION IS THE ONE EXCEPTION, AND IT IS NOT A LOOPHOLE.
+            # `AttentionHistoryCapacityError` is documented as "raised after capacity
+            # exhaustion has been durably marked" -- the saturation itself IS the record.
+            # Nothing was lost, so the honest outcome is to record it and still deliver the
+            # alarm. Suppressing fan-out here would withhold an alarm from the operator
+            # because the history was full, which is a worse failure than the one this
+            # propagation exists to prevent.
+            if not isinstance(persistence_failure, AttentionHistoryCapacityError):
+                raise persistence_failure
         if cancellation_seen:
             raise asyncio.CancelledError
 
