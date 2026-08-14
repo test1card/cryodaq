@@ -2399,3 +2399,20 @@ def test_c2_sweep_states_its_own_boundary() -> None:
         "the sweep does not name authority provenance as the property it cannot decide, which "
         "is the exact claim OC-031 refuted"
     )
+
+    # PINNING THE LABEL IS NOT PINNING THE CLAIM.  Review confirmed that rewriting
+    # `not scheduled` to `scheduled` left the assertions above green, because they
+    # search for `NOT FIXABLE HERE` and that string survives the rewrite.  A gap
+    # presented as future work reads as a roadmap to a completeness this matcher
+    # cannot reach, which is the drift this guard exists to stop -- so the semantic
+    # is asserted positively AND its opposite is asserted absent.
+    assert "not scheduled" in scope, (
+        "the unfixable gap is labelled but not declared UNSCHEDULED; without that word the "
+        "statement reads as work someone intends to do, which is the claim OC-031 refuted"
+    )
+    unfixable = scope[scope.index("NOT FIXABLE HERE") :]
+    for scheduled_wording in ("is scheduled", "will be scheduled", "is planned", "future work"):
+        assert scheduled_wording not in unfixable, (
+            f"the unfixable gap is described as {scheduled_wording!r}; a matcher cannot decide "
+            "authority provenance at all, so scheduling it is a promise nothing can keep"
+        )
