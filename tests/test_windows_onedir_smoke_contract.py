@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import io
 import json
+import subprocess
+import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +63,59 @@ def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
     assert 'command = [str(executable), "--mode=gui"]' in source
     assert '"QT_QPA_PLATFORM": "offscreen"' in source
     assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
+
+
+def test_gui_smoke_waits_for_process_not_inherited_pipe_eof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    release_pipe = threading.Event()
+
+    class InheritedPipe(io.BytesIO):
+        def read(self, _size: int = -1) -> bytes:
+            data = super().read()
+            if data:
+                return data
+            release_pipe.wait(timeout=5)
+            return b""
+
+    class Process:
+        pid = 1234
+        returncode = 0
+        stdout = InheritedPipe(b"gui output\n")
+        stderr = InheritedPipe()
+
+        def poll(self) -> None:
+            return None
+
+        def send_signal(self, _signal: int) -> None:
+            return None
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == 20
+            return self.returncode
+
+        def communicate(self, timeout: float) -> tuple[bytes, bytes]:
+            raise subprocess.TimeoutExpired("CryoDAQ.exe", timeout)
+
+        def terminate(self) -> None:
+            return None
+
+    process = Process()
+    ticks = iter((0.0, 0.0, 6.0, 6.0))
+    monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
+
+    outcome = None
+    try:
+        outcome = smoke._run_gui_startup_cell(tmp_path / "CryoDAQ.exe", tmp_path, tmp_path)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        release_pipe.set()
+
+    assert outcome is not None, "GUI smoke must wait for the direct process, not inherited pipe EOF"
+    assert outcome["status"] == "PASS"
+    assert (tmp_path / "gui_startup_offscreen.stdout.log").read_bytes() == b"gui output\n"
 
 
 def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:

@@ -16,6 +16,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from contextlib import suppress
@@ -577,6 +578,20 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         stderr=subprocess.PIPE,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
+    pipe_chunks: tuple[list[bytes], list[bytes]] = ([], [])
+    pipe_locks = (threading.Lock(), threading.Lock())
+
+    def read_pipe(stream: Any, chunks: list[bytes], lock: threading.Lock) -> None:
+        while data := stream.read(64 * 1024):
+            with lock:
+                chunks.append(data)
+
+    pipe_readers = tuple(
+        threading.Thread(target=read_pipe, args=(stream, chunks, lock), daemon=True)
+        for stream, chunks, lock in zip((process.stdout, process.stderr), pipe_chunks, pipe_locks, strict=True)
+    )
+    for reader in pipe_readers:
+        reader.start()
     try:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -584,7 +599,13 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
                 raise RuntimeError(f"gui_startup_offscreen exited before readiness observation ({process.returncode})")
             time.sleep(0.1)
         process.send_signal(signal.CTRL_BREAK_EVENT)
-        stdout, stderr = process.communicate(timeout=20)
+        process.wait(timeout=20)
+        for reader in pipe_readers:
+            reader.join(timeout=0.1)
+        with pipe_locks[0]:
+            stdout = b"".join(pipe_chunks[0])
+        with pipe_locks[1]:
+            stderr = b"".join(pipe_chunks[1])
     except BaseException:
         with suppress(Exception):
             process.terminate()
