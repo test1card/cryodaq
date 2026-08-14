@@ -41,6 +41,7 @@ from cryodaq.operator_snapshot import (
     MAX_ID_UTF8_BYTES,
     MAX_NONNEGATIVE_INT,
     AvailabilityTruth,
+    CooldownChannelBinding,
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
@@ -186,8 +187,14 @@ def test_alarm_attention_receipt_detaches_to_immutable_tuples_and_rejects_future
         "Inspect channel",
         NOW,
     )
-    receipt = AlarmAttentionReceipt(**_base(), alarms=(alarm,), attention=(attention,))
+    receipt = AlarmAttentionReceipt(
+        **_base(),
+        alarms=(alarm,),
+        attention=(attention,),
+        history_revision=9,
+    )
     assert receipt.alarms == (alarm,)
+    assert receipt.history_revision == 9
     with pytest.raises(dataclasses.FrozenInstanceError):
         receipt.revision = 4  # type: ignore[misc]
     with pytest.raises(TypeError, match="tuple"):
@@ -198,6 +205,11 @@ def test_alarm_attention_receipt_detaches_to_immutable_tuples_and_rejects_future
         AlarmAttentionReceipt(
             **_base(),
             alarms=(AlarmEvidence("future", "WARNING", NOW + timedelta(seconds=1), False),),
+        )
+    with pytest.raises(ValueError, match="cannot carry domain evidence"):
+        AlarmAttentionReceipt(
+            **_unavailable_base(reason="attention_not_sampled"),
+            history_revision=9,
         )
 
 
@@ -249,16 +261,28 @@ def test_integrity_receipt_distinguishes_zero_counters_from_unavailable() -> Non
 def test_cooldown_contract_is_bounded_ordered_and_explicitly_unavailable() -> None:
     point_a = CooldownPoint(0, 300)
     point_b = CooldownPoint(1, 299)
-    receipt = CooldownReceipt(**_base(), samples=(point_a, point_b))
+    receipt = CooldownReceipt(
+        **_base(),
+        samples=(point_a, point_b),
+        trajectory_channel=CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
+    )
     assert receipt.samples == (point_a, point_b)
     unavailable = UnavailableCooldownAuthority().snapshot_for_cut(_cut())
     assert unavailable.availability is AuthorityAvailability.UNAVAILABLE
     with pytest.raises(ValueError, match="strictly increasing"):
-        CooldownReceipt(**_base(), samples=(point_b, point_a))
+        CooldownReceipt(
+            **_base(),
+            samples=(point_b, point_a),
+            trajectory_channel=CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
+        )
     with pytest.raises(ValueError, match="present together"):
         CooldownReceipt(**_base(), reference_id="baseline")
     with pytest.raises(TypeError, match="at most"):
-        CooldownReceipt(**_base(), samples=(point_a,) * (MAX_COOLDOWN_SAMPLES + 1))
+        CooldownReceipt(
+            **_base(),
+            samples=(point_a,) * (MAX_COOLDOWN_SAMPLES + 1),
+            trajectory_channel=CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
+        )
 
 
 def test_infrastructure_contract_is_bounded_unique_and_missing_f36_4_stays_unavailable() -> None:

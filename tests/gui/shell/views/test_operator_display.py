@@ -24,6 +24,7 @@ from cryodaq.operator_snapshot import (
     AttentionItem,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownHistorySummary,
     CooldownSample,
     DataIntegritySummary,
@@ -318,6 +319,7 @@ def _snapshot(
         samples=(CooldownSample(0.0, 300.0), CooldownSample(60.0, 280.0)),
         reference_id="baseline-a",
         reference_samples=(CooldownSample(0.0, 300.0), CooldownSample(60.0, 275.0)),
+        trajectory_channel=CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
     )
 
     support_state = transport_state or (

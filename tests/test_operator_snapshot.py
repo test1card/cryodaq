@@ -10,6 +10,7 @@ import pytest
 
 import cryodaq.operator_snapshot as protocol
 from cryodaq.operator_snapshot import (
+    MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES,
     MAX_ATTENTION_ITEMS,
     MAX_BUNDLE_ENTRIES,
     MAX_CHANNELS,
@@ -26,6 +27,7 @@ from cryodaq.operator_snapshot import (
     AttentionItem,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownHistorySummary,
     CooldownSample,
     DataIntegritySummary,
@@ -104,7 +106,14 @@ def _snapshot(*, mode: SnapshotMode = SnapshotMode.LIVE) -> OperatorSnapshot:
             0,
             AvailabilityTruth.UNKNOWN if mode is SnapshotMode.REPLAY else AvailabilityTruth.AVAILABLE,
         ),
-        CooldownHistorySummary(cut, summary_status, (CooldownSample(0, 300),), None, ()),
+        CooldownHistorySummary(
+            cut,
+            summary_status,
+            (CooldownSample(0, 300),),
+            None,
+            (),
+            CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
+        ),
         SupportBundleSummary(
             cut,
             summary_status,
@@ -192,6 +201,7 @@ def test_lifecycle_fields_have_no_constructor_defaults() -> None:
 
 def test_codec_version_text_matches_wire_schema() -> None:
     schema_version = protocol._SCHEMA_VERSION
+    assert schema_version == 5
     source = Path(protocol.__file__).read_text(encoding="utf-8")
     stated_versions = {int(value) for value in re.findall(r"\b[vV](\d+)\b", source)}
 
@@ -602,6 +612,66 @@ def test_codec_round_trip_is_byte_canonical_for_live_and_replay() -> None:
         assert ".456789Z" in wire
 
 
+def _snapshot_with_channel_bound_attention() -> OperatorSnapshot:
+    snapshot = _snapshot()
+    item = AttentionItem(
+        "alarm.hot",
+        OperatorPresentationState.WARNING,
+        "Hot channel",
+        "Check the cooldown sensor",
+        snapshot.cut.observed_at,
+        channel_ids=tuple(f"sensor.{index}" for index in range(5)),
+        canonical_acknowledged=False,
+    )
+    return replace(
+        snapshot,
+        attention=replace(
+            snapshot.attention,
+            status=_status(OperatorPresentationState.WARNING),
+            items=(item,),
+        ),
+    )
+
+
+def test_attention_codec_round_trips_stable_channels_and_canonical_alarm_truth() -> None:
+    snapshot = _snapshot_with_channel_bound_attention()
+
+    wire = dump_operator_snapshot(snapshot)
+    restored = load_operator_snapshot(wire)
+    payload = json.loads(wire)["snapshot"]["attention"]["items"][0]
+
+    assert restored == snapshot
+    assert restored.attention.items[0].channel_ids == tuple(f"sensor.{index}" for index in range(5))
+    assert restored.attention.items[0].canonical_acknowledged is False
+    assert payload["channel_ids"] == [f"sensor.{index}" for index in range(5)]
+    assert payload["canonical_acknowledged"] is False
+    assert "acknowledged" not in payload
+
+
+def test_attention_codec_rejects_missing_or_malformed_identity_and_canonical_truth() -> None:
+    snapshot = _snapshot_with_channel_bound_attention()
+
+    missing_channels = encode_operator_snapshot(snapshot)
+    del missing_channels["snapshot"]["attention"]["items"][0]["channel_ids"]
+    with pytest.raises(ValueError, match="contain exactly"):
+        decode_operator_snapshot(missing_channels)
+
+    non_array_channels = encode_operator_snapshot(snapshot)
+    non_array_channels["snapshot"]["attention"]["items"][0]["channel_ids"] = "sensor.0"
+    with pytest.raises(TypeError, match=r"channel_ids must be an array"):
+        decode_operator_snapshot(non_array_channels)
+
+    duplicate_channels = encode_operator_snapshot(snapshot)
+    duplicate_channels["snapshot"]["attention"]["items"][0]["channel_ids"] = ["sensor.0", "sensor.0"]
+    with pytest.raises(ValueError, match="channel ids must be unique"):
+        decode_operator_snapshot(duplicate_channels)
+
+    non_boolean_acknowledgement = encode_operator_snapshot(snapshot)
+    non_boolean_acknowledgement["snapshot"]["attention"]["items"][0]["canonical_acknowledged"] = 0
+    with pytest.raises(TypeError, match=r"canonical_acknowledged must be a boolean"):
+        decode_operator_snapshot(non_boolean_acknowledgement)
+
+
 @pytest.mark.parametrize(
     "alternate",
     [
@@ -622,7 +692,12 @@ def test_codec_rejects_noncanonical_utc_spellings(alternate: str) -> None:
 
 def test_loader_rejects_duplicate_keys_at_outer_and_nested_depth() -> None:
     wire = dump_operator_snapshot(_snapshot())
-    outer = wire.replace('"version":2', '"version":3,"version":2', 1)
+    version = protocol._SCHEMA_VERSION
+    outer = wire.replace(
+        f'"version":{version}',
+        f'"version":{version},"version":{version}',
+        1,
+    )
     nested = wire.replace('"revision":42', '"revision":41,"revision":42', 1)
 
     with pytest.raises(OperatorSnapshotProtocolError, match="duplicate JSON key"):
@@ -652,7 +727,7 @@ def test_live_readiness_lifecycle_is_exact_and_transport_loss_erases_lifecycle_a
         decode_operator_snapshot(malformed)
 
 
-def test_v2_snapshot_identity_is_mandatory_and_bound_to_the_coherent_experiment() -> None:
+def test_v3_snapshot_identity_is_mandatory_and_bound_to_the_coherent_experiment() -> None:
     snapshot = _snapshot()
     envelope = encode_operator_snapshot(snapshot)
 
@@ -692,6 +767,18 @@ def test_receiver_closes_recursion_memory_and_json_failures(monkeypatch: pytest.
     monkeypatch.undo()
     with pytest.raises(OperatorSnapshotProtocolError, match="bounded JSON"):
         load_operator_snapshot("{")
+
+
+def test_attention_item_detail_rejects_one_byte_over_bound() -> None:
+    snapshot = _snapshot()
+    with pytest.raises(ValueError, match="UTF-8 bytes"):
+        AttentionItem(
+            "attention",
+            OperatorPresentationState.WARNING,
+            "warning",
+            "D" * (MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES + 1),
+            snapshot.cut.observed_at,
+        )
 
 
 def test_pre_json_wire_budget_accepts_exact_and_rejects_one_over(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -844,6 +931,7 @@ def test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap() -> None:
     max_reasons = tuple(f"reason-{index}-" + "r" * (MAX_REASON_UTF8_BYTES - 9) for index in range(MAX_REASON_CODES))
     max_transport = ("transport_disconnected",)
     max_text = "t" * MAX_TEXT_UTF8_BYTES
+    max_detail = "t" * MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES
 
     def associated_channel_id(index: int) -> str:
         prefix = f"node-{index % MAX_FLEET_DEVICES:03d}/channel-{index:04d}/"
@@ -876,7 +964,7 @@ def test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap() -> None:
             f"attention-{i:04d}/" + "a" * (MAX_ID_UTF8_BYTES - 15),
             OperatorPresentationState.WARNING,
             max_text,
-            max_text,
+            max_detail,
             snapshot.cut.observed_at,
             max_transport,
         )

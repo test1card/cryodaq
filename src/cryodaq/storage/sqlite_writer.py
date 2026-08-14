@@ -38,11 +38,23 @@ from cryodaq.core.alarm_ack_codec import (
     is_canonical_source_activation_id,
 )
 from cryodaq.core.command_reply_contract import COMMAND_REPLY_HISTORY_MAX_ROWS
+from cryodaq.core.event_bus import EngineEvent
 from cryodaq.core.operator_log import (
+    ATTENTION_HISTORY_MAX_ITEM_BYTES,
+    ATTENTION_HISTORY_MAX_ITEMS,
+    AttentionHistoryCapacityError,
+    AttentionHistoryItem,
+    AttentionHistoryPage,
     OperatorLogCommitResult,
     OperatorLogEntry,
     OperatorLogIdempotencyConflictError,
     OperatorLogIdempotencyUnavailableError,
+    dump_attention_history_item,
+    load_attention_history_item,
+    new_attention_acknowledgement,
+    new_attention_incident,
+    new_attention_resolution,
+    new_attention_severity_change,
     normalize_operator_log_tags,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -324,6 +336,111 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_log_request_id
 ON operator_log (request_id) WHERE request_id IS NOT NULL;
 """
 
+SCHEMA_ATTENTION_HISTORY = f"""
+CREATE TABLE IF NOT EXISTS attention_history (
+    sequence      INTEGER PRIMARY KEY AUTOINCREMENT,
+    history_revision INTEGER NOT NULL UNIQUE
+        CHECK (
+            typeof(history_revision) = 'integer'
+            AND history_revision = sequence
+        ),
+    event_id      TEXT    NOT NULL UNIQUE
+        CHECK (
+            length(CAST(event_id AS BLOB)) = 32
+            AND event_id NOT GLOB '*[^0-9a-f]*'
+        ),
+    timestamp     TEXT    NOT NULL
+        CHECK (
+            typeof(timestamp) = 'text'
+            AND length(CAST(timestamp AS BLOB)) = 32
+        ),
+    experiment_id TEXT    NOT NULL
+        CHECK (
+            length(CAST(experiment_id AS BLOB)) BETWEEN 1 AND 128
+        ),
+    kind          TEXT    NOT NULL
+        CHECK (kind IN ('incident', 'acknowledgement', 'severity_change', 'resolution')),
+    annotation_of TEXT
+        CHECK (
+            annotation_of IS NULL
+            OR (
+                length(CAST(annotation_of AS BLOB)) = 32
+                AND annotation_of NOT GLOB '*[^0-9a-f]*'
+            )
+        ),
+    payload       TEXT    NOT NULL
+        CHECK (
+            length(CAST(payload AS BLOB)) BETWEEN 1 AND {ATTENTION_HISTORY_MAX_ITEM_BYTES}
+        ),
+    CHECK (
+        (kind = 'incident' AND annotation_of IS NULL)
+        OR (kind IN ('acknowledgement', 'severity_change', 'resolution') AND annotation_of IS NOT NULL)
+    )
+);
+"""
+
+INDEX_ATTENTION_HISTORY_EXPERIMENT = """
+CREATE INDEX IF NOT EXISTS idx_attention_history_experiment
+ON attention_history (experiment_id, timestamp DESC, event_id DESC);
+"""
+
+SCHEMA_ATTENTION_HISTORY_STATUS = """
+CREATE TABLE IF NOT EXISTS attention_history_status (
+    singleton                    INTEGER PRIMARY KEY CHECK (singleton = 1),
+    admitted_total               INTEGER NOT NULL
+        CHECK (
+            typeof(admitted_total) = 'integer'
+            AND admitted_total >= 0
+        ),
+    current_revision             INTEGER NOT NULL
+        CHECK (
+            typeof(current_revision) = 'integer'
+            AND current_revision >= admitted_total
+            AND current_revision <= admitted_total + 1
+        ),
+    capacity_exhausted_revision  INTEGER
+        CHECK (
+            capacity_exhausted_revision IS NULL
+            OR (
+                typeof(capacity_exhausted_revision) = 'integer'
+                AND capacity_exhausted_revision > 0
+            )
+        ),
+    capacity_exhausted_at        TEXT
+        CHECK (
+            capacity_exhausted_at IS NULL
+            OR (
+                typeof(capacity_exhausted_at) = 'text'
+                AND length(CAST(capacity_exhausted_at AS BLOB)) = 32
+            )
+        ),
+    CHECK (
+        (
+            capacity_exhausted_revision IS NULL
+            AND capacity_exhausted_at IS NULL
+            AND current_revision = admitted_total
+        )
+        OR (
+            capacity_exhausted_revision = current_revision
+            AND current_revision = admitted_total + 1
+            AND capacity_exhausted_at IS NOT NULL
+        )
+    )
+);
+"""
+
+SCHEMA_CONTROL_FEATURE_MARKERS = """
+CREATE TABLE IF NOT EXISTS control_feature_markers (
+    feature_id    TEXT    PRIMARY KEY
+        CHECK (feature_id = 'attention_history'),
+    schema_version INTEGER NOT NULL
+        CHECK (
+            typeof(schema_version) = 'integer'
+            AND schema_version = 7
+        )
+);
+"""
+
 SCHEMA_ALARM_ACK_OUTBOX_LEGACY = """
 CREATE TABLE IF NOT EXISTS alarm_ack_outbox (
     request_id TEXT PRIMARY KEY,
@@ -568,6 +685,10 @@ _ALARM_ACK_MAX_ABORT_CODE_BYTES = max(len(code.encode("utf-8")) for code in _ALA
 _ALARM_ACK_INCARNATION_ID_BYTES = 32
 _ALARM_ACK_ABORT_DISPOSITION_SCHEMA = "alarm_ack_abort_disposition_v1"
 _SQLITE_MAX_ROWID = 2**63 - 1
+_ATTENTION_HISTORY_CONTINUITY_NAME = "attention_history.continuity"
+_ATTENTION_HISTORY_CONTINUITY_LEGACY_BYTES = b"cryodaq.attention-history-continuity.v1\n"
+_ATTENTION_HISTORY_CONTINUITY_VERSION = 2
+_ATTENTION_HISTORY_CONTINUITY_MAX_BYTES = 1024
 
 
 def _parse_timestamp(raw) -> datetime:
@@ -2548,6 +2669,199 @@ class SQLiteWriter:
     def _control_db_path(self) -> Path:
         return self._data_dir / "control.db"
 
+    @staticmethod
+    def _decode_attention_history_continuity(raw: bytes) -> dict[str, object]:
+        if raw == _ATTENTION_HISTORY_CONTINUITY_LEGACY_BYTES:
+            return {"version": 1, "state": "legacy"}
+        if not raw or len(raw) > _ATTENTION_HISTORY_CONTINUITY_MAX_BYTES:
+            raise RuntimeError("attention history continuity authority is invalid")
+
+        def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            decoded: dict[str, object] = {}
+            for key, value in pairs:
+                if key in decoded:
+                    raise ValueError("duplicate continuity key")
+                decoded[key] = value
+            return decoded
+
+        try:
+            decoded = json.loads(
+                raw,
+                object_pairs_hook=reject_duplicates,
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+            )
+        except (TypeError, ValueError, UnicodeError):
+            raise RuntimeError("attention history continuity authority is invalid") from None
+        if type(decoded) is not dict or decoded.get("version") != _ATTENTION_HISTORY_CONTINUITY_VERSION:
+            raise RuntimeError("attention history continuity authority is invalid")
+        state = decoded.get("state")
+        if state == "clean":
+            if set(decoded) != {"version", "state", "revision"}:
+                raise RuntimeError("attention history continuity authority is invalid")
+            revision = decoded.get("revision")
+            if type(revision) is not int or revision < 0 or revision > _SQLITE_MAX_ROWID:
+                raise RuntimeError("attention history continuity authority is invalid")
+        elif state == "pending":
+            if set(decoded) != {
+                "version",
+                "state",
+                "base_revision",
+                "event_id",
+                "payload_sha256",
+            }:
+                raise RuntimeError("attention history continuity authority is invalid")
+            base_revision = decoded.get("base_revision")
+            event_id = decoded.get("event_id")
+            payload_sha256 = decoded.get("payload_sha256")
+            if (
+                type(base_revision) is not int
+                or base_revision < 0
+                or base_revision >= _SQLITE_MAX_ROWID
+                or type(event_id) is not str
+                or len(event_id) != 32
+                or any(character not in "0123456789abcdef" for character in event_id)
+                or type(payload_sha256) is not str
+                or len(payload_sha256) != 64
+                or any(character not in "0123456789abcdef" for character in payload_sha256)
+            ):
+                raise RuntimeError("attention history continuity authority is invalid")
+        else:
+            raise RuntimeError("attention history continuity authority is invalid")
+        return decoded
+
+    def _read_attention_history_continuity(self) -> dict[str, object] | None:
+        path = self._data_dir / _ATTENTION_HISTORY_CONTINUITY_NAME
+        try:
+            _control_path_identity(path, directory=False)
+        except FileNotFoundError:
+            return None
+        try:
+            raw = (
+                read_secure_relative_bytes(
+                    self._data_dir,
+                    _ATTENTION_HISTORY_CONTINUITY_NAME,
+                    max_bytes=_ATTENTION_HISTORY_CONTINUITY_MAX_BYTES,
+                )
+                if os.name == "nt"
+                else path.read_bytes()
+            )
+        except (OSError, SecureRelativeReadError):
+            raise RuntimeError("attention history continuity authority is unavailable") from None
+        decoded = self._decode_attention_history_continuity(raw)
+        _control_path_identity(path, directory=False)
+        return decoded
+
+    def _write_attention_history_continuity(self, state: dict[str, object]) -> None:
+        try:
+            payload = (
+                json.dumps(
+                    state,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("ascii")
+                + b"\n"
+            )
+        except (TypeError, ValueError, UnicodeError):
+            raise RuntimeError("attention history continuity authority is invalid") from None
+        if self._decode_attention_history_continuity(payload) != state:
+            raise RuntimeError("attention history continuity authority is invalid")
+        path = self._data_dir / _ATTENTION_HISTORY_CONTINUITY_NAME
+        temporary = self._data_dir / (
+            f".{_ATTENTION_HISTORY_CONTINUITY_NAME}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            _control_path_identity(self._data_dir, directory=True)
+            descriptor = os.open(temporary, flags, 0o600)
+            offset = 0
+            while offset < len(payload):
+                written = os.write(descriptor, payload[offset:])
+                if written <= 0:
+                    raise OSError("attention history continuity write made no progress")
+                offset += written
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = None
+            os.replace(temporary, path)
+            if os.name != "nt":
+                directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+                directory_descriptor = os.open(self._data_dir, directory_flags)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
+        except OSError:
+            raise RuntimeError("attention history continuity authority is unavailable") from None
+        finally:
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError, OSError):
+                temporary.unlink()
+        if self._read_attention_history_continuity() != state:
+            raise RuntimeError("attention history continuity authority was not established")
+
+    def _reconcile_attention_history_continuity(
+        self,
+        conn: sqlite3.Connection | _OwnedControlConnection,
+        state: dict[str, object] | None,
+        *,
+        storage_created: bool,
+    ) -> dict[str, object] | None:
+        status = conn.execute(
+            "SELECT current_revision, capacity_exhausted_revision FROM attention_history_status WHERE singleton = 1"
+        ).fetchone()
+        if (
+            type(status) is not tuple
+            or len(status) != 2
+            or type(status[0]) is not int
+            or (status[1] is not None and type(status[1]) is not int)
+        ):
+            raise RuntimeError("attention history continuity database state is invalid")
+        current_revision, capacity_revision = status
+        clean = {
+            "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+            "state": "clean",
+            "revision": current_revision,
+        }
+        if storage_created:
+            if state is not None or current_revision != 0:
+                raise RuntimeError("attention history continuity bootstrap is invalid")
+            return clean
+        if state is None:
+            raise RuntimeError("attention history continuity loss detected")
+        if state.get("state") == "legacy":
+            return clean
+        if state.get("state") == "clean":
+            if state.get("revision") != current_revision:
+                raise RuntimeError("attention history continuity rollback detected")
+            return None
+        base_revision = state.get("base_revision")
+        if current_revision == base_revision:
+            raise RuntimeError("attention history continuity has an incomplete append")
+        if current_revision != base_revision + 1:
+            raise RuntimeError("attention history continuity revision is invalid")
+        if capacity_revision == current_revision:
+            return clean
+        row = conn.execute(
+            "SELECT event_id, payload FROM attention_history WHERE sequence = ? AND history_revision = ?",
+            (current_revision, current_revision),
+        ).fetchone()
+        if (
+            type(row) is not tuple
+            or len(row) != 2
+            or row[0] != state.get("event_id")
+            or type(row[1]) is not str
+            or hashlib.sha256(row[1].encode("utf-8")).hexdigest() != state.get("payload_sha256")
+        ):
+            raise RuntimeError("attention history continuity committed append is invalid")
+        return clean
+
     @classmethod
     def _alarm_ack_schema_catalog(
         cls,
@@ -3306,6 +3620,7 @@ class SQLiteWriter:
             activation_locked = False
             owned_connection.execute("PRAGMA synchronous=FULL;")
             owned_connection.execute("PRAGMA busy_timeout=250;")
+            attention_continuity = self._read_attention_history_continuity()
             owned_connection.execute("BEGIN IMMEDIATE")
             self._migrate_legacy_alarm_ack_storage(owned_connection)
             owned_connection.execute(SCHEMA_ALARM_ACK_OUTBOX)
@@ -3326,6 +3641,15 @@ class SQLiteWriter:
                 owned_connection,
                 allow_transactional_trigger_challenge=True,
             )
+            attention_storage_created = self._initialize_attention_history_storage(
+                owned_connection,
+                continuity_present=attention_continuity is not None,
+            )
+            continuity_update = self._reconcile_attention_history_continuity(
+                owned_connection,
+                attention_continuity,
+                storage_created=attention_storage_created,
+            )
             if _operator_log_monotonic() >= deadline:
                 expired[0] = True
                 raise RuntimeError(
@@ -3334,16 +3658,20 @@ class SQLiteWriter:
                     f"{_OPERATOR_LOG_PUBLICATION_INITIALIZATION_DEADLINE_S:.3f}s budget"
                 )
             owned_connection.commit()
+            if continuity_update is not None:
+                self._write_attention_history_continuity(continuity_update)
             raw_connection.set_progress_handler(None, 0)
             owned_connection.validate_authority()
             return owned_connection
         except BaseException as exc:
             initialization_failed = True
             detail = str(exc)
-            if (
-                isinstance(exc, RuntimeError)
-                and detail.startswith("alarm ACK")
-                and ("dependency" in detail or "migration authority is ambiguous" in detail)
+            if isinstance(exc, RuntimeError) and (
+                (
+                    detail.startswith("alarm ACK")
+                    and ("dependency" in detail or "migration authority is ambiguous" in detail)
+                )
+                or detail.startswith("attention history")
             ):
                 initialization_failure_detail = detail
             if authority is not None:
@@ -6643,6 +6971,229 @@ class SQLiteWriter:
         return " ".join(value.strip().rstrip(";").split()).casefold()
 
     @classmethod
+    def _initialize_attention_history_storage(
+        cls,
+        conn: sqlite3.Connection | _OwnedControlConnection,
+        *,
+        continuity_present: bool,
+    ) -> bool:
+        object_names = (
+            "attention_history",
+            "attention_history_status",
+            "idx_attention_history_experiment",
+        )
+        rows = conn.execute(
+            "SELECT type, name, tbl_name FROM sqlite_master WHERE name IN (?, ?, ?) ORDER BY name",
+            object_names,
+        ).fetchall()
+        marker_object = conn.execute(
+            "SELECT type, tbl_name, sql FROM sqlite_master WHERE name = 'control_feature_markers'"
+        ).fetchone()
+        expected = {
+            ("table", "attention_history", "attention_history"),
+            ("table", "attention_history_status", "attention_history_status"),
+            (
+                "index",
+                "idx_attention_history_experiment",
+                "attention_history",
+            ),
+        }
+        if not rows and marker_object is None:
+            if continuity_present:
+                raise RuntimeError("attention history continuity loss detected")
+            conn.execute(SCHEMA_CONTROL_FEATURE_MARKERS)
+            conn.execute(SCHEMA_ATTENTION_HISTORY)
+            conn.execute(INDEX_ATTENTION_HISTORY_EXPERIMENT)
+            conn.execute(SCHEMA_ATTENTION_HISTORY_STATUS)
+            marker = conn.execute(
+                "INSERT INTO control_feature_markers "
+                "(feature_id, schema_version) VALUES ('attention_history', 7) "
+                "RETURNING feature_id, schema_version"
+            ).fetchone()
+            inserted = conn.execute(
+                "INSERT INTO attention_history_status "
+                "(singleton, admitted_total, current_revision, "
+                "capacity_exhausted_revision, capacity_exhausted_at) "
+                "VALUES (1, 0, 0, NULL, NULL) "
+                "RETURNING singleton, admitted_total, current_revision, "
+                "capacity_exhausted_revision, capacity_exhausted_at"
+            ).fetchone()
+            if marker != ("attention_history", 7) or inserted != (1, 0, 0, None, None):
+                raise RuntimeError("attention history initial status was not created exactly")
+            cls._verify_attention_history_storage(conn)
+            return True
+        if (
+            type(rows) is not list
+            or len(rows) != len(expected)
+            or any(type(row) is not tuple or len(row) != 3 for row in rows)
+            or set(rows) != expected
+            or type(marker_object) is not tuple
+            or len(marker_object) != 3
+            or marker_object[0] != "table"
+            or marker_object[1] != "control_feature_markers"
+            or cls._normalized_schema_sql(marker_object[2])
+            not in {
+                cls._normalized_schema_sql(SCHEMA_CONTROL_FEATURE_MARKERS),
+                cls._normalized_schema_sql(SCHEMA_CONTROL_FEATURE_MARKERS).replace(
+                    " if not exists",
+                    "",
+                ),
+            }
+        ):
+            raise RuntimeError("attention history established storage is incomplete")
+        marker = conn.execute("SELECT feature_id, schema_version FROM control_feature_markers LIMIT 2").fetchall()
+        status = conn.execute(
+            "SELECT singleton, admitted_total, current_revision, "
+            "capacity_exhausted_revision, "
+            "capacity_exhausted_at FROM attention_history_status LIMIT 2"
+        ).fetchall()
+        if marker != [("attention_history", 7)] or type(status) is not list or len(status) != 1:
+            raise RuntimeError("attention history established storage is incomplete")
+        cls._verify_attention_history_storage(conn)
+        return False
+
+    @classmethod
+    def _verify_attention_history_storage(
+        cls,
+        conn: sqlite3.Connection | _OwnedControlConnection,
+    ) -> None:
+        if type(ATTENTION_HISTORY_MAX_ITEMS) is not int or not 1 <= ATTENTION_HISTORY_MAX_ITEMS <= _SQLITE_MAX_ROWID:
+            raise RuntimeError("attention history retained row bound is invalid")
+        expected_objects = (
+            (
+                "table",
+                "control_feature_markers",
+                "control_feature_markers",
+                SCHEMA_CONTROL_FEATURE_MARKERS,
+            ),
+            ("table", "attention_history", "attention_history", SCHEMA_ATTENTION_HISTORY),
+            (
+                "table",
+                "attention_history_status",
+                "attention_history_status",
+                SCHEMA_ATTENTION_HISTORY_STATUS,
+            ),
+            (
+                "index",
+                "idx_attention_history_experiment",
+                "attention_history",
+                INDEX_ATTENTION_HISTORY_EXPERIMENT,
+            ),
+        )
+        for object_type, name, table_name, expected in expected_objects:
+            row = conn.execute(
+                "SELECT tbl_name, sql FROM sqlite_master WHERE type = ? AND name = ?",
+                (object_type, name),
+            ).fetchone()
+            if type(row) is not tuple or len(row) != 2 or row[0] != table_name:
+                raise RuntimeError(f"attention history {name} schema object is missing")
+            actual_sql = cls._normalized_schema_sql(row[1])
+            expected_sql = cls._normalized_schema_sql(expected)
+            if actual_sql not in {
+                expected_sql,
+                expected_sql.replace(" if not exists", ""),
+            }:
+                raise RuntimeError(f"attention history {name} schema is not exact")
+        for catalog in ("sqlite_master", "sqlite_temp_master"):
+            trigger = conn.execute(
+                f"SELECT 1 FROM {catalog} WHERE type = 'trigger' "
+                "AND (tbl_name IN ('attention_history', 'attention_history_status', "
+                "'control_feature_markers') "
+                "OR instr(lower(coalesce(sql, '')), 'attention_history') > 0) LIMIT 1"
+            ).fetchone()
+            if trigger is not None:
+                raise RuntimeError("attention history trigger authority is invalid")
+        status_rows = conn.execute(
+            "SELECT singleton, admitted_total, current_revision, "
+            "capacity_exhausted_revision, "
+            "capacity_exhausted_at FROM attention_history_status LIMIT 2"
+        ).fetchall()
+        if (
+            type(status_rows) is not list
+            or len(status_rows) != 1
+            or type(status_rows[0]) is not tuple
+            or len(status_rows[0]) != 5
+            or status_rows[0][0] != 1
+            or type(status_rows[0][1]) is not int
+            or status_rows[0][1] < 0
+            or type(status_rows[0][2]) is not int
+            or not status_rows[0][1] <= status_rows[0][2] <= status_rows[0][1] + 1
+        ):
+            raise RuntimeError("attention history status authority is invalid")
+        current_revision = status_rows[0][2]
+        capacity_revision = status_rows[0][3]
+        capacity_at = status_rows[0][4]
+        if capacity_revision is None:
+            if capacity_at is not None or current_revision != status_rows[0][1]:
+                raise RuntimeError("attention history status authority is invalid")
+        elif (
+            type(capacity_revision) is not int
+            or capacity_revision != current_revision
+            or current_revision != status_rows[0][1] + 1
+            or capacity_revision > _SQLITE_MAX_ROWID
+            or type(capacity_at) is not str
+        ):
+            raise RuntimeError("attention history status authority is invalid")
+        if capacity_at is not None:
+            cls._attention_history_time_from_text(capacity_at)
+        count = conn.execute("SELECT COUNT(*) FROM attention_history").fetchone()
+        if (
+            type(count) is not tuple
+            or len(count) != 1
+            or type(count[0]) is not int
+            or not 0 <= count[0] <= ATTENTION_HISTORY_MAX_ITEMS
+        ):
+            raise RuntimeError("attention history retained row bound is invalid")
+        if count[0] != status_rows[0][1]:
+            raise RuntimeError("attention history admitted row total is invalid")
+        if capacity_revision is not None and count[0] != ATTENTION_HISTORY_MAX_ITEMS:
+            raise RuntimeError("attention history capacity marker is invalid")
+        retained_rows = conn.execute(
+            "SELECT sequence, history_revision, event_id, timestamp, "
+            "experiment_id, kind, annotation_of, "
+            "payload FROM attention_history ORDER BY sequence LIMIT ?",
+            (ATTENTION_HISTORY_MAX_ITEMS + 1,),
+        ).fetchall()
+        if type(retained_rows) is not list or len(retained_rows) != count[0]:
+            raise RuntimeError("attention history retained row set is invalid")
+        if any(
+            type(row) is not tuple or len(row) != 8 or row[0] != expected_sequence or row[1] != expected_sequence
+            for expected_sequence, row in enumerate(retained_rows, start=1)
+        ):
+            raise RuntimeError("attention history revision binding is invalid")
+        retained = tuple((row[0], cls._attention_history_item_from_row(row[2:])) for row in retained_rows)
+        by_event_id = {item.event_id: (revision, item) for revision, item in retained}
+        activation_ids = [
+            item.activation_id
+            for _revision, item in retained
+            if item.kind == "incident" and item.activation_id is not None
+        ]
+        if len(activation_ids) != len(set(activation_ids)):
+            raise RuntimeError("attention history activation identity is duplicated")
+        transition_keys: set[tuple[str, str]] = set()
+        for revision, item in retained:
+            if item.kind == "incident":
+                continue
+            parent_entry = by_event_id.get(item.annotation_of)
+            if (
+                parent_entry is None
+                or parent_entry[0] >= revision
+                or (parent := parent_entry[1]).kind != "incident"
+                or parent.experiment_id != item.experiment_id
+                or parent.alarm_id != item.alarm_id
+                or parent.channel_ids != item.channel_ids
+                or parent.timestamp > item.timestamp
+                or (item.kind == "severity_change" and (parent.level != "WARNING" or item.level != "CRITICAL"))
+                or (item.kind != "severity_change" and (parent.level != item.level or parent.message != item.message))
+            ):
+                raise RuntimeError("attention history incident graph is invalid")
+            if item.kind in {"severity_change", "resolution"}:
+                transition_key = (item.annotation_of, item.kind)
+                if transition_key in transition_keys:
+                    raise RuntimeError("attention history transition is duplicated")
+                transition_keys.add(transition_key)
+
+    @classmethod
     def _verify_operator_log_storage(cls, conn: sqlite3.Connection) -> None:
         if cls._operator_log_columns(conn) != _OPERATOR_LOG_CURRENT_COLUMNS:
             raise RuntimeError("operator_log schema is not the exact current schema")
@@ -9159,6 +9710,652 @@ class SQLiteWriter:
         assert isinstance(bound, CommittedBatchReceipt) or bound is None
         self.release_committed(settlement)
         return bound
+
+    @staticmethod
+    def _attention_history_time_text(value: datetime) -> str:
+        return value.astimezone(UTC).isoformat(timespec="microseconds")
+
+    @staticmethod
+    def _attention_history_time_from_text(raw: object) -> datetime:
+        if type(raw) is not str:
+            raise RuntimeError("attention history timestamp authority is invalid")
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            raise RuntimeError("attention history timestamp authority is invalid") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise RuntimeError("attention history timestamp authority is invalid")
+        normalized = parsed.astimezone(UTC)
+        if normalized.isoformat(timespec="microseconds") != raw:
+            raise RuntimeError("attention history timestamp authority is invalid")
+        return normalized
+
+    @staticmethod
+    def _attention_history_item_from_row(raw: object) -> AttentionHistoryItem:
+        if type(raw) is not tuple or len(raw) != 6:
+            raise RuntimeError("attention history row authority is invalid")
+        event_id, raw_timestamp, experiment_id, kind, annotation_of, payload = raw
+        if type(raw_timestamp) is not str or type(payload) is not str:
+            raise RuntimeError("attention history row authority is invalid")
+        item = load_attention_history_item(payload)
+        expected = (
+            item.event_id,
+            SQLiteWriter._attention_history_time_text(item.timestamp),
+            item.experiment_id,
+            item.kind,
+            item.annotation_of,
+            dump_attention_history_item(item),
+        )
+        if raw != expected:
+            raise RuntimeError("attention history row identity is inconsistent")
+        return item
+
+    def _append_attention_history_item_sync(
+        self,
+        item: AttentionHistoryItem,
+        *,
+        require_persisted_incident: bool,
+    ) -> AttentionHistoryItem:
+        if type(item) is not AttentionHistoryItem:
+            raise TypeError("attention history requires an exact item")
+        payload = dump_attention_history_item(item)
+        timestamp_value = self._attention_history_time_text(item.timestamp)
+        payload_sha256 = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        admitted = False
+        continuity_update: dict[str, object] | None = None
+        conn = self._open_control_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._verify_attention_history_storage(conn)
+            existing_raw = conn.execute(
+                "SELECT sequence, history_revision, event_id, timestamp, "
+                "experiment_id, kind, annotation_of, payload "
+                "FROM attention_history WHERE event_id = ?",
+                (item.event_id,),
+            ).fetchone()
+            if existing_raw is not None:
+                if (
+                    type(existing_raw) is not tuple
+                    or len(existing_raw) != 8
+                    or type(existing_raw[0]) is not int
+                    or existing_raw[0] != existing_raw[1]
+                ):
+                    raise RuntimeError("attention history retry identity is invalid")
+                existing = self._attention_history_item_from_row(existing_raw[2:])
+                if existing != item:
+                    raise RuntimeError("attention history event identity collision")
+                conn.commit()
+                return existing
+            if item.kind == "incident" and item.activation_id is not None:
+                incident_rows = conn.execute("SELECT payload FROM attention_history WHERE kind = 'incident'").fetchall()
+                for incident_row in incident_rows:
+                    if type(incident_row) is not tuple or len(incident_row) != 1:
+                        raise RuntimeError("attention incident identity row is invalid")
+                    retained_incident = load_attention_history_item(incident_row[0])
+                    if retained_incident.activation_id == item.activation_id:
+                        raise ValueError("attention activation already has a durable incident")
+            if require_persisted_incident:
+                parent_raw = conn.execute(
+                    "SELECT event_id, timestamp, experiment_id, kind, "
+                    "annotation_of, payload FROM attention_history WHERE event_id = ?",
+                    (item.annotation_of,),
+                ).fetchone()
+                if parent_raw is None:
+                    raise ValueError("attention annotation requires a persisted incident")
+                parent = self._attention_history_item_from_row(parent_raw)
+                if (
+                    parent.kind != "incident"
+                    or parent.event_id != item.annotation_of
+                    or parent.experiment_id != item.experiment_id
+                    or parent.alarm_id != item.alarm_id
+                    or parent.channel_ids != item.channel_ids
+                    or parent.timestamp > item.timestamp
+                    or (item.kind == "severity_change" and (parent.level != "WARNING" or item.level != "CRITICAL"))
+                    or (
+                        item.kind != "severity_change"
+                        and (parent.level != item.level or parent.message != item.message)
+                    )
+                ):
+                    raise ValueError("attention annotation requires its persisted incident")
+                existing_transitions = conn.execute(
+                    "SELECT kind FROM attention_history "
+                    "WHERE kind IN ('severity_change', 'resolution') "
+                    "AND annotation_of = ? LIMIT 3",
+                    (item.annotation_of,),
+                ).fetchall()
+                if any(
+                    type(row) is not tuple or len(row) != 1 or row[0] not in {"severity_change", "resolution"}
+                    for row in existing_transitions
+                ):
+                    raise RuntimeError("attention transition identity row is invalid")
+                existing_kinds = {row[0] for row in existing_transitions}
+                if item.kind in existing_kinds:
+                    raise ValueError(f"attention incident already has a durable {item.kind}")
+                if item.kind == "severity_change" and "resolution" in existing_kinds:
+                    raise ValueError("attention severity change cannot follow its resolution")
+            count_row = conn.execute("SELECT COUNT(*) FROM attention_history").fetchone()
+            if type(count_row) is not tuple or len(count_row) != 1 or type(count_row[0]) is not int:
+                raise RuntimeError("attention history retained row count is invalid")
+            if count_row[0] >= ATTENTION_HISTORY_MAX_ITEMS:
+                status_before = conn.execute(
+                    "SELECT admitted_total, current_revision, "
+                    "capacity_exhausted_revision, "
+                    "capacity_exhausted_at FROM attention_history_status "
+                    "WHERE singleton = 1"
+                ).fetchone()
+                if type(status_before) is not tuple or len(status_before) != 4 or status_before[0] != count_row[0]:
+                    raise RuntimeError("attention history status authority is invalid")
+                if status_before[1:] == (count_row[0], None, None):
+                    if count_row[0] >= _SQLITE_MAX_ROWID:
+                        raise RuntimeError("attention history revision bound is exhausted")
+                    self._write_attention_history_continuity(
+                        {
+                            "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                            "state": "pending",
+                            "base_revision": count_row[0],
+                            "event_id": item.event_id,
+                            "payload_sha256": payload_sha256,
+                        }
+                    )
+                    continuity_update = {
+                        "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                        "state": "clean",
+                        "revision": count_row[0] + 1,
+                    }
+                    before_changes = conn.total_changes
+                    status_after = conn.execute(
+                        "UPDATE attention_history_status SET "
+                        "current_revision = admitted_total + 1, "
+                        "capacity_exhausted_revision = admitted_total + 1, "
+                        "capacity_exhausted_at = ? "
+                        "WHERE singleton = 1 "
+                        "AND capacity_exhausted_revision IS NULL "
+                        "AND capacity_exhausted_at IS NULL "
+                        "RETURNING current_revision, "
+                        "capacity_exhausted_revision, "
+                        "capacity_exhausted_at",
+                        (timestamp_value,),
+                    ).fetchone()
+                    if (
+                        status_after
+                        != (
+                            count_row[0] + 1,
+                            count_row[0] + 1,
+                            timestamp_value,
+                        )
+                        or conn.total_changes - before_changes != 1
+                    ):
+                        raise RuntimeError("attention history capacity marker was not durable")
+                elif (
+                    status_before[1] != count_row[0] + 1
+                    or status_before[2] != status_before[1]
+                    or type(status_before[3]) is not str
+                ):
+                    raise RuntimeError("attention history capacity marker is invalid")
+                else:
+                    self._attention_history_time_from_text(status_before[3])
+            else:
+                self._write_attention_history_continuity(
+                    {
+                        "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                        "state": "pending",
+                        "base_revision": count_row[0],
+                        "event_id": item.event_id,
+                        "payload_sha256": payload_sha256,
+                    }
+                )
+                continuity_update = {
+                    "version": _ATTENTION_HISTORY_CONTINUITY_VERSION,
+                    "state": "clean",
+                    "revision": count_row[0] + 1,
+                }
+                before_changes = conn.total_changes
+                inserted = conn.execute(
+                    "INSERT INTO attention_history "
+                    "(sequence, history_revision, event_id, timestamp, "
+                    "experiment_id, kind, annotation_of, payload) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                    "RETURNING sequence, history_revision, event_id, "
+                    "timestamp, experiment_id, kind, annotation_of, payload",
+                    (
+                        count_row[0] + 1,
+                        count_row[0] + 1,
+                        item.event_id,
+                        timestamp_value,
+                        item.experiment_id,
+                        item.kind,
+                        item.annotation_of,
+                        payload,
+                    ),
+                ).fetchone()
+                expected = (
+                    count_row[0] + 1,
+                    count_row[0] + 1,
+                    item.event_id,
+                    timestamp_value,
+                    item.experiment_id,
+                    item.kind,
+                    item.annotation_of,
+                    payload,
+                )
+                if type(inserted) is not tuple or inserted != expected or conn.total_changes - before_changes != 1:
+                    raise RuntimeError("attention history insertion was not exact")
+                reread = conn.execute(
+                    "SELECT sequence, history_revision, event_id, timestamp, "
+                    "experiment_id, kind, "
+                    "annotation_of, payload FROM attention_history WHERE sequence = ?",
+                    (inserted[0],),
+                ).fetchone()
+                if reread != inserted:
+                    raise RuntimeError("attention history authority changed after insertion")
+                status_changes = conn.total_changes
+                admitted_after = conn.execute(
+                    "UPDATE attention_history_status SET "
+                    "admitted_total = admitted_total + 1, "
+                    "current_revision = current_revision + 1 "
+                    "WHERE singleton = 1 AND admitted_total = ? "
+                    "AND current_revision = admitted_total "
+                    "RETURNING admitted_total, current_revision",
+                    (count_row[0],),
+                ).fetchone()
+                if admitted_after != (count_row[0] + 1, count_row[0] + 1) or conn.total_changes - status_changes != 1:
+                    raise RuntimeError("attention history admitted total was not durable")
+                admitted = True
+            self._verify_attention_history_storage(conn)
+            conn.commit()
+            if continuity_update is not None:
+                self._write_attention_history_continuity(continuity_update)
+        except (TypeError, ValueError, RuntimeError):
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise RuntimeError("attention history transaction failed") from None
+        finally:
+            conn.close()
+        if not admitted:
+            raise AttentionHistoryCapacityError("attention history capacity exhausted; saturation is durably marked")
+        return item
+
+    def _change_attention_severity_event_sync(self, event: EngineEvent) -> AttentionHistoryItem:
+        activation_id = event.payload.get("activation_id")
+        alarm_id = event.payload.get("alarm_id")
+        conn = self._open_control_db()
+        try:
+            conn.execute("BEGIN")
+            self._verify_attention_history_storage(conn)
+            rows = conn.execute(
+                "SELECT payload FROM attention_history WHERE kind = 'incident' ORDER BY sequence"
+            ).fetchall()
+            matches: list[AttentionHistoryItem] = []
+            for row in rows:
+                if type(row) is not tuple or len(row) != 1:
+                    raise RuntimeError("attention incident lookup row is invalid")
+                incident = load_attention_history_item(row[0])
+                if incident.activation_id == activation_id:
+                    matches.append(incident)
+            if len(matches) != 1 or matches[0].alarm_id != alarm_id:
+                raise ValueError("attention severity change requires one persisted canonical activation")
+            incident = matches[0]
+            channels = event.payload.get("channels")
+            if tuple(channels) != incident.channel_ids:
+                raise ValueError("attention severity change channel identity changed")
+            conn.commit()
+        except (TypeError, ValueError, RuntimeError):
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise RuntimeError("attention incident lookup failed") from None
+        finally:
+            conn.close()
+        severity_change = new_attention_severity_change(
+            incident,
+            timestamp=event.timestamp,
+            level=event.payload.get("level"),
+            message=event.payload.get("message"),
+        )
+        return self._append_attention_history_item_sync(
+            severity_change,
+            require_persisted_incident=True,
+        )
+
+    def _resolve_attention_event_sync(self, event: EngineEvent) -> AttentionHistoryItem:
+        activation_id = event.payload.get("activation_id")
+        alarm_id = event.payload.get("alarm_id")
+        conn = self._open_control_db()
+        try:
+            conn.execute("BEGIN")
+            self._verify_attention_history_storage(conn)
+            rows = conn.execute(
+                "SELECT payload FROM attention_history WHERE kind = 'incident' ORDER BY sequence"
+            ).fetchall()
+            matches: list[AttentionHistoryItem] = []
+            for row in rows:
+                if type(row) is not tuple or len(row) != 1:
+                    raise RuntimeError("attention incident lookup row is invalid")
+                incident = load_attention_history_item(row[0])
+                if incident.activation_id == activation_id:
+                    matches.append(incident)
+            if len(matches) != 1 or matches[0].alarm_id != alarm_id:
+                raise ValueError("attention resolution requires one persisted canonical activation")
+            incident = matches[0]
+            conn.commit()
+        except (ValueError, RuntimeError):
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise RuntimeError("attention incident lookup failed") from None
+        finally:
+            conn.close()
+        resolution = new_attention_resolution(incident, timestamp=event.timestamp)
+        return self._append_attention_history_item_sync(
+            resolution,
+            require_persisted_incident=True,
+        )
+
+    def _read_attention_activation_sequence_sync(self) -> int:
+        conn = self._open_control_db()
+        try:
+            conn.execute("BEGIN")
+            self._verify_attention_history_storage(conn)
+            rows = conn.execute(
+                "SELECT payload FROM attention_history WHERE kind = 'incident' ORDER BY sequence"
+            ).fetchall()
+            activation_ids: list[int] = []
+            for row in rows:
+                if type(row) is not tuple or len(row) != 1:
+                    raise RuntimeError("attention activation identity row is invalid")
+                item = load_attention_history_item(row[0])
+                if item.activation_id is not None:
+                    activation_ids.append(item.activation_id)
+            if len(activation_ids) != len(set(activation_ids)):
+                raise RuntimeError("attention activation identity collision")
+            contiguous = 0
+            for activation_id in sorted(activation_ids):
+                if activation_id != contiguous + 1:
+                    break
+                contiguous = activation_id
+            conn.commit()
+            return contiguous
+        except (ValueError, RuntimeError):
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise RuntimeError("attention activation identity read failed") from None
+        finally:
+            conn.close()
+
+    def _read_attention_history_sync(
+        self,
+        *,
+        experiment_id: str,
+        limit: int,
+        as_of: datetime | None,
+        through_revision: int | None,
+    ) -> AttentionHistoryPage:
+        conn = self._open_control_db()
+        try:
+            conn.execute("BEGIN")
+            self._verify_attention_history_storage(conn)
+            status = conn.execute(
+                "SELECT admitted_total, current_revision, "
+                "capacity_exhausted_revision, "
+                "capacity_exhausted_at FROM attention_history_status "
+                "WHERE singleton = 1"
+            ).fetchone()
+            if type(status) is not tuple or len(status) != 4 or type(status[1]) is not int:
+                raise RuntimeError("attention history read authority is invalid")
+            current_revision = status[1]
+            selected_revision = current_revision if through_revision is None else through_revision
+            if (
+                type(current_revision) is not int
+                or type(selected_revision) is not int
+                or selected_revision < 0
+                or selected_revision > current_revision
+            ):
+                raise ValueError("attention history revision is unavailable")
+            if as_of is None:
+                rows = conn.execute(
+                    "SELECT sequence, event_id, timestamp, experiment_id, kind, "
+                    "annotation_of, payload FROM attention_history "
+                    "WHERE experiment_id = ? AND sequence <= ? "
+                    "ORDER BY timestamp DESC, event_id DESC LIMIT ?",
+                    (experiment_id, selected_revision, limit + 1),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT sequence, event_id, timestamp, experiment_id, kind, "
+                    "annotation_of, payload FROM attention_history "
+                    "WHERE experiment_id = ? AND sequence <= ? "
+                    "AND timestamp <= ? "
+                    "ORDER BY timestamp DESC, event_id DESC LIMIT ?",
+                    (
+                        experiment_id,
+                        selected_revision,
+                        self._attention_history_time_text(as_of),
+                        limit + 1,
+                    ),
+                ).fetchall()
+            if type(rows) is not list or len(rows) > limit + 1:
+                raise RuntimeError("attention history read authority is invalid")
+            selected = [
+                (row[0], self._attention_history_item_from_row(row[1:]))
+                for row in rows[:limit]
+                if type(row) is tuple and len(row) == 7
+            ]
+            if len(selected) != min(len(rows), limit):
+                raise RuntimeError("attention history read authority is invalid")
+            capacity_exhausted_at = None
+            if status[2] is not None and status[2] <= selected_revision:
+                capacity_exhausted_at = self._attention_history_time_from_text(status[3])
+            conn.commit()
+        except (ValueError, RuntimeError):
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise
+        except BaseException:
+            with contextlib.suppress(sqlite3.Error, RuntimeError):
+                conn.rollback()
+            raise RuntimeError("attention history read failed") from None
+        finally:
+            conn.close()
+        selected.reverse()
+        return AttentionHistoryPage(
+            items=tuple(item for _revision, item in selected),
+            item_revisions=tuple(revision for revision, _item in selected),
+            experiment_id=experiment_id,
+            truncated_before=len(rows) > limit,
+            through_revision=selected_revision,
+            as_of=as_of,
+            capacity_exhausted_at=capacity_exhausted_at,
+        )
+
+    async def append_attention_event(
+        self,
+        event: EngineEvent,
+    ) -> AttentionHistoryItem:
+        """Durably append one stable-identity alarm incident."""
+
+        if type(event) is not EngineEvent or event.event_type != "alarm_fired":
+            raise ValueError("attention history accepts exact alarm_fired EngineEvent values")
+        if type(event.experiment_id) is not str or not event.experiment_id:
+            raise ValueError("attention history requires a stable experiment_id")
+        if type(event.payload) is not dict:
+            raise ValueError("attention event payload must be a mapping")
+        channels = event.payload.get("channels", [])
+        if type(channels) not in {list, tuple}:
+            raise ValueError("attention event channels must be a list or tuple")
+        item = new_attention_incident(
+            timestamp=event.timestamp,
+            experiment_id=event.experiment_id,
+            alarm_id=event.payload.get("alarm_id"),
+            level=event.payload.get("level"),
+            message=event.payload.get("message"),
+            channel_ids=tuple(channels),
+            activation_id=event.payload.get("activation_id"),
+        )
+        identity_payload = item.to_payload()
+        del identity_payload["event_id"]
+        canonical_identity = json.dumps(
+            identity_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        item = replace(
+            item,
+            event_id=hashlib.sha256(canonical_identity).hexdigest()[:32],
+        )
+        owner = self._owned_executor_task(
+            self._executor,
+            partial(
+                self._append_attention_history_item_sync,
+                item,
+                require_persisted_incident=False,
+            ),
+            read=False,
+            name="sqlite_attention_history_append",
+        )
+        return await self._await_owned_task(owner)
+
+    async def change_attention_severity_event(self, event: EngineEvent) -> AttentionHistoryItem:
+        """Append one canonical severity upgrade without creating an incident."""
+
+        if type(event) is not EngineEvent or event.event_type != "alarm_severity_changed":
+            raise ValueError("attention severity change accepts an exact canonical EngineEvent")
+        if type(event.payload) is not dict:
+            raise ValueError("attention severity change payload must be a mapping")
+        activation_id = event.payload.get("activation_id")
+        alarm_id = event.payload.get("alarm_id")
+        channels = event.payload.get("channels")
+        audit_revision = event.payload.get("audit_revision")
+        if type(activation_id) is not int or activation_id <= 0:
+            raise ValueError("attention severity change requires a canonical activation identity")
+        if type(alarm_id) is not str or not alarm_id:
+            raise ValueError("attention severity change requires a canonical alarm identity")
+        if event.payload.get("level") != "CRITICAL":
+            raise ValueError("attention severity change requires CRITICAL severity")
+        if type(event.payload.get("message")) is not str or not event.payload["message"]:
+            raise ValueError("attention severity change requires a canonical message")
+        if type(channels) not in {list, tuple}:
+            raise ValueError("attention severity change channels must be a list or tuple")
+        if type(audit_revision) is not int or audit_revision <= 0:
+            raise ValueError("attention severity change requires a canonical audit revision")
+        owner = self._owned_executor_task(
+            self._executor,
+            partial(self._change_attention_severity_event_sync, event),
+            read=False,
+            name="sqlite_attention_severity_change_append",
+        )
+        return await self._await_owned_task(owner)
+
+    async def resolve_attention_event(self, event: EngineEvent) -> AttentionHistoryItem:
+        """Append one canonical clear as an immutable incident resolution."""
+
+        if type(event) is not EngineEvent or event.event_type != "alarm_cleared":
+            raise ValueError("attention resolution accepts an exact alarm_cleared EngineEvent")
+        if type(event.payload) is not dict:
+            raise ValueError("attention resolution payload must be a mapping")
+        activation_id = event.payload.get("activation_id")
+        alarm_id = event.payload.get("alarm_id")
+        if type(activation_id) is not int or activation_id <= 0:
+            raise ValueError("attention resolution requires a canonical activation identity")
+        if type(alarm_id) is not str or not alarm_id:
+            raise ValueError("attention resolution requires a canonical alarm identity")
+        owner = self._owned_executor_task(
+            self._executor,
+            partial(self._resolve_attention_event_sync, event),
+            read=False,
+            name="sqlite_attention_resolution_append",
+        )
+        return await self._await_owned_task(owner)
+
+    async def get_attention_activation_sequence(self) -> int:
+        """Return the highest contiguous owner-issued activation made durable."""
+
+        owner = self._owned_executor_task(
+            self._read_executor,
+            self._read_attention_activation_sequence_sync,
+            read=True,
+            name="sqlite_attention_activation_sequence_read",
+        )
+        return await self._await_owned_task(owner)
+
+    async def get_attention_history(
+        self,
+        *,
+        experiment_id: str,
+        limit: int = 100,
+        as_of: datetime | None = None,
+        through_revision: int | None = None,
+    ) -> AttentionHistoryPage:
+        """Read a bounded window at one durable revision and optional UTC cut."""
+
+        if type(experiment_id) is not str or not experiment_id:
+            raise ValueError("attention history requires a stable experiment_id")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("attention history limit must be a positive integer")
+        if limit > ATTENTION_HISTORY_MAX_ITEMS:
+            raise ValueError(f"attention history limit cannot exceed {ATTENTION_HISTORY_MAX_ITEMS}")
+        if as_of is not None:
+            if type(as_of) is not datetime or as_of.tzinfo is None or as_of.utcoffset() is None:
+                raise ValueError("attention history as_of must be an exact timezone-aware datetime")
+            as_of = as_of.astimezone(UTC)
+        if through_revision is not None and (type(through_revision) is not int or through_revision < 0):
+            raise ValueError("through_revision must be a non-negative integer")
+        owner = self._owned_executor_task(
+            self._read_executor,
+            partial(
+                self._read_attention_history_sync,
+                experiment_id=experiment_id,
+                limit=limit,
+                as_of=as_of,
+                through_revision=through_revision,
+            ),
+            read=True,
+            name="sqlite_attention_history_read",
+        )
+        return await self._await_owned_task(owner)
+
+    async def annotate_attention_acknowledgement(
+        self,
+        incident: AttentionHistoryItem,
+        *,
+        actor: str,
+        note: str,
+        timestamp: datetime,
+    ) -> AttentionHistoryItem:
+        """Append awareness without touching canonical alarm state or revision."""
+
+        annotation = new_attention_acknowledgement(
+            incident,
+            actor=actor,
+            note=note,
+            timestamp=timestamp,
+        )
+        owner = self._owned_executor_task(
+            self._executor,
+            partial(
+                self._append_attention_history_item_sync,
+                annotation,
+                require_persisted_incident=True,
+            ),
+            read=False,
+            name="sqlite_attention_history_annotation",
+        )
+        return await self._await_owned_task(owner)
 
     async def append_operator_log(
         self,

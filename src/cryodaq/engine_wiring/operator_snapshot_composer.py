@@ -317,15 +317,23 @@ class OperatorSnapshotComposer:
 
         attention_items: list[AttentionItem] = []
         if receipts.attention.availability is AuthorityAvailability.AVAILABLE:
+            experiment_id = receipts.experiment.experiment_id or "no-active-experiment"
             for alarm in receipts.attention.alarms:
+                if alarm.experiment_id != experiment_id:
+                    continue
                 alarm_key = hashlib.sha256(alarm.alarm_id.encode()).hexdigest()[:32]
+                alarm_state = OperatorPresentationState.FAULT if alarm.evaluator_error else _ALARM_STATE[alarm.level]
+                alarm_title = "Оценка тревоги недоступна" if alarm.evaluator_error else f"Active {alarm.level} alarm"
+                alarm_detail = f"{alarm.alarm_id} (ошибка оценки)" if alarm.evaluator_error else alarm.alarm_id
                 attention_items.append(
                     AttentionItem(
                         f"alarm:{alarm_key}",
-                        _ALARM_STATE[alarm.level],
-                        f"Active {alarm.level} alarm",
-                        alarm.alarm_id,
+                        alarm_state,
+                        alarm_title,
+                        alarm_detail,
                         alarm.triggered_at,
+                        channel_ids=alarm.channel_ids,
+                        canonical_acknowledged=alarm.acknowledged,
                     )
                 )
             attention_items.extend(
@@ -333,9 +341,19 @@ class OperatorSnapshotComposer:
                 for item in receipts.attention.attention
             )
             attention_state = _max_state(
-                tuple(item.state for item in attention_items), empty=OperatorPresentationState.OK
+                tuple(item.state for item in attention_items),
+                empty=(
+                    OperatorPresentationState.CAUTION
+                    if receipts.attention.history_revision is None
+                    else OperatorPresentationState.OK
+                ),
             )
-            attention_reasons = () if not attention_items else ("operator_attention_required",)
+            reasons: list[str] = []
+            if attention_items:
+                reasons.append("operator_attention_required")
+            if receipts.attention.history_revision is None:
+                reasons.append("attention_history_unavailable")
+            attention_reasons = tuple(reasons)
         else:
             attention_state = OperatorPresentationState.CAUTION
             attention_reasons = (receipts.attention.unavailable_reason,)  # type: ignore[arg-type]
@@ -343,6 +361,7 @@ class OperatorSnapshotComposer:
             cut,
             _status(attention_state, source_age, attention_reasons, "Backend attention authority"),
             tuple(attention_items),
+            receipts.attention.history_revision,
         )
 
         experiment_state = (
@@ -389,6 +408,7 @@ class OperatorSnapshotComposer:
         cooldown_samples: tuple[CooldownSample, ...] = ()
         reference_samples: tuple[CooldownSample, ...] = ()
         reference_id = None
+        trajectory_channel = None
         if receipts.cooldown.availability is AuthorityAvailability.AVAILABLE:
             cooldown_samples = tuple(
                 CooldownSample(item.elapsed_s, item.temperature_k) for item in receipts.cooldown.samples
@@ -397,6 +417,7 @@ class OperatorSnapshotComposer:
                 CooldownSample(item.elapsed_s, item.temperature_k) for item in receipts.cooldown.reference_samples
             )
             reference_id = receipts.cooldown.reference_id
+            trajectory_channel = receipts.cooldown.trajectory_channel
             cooldown_state = OperatorPresentationState.OK if cooldown_samples else OperatorPresentationState.CAUTION
             cooldown_reasons = () if cooldown_samples else ("cooldown_history_empty",)
         else:
@@ -408,6 +429,7 @@ class OperatorSnapshotComposer:
             cooldown_samples,
             reference_id,
             reference_samples,
+            trajectory_channel,
         )
 
         infrastructure_nodes: tuple[InfrastructureNode, ...] = ()

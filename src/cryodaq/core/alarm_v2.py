@@ -76,6 +76,10 @@ class AlarmEvent:
     # This distinguishes a held alarm with a broken evaluator from a normally
     # evaluated active hazard on operator-facing surfaces.
     evaluator_error: bool = False
+    experiment_id: str | None = None
+    transition: Literal["TRIGGERED", "SEVERITY_UPGRADED", "CLEARED"] = "TRIGGERED"
+    transition_at: float = 0.0
+    audit_revision: int = 0
 
 
 class AlarmSnapshotUnavailableError(RuntimeError):
@@ -90,11 +94,13 @@ class AlarmCanonicalSnapshot:
     """One synchronous revision, minimal active mapping, and canonical token."""
 
     state_revision: int
+    activation_sequence: int
     active: dict[str, dict[str, Any]]
     state_token: str
 
 
 _ALARM_SNAPSHOT_MAX_ACTIVE = 128
+_EXPERIMENT_ID_UNSET = object()
 _ALARM_SNAPSHOT_MAX_CHANNELS = 64
 _ALARM_SNAPSHOT_MAX_TEXT = 256
 _ALARM_SNAPSHOT_MAX_CANONICAL_BYTES = 60 * 1024
@@ -117,6 +123,10 @@ def _copy_alarm_event(event: AlarmEvent) -> AlarmEvent:
         acknowledgement_request_id=event.acknowledgement_request_id,
         activation_id=event.activation_id,
         evaluator_error=event.evaluator_error,
+        experiment_id=event.experiment_id,
+        transition=event.transition,
+        transition_at=event.transition_at,
+        audit_revision=event.audit_revision,
     )
 
 
@@ -672,6 +682,7 @@ class AlarmStateManager:
         self._sustained_since: dict[str, float] = {}
         self._state_revision = 0
         self._activation_sequence = 0
+        self._bound_experiment_id: str | None = None
         # Ограниченный deque предотвращает утечку памяти при длительной работе.
         self._history: deque[dict] = deque(maxlen=1000)
 
@@ -683,11 +694,27 @@ class AlarmStateManager:
     def _mark_active_mutation(self) -> None:
         self._state_revision += 1
 
+    def bind_experiment_id(self, experiment_id: str | None) -> None:
+        """Bind subsequent activations to the engine's current experiment."""
+        if experiment_id is not None and (type(experiment_id) is not str or not experiment_id):
+            raise ValueError("experiment_id must be non-empty text or None")
+        self._bound_experiment_id = experiment_id
+
+    def seed_activation_sequence(self, sequence: int) -> None:
+        """Restore the durable activation identity before producing alarms."""
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("activation sequence must be a non-negative integer")
+        if self._activation_sequence != 0:
+            raise RuntimeError("activation sequence is already in use")
+        self._activation_sequence = sequence
+
     def process(
         self,
         alarm_id: str,
         event: AlarmEvent | None,
         config: dict,
+        *,
+        experiment_id: str | None | object = _EXPERIMENT_ID_UNSET,
     ) -> AlarmTransition | None:
         """Обработать результат evaluate.
 
@@ -738,6 +765,10 @@ class AlarmStateManager:
                 return None  # Уже активен, не re-notify
 
             stored_event = _copy_alarm_event(event)
+            if stored_event.experiment_id is None:
+                stored_event.experiment_id = (
+                    self._bound_experiment_id if experiment_id is _EXPERIMENT_ID_UNSET else experiment_id
+                )
             self._activation_sequence += 1
             stored_event.activation_id = self._activation_sequence
             self._active[alarm_id] = stored_event
@@ -829,8 +860,10 @@ class AlarmStateManager:
                     channels.append(channel)
                 channels = sorted(set(channels))
 
-                if type(event.acknowledged) is not bool:
+                if type(event.acknowledged) is not bool or type(event.evaluator_error) is not bool:
                     raise AlarmSnapshotUnavailableError
+                experiment_id = event.experiment_id or "no-active-experiment"
+                self._validate_snapshot_text(experiment_id)
                 acknowledged_at: float | None = None
                 if event.acknowledged:
                     acknowledged_at = self._validate_snapshot_number(event.acknowledged_at)
@@ -841,6 +874,8 @@ class AlarmStateManager:
                     "channels": channels,
                     "acknowledged": event.acknowledged,
                     "acknowledged_at": acknowledged_at,
+                    "evaluator_error": event.evaluator_error,
+                    "experiment_id": experiment_id,
                 }
 
             canonical = json.dumps(
@@ -855,6 +890,7 @@ class AlarmStateManager:
             token = "sha256:" + hashlib.sha256(canonical).hexdigest()
             return AlarmCanonicalSnapshot(
                 state_revision=self._state_revision,
+                activation_sequence=self._activation_sequence,
                 active=active,
                 state_token=token,
             )
@@ -915,14 +951,18 @@ class AlarmStateManager:
             # operator notifications for the same physical anomaly. SEVERITY_UPGRADED
             # history entry provides the audit trail.
             if level == "CRITICAL" and existing.level == "WARNING":
+                transition_at = time.time()
                 existing.level = level
                 existing.message = f"Sensor anomaly sustained {age_seconds:.0f}s: {channel_id}"
                 self._mark_active_mutation()
+                existing.transition = "SEVERITY_UPGRADED"
+                existing.transition_at = transition_at
+                existing.audit_revision = self._state_revision
                 self._history.append(
                     {
                         "alarm_id": alarm_id,
                         "transition": "SEVERITY_UPGRADED",
-                        "at": time.time(),
+                        "at": transition_at,
                         "level": level,
                         "message": existing.message,
                     }
@@ -942,11 +982,15 @@ class AlarmStateManager:
             triggered_at=time.time(),
             channels=[channel_id],
             values={channel_id: age_seconds},
+            experiment_id=self._bound_experiment_id,
         )
         self._activation_sequence += 1
         event.activation_id = self._activation_sequence
         self._active[alarm_id] = event
         self._mark_active_mutation()
+        event.transition = "TRIGGERED"
+        event.transition_at = event.triggered_at
+        event.audit_revision = self._state_revision
         self._history.append(
             {
                 "alarm_id": alarm_id,
@@ -964,26 +1008,29 @@ class AlarmStateManager:
         )
         return _copy_alarm_event(event)
 
-    def clear_diagnostic_alarm(self, channel_id: str) -> None:
-        """Clear diagnostic alarm for channel when anomaly resolves.
+    def clear_diagnostic_alarm(self, channel_id: str) -> AlarmEvent | None:
+        """Clear a diagnostic alarm and return detached canonical evidence."""
 
-        Called by SensorDiagnosticsEngine when channel status returns to ok.
-        No-op if no active diagnostic alarm for this channel.
-        """
         alarm_id = f"diag:{channel_id}"
         if alarm_id not in self._active:
-            return
-        self._active.pop(alarm_id)
+            return None
+        transition_at = time.time()
+        old_event = self._active.pop(alarm_id)
         self._mark_active_mutation()
+        cleared = _copy_alarm_event(old_event)
+        cleared.transition = "CLEARED"
+        cleared.transition_at = transition_at
+        cleared.audit_revision = self._state_revision
         self._history.append(
             {
                 "alarm_id": alarm_id,
                 "transition": "CLEARED",
-                "at": time.time(),
-                "level": "INFO",
+                "at": transition_at,
+                "level": old_event.level,
             }
         )
         logger.info("DIAGNOSTIC ALARM CLEARED: %s", alarm_id)
+        return cleared
 
     def acknowledge(
         self,

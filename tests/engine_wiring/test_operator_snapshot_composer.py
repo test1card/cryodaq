@@ -35,6 +35,7 @@ from cryodaq.engine_wiring.operator_snapshot_authorities import (
 from cryodaq.engine_wiring.operator_snapshot_composer import OperatorSnapshotComposer
 from cryodaq.operator_snapshot import (
     AvailabilityTruth,
+    CooldownChannelBinding,
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
@@ -96,7 +97,16 @@ def _safety(cut: CommonCut) -> SafetyReadinessReceipt:
 def _attention(cut: CommonCut) -> AlarmAttentionReceipt:
     return AlarmAttentionReceipt(
         **_base(cut),
-        alarms=(AlarmEvidence("pressure_high", "WARNING", cut.observed_at, False),),
+        alarms=(
+            AlarmEvidence(
+                "pressure_high",
+                "WARNING",
+                cut.observed_at,
+                False,
+                ("sensor.main",),
+                experiment_id="exp-1",
+            ),
+        ),
         attention=(
             AttentionEvidence(
                 "inspect-vacuum",
@@ -106,6 +116,7 @@ def _attention(cut: CommonCut) -> AlarmAttentionReceipt:
                 cut.observed_at,
             ),
         ),
+        history_revision=9,
     )
 
 
@@ -134,6 +145,7 @@ def _cooldown(cut: CommonCut) -> CooldownReceipt:
     return CooldownReceipt(
         **_base(cut),
         samples=(CooldownPoint(0.0, 300.0), CooldownPoint(1.0, 299.0)),
+        trajectory_channel=CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
     )
 
 
@@ -208,8 +220,38 @@ async def test_complete_snapshot_has_one_cut_eight_detached_summaries_and_stable
     assert first.plant_health.subsystems[0] is not _safety(calls["safety"][0]).plant_health[0]
     assert first.attention.items[0].detail == "pressure_high"
     assert first.attention.items[0].state is OperatorPresentationState.WARNING
+    assert first.attention.items[0].channel_ids == ("sensor.main",)
+    assert first.attention.items[0].canonical_acknowledged is False
+    assert first.attention.history_revision == 9
+    assert first.cooldown_history.trajectory_channel == CooldownChannelBinding(
+        "sensor.main",
+        "thermometer",
+        "input.1.temperature",
+    )
     assert first.support_bundle.manifest is not None
     assert first.support_bundle.manifest.entries[0].path == "logs/engine.txt"
+
+
+@pytest.mark.asyncio
+async def test_missing_attention_history_keeps_canonical_critical_visible() -> None:
+    def degraded_attention(cut: CommonCut) -> AlarmAttentionReceipt:
+        return AlarmAttentionReceipt(
+            **_base(cut),
+            alarms=(AlarmEvidence("temperature_high", "CRITICAL", cut.observed_at, False, experiment_id="exp-1"),),
+            history_revision=None,
+        )
+
+    composer = _composer(
+        _Allocator([SnapshotRevision(43, NOW + timedelta(seconds=2))]),
+        attention=degraded_attention,
+    )
+    snapshot = await composer.compose(NOW)
+
+    assert tuple(item.detail for item in snapshot.attention.items) == ("temperature_high",)
+    assert snapshot.attention.items[0].state is OperatorPresentationState.FAULT
+    assert snapshot.attention.state is OperatorPresentationState.FAULT
+    assert snapshot.attention.history_revision is None
+    assert "attention_history_unavailable" in snapshot.attention.reason_codes
 
 
 @pytest.mark.asyncio
@@ -485,3 +527,31 @@ print(json.dumps(forbidden))
         check=True,
     )
     assert completed.stdout.strip() == "[]"
+
+
+@pytest.mark.asyncio
+async def test_attention_filters_origin_experiment_and_marks_evaluator_failure() -> None:
+    def attention(cut: CommonCut) -> AlarmAttentionReceipt:
+        return AlarmAttentionReceipt(
+            **_base(cut),
+            alarms=(
+                AlarmEvidence("old", "CRITICAL", cut.observed_at, False, experiment_id="experiment-old"),
+                AlarmEvidence(
+                    "held",
+                    "WARNING",
+                    cut.observed_at,
+                    False,
+                    evaluator_error=True,
+                    experiment_id="exp-1",
+                ),
+            ),
+        )
+
+    snapshot = await _composer(
+        _Allocator([SnapshotRevision(44, NOW + timedelta(seconds=2))]),
+        attention=attention,
+    ).compose(NOW)
+
+    assert tuple(item.detail for item in snapshot.attention.items) == ("held (ошибка оценки)",)
+    assert snapshot.attention.items[0].state is OperatorPresentationState.FAULT
+    assert snapshot.attention.items[0].title == "Оценка тревоги недоступна"

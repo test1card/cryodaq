@@ -11,11 +11,16 @@ import sqlite3
 import textwrap
 import threading
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from cryodaq.core import operator_log as operator_log_module
+from cryodaq.core.alarm_v2 import AlarmEvent, AlarmStateManager
+from cryodaq.core.event_bus import EngineEvent
 from cryodaq.core.operator_log import (
     OperatorLogIdempotencyConflictError,
     OperatorLogIdempotencyUnavailableError,
@@ -35,6 +40,875 @@ CREATE TABLE operator_log (
     tags          TEXT    NOT NULL DEFAULT '[]'
 )
 """
+
+
+def _attention_event(
+    *,
+    alarm_id: str = "cooldown-deviation",
+    timestamp: datetime = datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+) -> EngineEvent:
+    return EngineEvent(
+        event_type="alarm_fired",
+        timestamp=timestamp,
+        payload={
+            "alarm_id": alarm_id,
+            "level": "WARNING",
+            "message": "Cooldown trajectory deviated from reference",
+            "channels": ["temperature.cold-stage"],
+        },
+        experiment_id="exp-stable-7",
+    )
+
+
+async def test_attention_history_survives_writer_restart_with_explicit_bound(
+    tmp_path: Path,
+) -> None:
+    """The production writer must reopen the same bounded incident timeline."""
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        append = getattr(writer, "append_attention_event", None)
+        read = getattr(writer, "get_attention_history", None)
+        assert callable(append), "SQLiteWriter must durably append attention events"
+        assert callable(read), "SQLiteWriter must expose typed attention history"
+        first = await append(_attention_event())
+        await append(
+            _attention_event(
+                alarm_id="vacuum-deviation",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+        before = await read(experiment_id="exp-stable-7", limit=1)
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        read = getattr(restarted, "get_attention_history", None)
+        assert callable(read), "restarted SQLiteWriter must expose attention history"
+        after = await read(experiment_id="exp-stable-7", limit=1)
+        complete = await read(experiment_id="exp-stable-7", limit=2)
+    finally:
+        await restarted.stop()
+
+    assert before == after
+    assert after.truncated_before is True
+    assert len(after.items) == 1
+    assert after.items[0].alarm_id == "vacuum-deviation"
+    assert complete.truncated_before is False
+    assert tuple(item.event_id for item in complete.items)[0] == first.event_id
+    assert complete.items[0].channel_ids == ("temperature.cold-stage",)
+
+
+async def test_attention_history_empty_query_retains_requested_experiment_identity(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        page = await writer.get_attention_history(
+            experiment_id="different-experiment",
+            limit=10,
+        )
+    finally:
+        await writer.stop()
+
+    assert page.items == ()
+    assert getattr(page, "experiment_id", None) == "different-experiment"
+
+
+async def test_attention_history_page_binds_each_item_to_its_storage_revision(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(alarm_id="first"))
+        await writer.append_attention_event(
+            _attention_event(
+                alarm_id="second",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+        page = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    assert getattr(page, "item_revisions", None) == (1, 2)
+    with pytest.raises(ValueError, match="revision"):
+        replace(page, through_revision=1)
+
+
+async def test_attention_history_identical_event_retry_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    event = _attention_event()
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        first = await writer.append_attention_event(event)
+        second = await writer.append_attention_event(event)
+        page = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    assert second == first
+    assert page.through_revision == 1
+    assert page.items == (first,)
+
+
+async def test_attention_history_cancelled_append_retry_reconciles_one_incident(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    entered = threading.Event()
+    released = threading.Event()
+    settled = threading.Event()
+    real_append = writer._append_attention_history_item_sync
+
+    def blocked_append(item: object, *, require_persisted_incident: bool):
+        entered.set()
+        assert released.wait(timeout=5)
+        try:
+            return real_append(
+                item,
+                require_persisted_incident=require_persisted_incident,
+            )
+        finally:
+            settled.set()
+
+    monkeypatch.setattr(writer, "_append_attention_history_item_sync", blocked_append)
+    event = _attention_event()
+    caller = asyncio.create_task(writer.append_attention_event(event))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        released.set()
+        assert await asyncio.to_thread(settled.wait, 5)
+
+        retried = await writer.append_attention_event(event)
+        page = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        released.set()
+        await writer.stop()
+
+    assert page.items == (retried,)
+    assert page.through_revision == 1
+
+
+async def test_attention_history_detects_control_database_loss(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event())
+    finally:
+        await writer.stop()
+
+    (tmp_path / "control.db").unlink()
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="continuity|loss"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=1,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_restart_rejects_older_valid_database_rollback(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(alarm_id="first"))
+    finally:
+        await writer.stop()
+
+    older_path = tmp_path / "older-control.db"
+    source = sqlite3.connect(tmp_path / "control.db")
+    older = sqlite3.connect(older_path)
+    try:
+        source.backup(older)
+    finally:
+        older.close()
+        source.close()
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(
+            _attention_event(
+                alarm_id="second",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+    finally:
+        await writer.stop()
+
+    older = sqlite3.connect(older_path)
+    authority = sqlite3.connect(tmp_path / "control.db")
+    try:
+        older.backup(authority)
+    finally:
+        authority.close()
+        older.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="continuity|rollback"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_failed_append_remains_explicit_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.get_attention_history(experiment_id="exp-stable-7", limit=1)
+    real_commit = sqlite_writer_module._OwnedControlConnection.commit
+    injected = False
+
+    def fail_attention_commit(connection) -> None:  # noqa: ANN001
+        nonlocal injected
+        revision = connection._connection.execute(
+            "SELECT current_revision FROM attention_history_status WHERE singleton = 1"
+        ).fetchone()
+        if not injected and revision == (1,):
+            injected = True
+            raise RuntimeError("injected precommit attention failure")
+        real_commit(connection)
+
+    monkeypatch.setattr(
+        sqlite_writer_module._OwnedControlConnection,
+        "commit",
+        fail_attention_commit,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="injected precommit attention failure"):
+            await writer.append_attention_event(_attention_event())
+    finally:
+        monkeypatch.setattr(
+            sqlite_writer_module._OwnedControlConnection,
+            "commit",
+            real_commit,
+        )
+        await writer.stop()
+    assert injected is True
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="continuity|incomplete append"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=1,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_postcommit_unknown_reconciles_exact_event_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    await writer.get_attention_history(experiment_id="exp-stable-7", limit=1)
+    real_commit = sqlite_writer_module._OwnedControlConnection.commit
+    injected = False
+
+    def fail_after_attention_commit(connection) -> None:  # noqa: ANN001
+        nonlocal injected
+        revision = connection._connection.execute(
+            "SELECT current_revision FROM attention_history_status WHERE singleton = 1"
+        ).fetchone()
+        if not injected and revision == (1,):
+            injected = True
+            connection.validate_authority()
+            connection._connection.commit()
+            raise RuntimeError("injected postcommit attention uncertainty")
+        real_commit(connection)
+
+    monkeypatch.setattr(
+        sqlite_writer_module._OwnedControlConnection,
+        "commit",
+        fail_after_attention_commit,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="injected postcommit attention uncertainty"):
+            await writer.append_attention_event(_attention_event())
+    finally:
+        monkeypatch.setattr(
+            sqlite_writer_module._OwnedControlConnection,
+            "commit",
+            real_commit,
+        )
+        await writer.stop()
+    assert injected is True
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        page = await restarted.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await restarted.stop()
+    assert len(page.items) == 1
+    assert page.through_revision == 1
+    continuity = json.loads((tmp_path / "attention_history.continuity").read_text(encoding="ascii"))
+    assert continuity == {"revision": 1, "state": "clean", "version": 2}
+
+
+async def test_attention_history_capacity_is_fail_closed_durable_and_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlite_writer_module, "ATTENTION_HISTORY_MAX_ITEMS", 2)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        first = await writer.append_attention_event(_attention_event())
+        await writer.append_attention_event(
+            _attention_event(
+                alarm_id="second",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="third",
+                    timestamp=datetime(2026, 8, 10, 12, 2, tzinfo=UTC),
+                )
+            )
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="fourth",
+                    timestamp=datetime(2026, 8, 10, 12, 3, tzinfo=UTC),
+                )
+            )
+        before = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        after = await restarted.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await restarted.stop()
+
+    assert before == after
+    assert after.truncated_before is False
+    assert after.through_revision == 3
+    assert after.capacity_exhausted_at == datetime(2026, 8, 10, 12, 2, tzinfo=UTC)
+    assert tuple(item.alarm_id for item in after.items) == (
+        first.alarm_id,
+        "second",
+    )
+    assert first.event_id in {item.event_id for item in after.items}
+
+
+async def test_attention_history_as_of_surfaces_revision_bound_capacity_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlite_writer_module, "ATTENTION_HISTORY_MAX_ITEMS", 1)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(timestamp=datetime(2026, 1, 1, tzinfo=UTC)))
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="future-rejection",
+                    timestamp=datetime(2030, 1, 1, tzinfo=UTC),
+                )
+            )
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="backfilled-rejection",
+                    timestamp=datetime(2020, 1, 1, tzinfo=UTC),
+                )
+            )
+        page = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=1,
+            as_of=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+    finally:
+        await writer.stop()
+
+    assert page.items == ()
+    assert page.through_revision == 2
+    assert page.capacity_exhausted_at == datetime(2030, 1, 1, tzinfo=UTC)
+
+
+async def test_attention_history_restart_rejects_revision_identity_swap(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        first = await writer.append_attention_event(_attention_event(alarm_id="first"))
+        await writer.append_attention_event(
+            _attention_event(
+                alarm_id="second",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+        )
+        frozen = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+            through_revision=1,
+        )
+    finally:
+        await writer.stop()
+    assert tuple(item.event_id for item in frozen.items) == (first.event_id,)
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute("UPDATE attention_history SET sequence = -1 WHERE sequence = 1")
+        conn.execute("UPDATE attention_history SET sequence = 1 WHERE sequence = 2")
+        conn.execute("UPDATE attention_history SET sequence = 2 WHERE sequence = -1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="revision binding"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+                through_revision=1,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_restart_rejects_annotation_before_parent_revision(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        incident = await writer.append_attention_event(_attention_event())
+        await writer.annotate_attention_acknowledgement(
+            incident,
+            actor="operator-7",
+            note="Seen",
+            timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+        )
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute("UPDATE attention_history SET sequence = -1, history_revision = -1 WHERE sequence = 1")
+        conn.execute("UPDATE attention_history SET sequence = 1, history_revision = 1 WHERE sequence = 2")
+        conn.execute("UPDATE attention_history SET sequence = 2, history_revision = 2 WHERE sequence = -1")
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="incident graph"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_restart_rejects_erased_capacity_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlite_writer_module, "ATTENTION_HISTORY_MAX_ITEMS", 1)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(alarm_id="admitted"))
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="rejected",
+                    timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+                )
+            )
+        before = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=1,
+        )
+    finally:
+        await writer.stop()
+    assert before.through_revision == 2
+    assert before.capacity_exhausted_at is not None
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            "UPDATE attention_history_status SET capacity_exhausted_revision = NULL, capacity_exhausted_at = NULL"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(RuntimeError, match="status authority"):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=1,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_capacity_marker_round_trips_extreme_utc_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sqlite_writer_module, "ATTENTION_HISTORY_MAX_ITEMS", 1)
+    extreme = datetime.min.replace(tzinfo=UTC)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(alarm_id="admitted"))
+        with pytest.raises(RuntimeError, match="capacity exhausted"):
+            await writer.append_attention_event(
+                _attention_event(
+                    alarm_id="extreme-rejection",
+                    timestamp=extreme,
+                )
+            )
+        before = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=1,
+        )
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        after = await restarted.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=1,
+        )
+    finally:
+        await restarted.stop()
+
+    assert before == after
+    assert after.capacity_exhausted_at == extreme
+
+
+async def test_attention_history_orders_distinct_extreme_utc_microseconds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifiers = iter(("f" * 32, "0" * 32))
+    monkeypatch.setattr(
+        operator_log_module,
+        "uuid4",
+        lambda: SimpleNamespace(hex=next(identifiers)),
+    )
+    earlier = datetime.max.replace(microsecond=999998, tzinfo=UTC)
+    later = datetime.max.replace(microsecond=999999, tzinfo=UTC)
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event(alarm_id="earlier", timestamp=earlier))
+        await writer.append_attention_event(_attention_event(alarm_id="later", timestamp=later))
+        before = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        after = await restarted.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await restarted.stop()
+
+    assert before == after
+    assert tuple(item.timestamp for item in after.items) == (earlier, later)
+    assert tuple(item.alarm_id for item in after.items) == ("earlier", "later")
+
+
+async def test_attention_acknowledgement_is_annotation_not_alarm_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = AlarmStateManager()
+    canonical_event = AlarmEvent(
+        alarm_id="cooldown-deviation",
+        level="WARNING",
+        message="Cooldown trajectory deviated from reference",
+        triggered_at=datetime(2026, 8, 10, 12, 0, tzinfo=UTC).timestamp(),
+        channels=["temperature.cold-stage"],
+        values={"temperature.cold-stage": 8.2},
+    )
+    assert manager.process("cooldown-deviation", canonical_event, {}) == "TRIGGERED"
+    canonical_before = manager.snapshot_active_canonical()
+
+    def reject_canonical_ack(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("attention annotation called canonical AlarmStateManager.acknowledge")
+
+    monkeypatch.setattr(AlarmStateManager, "acknowledge", reject_canonical_ack)
+
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        incident = await writer.append_attention_event(_attention_event())
+        annotate = getattr(writer, "annotate_attention_acknowledgement", None)
+        assert callable(annotate), "attention acknowledgement must be an append-only annotation"
+        annotation = await annotate(
+            incident,
+            actor="operator-7",
+            note="Seen during cooldown review",
+            timestamp=datetime(2026, 8, 10, 12, 2, tzinfo=UTC),
+        )
+        history = await writer.get_attention_history(
+            experiment_id="exp-stable-7",
+            limit=2,
+        )
+    finally:
+        await writer.stop()
+
+    canonical_after = manager.snapshot_active_canonical()
+    assert canonical_after == canonical_before
+    assert manager.state_revision == canonical_before.state_revision
+    assert annotation.kind == "acknowledgement"
+    assert annotation.annotation_of == incident.event_id
+    assert tuple(item.kind for item in history.items) == (
+        "incident",
+        "acknowledgement",
+    )
+
+
+async def test_attention_annotation_rejects_unpersisted_incident(
+    tmp_path: Path,
+) -> None:
+    fabricated = operator_log_module.new_attention_incident(
+        timestamp=datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+        experiment_id="exp-stable-7",
+        alarm_id="fabricated",
+        level="WARNING",
+        message="Not persisted",
+        channel_ids=("temperature.cold-stage",),
+    )
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        with pytest.raises(ValueError, match="persisted incident"):
+            await writer.annotate_attention_acknowledgement(
+                fabricated,
+                actor="operator-7",
+                note="must not attach",
+                timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+            )
+    finally:
+        await writer.stop()
+
+
+@pytest.mark.parametrize(
+    "damage_sql",
+    (
+        "DROP TABLE attention_history",
+        "DELETE FROM attention_history_status",
+        "DROP TABLE attention_history; DROP TABLE attention_history_status",
+    ),
+    ids=(
+        "missing-history-table",
+        "missing-status-row",
+        "missing-all-attention-objects",
+    ),
+)
+async def test_attention_history_restart_rejects_missing_established_authority(
+    tmp_path: Path,
+    damage_sql: str,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        await writer.append_attention_event(_attention_event())
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.executescript(damage_sql)
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="attention history established storage is incomplete",
+        ):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_restart_rejects_dangling_annotation(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        incident = await writer.append_attention_event(_attention_event())
+        annotation = await writer.annotate_attention_acknowledgement(
+            incident,
+            actor="operator-7",
+            note="Seen",
+            timestamp=datetime(2026, 8, 10, 12, 1, tzinfo=UTC),
+        )
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        missing_parent_id = "f" * 32
+        assert missing_parent_id != incident.event_id
+        damaged = replace(annotation, annotation_of=missing_parent_id)
+        conn.execute(
+            "UPDATE attention_history SET annotation_of = ?, payload = ? WHERE event_id = ?",
+            (
+                damaged.annotation_of,
+                operator_log_module.dump_attention_history_item(damaged),
+                damaged.event_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="attention history incident graph is invalid",
+        ):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+async def test_attention_history_restart_rejects_deleted_standalone_incident(
+    tmp_path: Path,
+) -> None:
+    writer = SQLiteWriter(tmp_path)
+    await writer.start_immediate()
+    try:
+        incident = await writer.append_attention_event(_attention_event())
+    finally:
+        await writer.stop()
+
+    conn = sqlite3.connect(tmp_path / "control.db")
+    try:
+        conn.execute(
+            "DELETE FROM attention_history WHERE event_id = ?",
+            (incident.event_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SQLiteWriter(tmp_path)
+    await restarted.start_immediate()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="attention history admitted row total is invalid",
+        ):
+            await restarted.get_attention_history(
+                experiment_id="exp-stable-7",
+                limit=2,
+            )
+    finally:
+        await restarted.stop()
+
+
+def test_attention_codec_rejects_boolean_schema_version() -> None:
+    item = operator_log_module.new_attention_incident(
+        timestamp=datetime(2026, 8, 10, 12, 0, tzinfo=UTC),
+        experiment_id="exp-stable-7",
+        alarm_id="cooldown-deviation",
+        level="WARNING",
+        message="Deviation",
+        channel_ids=("temperature.cold-stage",),
+    )
+    payload = operator_log_module.dump_attention_history_item(item)
+    mutant = payload.replace(
+        f'"version":{operator_log_module.ATTENTION_HISTORY_ITEM_VERSION}',
+        '"version":true',
+    )
+    assert mutant != payload
+    with pytest.raises(ValueError, match="attention history item is invalid"):
+        operator_log_module.load_attention_history_item(mutant)
 
 
 def _publication_payload(

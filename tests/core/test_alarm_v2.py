@@ -971,6 +971,17 @@ def test_warning_then_critical_severity_upgrade() -> None:
     assert "SEVERITY_UPGRADED" in transitions
 
 
+def test_diagnostic_alarm_inherits_bound_experiment_id() -> None:
+    mgr = AlarmStateManager()
+    mgr.bind_experiment_id("experiment-diagnostic")
+
+    event = mgr.publish_diagnostic_alarm("T1", "warning", 300.0)
+
+    assert event is not None
+    assert event.experiment_id == "experiment-diagnostic"
+    assert mgr.snapshot_active_canonical().active["diag:T1"]["experiment_id"] == "experiment-diagnostic"
+
+
 def test_critical_no_duplicate_when_already_critical() -> None:
     """publish_diagnostic_alarm returns None when level is same or lower than active."""
     mgr = AlarmStateManager()

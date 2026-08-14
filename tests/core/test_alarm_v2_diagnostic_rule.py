@@ -100,3 +100,27 @@ def test_diagnostic_alarm_inherits_ack_workflow() -> None:
     history = mgr.get_history()
     acked = [e for e in history if e.get("alarm_id") == "diag:T2" and e["transition"] == "ACKNOWLEDGED"]
     assert len(acked) == 1
+
+
+def test_diagnostic_transition_receipts_preserve_one_activation_and_audit_order() -> None:
+    mgr = _make_manager()
+
+    triggered = mgr.publish_diagnostic_alarm("T9", "warning", 301.0)
+    upgraded = mgr.publish_diagnostic_alarm("T9", "critical", 901.0)
+    repeated_critical = mgr.publish_diagnostic_alarm("T9", "critical", 902.0)
+    cleared = mgr.clear_diagnostic_alarm("T9")
+
+    assert triggered is not None
+    assert upgraded is not None
+    assert repeated_critical is None
+    assert cleared is not None, "canonical clear must return its detached activation evidence"
+    assert [getattr(item, "transition", None) for item in (triggered, upgraded, cleared)] == [
+        "TRIGGERED",
+        "SEVERITY_UPGRADED",
+        "CLEARED",
+    ]
+    assert {item.activation_id for item in (triggered, upgraded, cleared)} == {1}
+    revisions = [getattr(item, "audit_revision", None) for item in (triggered, upgraded, cleared)]
+    assert revisions == sorted(revisions)
+    assert len(set(revisions)) == 3
+    assert mgr.clear_diagnostic_alarm("T9") is None

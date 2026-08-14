@@ -24,6 +24,7 @@ from cryodaq.operator_snapshot import (
     MAX_NONNEGATIVE_INT,
     AttentionQueue,
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownHistorySummary,
     CooldownSample,
     DataIntegritySummary,
@@ -72,6 +73,8 @@ class ReplaySnapshotEvidence:
     experiment_id: str | None = None
     experiment_name: str | None = None
     phase: str | None = None
+    attention_history_revision: int | None = None
+    cooldown_channel: CooldownChannelBinding | None = None
     cooldown_samples: tuple[CooldownSample, ...] = ()
     cooldown_reference_id: str | None = None
     cooldown_reference: tuple[CooldownSample, ...] = ()
@@ -82,14 +85,28 @@ class ReplaySnapshotEvidence:
             "observed_at",
             _exact_utc(self.observed_at, field="observed_at"),
         )
-        for field in ("experiment_id", "experiment_name", "phase", "cooldown_reference_id"):
+        for field in (
+            "experiment_id",
+            "experiment_name",
+            "phase",
+            "cooldown_reference_id",
+        ):
             value = getattr(self, field)
             if value is not None and (type(value) is not str or not value or value != value.strip()):
                 raise ValueError(f"{field} must be a non-empty exact string without surrounding whitespace")
+        if self.attention_history_revision is not None and (
+            type(self.attention_history_revision) is not int
+            or not 0 <= self.attention_history_revision <= MAX_NONNEGATIVE_INT
+        ):
+            raise ValueError("attention_history_revision must be an exact bounded non-negative integer")
+        if self.cooldown_channel is not None and type(self.cooldown_channel) is not CooldownChannelBinding:
+            raise TypeError("cooldown_channel must be an exact CooldownChannelBinding or None")
         _exact_samples(self.cooldown_samples, field="cooldown_samples")
         _exact_samples(self.cooldown_reference, field="cooldown_reference")
         if self.cooldown_reference and self.cooldown_reference_id is None:
             raise ValueError("cooldown reference samples require reference identity")
+        if (self.cooldown_samples or self.cooldown_reference) and self.cooldown_channel is None:
+            raise ValueError("cooldown trajectory evidence requires stable channel identity")
 
 
 class ReplayOperatorSnapshotSession:
@@ -291,6 +308,7 @@ def _build_replay_snapshot(
             cut,
             status("attention_authority_unavailable", "Attention history authority unavailable in replay"),
             (),
+            evidence.attention_history_revision,
         ),
         ExperimentOperatingState(
             cut,
@@ -316,6 +334,7 @@ def _build_replay_snapshot(
             evidence.cooldown_samples,
             evidence.cooldown_reference_id,
             evidence.cooldown_reference,
+            evidence.cooldown_channel,
         ),
         SupportBundleSummary(
             cut,

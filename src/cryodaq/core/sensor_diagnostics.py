@@ -268,6 +268,12 @@ class SensorDiagnosticsEngine:
             self._cold_start_grace_s = float(cold_start_grace_s)
         self._engine_started_mono: float | None = None
 
+    def bind_experiment_id(self, experiment_id: str | None) -> None:
+        """Bind the diagnostic alarm publisher before its next mutation."""
+        binder = getattr(self._alarm_publisher, "bind_experiment_id", None)
+        if callable(binder):
+            binder(experiment_id)
+
     def mark_engine_started(self) -> None:
         """Stamp the cold-start anchor; subsequent alarms wait out the grace."""
         self._engine_started_mono = time.monotonic()
@@ -362,7 +368,9 @@ class SensorDiagnosticsEngine:
                 if channel_id in self._anomaly_state:
                     state = self._anomaly_state.pop(channel_id)
                     if state.last_warning_published_ts is not None or state.last_critical_published_ts is not None:
-                        self._alarm_publisher.clear_diagnostic_alarm(channel_id)
+                        event = self._alarm_publisher.clear_diagnostic_alarm(channel_id)
+                        if event is not None:
+                            new_events.append(event)
             else:
                 if channel_id not in self._anomaly_state:
                     self._anomaly_state[channel_id] = _AnomalyState(

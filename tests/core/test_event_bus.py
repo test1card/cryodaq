@@ -113,6 +113,46 @@ async def test_publish_multiple_events_ordered() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_required_observer_settles_before_best_effort_fanout() -> None:
+    bus = EventBus()
+    queue = await bus.subscribe("consumer")
+    observed: list[EngineEvent] = []
+
+    async def persist(event: EngineEvent) -> None:
+        assert queue.empty()
+        observed.append(event)
+
+    bus.retain_required_observer("attention_history", persist)
+    event = _event("alarm_fired")
+    await bus.publish(event)
+
+    assert observed == [event]
+    assert observed[0] is not event
+    assert queue.get_nowait() is event
+
+
+async def test_required_observer_failure_aborts_fanout_and_has_exact_owner() -> None:
+    bus = EventBus()
+    queue = await bus.subscribe("consumer")
+
+    async def reject(_event: EngineEvent) -> None:
+        raise RuntimeError("persistence rejected")
+
+    bus.retain_required_observer("attention_history", reject)
+    with pytest.raises(RuntimeError, match="persistence rejected"):
+        await bus.publish(_event("alarm_fired"))
+    assert queue.empty()
+
+    with pytest.raises(RuntimeError, match="owner does not match"):
+        bus.release_required_observer("wrong_owner")
+    with pytest.raises(RuntimeError, match="already retained"):
+        bus.retain_required_observer("second_owner", reject)
+
+    bus.release_required_observer("attention_history")
+    await bus.publish(_event("alarm_fired"))
+    assert queue.qsize() == 1
+
+
 async def test_full_queue_drops_event_with_warning() -> None:
     bus = EventBus()
     q = await bus.subscribe("slow_consumer", maxsize=2)
@@ -129,6 +169,14 @@ async def test_full_queue_drops_event_with_warning() -> None:
         assert "slow_consumer" in call_args[1]
 
     assert q.qsize() == 2  # original two remain
+
+
+async def test_required_publish_rejects_alarm_path_that_would_bypass_history() -> None:
+    bus = EventBus()
+    await bus.subscribe("consumer")
+
+    with pytest.raises(ValueError, match="alarm_fired must use persistence-aware publish"):
+        await bus.publish_required(_event("alarm_fired"))
 
 
 async def test_required_publish_preflights_every_subscriber_without_partial_delivery() -> None:

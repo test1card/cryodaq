@@ -559,3 +559,62 @@ async def test_alarm_v2_feed_loop_pushes_only_usable_readings() -> None:
         usable.timestamp.timestamp(),
         usable.value,
     )
+
+
+async def test_vacuum_guard_tick_settles_before_shutdown_cancellation() -> None:
+    from cryodaq.core.alarm_v2 import AlarmEvent
+    from cryodaq.engine_wiring import runtime_tasks
+
+    tick_entered = asyncio.Event()
+    release_tick = asyncio.Event()
+    active_event = AlarmEvent(
+        alarm_id="vacuum_guard",
+        level="CRITICAL",
+        message="vacuum lost",
+        triggered_at=1.0,
+        channels=["pressure"],
+        values={"pressure": 1.0},
+        activation_id=7,
+    )
+    active = {"vacuum_guard": active_event}
+
+    async def tick() -> str:
+        active["vacuum_guard"] = active_event
+        tick_entered.set()
+        await release_tick.wait()
+        return "TRIGGERED"
+
+    async def sleep_once_then_cancel(_interval: float) -> None:
+        if not tick_entered.is_set():
+            return
+        raise asyncio.CancelledError
+
+    state_mgr = MagicMock()
+    state_mgr.get_active.return_value = active
+    event_bus = MagicMock()
+    event_bus.publish = AsyncMock()
+    experiment_manager = MagicMock(active_experiment_id="exp-1")
+    vacuum_guard = MagicMock(tick=tick)
+
+    with patch.object(runtime_tasks.asyncio, "sleep", side_effect=sleep_once_then_cancel):
+        task = asyncio.create_task(
+            runtime_tasks.vacuum_guard_tick_loop(
+                vacuum_cfg={"eval_interval_s": 0},
+                vacuum_guard=vacuum_guard,
+                state_mgr=state_mgr,
+                telegram_bot=None,
+                alarm_dispatch_tasks=set(),
+                event_bus=event_bus,
+                experiment_manager=experiment_manager,
+            )
+        )
+        await asyncio.wait_for(tick_entered.wait(), timeout=1)
+        task.cancel()
+        release_tick.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    event_bus.publish.assert_awaited_once()
+    published = event_bus.publish.await_args.args[0]
+    assert published.event_type == "alarm_fired"
+    assert published.payload["alarm_id"] == "vacuum_guard"

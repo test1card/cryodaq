@@ -38,6 +38,7 @@ from cryodaq.operator_snapshot import (
     MAX_REASON_UTF8_BYTES,
     MAX_TEXT_UTF8_BYTES,
     AvailabilityTruth,
+    CooldownChannelBinding,
     OperatorPresentationState,
     ReadinessTruth,
     RecordingTruth,
@@ -282,6 +283,9 @@ class AlarmEvidence:
     level: str
     triggered_at: datetime
     acknowledged: bool
+    channel_ids: tuple[str, ...] = ()
+    evaluator_error: bool = False
+    experiment_id: str = "no-active-experiment"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -292,6 +296,21 @@ class AlarmEvidence:
         object.__setattr__(self, "triggered_at", _utc(self.triggered_at, field="triggered_at"))
         if type(self.acknowledged) is not bool:
             raise TypeError("acknowledged must be exact bool")
+        if type(self.evaluator_error) is not bool:
+            raise TypeError("evaluator_error must be exact bool")
+        object.__setattr__(
+            self,
+            "experiment_id",
+            _bounded_text(self.experiment_id, field="experiment_id", max_bytes=MAX_ID_UTF8_BYTES),
+        )
+        if type(self.channel_ids) is not tuple or len(self.channel_ids) > MAX_CHANNELS:
+            raise TypeError("channel_ids must be a bounded exact tuple")
+        channel_ids = tuple(
+            _bounded_text(channel_id, field="channel_id", max_bytes=MAX_ID_UTF8_BYTES)
+            for channel_id in self.channel_ids
+        )
+        _unique(channel_ids, field="alarm channel ids")
+        object.__setattr__(self, "channel_ids", channel_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +338,7 @@ class AttentionEvidence:
 class AlarmAttentionReceipt(AuthorityReceipt):
     alarms: tuple[AlarmEvidence, ...] = ()
     attention: tuple[AttentionEvidence, ...] = ()
+    history_revision: int | None = None
 
     def __post_init__(self) -> None:
         super(AlarmAttentionReceipt, self).__post_init__()
@@ -326,11 +346,15 @@ class AlarmAttentionReceipt(AuthorityReceipt):
         _typed_tuple(self.attention, AttentionEvidence, field="attention", limit=MAX_ATTENTION_ITEMS)
         _unique(tuple(item.alarm_id for item in self.alarms), field="alarm ids")
         _unique(tuple(item.attention_id for item in self.attention), field="attention ids")
+        if self.history_revision is not None:
+            _exact_int(self.history_revision, field="history_revision")
         if any(item.triggered_at > self.cut.observed_at for item in self.alarms) or any(
             item.observed_at > self.cut.observed_at for item in self.attention
         ):
             raise ValueError("alarm/attention evidence must not postdate its common cut")
-        if self.availability is AuthorityAvailability.UNAVAILABLE and (self.alarms or self.attention):
+        if self.availability is AuthorityAvailability.UNAVAILABLE and (
+            self.alarms or self.attention or self.history_revision is not None
+        ):
             raise ValueError("unavailable alarm/attention receipt cannot carry domain evidence")
 
 
@@ -415,6 +439,7 @@ class CooldownReceipt(AuthorityReceipt):
     samples: tuple[CooldownPoint, ...] = ()
     reference_id: str | None = None
     reference_samples: tuple[CooldownPoint, ...] = ()
+    trajectory_channel: CooldownChannelBinding | None = None
 
     def __post_init__(self) -> None:
         super(CooldownReceipt, self).__post_init__()
@@ -425,15 +450,26 @@ class CooldownReceipt(AuthorityReceipt):
             "reference_id",
             _bounded_text(self.reference_id, field="reference_id", max_bytes=MAX_ID_UTF8_BYTES, optional=True),
         )
+        if self.trajectory_channel is not None and type(self.trajectory_channel) is not CooldownChannelBinding:
+            raise TypeError("trajectory_channel must be an exact CooldownChannelBinding or None")
         if (self.reference_id is None) != (not self.reference_samples):
             raise ValueError("reference_id and reference_samples must be present together")
+        if (self.samples or self.reference_samples) and self.trajectory_channel is None:
+            raise ValueError("cooldown trajectory evidence requires stable channel identity")
         for field, values in (("samples", self.samples), ("reference_samples", self.reference_samples)):
             if any(current.elapsed_s >= following.elapsed_s for current, following in zip(values, values[1:])):
                 raise ValueError(f"{field} elapsed_s must be strictly increasing")
         if self.availability is AuthorityAvailability.UNAVAILABLE and (
-            self.samples or self.reference_id is not None or self.reference_samples
+            self.samples
+            or self.reference_id is not None
+            or self.reference_samples
+            or self.trajectory_channel is not None
         ):
             raise ValueError("unavailable cooldown receipt cannot carry trajectory evidence")
+
+    @property
+    def trajectory_channel_id(self) -> str | None:
+        return None if self.trajectory_channel is None else self.trajectory_channel.channel_id
 
 
 @dataclass(frozen=True, slots=True)

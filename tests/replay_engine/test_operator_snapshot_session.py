@@ -13,6 +13,7 @@ from cryodaq.gui.state.operator_snapshot_ingress import OperatorSnapshotIngressO
 from cryodaq.gui.state.operator_view_models import OperatorSnapshotStore
 from cryodaq.operator_snapshot import (
     AvailabilityTruth,
+    CooldownChannelBinding,
     CooldownSample,
     OperatorPresentationState,
     ReadinessTruth,
@@ -46,6 +47,8 @@ def _evidence(observed_at: datetime = NOW) -> ReplaySnapshotEvidence:
         experiment_id="archive-exp-1",
         experiment_name="Historical cooldown",
         phase="cooldown",
+        attention_history_revision=9,
+        cooldown_channel=CooldownChannelBinding("sensor.main", "thermometer", "input.1.temperature"),
         cooldown_samples=(CooldownSample(0, 300), CooldownSample(60, 250)),
         cooldown_reference_id="reference-1",
         cooldown_reference=(CooldownSample(0, 300), CooldownSample(60, 245)),
@@ -75,6 +78,12 @@ def test_conservative_complete_replay_cut_never_claims_live_authority() -> None:
     assert snapshot.data_integrity.storage is AvailabilityTruth.UNKNOWN
     assert snapshot.support_bundle.availability is AvailabilityTruth.UNKNOWN
     assert snapshot.attention.reason_codes == ("attention_authority_unavailable",)
+    assert snapshot.attention.history_revision == 9
+    assert snapshot.cooldown_history.trajectory_channel == CooldownChannelBinding(
+        "sensor.main",
+        "thermometer",
+        "input.1.temperature",
+    )
     assert snapshot.infrastructure.reason_codes == ("infrastructure_authority_unavailable",)
     assert snapshot.support_bundle.reason_codes == ("support_authority_unavailable",)
 

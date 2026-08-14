@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -10,12 +11,16 @@ import pytest
 
 from cryodaq.core.alarm_config import AlarmConfig, SetpointDef
 from cryodaq.core.alarm_providers import ExperimentPhaseProvider, ExperimentSetpointProvider
-from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent
+from cryodaq.core.alarm_v2 import AlarmEvaluator, AlarmEvent, AlarmStateManager
 from cryodaq.core.channel_state import ChannelStateTracker
 from cryodaq.core.event_bus import EventBus
 from cryodaq.core.rate_estimator import RateEstimator
 from cryodaq.drivers.base import Reading
-from cryodaq.engine_wiring.runtime_tasks import _alarm_v2_tick_configs
+from cryodaq.engine_wiring.runtime_tasks import (
+    _alarm_v2_tick_configs,
+    cooldown_alarm_tick_loop,
+    sensor_diag_tick,
+)
 from cryodaq.notifications.telegram_commands import TelegramCommandBot
 
 _CHANNEL = "T12"
@@ -49,6 +54,7 @@ class _DispatchingActiveState:
 
     def process(self, alarm_id: str, event: AlarmEvent | None, config: dict) -> str | None:
         assert event is not None
+        event.activation_id = 1
         self._active[alarm_id] = event
         return "TRIGGERED"
 
@@ -119,3 +125,293 @@ async def test_unknown_rate_publication_omits_value_and_telegram_does_not_render
     rendered = bot._cmd_alarms()
     assert "Значение:" not in rendered
     assert "0" not in rendered.split("cooldown_rate", 1)[1]
+
+
+@pytest.mark.asyncio
+async def test_alarm_v2_publication_uses_canonical_activation_time_and_identity() -> None:
+    triggered_at = datetime(2026, 8, 10, 6, 30, tzinfo=UTC)
+    evaluated = AlarmEvent(
+        alarm_id="canonical-alarm",
+        level="CRITICAL",
+        message="Canonical transition",
+        triggered_at=triggered_at.timestamp(),
+        channels=[_CHANNEL],
+        values={_CHANNEL: 80.0},
+    )
+    evaluator = SimpleNamespace(evaluate=lambda *_args, **_kwargs: evaluated)
+    state_mgr = AlarmStateManager()
+    config = AlarmConfig(alarm_id="canonical-alarm", config={})
+    event_bus = EventBus()
+    published = await event_bus.subscribe("canonical-alarm-publication")
+
+    await _alarm_v2_tick_configs(
+        configs=[config],
+        phase_provider=SimpleNamespace(get_current_phase=lambda: None),
+        evaluator=evaluator,
+        state_mgr=state_mgr,
+        telegram_bot=None,
+        alarm_dispatch_tasks=set(),
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="experiment-stable-11"),
+    )
+
+    engine_event = published.get_nowait()
+    canonical = state_mgr.get_active()["canonical-alarm"]
+    assert engine_event.timestamp == triggered_at
+    assert engine_event.experiment_id == "experiment-stable-11"
+    assert engine_event.payload.get("activation_id") == canonical.activation_id == 1
+    assert engine_event.payload["channels"] == canonical.channels
+
+    evaluator.evaluate = lambda *_args, **_kwargs: None
+    await _alarm_v2_tick_configs(
+        configs=[config],
+        phase_provider=SimpleNamespace(get_current_phase=lambda: None),
+        evaluator=evaluator,
+        state_mgr=state_mgr,
+        telegram_bot=None,
+        alarm_dispatch_tasks=set(),
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="experiment-stable-11"),
+    )
+    cleared = published.get_nowait()
+    assert cleared.event_type == "alarm_cleared"
+    assert cleared.payload.get("activation_id") == canonical.activation_id
+
+
+@pytest.mark.asyncio
+async def test_physical_alarm_publication_captures_pre_tick_experiment_and_canonical_event() -> None:
+    triggered_at = datetime(2026, 8, 10, 6, 45, tzinfo=UTC)
+    state_mgr = AlarmStateManager()
+    assert (
+        state_mgr.process(
+            "cooldown_alarm",
+            AlarmEvent(
+                alarm_id="cooldown_alarm",
+                level="CRITICAL",
+                message="Cooldown deviation",
+                triggered_at=triggered_at.timestamp(),
+                channels=[_CHANNEL],
+                values={_CHANNEL: 81.0},
+            ),
+            {},
+        )
+        == "TRIGGERED"
+    )
+    experiment = SimpleNamespace(active_experiment_id="experiment-before-tick")
+
+    class _CooldownAlarm:
+        calls = 0
+
+        async def tick(self, experiment_id: str | None = None) -> str:
+            self.calls += 1
+            if self.calls > 1:
+                raise asyncio.CancelledError
+            experiment.active_experiment_id = "experiment-after-tick"
+            return "TRIGGERED"
+
+    event_bus = EventBus()
+    published = await event_bus.subscribe("physical-alarm-publication")
+    with pytest.raises(asyncio.CancelledError):
+        await cooldown_alarm_tick_loop(
+            cooldown_cfg={"eval_interval_s": 0},
+            cooldown_alarm=_CooldownAlarm(),
+            state_mgr=state_mgr,
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=experiment,
+        )
+
+    engine_event = published.get_nowait()
+    canonical = state_mgr.get_active()["cooldown_alarm"]
+    assert engine_event.timestamp == triggered_at
+    assert engine_event.experiment_id == "experiment-before-tick"
+    assert engine_event.payload.get("activation_id") == canonical.activation_id == 1
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_activation_also_enters_canonical_attention_stream() -> None:
+    state_mgr = AlarmStateManager()
+    canonical = state_mgr.publish_diagnostic_alarm(_CHANNEL, "critical", 600.0)
+    assert canonical is not None
+
+    class _Diagnostics:
+        calls = 0
+
+        def update(self) -> list[AlarmEvent]:
+            self.calls += 1
+            if self.calls > 1:
+                raise asyncio.CancelledError
+            return [canonical]
+
+    event_bus = EventBus()
+    published = await event_bus.subscribe("diagnostic-alarm-publication")
+    with pytest.raises(asyncio.CancelledError):
+        await sensor_diag_tick(
+            sensor_diag=_Diagnostics(),
+            sd_cfg={"update_interval_s": 0},
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=SimpleNamespace(active_experiment_id="experiment-diagnostic"),
+        )
+
+    durable_event = published.get_nowait()
+    assert durable_event.event_type == "alarm_fired"
+    assert durable_event.timestamp == datetime.fromtimestamp(canonical.triggered_at, UTC)
+    assert durable_event.payload.get("activation_id") == canonical.activation_id == 1
+    assert published.get_nowait().event_type == "sensor_anomaly_critical"
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_transition_kinds_do_not_create_duplicate_incidents() -> None:
+    triggered = AlarmEvent(
+        alarm_id="diag:T12",
+        level="WARNING",
+        message="warning",
+        triggered_at=1_700_000_000.0,
+        channels=[_CHANNEL],
+        values={_CHANNEL: 301.0},
+        activation_id=7,
+    )
+    triggered.transition = "TRIGGERED"
+    triggered.transition_at = triggered.triggered_at
+    triggered.audit_revision = 11
+    upgraded = AlarmEvent(
+        alarm_id="diag:T12",
+        level="CRITICAL",
+        message="critical",
+        triggered_at=triggered.triggered_at,
+        channels=[_CHANNEL],
+        values={_CHANNEL: 901.0},
+        activation_id=7,
+    )
+    upgraded.transition = "SEVERITY_UPGRADED"
+    upgraded.transition_at = triggered.triggered_at + 1.0
+    upgraded.audit_revision = 12
+    cleared = AlarmEvent(
+        alarm_id="diag:T12",
+        level="CRITICAL",
+        message="critical",
+        triggered_at=triggered.triggered_at,
+        channels=[_CHANNEL],
+        values={_CHANNEL: 901.0},
+        activation_id=7,
+    )
+    cleared.transition = "CLEARED"
+    cleared.transition_at = triggered.triggered_at + 2.0
+    cleared.audit_revision = 13
+
+    class _Diagnostics:
+        calls = 0
+
+        def update(self) -> list[AlarmEvent]:
+            self.calls += 1
+            if self.calls > 1:
+                raise asyncio.CancelledError
+            return [triggered, upgraded, cleared]
+
+    event_bus = EventBus()
+    published = await event_bus.subscribe("diagnostic-transition-publication")
+    with pytest.raises(asyncio.CancelledError):
+        await sensor_diag_tick(
+            sensor_diag=_Diagnostics(),
+            sd_cfg={"update_interval_s": 0},
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=SimpleNamespace(active_experiment_id="experiment-origin"),
+        )
+
+    emitted = []
+    while not published.empty():
+        emitted.append(published.get_nowait())
+    assert [event.event_type for event in emitted] == [
+        "alarm_fired",
+        "alarm_severity_changed",
+        "sensor_anomaly_critical",
+        "alarm_cleared",
+    ]
+    assert [event.payload.get("activation_id") for event in emitted] == [7, 7, 7, 7]
+    assert emitted[1].payload.get("audit_revision") == 12
+    assert emitted[-1].timestamp == datetime.fromtimestamp(cleared.transition_at, UTC)
+
+
+@pytest.mark.asyncio
+async def test_cooldown_loop_publishes_clear_after_non_tick_mutation() -> None:
+    state_mgr = AlarmStateManager()
+    event_bus = EventBus()
+    published = await event_bus.subscribe("cooldown-clear-after-disarm")
+
+    class _CooldownAlarm:
+        calls = 0
+
+        async def tick(self, experiment_id: str | None = None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                state_mgr.process(
+                    "cooldown_alarm",
+                    AlarmEvent(
+                        alarm_id="cooldown_alarm",
+                        level="WARNING",
+                        message="held",
+                        triggered_at=100.0,
+                        channels=[_CHANNEL],
+                        values={_CHANNEL: 80.0},
+                    ),
+                    {},
+                )
+                return "TRIGGERED"
+            state_mgr.process("cooldown_alarm", None, {})
+            if self.calls > 2:
+                raise asyncio.CancelledError
+            return None
+
+    with pytest.raises(asyncio.CancelledError):
+        await cooldown_alarm_tick_loop(
+            cooldown_cfg={"eval_interval_s": 0},
+            cooldown_alarm=_CooldownAlarm(),
+            state_mgr=state_mgr,
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=SimpleNamespace(active_experiment_id="experiment-clear"),
+        )
+
+    emitted = []
+    while not published.empty():
+        emitted.append(published.get_nowait())
+    assert [event.event_type for event in emitted] == ["alarm_fired", "alarm_cleared"]
+    assert emitted[-1].experiment_id == "experiment-clear"
+
+
+@pytest.mark.asyncio
+async def test_cooldown_loop_ignores_non_cooldown_alarm_clear() -> None:
+    state_mgr = AlarmStateManager()
+    state_mgr.bind_experiment_id("experiment-clear")
+    state_mgr.publish_diagnostic_alarm(_CHANNEL, "warning", 300.0)
+    event_bus = EventBus()
+    published = await event_bus.subscribe("cooldown-ignores-diagnostic-clear")
+
+    class _CooldownAlarm:
+        calls = 0
+
+        async def tick(self, experiment_id: str | None = None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                state_mgr.clear_diagnostic_alarm(_CHANNEL)
+                return None
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await cooldown_alarm_tick_loop(
+            cooldown_cfg={"eval_interval_s": 0},
+            cooldown_alarm=_CooldownAlarm(),
+            state_mgr=state_mgr,
+            telegram_bot=None,
+            alarm_dispatch_tasks=set(),
+            event_bus=event_bus,
+            experiment_manager=SimpleNamespace(active_experiment_id="experiment-clear"),
+        )
+
+    assert published.empty()

@@ -1,7 +1,7 @@
 """Backend-owned immutable F36 operator snapshot protocol.
 
 This neutral module deliberately contains no GUI objects, transport calls, or
-commands. Engine/replay producers and GUI consumers share its strict v2 codec.
+commands. Engine/replay producers and GUI consumers share its strict v5 codec.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class AvailabilityTruth(StrEnum):
     UNKNOWN = "unknown"
 
 
-# V2 resource budgets. Collection limits derive from the public fleet target of
+# V5 resource budgets. Collection limits derive from the public fleet target of
 # 100 devices / 2,000 channels. The 8 MiB wire cap is frozen with measured
 # worst-case headroom in tests; evidence is rejected, never silently truncated.
 MAX_FLEET_DEVICES = 100
@@ -86,6 +86,7 @@ MAX_ID_UTF8_BYTES = 128
 MAX_LIVE_SOURCES_PER_SESSION = 8
 MAX_REASON_UTF8_BYTES = 128
 MAX_TEXT_UTF8_BYTES = 256
+MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES = 224
 MAX_PATH_UTF8_BYTES = 256
 MAX_NONNEGATIVE_INT = 2**63 - 1
 MAX_WIRE_BYTES = 8 * 1024 * 1024
@@ -105,7 +106,7 @@ STATE_PRECEDENCE = MappingProxyType(
 
 
 class OperatorSnapshotProtocolError(ValueError):
-    """Closed receiver-boundary failure for invalid or excessive v2 data."""
+    """Closed receiver-boundary failure for invalid or excessive v5 data."""
 
 
 __all__ = [
@@ -120,6 +121,7 @@ __all__ = [
     "MAX_PATH_UTF8_BYTES",
     "MAX_REASON_CODES",
     "MAX_REASON_UTF8_BYTES",
+    "MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES",
     "MAX_TEXT_UTF8_BYTES",
     "MAX_TRANSPORT_REASON_CODES",
     "MAX_WIRE_BYTES",
@@ -127,6 +129,7 @@ __all__ = [
     "AttentionItem",
     "AttentionQueue",
     "AvailabilityTruth",
+    "CooldownChannelBinding",
     "CooldownHistorySummary",
     "CooldownSample",
     "DataIntegritySummary",
@@ -466,6 +469,8 @@ class AttentionItem:
     detail: str
     observed_at: datetime
     transport_reason_codes: tuple[str, ...] = ()
+    channel_ids: tuple[str, ...] = ()
+    canonical_acknowledged: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -476,7 +481,11 @@ class AttentionItem:
         if not isinstance(self.state, OperatorPresentationState) or self.state is OperatorPresentationState.OK:
             raise ValueError("attention state must be a non-ok presentation state")
         object.__setattr__(self, "title", _non_empty(self.title, field_name="title"))
-        object.__setattr__(self, "detail", _non_empty(self.detail, field_name="detail"))
+        object.__setattr__(
+            self,
+            "detail",
+            _non_empty(self.detail, field_name="detail", max_bytes=MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES),
+        )
         if not isinstance(self.observed_at, datetime):
             raise TypeError("observed_at must be a datetime")
         if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
@@ -487,6 +496,17 @@ class AttentionItem:
             "transport_reason_codes",
             _transport_reason_codes(self.transport_reason_codes),
         )
+        if type(self.channel_ids) is not tuple:
+            raise TypeError("channel_ids must be an exact tuple")
+        _bounded_tuple(self.channel_ids, field_name="channel_ids", limit=MAX_CHANNELS)
+        channel_ids = tuple(
+            _non_empty(channel_id, field_name="channel_id", max_bytes=MAX_ID_UTF8_BYTES)
+            for channel_id in self.channel_ids
+        )
+        _unique(channel_ids, field_name="channel ids")
+        object.__setattr__(self, "channel_ids", channel_ids)
+        if self.canonical_acknowledged is not None and type(self.canonical_acknowledged) is not bool:
+            raise TypeError("canonical_acknowledged must be exact bool or None")
         _validate_transport_presentation(
             self.state,
             self.transport_reason_codes,
@@ -702,14 +722,17 @@ class InfrastructureNodeHealth(_OperatorSummary):
 
 @dataclass(frozen=True, slots=True)
 class AttentionQueue(_OperatorSummary):
-    """Ordered backend-authoritative attention items."""
+    """Ordered backend-authoritative attention items at a durable revision."""
 
     items: tuple[AttentionItem, ...]
+    history_revision: int | None = None
 
     def __post_init__(self) -> None:
         super(AttentionQueue, self).__post_init__()
         _typed_tuple(self.items, AttentionItem, field_name="items")
         _bounded_tuple(self.items, field_name="items", limit=MAX_ATTENTION_ITEMS)
+        if self.history_revision is not None:
+            _non_negative_int(self.history_revision, field_name="history_revision")
         ids = tuple(item.attention_id for item in self.items)
         _unique(ids, field_name="attention ids")
         if any(item.observed_at > self.cut.observed_at for item in self.items):
@@ -799,12 +822,38 @@ class DataIntegritySummary(_OperatorSummary):
 
 
 @dataclass(frozen=True, slots=True)
+class CooldownChannelBinding:
+    """Stable source identity retained independently of display metadata."""
+
+    channel_id: str
+    instrument_id: str
+    source_key: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("channel_id", "instrument_id", "source_key"):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_empty(
+                    getattr(self, field_name),
+                    field_name=field_name,
+                    max_bytes=MAX_ID_UTF8_BYTES,
+                ),
+            )
+
+    @property
+    def anchor(self) -> tuple[str, str, str]:
+        return (self.channel_id, self.instrument_id, self.source_key)
+
+
+@dataclass(frozen=True, slots=True)
 class CooldownHistorySummary(_OperatorSummary):
     """Cooldown observations and optional named comparison reference."""
 
     samples: tuple[CooldownSample, ...]
     reference_id: str | None
     reference_samples: tuple[CooldownSample, ...]
+    trajectory_channel: CooldownChannelBinding | None = None
 
     def __post_init__(self) -> None:
         super(CooldownHistorySummary, self).__post_init__()
@@ -818,11 +867,19 @@ class CooldownHistorySummary(_OperatorSummary):
                 "reference_id",
                 _non_empty(self.reference_id, field_name="reference_id", max_bytes=MAX_ID_UTF8_BYTES),
             )
+        if self.trajectory_channel is not None and type(self.trajectory_channel) is not CooldownChannelBinding:
+            raise TypeError("trajectory_channel must be an exact CooldownChannelBinding or None")
         if (self.reference_id is None) != (not self.reference_samples):
             raise ValueError("reference_id and reference_samples must be present together")
+        if (self.samples or self.reference_samples) and self.trajectory_channel is None:
+            raise ValueError("cooldown trajectory evidence requires stable channel identity")
         for name, values in (("samples", self.samples), ("reference_samples", self.reference_samples)):
             if any(later.elapsed_s <= earlier.elapsed_s for earlier, later in zip(values, values[1:])):
                 raise ValueError(f"{name} elapsed_s must be strictly increasing")
+
+    @property
+    def trajectory_channel_id(self) -> str | None:
+        return None if self.trajectory_channel is None else self.trajectory_channel.channel_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -938,11 +995,11 @@ class OperatorSnapshot:
 
 
 _SCHEMA = "cryodaq.operator-snapshot"
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 5
 
 
 def encode_operator_snapshot(snapshot: OperatorSnapshot) -> dict[str, Any]:
-    """Return the strict v2 JSON-compatible envelope for ``snapshot``."""
+    """Return the strict v5 JSON-compatible envelope for ``snapshot``."""
 
     if not isinstance(snapshot, OperatorSnapshot):
         raise TypeError("snapshot must be an OperatorSnapshot")
@@ -966,7 +1023,7 @@ def dump_operator_snapshot(snapshot: OperatorSnapshot) -> str:
 
 
 def load_operator_snapshot(payload: str) -> OperatorSnapshot:
-    """Parse and validate one strict v2 JSON envelope."""
+    """Parse and validate one strict v5 JSON envelope."""
 
     if not isinstance(payload, str):
         raise TypeError("payload must be a string")
@@ -1101,6 +1158,7 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             "snapshot.attention.items",
             MAX_ATTENTION_ITEMS,
         ),
+        _optional_int(item["history_revision"], "snapshot.attention.history_revision"),
     )
     (status, item) = status_and("experiment")
     experiment = ExperimentOperatingState(
@@ -1138,6 +1196,10 @@ def _decode_operator_snapshot(envelope: Mapping[str, Any]) -> OperatorSnapshot:
             _decode_cooldown_sample,
             "snapshot.cooldown_history.reference_samples",
             MAX_COOLDOWN_SAMPLES,
+        ),
+        _decode_cooldown_channel_binding(
+            item["trajectory_channel"],
+            "snapshot.cooldown_history.trajectory_channel",
         ),
     )
     (status, item) = status_and("support_bundle")
@@ -1278,6 +1340,25 @@ def _decode_attention_item(value: Any, path: str) -> AttentionItem:
         _string(item["detail"], f"{path}.detail"),
         _datetime(item["observed_at"], f"{path}.observed_at"),
         _string_tuple(item["transport_reason_codes"], f"{path}.transport_reason_codes"),
+        _string_tuple(
+            item["channel_ids"],
+            f"{path}.channel_ids",
+            limit=MAX_CHANNELS,
+        ),
+        None
+        if item["canonical_acknowledged"] is None
+        else _bool(item["canonical_acknowledged"], f"{path}.canonical_acknowledged"),
+    )
+
+
+def _decode_cooldown_channel_binding(value: Any, path: str) -> CooldownChannelBinding | None:
+    if value is None:
+        return None
+    item = _mapping(value, {"channel_id", "instrument_id", "source_key"}, path=path)
+    return CooldownChannelBinding(
+        _string(item["channel_id"], f"{path}.channel_id"),
+        _string(item["instrument_id"], f"{path}.instrument_id"),
+        _string(item["source_key"], f"{path}.source_key"),
     )
 
 
@@ -1317,11 +1398,11 @@ def _optional_string(value: Any, path: str) -> str | None:
     return None if value is None else _string(value, path)
 
 
-def _string_tuple(value: Any, path: str) -> tuple[str, ...]:
+def _string_tuple(value: Any, path: str, *, limit: int = MAX_REASON_CODES) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise TypeError(f"{path} must be an array")
-    if len(value) > MAX_REASON_CODES:
-        raise ValueError(f"{path} exceeds {MAX_REASON_CODES} values")
+    if len(value) > limit:
+        raise ValueError(f"{path} exceeds {limit} values")
     return tuple(_string(item, f"{path}[{index}]") for index, item in enumerate(value))
 
 
@@ -1356,7 +1437,7 @@ def _datetime(value: Any, path: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"{path} must be an ISO-8601 timestamp") from exc
     if _format_datetime(parsed) != raw:
-        raise ValueError(f"{path} is not the canonical v2 UTC timestamp")
+        raise ValueError(f"{path} is not the canonical v5 UTC timestamp")
     return parsed
 
 
