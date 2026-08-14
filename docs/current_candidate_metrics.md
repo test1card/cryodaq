@@ -6,28 +6,28 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | Measure | Value |
 |---|---:|
 | Baseline commit | `f5d6434d20dffae62c9f03fbc12f68b03f48351b` |
-| Source snapshot tree | `6212470ca8230279feb9624816afc2bf70aa5890` |
-| Source snapshot object manifest SHA-256 | `92fdccba8f8371eea699d50c25cf3af1a112ffcaeea91582aff35837ba3cd16d` |
-| Changed source-inventory paths | 862 |
-| Source-inventory Git churn | 313,662 insertions / 21,159 deletions / 292,503 net |
-| Delivered-tree changed paths | 864 |
-| Delivered-tree Git churn | 313,783 insertions / 21,159 deletions / 292,624 net |
+| Source snapshot tree | `ddaae0374309e479dce6ae81902082e58e2f6bac` |
+| Source snapshot object manifest SHA-256 | `3c9a0a37432b00c5d375216bee907215393c0c230a03c10cb7331e58e7876807` |
+| Changed source-inventory paths | 865 |
+| Source-inventory Git churn | 313,962 insertions / 21,179 deletions / 292,783 net |
+| Delivered-tree changed paths | 867 |
+| Delivered-tree Git churn | 314,083 insertions / 21,179 deletions / 292,904 net |
 | Changed binary paths, source / delivered | 9 / 9 |
 | Baseline repository text | 188,539 lines |
-| Candidate source-inventory text | 481,042 lines |
-| Delivered-tree text | 481,163 lines |
+| Candidate source-inventory text | 481,322 lines |
+| Delivered-tree text | 481,443 lines |
 | Baseline production Python | 68,857 lines |
-| Candidate production Python | 157,660 lines |
-| Production-Python inventory growth | 88,803 lines |
+| Candidate production Python | 157,685 lines |
+| Production-Python inventory growth | 88,828 lines |
 | Baseline test Python | 80,529 lines |
-| Candidate test Python | 236,321 lines |
-| Test-Python inventory growth | 155,792 lines |
+| Candidate test Python | 236,482 lines |
+| Test-Python inventory growth | 155,953 lines |
 | Baseline files | 779 |
-| Candidate source-manifest files | 1,217 |
-| Delivered-tree files | 1,219 |
+| Candidate source-manifest files | 1,220 |
+| Delivered-tree files | 1,222 |
 | Baseline text / binary files | 767 / 12 |
 | Baseline binary bytes | 3,878,632 |
-| Candidate source text / binary files | 1,196 / 21 |
+| Candidate source text / binary files | 1,199 / 21 |
 | Candidate source binary bytes | 5,812,612 |
 | `src/cryodaq/engine.py`, baseline / candidate | 4,103 / 7,989 lines |
 | `_run_engine`, baseline / candidate | 1,945 / 1,327 lines |
