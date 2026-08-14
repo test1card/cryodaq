@@ -6,6 +6,7 @@ import re
 
 import pytest
 
+from cryodaq.drivers.contracts import CommandEvidence, CommandOutcome
 from cryodaq.drivers.instruments.keithley_2604b import (
     _COMPLIANCE_NOTIFY_THRESHOLD,
     MAX_DELTA_V_PER_STEP,
@@ -88,6 +89,24 @@ async def _connected_physical_driver(
     await driver.connect()
     fake.writes.clear()
     return driver, fake
+
+
+def test_command_outcome_rejects_non_enum_evidence() -> None:
+    try:
+        CommandOutcome("device_readback_confirmed")  # type: ignore[arg-type]
+    except TypeError:
+        return
+    assert False, "CommandOutcome accepted non-enum evidence"
+
+
+async def test_start_source_returns_acknowledged_command_outcome() -> None:
+    driver, _fake = await _connected_physical_driver()
+
+    outcome = await driver.start_source("smua", 0.5, 40.0, 1.0)
+
+    assert outcome == CommandOutcome(CommandEvidence.DEVICE_ACKNOWLEDGED), (
+        "start_source must not claim compound-setting readback from OUTPUT_ON readback alone"
+    )
 
 
 # ---------------------------------------------------------------------------
