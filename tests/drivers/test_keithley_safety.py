@@ -6,6 +6,7 @@ import re
 
 import pytest
 
+from cryodaq.drivers.contracts import CommandEvidence, CommandOutcome
 from cryodaq.drivers.instruments.keithley_2604b import (
     _COMPLIANCE_NOTIFY_THRESHOLD,
     MAX_DELTA_V_PER_STEP,
@@ -88,6 +89,16 @@ async def _connected_physical_driver(
     await driver.connect()
     fake.writes.clear()
     return driver, fake
+
+
+async def test_start_source_returns_readback_confirmed_command_outcome() -> None:
+    driver, _fake = await _connected_physical_driver()
+
+    outcome = await driver.start_source("smua", 0.5, 40.0, 1.0)
+
+    assert outcome == CommandOutcome(CommandEvidence.DEVICE_READBACK_CONFIRMED), (
+        "start_source must return device-readback-confirmed evidence after OUTPUT_ON readback"
+    )
 
 
 # ---------------------------------------------------------------------------
