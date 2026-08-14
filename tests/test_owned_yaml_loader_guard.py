@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-_SOURCE_ROOT = Path(__file__).parents[2] / "src" / "cryodaq"
+# The module moved from `tests/governance/` to the tests root, so the depth changed.
+# It lives here for the same reason `test_c2_repo_wide_spelling_sweep.py` does: it is a
+# repo-wide AST sweep over production, not a governance-contract test -- and a new module
+# under `tests/governance/` moves an inventory that OC-012 pins by COUNT and by hash.
+_SOURCE_ROOT = Path(__file__).parents[1] / "src" / "cryodaq"
 _CONVENIENCE_LOADERS = {
     "full_load",
     "full_load_all",
