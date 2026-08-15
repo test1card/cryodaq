@@ -164,7 +164,7 @@ This matrix underlies specific pattern decisions:
 
 - `patterns/state-visualization.md` — why fault chrome uses border + icon + value FOREGROUND (not colored text)
 - `components/bottom-status-bar.md` — why fault labels use FOREGROUND while the
-  STATUS_FAULT dot and left border carry the fault signal
+  STATUS_FAULT left border carries the fault signal
 - `components/alarm-badge.md` — why filled pills ship with multi-channel signaling rather than stressing contrast
 
 ## Rationale for accepted gaps

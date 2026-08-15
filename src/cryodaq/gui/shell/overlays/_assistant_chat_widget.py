@@ -197,7 +197,7 @@ class AssistantChatPanel(QWidget):
             f"}}"
             f"QPushButton:disabled {{"
             f" background-color: {theme.SURFACE_MUTED};"
-            f" color: {theme.MUTED_FOREGROUND};"
+            f" color: {theme.TEXT_DISABLED};"
             f"}}"
         )
         self._send_btn.clicked.connect(self._on_send_clicked)

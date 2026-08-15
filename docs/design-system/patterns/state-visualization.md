@@ -149,8 +149,9 @@ Note: fault keeps value FOREGROUND per RULE-A11Y-003 (contrast); the border + ic
 | fault | STATUS_FAULT | FOREGROUND with STATUS_FAULT left border |
 | stale | STATUS_STALE | MUTED_FOREGROUND |
 
-Fault labels use neutral FOREGROUND text; the STATUS_FAULT dot and left border
-carry the fault signal. Other inline-state labels stay MUTED_FOREGROUND. This
+Fault labels use neutral FOREGROUND text; the STATUS_FAULT left border is the
+only red fault cue. The safety dot inherits neutral text, and disk evidence
+does not render a dot. Other inline-state labels stay MUTED_FOREGROUND. This
 avoids RULE-A11Y-003 body contrast failure without removing the fault cue.
 
 ### Filled pills / badges (Mode badge, AlarmBadge, filled StatusBadge)

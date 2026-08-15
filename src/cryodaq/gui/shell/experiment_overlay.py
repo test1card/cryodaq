@@ -365,7 +365,7 @@ class ExperimentOverlay(QWidget):
             f"}} "
             f"#expFinalizeBtn:disabled {{ "
             f"background-color: {theme.SURFACE_MUTED}; "
-            f"color: {theme.MUTED_FOREGROUND}; "
+            f"color: {theme.TEXT_DISABLED}; "
             f"border-color: {theme.BORDER_SUBTLE}; "
             f"}}"
         )
@@ -455,7 +455,7 @@ class ExperimentOverlay(QWidget):
             f"}} "
             f"#expLandingCreateBtn:disabled {{ "
             f"background-color: {theme.SURFACE_MUTED}; "
-            f"color: {theme.MUTED_FOREGROUND}; "
+            f"color: {theme.TEXT_DISABLED}; "
             f"border-color: {theme.BORDER_SUBTLE}; "
             f"}}"
         )
