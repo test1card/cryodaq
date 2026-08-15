@@ -2,7 +2,7 @@ name: CryoDAQ protected CI evidence gate
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   merge_group:
 
 # This workflow is configured as an organization-required workflow. GitHub

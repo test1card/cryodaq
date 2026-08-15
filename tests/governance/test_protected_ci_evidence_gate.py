@@ -88,7 +88,15 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     payload = yaml.safe_load(text)
 
     assert _workflow_trigger(payload) == {
-        "pull_request": {"types": ["opened", "synchronize", "reopened", "ready_for_review"]},
+        "pull_request": {
+            "types": [
+                "opened",
+                "synchronize",
+                "reopened",
+                "ready_for_review",
+                "converted_to_draft",
+            ]
+        },
         "merge_group": None,
     }
     assert "workflow_run" not in text
@@ -183,8 +191,7 @@ def test_native_final_job_is_fail_closed_and_uploads_only_accepted_context() -> 
     assert job["name"] == "protected CI evidence gate"
     assert job["needs"] == "protected-execution"
     assert job["if"] == (
-        "${{ always() && (github.event_name != 'pull_request' "
-        "|| github.event.pull_request.draft == false) }}"
+        "${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}"
     )
     assert job["permissions"] == {"actions": "read", "contents": "read"}
     assert job["env"]["TARGET_SHA"] == "${{ github.sha }}"
