@@ -135,7 +135,10 @@ def test_72h_profile_rejects_its_own_descriptor_slope_limit() -> None:
     for sample in warmup_ramp:
         if soak.PROFILES["short"].warmup_s <= sample["elapsed_s"] < profile.warmup_s:
             sample["roles"]["launcher"]["rss_bytes"] += int(
-                (sample["elapsed_s"] - soak.PROFILES["short"].warmup_s) * 100 * 1024 * 1024
+                (sample["elapsed_s"] - soak.PROFILES["short"].warmup_s)
+                * 100
+                * 1024
+                * 1024
                 / (profile.warmup_s - soak.PROFILES["short"].warmup_s)
             )
     assert soak.evaluate_resources(warmup_ramp, profile) == []
