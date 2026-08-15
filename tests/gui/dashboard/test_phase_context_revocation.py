@@ -403,3 +403,27 @@ def test_an_unusable_update_invalidates_freshness_immediately(
         "an unusable update left the freshness stamp intact, so the previous ETA still reads as current"
     )
     assert "2ч" in text, "the last legible ETA was hidden instead of marked"
+
+
+def test_unusable_same_suffix_from_another_producer_does_not_revoke_cached_freshness(
+    app, tmp_path, monkeypatch
+) -> None:
+    """A matching suffix is not authority to invalidate another producer."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    fresh = _eta_reading(datetime.now(UTC), cadence_s=30.0)
+    view.on_reading(fresh)
+
+    foreign_failure = replace(
+        fresh,
+        instrument_id="site_predictor",
+        channel="analytics/site/cooldown_eta",
+        status=ChannelStatus.SENSOR_ERROR,
+        value=float("nan"),
+    )
+    assert not foreign_failure.is_usable(), "the control reading must be unusable"
+    view.on_reading(foreign_failure)
+
+    text = view._phase_widget._context_label.text()
+    assert STALE_MARK not in text, "a same-suffix foreign producer revoked the cached ETA"

@@ -79,6 +79,7 @@ class PhaseAwareWidget(QWidget):
         self._last_context_text: str = ""
         self._cached_at: dict[str, float | None] = {}
         self._stale_after_s: dict[str, float | None] = {}
+        self._cached_producer: dict[str, tuple[str, str]] = {}
 
         self._build_ui()
         self._apply_inactive_state()
@@ -382,6 +383,7 @@ class PhaseAwareWidget(QWidget):
                 self._cached_pressure = None
                 self._cached_at.clear()
                 self._stale_after_s.clear()
+                self._cached_producer.clear()
             self._active_experiment_id = new_experiment_id
             self._current_phase = new_phase
             self._phase_started_at = new_started
@@ -421,9 +423,11 @@ class PhaseAwareWidget(QWidget):
 
     def _apply_context_reading(self, key: str, reading, usable: bool) -> None:
         """Cache a usable value, or invalidate freshness when it is not."""
+        producer = (reading.instrument_id, reading.channel)
         if not usable:
-            self._cached_at[key] = None
-            self._refresh_context_label()
+            if self._cached_producer.get(key) == producer:
+                self._cached_at[key] = None
+                self._refresh_context_label()
             return
         value = reading.value
         if key == "eta":
@@ -432,6 +436,7 @@ class PhaseAwareWidget(QWidget):
             self._cached_r_thermal = value
         else:
             self._cached_pressure = value
+        self._cached_producer[key] = producer
         self._remember_freshness(key, reading)
         self._refresh_context_label()
 
@@ -472,6 +477,7 @@ class PhaseAwareWidget(QWidget):
         self._cached_pressure = None
         self._cached_at.clear()
         self._stale_after_s.clear()
+        self._cached_producer.clear()
         self._stepper.setVisible(False)
         self._duration_label.setText("")
         self._controls.setVisible(False)
