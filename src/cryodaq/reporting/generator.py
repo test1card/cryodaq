@@ -185,9 +185,7 @@ class ReportGenerator:
         # actually called.
         gemma_intro_model: str = ""
 
-        raw_document = self._build_document(
-            dataset, assets_dir, raw_sections, gemma_intro, gemma_intro_model
-        )
+        raw_document = self._build_document(dataset, assets_dir, raw_sections, gemma_intro, gemma_intro_model)
         raw_document.save(str(raw_source_docx_path))
         pdf_path = self._try_convert_pdf(
             raw_source_docx_path,
@@ -195,9 +193,7 @@ class ReportGenerator:
             deadline_epoch=deadline_epoch,
         )
 
-        editable_document = self._build_document(
-            dataset, assets_dir, editable_sections, gemma_intro, gemma_intro_model
-        )
+        editable_document = self._build_document(dataset, assets_dir, editable_sections, gemma_intro, gemma_intro_model)
         editable_document.save(str(editable_docx_path))
 
         return ReportGenerationResult(
@@ -265,15 +261,11 @@ class ReportGenerator:
             renderer(document, dataset, assets_dir)
             # Insert Гемма annotation immediately after title page
             if section_name == "title_page" and gemma_intro:
-                self._render_gemma_annotation(
-                    document, gemma_intro, gemma_intro_model
-                )
+                self._render_gemma_annotation(document, gemma_intro, gemma_intro_model)
         return document
 
     @staticmethod
-    def _render_gemma_annotation(
-        document: Document, intro_text: str, model: str = ""
-    ) -> None:
+    def _render_gemma_annotation(document: Document, intro_text: str, model: str = "") -> None:
         """Insert Slice C Гемма-generated annotation section after the title page."""
         from cryodaq.utils.xml_safe import xml_safe
 
