@@ -99,6 +99,11 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
         },
         "merge_group": None,
     }
+    assert payload["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+
     assert "workflow_run" not in text
     assert "checks: write" not in text
     assert "check-runs" not in text
@@ -108,6 +113,7 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
     assert set(payload["jobs"]) == {"protected-execution", "protected-ci-evidence-gate"}
 
     execution = payload["jobs"]["protected-execution"]
+    assert execution["if"] == ("${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}")
     assert "needs" not in execution
     assert execution["permissions"] == {"actions": "read", "contents": "read", "id-token": "write"}
     assert execution["strategy"] == {
