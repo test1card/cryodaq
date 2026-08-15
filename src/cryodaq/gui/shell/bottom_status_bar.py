@@ -232,6 +232,17 @@ class BottomStatusBar(QWidget):
             self._channel_authority_label.setStyleSheet(f"color: {theme.STATUS_CAUTION}; font-weight: bold;")
             self._channel_authority_label.setToolTip(detail)
             self._channel_authority_label.setAccessibleDescription(detail)
+        else:
+            # Clearing is not symmetry for its own sake. Without this branch the
+            # notice was write-once: once the catalog fell back, the warning
+            # stayed in the persistent chrome forever, and kept telling the
+            # operator that quantity routing was degraded long after the catalog
+            # came back. A stale warning that cannot be cleared teaches the
+            # operator to ignore the chrome, which costs the real warning too.
+            self._channel_authority_label.clear()
+            self._channel_authority_label.setStyleSheet(f"color: {theme.TEXT_MUTED};")
+            self._channel_authority_label.setToolTip("")
+            self._channel_authority_label.setAccessibleDescription("")
 
     def set_disk_evidence(self, value: float, *, source: str, state: str) -> bool:
         """Present backend-owned disk evidence; this widget never probes disk."""

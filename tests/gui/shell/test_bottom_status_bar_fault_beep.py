@@ -129,9 +129,14 @@ def test_bottom_bar_keeps_descriptor_fallback_visible() -> None:
 
     bar.set_channel_authority_fallback(True)
 
-    assert "fallback" in bar._safety_label.text()
-    assert "channels.yaml" in bar._safety_label.toolTip()
-    assert "расходиться" in bar._safety_label.accessibleDescription()
+    # The notice moved OFF _safety_label and onto its own label. That is the
+    # point of the move, not an incidental relocation: written into
+    # _safety_label, the next set_safety_state() call overwrote it and the
+    # operator silently stopped being told that channel authority had fallen
+    # back. The assertion below on survival is what makes the move load-bearing.
+    assert "fallback" in bar._channel_authority_label.text()
+    assert "channels.yaml" in bar._channel_authority_label.toolTip()
+    assert "расходиться" in bar._channel_authority_label.accessibleDescription()
     return
     bar._start_time -= 10**12
     bar._tick()
@@ -153,6 +158,37 @@ def test_bottom_bar_keeps_descriptor_fallback_visible() -> None:
     assert "1e+300" in bar._disk_label.accessibleDescription()
     assert "y" * 100 in bar._conn_label.accessibleDescription()
     assert "д" in bar._uptime_label.accessibleDescription()
+
+def test_bottom_bar_descriptor_fallback_survives_and_then_clears() -> None:
+    """The fallback notice outlives a safety snapshot, and can still be cleared.
+
+    Survival is the property that justifies giving the notice its own label:
+    written into ``_safety_label`` it was erased by the next state update.
+    Clearing is the other half. Without it the notice was write-once, so the
+    chrome kept reporting degraded quantity routing long after the catalog came
+    back, and a warning that never clears teaches the operator to ignore the
+    chrome -- which costs the real warning too.
+    """
+    bar = _make_bar()
+
+    bar.set_channel_authority_fallback(True)
+    assert "fallback" in bar._channel_authority_label.text()
+
+    bar.set_safety_state("safe_off")
+    assert "fallback" in bar._channel_authority_label.text(), (
+        "a safety-state update erased the channel-authority fallback notice"
+    )
+
+    bar.set_safety_state("fault_latched", stale=True)
+    assert "fallback" in bar._channel_authority_label.text(), (
+        "a stale fault snapshot erased the channel-authority fallback notice"
+    )
+
+    bar.set_channel_authority_fallback(False)
+    assert bar._channel_authority_label.text() == "", (
+        "the fallback notice could not be cleared once it had been shown"
+    )
+    assert bar._channel_authority_label.toolTip() == ""
 
 
 if __name__ == "__main__":
