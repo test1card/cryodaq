@@ -95,6 +95,13 @@ class BottomStatusBar(QWidget):
         self._safety_label.setStyleSheet(muted)
         layout.addWidget(self._safety_label)
 
+        # Descriptor-authority fallback is independent operational evidence.
+        # It must survive subsequent safety-state snapshots.
+        self._channel_authority_label = QLabel()
+        self._channel_authority_label.setMaximumWidth(220)
+        self._channel_authority_label.setStyleSheet(muted)
+        layout.addWidget(self._channel_authority_label)
+
         layout.addWidget(_separator())
 
         # Phase III.D Item 16: explicit what-is-counted — it is the
@@ -221,10 +228,10 @@ class BottomStatusBar(QWidget):
                 "Каталог дескрипторов каналов недоступен; маршрутизация количеств использует channels.yaml. "
                 "Живые данные и каталог Engine могут расходиться."
             )
-            self._safety_label.setText(text)
-            self._safety_label.setStyleSheet(f"color: {theme.STATUS_CAUTION}; font-weight: bold;")
-            self._safety_label.setToolTip(detail)
-            self._safety_label.setAccessibleDescription(detail)
+            self._channel_authority_label.setText(text)
+            self._channel_authority_label.setStyleSheet(f"color: {theme.STATUS_CAUTION}; font-weight: bold;")
+            self._channel_authority_label.setToolTip(detail)
+            self._channel_authority_label.setAccessibleDescription(detail)
 
     def set_disk_evidence(self, value: float, *, source: str, state: str) -> bool:
         """Present backend-owned disk evidence; this widget never probes disk."""
