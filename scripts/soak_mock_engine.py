@@ -104,6 +104,11 @@ def _default_cmd() -> list[str]:
 #: be delivered to it. On POSIX this is 0 and changes nothing.
 _SHUTDOWN_CREATION_FLAGS = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
+# The engine emits this after installing its signal handlers.  A soak must not
+# request shutdown until that receipt is present, otherwise a slow Windows
+# startup can receive CTRL_BREAK_EVENT before the handler exists.
+_ENGINE_READY_MARKER = "CryoDAQ Engine запущен"
+
 
 def _request_shutdown(proc: subprocess.Popen[str]) -> None:
     """ASK the engine to stop, on a channel it can actually hear.
@@ -147,26 +152,45 @@ def run_soak(
             creationflags=_SHUTDOWN_CREATION_FLAGS,
         )
         try:
-            deadline = time.monotonic() + duration_s
-            alive_before_shutdown = True
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+            ready_deadline = time.monotonic() + grace_s
+            ready = False
+            while time.monotonic() < ready_deadline:
+                if _ENGINE_READY_MARKER in log_path.read_text(encoding="utf-8", errors="replace"):
+                    ready = True
                     break
                 if proc.poll() is not None:
-                    alive_before_shutdown = False
                     break
-                time.sleep(min(poll_interval_s, remaining))
+                time.sleep(poll_interval_s)
 
-            if proc.poll() is None:
+            alive_before_shutdown = ready
+            if ready:
+                deadline = time.monotonic() + duration_s
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if proc.poll() is not None:
+                        alive_before_shutdown = False
+                        break
+                    time.sleep(min(poll_interval_s, remaining))
+
+            if ready and proc.poll() is None:
                 _request_shutdown(proc)
+            elif not ready and proc.poll() is None:
+                proc.kill()
+                exit_code = proc.wait(timeout=10.0)
+                clean_shutdown = False
             else:
                 alive_before_shutdown = False
-            try:
-                exit_code = proc.wait(timeout=grace_s)
-                clean_shutdown = exit_code == 0
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            if ready:
+                try:
+                    exit_code = proc.wait(timeout=grace_s)
+                    clean_shutdown = exit_code == 0
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    exit_code = proc.wait(timeout=10.0)
+                    clean_shutdown = False
+            elif proc.poll() is not None:
                 exit_code = proc.wait(timeout=10.0)
                 clean_shutdown = False
         finally:
