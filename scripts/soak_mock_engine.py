@@ -54,6 +54,10 @@ class UnreadableLogError(RuntimeError):
     that would have failed the scan is the one the parser could not read.
     """
 
+    def __init__(self, message: str, violations: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.violations = list(violations)
+
 
 def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[str]:
     """Return ERROR/CRITICAL log lines not matched by ``allowlist``.
@@ -95,7 +99,8 @@ def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[st
     if malformed_error_record:
         raise UnreadableLogError(
             "could not read log: a malformed ERROR/CRITICAL record was found, "
-            "so the readable lines do not establish a clean run"
+            "so the readable lines do not establish a clean run",
+            violations,
         )
     return violations
 
@@ -194,7 +199,7 @@ def run_soak(
         # "a malformed ERROR record was found among readable lines", and discarding that
         # here made the command report the first cause for both -- sending an operator
         # investigating a failed long soak toward a log that had in fact parsed.
-        violations = []
+        violations = exc.violations
         log_readable = False
         unreadable_reason = str(exc)
 

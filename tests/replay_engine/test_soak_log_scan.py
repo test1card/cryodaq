@@ -172,6 +172,24 @@ def test_run_soak_reports_the_specific_unreadable_reason(tmp_path):
     assert "no structured lines parsed" not in reason, reason
 
 
+
+def test_run_soak_keeps_parsed_violations_when_log_is_unreadable(tmp_path):
+    error = _line("ERROR", "definite failure")
+    script = (
+        "print(" + repr(error) + ", flush=True);"
+        "print('literal escape ' + chr(92) + 'u2502 ERROR ' + chr(92) + 'u2502 damaged', flush=True)"
+    )
+    result = soak.run_soak(
+        1.0,
+        log_path=tmp_path / "mixed-with-error.log",
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is False
+    assert result.violations == [error]
+
+
 def test_run_soak_keeps_no_reason_when_the_log_is_readable(tmp_path):
     """A readable log carries no reason, so the field cannot go stale."""
     script = "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) + ' child " + chr(0x2502) + " ok', flush=True)"
