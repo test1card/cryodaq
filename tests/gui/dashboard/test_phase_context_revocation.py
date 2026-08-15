@@ -360,7 +360,17 @@ def test_unusable_analytics_reading_does_not_refresh_freshness(
     assert STALE_MARK in text, f"unusable {status.value} reading refreshed a live freshness stamp"
 
 
-def test_an_unusable_update_invalidates_freshness_immediately(app, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("value", "status"),
+    [
+        (float("nan"), ChannelStatus.OK),
+        (1.0, ChannelStatus.SENSOR_ERROR),
+        (1.0, ChannelStatus.TIMEOUT),
+    ],
+)
+def test_an_unusable_update_invalidates_freshness_immediately(
+    app, tmp_path, monkeypatch, value: float, status: ChannelStatus
+) -> None:
     """A feed that reports ITSELF broken must not keep reading as current.
 
     The cadence horizon covers a producer that goes QUIET. It does not cover one
