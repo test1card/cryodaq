@@ -14,6 +14,7 @@ service passes at cooldown end alike.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -61,10 +62,20 @@ def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
         raise ValueError("invalid fingerprint record")
     numeric_fields = ("cooldown_start_ts", "duration_h", "T_cold_final")
     optional_numeric_fields = ("time_to_base_h", "time_to_50K_h", "ultimate_vacuum_mbar")
-    if any(not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool) for field in numeric_fields):
+    if any(
+        not isinstance(d.get(field), (int, float))
+        or isinstance(d.get(field), bool)
+        or not math.isfinite(d[field])
+        for field in numeric_fields
+    ):
         raise ValueError("invalid fingerprint record")
     if any(
-        d.get(field) is not None and (not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool))
+        d.get(field) is not None
+        and (
+            not isinstance(d.get(field), (int, float))
+            or isinstance(d.get(field), bool)
+            or not math.isfinite(d[field])
+        )
         for field in optional_numeric_fields
     ):
         raise ValueError("invalid fingerprint record")
