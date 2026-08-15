@@ -144,7 +144,7 @@ def _is_queue_get_call(node: ast.AST, queue_get_aliases: set[str]) -> bool:
         return node.id in queue_get_aliases
     if not isinstance(node, ast.Call):
         return False
-    if isinstance(node.func, ast.Attribute) and node.func.attr == 'get':
+    if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
         return True
     if isinstance(node.func, ast.Name) and node.func.id in queue_get_aliases:
         return True
@@ -1346,13 +1346,13 @@ async def under_test(queue: asyncio.Queue):
 
 
 def test_durable_ack_guard_tracks_stored_queue_get_awaitable_in_discovery_timeout() -> None:
-    snippet = '''import asyncio
+    snippet = """import asyncio
 
 async def under_test(queue: asyncio.Queue):
     pending = queue.get()
     await asyncio.wait_for(pending, timeout=2.0)
-'''
-    function = _first_function(ast.parse(snippet), 'under_test')
+"""
+    function = _first_function(ast.parse(snippet), "under_test")
     aliases = _discovery_wait_get_aliases(function)
     discovery_waits = [
         node
