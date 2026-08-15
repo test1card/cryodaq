@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 CHECKLIST = Path(__file__).parents[2] / "docs" / "new_lab_acceptance_checklist.md"
+READINESS = Path(__file__).parents[2] / "docs" / "evidence_packaging_readiness.md"
 GATE_RE = re.compile(r"^G([0-9]+\.[0-9]+):$")
 
 
@@ -57,3 +58,24 @@ def test_procedure_parser_rejects_duplicate_opener_outside_bounded_block():
 
     with pytest.raises(AssertionError):
         _parse_procedure_gates(malformed)
+
+
+def test_g71_requires_a_slope_limited_profile_that_covers_the_run():
+    lines = CHECKLIST.read_text(encoding="utf-8").splitlines()
+    block = "\n".join(_parse_procedure_gates(lines)["7.1"])
+    assert "do not select the slope-free short profile for G7.1" in block
+    assert "12 h for an intended run from 15 min through 12 h" in block
+    assert "observe for that selected profile's full duration" in block
+
+
+def test_g71_defines_the_real_stack_capture_and_offline_verdict():
+    checklist = CHECKLIST.read_text(encoding="utf-8")
+    assert "### G7.1 real-stack resource capture and verdict" in checklist
+    assert "Every 5 s from startup through the selected 12 h or 72 h duration" in checklist
+    assert "the mock-stack evidence validator is not evidence for this real-instrument gate" in checklist
+
+
+def test_threshold_coverage_agrees_that_only_g31_remains_open():
+    readiness = READINESS.read_text(encoding="utf-8")
+    assert "G3.1 is the only remaining gate without a measurable decision threshold" in readiness
+    assert "G3.1 and G7.1 lack measurable decision thresholds" not in readiness
