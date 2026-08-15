@@ -2657,15 +2657,31 @@ def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None
         'rerun through workflow_dispatch with trusted_base_sha" >&2\n'
         "    exit 1\n"
     )
+    # INDENTATION IS TAKEN FROM THE PARSED `run`, NOT RETYPED. This literal is
+    # compared against the block-scalar body after YAML has stripped the block
+    # indent, so it carries the script's own two-space nesting -- not the four
+    # spaces the surrounding Python suggests and not the raw file's deeper
+    # indent. A four-space version of this literal was never found in the
+    # workflow, so the substitution silently did nothing and the guard failed
+    # while both files were correct.
     dispatch_tag_validation = (
-        '    if [[ "${GITHUB_REF_TYPE:?}" != "tag" ]] || [[ "${GITHUB_REF_NAME:?}" != v* ]]; then\n'
-        '      echo "workflow_dispatch release evidence must target a v* tag" >&2\n'
-        "      exit 1\n"
-        "    fi\n"
+        '  if [[ "${GITHUB_REF_TYPE:?}" != "tag" ]] || [[ "${GITHUB_REF_NAME:?}" != v* ]]; then\n'
+        '    echo "workflow_dispatch release evidence must target a v* tag" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+    )
+    # Both anchors carry the indentation of the PARSED script, which for this
+    # `elif` is column zero. A two-space version matched nothing, so `.replace`
+    # returned the string unchanged and the comparison failed while both
+    # workflows were correct. `str.replace` reports no error when it substitutes
+    # nothing, so an anchor must be proven to occur before it is relied upon --
+    # which the assertion below now does.
+    dispatch_branch = 'elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then\n'
+    assert ci_bind.count(dispatch_branch) == 1, (
+        "main.yml's workflow_dispatch branch moved or changed indentation; re-pin it here"
     )
     expected_release_bind = ci_bind.replace(creation_merge_base, tag_creation_refusal).replace(
-        '  elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then\n',
-        '  elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then\n' + dispatch_tag_validation,
+        dispatch_branch, dispatch_branch + dispatch_tag_validation
     )
     assert _bind(workflow)["run"] == expected_release_bind, (
         "release-gate bind drifted from main.yml outside its two pinned release divergences"
