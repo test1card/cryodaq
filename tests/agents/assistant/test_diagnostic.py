@@ -285,7 +285,32 @@ async def test_diagnostic_reports_authoritative_empty_history_as_no_data(tmp_pat
     assert ollama.generate.await_count == 2
     diagnostic_prompt = ollama.generate.call_args_list[1].args[0]
     assert _channel_history_section(diagnostic_prompt) == "нет данных"
-    assert _pressure_trend_section(diagnostic_prompt) == 'нет данных'
+    assert _pressure_trend_section(diagnostic_prompt) == "нет данных"
+    await agent.stop()
+
+
+async def test_diagnostic_reports_successful_insufficient_history_as_no_data(tmp_path: Path) -> None:
+    """A successful empty channel series and one-point pressure trend are no data."""
+
+    reader = MagicMock()
+
+    async def read_readings_history(**kwargs):
+        if "channels" in kwargs:
+            return {"T1": []}
+        return {"pressure": [(0.0, 1.0)]}
+
+    reader.read_readings_history = AsyncMock(side_effect=read_readings_history)
+    ollama = _two_call_ollama("Alarm summary.", "Diagnostic.")
+    agent, bus = _make_agent(ollama=ollama, reader=reader, tmp_path=tmp_path)
+    await agent.start()
+
+    await bus.publish(_alarm_event())
+    await asyncio.wait_for(_drain_handler_tasks(agent), timeout=5.0)
+
+    assert ollama.generate.await_count == 2
+    diagnostic_prompt = ollama.generate.call_args_list[1].args[0]
+    assert _channel_history_section(diagnostic_prompt) == "нет данных"
+    assert _pressure_trend_section(diagnostic_prompt) == "нет данных"
     await agent.stop()
 
 

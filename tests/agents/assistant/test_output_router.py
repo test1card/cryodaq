@@ -146,6 +146,41 @@ async def test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sender_outcome", "expected"),
+    [
+        ({101: True}, {"telegram": "outcome_unknown"}),
+        (
+            {101: True, 202: "delivered"},
+            {"telegram": {"101": "outcome_unknown", "202": "delivered"}},
+        ),
+    ],
+)
+async def test_untyped_telegram_recipient_outcomes_are_not_reported_as_delivered(sender_outcome, expected) -> None:
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock(return_value=sender_outcome)
+    router = OutputRouter(telegram_bot=telegram, event_bus=AsyncMock())
+
+    outcomes = await router.dispatch_detailed(
+        _Event(),
+        "response",
+        targets=[OutputTarget.TELEGRAM],
+        audit_id="audit-untyped-telegram-recipient-outcome",
+    )
+
+    assert outcomes == expected
+    assert (
+        await router.dispatch(
+            _Event(),
+            "response",
+            targets=[OutputTarget.TELEGRAM],
+            audit_id="audit-untyped-telegram-recipient-outcome-delivery",
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
 async def test_audit_failure_prevents_external_egress(tmp_path, monkeypatch) -> None:
     audit = AuditLogger(tmp_path / "audit")
     monkeypatch.setattr(

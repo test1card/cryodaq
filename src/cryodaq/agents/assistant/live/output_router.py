@@ -61,6 +61,13 @@ class OutputTarget(enum.Enum):
     GUI_INSIGHT = "gui_insight"
 
 
+def _normalize_telegram_recipient_outcome(state: Any) -> str:
+    """Preserve only explicit Telegram recipient settlement states."""
+    if state in ("delivered", "service_reported_delivered", "failed", "outcome_unknown"):
+        return state
+    return "outcome_unknown"
+
+
 def _is_delivered_outcome(state: Any) -> bool:
     return state in ("delivered", "service_reported_delivered") or (
         isinstance(state, dict)
@@ -116,9 +123,14 @@ class OutputRouter:
                         if isinstance(sent, dict):
                             states = tuple(sent.values())
                             if len(sent) == 1:
-                                outcomes["telegram"] = next(iter(states), "failed")
+                                outcomes["telegram"] = _normalize_telegram_recipient_outcome(
+                                    next(iter(states), "failed")
+                                )
                             else:
-                                outcomes["telegram"] = {str(chat_id): str(state) for chat_id, state in sent.items()}
+                                outcomes["telegram"] = {
+                                    str(chat_id): _normalize_telegram_recipient_outcome(state)
+                                    for chat_id, state in sent.items()
+                                }
                         elif sent is True:
                             # A legacy boolean carries no Telegram acknowledgement tier.
                             # In particular, it cannot prove that a truthy transport result
