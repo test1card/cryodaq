@@ -168,7 +168,7 @@ Do not energize a heater inside a cryostat to close any gate in this document.
 
 | Gate | Procedure | Pass criterion |
 |---|---|---|
-| **G7.1 Soak** | Run the full stack against real instruments for at least one intended experiment duration. | No memory growth trend, no unexplained gap in any channel, no restart. |
+| **G7.1 Soak** | Run the full stack against real instruments for at least one intended experiment duration, sampling resources every 5 s, and record which soak profile was used. | `evaluate_resources()` returns no error for that profile. It is the authority and checks more than the headline slopes: aggregate and per-role RSS slope, aggregate RSS growth against a 50 MiB cap, aggregate and per-role descriptor slope, final and peak descriptor envelopes, and per-role thread growth. Headline slopes for orientation — **12 h: 4 MiB/h, 1 descriptor/h; 72 h: 1 MiB/h, 0.25 descriptor/h**. Also: no unexplained gap in any channel, and no restart. |
 | **G7.2 Full cycle** | One complete operating cycle end to end. | Every phase transition behaves as configured; the archive and the report for that cycle are complete. |
 | **G7.3 Restart mid-run** | Record the configured maximum poll interval `P` and the last committed receipt before the stop. Stop and restart the engine, using a stopwatch; obtain the first new committed receipt within **60 s** of the stop command. The acknowledged in-flight window is the single measured restart interval, bounded per channel by **60 s + 2P** between its last pre-stop and first post-restart persisted timestamps. Query both receipt batches and compare each ordered entry identity `(instrument_id, channel_id, timestamp)` with the stored rows. `commit_revision` is per writer, so record it inside each run but do not compare its value across the restart. | `CommittedBatchReceipt` carries entries and a per-writer `commit_revision` ([[ref:src/cryodaq/storage/sqlite_writer.py::CommittedBatchReceipt]]); every entry in the last pre-stop receipt and first post-restart receipt must persist exactly once. Every channel's measured timestamp gap must be at or below `60 s + 2P`; a longer or unexplained gap, duplicate, reordered row, or missing receipt leaves G7.3 **NOT PASSED**. |
 
@@ -465,7 +465,9 @@ G7.1:
   preconditions: real stack is approved for endurance
   target: 1 intended experiment duration
   bound: 1 full intended duration
-  abort: memory growth gap or restart occurs
+  threshold: scripts/soak_mock_stack.py evaluate_resources(samples, profile) returns an empty error list for the profile whose duration covers the intended run; that function IS the threshold and enforces more than the two headline slopes, so do not restate its checks here and expect them to stay complete; slope is robust_slope, a deterministic median-pairwise (Theil-Sen) fit in units per hour over post-warm-up samples only, at SAMPLE_INTERVAL_S = 5 s with warm-up discarded (600 s on both long profiles); the boundaries are NOT symmetric -- aggregate RSS slope fails at >= the profile limit while descriptor slope fails at > it -- which is why the evaluator, not prose, decides; headline slopes are 4 MiB/h and 1/h at 12 h and 1 MiB/h and 0.25/h at 72 h, the longer run being tighter because a slope harmless over twelve hours is not harmless over seventy-two
+  profile_selection: use the profile whose duration is the largest that does not exceed the intended run; for an intended run longer than 72 h use the 72 h profile and record that the limits applied are tighter than the run demands; never interpolate a limit between profiles
+  abort: evaluate_resources() returns any error for the selected profile, an unexplained channel gap appears, or any restart occurs
   cleanup: stop stack by normal procedure
   evidence: dated endurance log
   decision_owner: engineer
