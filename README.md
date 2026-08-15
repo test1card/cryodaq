@@ -147,9 +147,7 @@ The most important changes are:
   descriptors are carried through named acquisition, SQLite, archive/replay,
   report, and GUI paths. Archive-finalisation rows and multiple GUI, assistant,
   and notification routes still fall back to spelling or lack descriptor
-  authority, and the phantom throttle-protection interlocks in
-  `config/alarms_v3.yaml` still name their channels literally
-  (OC-008, OC-011, OC-023 to OC-025). Startup validation fails
+  authority (OC-008, OC-011, OC-024 to OC-025). Startup validation fails
   closed for the exact safety bindings it resolves; this is not a claim that
   every safety/alarm/interlock pattern is descriptor-bound.
 - **Process isolation and recovery.** The launcher supervises the engine, GUI
