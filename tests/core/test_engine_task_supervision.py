@@ -1435,3 +1435,53 @@ async def test_engine_startup_cancellation_settles_initialization_before_writer_
         "initialization-settled",
         "writer-stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_startup_call_does_not_await_a_returned_task() -> None:
+    """Startup must RECEIVE a supervised task, never wait for it to finish.
+
+    `inspect.isawaitable` is True for a Task, because a Task is a Future. A
+    registration helper returns the task it just started, so awaiting that
+    return value waits for a supervised loop that never ends. That blocked
+    engine startup permanently at `supervisor.register("safety_collect", ...)`,
+    so the SIGTERM handler installed further down was never reached and the
+    engine died on the signal a real deployment sends -- the failure mode of the
+    nightly bounded mock soak.
+
+    Without the fix this test does not fail with an assertion; it HANGS, which
+    is exactly what the engine did. The timeout is the assertion.
+    """
+    from cryodaq.engine import _EngineStartupRollback
+
+    async def never_finishes() -> None:
+        # An Event that nobody sets, not a sleep loop. The task must be
+        # genuinely unresolvable for the whole test, because the defect being
+        # pinned is that startup waits for something that never completes.
+        await asyncio.Event().wait()
+
+    startup = _EngineStartupRollback()
+    running = asyncio.create_task(never_finishes())
+    try:
+        returned = await asyncio.wait_for(startup.call(lambda: running), timeout=5.0)
+        assert returned is running, "startup.call must hand back the task itself, not its result"
+        assert not running.done(), "the supervised task must still be running"
+    except TimeoutError:  # pragma: no cover - the defect being pinned
+        raise AssertionError(
+            "startup.call awaited a returned Task and blocked; engine startup "
+            "cannot complete when a registration helper returns a live task"
+        ) from None
+    finally:
+        running.cancel()
+
+
+@pytest.mark.asyncio
+async def test_startup_call_still_awaits_a_coroutine() -> None:
+    """The narrowing must not stop coroutines from being awaited."""
+    from cryodaq.engine import _EngineStartupRollback
+
+    async def produces_a_value() -> str:
+        return "awaited"
+
+    startup = _EngineStartupRollback()
+    assert await startup.call(produces_a_value) == "awaited"
