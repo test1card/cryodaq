@@ -60,6 +60,92 @@ def test_registry_is_exact_static_allowlist() -> None:
     assert ALLOWLISTED_DRIVER_MODULES == tuple(sorted(spec.module for spec in BUILTIN_DRIVER_SPECS.values()))
 
 
+def test_every_measurement_driver_declares_its_emitted_channel_projection() -> None:
+    for spec in INSTRUMENT_DRIVER_SPECS.values():
+        assert spec.emitted_channels is not None
+
+
+def test_passive_sensor_spec_cannot_omit_emitted_channel_projection() -> None:
+    with pytest.raises(ValueError, match="requires an emitted-channel projection"):
+        replace(PASSIVE_DRIVER_SPECS["thyracont_vsp63d"], emitted_channels=None)
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        (
+            {
+                "type": "lakeshore_218s",
+                "name": "LS",
+                "resource": "GPIB0::12::INSTR",
+                "channels": {1: "T1"},
+            },
+            (
+                "T1",
+                "CH2",
+                "CH3",
+                "CH4",
+                "CH5",
+                "CH6",
+                "CH7",
+                "CH8",
+                "T1_raw",
+                "CH2_raw",
+                "CH3_raw",
+                "CH4_raw",
+                "CH5_raw",
+                "CH6_raw",
+                "CH7_raw",
+                "CH8_raw",
+            ),
+        ),
+        (
+            {"type": "thyracont_vsp63d", "name": "VSP", "resource": "COM3"},
+            ("VSP/pressure",),
+        ),
+        (
+            {"type": "etalon_multiline", "name": "ML", "channels": [2, 4]},
+            (
+                "ML/length_ch2",
+                "ML/length_ch4",
+                "ML/env_temperature",
+                "ML/env_pressure",
+                "ML/env_humidity",
+            ),
+        ),
+        (
+            {
+                "type": "asc_reference_tcp",
+                "name": "ASC",
+                "port": 9000,
+                "channels": [{"channel_id": "reference", "unit": "K", "mock_value": 1.0}],
+            },
+            ("reference",),
+        ),
+        (
+            {"type": "keithley_2604b", "name": "K", "resource": "USB::1"},
+            (
+                "K/smua/voltage",
+                "K/smua/current",
+                "K/smua/resistance",
+                "K/smua/power",
+                "K/smub/voltage",
+                "K/smub/current",
+                "K/smub/resistance",
+                "K/smub/power",
+            ),
+        ),
+    ],
+)
+def test_emitted_channel_projection_matches_driver_owned_labels(
+    entry: dict[str, object], expected: tuple[str, ...]
+) -> None:
+    config = validate_instrument_entry(entry)
+    projection = config.spec.emitted_channels
+    assert projection is not None
+    assert projection(config) == expected
+
+
 def test_exported_partitions_have_independent_inaccessible_backing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

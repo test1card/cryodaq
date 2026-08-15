@@ -7,6 +7,7 @@ import logging
 import math
 import random
 import time as _time
+from collections.abc import Mapping
 from typing import Any
 
 from cryodaq.analytics.calibration import CalibrationStore
@@ -16,6 +17,19 @@ from cryodaq.drivers.transport.gpib import GPIBTransport
 log = logging.getLogger(__name__)
 
 _MOCK_BASE_TEMPS: tuple[float, ...] = (4.2, 4.8, 77.0, 77.5, 4.5, 4.1, 3.9, 300.0)
+
+
+def channel_label(channel_labels: Mapping[int, str], index: int) -> str:
+    """Return the configured label for one physical input."""
+
+    return channel_labels.get(index, f"CH{index}")
+
+
+def emitted_channel_labels(channel_labels: Mapping[int, str]) -> tuple[str, ...]:
+    """Declare the complete channel roster emitted by one configured driver."""
+
+    labels = tuple(channel_label(channel_labels, index) for index in range(1, 9))
+    return (*labels, *(f"{label}_raw" for label in labels))
 
 
 def _mock_sensor_unit(temp_k: float) -> float:
@@ -215,7 +229,7 @@ class LakeShore218S(InstrumentDriver):
         """
         return [
             Reading.now(
-                self._channel_labels.get(index, f"CH{index}"),
+                channel_label(self._channel_labels, index),
                 float("nan"),
                 "K",
                 instrument_id=self.name,
@@ -289,7 +303,7 @@ class LakeShore218S(InstrumentDriver):
                 if parsed:
                     # Fix channel index — _parse_response starts at 1 for first token
                     reading = parsed[0]
-                    channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                    channel_name = channel_label(self._channel_labels, ch)
                     readings.append(
                         Reading.now(
                             channel=channel_name,
@@ -303,7 +317,7 @@ class LakeShore218S(InstrumentDriver):
                     )
             except Exception as exc:
                 log.error("%s: KRDG? %d failed: %s", self.name, ch, exc)
-                channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                channel_name = channel_label(self._channel_labels, ch)
                 readings.append(
                     Reading.now(
                         channel=channel_name,
@@ -378,7 +392,7 @@ class LakeShore218S(InstrumentDriver):
                 parsed = self._parse_response(raw, unit="sensor_unit", reading_kind="raw_sensor")
                 if parsed:
                     reading = parsed[0]
-                    channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                    channel_name = channel_label(self._channel_labels, ch)
                     readings.append(
                         Reading.now(
                             channel=channel_name,
@@ -392,7 +406,7 @@ class LakeShore218S(InstrumentDriver):
                     )
             except Exception as exc:
                 log.error("%s: SRDG? %d failed: %s", self.name, ch, exc)
-                channel_name = self._channel_labels.get(ch, f"CH{ch}")
+                channel_name = channel_label(self._channel_labels, ch)
                 readings.append(
                     Reading.now(
                         channel=channel_name,
@@ -445,7 +459,7 @@ class LakeShore218S(InstrumentDriver):
         tokens = [token.strip() for token in response.split(",")]
         readings: list[Reading] = []
         for index, token in enumerate(tokens[:8], start=1):
-            channel_name = self._channel_labels.get(index, f"CH{index}")
+            channel_name = channel_label(self._channel_labels, index)
             metadata = {
                 "raw_channel": index,
                 "reading_kind": reading_kind,
@@ -495,7 +509,7 @@ class LakeShore218S(InstrumentDriver):
     def _mock_readings(self) -> list[Reading]:
         readings: list[Reading] = []
         for index, base_temp in enumerate(_MOCK_BASE_TEMPS, start=1):
-            channel_name = self._channel_labels.get(index, f"CH{index}")
+            channel_name = channel_label(self._channel_labels, index)
             noise = base_temp * random.uniform(-0.005, 0.005)
             value = round(base_temp + noise, 4)
             readings.append(
@@ -517,7 +531,7 @@ class LakeShore218S(InstrumentDriver):
     def _mock_sensor_readings(self) -> list[Reading]:
         readings: list[Reading] = []
         for index, base_temp in enumerate(_MOCK_BASE_TEMPS, start=1):
-            channel_name = self._channel_labels.get(index, f"CH{index}")
+            channel_name = channel_label(self._channel_labels, index)
             raw_base = _mock_sensor_unit(base_temp)
             noise = raw_base * random.uniform(-0.002, 0.002)
             value = round(raw_base + noise, 6)
@@ -542,7 +556,7 @@ class LakeShore218S(InstrumentDriver):
             return {}
         policies: dict[int, dict[str, Any]] = {}
         for channel_num in range(1, 9):
-            channel_name = self._channel_labels.get(channel_num, f"CH{channel_num}")
+            channel_name = channel_label(self._channel_labels, channel_num)
             channel_key = self._runtime_channel_key(channel_name)
             resolution = self._calibration_store.resolve_runtime_policy(channel_key=channel_key)
             policies[channel_num] = resolution

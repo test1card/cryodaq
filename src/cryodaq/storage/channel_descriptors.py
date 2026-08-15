@@ -844,6 +844,27 @@ class LiveChannelDescriptorCatalog:
                 f"live descriptor manifest instrument mismatch (missing={missing}, extra={extra})"
             )
 
+    def require_exact_channels(self, configured_bindings: object) -> None:
+        """Fail startup unless every configured emitted channel is catalogued."""
+
+        if type(configured_bindings) is not dict:
+            raise TypeError("configured channel bindings must be an explicit mapping")
+        expected: set[tuple[str, str]] = set()
+        for instrument_id, channels in configured_bindings.items():
+            if type(instrument_id) is not str or type(channels) not in (tuple, list, frozenset, set):
+                raise ChannelDescriptorStorageError("configured channel bindings are malformed")
+            for channel in channels:
+                if type(channel) is not str or not channel:
+                    raise ChannelDescriptorStorageError("configured channel bindings contain a malformed channel")
+                pair = (instrument_id, channel)
+                if pair in expected:
+                    raise ChannelDescriptorStorageError("configured channel bindings contain duplicates")
+                expected.add(pair)
+        actual = frozenset(self._bindings)
+        missing = sorted(expected - actual)
+        if missing:
+            raise ChannelDescriptorStorageError(f"live descriptor manifest channel mismatch (missing={missing})")
+
     def bind(self, reading: object) -> DescriptorBoundReading:
         owned = _own_live_reading(reading)
         channel_id = self._bindings.get((owned.instrument_id, owned.channel))

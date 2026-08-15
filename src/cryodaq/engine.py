@@ -1076,6 +1076,7 @@ async def _handle_multiline_set_channels_command(
     *,
     drivers_by_name: dict[str, Any],
     config_dir: Path,
+    descriptor_catalog: Any | None = None,
 ) -> dict[str, Any]:
     """v0.55.16.0.1 (smoke hotfix) — runtime channel-set update for
     a MultiLine driver.
@@ -1120,6 +1121,23 @@ async def _handle_multiline_set_channels_command(
             "ok": False,
             "error_code": "multiline_driver_unavailable",
             "error": "The requested MultiLine driver is unavailable.",
+        }
+
+    if descriptor_catalog is None:
+        return {
+            "ok": False,
+            "error_code": "multiline_descriptor_catalog_unavailable",
+            "error": "MultiLine channel reconfiguration requires the live descriptor catalog.",
+        }
+    from cryodaq.drivers.instruments.etalon_multiline import emitted_channel_labels
+
+    try:
+        descriptor_catalog.require_exact_channels({name: emitted_channel_labels(name, tuple(channels))})
+    except Exception:  # noqa: BLE001 - descriptor authority must fail closed before reconfiguration
+        return {
+            "ok": False,
+            "error_code": "multiline_descriptor_coverage_invalid",
+            "error": "The requested MultiLine channels are not covered by the live descriptor catalog.",
         }
 
     try:
@@ -2296,6 +2314,17 @@ def _load_cooldown_config(path: Path) -> tuple[dict[str, Any], PhysicalPolicyRec
     return raw, receipt_for_applied_policy("cooldown", path, snapshot)
 
 
+def _configured_descriptor_channels(driver_load: DriverLoadResult) -> dict[str, tuple[str, ...]]:
+    """Project validated instrument channel configuration into emitted labels."""
+
+    configured: dict[str, tuple[str, ...]] = {}
+    for instrument in driver_load.validated_configs:
+        projection = getattr(getattr(instrument, "spec", None), "emitted_channels", None)
+        emitted = projection(instrument) if projection is not None else ()
+        configured[instrument.name] = emitted
+    return configured
+
+
 async def _load_live_descriptor_authority(
     instruments_cfg: Path,
     driver_load: DriverLoadResult,
@@ -2312,6 +2341,7 @@ async def _load_live_descriptor_authority(
         local_path=descriptor_local,
     )
     owner.require_exact_instruments(tuple(config.name for config in driver_load.validated_configs))
+    owner.require_exact_channels(_configured_descriptor_channels(driver_load))
     return owner
 
 
@@ -2589,6 +2619,7 @@ class EngineCommandContext:
     alarm_v2_state_tracker: Any
     multiline_burst_auto_stop_meta: dict[str, dict[str, Any]]
     multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]]
+    descriptor_catalog: Any = None
     shutdown_event: asyncio.Event | None = None
     engine_instance_id: str = ""
     shutdown_capability: str = ""
@@ -5060,6 +5091,7 @@ async def _handle_gui_command(
     _alarm_dispatch_tasks = context.alarm_dispatch_tasks
     calibration_store = context.calibration_store
     writer = context.writer
+    descriptor_catalog = context.descriptor_catalog
     drivers_by_name = context.drivers_by_name
     sensor_diag = context.sensor_diag
     vacuum_trend = context.vacuum_trend
@@ -5746,6 +5778,7 @@ async def _handle_gui_command(
                 cmd,
                 drivers_by_name=drivers_by_name,
                 config_dir=_CONFIG_DIR,
+                descriptor_catalog=descriptor_catalog,
             )
         if action.startswith("multiline.burst_"):
             # v0.55.11 (F-MultiLineContinuous): GUI burst-capture
@@ -6937,6 +6970,7 @@ async def _run_engine(
     _multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]] = {}
 
     command_context = EngineCommandContext(
+        descriptor_catalog=live_descriptor_catalog,
         safety_manager=safety_manager,
         event_logger=event_logger,
         sink_registry=sink_registry,

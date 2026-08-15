@@ -30,6 +30,27 @@ from cryodaq.drivers.transport.tcp import TCPTransport, TCPTransportError
 logger = logging.getLogger(__name__)
 
 _ASCII_INTEGER_RE = re.compile(r"[+-]?[0-9]+\Z", re.ASCII)
+_ENVIRONMENT_FIELDS = ("temperature", "pressure", "humidity")
+
+
+def length_channel_label(instrument_name: str, channel_number: int) -> str:
+    """Return one emitted interferometer length-channel label."""
+
+    return f"{instrument_name}/length_ch{channel_number}"
+
+
+def environment_channel_label(instrument_name: str, field: str) -> str:
+    """Return one emitted environment-channel label."""
+
+    return f"{instrument_name}/env_{field}"
+
+
+def emitted_channel_labels(instrument_name: str, channel_numbers: tuple[int, ...]) -> tuple[str, ...]:
+    """Declare the complete channel roster emitted by one configured driver."""
+
+    length_channels = tuple(length_channel_label(instrument_name, channel) for channel in channel_numbers)
+    environment_channels = tuple(environment_channel_label(instrument_name, field) for field in _ENVIRONMENT_FIELDS)
+    return length_channels + environment_channels
 
 
 def _parse_ascii_integer(token: str, *, field: str) -> int:
@@ -504,7 +525,7 @@ class MultiLineDriver(InstrumentDriver):
                 value = reported_length if status is ChannelStatus.OK else float("nan")
                 readings.append(
                     Reading.now(
-                        channel=f"{self.name}/length_ch{ch.channel_number}",
+                        channel=length_channel_label(self.name, ch.channel_number),
                         value=value,
                         unit="mm",
                         instrument_id=self.name,
@@ -522,7 +543,7 @@ class MultiLineDriver(InstrumentDriver):
             t_c, p_hpa, h_pct = _parse_environmentdata_response(env_response)
             readings.append(
                 Reading.now(
-                    channel=f"{self.name}/env_temperature",
+                    channel=environment_channel_label(self.name, "temperature"),
                     value=t_c,
                     unit="°C",
                     instrument_id=self.name,
@@ -530,7 +551,7 @@ class MultiLineDriver(InstrumentDriver):
             )
             readings.append(
                 Reading.now(
-                    channel=f"{self.name}/env_pressure",
+                    channel=environment_channel_label(self.name, "pressure"),
                     value=p_hpa,
                     unit="hPa",
                     instrument_id=self.name,
@@ -538,7 +559,7 @@ class MultiLineDriver(InstrumentDriver):
             )
             readings.append(
                 Reading.now(
-                    channel=f"{self.name}/env_humidity",
+                    channel=environment_channel_label(self.name, "humidity"),
                     value=h_pct,
                     unit="%",
                     instrument_id=self.name,
@@ -557,7 +578,7 @@ class MultiLineDriver(InstrumentDriver):
         metadata = {"available": False, "stale": True, "reason": reason}
         readings = [
             Reading.now(
-                channel=f"{self.name}/length_ch{channel_number}",
+                channel=length_channel_label(self.name, channel_number),
                 value=float("nan"),
                 unit="mm",
                 instrument_id=self.name,
@@ -568,7 +589,7 @@ class MultiLineDriver(InstrumentDriver):
         ]
         readings.extend(
             Reading.now(
-                channel=f"{self.name}/env_{field}",
+                channel=environment_channel_label(self.name, field),
                 value=float("nan"),
                 unit=unit,
                 instrument_id=self.name,
@@ -687,7 +708,7 @@ class MultiLineDriver(InstrumentDriver):
             readings.append(
                 Reading(
                     timestamp=ts,
-                    channel=f"{self.name}/length_ch{ch.channel_number}",
+                    channel=length_channel_label(self.name, ch.channel_number),
                     value=value,
                     unit="mm",
                     instrument_id=self.name,
@@ -710,7 +731,7 @@ class MultiLineDriver(InstrumentDriver):
             readings.append(
                 Reading(
                     timestamp=ts,
-                    channel=f"{self.name}/env_temperature",
+                    channel=environment_channel_label(self.name, "temperature"),
                     value=first.temperature_c,
                     unit="°C",
                     instrument_id=self.name,
@@ -719,7 +740,7 @@ class MultiLineDriver(InstrumentDriver):
             readings.append(
                 Reading(
                     timestamp=ts,
-                    channel=f"{self.name}/env_pressure",
+                    channel=environment_channel_label(self.name, "pressure"),
                     value=first.pressure_hpa,
                     unit="hPa",
                     instrument_id=self.name,
@@ -728,7 +749,7 @@ class MultiLineDriver(InstrumentDriver):
             readings.append(
                 Reading(
                     timestamp=ts,
-                    channel=f"{self.name}/env_humidity",
+                    channel=environment_channel_label(self.name, "humidity"),
                     value=first.humidity_pct,
                     unit="%",
                     instrument_id=self.name,
@@ -963,7 +984,7 @@ class MultiLineDriver(InstrumentDriver):
             length = nominal + random.uniform(-0.010, 0.010)
             readings.append(
                 Reading.now(
-                    channel=f"{self.name}/length_ch{ch_num}",
+                    channel=length_channel_label(self.name, ch_num),
                     value=length,
                     unit="mm",
                     instrument_id=self.name,
@@ -971,7 +992,7 @@ class MultiLineDriver(InstrumentDriver):
             )
         readings.append(
             Reading.now(
-                channel=f"{self.name}/env_temperature",
+                channel=environment_channel_label(self.name, "temperature"),
                 value=22.5 + random.uniform(-0.5, 0.5),
                 unit="°C",
                 instrument_id=self.name,
@@ -979,7 +1000,7 @@ class MultiLineDriver(InstrumentDriver):
         )
         readings.append(
             Reading.now(
-                channel=f"{self.name}/env_pressure",
+                channel=environment_channel_label(self.name, "pressure"),
                 value=1013.25 + random.uniform(-2.0, 2.0),
                 unit="hPa",
                 instrument_id=self.name,
@@ -987,7 +1008,7 @@ class MultiLineDriver(InstrumentDriver):
         )
         readings.append(
             Reading.now(
-                channel=f"{self.name}/env_humidity",
+                channel=environment_channel_label(self.name, "humidity"),
                 value=45.0 + random.uniform(-3.0, 3.0),
                 unit="%",
                 instrument_id=self.name,

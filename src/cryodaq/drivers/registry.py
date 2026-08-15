@@ -233,6 +233,7 @@ class ValidatedInstrumentConfig:
 
 ConfigNormalizer = Callable[[dict[str, object], str], dict[str, object]]
 DriverFactory = Callable[[ValidatedInstrumentConfig, DriverConstructionContext], object]
+ChannelProjection = Callable[[ValidatedInstrumentConfig], tuple[str, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +248,7 @@ class DriverSpec:
     config_fields: Mapping[str, ConfigField]
     normalizer: ConfigNormalizer
     factory: DriverFactory
+    emitted_channels: ChannelProjection | None = None
     reviewed_source_binding: ReviewedSourceBinding | None = None
     implementation_type: type[object] | None = None
 
@@ -260,6 +262,11 @@ class DriverSpec:
         if any(not isinstance(key, str) or not isinstance(value, ConfigField) for key, value in fields.items()):
             raise TypeError("DriverSpec.config_fields must map strings to ConfigField values")
         object.__setattr__(self, "config_fields", MappingProxyType(fields))
+
+        if self.emitted_channels is not None and not callable(self.emitted_channels):
+            raise TypeError("DriverSpec.emitted_channels must be callable or None")
+        if DriverCapability.PASSIVE_SENSOR in capabilities and self.emitted_channels is None:
+            raise ValueError("passive-sensor DriverSpec requires an emitted-channel projection")
 
         source_capabilities = {
             DriverCapability.CONTROLLED_SOURCE,
@@ -331,6 +338,44 @@ def _multiline_normalizer(values: dict[str, object], path: str) -> dict[str, obj
     if selected != 1:
         raise DriverRegistryError(f"{path} must define exactly one of channels or channel_count")
     return values
+
+
+def _lakeshore_emitted_channels(config: ValidatedInstrumentConfig) -> tuple[str, ...]:
+    from cryodaq.drivers.instruments.lakeshore_218s import emitted_channel_labels
+
+    channels = config.values["channels"]
+    assert isinstance(channels, Mapping)
+    return emitted_channel_labels(channels)  # type: ignore[arg-type]
+
+
+def _thyracont_emitted_channels(config: ValidatedInstrumentConfig) -> tuple[str, ...]:
+    from cryodaq.drivers.instruments.thyracont_vsp63d import emitted_channel_labels
+
+    return emitted_channel_labels(config.name)
+
+
+def _multiline_emitted_channels(config: ValidatedInstrumentConfig) -> tuple[str, ...]:
+    from cryodaq.drivers.instruments.etalon_multiline import emitted_channel_labels
+
+    selected = config.values.get("channels")
+    if selected is None:
+        count = config.values["channel_count"]
+        assert isinstance(count, int)
+        selected = tuple(range(1, count + 1))
+    assert isinstance(selected, tuple)
+    return emitted_channel_labels(config.name, tuple(int(channel) for channel in selected))
+
+
+def _asc_reference_emitted_channels(config: ValidatedInstrumentConfig) -> tuple[str, ...]:
+    channels = config.values["channels"]
+    assert isinstance(channels, tuple)
+    return tuple(str(channel["channel_id"]) for channel in channels)
+
+
+def _keithley_emitted_channels(config: ValidatedInstrumentConfig) -> tuple[str, ...]:
+    from cryodaq.drivers.instruments.keithley_2604b import emitted_channel_labels
+
+    return emitted_channel_labels(config.name)
 
 
 def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConstructionContext) -> InstrumentDriver:
@@ -496,6 +541,7 @@ _PASSIVE_SPECS = {
         ),
         normalizer=_lakeshore_normalizer,
         factory=_construct_lakeshore,
+        emitted_channels=_lakeshore_emitted_channels,
     ),
     "thyracont_vsp63d": DriverSpec(
         type_name="thyracont_vsp63d",
@@ -511,6 +557,7 @@ _PASSIVE_SPECS = {
         ),
         normalizer=_identity_normalizer,
         factory=_construct_thyracont,
+        emitted_channels=_thyracont_emitted_channels,
     ),
     "etalon_multiline": DriverSpec(
         type_name="etalon_multiline",
@@ -534,6 +581,7 @@ _PASSIVE_SPECS = {
         ),
         normalizer=_multiline_normalizer,
         factory=_construct_multiline,
+        emitted_channels=_multiline_emitted_channels,
     ),
     "asc_reference_tcp": DriverSpec(
         type_name="asc_reference_tcp",
@@ -552,6 +600,7 @@ _PASSIVE_SPECS = {
         ),
         normalizer=_identity_normalizer,
         factory=_construct_asc_reference_tcp,
+        emitted_channels=_asc_reference_emitted_channels,
     ),
     "deterministic_health_node": DriverSpec(
         type_name="deterministic_health_node",
@@ -605,6 +654,7 @@ _SOURCE_SPECS = {
         config_fields=_fields(resource=ConfigField(ValueKind.STRING, required=True)),
         normalizer=_identity_normalizer,
         factory=_construct_keithley,
+        emitted_channels=_keithley_emitted_channels,
         reviewed_source_binding=KEITHLEY_2604B_SOURCE_BINDING,
     )
 }

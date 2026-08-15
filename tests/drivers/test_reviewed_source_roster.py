@@ -139,6 +139,7 @@ def _acme_spec(
         config_fields=dict(keithley.config_fields),
         normalizer=keithley.normalizer,
         factory=factory,  # type: ignore[arg-type]
+        emitted_channels=keithley.emitted_channels,
         reviewed_source_binding=binding,
     )
 
