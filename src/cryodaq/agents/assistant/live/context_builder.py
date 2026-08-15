@@ -357,7 +357,7 @@ class ContextBuilder:
             return "\n".join(lines) if lines else "нет данных"
         except Exception:
             logger.debug("ContextBuilder: pressure trend read failed", exc_info=True)
-            return "нет данных"
+            return "данные недоступны"
 
 
 def _compute_experiment_age(em: Any) -> float | None:

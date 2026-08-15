@@ -21,6 +21,7 @@ from cryodaq.core.event_bus import EngineEvent, EventBus
 
 
 _CHANNEL_HISTORY_BLOCK = "ИСТОРИЯ КАНАЛОВ (последние {lookback_min} минут):\n{channel_history}"
+_PRESSURE_TREND_BLOCK = "ТРЕНД ДАВЛЕНИЯ (30 мин):\n{pressure_trend}"
 
 
 def _channel_history_section(diagnostic_prompt: str, *, lookback_min: int = 60) -> str:
@@ -32,6 +33,14 @@ def _channel_history_section(diagnostic_prompt: str, *, lookback_min: int = 60) 
     """
     assert _CHANNEL_HISTORY_BLOCK in DIAGNOSTIC_SUGGESTION_USER
     header = _CHANNEL_HISTORY_BLOCK.split("{channel_history}")[0].format(lookback_min=lookback_min)
+    assert header in diagnostic_prompt, diagnostic_prompt
+    return diagnostic_prompt.split(header, 1)[1].split("\n\n", 1)[0]
+
+
+def _pressure_trend_section(diagnostic_prompt: str) -> str:
+    """Return exactly the rendered pressure-trend block of the diagnostic prompt."""
+    assert _PRESSURE_TREND_BLOCK in DIAGNOSTIC_SUGGESTION_USER
+    header = _PRESSURE_TREND_BLOCK.split("{pressure_trend}")[0]
     assert header in diagnostic_prompt, diagnostic_prompt
     return diagnostic_prompt.split(header, 1)[1].split("\n\n", 1)[0]
 
@@ -249,6 +258,7 @@ async def test_diagnostic_handles_missing_history_gracefully(tmp_path: Path) -> 
     assert ollama.generate.await_count == 2
     diagnostic_prompt = ollama.generate.call_args_list[1].args[0]
     assert _channel_history_section(diagnostic_prompt) == "данные недоступны"
+    assert _pressure_trend_section(diagnostic_prompt) == "данные недоступны"
     # Both dispatched to Telegram
     assert telegram._send_to_all.await_count == 2
     await agent.stop()

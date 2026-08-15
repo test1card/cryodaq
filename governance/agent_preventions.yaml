@@ -3250,6 +3250,14 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-FALSE-GREEN-340
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-UNKNOWN-OUTCOME-AS-SETTLED-340
+    guard: tests/agents/assistant/test_diagnostic.py::test_diagnostic_reports_authoritative_empty_history_as_no_data
+    ci_partition: agents
+    red_evidence: measured_2026_08_14_on_71e995c5_rewriting_the_three_empty_read_returns_of_read_channel_history_to_dannye_nedostupny_42_bytes_added_left_that_heads_test_diagnostic_module_7_passed_exit_0_so_the_distinction_could_collapse_toward_unavailable_unobserved_and_the_paired_node_added_here_turns_the_same_control_1_failed_7_passed_while_rewriting_the_exception_branch_back_to_net_dannyh_14_bytes_removed_turns_the_failure_node_red_pending_immutable_capture
+    green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
