@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
 
@@ -142,10 +143,9 @@ def _nightly_job_block(text: str, job_name: str) -> str:
     return text[start:]
 
 
-def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> None:
-    """Nightly Qt lanes must retain the system libraries installed in default CI."""
+def _assert_nightly_qt_prerequisites(text: str) -> None:
+    """Require each Qt lane to install its libraries, rather than merely name them."""
 
-    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
     for job_name in _NIGHTLY_QT_JOB_NAMES:
         job = _nightly_job_block(text, job_name)
         install = job.index("- name: Install Qt offscreen system libraries (Linux)")
@@ -154,5 +154,30 @@ def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> No
         step = job[install:dependencies]
         assert "if: runner.os == 'Linux'" in step
         assert "sudo apt-get update" in step
+        install_commands = [
+            line.strip().split() for line in step.splitlines() if line.strip().startswith("sudo apt-get install ")
+        ]
+        assert len(install_commands) == 1, f"{job_name} must contain exactly one apt-get install command"
+        command = install_commands[0]
+        assert command[:4] == ["sudo", "apt-get", "install", "-y"]
         for library in _QT_LINUX_LIBRARIES:
-            assert library in step, f"{job_name} omits required Qt library {library!r}"
+            assert library in command[4:], f"{job_name} does not install required Qt library {library!r}"
+
+
+def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> None:
+    """Nightly Qt lanes must retain the system libraries installed in default CI."""
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    _assert_nightly_qt_prerequisites(text)
+
+
+def test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed() -> None:
+    """The prerequisite names alone are insufficient: apt-get must receive them."""
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    install = "sudo apt-get install -y " + " ".join(_QT_LINUX_LIBRARIES)
+    assert text.count(install) == len(_NIGHTLY_QT_JOB_NAMES)
+    mutated = text.replace(install, "echo " + " ".join(_QT_LINUX_LIBRARIES))
+
+    with pytest.raises(AssertionError, match="apt-get install command"):
+        _assert_nightly_qt_prerequisites(mutated)
