@@ -98,12 +98,8 @@ jobs:
           elif [[ "$EVENT_NAME" == "push" ]]; then
             if [[ "${PUSH_CREATED:-false}" == true ]]; then
               test "${PUSH_BEFORE:?}" = "0000000000000000000000000000000000000000"
-              test -n "${DEFAULT_BRANCH:?}"
-              git fetch --no-tags origin "${DEFAULT_BRANCH}"
-              default_tip="$(git rev-parse --verify "origin/${DEFAULT_BRANCH}^{commit}")"
-              mapfile -t bases < <(git merge-base --all "$event_commit" "$default_tip")
-              test "${#bases[@]}" = 1
-              trusted_base_sha="$(require_commit 'creation-push merge base' "${bases[0]}")"
+              echo "new tag creation has no independently authenticated trusted base; rerun through workflow_dispatch with trusted_base_sha" >&2
+              exit 1
             else
               test "${PUSH_BEFORE:?}" != "0000000000000000000000000000000000000000"
               trusted_base_sha="$(require_commit 'push before' "${PUSH_BEFORE}")"
@@ -155,8 +151,14 @@ jobs:
       # `remaining` suite -- NOT plain pytest, which cannot tell a skipped guard from a passing
       # one. The revision and trusted base are the ones `candidate_identity` derived from this
       # event: a tag push IS a push event, and the `bind` step's push branch resolves the trusted
-      # base from `github.event.before`, or, for a newly created tag, from the single merge base
-      # with the default branch. Nothing here is guessed.
+      # base from `github.event.before`. For a newly CREATED tag it derives nothing and
+      # REFUSES: a fresh tag usually points at the default tip, so a merge base against that
+      # tip would collapse to the tagged candidate itself, and compare_red_reproduction_bindings
+      # would compare a commit with itself -- vacuously green on exactly the check this gate
+      # exists to make independently. A `v*` tag push is therefore a fail-closed tripwire: run
+      # the release through workflow_dispatch on the tag ref with an explicit trusted_base_sha.
+      # A tag FORCE-MOVE still derives a non-vacuous base from the old tag commit. Nothing here
+      # is guessed.
       - name: Run the release suite through the strict active-guard runner
         run: |
           set -euo pipefail

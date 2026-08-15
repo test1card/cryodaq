@@ -2626,7 +2626,40 @@ def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None
         job = document["jobs"]["candidate_identity"]
         return next(step for step in job["steps"] if step.get("id") == "bind")
 
-    assert _bind(workflow)["run"] == _bind(ci)["run"], "release-gate bind script drifted from main.yml"
+    # The two bind scripts are identical EXCEPT in the creation-push branch, and
+    # that one divergence is pinned here rather than excluded from comparison.
+    # Why they must differ: main.yml fires on `push: branches: ["**"]`, where a
+    # new branch's merge base with the default tip is a proper ancestor and the
+    # comparison is meaningful -- and a branch green carries no release
+    # authority. release-gate.yml fires on `tags: ['v*']`, where the tag usually
+    # points AT the default tip, so the merge base collapses to the candidate
+    # and compare_red_reproduction_bindings would compare a commit with itself.
+    # That is the one check the release gate exists to make independently, so it
+    # refuses instead and routes to workflow_dispatch with an explicit base.
+    #
+    # This assert is STRONGER than byte-identity, not weaker: every byte of both
+    # scripts is still covered, the divergence's content is dictated by this
+    # test, and drift anywhere in either file still fails.
+    ci_bind = _bind(ci)["run"]
+    creation_merge_base = (
+        '    test -n "${DEFAULT_BRANCH:?}"\n'
+        '    git fetch --no-tags origin "${DEFAULT_BRANCH}"\n'
+        '    default_tip="$(git rev-parse --verify "origin/${DEFAULT_BRANCH}^{commit}")"\n'
+        '    mapfile -t bases < <(git merge-base --all "$event_commit" "$default_tip")\n'
+        '    test "${#bases[@]}" = 1\n'
+        "    trusted_base_sha=\"$(require_commit 'creation-push merge base' \"${bases[0]}\")\"\n"
+    )
+    assert ci_bind.count(creation_merge_base) == 1, (
+        "main.yml's creation-push merge-base block moved; re-pin it here deliberately"
+    )
+    tag_creation_refusal = (
+        '    echo "new tag creation has no independently authenticated trusted base; '
+        'rerun through workflow_dispatch with trusted_base_sha" >&2\n'
+        "    exit 1\n"
+    )
+    assert _bind(workflow)["run"] == ci_bind.replace(
+        creation_merge_base, tag_creation_refusal
+    ), "release-gate bind drifted from main.yml outside its one pinned divergence"
     assert _bind(workflow)["env"] == _bind(ci)["env"], "release-gate bind environment drifted from main.yml"
     assert workflow["jobs"]["candidate_identity"]["outputs"] == ci["jobs"]["candidate_identity"]["outputs"]
     gate = jobs["whole-tree-artifact-freshness"]
