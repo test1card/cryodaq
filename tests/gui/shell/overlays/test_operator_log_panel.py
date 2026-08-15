@@ -338,6 +338,29 @@ def test_submit_result_ok_clears_message_and_persists_author(app):
     assert not any(e["id"] == 42 for e in panel._entries_all)
 
 
+def test_unresolved_submit_keeps_disabled_payload_fields_readable(app):
+    panel = OperatorLogPanel()
+    panel.set_connected(True)
+    panel._message_edit.setPlainText("Unresolved entry")
+    context = _submit_context()
+
+    panel._on_submit_result(
+        {
+            "ok": False,
+            "_handler_timeout": True,
+            "error": "timeout",
+        },
+        context,
+    )
+
+    assert not panel._author_edit.isEnabled()
+    assert not panel._tags_edit.isEnabled()
+    assert not panel._message_edit.isEnabled()
+    for field in (panel._author_edit, panel._tags_edit, panel._message_edit):
+        assert f"color: {theme.FOREGROUND};" in field.styleSheet()
+        assert f"color: {theme.TEXT_DISABLED};" not in field.styleSheet()
+
+
 def test_ambiguous_persistence_failure_retains_draft_and_retry_identity(app):
     panel = OperatorLogPanel()
     panel.set_connected(True)

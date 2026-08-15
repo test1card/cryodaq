@@ -172,8 +172,11 @@ def _style_input(widget: QLineEdit | QPlainTextEdit) -> None:
         f" border-radius: {theme.RADIUS_SM}px;"
         f" padding: {theme.SPACE_1}px {theme.SPACE_2}px;"
         f"}}"
+        # Disabled composer fields can retain an unresolved journal payload.
+        # Keep that evidence readable while setEnabled(False) preserves the
+        # no-mutation boundary.
         f" QLineEdit:disabled, QPlainTextEdit:disabled {{"
-        f" color: {theme.TEXT_DISABLED};"
+        f" color: {theme.FOREGROUND};"
         f"}}"
     )
 
