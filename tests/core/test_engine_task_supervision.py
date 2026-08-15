@@ -46,11 +46,11 @@ from cryodaq.engine import (
     _EngineTeardownSequence,
     _EngineTeardownState,
     _handle_supervised_task_exit,
+    _run_engine,
     _settle_command_server_before_safety,
     _settle_engine_shutdown_phase,
     _settle_engine_shutdown_plan,
     _wait_for_engine_shutdown_or_ingress_failure,
-    _run_engine,
 )
 from cryodaq.engine_wiring import supervision as supervision_mod
 from cryodaq.engine_wiring.supervision import (
