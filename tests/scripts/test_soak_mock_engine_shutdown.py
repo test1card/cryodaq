@@ -22,10 +22,11 @@ from __future__ import annotations
 
 import signal
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from scripts.soak_mock_engine import _request_shutdown
+from scripts.soak_mock_engine import _request_shutdown, run_soak
 
 
 class _RecordingProc:
@@ -55,6 +56,24 @@ def test_windows_shutdown_uses_ctrl_break_not_terminate(monkeypatch: pytest.Monk
 
     assert proc.terminated == 0, "terminate() on Windows is TerminateProcess and cannot be handled"
     assert proc.signals == [signal.CTRL_BREAK_EVENT]
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "CTRL_BREAK_EVENT"),
+    reason="CTRL_BREAK_EVENT is only deliverable on Windows",
+)
+def test_windows_ctrl_break_reaches_real_mock_engine(tmp_path: Path) -> None:
+    """The production launch and SIGBREAK handler must produce a clean exit."""
+    result = run_soak(
+        duration_s=5.0,
+        grace_s=30.0,
+        poll_interval_s=0.05,
+        log_path=tmp_path / "engine.log",
+    )
+
+    assert result.alive_before_shutdown
+    assert result.clean_shutdown
+    assert result.exit_code == 0
 
 
 def test_posix_shutdown_still_uses_terminate(monkeypatch: pytest.MonkeyPatch) -> None:

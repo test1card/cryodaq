@@ -174,7 +174,7 @@ def run_soak(
                 proc.kill()
                 proc.wait(timeout=10.0)
 
-    log_text = log_path.read_text(encoding="utf-8")
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
     violations = scan_log(log_text, allowlist)
 
     return SoakResult(
