@@ -36,17 +36,15 @@ def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
                 if alias.name == "cryodaq._owned_yaml" and alias.asname is not None
             )
 
-    changed = True
-    while changed:
-        changed = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) and node.value.id in names:
-                aliases = {target.id for target in node.targets if isinstance(target, ast.Name)}
-                if not aliases <= names:
-                    names.update(aliases)
-                    changed = True
-            if not isinstance(node, ast.ClassDef) or node.name in names:
-                continue
+    for node in sorted(ast.walk(tree), key=lambda item: (getattr(item, "lineno", -1), getattr(item, "col_offset", -1))):
+        if isinstance(node, ast.Assign):
+            targets = {target.id for target in node.targets if isinstance(target, ast.Name)}
+            if isinstance(node.value, ast.Name) and node.value.id in names:
+                names.update(targets)
+            else:
+                names.difference_update(targets)
+                modules.difference_update(targets)
+        elif isinstance(node, ast.ClassDef):
             if any(
                 (isinstance(base, ast.Name) and base.id in names)
                 or (
@@ -58,7 +56,9 @@ def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
                 for base in node.bases
             ):
                 names.add(node.name)
-                changed = True
+            else:
+                names.discard(node.name)
+                modules.discard(node.name)
     return names, modules
 
 
@@ -153,6 +153,36 @@ def test_guard_accepts_explicit_owned_loader_and_its_subclass(tmp_path: Path) ->
     )
 
     assert _unsafe_yaml_calls(path, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+OwnedSafeLoader = yaml.UnsafeLoader
+yaml.load("x", Loader=OwnedSafeLoader)
+""",
+        """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+LoaderAlias = OwnedSafeLoader
+LoaderAlias = yaml.UnsafeLoader
+yaml.load("x", Loader=LoaderAlias)
+""",
+        """import cryodaq._owned_yaml as owned
+import yaml
+owned = yaml
+yaml.load("x", Loader=owned.OwnedSafeLoader)
+""",
+    ],
+    ids=["imported-loader", "loader-alias", "module-alias"],
+)
+def test_guard_rejects_rebound_owned_loader_names(tmp_path: Path, source: str) -> None:
+    path = tmp_path / "probe.py"
+    path.write_text(source, encoding="utf-8")
+    offenders = _unsafe_yaml_calls(path, tmp_path)
+    assert len(offenders) == 1
+    assert "PyYAML load bypasses cryodaq._owned_yaml.OwnedSafeLoader" in offenders[0]
 
 
 def test_guard_accepts_relative_import_of_owned_loader(tmp_path: Path) -> None:
