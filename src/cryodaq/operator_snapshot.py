@@ -86,10 +86,10 @@ MAX_ID_UTF8_BYTES = 128
 MAX_LIVE_SOURCES_PER_SESSION = 8
 MAX_REASON_UTF8_BYTES = 128
 MAX_TEXT_UTF8_BYTES = 256
-MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES = 224
+MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES = 256
 MAX_PATH_UTF8_BYTES = 256
 MAX_NONNEGATIVE_INT = 2**63 - 1
-MAX_WIRE_BYTES = 8 * 1024 * 1024
+MAX_WIRE_BYTES = 9 * 1024 * 1024
 _TRANSPORT_REASON_CODES = frozenset({"snapshot_stale", "transport_disconnected"})
 _NO_ACTIVE_EXPERIMENT_ID = "no-active-experiment"
 
@@ -733,6 +733,8 @@ class AttentionQueue(_OperatorSummary):
         _bounded_tuple(self.items, field_name="items", limit=MAX_ATTENTION_ITEMS)
         if self.history_revision is not None:
             _non_negative_int(self.history_revision, field_name="history_revision")
+        elif self.state is OperatorPresentationState.OK:
+            raise ValueError("attention without durable history cannot be ok")
         ids = tuple(item.attention_id for item in self.items)
         _unique(ids, field_name="attention ids")
         if any(item.observed_at > self.cut.observed_at for item in self.items):

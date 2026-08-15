@@ -87,7 +87,7 @@ def _snapshot(*, mode: SnapshotMode = SnapshotMode.LIVE) -> OperatorSnapshot:
             summary_status,
             (InfrastructureNode("ups", "ИБП", summary_status.state, ()),),
         ),
-        AttentionQueue(cut, summary_status, ()),
+        AttentionQueue(cut, summary_status, (), 0),
         ExperimentOperatingState(
             cut,
             summary_status,
@@ -771,6 +771,16 @@ def test_receiver_closes_recursion_memory_and_json_failures(monkeypatch: pytest.
 
 def test_attention_item_detail_rejects_one_byte_over_bound() -> None:
     snapshot = _snapshot()
+    assert (
+        AttentionItem(
+            "attention",
+            OperatorPresentationState.WARNING,
+            "warning",
+            "D" * MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES,
+            snapshot.cut.observed_at,
+        ).detail
+        == "D" * MAX_ATTENTION_ITEM_DETAIL_UTF8_BYTES
+    )
     with pytest.raises(ValueError, match="UTF-8 bytes"):
         AttentionItem(
             "attention",
@@ -1042,3 +1052,14 @@ def test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap() -> None:
 def _summary_payloads(envelope: dict) -> list[dict]:
     snapshot = envelope["snapshot"]
     return [value for key, value in snapshot.items() if key != "cut"]
+
+
+def test_attention_queue_without_durable_history_rejects_ok_status() -> None:
+    snapshot = _snapshot()
+    with pytest.raises(ValueError, match="without durable history"):
+        AttentionQueue(
+            snapshot.cut,
+            SummaryStatus(OperatorPresentationState.OK, 0, 0, (), "normal"),
+            (),
+            None,
+        )
