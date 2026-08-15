@@ -191,7 +191,7 @@ def test_native_final_job_is_fail_closed_and_uploads_only_accepted_context() -> 
     assert job["name"] == "protected CI evidence gate"
     assert job["needs"] == "protected-execution"
     assert job["if"] == (
-        "${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}"
+        "${{ !cancelled() && always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}"
     )
     assert job["permissions"] == {"actions": "read", "contents": "read"}
     assert job["env"]["TARGET_SHA"] == "${{ github.sha }}"
