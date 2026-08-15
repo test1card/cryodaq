@@ -146,10 +146,12 @@ Note: fault keeps value FOREGROUND per RULE-A11Y-003 (contrast); the border + ic
 |---|---|---|
 | ok | STATUS_OK | MUTED_FOREGROUND |
 | caution | STATUS_CAUTION | MUTED_FOREGROUND |
-| fault | STATUS_FAULT | MUTED_FOREGROUND |
+| fault | STATUS_FAULT | FOREGROUND with STATUS_FAULT left border |
 | stale | STATUS_STALE | MUTED_FOREGROUND |
 
-Label stays MUTED_FOREGROUND; dot carries color. Avoids RULE-A11Y-003 body contrast failure.
+Fault labels use neutral FOREGROUND text; the STATUS_FAULT dot and left border
+carry the fault signal. Other inline-state labels stay MUTED_FOREGROUND. This
+avoids RULE-A11Y-003 body contrast failure without removing the fault cue.
 
 ### Filled pills / badges (Mode badge, AlarmBadge, filled StatusBadge)
 

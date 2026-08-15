@@ -294,5 +294,11 @@ class NewExperimentDialog(QDialog):
     def _show_error(self, msg: str, field: QWidget) -> None:
         self._validation_label.setText(msg)
         self._validation_label.setVisible(True)
-        field.setStyleSheet(f"border: 2px solid {theme.STATUS_FAULT}; border-radius: {theme.RADIUS_SM}px;")
+        selector = "QComboBox" if isinstance(field, QComboBox) else "QLineEdit"
+        field.setStyleSheet(
+            f"{selector} {{ border: 2px solid {theme.STATUS_FAULT};"
+            f" border-radius: {theme.RADIUS_SM}px; }}"
+            f" {selector}:focus {{ border: 2px solid {theme.STATUS_FAULT};"
+            f" border-left: 4px solid {theme.ACCENT}; }}"
+        )
         field.setAccessibleDescription(msg)

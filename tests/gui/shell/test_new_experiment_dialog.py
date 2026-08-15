@@ -34,6 +34,8 @@ def test_dialog_validates_empty_name(app):
     assert theme.STATUS_FAULT not in dialog._validation_label.styleSheet()
     assert theme.FOREGROUND in dialog._validation_label.styleSheet()
     assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._name_edit.styleSheet()
+    assert "QLineEdit:focus" in dialog._name_edit.styleSheet()
+    assert f"border-left: 4px solid {theme.ACCENT}" in dialog._name_edit.styleSheet()
     assert dialog._name_edit.accessibleDescription() == "Введите название"
 
 
@@ -53,6 +55,8 @@ def test_dialog_validates_empty_operator(app):
     assert theme.STATUS_FAULT not in dialog._validation_label.styleSheet()
     assert theme.FOREGROUND in dialog._validation_label.styleSheet()
     assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._operator_combo.styleSheet()
+    assert "QComboBox:focus" in dialog._operator_combo.styleSheet()
+    assert f"border-left: 4px solid {theme.ACCENT}" in dialog._operator_combo.styleSheet()
     assert dialog._operator_combo.accessibleDescription() == "Введите оператора"
 
 
