@@ -658,8 +658,7 @@ def test_default_cool_accent_is_status_info_by_decision():
         "indigo #7c8cff) — if intentional, update this test + ADR 002"
     )
     assert pack["ACCENT"] != pack["STATUS_OK"], (
-        "default_cool ACCENT collided with STATUS_OK — the III.A regression this "
-        "guard has always existed to catch"
+        "default_cool ACCENT collided with STATUS_OK — the III.A regression this guard has always existed to catch"
     )
 
 
