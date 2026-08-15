@@ -146,6 +146,11 @@ def _drivers_dict_with_one(driver) -> dict:
     return {driver.name: driver}
 
 
+class _DescriptorCatalog:
+    def require_exact_channels(self, configured_bindings: object) -> None:
+        self.configured_bindings = configured_bindings
+
+
 def test_set_channels_command_rejects_non_list() -> None:
     driver = _driver()
     out = _run(
@@ -230,6 +235,7 @@ def test_set_channels_command_default_name_when_one_driver(tmp_path: Path) -> No
             {"channels": [10, 20]},
             drivers_by_name=_drivers_dict_with_one(driver),
             config_dir=tmp_path,
+            descriptor_catalog=_DescriptorCatalog(),
         )
     )
     assert out["ok"] is True
@@ -243,6 +249,7 @@ def test_set_channels_command_persists_to_local_yaml(tmp_path: Path) -> None:
             {"channels": [3, 7, 11]},
             drivers_by_name=_drivers_dict_with_one(driver),
             config_dir=tmp_path,
+            descriptor_catalog=_DescriptorCatalog(),
         )
     )
     assert out["ok"] is True
@@ -258,6 +265,26 @@ def test_set_channels_command_persists_to_local_yaml(tmp_path: Path) -> None:
     ]
     assert len(matched) == 1
     assert matched[0]["channels"] == [3, 7, 11]
+
+
+def test_set_channels_command_refuses_uncovered_descriptor_channel(tmp_path: Path) -> None:
+    driver = _driver()
+
+    class _MissingChannelCatalog:
+        def require_exact_channels(self, _configured_bindings: object) -> None:
+            raise ValueError("missing descriptor binding")
+
+    out = _run(
+        _handle_multiline_set_channels_command(
+            {"channels": [5]},
+            drivers_by_name=_drivers_dict_with_one(driver),
+            config_dir=tmp_path,
+            descriptor_catalog=_MissingChannelCatalog(),
+        )
+    )
+
+    assert out["error_code"] == "multiline_descriptor_coverage_invalid"
+    assert driver._channel_numbers == [1, 2, 3, 4]
 
 
 # ---------------------------------------------------------------------------
