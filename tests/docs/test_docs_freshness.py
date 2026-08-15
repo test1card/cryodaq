@@ -2657,9 +2657,19 @@ def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None
         'rerun through workflow_dispatch with trusted_base_sha" >&2\n'
         "    exit 1\n"
     )
-    assert _bind(workflow)["run"] == ci_bind.replace(
-        creation_merge_base, tag_creation_refusal
-    ), "release-gate bind drifted from main.yml outside its one pinned divergence"
+    dispatch_tag_validation = (
+        '    if [[ "${GITHUB_REF_TYPE:?}" != "tag" ]] || [[ "${GITHUB_REF_NAME:?}" != v* ]]; then\n'
+        '      echo "workflow_dispatch release evidence must target a v* tag" >&2\n'
+        "      exit 1\n"
+        "    fi\n"
+    )
+    expected_release_bind = ci_bind.replace(creation_merge_base, tag_creation_refusal).replace(
+        '  elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then\n',
+        '  elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then\n' + dispatch_tag_validation,
+    )
+    assert _bind(workflow)["run"] == expected_release_bind, (
+        "release-gate bind drifted from main.yml outside its two pinned release divergences"
+    )
     assert _bind(workflow)["env"] == _bind(ci)["env"], "release-gate bind environment drifted from main.yml"
     assert workflow["jobs"]["candidate_identity"]["outputs"] == ci["jobs"]["candidate_identity"]["outputs"]
     gate = jobs["whole-tree-artifact-freshness"]

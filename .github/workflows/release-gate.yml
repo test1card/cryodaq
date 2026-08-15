@@ -107,6 +107,10 @@ jobs:
             readonly trusted_base_sha
             readonly evidence_sha="$event_commit"
           elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF_TYPE:?}" != "tag" ]] || [[ "${GITHUB_REF_NAME:?}" != v* ]]; then
+              echo "workflow_dispatch release evidence must target a v* tag" >&2
+              exit 1
+            fi
             readonly evidence_sha="$event_commit"
             trusted_base_sha="$(require_commit 'workflow-dispatch trusted base' "${DISPATCH_TRUSTED_BASE_SHA:?}")"
             readonly trusted_base_sha
