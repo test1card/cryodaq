@@ -1,4 +1,4 @@
-"""OC-028 вЂ” the alarm-narration ledger must have a floor as well as a ceiling.
+"""OC-028 — the alarm-narration ledger must have a floor as well as a ceiling.
 
 The dedup gate solved a real problem: a flapping alarm produced one narrative
 per re-fire and buried the operator.  It solved it without a floor.  ``_seen``
@@ -280,7 +280,7 @@ def test_bookkeeping_does_not_grow_without_bound(clock) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Round 2 вЂ” four findings against 7efd6879, two of them P1.
+# Round 2 — four findings against 7efd6879, two of them P1.
 # ---------------------------------------------------------------------------
 
 
@@ -567,6 +567,21 @@ def test_late_delivery_preserves_freshness_without_rearming_the_source_clock(clo
     assert ledger.should_dispatch("alarm:late") is False
     assert ledger.current_attempt("alarm:late") == attempt
     assert ledger._activity["alarm:late"] == start + ESCALATE + WINDOW + 21.0
+
+
+def test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap(clock) -> None:
+    ledger = _ledger()
+    event_id = "alarm:backpressure-late"
+    assert ledger.should_dispatch(event_id) is True
+    attempt = ledger.current_attempt(event_id)
+    for index in range(63):
+        assert ledger.should_dispatch(f"alarm:filler-{index}") is True
+    clock.return_value = 1010.0
+    assert ledger.should_dispatch(event_id) is False
+    clock.return_value = 1035.0
+    ledger.note_outcome(event_id, delivered=True, attempt=attempt)
+    clock.return_value = 1041.0
+    assert ledger.should_dispatch(event_id) is True
 
 
 def test_the_ledger_bounds_admissions_and_claims_nothing_about_delivery(clock) -> None:

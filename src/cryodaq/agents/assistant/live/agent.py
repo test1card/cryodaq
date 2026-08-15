@@ -315,11 +315,13 @@ class _EventDedup:
         """
 
         horizon = now - max(self._window_s, self._escalate_after_s)
-        self._activity = {key: stamp for key, stamp in self._activity.items() if stamp >= horizon}
-        self._seen = {key: stamp for key, stamp in self._seen.items() if key in self._activity}
-        self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in self._activity}
-        self._undelivered &= set(self._activity)
-        self._suppressed &= set(self._activity)
+        retained = {key for key, stamp in self._activity.items() if stamp >= horizon}
+        retained |= {key for key, stamp in self._last_told.items() if stamp >= horizon}
+        self._activity = {key: stamp for key, stamp in self._activity.items() if key in retained}
+        self._seen = {key: stamp for key, stamp in self._seen.items() if key in retained}
+        self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in retained}
+        self._undelivered &= retained
+        self._suppressed &= retained
         # PRUNING DOES NOT ABANDON.  It is tempting -- the ids it leaves in
         # `_pending` are orphans -- but a pruned alarm's attempt may be SLOW
         # rather than dead: the alarm fired once, its narration is still queued,
@@ -328,15 +330,15 @@ class _EventDedup:
         # that alarm.  The orphan is instead cleared at the moment the same
         # alarm is admitted again, in `_allow`, where a replacement narration
         # provably exists.
-        self._attempt = {key: seq for key, seq in self._attempt.items() if key in self._activity}
-        self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in self._activity}
-        self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in self._activity}
+        self._attempt = {key: seq for key, seq in self._attempt.items() if key in retained}
+        self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in retained}
+        self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in retained}
         # The generation marker is pruned WITH its alarm.  Left behind, it still
         # names the retired occurrence's attempt, so a success from that
         # occurrence arriving BEFORE the alarm fires again compares equal and is
         # accepted -- recreating `_seen` and `_last_allowed` and suppressing the
         # new occurrence's first event.
-        self._generation = {key: seq for key, seq in self._generation.items() if key in self._activity}
+        self._generation = {key: seq for key, seq in self._generation.items() if key in retained}
         # `_settled_below` and `_settled_above` are pruned as they are written;
         # see `_mark_settled`.  Nothing to do here.
         return
@@ -525,6 +527,8 @@ class _EventDedup:
             # so this does not silence the alarm. It declines to tell the
             # operator a 65th time by a system that has not managed to tell them
             # once.
+            if event_id not in self._undelivered and last_allowed is not None:
+                self._suppressed.add(event_id)
             return False
 
         if (

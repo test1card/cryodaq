@@ -224,6 +224,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: three_separate_nodes_stepped_the_clock_forward_without_refiring_the_alarm_so_seen_went_stale_and_the_ordinary_quiet_for_a_full_window_branch_admitted_the_dispatch_while_the_escalation_and_retry_branches_under_test_were_never_reached_the_helper_flap_quietly_now_carries_the_refires_so_they_cannot_be_omitted_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: NARRATION-GUARD-LATE-DELIVERY-PRUNE-FALSE-GREEN-342
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_preserves_freshness_without_rearming_the_source_clock
+    ci_partition: agents
+    red_evidence: cross_alarm_pruning_used_only_source_activity_so_a_delivery_one_second_old_was_deleted_when_another_alarm_dispatched_and_the_next_refire_was_admitted_as_new_2026_08_15
+    green_evidence: pending
   - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
     status: open
     scope: product_contract
@@ -3345,6 +3353,8 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_quiet_gap_clears_suppression_before_escalation_retirement
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_does_not_reset_source_activity_for_returning_alarm
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_preserves_freshness_without_rearming_the_source_clock
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_duplicate_compatibility_delivery_does_not_move_the_clock
         ci_partition: agents
