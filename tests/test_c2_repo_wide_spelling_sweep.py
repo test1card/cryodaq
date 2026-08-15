@@ -2390,7 +2390,10 @@ def test_c2_sweep_states_its_own_boundary() -> None:
 
     scope = _scope_statement()
     assert "NOT COVERED" in scope, "the sweep does not state what it fails to cover"
-    assert "BOUNDED-FIXABLE" in scope, "the sweep states no fixable gap, so a reader cannot tell a widening from a wall"
+    assert ".get(...)" in scope, "the scope does not name mapping extraction as a bounded-fixable bypass"
+    assert 'fnmatchcase(reading.channel, "T*")' in scope, (
+        "the scope does not name fnmatchcase as a bounded-fixable bypass"
+    )
     assert "NOT FIXABLE HERE" in scope, (
         "the sweep names no unfixable gap; a boundary listing only fixable gaps reads as a "
         "roadmap to completeness that this matcher cannot reach"
@@ -2412,6 +2415,11 @@ def test_c2_sweep_states_its_own_boundary() -> None:
         "separate 'not scheduled' phrase can conceal that this gap is presented as future work"
     )
     unfixable = scope[scope.index("NOT FIXABLE HERE") :]
+    unfixable_sentence = unfixable.split(".", maxsplit=1)[0]
+    assert unfixable_sentence == unfixable_clause, (
+        "the unfixable gap's complete clause must remain unscheduled, not merely contain an "
+        "unscheduled substring before a contradictory scheduling promise"
+    )
     for scheduled_wording in ("is scheduled", "will be scheduled", "is planned", "future work"):
         assert scheduled_wording not in unfixable, (
             f"the unfixable gap is described as {scheduled_wording!r}; a matcher cannot decide "
