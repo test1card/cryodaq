@@ -50,6 +50,7 @@ from cryodaq.engine import (
     _settle_engine_shutdown_phase,
     _settle_engine_shutdown_plan,
     _wait_for_engine_shutdown_or_ingress_failure,
+    _run_engine,
 )
 from cryodaq.engine_wiring import supervision as supervision_mod
 from cryodaq.engine_wiring.supervision import (
@@ -1435,6 +1436,47 @@ async def test_engine_startup_cancellation_settles_initialization_before_writer_
         "initialization-settled",
         "writer-stop",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_engine_registers_safety_tasks_before_installing_startup_backstop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real startup path must advance past live safety-task registration."""
+
+    class _ReachedPostRegistrationStartup(RuntimeError):
+        pass
+
+    registered: list[tuple[str, bool]] = []
+    original_register = TaskSupervisor.register
+
+    def _record_register(
+        self: TaskSupervisor,
+        name: str,
+        task: asyncio.Task[object],
+        *args: object,
+        **kwargs: object,
+    ) -> asyncio.Task[object]:
+        registered.append((name, not task.done()))
+        return original_register(self, name, task, *args, **kwargs)
+
+    def _stop_after_registration(*_args: object, **_kwargs: object) -> None:
+        raise _ReachedPostRegistrationStartup
+
+    monkeypatch.setattr(TaskSupervisor, "register", _record_register)
+    monkeypatch.setattr(engine_module, "install_loop_exception_backstop", _stop_after_registration)
+
+    try:
+        with pytest.raises(_ReachedPostRegistrationStartup):
+            await asyncio.wait_for(_run_engine(mock=True), timeout=5.0)
+    except TimeoutError:  # pragma: no cover - exercised by the pre-fix startup hang
+        raise AssertionError(
+            "_run_engine awaited the live safety task during registration and "
+            "never reached the post-registration startup step"
+        ) from None
+
+    assert [name for name, _was_live in registered] == ["safety_collect", "safety_monitor"]
+    assert all(was_live for _name, was_live in registered)
 
 
 @pytest.mark.asyncio
