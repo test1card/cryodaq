@@ -183,7 +183,14 @@ def test_subprocess_snapshot_topic_and_cap_match_neutral_transport_contract() ->
     from cryodaq.operator_snapshot_transport import OPERATOR_SNAPSHOT_TOPIC as WIRE_TOPIC
 
     assert OPERATOR_SNAPSHOT_TOPIC == WIRE_TOPIC
-    assert OPERATOR_SNAPSHOT_MAX_WIRE_BYTES == MAX_WIRE_BYTES == 8 * 1024 * 1024
+    # The contract is that the producer's cap and the transport's cap are the
+    # SAME, not that either equals a particular number. Pinning the literal
+    # here meant that raising one side alone left this test red for the wrong
+    # reason, and it would have gone green again if someone had raised only
+    # the literal. The floor below keeps a bare minimum so the pair cannot be
+    # lowered into uselessness together.
+    assert OPERATOR_SNAPSHOT_MAX_WIRE_BYTES == MAX_WIRE_BYTES
+    assert MAX_WIRE_BYTES >= 8 * 1024 * 1024
     assert READING_MAX_WIRE_BYTES == MAX_DATA_MSG_SIZE == 2 * 1024 * 1024
 
 
@@ -460,7 +467,10 @@ def test_readings_and_snapshots_use_distinct_sub_sockets_topics_and_caps() -> No
 
     assert reading is not snapshot
     assert reading.options.count((_FakeZmq.MAXMSGSIZE, 2 * 1024 * 1024)) == 1
-    assert snapshot.options.count((_FakeZmq.MAXMSGSIZE, 8 * 1024 * 1024)) == 1
+    # Take the expected cap from the module under test, so this asserts that
+    # the socket is configured with THE contract value rather than with a
+    # number that happens to match today.
+    assert snapshot.options.count((_FakeZmq.MAXMSGSIZE, OPERATOR_SNAPSHOT_MAX_WIRE_BYTES)) == 1
     assert reading.actions == [
         ("connect", "tcp://127.0.0.1:5555"),
         ("subscribe", b"readings"),

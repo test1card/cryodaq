@@ -82,7 +82,15 @@ _INTERNAL_COMMAND_FIELDS = frozenset({"_rid", "_bridge_generation"})
 DEFAULT_TOPIC = b"readings"
 OPERATOR_SNAPSHOT_TOPIC = b"operator.snapshot"
 READING_MAX_WIRE_BYTES = 2 * 1024 * 1024
-OPERATOR_SNAPSHOT_MAX_WIRE_BYTES = 8 * 1024 * 1024
+# Kept EQUAL to cryodaq.operator_snapshot.MAX_WIRE_BYTES by
+# test_subprocess_snapshot_topic_and_cap_match_neutral_transport_contract.
+# Raised 8 -> 9 MiB together with the producer when the attention-detail
+# field grew from 224 to 256 UTF-8 bytes: at 8 MiB the maximum reviewed
+# fleet no longer fits, which
+# test_maximum_reviewed_fleet_content_is_sendable_under_wire_cap measures.
+# Moving one side alone makes the transport refuse a snapshot the producer
+# considers valid, so these two constants move together or not at all.
+OPERATOR_SNAPSHOT_MAX_WIRE_BYTES = 9 * 1024 * 1024
 _COUNTER_LOCK_TIMEOUT_S = 0.01
 
 # IV.3 Finding 7 / H7: subprocess REQ-socket RCVTIMEO/SNDTIMEO. This MUST sit
