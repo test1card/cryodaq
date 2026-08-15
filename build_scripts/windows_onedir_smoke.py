@@ -969,10 +969,13 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         if executable.resolve() == source_exe.resolve():
             raise RuntimeError("UNICODE_COPY_NOT_USED")
 
+        active_cell = "frozen_driver_imports"
         cells.append(_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir))
+        active_cell = None
         active_cell = "gui_startup_offscreen"
         cells.append(_run_gui_startup_cell(executable, runtime_root, evidence_dir))
         active_cell = None
+        active_cell = "report_render_unicode"
         cells.append(
             _run_report_cell(
                 executable,
@@ -983,10 +986,14 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
                 generation_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
         )
+        active_cell = None
+        active_cell = "windows_job_timeout"
         cells.append(_run_job_timeout_cell(executable, runtime_root, evidence_dir))
+        active_cell = None
 
         # H2 works independently with both an explicit LLM-off config and a
         # missing optional agent config.  The event SUB socket may be idle.
+        active_cell = "assistant_h2_agent_off"
         cells.append(
             _run_assistant_cell(
                 executable,
@@ -999,6 +1006,8 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
                 automatic=True,
             )
         )
+        active_cell = None
+        active_cell = "assistant_h2_agent_missing"
         cells.append(
             _run_assistant_cell(
                 executable,
@@ -1011,7 +1020,9 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
                 automatic=True,
             )
         )
+        active_cell = None
 
+        active_cell = "assistant_replay_exact_off"
         cells.append(
             _run_assistant_cell(
                 executable,
@@ -1024,12 +1035,14 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
                 automatic=False,
             )
         )
+        active_cell = None
 
         # A valid synthetic config loads the complete frozen H3 stack.  No
         # engine publisher is present, so bounded non-ready durable health is
         # the expected allowed-idle outcome and no Telegram request is attempted.
         synthetic_token = "123456:abcdefghijklmnopqrstuvwxyzABCDE"
         _write_periodic_config(runtime_root, synthetic_token)
+        active_cell = "assistant_h3_only_allowed_idle"
         cells.append(
             _run_assistant_cell(
                 executable,
@@ -1044,8 +1057,10 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
                 forbidden_text=synthetic_token,
             )
         )
+        active_cell = None
         # Reacquiring the durable leader and publishing health in the same
         # root proves the first frozen assistant released its kernel lock.
+        active_cell = "assistant_h3_only_restart_lock_release"
         cells.append(
             _run_assistant_cell(
                 executable,
@@ -1060,6 +1075,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
                 forbidden_text=synthetic_token,
             )
         )
+        active_cell = None
 
         inventory = _artifact_inventory(dist_dir)
         _atomic_json(evidence_dir / "artifact-hashes.json", inventory)

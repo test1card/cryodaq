@@ -129,7 +129,13 @@ def test_run_smoke_executes_frozen_driver_cell_as_required_production_step(
     assert calls == ["frozen_driver_imports"]
     assert failure["status"] == "FAIL"
     assert "FROZEN_DRIVER_REQUIRED_CONTROL" in failure["reason"]
-    assert failure["cells"] == []
+    assert failure["cells"] == [
+        {
+            "name": "frozen_driver_imports",
+            "status": "FAIL",
+            "reason": "RuntimeError:FROZEN_DRIVER_REQUIRED_CONTROL",
+        }
+    ]
 
 
 def test_frozen_driver_import_cell_accepts_only_the_exact_live_registry_payload(
