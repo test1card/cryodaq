@@ -582,7 +582,7 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
     pipe_locks = (threading.Lock(), threading.Lock())
 
     def read_pipe(stream: Any, chunks: list[bytes], lock: threading.Lock) -> None:
-        while data := stream.read(64 * 1024):
+        while data := stream.read1(64 * 1024):
             with lock:
                 chunks.append(data)
 

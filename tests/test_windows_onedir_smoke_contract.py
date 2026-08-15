@@ -69,8 +69,8 @@ def test_gui_smoke_waits_for_process_not_inherited_pipe_eof(tmp_path: Path, monk
     release_pipe = threading.Event()
 
     class InheritedPipe(io.BytesIO):
-        def read(self, _size: int = -1) -> bytes:
-            data = super().read()
+        def read1(self, size: int = -1) -> bytes:
+            data = super().read(size)
             if data:
                 return data
             release_pipe.wait(timeout=5)
@@ -103,6 +103,7 @@ def test_gui_smoke_waits_for_process_not_inherited_pipe_eof(tmp_path: Path, monk
     monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
     monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
 
     outcome = None
