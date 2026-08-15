@@ -158,7 +158,10 @@ def run_soak(
                     break
                 time.sleep(min(poll_interval_s, remaining))
 
-            _request_shutdown(proc)
+            if proc.poll() is None:
+                _request_shutdown(proc)
+            else:
+                alive_before_shutdown = False
             try:
                 exit_code = proc.wait(timeout=grace_s)
                 clean_shutdown = exit_code == 0
@@ -171,7 +174,7 @@ def run_soak(
                 proc.kill()
                 proc.wait(timeout=10.0)
 
-    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    log_text = log_path.read_text(encoding="utf-8")
     violations = scan_log(log_text, allowlist)
 
     return SoakResult(
