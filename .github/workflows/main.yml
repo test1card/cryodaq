@@ -7,6 +7,7 @@ on:
   # Every pull request into master — validates the simulated merge result.
   pull_request:
     branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   # Manual "Run workflow" button in the Actions tab.
   workflow_dispatch:
@@ -29,6 +30,7 @@ permissions:
 jobs:
   test:
     needs: candidate_identity
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: test (${{ matrix.os }}, ${{ matrix.suite }})
     runs-on: ${{ matrix.os }}
     defaults:
