@@ -21,9 +21,9 @@
   и не выдаёт instrument/control authority.
 - Добавлена каноническая descriptor authority на именованных путях acquisition,
   SQLite и отдельных archive/replay/report/GUI consumers. Это не end-to-end
-  closure: archive-finalisation rows и часть GUI/interlock/assistant/notification
+  closure: archive-finalisation rows и часть GUI/assistant/notification
   путей ещё не имеют descriptor authority или используют spelling; см.
-  `docs/OPEN_CELLS.md` (OC-008, OC-011, OC-023–OC-025). Machine-local manifest
+  `docs/OPEN_CELLS.md` (OC-008, OC-011, OC-024–OC-025). Machine-local manifest
   является whole-file replacement и проходит строгую roster/binding validation.
   Passive extension registry и ASC reference driver не могут приобрести
   hazardous source authority через duck typing.
