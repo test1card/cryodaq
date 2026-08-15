@@ -132,15 +132,18 @@ def test_72h_profile_rejects_its_own_descriptor_slope_limit() -> None:
 
     assert soak.evaluate_resources(_samples(profile), profile) == []
     warmup_ramp = _samples(profile)
+    # The ramp rises across the long profile's warm-up and is then HELD. Growth
+    # is measured from the first post-warm-up sample to the last, so a bump that
+    # returns to baseline nets to zero and trips nothing; only a sustained step
+    # distinguishes the two warm-up lengths.
+    ramp_start_s = soak.PROFILES["short"].warmup_s
+    ramp_bytes = 100 * 1024 * 1024
     for sample in warmup_ramp:
-        if soak.PROFILES["short"].warmup_s <= sample["elapsed_s"] < profile.warmup_s:
-            sample["roles"]["launcher"]["rss_bytes"] += int(
-                (sample["elapsed_s"] - soak.PROFILES["short"].warmup_s)
-                * 100
-                * 1024
-                * 1024
-                / (profile.warmup_s - soak.PROFILES["short"].warmup_s)
-            )
+        elapsed_s = float(sample["elapsed_s"])
+        if elapsed_s < ramp_start_s:
+            continue
+        fraction = min(1.0, (elapsed_s - ramp_start_s) / (profile.warmup_s - ramp_start_s))
+        sample["roles"]["launcher"]["rss_bytes"] += int(fraction * ramp_bytes)
     assert soak.evaluate_resources(warmup_ramp, profile) == []
     short_warmup = replace(profile, warmup_s=soak.PROFILES["short"].warmup_s)
     assert "launcher epoch 0 RSS growth reached 50 MiB" in soak.evaluate_resources(warmup_ramp, short_warmup)
