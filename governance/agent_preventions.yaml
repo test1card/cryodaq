@@ -60,7 +60,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: EVIDENCE-INVENTORY-BINDING-001
-    guard: tests/governance/test_agent_preventions.py::test_evidence_inventory_guard_binds_the_named_facility
+    guard: tests/governance/test_agent_preventions.py::test_evidence_inventory_false_green_guard_uses_the_actual_claim
     ci_partition: remaining
     red_evidence: pending
     green_evidence: pending
@@ -68,7 +68,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: EVIDENCE-IMMUTABLE-MEASUREMENT-002
-    guard: tests/governance/test_agent_preventions.py::test_evidence_measurement_guard_requires_immutable_identity
+    guard: tests/governance/test_agent_preventions.py::test_evidence_immutable_measurement_false_green_guard_uses_the_actual_claim
     ci_partition: remaining
     red_evidence: pending
     green_evidence: pending
@@ -76,7 +76,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: EVIDENCE-RETRIEVABLE-IDENTIFIER-003
-    guard: tests/governance/test_agent_preventions.py::test_evidence_retrieval_guard_covers_every_identifier
+    guard: tests/governance/test_agent_preventions.py::test_evidence_retrieval_false_green_guard_uses_the_actual_claim
     ci_partition: remaining
     red_evidence: pending
     green_evidence: pending
@@ -84,7 +84,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: EVIDENCE-AUTHORIZATION-ORDERING-004
-    guard: tests/governance/test_agent_preventions.py::test_evidence_authorization_guard_rejects_artifact_substitution
+    guard: tests/governance/test_agent_preventions.py::test_evidence_authorization_false_green_guard_uses_the_actual_claim
     ci_partition: remaining
     red_evidence: pending
     green_evidence: pending
@@ -92,7 +92,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: EVIDENCE-EXACT-CANDIDATE-005
-    guard: tests/governance/test_agent_preventions.py::test_evidence_candidate_guard_requires_candidate_and_measured_equality
+    guard: tests/governance/test_agent_preventions.py::test_evidence_candidate_false_green_guard_uses_the_actual_claim
     ci_partition: remaining
     red_evidence: pending
     green_evidence: pending
@@ -100,7 +100,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: EVIDENCE-PER-COMMIT-DIFF-006
-    guard: tests/governance/test_agent_preventions.py::test_evidence_per_commit_guard_requires_each_commit_result
+    guard: tests/governance/test_agent_preventions.py::test_evidence_per_commit_false_green_guard_uses_the_actual_claim
     ci_partition: remaining
     red_evidence: pending
     green_evidence: pending
@@ -6474,6 +6474,8 @@ records:
     guards:
       - node: tests/governance/test_agent_preventions.py::test_evidence_inventory_guard_binds_the_named_facility
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_evidence_inventory_false_green_guard_uses_the_actual_claim
+        ci_partition: remaining
     automation_limit: The guard binds the exact facility identifier named by a retirement or absence claim to the authoritative inventory wording; independent closure evidence remains required.
     red_evidence: pending
     green_evidence: pending
@@ -6493,6 +6495,8 @@ records:
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/governance/test_agent_preventions.py::test_evidence_measurement_guard_requires_immutable_identity
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_evidence_immutable_measurement_false_green_guard_uses_the_actual_claim
         ci_partition: remaining
     automation_limit: The guard rejects moving-ref-only measurement language and requires immutable identity; independent closure evidence remains required.
     red_evidence: pending
@@ -6514,6 +6518,8 @@ records:
     guards:
       - node: tests/governance/test_agent_preventions.py::test_evidence_retrieval_guard_covers_every_identifier
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_evidence_retrieval_false_green_guard_uses_the_actual_claim
+        ci_partition: remaining
     automation_limit: The guard covers every evidence identifier regardless of register cell or status; fresh-clone resolution still requires independent closure evidence.
     red_evidence: pending
     green_evidence: pending
@@ -6533,6 +6539,8 @@ records:
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/governance/test_agent_preventions.py::test_evidence_authorization_guard_rejects_artifact_substitution
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_evidence_authorization_false_green_guard_uses_the_actual_claim
         ci_partition: remaining
     automation_limit: The guard requires quoted authorization and rejects artifact existence as a substitute; manual ordering remains a fail-closed human gate.
     red_evidence: pending
@@ -6554,6 +6562,8 @@ records:
     guards:
       - node: tests/governance/test_agent_preventions.py::test_evidence_candidate_guard_requires_candidate_and_measured_equality
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_evidence_candidate_false_green_guard_uses_the_actual_claim
+        ci_partition: remaining
     automation_limit: The guard requires equality between candidate and measured immutable objects; independent closure evidence remains required.
     red_evidence: pending
     green_evidence: pending
@@ -6573,6 +6583,8 @@ records:
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/governance/test_agent_preventions.py::test_evidence_per_commit_guard_requires_each_commit_result
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_evidence_per_commit_false_green_guard_uses_the_actual_claim
         ci_partition: remaining
     automation_limit: The guard requires a result for every commit in the compared range; independent closure evidence remains required.
     red_evidence: pending

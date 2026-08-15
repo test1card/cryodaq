@@ -7004,7 +7004,7 @@ async def _run_engine(
     command_ingress = ZMQCommandIngressPair(ordinary=cmd_server, safe=safe_cmd_server)
 
     # Plugin Pipeline
-    plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR)
+    plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR, hot_reload=qualification_receipt is None)
 
     # --- CooldownService (прогноз охлаждения) ---
     cooldown_service: Any = None

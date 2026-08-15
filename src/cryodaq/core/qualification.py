@@ -330,13 +330,20 @@ def source_checkout_qualification_context(
 
     package_root = project_root / "src" / "cryodaq"
     plugins_root = project_root / "plugins"
-    artifact_paths = [
+    if not package_root.is_dir():
+        raise QualificationReceiptError("source package manifest is unavailable")
+    package_paths = [
         path
-        for root in (package_root, plugins_root)
-        if root.is_dir()
-        for path in root.rglob("*")
+        for path in package_root.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
     ]
+    if not package_paths:
+        raise QualificationReceiptError("source package manifest is empty")
+    artifact_paths = package_paths + [
+        path
+        for path in plugins_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+    ] if plugins_root.is_dir() else package_paths
     config_paths = [
         path for path in config_directory.rglob("*") if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}
     ]

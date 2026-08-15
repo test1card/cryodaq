@@ -342,3 +342,21 @@ async def test_watch_loop_skips_unstable_file(tmp_path: Path, monkeypatch):
     await pipeline._watch_loop()
 
     assert loaded == ["simple_plugin.py"], "file must load exactly once, only after its mtime stabilised"
+
+async def test_qualified_pipeline_disables_plugin_hot_reload(tmp_path: Path, monkeypatch) -> None:
+    """A qualified source identity must not survive a changed plugin reload."""
+
+    import cryodaq.analytics.plugin_loader as plugin_loader
+
+    broker = DataBroker()
+    pipeline = PluginPipeline(broker, tmp_path, batch_interval_s=0.01, hot_reload=False)
+    scans: list[object] = []
+    monkeypatch.setattr(plugin_loader, "_WATCH_INTERVAL_S", 0.001)
+    monkeypatch.setattr(pipeline, "_scan_plugins", lambda *args: scans.append(args))
+
+    await pipeline.start()
+    try:
+        await asyncio.sleep(0.02)
+        assert scans == []
+    finally:
+        await pipeline.stop()

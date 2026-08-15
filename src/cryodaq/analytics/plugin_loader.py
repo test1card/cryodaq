@@ -100,6 +100,7 @@ class PluginPipeline:
         plugins_dir: Path,
         *,
         batch_interval_s: float = 1.0,
+        hot_reload: bool = True,
     ) -> None:
         """Инициализировать пайплайн.
 
@@ -112,6 +113,7 @@ class PluginPipeline:
         self._plugins_dir = plugins_dir
         self._plugins: dict[str, AnalyticsPlugin] = {}
         self._batch_interval_s = batch_interval_s
+        self._hot_reload = hot_reload
         self._queue: asyncio.Queue[Reading] | None = None
         self._process_task: asyncio.Task[None] | None = None
         self._watch_task: asyncio.Task[None] | None = None
@@ -756,6 +758,11 @@ class PluginPipeline:
         Ошибки в цикле перехватываются — сбой слежения не влияет на
         обработку данных.
         """
+        if not self._hot_reload:
+            while self._running:
+                await asyncio.sleep(_WATCH_INTERVAL_S)
+            return
+
         known_files: dict[str, float] | None
         try:
             known_files = self._scan_plugins()

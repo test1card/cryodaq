@@ -5,7 +5,6 @@ import copy
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cryodaq.agents.assistant_bootstrap import PERIODIC_REPORTER_FACILITIES, RETIRED_PERIODIC_REPORTER_SYMBOLS
 from tools.check_python_compile import compile_python_tree
 from tools.ci_candidate_runner import suite_for_node
 from tools.ci_execution_roots import checkout_execution_selection
@@ -131,79 +131,106 @@ def test_registry_schema_ids_and_references_are_exact() -> None:
 
 
 def test_evidence_inventory_guard_binds_the_named_facility() -> None:
-    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
-    inventory = {"PeriodicPngSupervisor", "assistant_main._periodic_report_tick"}
-    claimed_facility = "assistant_main._periodic_report_tick"
-    retired_facility = "notifications.periodic_report.PeriodicReporter"
-    assert claimed_facility in inventory
-    assert retired_facility not in inventory
-    assert claimed_facility != retired_facility
-    assert "Bind the evidence to the facility under review" in text
-    assert "quote the identifier the reviewed claim names" in text
+    claim = _ob013_claim()
+    rule = _ob014_claim()
+    live_symbols = {facility.symbol for facility in PERIODIC_REPORTER_FACILITIES}
+    retired_symbols = set(RETIRED_PERIODIC_REPORTER_SYMBOLS)
 
+    named_live = {
+        symbol.removeprefix("cryodaq.agents.")
+        for symbol in live_symbols
+        if symbol.endswith("_periodic_report_tick")
+    }
+    named_retired = {symbol.rsplit(".", 1)[-1] for symbol in retired_symbols}
+
+    assert named_live == {"assistant_main._periodic_report_tick"}
+    assert named_retired == {"PeriodicReporter"}
+    assert live_symbols.isdisjoint(retired_symbols)
+    assert all(symbol in claim for symbol in named_live)
+    assert all(symbol in claim for symbol in named_retired)
+    assert "Bind the evidence to the facility under review" in rule
 
 def test_evidence_measurement_guard_requires_immutable_identity() -> None:
-    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
-    immutable = re.compile(r"^(?:commit|tree):[0-9a-f]{40}$")
-    assert immutable.fullmatch("commit:" + "a" * 40)
-    assert not immutable.fullmatch("origin/master")
-    assert not immutable.fullmatch("HEAD")
-    assert "Bind a measurement to an immutable commit id" in text
-    assert "A branch name, `HEAD` or `origin/master` is not a binding" in text
-
+    claim = _ob014_claim()
+    assert 'Bind a measurement to an immutable commit id' in claim
+    assert 'origin/master' in claim
+    assert 'not a binding' in claim
 
 def test_evidence_retrieval_guard_covers_every_identifier() -> None:
-    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
-
-    def resolves(identifier: str, objects: set[str]) -> bool:
-        return identifier in objects
-
-    locally_retrievable = {"commit:" + "a" * 40}
-    assert resolves("commit:" + "a" * 40, locally_retrievable)
-    assert not resolves("commit:" + "b" * 40, locally_retrievable)
-    assert (
-        "For every repository evidence identifier, verify retrievability in a fresh clone, regardless of cell or status"
-        in text
-    )
-
+    claim = _ob014_claim()
+    assert 'verify retrievability in a fresh clone' in claim
+    assert 'every repository evidence identifier' in claim
+    assert 'every identifier in its Discharge cell resolves' in claim
 
 def test_evidence_authorization_guard_rejects_artifact_substitution() -> None:
-    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
-
-    def ordering_evidence_is_complete(evidence: dict[str, str]) -> bool:
-        return {"inputs", "decision_owner", "required_evidence", "outcome", "authorization_quote"} <= evidence.keys()
-
-    assert not ordering_evidence_is_complete({"artifact": "merged-pr"})
-    assert ordering_evidence_is_complete(
-        {
-            "inputs": "queue state and publication time",
-            "decision_owner": "coordinator",
-            "required_evidence": "timestamped queue-empty record",
-            "outcome": "retain PENDING if absent",
-            "authorization_quote": "owner said proceed",
-        }
-    )
-    assert "Quote the authorisation when the trigger needs one" in text
-    assert "artifact existence is not permission to create it" in text
-
+    claim = _ob014_claim()
+    assert 'Quote the authorisation when the trigger needs one' in claim
+    assert 'artifact existence is not permission to create it' in claim
+    assert 'fail-closed outcome' in claim
 
 def test_evidence_candidate_guard_requires_candidate_and_measured_equality() -> None:
-    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
-    assert ("candidate-commit", "measured-commit") != ("candidate-commit", "other-commit")
-    assert ("candidate-commit", "measured-commit") == ("candidate-commit", "measured-commit")
-    assert "exact candidate tree under review" in text
-    assert "require them to be equal" in text
-
+    claim = _ob014_claim()
+    assert 'exact candidate tree under review' in claim
+    assert 'immutable tree or commit actually measured' in claim
+    assert 'require them to be equal' in claim
 
 def test_evidence_per_commit_guard_requires_each_commit_result() -> None:
-    text = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8")
-    compared_range = ["commit-a", "commit-b", "commit-c"]
-    reported = {"commit-a": "no deletion", "commit-b": "deleted", "commit-c": "no deletion"}
-    endpoint_only = {"commit-a": "no deletion", "commit-c": "no deletion"}
-    assert set(reported) == set(compared_range)
-    assert set(endpoint_only) != set(compared_range)
-    assert "inspect every commit in the compared range" in text
-    assert "Record per-commit deletion results" in text
+    claim = _ob014_claim()
+    assert 'inspect every commit in the compared range' in claim
+    assert 'Record per-commit deletion results' in claim
+    assert 'final-tip diff does not test intermediate deletion and restoration' in claim
+
+def _obligation_claim(identifier: str) -> str:
+    lines = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8").splitlines()
+    return next(line for line in lines if line.startswith(f"| {identifier} |"))
+
+
+def _ob013_claim() -> str:
+    return _obligation_claim("OB-013")
+
+
+def _ob014_claim() -> str:
+    return _obligation_claim("OB-014")
+
+
+def test_evidence_inventory_false_green_guard_uses_the_actual_claim() -> None:
+    claim = _ob013_claim()
+    live_symbols = {facility.symbol for facility in PERIODIC_REPORTER_FACILITIES}
+    retired_symbols = set(RETIRED_PERIODIC_REPORTER_SYMBOLS)
+    named_live = {
+        symbol.removeprefix("cryodaq.agents.")
+        for symbol in live_symbols
+        if symbol.endswith("_periodic_report_tick")
+    }
+    named_retired = {symbol.rsplit(".", 1)[-1] for symbol in retired_symbols}
+
+    assert named_live == {"assistant_main._periodic_report_tick"}
+    assert named_retired == {"PeriodicReporter"}
+    assert all(symbol in claim for symbol in named_live | named_retired)
+
+
+def test_evidence_immutable_measurement_false_green_guard_uses_the_actual_claim() -> None:
+    assert "Bind a measurement to an immutable commit id" in _ob014_claim()
+
+
+def test_evidence_retrieval_false_green_guard_uses_the_actual_claim() -> None:
+    assert "verify retrievability in a fresh clone" in _ob014_claim()
+
+
+def test_evidence_authorization_false_green_guard_uses_the_actual_claim() -> None:
+    assert "Quote the authorisation when the trigger needs one" in _ob014_claim()
+
+
+def test_evidence_candidate_false_green_guard_uses_the_actual_claim() -> None:
+    claim = _ob014_claim()
+    assert "exact candidate tree under review" in claim
+    assert "require them to be equal" in claim
+
+
+def test_evidence_per_commit_false_green_guard_uses_the_actual_claim() -> None:
+    claim = _ob014_claim()
+    assert "inspect every commit in the compared range" in claim
+    assert "Record per-commit deletion results" in claim
 
 
 def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidence() -> None:
