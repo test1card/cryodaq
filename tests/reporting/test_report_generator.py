@@ -1150,3 +1150,51 @@ def test_service_log_empty_state_is_russian(tmp_path: Path) -> None:
     text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
     assert "Служебный лог" in text
     assert "Записи служебного лога за интервал эксперимента отсутствуют." in text
+
+
+async def test_metadata_section_counts_bind_to_generated_summary_keys(
+    manager: ExperimentManager,
+    tmp_path: Path,
+) -> None:
+    """The counts line must key off the archive `_build_archive_snapshot` actually writes.
+
+    It emits `measured_value_rows` / `run_record_count` / `artifact_count`.  Keying off
+    `reading_count` / `run_count` — which no producer has ever written — dropped both counts
+    from every generated report.  And `artifact_count` is taken before the summary_metadata
+    artifact is appended, so comparing it against the whole loaded index announced a
+    one-artifact discrepancy for every consistent archive.
+    """
+    from cryodaq.reporting.data import ReportDataset
+    from cryodaq.reporting.sections import render_experiment_metadata_section
+
+    exp_id = manager.start_experiment(
+        name="Counts",
+        operator="Operator",
+        template_id="thermal_conductivity",
+        start_time="2026-03-16T12:00:00+00:00",
+    )
+    manager.finalize_experiment(exp_id, end_time="2026-03-16T12:05:00+00:00")
+    metadata = json.loads((tmp_path / "experiments" / exp_id / "metadata.json").read_text(encoding="utf-8"))
+    summary = metadata["summary_metadata"]
+    artifact_index = [dict(item) for item in metadata["artifact_index"]]
+
+    # The generated archive really is consistent, and really is off by the one artifact
+    # appended after the count was taken.
+    assert {"measured_value_rows", "run_record_count", "artifact_count"} <= set(summary)
+    assert [item for item in artifact_index if item.get("role") == "summary_metadata"]
+    assert summary["artifact_count"] == len(artifact_index) - 1
+
+    dataset = ReportDataset(
+        metadata=metadata,
+        run_records=[dict(item) for item in metadata["run_records"]],
+        artifact_index=artifact_index,
+        summary_metadata=dict(summary),
+    )
+    document = Document()
+    render_experiment_metadata_section(document, dataset, tmp_path)
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text)
+
+    assert f"Измерений: {len(dataset.readings):,}" in text
+    assert f"Прогонов: {len(dataset.run_records):,}" in text
+    assert f"Артефактов: {len(artifact_index):,}" in text
+    assert "в записи" not in text, f"a consistent generated archive was reported as stale:\n{text}"
