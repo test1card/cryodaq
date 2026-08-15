@@ -2613,13 +2613,13 @@ class EngineCommandContext:
     alarm_dispatch_tasks: set[asyncio.Task[Any]]
     calibration_store: Any
     writer: Any
-    descriptor_catalog: Any
     drivers_by_name: dict[str, Any]
     sensor_diag: Any
     vacuum_trend: Any
     alarm_v2_state_tracker: Any
     multiline_burst_auto_stop_meta: dict[str, dict[str, Any]]
     multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]]
+    descriptor_catalog: Any = None
     shutdown_event: asyncio.Event | None = None
     engine_instance_id: str = ""
     shutdown_capability: str = ""
@@ -6656,7 +6656,6 @@ async def _run_engine(
     _alarm_dispatch_tasks: set[asyncio.Task[Any]] = set()
     safety_fault_context = _SafetyFaultLogContext(
         writer=writer,
-        descriptor_catalog=live_descriptor_catalog,
         broker=broker,
         alarm_dispatch_tasks=_alarm_dispatch_tasks,
     )
@@ -6971,6 +6970,7 @@ async def _run_engine(
     _multiline_burst_auto_stop_tasks: dict[str, asyncio.Task[None]] = {}
 
     command_context = EngineCommandContext(
+        descriptor_catalog=live_descriptor_catalog,
         safety_manager=safety_manager,
         event_logger=event_logger,
         sink_registry=sink_registry,
