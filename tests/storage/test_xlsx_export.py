@@ -106,17 +106,17 @@ async def test_xlsx_data_values_correct(tmp_path: Path) -> None:
     wb = openpyxl.load_workbook(output_path)
     ws = wb["Данные"]
 
-    # Pivoted format: header = ["Время", "CH1", "CH2"]
-    header = [cell.value for cell in ws[1]]
-    assert "CH1" in header, f"CH1 missing from header: {header}"
-    assert "CH2" in header, f"CH2 missing from header: {header}"
+    # Channel identities occupy three header rows.
+    channels = [cell.value for cell in ws[2]]
+    assert "CH1" in channels, f"CH1 missing from channel row: {channels}"
+    assert "CH2" in channels, f"CH2 missing from channel row: {channels}"
 
-    ch1_col = header.index("CH1") + 1
-    ch2_col = header.index("CH2") + 1
+    ch1_col = channels.index("CH1") + 1
+    ch2_col = channels.index("CH2") + 1
 
-    # Read first data row
-    ch1_val = ws.cell(row=2, column=ch1_col).value
-    ch2_val = ws.cell(row=2, column=ch2_col).value
+    # The first data row follows the three identity header rows.
+    ch1_val = ws.cell(row=4, column=ch1_col).value
+    ch2_val = ws.cell(row=4, column=ch2_col).value
 
     assert ch1_val is not None and abs(ch1_val - 4.5) < 0.01, f"CH1 value: {ch1_val}"
     assert ch2_val is not None and abs(ch2_val - 77.0) < 0.01, f"CH2 value: {ch2_val}"
@@ -173,11 +173,11 @@ async def test_xlsx_channel_filter(tmp_path: Path) -> None:
     wb = openpyxl.load_workbook(output_path)
     ws = wb["Данные"]
 
-    # Pivoted: header should only have Время + CH1 (not CH2, CH3)
-    header = [cell.value for cell in ws[1]]
-    assert "CH1" in header, f"CH1 missing from header: {header}"
-    assert "CH2" not in header, f"CH2 should not be in filtered output: {header}"
-    assert "CH3" not in header, f"CH3 should not be in filtered output: {header}"
+    # The channel identity row should only contain CH1 (not CH2, CH3).
+    channels = [cell.value for cell in ws[2]]
+    assert "CH1" in channels, f"CH1 missing from channel row: {channels}"
+    assert "CH2" not in channels, f"CH2 should not be in filtered output: {channels}"
+    assert "CH3" not in channels, f"CH3 should not be in filtered output: {channels}"
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +203,8 @@ async def test_xlsx_max_rows_constant(tmp_path: Path) -> None:
     _populate_db(data_dir, readings)
 
     output_path = tmp_path / "out_capped.xlsx"
-    # cap=5: row_num starts at 2 (header row=1); loop breaks when row_num >= 5,
-    # so at most 3 data rows (row_num 2, 3, 4) are written before truncation.
+    # cap=5: data starts at row 4 after three identity header rows; the loop
+    # breaks at row 5, so exactly one data row can be written.
     cap = 5
     with _mock.patch.object(xlsx_mod, "_XLSX_MAX_ROWS", cap):
         exporter = XLSXExporter(data_dir)
@@ -213,7 +213,7 @@ async def test_xlsx_max_rows_constant(tmp_path: Path) -> None:
     assert output_path.exists(), "XLSX not created under small cap"
     wb = openpyxl.load_workbook(output_path)
     ws = wb["Данные"]
-    data_rows = ws.max_row - 1  # subtract header row
+    data_rows = ws.max_row - 3  # subtract the three identity header rows
     assert data_rows < 10, f"Exporter wrote {data_rows} data rows despite cap={cap}; truncation broken"
     assert count == data_rows, f"Return value {count} must equal actual data rows written {data_rows}"
 
@@ -238,13 +238,48 @@ async def test_xlsx_preserves_small_vacuum_values(tmp_path: Path) -> None:
 
     wb = openpyxl.load_workbook(output_path)
     ws = wb["Данные"]
-    header = [cell.value for cell in ws[1]]
-    col = header.index("VAC") + 1
-    val = ws.cell(row=2, column=col).value
+    channels = [cell.value for cell in ws[2]]
+    col = channels.index("VAC") + 1
+    val = ws.cell(row=4, column=col).value
 
     assert val is not None, "vacuum cell is empty"
     assert val != 0.0, f"vacuum value truncated to zero: {val}"
     assert abs(val - 1e-7) < 1e-12, f"vacuum value not preserved: {val}"
+
+
+def test_xlsx_preserves_same_channel_readings_with_distinct_descriptor_hashes(tmp_path: Path) -> None:
+    """A timestamp/channel collision must retain each descriptor identity."""
+    data_dir = tmp_path / "data"
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    _populate_db(
+        data_dir,
+        [
+            _reading("CH1", 4.5, ts=ts),
+            _reading("CH1", 7.5, ts=ts),
+        ],
+    )
+
+    db_path = data_dir / f"data_{ts.date().isoformat()}.db"
+    first_hash = "sha256:first"
+    second_hash = "sha256:second"
+    with sqlite3.connect(str(db_path)) as conn:
+        row_ids = [row[0] for row in conn.execute("SELECT id FROM readings ORDER BY id")]
+        assert len(row_ids) == 2
+        conn.execute("UPDATE readings SET descriptor_hash=? WHERE id=?", (first_hash, row_ids[0]))
+        conn.execute("UPDATE readings SET descriptor_hash=? WHERE id=?", (second_hash, row_ids[1]))
+        conn.commit()
+
+    output_path = tmp_path / "descriptor-collision.xlsx"
+    assert XLSXExporter(data_dir).export(output_path) == 1
+
+    ws = openpyxl.load_workbook(output_path).active
+    values_by_hash = {
+        ws.cell(row=3, column=column).value: ws.cell(row=4, column=column).value
+        for column in range(2, ws.max_column + 1)
+        if ws.cell(row=1, column=column).value == "ls218s" and ws.cell(row=2, column=column).value == "CH1"
+    }
+
+    assert values_by_hash == {first_hash: 4.5, second_hash: 7.5}
 
 
 # ---------------------------------------------------------------------------

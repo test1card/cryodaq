@@ -42,13 +42,14 @@ def test_xlsx_exports_descriptor_hash_and_leaves_old_archive_empty(tmp_path: Pat
     XLSXExporter(data_dir).export(output_path)
 
     ws = openpyxl.load_workbook(output_path)["Данные"]
-    header = [cell.value for cell in ws[1]]
-    assert header == [
+    assert [ws.cell(row=1, column=column).value for column in range(1, 4)] == [
         "Время",
+        "i",
+        "i",
+    ]
+    assert [ws.cell(row=2, column=column).value for column in range(2, 4)] == [
         "CH_NEW",
-        "CH_NEW descriptor_hash",
         "CH_OLD",
-        "CH_OLD descriptor_hash",
-    ], f"descriptor_hash export columns missing or misplaced: {header}"
-    assert ws.cell(row=2, column=3).value == descriptor_hash
-    assert ws.cell(row=3, column=5).value is None, "old archive descriptor_hash cell must be empty"
+    ]
+    assert ws.cell(row=3, column=2).value == descriptor_hash
+    assert ws.cell(row=3, column=3).value is None, "old archive descriptor_hash cell must be empty"
