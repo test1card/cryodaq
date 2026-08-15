@@ -579,20 +579,43 @@ def test_check_warnings_reports_a_missing_warning_file_in_the_log(tmp_path, caps
     assert "PYINSTALLER_WARNING_FILE_MISSING" in capsys.readouterr().err
 
 
-def test_announce_names_each_failing_cell(capsys) -> None:
-    """The smoke verdict alone does not say WHICH cell failed."""
-    smoke._announce(
-        "smoke",
-        "FAIL",
-        "RuntimeError:gui_startup_offscreen exited before readiness observation (3)",
-        [
-            {"name": "frozen_driver_imports", "status": "PASS"},
-            {"name": "gui_startup_offscreen", "status": "FAIL"},
-        ],
+def test_run_smoke_reports_raised_gui_cell_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A raised GUI cell must remain named in the smoke log and evidence."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "CryoDAQ.exe").write_bytes(b"frozen-executable")
+    evidence = tmp_path / "evidence"
+
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(
+        smoke,
+        "_run_frozen_driver_import_cell",
+        lambda *_args: {"name": "frozen_driver_imports", "status": "PASS"},
     )
 
+    def raised_gui_cell(*_args: object) -> dict[str, object]:
+        raise RuntimeError("GUI_STARTUP_NOT_READY")
+
+    monkeypatch.setattr(smoke, "_run_gui_startup_cell", raised_gui_cell)
+
+    assert smoke.run_smoke(dist, evidence) == 1
+
+    payload = json.loads((evidence / "smoke-result.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "FAIL"
+    assert payload["reason"] == "RuntimeError:GUI_STARTUP_NOT_READY"
+    assert payload["cells"] == [
+        {"name": "frozen_driver_imports", "status": "PASS"},
+        {
+            "name": "gui_startup_offscreen",
+            "status": "FAIL",
+            "reason": "RuntimeError:GUI_STARTUP_NOT_READY",
+        },
+    ]
     err = capsys.readouterr().err
-    assert "gui_startup_offscreen exited before readiness observation" in err
     assert "cell gui_startup_offscreen: FAIL" in err
-    # A passing cell must not be reported as a failure.
+    assert "GUI_STARTUP_NOT_READY" in err
     assert "cell frozen_driver_imports" not in err

@@ -953,6 +953,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
     cells: list[dict[str, Any]] = []
     status = "FAIL"
     reason: str | None = None
+    active_cell: str | None = None
     try:
         if os.name != "nt":
             raise RuntimeError("WINDOWS_REQUIRED")
@@ -969,7 +970,9 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
             raise RuntimeError("UNICODE_COPY_NOT_USED")
 
         cells.append(_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir))
+        active_cell = "gui_startup_offscreen"
         cells.append(_run_gui_startup_cell(executable, runtime_root, evidence_dir))
+        active_cell = None
         cells.append(
             _run_report_cell(
                 executable,
@@ -1063,6 +1066,8 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         status, reason = smoke_summary(cells)
     except BaseException as exc:
         reason = f"{type(exc).__name__}:{str(exc)[:512]}"
+        if active_cell is not None:
+            cells.append({"name": active_cell, "status": "FAIL", "reason": reason})
     finally:
         runtime_parent = evidence_dir.parent / "windows smoke runtime path with spaces"
         if runtime_parent.exists():

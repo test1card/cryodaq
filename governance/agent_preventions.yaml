@@ -3250,6 +3250,15 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: ONEDIR-SMOKE-CELL-DIAGNOSTIC-VISIBILITY-FALSE-GREEN-001
+    status: open
+    scope: repository
+    runtime_prevention_id: ONEDIR-SMOKE-CELL-DIAGNOSTIC-VISIBILITY-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_run_smoke_reports_raised_gui_cell_identity
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6408,4 +6417,28 @@ records:
       - node: tests/docs/test_evidence_packaging_readiness.py::test_procedure_parser_rejects_duplicate_opener_outside_bounded_block
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending
+
+  - id: ONEDIR-SMOKE-CELL-DIAGNOSTIC-VISIBILITY-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Windows one-directory smoke cells that raise before returning their result record.
+    classification: smoke_cell_diagnostic_evidence_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A failed smoke cell can be absent from the result evidence and ordinary CI log, leaving the failure identity permanently undiagnosable after an artifact-overwriting rerun.
+    invariant: Every smoke cell that raises after execution begins is recorded by name as FAIL with its exception-derived reason before the runner publishes the final failure result and log.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#integration-and-publication-discipline
+    guards:
+      - node: tests/test_windows_onedir_smoke_contract.py::test_check_warnings_prints_its_reason_not_only_the_json
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_check_warnings_reports_a_missing_warning_file_in_the_log
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_run_smoke_reports_raised_gui_cell_identity
+        ci_partition: remaining
+    red_evidence: pending
     green_evidence: pending
