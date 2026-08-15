@@ -3057,6 +3057,14 @@ false_green_pairs:
     ci_partition: core
     red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-REPLY-COUNT-FALSE-GREEN-249
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
+    ci_partition: core
+    red_evidence: an_always_false_reply_count_predicate_passed_only_the_negative_loss_test_while_the_positive_exact_count_control_was_unmapped_2026_08_15_pending_immutable_capture
+    green_evidence: pending
   - id: MONTANA-METRICS-SNAPSHOT-FALSE-GREEN-239
     status: open
     scope: repository
