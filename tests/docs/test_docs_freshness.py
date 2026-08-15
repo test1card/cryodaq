@@ -2845,6 +2845,46 @@ def test_ob_002_marker_trigger_rejects_trailing_text(monkeypatch: pytest.MonkeyP
         _ob_002_marker_trigger()
 
 
+def test_ob_002_marker_trigger_rejects_retargeted_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The marker guard must read the token the register actually declares."""
+
+    original_read = _read
+
+    def _read_with_retargeted_token(path: Path) -> str:
+        text = original_read(path)
+        if path == REPO_ROOT / "docs" / "OBLIGATIONS.md":
+            return text.replace(
+                "marker:ROADMAP.md:phase-1-status=DONE",
+                "marker:ROADMAP.md:phase-1-other=DONE",
+                1,
+            )
+        return text
+
+    monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_retargeted_token)
+    with pytest.raises(AssertionError, match="phase-1-other token exactly once"):
+        test_roadmap_phase_marker_has_exactly_one_occurrence()
+
+
+def test_ob_002_marker_trigger_requires_terminal_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OB-002 must not fire its evaluator while Phase 1 remains in progress."""
+
+    original_read = _read
+
+    def _read_with_nonterminal_trigger(path: Path) -> str:
+        text = original_read(path)
+        if path == REPO_ROOT / "docs" / "OBLIGATIONS.md":
+            return text.replace(
+                "marker:ROADMAP.md:phase-1-status=DONE",
+                "marker:ROADMAP.md:phase-1-status=IN_PROGRESS",
+                1,
+            )
+        return text
+
+    monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_nonterminal_trigger)
+    with pytest.raises(AssertionError, match="must require the terminal value"):
+        test_roadmap_phase_marker_has_exactly_one_occurrence()
+
+
 def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
     """OB-002's trigger token must be a MARKER, not a string that also appears in prose.
 
@@ -2866,11 +2906,9 @@ def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
     """
 
     marker_file, token, expected = _ob_002_marker_trigger()
-    assert expected in _PHASE_MARKER_VALUES, (
-        f"OB-002's trigger expects the value {expected!r}, which is not in the declared "
-        f"vocabulary {sorted(_PHASE_MARKER_VALUES)}. A trigger keyed to a value the marker can "
-        "never carry answers 'not fired' forever, which is indistinguishable from work that is "
-        "genuinely incomplete."
+    assert expected == "DONE", (
+        f"OB-002's trigger must require the terminal value 'DONE'; got {expected!r}. "
+        "A non-terminal value fires the planned evaluator before Phase 1 is complete."
     )
     target = _read(REPO_ROOT / marker_file)
     occurrences = re.findall(rf"{re.escape(token)}=([A-Za-z_]+)", target)
