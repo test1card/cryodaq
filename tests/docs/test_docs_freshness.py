@@ -2813,13 +2813,8 @@ def _ob_002_marker_trigger() -> tuple[str, str, str]:
     row = next((line for line in register.splitlines() if line.startswith("| OB-002 |")), None)
     assert row is not None, "OB-002 is missing from the obligations register"
     trigger_cell = row.split("|")[5].strip()
-    trigger = re.fullmatch(
-        r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=([A-Za-z0-9_-]+)", trigger_cell
-    )
-    assert trigger is not None, (
-        "OB-002's Trigger cell must be exactly one marker expression; "
-        f"got {trigger_cell!r}."
-    )
+    trigger = re.fullmatch(r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=([A-Za-z0-9_-]+)", trigger_cell)
+    assert trigger is not None, f"OB-002's Trigger cell must be exactly one marker expression; got {trigger_cell!r}."
     return trigger.groups()
 
 
@@ -2838,9 +2833,7 @@ def test_ob_002_marker_trigger_rejects_trailing_text(monkeypatch: pytest.MonkeyP
             )
         return text
 
-    monkeypatch.setitem(
-        _ob_002_marker_trigger.__globals__, "_read", _read_with_trailing_trigger_text
-    )
+    monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_trailing_trigger_text)
     with pytest.raises(AssertionError, match="Trigger cell must be exactly one marker expression"):
         _ob_002_marker_trigger()
 
