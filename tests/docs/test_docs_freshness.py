@@ -2647,7 +2647,7 @@ def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None
         '    default_tip="$(git rev-parse --verify "origin/${DEFAULT_BRANCH}^{commit}")"\n'
         '    mapfile -t bases < <(git merge-base --all "$event_commit" "$default_tip")\n'
         '    test "${#bases[@]}" = 1\n'
-        "    trusted_base_sha=\"$(require_commit 'creation-push merge base' \"${bases[0]}\")\"\n"
+        '    trusted_base_sha="$(require_commit \'creation-push merge base\' "${bases[0]}")"\n'
     )
     assert ci_bind.count(creation_merge_base) == 1, (
         "main.yml's creation-push merge-base block moved; re-pin it here deliberately"
