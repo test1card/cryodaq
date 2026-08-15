@@ -158,7 +158,9 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
 
 # A RECORDED measurement, not a re-derivable one: the number of C2 challenges
 # whose fingerprint the registry rejects on the declared minimum interpreter.
-# RE-MEASURED 2026-08-14 at immutable commit `92aeb74c90f89fe89a9e1ff4c3208e15f1a80c20` on the OC-011 tree: 106 errors over 133 challenges.
+# RE-MEASURED 2026-08-14 at immutable commit
+# `92aeb74c90f89fe89a9e1ff4c3208e15f1a80c20` on the OC-011 tree:
+# 106 errors over 133 challenges.
 # The sweep LOST a site when OC-011 gave `/temps` descriptor authority, which
 # retired registration C2-105, so both halves moved again. 3.13 and 3.14 were
 # re-measured the same turn and both give 0 over the same 133.
