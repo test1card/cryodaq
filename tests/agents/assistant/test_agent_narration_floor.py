@@ -564,6 +564,7 @@ def test_late_delivery_preserves_freshness_without_rearming_the_source_clock(clo
     # retirement on the next source event.  `_activity` remains the source
     # clock: delivery must not make a quiet-gap re-arm look non-quiet.
     clock.return_value += 1.0
+    assert ledger.should_dispatch("alarm:other") is True
     assert ledger.should_dispatch("alarm:late") is False
     assert ledger.current_attempt("alarm:late") == attempt
     assert ledger._activity["alarm:late"] == start + ESCALATE + WINDOW + 21.0
