@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -90,3 +91,66 @@ def test_receipt_guard_blob_still_rejects_a_real_source_mismatch(tmp_path: Path)
 
     with pytest.raises(GovernanceContractError, match="receipt guard blob does not match registry guard file"):
         validate_registry(payload, root=tmp_path)
+
+
+# --- derived prevention baseline: the line separator ---------------------------------
+#
+# Measured 2026-08-14: `_write_removal_baseline` called `write_text` with no `newline`
+# argument, so it applied the platform separator and the same registry rendered as LF on
+# Linux and CRLF on Windows -- 490 carriage returns, byte-identical otherwise. The sync
+# guard then reports the registry out of date on a Windows checkout that changed nothing,
+# and the obvious response, regenerate and commit, writes carriage returns into a tracked
+# governance artifact.
+#
+# These live in this module rather than a new one deliberately: a new file under
+# tests/governance moves the tracked-module inventory that OC-012 pins by count and by a
+# 35-path digest, and bumping that count would extend its examination claim to a module
+# that examination never covered.
+
+BASELINE_ARTIFACT = ROOT / "governance" / "agent_preventions_baseline.json"
+GENERATOR_SOURCE = ROOT / "tools" / "governance_contract.py"
+
+
+def test_generated_baseline_artifact_contains_no_carriage_return() -> None:
+    """The tracked derived baseline is LF-only and carries no byte-order mark."""
+    raw = BASELINE_ARTIFACT.read_bytes()
+    assert raw, "the baseline artifact is empty"
+    # Counted from BYTES. A shell pattern for a carriage return has already lied in this
+    # repository by matching the letter "r", so the count never comes from a grep.
+    carriage_returns = raw.count(b"\r")
+    assert carriage_returns == 0, (
+        f"{BASELINE_ARTIFACT.name} carries {carriage_returns} carriage returns; it must be "
+        "LF-only. Regenerate with: python tools/governance_contract.py --write-baseline"
+    )
+    assert not raw.startswith(b"\xef\xbb\xbf"), "the baseline must not carry a byte-order mark"
+
+
+def test_baseline_generator_pins_the_line_separator_explicitly(tmp_path: Path) -> None:
+    """The real --write-baseline path must generate an LF-only artifact.
+
+    Source inspection cannot establish that the CLI reaches the writer or that the writer
+    remains live. Execute the same command used by maintainers, then inspect its output
+    bytes so this test fails if a platform separator leaks into the generated artifact.
+    """
+    _copy_receipt_evidence(tmp_path)
+    temporary_registry = tmp_path / "governance" / "agent_preventions.yaml"
+    temporary_registry.write_bytes(REGISTRY_PATH.read_bytes())
+    temporary_generator = tmp_path / "tools" / "governance_contract.py"
+    temporary_generator.parent.mkdir(parents=True, exist_ok=True)
+    temporary_generator.write_bytes(GENERATOR_SOURCE.read_bytes())
+
+    subprocess.run(
+        [sys.executable, str(temporary_generator), "--write-baseline"],
+        cwd=tmp_path,
+        env={"PYTHONPATH": str(tmp_path)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    generated = (tmp_path / "governance" / "agent_preventions_baseline.json").read_bytes()
+    assert generated, "the baseline generator produced an empty artifact"
+    assert b"\r" not in generated, (
+        "the real --write-baseline path generated carriage returns; the baseline must be LF-only"
+    )
+    assert not generated.startswith(b"\xef\xbb\xbf"), "the real --write-baseline path generated a byte-order mark"
