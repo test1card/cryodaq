@@ -30,7 +30,7 @@ from cryodaq.core.ru_labels import phase_display_name
 from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
-from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
+from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError, LiveChannelDescriptorCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -524,9 +524,13 @@ class TelegramCommandBot:
             catalog = self._channel_descriptor_catalog.storage_catalog_snapshot()
             for channel, reading in self._latest.items():
                 descriptor = catalog.by_channel_id.get(reading.channel)
+                if descriptor is None:
+                    try:
+                        descriptor = self._channel_descriptor_catalog.bind(reading).descriptor
+                    except ChannelDescriptorStorageError:
+                        continue
                 if (
-                    descriptor is not None
-                    and descriptor.instrument_id == reading.instrument_id
+                    descriptor.instrument_id == reading.instrument_id
                     and descriptor.unit == reading.unit
                     and descriptor.quantity is ChannelQuantity.TEMPERATURE
                 ):
