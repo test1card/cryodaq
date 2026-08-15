@@ -6409,3 +6409,23 @@ records:
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
     green_evidence: pending
+
+  - id: NIGHTLY-QT-PREREQUISITES-055
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The golden-replay and mock-stack-short-soak nightly jobs' Linux Qt system-library installation steps.
+    classification: default_ci_coverage_escape
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Either nightly Qt-dependent job can lose a required Linux shared library while its own schedule remains the only execution path, producing collection or launcher failures after a pull request merges.
+    invariant: The golden-replay and mock-stack-short-soak nightly jobs each install libegl1, libgl1, libxkbcommon0, and libdbus-1-3 under the Linux condition before Python dependencies are installed; the default remaining partition executes the guard that verifies this exact job-level contract.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies
+        ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending

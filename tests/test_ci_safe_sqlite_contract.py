@@ -122,3 +122,37 @@ def test_windows_installer_sqlite_policy_matches_runtime_gate() -> None:
     condition = lines[0].split("0 if ", 1)[1].split(" else 1", 1)[0]
 
     assert condition.replace(" ", "") == expected.replace(" ", "")
+
+
+_NIGHTLY_QT_JOB_NAMES = ("golden-replay", "mock-stack-short-soak")
+_QT_LINUX_LIBRARIES = ("libegl1", "libgl1", "libxkbcommon0", "libdbus-1-3")
+
+
+def _nightly_job_block(text: str, job_name: str) -> str:
+    """Return one top-level nightly job, refusing ambiguous workflow structure."""
+
+    marker = f"  {job_name}:\n"
+    assert text.count(marker) == 1, f"nightly job {job_name!r} must occur exactly once"
+    start = text.index(marker)
+    cursor = start + len(marker)
+    for line in text[cursor:].splitlines(keepends=True):
+        if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
+            return text[start:cursor]
+        cursor += len(line)
+    return text[start:]
+
+
+def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> None:
+    """Nightly Qt lanes must retain the system libraries installed in default CI."""
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    for job_name in _NIGHTLY_QT_JOB_NAMES:
+        job = _nightly_job_block(text, job_name)
+        install = job.index("- name: Install Qt offscreen system libraries (Linux)")
+        dependencies = job.index("- name: Install dependencies")
+        assert install < dependencies, f"{job_name} installs Qt libraries after Python dependencies"
+        step = job[install:dependencies]
+        assert "if: runner.os == 'Linux'" in step
+        assert "sudo apt-get update" in step
+        for library in _QT_LINUX_LIBRARIES:
+            assert library in step, f"{job_name} omits required Qt library {library!r}"
