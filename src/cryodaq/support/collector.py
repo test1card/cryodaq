@@ -120,8 +120,8 @@ def collect_bundle_capture(
 
     _collect_versions(versions, extra_versions, unavailable)
     _collect_fingerprints(fingerprints, extra_fingerprints, unavailable)
-    _collect_recent_entries("audit", recent_audit_entries, records, unavailable)
-    _collect_recent_entries("log", recent_log_entries, records, unavailable)
+    _collect_recent_entries("audit", recent_audit_entries, created_at, records, unavailable)
+    _collect_recent_entries("log", recent_log_entries, created_at, records, unavailable)
 
     if snapshot is None:
         for kind in ("health", "attention", "integrity"):
@@ -373,6 +373,7 @@ def _collect_attention(
 def _collect_recent_entries(
     kind: str,
     source: Iterable[OperatorLogEntry] | None,
+    created_at: datetime,
     records: list[EvidenceRecord],
     unavailable: dict[str, str],
 ) -> None:
@@ -393,11 +394,15 @@ def _collect_recent_entries(
     try:
         pending: list[EvidenceRecord] = []
         seen_event_ids: set[str] = set()
+        seen_entry_ids: set[int] = set()
         for entry in entries:
             if type(entry) is not OperatorLogEntry:
                 raise TypeError("recent evidence entries must be exact OperatorLogEntry values")
             if type(entry.id) is not int or entry.id < 0:
                 raise ValueError("recent evidence entry ids must be non-negative exact ints")
+            if entry.id in seen_entry_ids:
+                raise ValueError("recent evidence durable entry identities must be unique")
+            seen_entry_ids.add(entry.id)
             if (
                 type(entry.source) is not str
                 or type(entry.tags) is not tuple
@@ -410,7 +415,17 @@ def _collect_recent_entries(
                 raise ValueError("recent evidence tag cardinality exceeds the public projection bounds")
             if any(not tag or len(tag.encode("utf-8")) > 128 for tag in entry.tags):
                 raise ValueError("recent evidence tags exceed the public projection bounds")
-            unknown_tags = tuple(tag for tag in entry.tags if tag not in _PUBLIC_EVENT_TAGS)
+            safety_fault_channel = (
+                kind == "log"
+                and entry.source == "machine"
+                and len(entry.tags) >= 2
+                and entry.tags[0] == "safety_fault"
+                and entry.tags[1] in _LOG_LEVELS
+            )
+            projected_input_tags = tuple(
+                "channel" if safety_fault_channel and index == 1 else tag for index, tag in enumerate(entry.tags)
+            )
+            unknown_tags = tuple(tag for tag in projected_input_tags if tag not in _PUBLIC_EVENT_TAGS)
             if unknown_tags:
                 if not (
                     kind == "log"
@@ -419,10 +434,12 @@ def _collect_recent_entries(
                     and len(set(unknown_tags)) == 1
                 ):
                     raise ValueError("recent evidence tags are not in the public projection allowlist")
-                projected_tags = tuple("channel" if tag in unknown_tags else tag for tag in entry.tags)
+                projected_tags = tuple("channel" if tag in unknown_tags else tag for tag in projected_input_tags)
             else:
-                projected_tags = entry.tags
+                projected_tags = projected_input_tags
             observed_at = _utc_iso(entry.timestamp)
+            if entry.timestamp > created_at:
+                raise ValueError("recent evidence observed_at must not exceed bundle created_at")
             public_tags = tuple(sorted(set(projected_tags)))
             if kind == "audit":
                 semantic_values = tuple(tag for tag in public_tags if tag in _AUDIT_OUTCOMES)
