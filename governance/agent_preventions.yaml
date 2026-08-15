@@ -267,7 +267,7 @@ false_green_pairs:
   - id: SCOPE-STATEMENT-GUARD-SELF-SATISFYING-FALSE-GREEN-338
     status: open
     scope: repository
-    runtime_prevention_id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
+    runtime_prevention_id: SCOPE-STATEMENT-BOUNDARY-MISREPRESENTATION-340
     guard: tests/test_c2_repo_wide_spelling_sweep.py::test_c2_sweep_states_its_own_boundary
     ci_partition: remaining
     red_evidence: the_guard_read_its_own_module_for_labels_that_its_own_assertion_messages_also_contain_so_deleting_NOT_FIXABLE_HERE_from_the_scope_statement_left_it_green_and_after_the_delimited_block_repair_a_second_escape_remained_because_rewriting_not_scheduled_to_scheduled_preserved_the_searched_label_while_presenting_an_unreachable_gap_as_future_work_2026_08_14_pending_immutable_capture
@@ -3426,6 +3426,25 @@ records:
         ci_partition: core
     red_evidence: replacing_the_identity_argument_with_None_AT_THE_CALL_SITE_left_all_14_nodes_green_because_the_extracted_helper_stayed_correct_in_isolation_while_production_stopped_charging_for_what_it_persists_so_the_WIRING_is_now_asserted_by_driving_the_real_loader_and_recording_the_argument; and_dropping_the_identity_terms_from_the_retained_byte_accounting_leaves_every_other_mapped_guard_GREEN_because_reaching_the_32_MiB_cap_inline_required_an_archive_no_guard_builds_which_is_why_the_accounting_was_extracted_and_is_now_asserted_directly_2026_08_06_pending_immutable_capture; and_reverting_the_csv_header_and_the_loader_together_turns_6_of_the_7_writer_nodes_red_and_reverting_the_entire_loader_carry_turns_4_of_the_6_loader_nodes_red_while_all_7_writer_nodes_stay_GREEN_which_is_the_finding_that_the_writer_suite_cannot_observe_a_loader_regression_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: SCOPE-STATEMENT-BOUNDARY-MISREPRESENTATION-340
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The C2 spelling sweep scope statement in tests/test_c2_repo_wide_spelling_sweep.py and the guard that verifies its declared boundary.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A guard can pass by reading its own assertion messages while the scope statement omits a known boundary or labels an unreachable gap as scheduled work, allowing the C2 sweep to make a broader completion claim than its evidence supports.
+    invariant: The scope-boundary guard reads only the delimited scope-statement block and proves that the block itself names each required boundary and preserves NOT FIXABLE HERE for unresolved work; assertion text outside that block cannot satisfy the check.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_c2_repo_wide_spelling_sweep.py::test_c2_sweep_states_its_own_boundary
+        ci_partition: remaining
+    red_evidence: deleting_NOT_FIXABLE_HERE_from_the_scope_statement_or_rewriting_not_scheduled_to_scheduled_left_the_self_satisfying_guard_green_until_the_delimited_block_repair_made_the_same_mutations_red_2026_08_14_pending_immutable_capture
+    green_evidence: pending
   - id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
     status: open
     scope: repository
@@ -3441,8 +3460,6 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
-      - node: tests/test_c2_repo_wide_spelling_sweep.py::test_c2_sweep_states_its_own_boundary
-        ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_sweep_counts_are_rederived_from_the_live_sweep
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cells_oc031_preserves_its_supported_interpreter_caveat
