@@ -130,8 +130,20 @@ def test_72h_profile_rejects_its_own_descriptor_slope_limit() -> None:
             sample["roles"][role]["descriptors"] += growth
 
     assert soak.evaluate_resources(_samples(profile), profile) == []
+    warmup_spike = _samples(profile)
+    for sample in warmup_spike:
+        if soak.PROFILES["short"].warmup_s <= sample["elapsed_s"] < profile.warmup_s:
+            sample["roles"]["launcher"]["rss_bytes"] += 100 * 1024 * 1024
+    assert soak.evaluate_resources(warmup_spike, profile) == []
     errors = soak.evaluate_resources(samples, profile)
     assert "aggregate descriptor slope exceeded profile limit" in errors
+
+    per_role = _samples(profile)
+    for sample in per_role:
+        elapsed_s = float(sample["elapsed_s"])
+        growth = int((elapsed_s - profile.warmup_s) * 0.5 / 3600) if elapsed_s >= profile.warmup_s else 0
+        sample["roles"]["launcher"]["descriptors"] += growth
+    assert "launcher descriptor slope exceeded profile limit" in soak.evaluate_resources(per_role, profile)
 
 
 def test_72h_profile_rejects_its_own_rss_slope_limit() -> None:
@@ -154,7 +166,9 @@ def test_72h_profile_rejects_its_own_rss_slope_limit() -> None:
     errors_72h = soak.evaluate_resources(samples, profile_72h)
     errors_12h = soak.evaluate_resources(samples, profile_12h)
     assert "aggregate RSS slope exceeded profile limit" in errors_72h
+    assert "launcher epoch 0 RSS slope exceeded profile limit" in errors_72h
     assert "aggregate RSS slope exceeded profile limit" not in errors_12h
+    assert "launcher epoch 0 RSS slope exceeded profile limit" not in errors_12h
 
 
 def test_long_profile_contract_rejects_schedule_and_recovery_mutations() -> None:
@@ -181,6 +195,21 @@ def test_long_profile_contract_rejects_schedule_and_recovery_mutations() -> None
     reordered[0], reordered[1] = reordered[1], reordered[0]
     assert "fault schedule is missing, duplicated, reordered, or unscheduled" in soak._validate_faults(
         reordered, profile, samples
+    )
+
+    late = copy.deepcopy(faults)
+    late_index = 1
+    late[late_index]["observed_s"] += soak.SAMPLE_INTERVAL_S + 1
+    assert f"fault {late_index} exceeded schedule tolerance" in soak._validate_faults(late, profile, samples)
+
+    recheck_changed = copy.deepcopy(faults)
+    recheck_changed[0]["recheck_pid"] += 1
+    assert "fault 0 failed immediate identity recheck" in soak._validate_faults(recheck_changed, profile, samples)
+
+    fabricated_recovery = copy.deepcopy(faults)
+    fabricated_recovery[0]["recovery_s"] = 0.0
+    assert "fault 0 recovery does not match sample history" in soak._validate_faults(
+        fabricated_recovery, profile, samples
     )
 
     not_ready = copy.deepcopy(faults)
