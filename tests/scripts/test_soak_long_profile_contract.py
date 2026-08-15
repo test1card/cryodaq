@@ -134,6 +134,29 @@ def test_72h_profile_rejects_its_own_descriptor_slope_limit() -> None:
     assert "aggregate descriptor slope exceeded profile limit" in errors
 
 
+def test_72h_profile_rejects_its_own_rss_slope_limit() -> None:
+    profile_12h = soak.PROFILES["12h"]
+    profile_72h = soak.PROFILES["72h"]
+    assert profile_12h.rss_slope_limit_bytes_per_hour is not None
+    assert profile_72h.rss_slope_limit_bytes_per_hour is not None
+    assert profile_72h.rss_slope_limit_bytes_per_hour < profile_12h.rss_slope_limit_bytes_per_hour
+    growth_per_hour = (profile_72h.rss_slope_limit_bytes_per_hour + profile_12h.rss_slope_limit_bytes_per_hour) / 2
+    samples = _samples(profile_72h)
+    for sample in samples:
+        elapsed_s = float(sample["elapsed_s"])
+        if elapsed_s >= profile_72h.warmup_s:
+            growth = int((elapsed_s - profile_72h.warmup_s) * growth_per_hour / 3600)
+        else:
+            growth = 0
+        sample["roles"]["launcher"]["rss_bytes"] += growth
+
+    assert soak.evaluate_resources(_samples(profile_72h), profile_72h) == []
+    errors_72h = soak.evaluate_resources(samples, profile_72h)
+    errors_12h = soak.evaluate_resources(samples, profile_12h)
+    assert "aggregate RSS slope exceeded profile limit" in errors_72h
+    assert "aggregate RSS slope exceeded profile limit" not in errors_12h
+
+
 def test_long_profile_contract_rejects_schedule_and_recovery_mutations() -> None:
     """The complete ordered schedule and target-specific recovery receipts are required."""
 
