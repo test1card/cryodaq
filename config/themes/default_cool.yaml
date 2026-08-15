@@ -23,11 +23,20 @@ TEXT_DISABLED: "#555a66"
 SELECTION_BG: "#2a2d38"
 FOCUS_RING: "#5a6380"
 
-# Accent (indigo) + scale — from pre-switcher theme.py
-ACCENT: "#7c8cff"
-ACCENT_300: "#6470d9"
-ACCENT_500: "#95a3ff"
-ACCENT_600: "#b8c0ff"
+# Accent + scale. DELIBERATELY IDENTICAL TO STATUS_INFO (owner, 2026-08-15).
+# The indigo #7c8cff this replaces measured CIEDE2000 8.6 from STATUS_INFO
+# #6490c4, where the next-closest pair anywhere in this palette is 24.1. That
+# reads as an inconsistency rather than a distinction, so the two are now the
+# same colour on purpose instead of nearly the same by accident.
+# default_cool is a PRE-ADR pack, outside _ADR_001_PACKS in
+# tests/gui/test_theme_loader.py, whose >=30 degree ACCENT-to-STATUS hue rule
+# would otherwise forbid this. The six ADR packs keep that separation.
+# The 300/500/600 rungs are re-derived from the new base with the SAME
+# saturation and value offsets, so hover and pressed do not change hue.
+ACCENT: "#6490c4"
+ACCENT_300: "#4d729e"
+ACCENT_500: "#779ac4"
+ACCENT_600: "#92a9c4"
 
 # Text on colored backgrounds
 ON_PRIMARY: "#e8eaf0"
