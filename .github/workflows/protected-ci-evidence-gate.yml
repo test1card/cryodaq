@@ -2,7 +2,19 @@ name: CryoDAQ protected CI evidence gate
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   merge_group:
+
+# A pull request converted back to draft, or pushed again, must supersede the
+# matrices already running for it. Cancellation requires cancel-in-progress
+# inside a shared group, so the group is declared here rather than relied on.
+# The predicate is narrower than main.yml's `github.ref != master`: that is
+# also true for a merge_group ref, which would let a newer queue entry cancel
+# an in-flight protected run. A cancelled run fails CLOSED -- it produces no
+# evidence, and the gate refuses absent evidence.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # This workflow is configured as an organization-required workflow. GitHub
 # binds its native check directly to the immutable pull-request merge candidate
@@ -12,6 +24,7 @@ on:
 jobs:
   protected-execution:
     name: protected execution (${{ matrix.os }}, ${{ matrix.suite }})
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     permissions:
@@ -187,7 +200,7 @@ jobs:
   protected-ci-evidence-gate:
     name: protected CI evidence gate
     needs: protected-execution
-    if: ${{ always() }}
+    if: ${{ !cancelled() && always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

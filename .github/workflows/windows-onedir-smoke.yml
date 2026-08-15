@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - ".github/workflows/windows-onedir-smoke.yml"
       - "build_scripts/**"
@@ -26,6 +27,7 @@ concurrency:
 
 jobs:
   windows-onedir:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: real Windows ONEDIR build and smoke
     runs-on: windows-latest
     timeout-minutes: 90
