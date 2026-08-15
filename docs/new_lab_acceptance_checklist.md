@@ -168,7 +168,7 @@ Do not energize a heater inside a cryostat to close any gate in this document.
 
 | Gate | Procedure | Pass criterion |
 |---|---|---|
-| **G7.1 Soak** | Run the full stack against real instruments for at least one intended experiment duration. | No memory growth trend, no unexplained gap in any channel, no restart. |
+| **G7.1 Soak** | Run the full stack against real instruments for at least one intended experiment duration. | Resident-set and descriptor growth stay within the limit for the matching soak profile — **12 h: 4 MiB/h and 1 descriptor/h; 72 h: 1 MiB/h and 0.25 descriptor/h** — each fitted after discarding a 10-minute warm-up, with the profile used recorded; no unexplained gap in any channel; no restart. |
 | **G7.2 Full cycle** | One complete operating cycle end to end. | Every phase transition behaves as configured; the archive and the report for that cycle are complete. |
 | **G7.3 Restart mid-run** | Record the configured maximum poll interval `P` and the last committed receipt before the stop. Stop and restart the engine, using a stopwatch; obtain the first new committed receipt within **60 s** of the stop command. The acknowledged in-flight window is the single measured restart interval, bounded per channel by **60 s + 2P** between its last pre-stop and first post-restart persisted timestamps. Query both receipt batches and compare each ordered entry identity `(instrument_id, channel_id, timestamp)` with the stored rows. `commit_revision` is per writer, so record it inside each run but do not compare its value across the restart. | `CommittedBatchReceipt` carries entries and a per-writer `commit_revision` ([[ref:src/cryodaq/storage/sqlite_writer.py::CommittedBatchReceipt]]); every entry in the last pre-stop receipt and first post-restart receipt must persist exactly once. Every channel's measured timestamp gap must be at or below `60 s + 2P`; a longer or unexplained gap, duplicate, reordered row, or missing receipt leaves G7.3 **NOT PASSED**. |
 
@@ -465,7 +465,8 @@ G7.1:
   preconditions: real stack is approved for endurance
   target: 1 intended experiment duration
   bound: 1 full intended duration
-  abort: memory growth gap or restart occurs
+  threshold: rss_slope <= 4 MiB/h and descriptor_slope <= 1/h for a 12 h run, or <= 1 MiB/h and <= 0.25/h for a 72 h run, each fitted after discarding a 10 min warm-up, recording which profile was used; the longer run is tighter because a slope harmless over twelve hours is not harmless over seventy-two; identical to the limits scripts/soak_mock_stack.py enforces per SoakProfile, so the physical gate and the automated soak cannot drift apart
+  abort: rss_slope or descriptor_slope exceeds the threshold for the profile used, an unexplained channel gap appears, or any restart occurs
   cleanup: stop stack by normal procedure
   evidence: dated endurance log
   decision_owner: engineer
