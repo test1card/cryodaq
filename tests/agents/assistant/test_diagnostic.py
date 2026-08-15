@@ -285,6 +285,7 @@ async def test_diagnostic_reports_authoritative_empty_history_as_no_data(tmp_pat
     assert ollama.generate.await_count == 2
     diagnostic_prompt = ollama.generate.call_args_list[1].args[0]
     assert _channel_history_section(diagnostic_prompt) == "нет данных"
+    assert _pressure_trend_section(diagnostic_prompt) == 'нет данных'
     await agent.stop()
 
 
