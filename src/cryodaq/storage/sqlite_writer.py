@@ -2732,23 +2732,39 @@ class SQLiteWriter:
     def _read_attention_history_continuity(self) -> dict[str, object] | None:
         path = self._data_dir / _ATTENTION_HISTORY_CONTINUITY_NAME
         try:
-            _control_path_identity(path, directory=False)
+            before = _control_path_identity(path, directory=False)
         except FileNotFoundError:
             return None
         try:
-            raw = (
-                read_secure_relative_bytes(
+            if os.name == "nt":
+                raw = read_secure_relative_bytes(
                     self._data_dir,
                     _ATTENTION_HISTORY_CONTINUITY_NAME,
                     max_bytes=_ATTENTION_HISTORY_CONTINUITY_MAX_BYTES,
                 )
-                if os.name == "nt"
-                else path.read_bytes()
-            )
+            else:
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                directory_descriptor = os.open(
+                    self._data_dir,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0),
+                )
+                try:
+                    descriptor = os.open(
+                        _ATTENTION_HISTORY_CONTINUITY_NAME,
+                        flags,
+                        dir_fd=directory_descriptor,
+                    )
+                    try:
+                        raw = os.read(descriptor, _ATTENTION_HISTORY_CONTINUITY_MAX_BYTES + 1)
+                    finally:
+                        os.close(descriptor)
+                finally:
+                    os.close(directory_descriptor)
         except (OSError, SecureRelativeReadError):
             raise RuntimeError("attention history continuity authority is unavailable") from None
+        if _control_path_identity(path, directory=False) != before:
+            raise RuntimeError("attention history continuity authority changed during read")
         decoded = self._decode_attention_history_continuity(raw)
-        _control_path_identity(path, directory=False)
         return decoded
 
     def _write_attention_history_continuity(self, state: dict[str, object]) -> None:
