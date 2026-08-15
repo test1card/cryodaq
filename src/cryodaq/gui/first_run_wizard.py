@@ -153,10 +153,10 @@ def _bounded_compound_value(text: str, kind: ValueKind) -> object:
 
     if len(text.encode("utf-8")) > _MAX_COMPOUND_UTF8_BYTES:
         raise DriverRegistryError("структурированное значение превышает допустимый размер")
-    tokens = yaml.scan(text, Loader=yaml.SafeLoader)
+    tokens = yaml.scan(text, Loader=OwnedSafeLoader)
     if any(isinstance(token, (AliasToken, AnchorToken)) for token in tokens):
         raise DriverRegistryError("YAML-ссылки и псевдонимы в мастере запрещены")
-    node = yaml.compose(text, Loader=yaml.SafeLoader)
+    node = yaml.compose(text, Loader=OwnedSafeLoader)
     if node is None:
         return None
 

@@ -20,7 +20,7 @@ _CONVENIENCE_LOADERS = {
     "unsafe_load",
     "unsafe_load_all",
 }
-_EXPLICIT_LOADERS = {"load", "load_all"}
+_EXPLICIT_LOADERS = {"load", "load_all", "scan", "scan_all", "parse", "compose", "compose_all"}
 
 
 def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
