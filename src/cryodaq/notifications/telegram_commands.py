@@ -30,7 +30,7 @@ from cryodaq.core.ru_labels import phase_display_name
 from cryodaq.core.shutdown_settlement import cancel_and_settle_tasks
 from cryodaq.drivers.base import Reading
 from cryodaq.notifications._secrets import SecretStr
-from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError, LiveChannelDescriptorCatalog
+from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
 
 logger = logging.getLogger(__name__)
 
