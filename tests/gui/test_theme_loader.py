@@ -634,13 +634,32 @@ def test_accent_hue_distance_from_status_ok_all_themes(real_themes_dir):
         )
 
 
-def test_default_cool_accent_preserved_as_indigo():
-    """III.A historical baseline — default_cool keeps pre-switcher
-    indigo. Explicit guard against any rename back to the accidental
-    STATUS_OK green that the other presets had."""
+def test_default_cool_accent_is_status_info_by_decision():
+    """default_cool ACCENT is DELIBERATELY identical to STATUS_INFO.
+
+    Owner decision 2026-08-15, taken by eye and then measured: the previous
+    historical indigo #7c8cff sat CIEDE2000 8.6 from STATUS_INFO #6490c4, where
+    the next-closest pair anywhere in the palette is 24.1. Two state colours
+    that close read as an inconsistency rather than a distinction, so they are
+    now exactly equal on purpose instead of nearly equal by accident.
+
+    This guard is NOT relaxed by that change. It still pins one exact value, and
+    it still serves its original purpose -- catching a drift back to the
+    accidental STATUS_OK green the other presets had -- which is asserted
+    explicitly below. The superseded pin is named so the history stays legible.
+    """
     pack = loader._load_theme_pack("default_cool")
-    assert pack["ACCENT"] == "#7c8cff", (
-        "default_cool ACCENT changed from historical indigo #7c8cff — if intentional, update this test + ADR 002"
+    assert pack["ACCENT"] == pack["STATUS_INFO"], (
+        "default_cool ACCENT must equal STATUS_INFO by the 2026-08-15 owner "
+        "decision; if that is reversed, update this test + ADR 002"
+    )
+    assert pack["ACCENT"] == "#6490c4", (
+        "default_cool ACCENT changed from #6490c4 (superseding the historical "
+        "indigo #7c8cff) — if intentional, update this test + ADR 002"
+    )
+    assert pack["ACCENT"] != pack["STATUS_OK"], (
+        "default_cool ACCENT collided with STATUS_OK — the III.A regression this "
+        "guard has always existed to catch"
     )
 
 
