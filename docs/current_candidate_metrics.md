@@ -6,12 +6,12 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | Measure | Value |
 |---|---:|
 | Baseline commit | `f5d6434d20dffae62c9f03fbc12f68b03f48351b` |
-| Source snapshot tree | `7fb0ba31f8140538dcea9461b3d6b361cef14e2a` |
-| Source snapshot object manifest SHA-256 | `b4b5bf114be6a9787d9c4f11ddc29eb6b45ca7ac285574726509836acb73f554` |
+| Source snapshot tree | `011c7854346b02040cd4c07f1b0d86f4b4752b3c` |
+| Source snapshot object manifest SHA-256 | `6c1f437ab02f2e776a4470744019da318e43580b1cea53112dfc72989a25528b` |
 | Changed source-inventory paths | 865 |
-| Source-inventory Git churn | 314,095 insertions / 21,176 deletions / 292,919 net |
+| Source-inventory Git churn | 314,098 insertions / 21,179 deletions / 292,919 net |
 | Delivered-tree changed paths | 867 |
-| Delivered-tree Git churn | 314,216 insertions / 21,176 deletions / 293,040 net |
+| Delivered-tree Git churn | 314,219 insertions / 21,179 deletions / 293,040 net |
 | Changed binary paths, source / delivered | 9 / 9 |
 | Baseline repository text | 188,539 lines |
 | Candidate source-inventory text | 481,458 lines |
