@@ -298,6 +298,19 @@ def test_fresh_cached_temperature_remains_a_normal_readout() -> None:
     assert "устар" not in rendered and "недоступ" not in rendered
 
 
+def test_cmd_temps_resolves_post_bind_canonical_channel_identity() -> None:
+    emitted = Reading.now("emitted_probe", 4.2, "K", instrument_id="sensor")
+    catalog = _temperature_catalog(emitted)
+    persisted = catalog.bind(emitted).reading
+    bot = _make_bot(channel_descriptor_catalog=catalog)
+    bot._latest = {persisted.channel: persisted}
+
+    rendered = bot._cmd_temps()
+
+    assert persisted.channel in rendered
+    assert "4.20 K" in rendered
+
+
 def test_cmd_temps_uses_descriptor_quantity_not_channel_spelling() -> None:
     renamed = Reading.now("renamed_probe", 4.2, "K", instrument_id="sensor")
     deceptive = Reading.now("Т_fake", 5.1, "K", instrument_id="sensor")

@@ -521,12 +521,15 @@ class TelegramCommandBot:
     def _cmd_temps(self) -> str:
         temps: dict[str, Reading] = {}
         if self._channel_descriptor_catalog is not None:
+            catalog = self._channel_descriptor_catalog.storage_catalog_snapshot()
             for channel, reading in self._latest.items():
-                try:
-                    descriptor = self._channel_descriptor_catalog.bind(reading).descriptor
-                except ChannelDescriptorStorageError:
-                    continue
-                if descriptor.quantity is ChannelQuantity.TEMPERATURE:
+                descriptor = catalog.by_channel_id.get(reading.channel)
+                if (
+                    descriptor is not None
+                    and descriptor.instrument_id == reading.instrument_id
+                    and descriptor.unit == reading.unit
+                    and descriptor.quantity is ChannelQuantity.TEMPERATURE
+                ):
                     temps[channel] = reading
 
         if not temps:
