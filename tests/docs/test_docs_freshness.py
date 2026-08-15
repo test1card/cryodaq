@@ -2826,7 +2826,7 @@ _CYRILLIC_ONLY_MOJIBAKE_SOURCES = tuple(
         0xAA,
         0xAF,
         *range(0xB2, 0xB5),
-        0xB8,
+        # U+00B8 is excluded: its image is the genuine Russian prefix U+0412 U+0451.
         0xBA,
         *range(0xBC, 0xC0),
         0xC0,
@@ -2845,6 +2845,7 @@ _CYRILLIC_ONLY_MOJIBAKE_SOURCES = tuple(
         0xF8,
         0xFA,
         *range(0xFC, 0x100),
+        0x101,
     )
 )
 
@@ -3038,7 +3039,7 @@ def _mojibake_hits(text: str) -> int:
 # below exercise only a handful of signatures, so without this a single deleted source
 # would leave every test green -- the vacuous-pass condition, one entry at a time.  Any
 # removal, addition or substitution changes this digest.
-_MOJIBAKE_SOURCE_DIGEST = "sha256:2ce3e72088f179d36df00944fef9b96b15aeedbd75a6670b3a492b817e5136d6"
+_MOJIBAKE_SOURCE_DIGEST = "sha256:dfaca1848d01d822260175539b79e6863d76ab20a9692b786cc43d9f6fc1457a"
 
 
 def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
@@ -3052,7 +3053,7 @@ def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
         except OSError as exc:
             raise OSError(f"unable to read tracked file {relative!r}") from exc
         for character in text:
-            if ord(character) <= 0x7F or 0x0400 <= ord(character) <= 0x052F or character == "\u00bb":
+            if ord(character) <= 0x7F or 0x0400 <= ord(character) <= 0x052F or character in {"\u00b8", "\u00bb"}:
                 continue
             try:
                 _cp1251_mojibake(character)
@@ -3085,7 +3086,7 @@ def test_mojibake_source_set_matches_its_pinned_digest() -> None:
 # Measured before this anchor existed: returning a dynamically assembled bogus signature
 # for a single source left all four guard nodes green, and the real corruption for that
 # character escaped the repository sweep.
-_MOJIBAKE_MAPPING_DIGEST = "sha256:cc6003bb7637ddf339d044461856b301ffdcd0a597ca40032c585eba1823041a"
+_MOJIBAKE_MAPPING_DIGEST = "sha256:9ef24dfa690bb3c40959a081bbc04c0fda7003518f8ba4c2b293f77b82c9434d"
 
 
 def test_mojibake_derivation_matches_its_pinned_mapping() -> None:
@@ -3139,6 +3140,7 @@ def test_mojibake_detector_fires_on_independently_specified_damage() -> None:
         ("bullet \u0412\u00b7 item", 1),
         ("ellipsis \u0432\u0402\u00a6 tail", 1),
         ("two \u0432\u0402\u201d and \u0412\u00b7", 2),
+        ("non-Latin-1 \u0414\u0403", 1),
     )
     for text, expected in samples:
         assert _mojibake_hits(text) == expected, text
@@ -3149,6 +3151,12 @@ def test_mojibake_detector_fires_on_independently_specified_damage() -> None:
     assert _mojibake_hits("plain ASCII \u2014 with real punctuation \u201d\u2026") == 0
     assert _mojibake_hits("V = \u00ab\u0412\u00bb, I = \u00ab\u0410\u00bb") == 0
     assert _mojibake_hits("\u00ab\u0410\u0420\u0425\u0418\u0412 \u041e\u0412\u00bb title") == 0
+    assert (
+        _mojibake_hits(
+            "\u0412\u0451\u0440\u0441\u0442\u043a\u0430 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430"
+        )
+        == 0
+    )
 
 
 def test_tracked_text_carries_no_known_mojibake() -> None:
