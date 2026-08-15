@@ -145,9 +145,9 @@ The most important changes are:
   mechanisms cannot acquire actuator authority.
 - **Descriptor-qualified channel identity, incomplete end to end.** Canonical
   descriptors are carried through named acquisition, SQLite, archive/replay,
-  report, and GUI paths. Archive-finalisation rows and multiple GUI, interlock,
-  assistant, and notification routes still fall back to spelling or lack
-  descriptor authority (OC-008, OC-011, OC-023–OC-025). Startup validation fails
+  report, and GUI paths. Archive-finalisation rows and multiple GUI, assistant,
+  and notification routes still fall back to spelling or lack descriptor
+  authority (OC-008, OC-011, OC-024 to OC-025). Startup validation fails
   closed for the exact safety bindings it resolves; this is not a claim that
   every safety/alarm/interlock pattern is descriptor-bound.
 - **Process isolation and recovery.** The launcher supervises the engine, GUI

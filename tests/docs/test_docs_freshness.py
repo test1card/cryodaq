@@ -156,6 +156,51 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
     assert not failures, "\n".join(failures)
 
 
+def test_deployment_residuals_are_carried_into_their_gates() -> None:
+    """A blocking row's Gate must name every residual that keeps it open.
+
+    Prevention ``OPEN-CELL-RESIDUAL-GATE-FALSE-GREEN-350``.  The register once
+    kept OC-020, OC-028, and OC-040 blocking while their Gate cells omitted
+    residuals in the narrative.  That allowed a green docs suite to publish an
+    incomplete deployment-closure condition.
+    """
+    rows = _open_cell_rows(_read(REPO_ROOT / "docs" / "OPEN_CELLS.md"))
+    required = {
+        "OC-020": (
+            (4, "Mutate-execute-restore remains possible"),
+            (9, "candidate mutate-execute-restore remains possible"),
+            (9, "integrated MIC-plus-privilege-stripping Windows sandbox remains unmeasured"),
+        ),
+        "OC-028": (
+            (5, "operator can still go without a narration for an unbounded time"),
+            (9, "two named backpressure-cap defects remain open"),
+            (9, "partial delivery across router cancellation is not preserved"),
+        ),
+        "OC-040": (
+            (4, "50 bare `yaml.safe_load` / `yaml.load` / `yaml.full_load` call sites remain"),
+            (9, "remaining 50 bare call sites"),
+            (9, "pre-import ordering with package-owned pristine constructors"),
+        ),
+    }
+
+    def assert_residuals(candidate: dict[str, tuple[str, ...]]) -> None:
+        for cell_id, assertions in required.items():
+            _assert_open_cell_gate(candidate, cell_id)
+            for column, phrase in assertions:
+                assert phrase in candidate[cell_id][column], (cell_id, column, phrase)
+
+    assert_residuals(rows)
+    for cell_id, assertions in required.items():
+        gate_phrase = next(phrase for column, phrase in assertions if column == 9)
+        fields = list(rows[cell_id])
+        original = "| " + " | ".join(fields) + " |"
+        fields[9] = fields[9].replace(gate_phrase, "omitted residual", 1)
+        mutated = _read(REPO_ROOT / "docs" / "OPEN_CELLS.md").replace(original, "| " + " | ".join(fields) + " |", 1)
+        assert mutated != _read(REPO_ROOT / "docs" / "OPEN_CELLS.md")
+        with pytest.raises(AssertionError, match=rf"{cell_id}.*{re.escape(gate_phrase)}"):
+            assert_residuals(_open_cell_rows(mutated))
+
+
 # A RECORDED measurement, not a re-derivable one: the number of C2 challenges
 # whose fingerprint the registry rejects on the declared minimum interpreter.
 # RE-MEASURED 2026-08-09 on the OC-023 tree: 108 errors over 134 challenges.

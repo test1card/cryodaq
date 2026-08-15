@@ -2913,6 +2913,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_guard_passed_after_the_OC_013_physical_OFF_Gate_cell_was_retagged_from_BLOCKS_DEPLOYMENT_to_NONBLOCKING_and_exact_6d91e1c71f41655e84b392f2c81a166d8a05cd7d_guard_passed_explicit_negation_and_strikeout_2026_08_01
     green_evidence: pending
+  - id: OPEN-CELL-RESIDUAL-GATE-FALSE-GREEN-350
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/docs/test_docs_freshness.py::test_deployment_residuals_are_carried_into_their_gates
+    ci_partition: remaining
+    red_evidence: removing_a_named_OC_020_OC_028_or_OC_040_residual_from_its_Gate_cell_leaves_the_legacy_gate_inventory_green_while_the_new_guard_refuses_the_mutant_2026_08_15_pending_immutable_capture
+    green_evidence: pending
   - id: OPEN-CELL-QUALIFICATION-AUTHORITY-FALSE-GREEN-232
     status: open
     scope: repository
@@ -3773,6 +3781,8 @@ records:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     guards:
+      - node: tests/docs/test_docs_freshness.py::test_deployment_residuals_are_carried_into_their_gates
+        ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_every_machine_testable_record_names_a_collectable_guard
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_skipped_xfailed_deselected_or_nondefault_guards_do_not_close
