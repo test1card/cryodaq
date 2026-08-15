@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -124,41 +125,32 @@ def test_generated_baseline_artifact_contains_no_carriage_return() -> None:
     assert not raw.startswith(b"\xef\xbb\xbf"), "the baseline must not carry a byte-order mark"
 
 
-def test_baseline_generator_pins_the_line_separator_explicitly() -> None:
-    """The generator must pass an explicit newline instead of inheriting the platform.
+def test_baseline_generator_pins_the_line_separator_explicitly(tmp_path: Path) -> None:
+    """The real --write-baseline path must generate an LF-only artifact.
 
-    Checked with ``ast`` rather than a substring search: a comment or docstring that merely
-    mentions the argument would satisfy a text match while the call stayed platform
-    dependent. This binds on every platform, including Linux CI -- an earlier draft
-    regenerated through a subprocess and could only fail on Windows, which made it vacuous
-    where it actually runs.
+    Source inspection cannot establish that the CLI reaches the writer or that the writer
+    remains live. Execute the same command used by maintainers, then inspect its output
+    bytes so this test fails if a platform separator leaks into the generated artifact.
     """
-    import ast
+    _copy_receipt_evidence(tmp_path)
+    temporary_registry = tmp_path / "governance" / "agent_preventions.yaml"
+    temporary_registry.write_bytes(REGISTRY_PATH.read_bytes())
+    temporary_generator = tmp_path / "tools" / "governance_contract.py"
+    temporary_generator.parent.mkdir(parents=True, exist_ok=True)
+    temporary_generator.write_bytes(GENERATOR_SOURCE.read_bytes())
 
-    tree = ast.parse(GENERATOR_SOURCE.read_text(encoding="utf-8"), filename=str(GENERATOR_SOURCE))
-    writer = next(
-        (
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "_write_removal_baseline"
-        ),
-        None,
+    subprocess.run(
+        [sys.executable, str(temporary_generator), "--write-baseline"],
+        cwd=tmp_path,
+        env={"PYTHONPATH": str(tmp_path)},
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    assert writer is not None, "_write_removal_baseline is gone; this guard needs re-aiming"
 
-    write_calls = [
-        node
-        for node in ast.walk(writer)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "write_text"
-    ]
-    assert write_calls, "_write_removal_baseline no longer calls write_text; re-aim this guard"
-
-    for call in write_calls:
-        keywords = {keyword.arg for keyword in call.keywords}
-        assert "newline" in keywords, (
-            "write_text in _write_removal_baseline must pass an explicit newline. Without it "
-            "the platform separator applies and the same registry renders as LF on Linux and "
-            "CRLF on Windows."
-        )
-        newline = next(keyword.value for keyword in call.keywords if keyword.arg == "newline")
-        assert isinstance(newline, ast.Constant) and newline.value == "\n", 'the explicit newline must be "\\n"'
+    generated = (tmp_path / "governance" / "agent_preventions_baseline.json").read_bytes()
+    assert generated, "the baseline generator produced an empty artifact"
+    assert b"\r" not in generated, (
+        "the real --write-baseline path generated carriage returns; the baseline must be LF-only"
+    )
+    assert not generated.startswith(b"\xef\xbb\xbf"), "the real --write-baseline path generated a byte-order mark"
