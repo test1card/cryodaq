@@ -116,3 +116,75 @@ def test_long_profile_contract_rejects_each_mutation(profile_name: str) -> None:
     assert any(
         "recovery exceeded ceiling" in error for error in soak._validate_faults(excessive_recovery, profile, samples)
     )
+
+
+def test_72h_profile_rejects_its_own_descriptor_slope_limit() -> None:
+    """A slope accepted by 12h is rejected by the stricter 72h aggregate rule."""
+
+    profile = soak.PROFILES["72h"]
+    samples = _samples(profile)
+    for sample in samples:
+        elapsed_s = float(sample["elapsed_s"])
+        growth = int((elapsed_s - profile.warmup_s) * 0.1 / 3600) if elapsed_s >= profile.warmup_s else 0
+        for role in ("launcher", "engine", "bridge"):
+            sample["roles"][role]["descriptors"] += growth
+
+    assert soak.evaluate_resources(_samples(profile), profile) == []
+    errors = soak.evaluate_resources(samples, profile)
+    assert "aggregate descriptor slope exceeded profile limit" in errors
+
+
+def test_long_profile_contract_rejects_schedule_and_recovery_mutations() -> None:
+    """The complete ordered schedule and target-specific recovery receipts are required."""
+
+    profile = soak.PROFILES["72h"]
+    samples = _samples(profile)
+    faults = _faults(profile)
+    assert soak._validate_faults(faults, profile, samples) == []
+
+    missing = copy.deepcopy(faults)
+    missing.pop()
+    assert "fault schedule is missing, duplicated, reordered, or unscheduled" in soak._validate_faults(
+        missing, profile, samples
+    )
+
+    duplicated = copy.deepcopy(faults)
+    duplicated.append(copy.deepcopy(duplicated[-1]))
+    assert "fault schedule is missing, duplicated, reordered, or unscheduled" in soak._validate_faults(
+        duplicated, profile, samples
+    )
+
+    reordered = copy.deepcopy(faults)
+    reordered[0], reordered[1] = reordered[1], reordered[0]
+    assert "fault schedule is missing, duplicated, reordered, or unscheduled" in soak._validate_faults(
+        reordered, profile, samples
+    )
+
+    not_ready = copy.deepcopy(faults)
+    not_ready[0]["ready"] = False
+    assert "fault 0 replacement was not ready" in soak._validate_faults(not_ready, profile, samples)
+
+    engine_unhealthy = copy.deepcopy(faults)
+    engine_index = next(index for index, fault in enumerate(engine_unhealthy) if fault["target"] == "engine")
+    engine_unhealthy[engine_index]["bridge_data_resumed"] = False
+    assert f"fault {engine_index} lacks bridge-data recovery" in soak._validate_faults(
+        engine_unhealthy, profile, samples
+    )
+
+    assistant_unhealthy = copy.deepcopy(faults)
+    assistant_index = next(index for index, fault in enumerate(assistant_unhealthy) if fault["target"] == "assistant")
+    assistant_unhealthy[assistant_index]["newer_h3_health"] = False
+    assert f"fault {assistant_index} lacks newer H3 health" in soak._validate_faults(
+        assistant_unhealthy, profile, samples
+    )
+
+
+def test_long_profile_contract_rejects_a_truncated_sample_tail() -> None:
+    """Series coverage must reach the selected profile duration."""
+
+    profile = soak.PROFILES["72h"]
+    samples = _samples(profile)
+    truncated = [sample for sample in samples if sample["elapsed_s"] < profile.duration_s - soak.SAMPLE_INTERVAL_S]
+
+    assert soak.validate_sample_series(samples, profile) == []
+    assert "series does not cover profile duration" in soak.validate_sample_series(truncated, profile)

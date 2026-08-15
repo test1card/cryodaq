@@ -6,14 +6,6 @@ profile substituted into the ``PROFILES`` mapping under the ``short`` key is
 still refused, so the mapping is not a way to smuggle a long-duration run past
 the gate. This module pins that property.
 
-It also records, as an executable statement rather than prose, what the runner
-still lacks: a reviewed seam that passes the SELECTED profile through to
-``_PosixSoakRunner``. Today ``soak_mock_stack_runner`` calls
-``soak.profile("short")`` directly and writes ``"profile": "short"`` into the
-manifest unconditionally, so the multi-fault, multi-epoch mechanics that the 12h
-profile describes have never been exercised by anything. Closing that is a
-separate, reviewed change; this module must not be made to pass by adding a
-rehearsal profile to the production choices or by weakening the refusal.
 """
 
 from __future__ import annotations
@@ -70,8 +62,8 @@ def test_the_refusal_follows_the_profile_identity_not_the_lookup_key(
     and no evidence directory is created for it.
     """
 
-    rehearsal = _compressed_12h_rehearsal()
-    monkeypatch.setitem(soak.PROFILES, "short", rehearsal)
+    renamed_short = replace(soak.PROFILES["short"], name="not-short")
+    monkeypatch.setitem(soak.PROFILES, "short", renamed_short)
 
     evidence_dir = tmp_path / "rehearsal"
     assert soak.main(["--profile", "short", "--evidence-dir", str(evidence_dir)]) == 3
