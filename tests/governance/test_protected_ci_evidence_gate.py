@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 PROTECTED_WORKFLOW = ROOT / ".github" / "workflows" / "protected-ci-evidence-gate.yml"
 CHECKOUT_PIN = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 UPLOAD_PIN = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+PULL_REQUEST_WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+PULL_REQUEST_READY_TO_DRAFT_EVENTS = ("ready_for_review", "converted_to_draft")
+PULL_REQUEST_DRAFT_GATE = "github.event.pull_request.draft == false"
 
 
 def _workflow_trigger(payload: dict) -> dict:
@@ -38,6 +41,16 @@ def _expected_immutable_paths() -> tuple[str, ...]:
     producer_files = _PROTECTED_PRODUCER_FILES
     anchor = producer_files.index("environment.yml") + 1
     return (*producer_files[:anchor], "requirements-lock.txt", *producer_files[anchor:])
+
+
+def _pull_request_workflows() -> tuple[tuple[str, dict], ...]:
+    """Every workflow under `.github/workflows` that reacts to pull_request events."""
+    workflows = []
+    for path in sorted(PULL_REQUEST_WORKFLOWS_DIR.glob("*.yml")):
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if "pull_request" in _workflow_trigger(payload):
+            workflows.append((path.name, payload))
+    return tuple(workflows)
 
 
 def test_every_protected_producer_file_is_pinned_to_lf(tmp_path: Path) -> None:
@@ -332,3 +345,36 @@ def test_attestation_uses_absolute_conda_interpreter() -> None:
 
     assert 'interpreter="${CONDA_PREFIX:?}' in identity["run"]
     assert '"$interpreter" -B -m tools.ci_candidate_evidence attest-job' in identity["run"]
+
+
+@pytest.mark.parametrize(
+    ("workflow_name", "payload"),
+    _pull_request_workflows(),
+    ids=[name for name, _ in _pull_request_workflows()],
+)
+def test_every_pull_request_workflow_keeps_ready_to_draft_gating(workflow_name: str, payload: dict) -> None:
+    """Every pull_request workflow must keep its ready-to-draft gating.
+
+    A confirmed gap corrected by this PR was the ONEDIR workflow omitting the
+    draft gate while the regression only parsed the protected workflow. This
+    enumerates every pull_request workflow, so removing the gating from any of
+    them -- the trigger events, the job condition, or the cancellation
+    configuration -- fails the suite instead of passing green.
+    """
+
+    trigger = _workflow_trigger(payload)
+    pr_trigger = trigger["pull_request"]
+    assert pr_trigger is not None, f"{workflow_name}: pull_request trigger has no types"
+    assert set(PULL_REQUEST_READY_TO_DRAFT_EVENTS) <= set(pr_trigger["types"])
+
+    concurrency = payload["concurrency"]
+    assert "github.ref" in concurrency["group"], f"{workflow_name}: concurrency group is not ref-scoped"
+    cancel = concurrency["cancel-in-progress"]
+    assert cancel is True or (
+        isinstance(cancel, str) and ("pull_request" in cancel or "ref != 'refs/heads/master'" in cancel)
+    ), f"{workflow_name}: cancel-in-progress does not cancel pull_request runs"
+
+    for job_name, job in payload["jobs"].items():
+        assert PULL_REQUEST_DRAFT_GATE in job.get("if", ""), (
+            f"{workflow_name}: job {job_name!r} is not gated against draft pull requests"
+        )
