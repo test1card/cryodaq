@@ -3769,6 +3769,8 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_stored_queue_get_awaitable_in_discovery_timeout
         ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_transitively_aliased_stored_queue_get_awaitable_in_discovery_timeout
+        ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_keyword_future_in_discovery_timeout
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_conditional_loop_jump_timeout_handler_as_swallow

@@ -119,6 +119,7 @@ def _caught_timeout_error_names(handler: ast.ExceptHandler) -> set[str]:
 
 def _discovery_wait_get_aliases(function: ast.AST) -> set[str]:
     aliases: set[str] = set()
+    name_assignments: list[tuple[str, str]] = []
     for node in ast.walk(function):
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -136,6 +137,19 @@ def _discovery_wait_get_aliases(function: ast.AST) -> set[str]:
             isinstance(value, ast.Attribute) and value.attr == "get"
         ):
             aliases.add(target.id)
+        elif isinstance(value, ast.Name):
+            name_assignments.append((target.id, value.id))
+    # Resolve simple Name aliases of queue-get aliases transitively: with
+    # ``pending = queue.get(); discovery = pending`` the awaited name is a
+    # queue-get too, so ``asyncio.wait_for(discovery, ...)`` is a publication
+    # discovery wait that the timeout guard must not omit.
+    changed = True
+    while changed:
+        changed = False
+        for target, source in name_assignments:
+            if source in aliases and target not in aliases:
+                aliases.add(target)
+                changed = True
     return aliases
 
 
@@ -1354,6 +1368,25 @@ async def under_test(queue: asyncio.Queue):
 """
     function = _first_function(ast.parse(snippet), "under_test")
     aliases = _discovery_wait_get_aliases(function)
+    discovery_waits = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and _is_publication_discovery_wait(node, aliases)
+    ]
+    assert len(discovery_waits) == 1
+
+
+def test_durable_ack_guard_tracks_transitively_aliased_stored_queue_get_awaitable_in_discovery_timeout() -> None:
+    snippet = """import asyncio
+
+async def under_test(queue: asyncio.Queue):
+    pending = queue.get()
+    discovery = pending
+    await asyncio.wait_for(discovery, timeout=2.0)
+"""
+    function = _first_function(ast.parse(snippet), "under_test")
+    aliases = _discovery_wait_get_aliases(function)
+    assert aliases == {"pending", "discovery"}
     discovery_waits = [
         node
         for node in ast.walk(function)
