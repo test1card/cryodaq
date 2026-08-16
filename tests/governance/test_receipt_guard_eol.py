@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -52,9 +53,16 @@ def _copy_receipt_evidence(tmp_path: Path) -> dict[str, Any]:
 
 
 def test_receipt_bound_guards_are_checked_out_with_lf(tmp_path: Path) -> None:
-    """Git must preserve every raw-bound guard's exact attested bytes."""
+    """Git must preserve every raw-bound guard's exact attested bytes.
 
-    paths = sorted(_raw_bound_guard_paths())
+    The derived baseline is included even though it is not a guard source: removing its
+    `.gitattributes` rule leaves the artifact-bytes guard green on an LF checkout (the
+    generator still emits LF), while `git check-attr` then reports `text` and `eol` as
+    unspecified and an `autocrlf` checkout can recreate the CRLF failure. The attribute
+    assertion is what makes the missing rule red on any platform.
+    """
+
+    paths = sorted(_raw_bound_guard_paths() | {BASELINE_ARTIFACT.relative_to(ROOT).as_posix()})
     attributes_root = tmp_path / "attributes"
     attributes_root.mkdir()
     attributes_raw = (ROOT / ".gitattributes").read_bytes()
@@ -131,26 +139,65 @@ def test_baseline_generator_pins_the_line_separator_explicitly(tmp_path: Path) -
     Source inspection cannot establish that the CLI reaches the writer or that the writer
     remains live. Execute the same command used by maintainers, then inspect its output
     bytes so this test fails if a platform separator leaks into the generated artifact.
+    The command runs against a Git-backed clone of this repository rather than a
+    file-only temporary root: validate_registry performs Git-object resolution on the
+    red-reproduction receipt bindings only when the root under validation carries .git
+    metadata, so a file-only copy silently skips exactly the resolution a real checkout
+    performs before the writer runs -- an in-repository early return or failure would
+    stay invisible.
     """
-    _copy_receipt_evidence(tmp_path)
-    temporary_registry = tmp_path / "governance" / "agent_preventions.yaml"
-    temporary_registry.write_bytes(REGISTRY_PATH.read_bytes())
-    temporary_generator = tmp_path / "tools" / "governance_contract.py"
-    temporary_generator.parent.mkdir(parents=True, exist_ok=True)
-    temporary_generator.write_bytes(GENERATOR_SOURCE.read_bytes())
-
+    clone = tmp_path / "clone"
     subprocess.run(
-        [sys.executable, str(temporary_generator), "--write-baseline"],
-        cwd=tmp_path,
-        env={"PYTHONPATH": str(tmp_path)},
+        ["git", "-c", "advice.detachedHead=false", "clone", "--quiet", str(ROOT), str(clone)],
         check=True,
+        capture_output=True,
+    )
+
+    clone_environment = dict(os.environ)
+    clone_environment["PYTHONPATH"] = str(clone)
+    completed = subprocess.run(
+        [sys.executable, "tools/governance_contract.py", "--write-baseline"],
+        cwd=clone,
+        env=clone_environment,
         capture_output=True,
         text=True,
     )
+    assert completed.returncode == 0, completed.stderr
 
-    generated = (tmp_path / "governance" / "agent_preventions_baseline.json").read_bytes()
+    generated = (clone / "governance" / "agent_preventions_baseline.json").read_bytes()
     assert generated, "the baseline generator produced an empty artifact"
     assert b"\r" not in generated, (
         "the real --write-baseline path generated carriage returns; the baseline must be LF-only"
     )
     assert not generated.startswith(b"\xef\xbb\xbf"), "the real --write-baseline path generated a byte-order mark"
+
+
+def test_tracked_baseline_is_never_mutated_by_the_real_command(tmp_path: Path) -> None:
+    """Recreate the passing-run mutation and prove the real tracked artifact is untouched.
+
+    The first draft of the generator guard executed the real --write-baseline command with
+    cwd at the repository root, and the passing run rewrote the tracked
+    governance/agent_preventions_baseline.json -- measured 2026-08-15: git status showed
+    that path modified after an otherwise green suite. A green run repairing tracked
+    governance state can hide exactly the drift the stale-pair check exists to report, so
+    the command was moved to tmp_path, but nothing registered the old shape as a regression.
+    This guard recreates it: it executes the exact maintainer command against the real
+    repository root, then proves the tracked artifact's bytes are unchanged. A mismatch is
+    restored before the assertion reports, so the guard itself never repairs tracked state.
+    """
+    before = BASELINE_ARTIFACT.read_bytes()
+    completed = subprocess.run(
+        [sys.executable, str(GENERATOR_SOURCE), "--write-baseline"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        assert completed.returncode == 0, completed.stderr
+        assert BASELINE_ARTIFACT.read_bytes() == before, (
+            "the real --write-baseline command mutated the tracked baseline; a test run "
+            "must never rewrite a tracked governance artifact"
+        )
+    finally:
+        if BASELINE_ARTIFACT.read_bytes() != before:
+            BASELINE_ARTIFACT.write_bytes(before)
