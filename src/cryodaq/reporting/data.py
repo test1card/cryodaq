@@ -277,6 +277,11 @@ class ReportDataExtractor:
                     _ReadingsState.UNAVAILABLE_INCONSISTENT,
                     detail="finalized metadata declares measured values incomplete",
                 )
+            if summary.get("measured_values_truncated") is True:
+                return _ReadingsResolution(
+                    _ReadingsState.UNAVAILABLE_INCONSISTENT,
+                    detail="finalized metadata declares measured values truncated",
+                )
             if summary.get("measured_values_issues"):
                 return _ReadingsResolution(
                     _ReadingsState.UNAVAILABLE_INCONSISTENT,
@@ -554,7 +559,7 @@ class ReportDataExtractor:
                 unit=str(unit or ""),
                 status=str(status or ""),
             )
-            for raw_ts, instrument_id, channel, value, unit, status in rows
+            for raw_ts, instrument_id, channel, value, unit, status, *_ in rows
         ]
 
     def _load_operator_log(

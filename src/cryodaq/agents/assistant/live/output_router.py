@@ -62,8 +62,10 @@ class OutputTarget(enum.Enum):
 
 
 def _is_delivered_outcome(state: Any) -> bool:
-    return state == "delivered" or (
-        isinstance(state, dict) and state and all(recipient_state == "delivered" for recipient_state in state.values())
+    return state in ("delivered", "service_reported_delivered") or (
+        isinstance(state, dict)
+        and state
+        and all(recipient_state in ("delivered", "service_reported_delivered") for recipient_state in state.values())
     )
 
 
