@@ -120,6 +120,7 @@ def test_gui_smoke_refuses_live_descendant_holding_inherited_pipes(
     monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
 
     with pytest.raises(RuntimeError, match="process tree kept inherited output pipes open"):
         smoke._run_gui_startup_cell(tmp_path / "CryoDAQ.exe", tmp_path, tmp_path)
