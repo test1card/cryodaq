@@ -65,6 +65,7 @@ _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
 _FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
 _GUI_PIPE_SETTLEMENT_TIMEOUT_S = 5.0
+_GUI_JOB_SETTLEMENT_TIMEOUT_S = 5.0
 _REQUIRED_SMOKE_CELLS = (
     "frozen_driver_imports",
     "gui_startup_offscreen",
@@ -559,12 +560,34 @@ def _run_report_cell(
     }
 
 
-def _create_gui_process_job(process: subprocess.Popen[Any]) -> Any | None:
+def _start_gui_process(
+    command: list[str],
+    env: dict[str, str],
+) -> tuple[subprocess.Popen[Any], Any | None]:
+    popen_kwargs = {
+        "env": env,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "close_fds": True,
+        "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    }
     if os.name != "nt":
-        return None
-    from cryodaq.report_process import _create_windows_job
+        return subprocess.Popen(command, **popen_kwargs), None
 
-    return _create_windows_job(process)
+    from cryodaq.report_process import _popen_windows_job
+
+    return _popen_windows_job(command, **popen_kwargs)
+
+
+def _wait_for_job_settlement(job: Any, timeout_s: float) -> Any:
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while True:
+        accounting = job.accounting()
+        if accounting.total_processes < 1:
+            raise RuntimeError("Windows Job Object never recorded its suspended root process")
+        if accounting.active_processes == 0 or time.monotonic() >= deadline:
+            return accounting
+        time.sleep(0.05)
 
 
 def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> dict[str, Any]:
@@ -580,19 +603,13 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         }
     )
     started = time.monotonic()
-    process = subprocess.Popen(
-        command,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
+    process, job = _start_gui_process(command, env)
     pipe_chunks: tuple[list[bytes], list[bytes]] = ([], [])
     pipe_locks = (threading.Lock(), threading.Lock())
     pipe_errors: list[BaseException] = []
     pipe_error_lock = threading.Lock()
     pipe_readers: tuple[threading.Thread, ...] = ()
-    job: Any | None = None
+    job_accounting: Any | None = None
 
     def read_pipe(stream: Any, chunks: list[bytes], lock: threading.Lock) -> None:
         try:
@@ -604,7 +621,6 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
                 pipe_errors.append(exc)
 
     try:
-        job = _create_gui_process_job(process)
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("gui_startup_offscreen did not expose its output pipes")
         pipe_readers = tuple(
@@ -626,6 +642,12 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
             raise RuntimeError("gui_startup_offscreen process tree kept inherited output pipes open")
         if pipe_errors:
             raise RuntimeError("gui_startup_offscreen output reader failed") from pipe_errors[0]
+        if job is not None:
+            job_accounting = _wait_for_job_settlement(job, _GUI_JOB_SETTLEMENT_TIMEOUT_S)
+            if job_accounting.active_processes:
+                count = int(job_accounting.active_processes)
+                noun = "process" if count == 1 else "processes"
+                raise RuntimeError(f"gui_startup_offscreen process tree left {count} live {noun}")
         with pipe_locks[0]:
             stdout = b"".join(pipe_chunks[0])
         with pipe_locks[1]:
@@ -654,6 +676,9 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         "status": "PASS",
         "duration_s": round(time.monotonic() - started, 3),
         "argv": command,
+        "job_object_assigned": job is not None,
+        "job_total_processes": None if job_accounting is None else int(job_accounting.total_processes),
+        "job_active_processes_before_close": None if job_accounting is None else int(job_accounting.active_processes),
         "runtime": logs,
     }
 
@@ -725,29 +750,44 @@ def _run_job_timeout_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         }
     )
     started = time.monotonic()
-    process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process: subprocess.Popen[Any] | None = None
     job: Any = None
+    job_accounting: Any | None = None
     try:
         # Exercise the installed production Job Object implementation while
         # the process placed in it is always the built CryoDAQ.exe.
-        from cryodaq.report_process import _create_windows_job
+        from cryodaq.report_process import _popen_windows_job
 
-        job = _create_windows_job(process)
+        process, job = _popen_windows_job(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
         # Must outlast the child's own deadline, or this timeout kills the EXE
         # before its degradation path runs and we would be observing our own
         # impatience instead of the product's behaviour.
         stdout, stderr = process.communicate(timeout=child_deadline_s + 30.0)
+        job_accounting = _wait_for_job_settlement(job, _GUI_JOB_SETTLEMENT_TIMEOUT_S)
+        if job_accounting.active_processes:
+            count = int(job_accounting.active_processes)
+            noun = "process" if count == 1 else "processes"
+            raise RuntimeError(f"windows_job_timeout product cleanup left {count} live {noun}")
     except BaseException:
         if job is not None:
             job.close()
-        with suppress(Exception):
-            process.kill()
-        with suppress(Exception):
-            process.wait(timeout=5)
+        if process is not None:
+            with suppress(Exception):
+                process.kill()
+            with suppress(Exception):
+                process.wait(timeout=5)
         raise
     finally:
         if job is not None:
             job.close()
+    if process is None:
+        raise RuntimeError("windows_job_timeout did not start the built executable")
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     logs = _write_log(evidence_dir, "windows_job_timeout", completed)
     if completed.returncode != 0 or not nested_pid_file.is_file():
@@ -767,6 +807,8 @@ def _run_job_timeout_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         "duration_s": round(time.monotonic() - started, 3),
         "argv": command,
         "job_object_assigned": True,
+        "job_total_processes": int(job_accounting.total_processes),
+        "job_active_processes_before_close": int(job_accounting.active_processes),
         "nested_pid": nested_pid,
         "nested_pid_gone": True,
         "runtime": logs,

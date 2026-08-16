@@ -112,10 +112,7 @@ def test_gui_smoke_refuses_live_descendant_holding_inherited_pipes(
     process = Process()
     job = Job()
     ticks = iter((0.0, 0.0, 6.0, 6.0))
-    monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
-    monkeypatch.setattr(
-        smoke, "_create_gui_process_job", lambda candidate: job if candidate is process else None, raising=False
-    )
+    monkeypatch.setattr(smoke, "_start_gui_process", lambda _command, _env: (process, job))
     monkeypatch.setattr(smoke, "_GUI_PIPE_SETTLEMENT_TIMEOUT_S", 0.01, raising=False)
     monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
@@ -128,6 +125,57 @@ def test_gui_smoke_refuses_live_descendant_holding_inherited_pipes(
     assert job.closed is True
     assert process.stdout.settled.wait(timeout=1)
     assert process.stderr.settled.wait(timeout=1)
+
+
+def test_gui_smoke_refuses_live_descendant_after_pipe_eof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        pid = 1234
+        returncode = 0
+        stdout = io.BytesIO(b"gui output\n")
+        stderr = io.BytesIO()
+
+        def poll(self) -> None:
+            return None
+
+        def send_signal(self, _signal: int) -> None:
+            return None
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == 20
+            return self.returncode
+
+        def terminate(self) -> None:
+            return None
+
+    class Job:
+        closed = False
+
+        def accounting(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                total_processes=2,
+                active_processes=0 if self.closed else 1,
+            )
+
+        def close(self) -> None:
+            self.closed = True
+
+    process = Process()
+    job = Job()
+    ticks = iter((0.0, 0.0, 6.0, 6.0, 6.0))
+    monkeypatch.setattr(smoke, "_start_gui_process", lambda _command, _env: (process, job))
+    monkeypatch.setattr(smoke, "_GUI_JOB_SETTLEMENT_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
+
+    with pytest.raises(RuntimeError, match="left 1 live process"):
+        smoke._run_gui_startup_cell(tmp_path / "CryoDAQ.exe", tmp_path, tmp_path)
+
+    assert job.closed is True
 
 
 def test_gui_smoke_passes_after_process_tree_closes_inherited_pipes(
@@ -156,14 +204,16 @@ def test_gui_smoke_passes_after_process_tree_closes_inherited_pipes(
     class Job:
         closed = False
 
+        def accounting(self) -> SimpleNamespace:
+            return SimpleNamespace(total_processes=1, active_processes=0)
+
         def close(self) -> None:
             self.closed = True
 
     process = Process()
     job = Job()
-    ticks = iter((0.0, 0.0, 6.0, 6.0))
-    monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
-    monkeypatch.setattr(smoke, "_create_gui_process_job", lambda candidate: job if candidate is process else None)
+    ticks = iter((0.0, 0.0, 6.0, 6.0, 6.0))
+    monkeypatch.setattr(smoke, "_start_gui_process", lambda _command, _env: (process, job))
     monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
@@ -173,6 +223,8 @@ def test_gui_smoke_passes_after_process_tree_closes_inherited_pipes(
 
     assert outcome["status"] == "PASS"
     assert job.closed is True
+    assert outcome["job_total_processes"] == 1
+    assert outcome["job_active_processes_before_close"] == 0
     assert (tmp_path / "gui_startup_offscreen.stdout.log").read_bytes() == b"gui output\n"
 
 
@@ -629,8 +681,9 @@ def test_smoke_summary_fails_closed_on_status_or_roster_mismatch(
 def test_timeout_cell_uses_production_job_object_around_built_exe() -> None:
     source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
 
-    assert "from cryodaq.report_process import _create_windows_job" in source
-    assert "job = _create_windows_job(process)" in source
+    assert "from cryodaq.report_process import _popen_windows_job" in source
+    assert "process, job = _popen_windows_job(" in source
+    assert "job_accounting = _wait_for_job_settlement(" in source
     assert "command = frozen_report_command(executable" in source
 
 

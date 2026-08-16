@@ -1051,6 +1051,12 @@ def _creation_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
+@dataclass(frozen=True, slots=True)
+class _WindowsJobAccounting:
+    total_processes: int
+    active_processes: int
+
+
 class _WindowsJob:
     """Kill-on-close Windows Job Object containing a report child tree."""
 
@@ -1091,6 +1097,18 @@ class _WindowsJob:
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             ]
 
+        class BasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -1103,6 +1121,14 @@ class _WindowsJob:
         kernel32.SetInformationJobObject.restype = wintypes.BOOL
         kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
         kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
         job = kernel32.CreateJobObjectW(None, None)
@@ -1121,15 +1147,168 @@ class _WindowsJob:
             raise OSError(error, "AssignProcessToJobObject failed")
         self._kernel32 = kernel32
         self._handle = job
+        self._accounting_type = BasicAccountingInformation
+
+    def accounting(self) -> _WindowsJobAccounting:
+        import ctypes
+
+        if not self._handle:
+            raise RuntimeError("Windows Job Object handle is closed")
+        info = self._accounting_type()
+        if not self._kernel32.QueryInformationJobObject(
+            self._handle,
+            1,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        ):
+            raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
+        return _WindowsJobAccounting(
+            total_processes=int(info.TotalProcesses),
+            active_processes=int(info.ActiveProcesses),
+        )
 
     def close(self) -> None:
         if self._handle:
-            self._kernel32.CloseHandle(self._handle)
+            if not self._kernel32.CloseHandle(self._handle):
+                import ctypes
+
+                raise OSError(ctypes.get_last_error(), "CloseHandle for Windows Job Object failed")
             self._handle = None
 
 
 def _create_windows_job(process: subprocess.Popen[Any]) -> _WindowsJob:
     return _WindowsJob(process)
+
+
+def _resume_suspended_windows_process(process: subprocess.Popen[Any]) -> None:
+    """Resume the sole primary thread of a process created with CREATE_SUSPENDED."""
+
+    if os.name != "nt":
+        raise OSError("suspended Windows process resume requires Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    class ThreadEntry32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", wintypes.LONG),
+            ("tpDeltaPri", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+    kernel32.Thread32First.restype = wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry32)]
+    kernel32.Thread32Next.restype = wintypes.BOOL
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, 0)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if not snapshot or int(snapshot) == invalid_handle:
+        raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
+
+    thread_ids: list[int] = []
+    snapshot_close_error: OSError | None = None
+    try:
+        entry = ThreadEntry32()
+        entry.dwSize = ctypes.sizeof(entry)
+        if not kernel32.Thread32First(snapshot, ctypes.byref(entry)):
+            raise OSError(ctypes.get_last_error(), "Thread32First failed")
+        while True:
+            if int(entry.th32OwnerProcessID) == int(process.pid):
+                thread_ids.append(int(entry.th32ThreadID))
+            ctypes.set_last_error(0)
+            if kernel32.Thread32Next(snapshot, ctypes.byref(entry)):
+                continue
+            error = ctypes.get_last_error()
+            if error != 18:
+                raise OSError(error, "Thread32Next failed")
+            break
+    finally:
+        if not kernel32.CloseHandle(snapshot):
+            snapshot_close_error = OSError(ctypes.get_last_error(), "CloseHandle for thread snapshot failed")
+    if snapshot_close_error is not None:
+        raise snapshot_close_error
+    if len(thread_ids) != 1:
+        raise RuntimeError(
+            f"suspended Windows process {process.pid} exposed {len(thread_ids)} primary-thread candidates"
+        )
+
+    thread = kernel32.OpenThread(0x0002, False, thread_ids[0])
+    if not thread:
+        raise OSError(ctypes.get_last_error(), "OpenThread failed")
+    thread_close_error: OSError | None = None
+    try:
+        previous_suspend_count = int(kernel32.ResumeThread(thread))
+        if previous_suspend_count == 0xFFFFFFFF:
+            raise OSError(ctypes.get_last_error(), "ResumeThread failed")
+        if previous_suspend_count != 1:
+            raise RuntimeError(f"ResumeThread returned unexpected prior suspend count {previous_suspend_count}")
+    finally:
+        if not kernel32.CloseHandle(thread):
+            thread_close_error = OSError(ctypes.get_last_error(), "CloseHandle for primary thread failed")
+    if thread_close_error is not None:
+        raise thread_close_error
+
+
+def _popen_windows_job(
+    command: Sequence[str],
+    **popen_kwargs: Any,
+) -> tuple[subprocess.Popen[Any], _WindowsJob]:
+    """Start a Windows child suspended, assign its tree to a Job, then resume it."""
+
+    if os.name != "nt":
+        raise OSError("Windows Job Object process start requires Windows")
+
+    creationflags = int(popen_kwargs.pop("creationflags", 0)) | 0x00000004
+    process = subprocess.Popen(list(command), creationflags=creationflags, **popen_kwargs)
+    job: _WindowsJob | None = None
+    try:
+        job = _create_windows_job(process)
+        accounting = job.accounting()
+        if accounting.total_processes != 1 or accounting.active_processes != 1:
+            raise RuntimeError(
+                "new Windows Job Object did not contain exactly the suspended root process "
+                f"(total={accounting.total_processes}, active={accounting.active_processes})"
+            )
+        _resume_suspended_windows_process(process)
+        return process, job
+    except BaseException as exc:
+        cleanup_error: BaseException | None = None
+        if job is not None:
+            try:
+                job.close()
+            except BaseException as job_cleanup_exc:
+                cleanup_error = job_cleanup_exc
+        else:
+            try:
+                terminate_process_tree(process.pid)
+            except BaseException:
+                pass
+        try:
+            process.wait(timeout=2.0)
+        except BaseException:
+            try:
+                process.kill()
+                process.wait(timeout=2.0)
+            except BaseException as process_cleanup_exc:
+                cleanup_error = cleanup_error or process_cleanup_exc
+        if cleanup_error is not None:
+            raise OSError(f"suspended Windows child cleanup failed: {cleanup_error}") from exc
+        raise
 
 
 class ReportProcessRunner:
@@ -1152,43 +1331,30 @@ class ReportProcessRunner:
         *,
         env: Mapping[str, str] | None = None,
     ) -> int:
-        process = subprocess.Popen(
-            list(command),
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            env=dict(env) if env is not None else None,
-            **_creation_kwargs(),
-        )
+        popen_kwargs: dict[str, Any] = {
+            "shell": False,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+            "env": dict(env) if env is not None else None,
+        }
         windows_job: _WindowsJob | None = None
         if os.name == "nt":
-            # CPython exposes the process handle only after CreateProcess has
-            # started it, so there is a small Popen-to-assignment window. The
-            # child/package import path is intentionally side-effect-free and
-            # cannot spawn descendants before main. Assignment failure is
-            # handled fail-closed below.
             try:
-                windows_job = _create_windows_job(process)
+                process, windows_job = _popen_windows_job(
+                    list(command),
+                    **popen_kwargs,
+                    **_creation_kwargs(),
+                )
             except Exception as exc:
-                try:
-                    terminate_process_tree(process.pid)
-                except Exception:
-                    # taskkill itself can time out or fail. The process handle
-                    # remains our final cleanup authority below.
-                    pass
-                try:
-                    process.wait(timeout=2.0)
-                except Exception:
-                    try:
-                        process.kill()
-                        process.wait(timeout=2.0)
-                    except Exception as cleanup_exc:
-                        raise ReportProcessError(
-                            "report child cleanup failed after Windows Job Object assignment failure"
-                        ) from cleanup_exc
-                raise ReportProcessError("report child could not be assigned to a Windows Job Object") from exc
+                raise ReportProcessError("report child could not start inside a Windows Job Object") from exc
+        else:
+            process = subprocess.Popen(
+                list(command),
+                **popen_kwargs,
+                **_creation_kwargs(),
+            )
         timed_out = False
         try:
             return_code = process.wait(timeout=self._timeout_s)
