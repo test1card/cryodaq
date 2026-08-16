@@ -28,8 +28,7 @@ def channel_label(channel_labels: Mapping[int, str], index: int) -> str:
 def emitted_channel_labels(channel_labels: Mapping[int, str]) -> tuple[str, ...]:
     """Declare the complete channel roster emitted by one configured driver."""
 
-    labels = tuple(channel_label(channel_labels, index) for index in range(1, 9))
-    return (*labels, *(f"{label}_raw" for label in labels))
+    return tuple(channel_label(channel_labels, index) for index in range(1, 9))
 
 
 def _mock_sensor_unit(temp_k: float) -> float:
