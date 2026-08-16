@@ -172,8 +172,13 @@ def test_gui_smoke_refuses_live_descendant_after_pipe_eof(
         lambda candidate: job if candidate is process else None,
         raising=False,
     )
-    monkeypatch.setattr(smoke, "_start_gui_process", lambda _command, _env: (process, job))
-    monkeypatch.setattr(smoke, "_GUI_JOB_SETTLEMENT_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(
+        smoke,
+        "_start_gui_process",
+        lambda _command, _env: (process, job),
+        raising=False,
+    )
+    monkeypatch.setattr(smoke, "_GUI_JOB_SETTLEMENT_TIMEOUT_S", 0.0, raising=False)
     monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
