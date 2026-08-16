@@ -5,16 +5,21 @@ agent:
 
   ollama:
     base_url: http://127.0.0.1:11434
-    default_model: gemma4:e4b
-    timeout_s: 120  # gemma4:e4b thinking-first; cold-load ~40s, warm ~10s on RTX 5070 Ti 16GB
+    default_model: gemma4:12b
+    timeout_s: 120  # gemma4:12b thinking-first; cold-load ~9s, warm ~0.3s on RTX 5070 Ti 16GB
     temperature: 0.3
-    num_ctx: 32768  # 32K context; fits 100% on GPU with ~2 GB vRAM headroom on RTX 5070 Ti 16GB
-    # Deployment notes (verified 2026-05-15 on RTX 5070 Ti 16GB lab PC):
+    num_ctx: 32768  # 32K context; 12b fits 100% on GPU at 8.4 GB on RTX 5070 Ti 16GB
+    # Deployment notes. The 12b line is measured 2026-08-15 on the RTX 5070 Ti
+    # 16GB lab PC. e4b and e2b are NO LONGER INSTALLED there, so the older
+    # lines are retained only as the comparison that justifies the move:
+    #   12b @ num_ctx=32768: 100% GPU, 8.4 GB used, ~56 tok/s, cold load 9.3 s,
+    #     warm load 0.32 s. Faster, and smaller in vRAM, than the e4b it replaces.
     #   e4b @ num_ctx=32768: 100% GPU, ~11 GB used, ~2 GB headroom, ~39 tok/s.
     #   26b @ num_ctx=16384: 41% CPU / 59% GPU split (model 17 GB > vRAM budget),
     #     only ~680 MiB headroom, degraded throughput. Not viable on 16 GB.
-    #   M5 24GB (Mac dev): downgrade default_model к gemma4:e2b — e4b не fits
-    #     alongside engine + GUI on Apple Silicon shared memory.
+    #   M5 24GB (Mac dev): e2b is not installed on the lab PC and whether it
+    #     survives on the Mac is UNVERIFIED from here. Re-measure before
+    #     relying on a downgrade path that names it.
 
   triggers:
     alarm_fired:
@@ -47,12 +52,12 @@ agent:
 
   query:
     enabled: true
-    intent_model: gemma4:e4b
-    format_model: gemma4:e4b
+    intent_model: gemma4:12b
+    format_model: gemma4:12b
     intent_temperature: 0.1
     format_temperature: 0.3
-    intent_timeout_s: 60.0  # 3× e2b default — absorbs e4b cold-load (~40s) + intent generation
-    format_timeout_s: 90.0  # 2.25× e2b default — absorbs e4b cold-load + Russian format generation
+    intent_timeout_s: 60.0  # absorbs 12b cold-load (9.3 s measured) + intent generation
+    format_timeout_s: 90.0  # absorbs 12b cold-load + Russian format generation
     rate_limit:
       max_queries_per_chat_per_hour: 60
 

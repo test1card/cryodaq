@@ -702,8 +702,8 @@ deployment evidence; an unsafe runtime must be replaced.
 ## Local Operator-Query Service
 
 CryoDAQ runs a local text-generation service (current brand: Gemma, default
-model gemma4:e4b via Ollama; downgraded to gemma4:e2b on low-VRAM dev
-machines). It uses no external model API; Telegram delivery is a separate
+model gemma4:12b via Ollama; the lab deployment has no alternative models
+installed). It uses no external model API; Telegram delivery is a separate
 external service and remains part of the open credential/authority boundary.
 
 ### What it does

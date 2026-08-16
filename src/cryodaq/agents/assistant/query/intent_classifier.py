@@ -1,7 +1,7 @@
 """Intent classifier for F30 Live Query Agent.
 
 Classifies operator free-text queries into QueryCategory using a small
-LLM call (gemma4:e2b, temperature=0.1 for structured output).
+LLM call (temperature=0.1 for structured output).
 Falls back to UNKNOWN on JSON parse failure or timeout.
 """
 
@@ -39,7 +39,7 @@ def _build_landmark_hint(channel_manager: ChannelManager) -> str:
 
     2026-05-08: stronger formatting — landmark block приоритетнее EVERYTHING
     else в prompt (поднят к топу system_prompt в ``classify``), aliases
-    listed exhaustively per channel так что Gemma e2b может pattern-match
+    listed exhaustively per channel так что модель может pattern-match
     каждую фразу к channel_id.
     """
     landmarks = channel_manager.get_landmarks()
@@ -260,13 +260,13 @@ class IntentClassifier:
         """Classify query text into a QueryIntent. Never raises.
 
         2026-05-08: landmark hint moved к ТОЧНО ВЕРХ system prompt
-        (BEFORE INTENT_CLASSIFIER_SYSTEM) — gemma4:e2b слабая модель и
-        position bias significant: landmark instructions в конце были
+        (BEFORE INTENT_CLASSIFIER_SYSTEM) — position bias significant:
+        landmark instructions в конце были
         ignored, в начале — followed.
         """
         try:
             channel_hint = _build_channel_hint(self._channel_manager)
-            # Landmark hint goes FIRST — gemma4:e2b position-biased,
+            # Landmark hint goes FIRST — position-biased,
             # critical instructions must lead.
             system_prompt = channel_hint + "\n\n" + INTENT_CLASSIFIER_SYSTEM
             user_prompt = INTENT_CLASSIFIER_USER.format(query=query)

@@ -42,8 +42,8 @@ class IntroConfig:
 
     enabled: bool = False  # explicitly opted in via agent.yaml c_campaign_report: true
     base_url: str = "http://127.0.0.1:11434"
-    model: str = "gemma4:e4b"
-    timeout_s: float = 180.0  # campaign report is long — gemma4:e4b needs 60-120s
+    model: str = "gemma4:12b"
+    timeout_s: float = 180.0  # campaign report is long — gemma4:12b needs 60-120s
     max_tokens: int = 2048
     temperature: float = 0.2  # lower → more formal, less creative
     brand_name: str = "Гемма"
@@ -80,7 +80,7 @@ def load_intro_config() -> IntroConfig:
         return IntroConfig(
             enabled=gemma_enabled and slice_enabled,
             base_url=str(ollama.get("base_url", "http://127.0.0.1:11434")),
-            model=str(ollama.get("default_model", "gemma4:e4b")),
+            model=str(ollama.get("default_model", "gemma4:12b")),
             # Campaign reports generate 200-400 words — use at least 180s
             timeout_s=max(base_timeout, 180.0),
             brand_name=str(gemma.get("brand_name", "Гемма")),

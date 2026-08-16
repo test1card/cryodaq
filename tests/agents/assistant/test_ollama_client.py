@@ -261,7 +261,9 @@ async def test_smoke_real_ollama() -> None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pytest.skip("ollama not installed or not responding")
 
-    if "gemma4:e4b" in available:
+    if "gemma4:12b" in available:
+        model = "gemma4:12b"
+    elif "gemma4:e4b" in available:
         model = "gemma4:e4b"
     elif "gemma4" in available:
         model = "gemma4:26b"
@@ -279,7 +281,7 @@ async def test_smoke_real_ollama() -> None:
         result = await client.generate(
             "Reply with exactly the word: PASS",
             system="You are a test assistant. Reply with only the exact word requested.",
-            max_tokens=10,
+            max_tokens=2048,
             temperature=0.0,
         )
         assert not result.truncated, f"Timed out. model={model}"

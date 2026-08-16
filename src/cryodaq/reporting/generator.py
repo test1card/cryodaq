@@ -180,8 +180,12 @@ class ReportGenerator:
         # "skip the annotation section", which is exactly the existing
         # graceful-degradation behaviour when Ollama was unavailable.
         gemma_intro: str | None = None
+        # Carried beside the intro so the two can never disagree. Whatever
+        # reinstates the cross-process call must set this to the model it
+        # actually called.
+        gemma_intro_model: str = ""
 
-        raw_document = self._build_document(dataset, assets_dir, raw_sections, gemma_intro)
+        raw_document = self._build_document(dataset, assets_dir, raw_sections, gemma_intro, gemma_intro_model)
         raw_document.save(str(raw_source_docx_path))
         pdf_path = self._try_convert_pdf(
             raw_source_docx_path,
@@ -189,7 +193,7 @@ class ReportGenerator:
             deadline_epoch=deadline_epoch,
         )
 
-        editable_document = self._build_document(dataset, assets_dir, editable_sections, gemma_intro)
+        editable_document = self._build_document(dataset, assets_dir, editable_sections, gemma_intro, gemma_intro_model)
         editable_document.save(str(editable_docx_path))
 
         return ReportGenerationResult(
@@ -230,6 +234,7 @@ class ReportGenerator:
         assets_dir: Path,
         sections: tuple[str, ...],
         gemma_intro: str | None = None,
+        gemma_intro_model: str = "",
     ) -> Document:
         document = Document()
         self._apply_gost_formatting(document)
@@ -256,11 +261,11 @@ class ReportGenerator:
             renderer(document, dataset, assets_dir)
             # Insert Гемма annotation immediately after title page
             if section_name == "title_page" and gemma_intro:
-                self._render_gemma_annotation(document, gemma_intro)
+                self._render_gemma_annotation(document, gemma_intro, gemma_intro_model)
         return document
 
     @staticmethod
-    def _render_gemma_annotation(document: Document, intro_text: str) -> None:
+    def _render_gemma_annotation(document: Document, intro_text: str, model: str = "") -> None:
         """Insert Slice C Гемма-generated annotation section after the title page."""
         from cryodaq.utils.xml_safe import xml_safe
 
@@ -270,7 +275,19 @@ class ReportGenerator:
                 document.add_paragraph(xml_safe(para.strip()))
         # Auto-generated marker as italicised note
         note = document.add_paragraph()
-        run = note.add_run("Аннотация сгенерирована автоматически: Гемма (gemma4:e4b).")
+        # The model is NAMED BY THE CALLER, never by a literal here. A literal
+        # states which model wrote the annotation, and this one kept stating
+        # `gemma4:e4b` after the configured model changed -- a delivered report
+        # would have attributed the text to a model that did not produce it.
+        #
+        # An unknown model is NOT guessed and NOT defaulted to the configured
+        # one: the report says the annotation is automatic without naming a
+        # source, because naming the wrong source is worse than naming none.
+        if model:
+            text = f"Аннотация сгенерирована автоматически: Гемма ({model})."
+        else:
+            text = "Аннотация сгенерирована автоматически: Гемма."
+        run = note.add_run(text)
         run.italic = True
         run.font.size = Pt(11)
 

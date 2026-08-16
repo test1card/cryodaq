@@ -55,10 +55,10 @@ _MIN_LEVELS = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
 class AssistantConfig:
     enabled: bool = True
     ollama_base_url: str = "http://127.0.0.1:11434"
-    default_model: str = "gemma4:e4b"
+    default_model: str = "gemma4:12b"
     timeout_s: float = 60.0
     temperature: float = 0.3
-    max_tokens: int = 2048  # gemma4:e4b is thinking-first; needs 2048+ for thought + response
+    max_tokens: int = 2048  # gemma4:12b is thinking-first; needs 2048+ for thought + response
     max_concurrent_inferences: int = 2
     max_calls_per_hour: int = 60
     alarm_fired_enabled: bool = True

@@ -86,7 +86,7 @@ class OllamaClient:
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:11434",
-        default_model: str = "gemma4:e4b",
+        default_model: str = "gemma4:12b",
         *,
         timeout_s: float = 30.0,
     ) -> None:
