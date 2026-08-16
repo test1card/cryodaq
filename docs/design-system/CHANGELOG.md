@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-15
+version: 5.0.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [5.0.0] — 2026-08-15
+
+### Changed
+
+- `default_cool` ACCENT reconciled to `STATUS_INFO` (`#6490c4`) by owner
+  decision 2026-08-15, replacing the historical indigo `#7c8cff`. The indigo
+  measured CIEDE2000 8.6 from `STATUS_INFO` and read as an inconsistency rather
+  than a distinction; the two are now the same colour on purpose instead of
+  nearly the same by accident. The ACCENT 300/500/600 rungs are re-derived from
+  the new base with the same saturation and value offsets, so hover and pressed
+  do not change hue. Recorded in `adr/002-accent-status-decoupling.md`;
+  ACCENT contrast evidence re-measured for `#6490c4` in
+  `accessibility/contrast-matrix.md`, `accessibility/focus-management.md`, and
+  `accessibility/wcag-baseline.md`. `default_cool` remains a PRE-ADR pack, so
+  the ≥30° ACCENT-to-STATUS hue rule does not apply to it; the six ADR packs
+  keep that separation.
+- Version bumped 4.1.0 → 5.0.0. A reusable token value changed and alters the
+  visual state of the `default_cool` pack, which `governance/versioning.md`
+  classifies as breaking.
 
 ## [4.1.0] — 2026-08-05
 

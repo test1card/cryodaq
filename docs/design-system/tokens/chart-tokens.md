@@ -93,7 +93,7 @@ plot.addItem(fault_region)
 | 4 | `#8f8578` | Warm grey | Fifth series, non-status neutral |
 | 5 | `#b88a5b` | Ochre brown | Sixth series |
 | 6 | `#b87b9b` | Dusty rose | Seventh series |
-| 7 | `#7c8cff` | Periwinkle (ACCENT) | Eighth series, cool tone |
+| 7 | `#7c8cff` | Periwinkle indigo (hardcoded in `theme.py`; independent of the theme ACCENT) | Eighth series, cool tone |
 
 All 8 colors share ~60% saturation ceiling — consistent with desaturated palette. No pure primaries.
 

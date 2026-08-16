@@ -25,9 +25,9 @@ FOCUS_RING: "#5a6380"
 
 # Accent + scale. DELIBERATELY IDENTICAL TO STATUS_INFO (owner, 2026-08-15).
 # The indigo #7c8cff this replaces measured CIEDE2000 8.6 from STATUS_INFO
-# #6490c4, where the next-closest pair anywhere in this palette is 24.1. That
-# reads as an inconsistency rather than a distinction, so the two are now the
-# same colour on purpose instead of nearly the same by accident.
+# #6490c4, which read as an inconsistency rather than a distinction, so the
+# two are now the same colour on purpose instead of nearly the same by
+# accident.
 # default_cool is a PRE-ADR pack, outside _ADR_001_PACKS in
 # tests/gui/test_theme_loader.py, whose >=30 degree ACCENT-to-STATUS hue rule
 # would otherwise forbid this. The six ADR packs keep that separation.

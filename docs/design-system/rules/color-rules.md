@@ -174,7 +174,7 @@ sensor_cell.setStyleSheet(
 
 ## RULE-COLOR-004: ACCENT is interaction/current-activity, never health
 
-**TL;DR:** `ACCENT #7c8cff` marks UI activation: focus/selection, a primary action, or current activity/progress. It never asserts health, safety, success, caution, or fault, and it is not a hover/decorative color.
+**TL;DR:** `ACCENT #6490c4` marks UI activation: focus/selection, a primary action, or current activity/progress. It never asserts health, safety, success, caution, or fault, and it is not a hover/decorative color.
 
 **Statement:** `theme.ACCENT` has one semantic family: **UI activation affordance**. Valid uses:
 
@@ -312,7 +312,7 @@ def load_colored_icon(name: str, color: str = None) -> QIcon:
 
 ```python
 # Icon has its own hardcoded fill — doesn't respect context
-# SVG file contains: <svg ... stroke="#7c8cff">...</svg>
+# SVG file contains: <svg ... stroke="#6490c4">...</svg>
 icon.setPixmap(QPixmap("assets/icons/alert.svg"))  # fixed color regardless of context
 label = QLabel("Норма")  # FOREGROUND text
 # Result: blue icon next to white "Норма" — disconnected

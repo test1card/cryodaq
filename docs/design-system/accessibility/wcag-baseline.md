@@ -59,7 +59,7 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 | **1.4.4 Resize Text** (AA) | Partial | Qt apps support OS-level DPI scaling; manual text zoom within app is out of scope |
 | **1.4.5 Images of Text** (AA) | Met | No images of text; all text is actual text |
 | **1.4.10 Reflow** (AA) | Partial | Desktop-only; reflow at 320px viewport not targeted |
-| **1.4.11 Non-text Contrast** (AA) | Partial | BORDER token fails 3:1 against BACKGROUND (actual: 1.46:1). Card shapes provide visual grouping; focus rings use ACCENT (6.48:1, passes). Functional boundaries use ACCENT or STATUS_* with proven higher ratios. See `contrast-matrix.md`. |
+| **1.4.11 Non-text Contrast** (AA) | Partial | BORDER token fails 3:1 against BACKGROUND (actual: 1.46:1). Card shapes provide visual grouping; focus rings use ACCENT (5.81:1, passes). Functional boundaries use ACCENT or STATUS_* with proven higher ratios. See `contrast-matrix.md`. |
 | **1.4.12 Text Spacing** (AA) | Met | Line-height 1.5 default; letter-spacing adjustable via QSS |
 | **1.4.13 Content on Hover / Focus** (AA) | Met | Tooltips dismissible (Escape closes); persistent while hovered; not obscuring |
 

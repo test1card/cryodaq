@@ -23,7 +23,7 @@ BACKGROUND = "#0d0e12"
 FOREGROUND = "#e8eaf0"
 STATUS_OK = "#4a8a5e"
 STATUS_FAULT = "#c44545"
-ACCENT = "#7c8cff"
+ACCENT = "#6490c4"
 SPACE_1 = 4
 SPACE_2 = 8
 # ... 126 tokens total

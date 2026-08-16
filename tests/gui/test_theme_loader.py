@@ -638,9 +638,8 @@ def test_default_cool_accent_is_status_info_by_decision():
     """default_cool ACCENT is DELIBERATELY identical to STATUS_INFO.
 
     Owner decision 2026-08-15, taken by eye and then measured: the previous
-    historical indigo #7c8cff sat CIEDE2000 8.6 from STATUS_INFO #6490c4, where
-    the next-closest pair anywhere in the palette is 24.1. Two state colours
-    that close read as an inconsistency rather than a distinction, so they are
+    historical indigo #7c8cff sat CIEDE2000 8.6 from STATUS_INFO #6490c4, close
+    enough to read as an inconsistency rather than a distinction, so they are
     now exactly equal on purpose instead of nearly equal by accident.
 
     This guard is NOT relaxed by that change. It still pins one exact value, and

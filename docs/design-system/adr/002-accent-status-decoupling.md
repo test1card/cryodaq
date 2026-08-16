@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-04-19
+**Amended:** 2026-08-15 — default_cool ACCENT reconciled to STATUS_INFO
 **Scope:** Phase III.A — DS semantic cleanup blocking III.B/C/D.
 
 ---
@@ -38,7 +39,8 @@ experiment mode», операторский парсинг ломается. Б�
 
 Ввести два **нейтральных interaction-токена**, decouple'ить
 `ACCENT` от STATUS-семантики в 11 темах (тема `default_cool`
-остаётся с историческим indigo `#7c8cff`).
+сохраняла исторический indigo `#7c8cff` до решения владельца
+2026-08-15 — см. «Изменение 2026-08-15» ниже).
 
 ### Новые токены
 
@@ -90,7 +92,7 @@ tint'ы.
 
 | Theme | Prior ACCENT | Action | New ACCENT |
 |---|---|---|---|
-| default_cool | `#7c8cff` indigo | **KEEP** (historical baseline) | `#7c8cff` |
+| default_cool | `#7c8cff` indigo | **REPLACE 2026-08-15** (owner decision: read as near-duplicate of STATUS_INFO) | `#6490c4` (= STATUS_INFO) |
 | warm_stone | `#4a8a5e` = STATUS_OK | **REPLACE** (bug) | `#b89e7a` warm sand |
 | anthropic_mono | `#d97757` terracotta | **KEEP** (brand) | — |
 | ochre_bloom | `#a39450` olive ≈49° | **KEEP** (distance 90° from STATUS_OK 139°) | — |
@@ -103,6 +105,21 @@ tint'ы.
 | xcode | `#6839c6` indigo | **KEEP** (theme signature) | — |
 | braun | `#476f20` olive ≈90° | **REPLACE** (invariant violation: 53° from light STATUS_OK 143°) | `#6a7530` moss-olive ≈70° |
 
+## Изменение 2026-08-15 — default_cool ACCENT === STATUS_INFO
+
+По решению владельца от 2026-08-15 тема `default_cool` заменяет
+исторический indigo `#7c8cff` на `#6490c4`, **намеренно идентичный**
+`STATUS_INFO`. Решение принято «на глаз» и затем измерено: indigo
+`#7c8cff` находился на CIEDE2000 8.6 от `STATUS_INFO #6490c4` — два
+state-цвета так близко читались как непоследовательность, а не как
+различие. Теперь это один цвет намеренно, а не почти одинаковый по
+случайности. `default_cool` остаётся PRE-ADR pack'ом (вне
+`_ADR_001_PACKS` в `tests/gui/test_theme_loader.py`), поэтому правило
+hue-дистанции ≥30° ACCENT-to-STATUS к нему не применяется; шесть
+ADR-pack'ов сохраняют разделение. ACCENT-ramp 300/500/600 выведен из
+новой базы с теми же смещениями saturation/value, так что hover и
+pressed не меняют hue.
+
 ## Инварианты (tested)
 
 1. **SELECTION_BG и FOCUS_RING обязательны во всех 12 packs** —
@@ -110,13 +127,13 @@ tint'ы.
 2. **SELECTION_BG и FOCUS_RING distinct from STATUS_OK** — либо hue
    distance ≥30°, либо luminance distance ≥0.15.
 3. **ACCENT hue distance from STATUS_OK ≥60°** во всех 12 темах.
-   `default_cool` исторический indigo (230°, vs STATUS_OK 138°, delta
-   92°) удовлетворяет естественно.
+   `default_cool` после решения 2026-08-15 имеет ACCENT `#6490c4`
+   (hue 212°, vs STATUS_OK 139°, delta 74°) — инвариант сохраняется.
 4. **ACCENT hue distance ≥30° from every STATUS hue** для
    ADR-001-scope packs (signal / instrument / amber / gost / xcode /
    braun) — тот же инвариант что в ADR 001, не ослаблен.
-5. **default_cool ACCENT preserved as `#7c8cff`** — explicit regression
-   guard (ADR 002 test).
+5. **default_cool ACCENT === STATUS_INFO (`#6490c4`)** — owner decision
+   2026-08-15, explicit regression guard (ADR 002 test).
 6. **warm_stone + taupe_quiet ACCENT ≠ STATUS_OK** — explicit
    regression guard.
 

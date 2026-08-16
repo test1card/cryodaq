@@ -4,7 +4,7 @@ keywords: color, token, palette, surface, status, text, plot, stone, accent, hex
 applies_to: all widgets
 enforcement: strict
 priority: critical
-last_updated: 2026-07-20
+last_updated: 2026-08-15
 status: canonical
 ---
 
@@ -127,7 +127,7 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 | `TEXT_MUTED` | `MUTED_FOREGROUND` | `#8a8f9b` | Same as SECONDARY, alias for muted semantic |
 | `TEXT_DISABLED` | literal | `#555a66` | Disabled controls, unreachable items |
 | `TEXT_INVERSE` | `ON_PRIMARY` | `#e8eaf0` | Reserved for light surfaces (we have none) |
-| `TEXT_ACCENT` | `ACCENT` | `#7c8cff` | Link color, selected item text, focused label |
+| `TEXT_ACCENT` | `ACCENT` | `#6490c4` | Link color, selected item text, focused label |
 | `TEXT_OK` | `STATUS_OK` | `#4a8a5e` | Positive status inline (respect contrast constraint) |
 | `TEXT_WARNING` | `STATUS_CAUTION` | `#c4862e` | Legacy compatibility alias; do not create a separate visual step |
 | `TEXT_CAUTION` | `STATUS_CAUTION` | `#c4862e` | Canonical caution status inline |
@@ -141,8 +141,8 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 
 | Token | Hex (default_cool) | Semantic role | Use |
 |---|---|---|---|
-| `ACCENT` | `#7c8cff` | UI activation affordance | Primary buttons («Сохранить», «Экспорт CSV», «Применить»), active ToolRail slot indicator, active tab underline, progress-bar chunk for running tasks, focused-input border. Per-theme recalibrated Phase III.A — see `adr/002-accent-status-decoupling.md`. |
-| `RING` | `#7c8cff` | Focus ring alias for ACCENT | Legacy — prefer `FOCUS_RING` (neutral) for new focus outlines to avoid accent bleed. |
+| `ACCENT` | `#6490c4` | UI activation affordance | Primary buttons («Сохранить», «Экспорт CSV», «Применить»), active ToolRail slot indicator, active tab underline, progress-bar chunk for running tasks, focused-input border. Per-theme recalibrated Phase III.A — see `adr/002-accent-status-decoupling.md`. `default_cool` ACCENT is `STATUS_INFO` by owner decision 2026-08-15 (was indigo `#7c8cff`). |
+| `RING` | `#6490c4` | Focus ring alias for ACCENT | Legacy — prefer `FOCUS_RING` (neutral) for new focus outlines to avoid accent bleed. |
 | `SELECTION_BG` | per-theme | Selected-row background (neutral) | QTableWidget selected row highlight, selected list item background. Phase III.A neutral — decoupled from STATUS semantics so safety-green never signals "selected". |
 | `FOCUS_RING` | per-theme | Focused-element outline (neutral) | `:focus` QSS border on inputs / buttons when accent bleed would collide with surrounding UI chrome. |
 | `ON_ACCENT` | `#0d0e12` | Text color on ACCENT background | When ACCENT used as button/chip background. |
@@ -203,7 +203,7 @@ See `tokens/chart-tokens.md` for full list with usage context. Summary:
 5. `#8f8578` (warm grey)
 6. `#b88a5b` (ochre)
 7. `#b87b9b` (dusty rose)
-8. `#7c8cff` (ACCENT periwinkle)
+8. `#7c8cff` (periwinkle indigo — hardcoded in `theme.py`, independent of the theme ACCENT)
 
 All 8 colors share ~60% saturation ceiling — consistent with desaturated aesthetic. Palette supports up to 8 concurrent series; for 9+ series, wrap and differentiate via line dash style (see `rules/data-display-rules.md` RULE-DATA-007).
 
@@ -223,7 +223,7 @@ All 8 colors share ~60% saturation ceiling — consistent with desaturated aesth
 |---|---|---|
 | `PRIMARY` | `#181a22` (same as CARD) | Primary surface in component APIs that expect "primary/secondary/destructive" tri-state |
 | `SECONDARY` | `#22252f` | Secondary surface — same as `SURFACE_ELEVATED` |
-| `ACCENT` (also listed under Interaction) | `#7c8cff` | Interaction accent |
+| `ACCENT` (also listed under Interaction) | `#6490c4` | Interaction accent |
 | `SUCCESS_400` | `STATUS_OK` | Success feedback, alias used in shadcn/ui-style code |
 | `WARNING_400` | `STATUS_WARNING` | Warning alias |
 | `DANGER_400` | `STATUS_FAULT` | Danger alias |
@@ -288,6 +288,9 @@ See `ANTI_PATTERNS.md` for historical regressions and their corrections.
 
 ## Changelog
 
+- 2026-08-15: default_cool ACCENT changed from indigo `#7c8cff` to
+  `#6490c4` (= STATUS_INFO) by owner decision; updated ACCENT, RING,
+  TEXT_ACCENT values and the PLOT_LINE_PALETTE note.
 - 2026-07-20: Reserved OK for independently demonstrated health; documented
   activity/progress as ACCENT and canonicalized the single caution rung.
 - 2026-04-17: Initial version from theme.py inventory at commit 53e258c (71 color tokens)

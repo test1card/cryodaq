@@ -5,7 +5,7 @@ applies_to: focus indicator visuals + focus lifecycle across widgets and overlay
 status: canonical
 references: rules/accessibility-rules.md, rules/interaction-rules.md, tokens/colors.md, accessibility/keyboard-navigation.md
 external_reference: WCAG 2.2 sections 2.4.7, 2.4.11; Apple HIG Keyboard/Focus; Material Design focus-visible
-last_updated: 2026-04-17
+last_updated: 2026-08-15
 ---
 
 # Focus Management
@@ -18,14 +18,14 @@ Rules for focus indication, focus trap behavior, and focus lifecycle (autofocus,
 
 ```css
 QWidget:focus {
-    border: 2px solid ACCENT;  /* #7c8cff */
+    border: 2px solid ACCENT;  /* #6490c4 */
     border-radius: inherit;     /* match the widget's own radius */
 }
 ```
 
 Specifics:
 - **Width:** 2px (UXPM v2.5.0 recommends 2-4px; we use 2 for density; 3px for the most critical destructive buttons to visually emphasize)
-- **Color:** ACCENT (`#7c8cff`) — contrast 6.48:1 vs BACKGROUND, passes AA + non-text 3:1 per `contrast-matrix.md`
+- **Color:** ACCENT (`#6490c4`) — contrast 5.81:1 vs BACKGROUND, passes AA + non-text 3:1 per `contrast-matrix.md`
 - **Offset:** none (adjacent to widget edge) — simpler rendering in Qt; deviation from web `outline-offset` convention
 - **Style:** solid — no dashed/dotted; those read as states, not focus
 - **Visibility:** only on `:focus-visible` equivalent (Qt's focus based on Tab, not click)
@@ -67,7 +67,7 @@ class FocusAwareWidget(QWidget):
 Simpler: use Qt 6.7+ `:focus-visible` pseudo-state in QSS if available:
 ```css
 QWidget:focus-visible {
-    border: 2px solid #7c8cff;
+    border: 2px solid #6490c4;
 }
 ```
 
@@ -271,4 +271,5 @@ Qt's `QAbstractItemView` handles this natively; custom widgets (DynamicSensorGri
 
 ## Changelog
 
+- 2026-08-15: Focus-ring ACCENT hex updated to default_cool `#6490c4` (= STATUS_INFO); contrast re-measured 5.81:1 vs BACKGROUND.
 - 2026-04-17: Initial version. 2px ACCENT focus ring spec. focus-visible equivalent in Qt. Restoration on overlay close. Autofocus policy by overlay type. Focus trap inside overlays. Coexistence of selection + focus chrome. Custom-widget paintEvent patterns.

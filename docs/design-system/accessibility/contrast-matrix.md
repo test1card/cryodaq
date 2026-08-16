@@ -4,7 +4,7 @@ keywords: contrast, wcag, aa, aaa, ratios, measured, token-pairs, foreground, ba
 applies_to: WCAG contrast ratios for every token pair used in the product
 status: canonical
 references: tokens/colors.md, rules/accessibility-rules.md, rules/color-rules.md
-last_updated: 2026-04-17
+last_updated: 2026-08-15
 ---
 
 # Contrast Matrix
@@ -29,7 +29,7 @@ All ratios below computed against **BACKGROUND `#0d0e12`** (the canonical shell 
 |---|---|---|---|---|---|---|
 | **FOREGROUND** | `#e8eaf0` | **16.04:1** | ✓ | ✓ | ✓ | Primary text — safest |
 | **MUTED_FOREGROUND** | `#8a8f9b` | **5.95:1** | ✓ | ✓ | ✗ | Labels, secondary text — AA OK, AAA miss |
-| **ACCENT** | `#7c8cff` | **6.48:1** | ✓ | ✓ | ✗ | Focus rings, selection — AA body OK |
+| **ACCENT** | `#6490c4` | **5.81:1** | ✓ | ✓ | ✗ | Focus rings, selection — AA body OK |
 | **COLD_HIGHLIGHT** | `#7ab8c4` | **8.71:1** | ✓ | ✓ | ✓ | Cold channel indicator — AAA OK |
 | **STATUS_OK** | `#4a8a5e` | **4.67:1** | ✓ (barely) | ✓ | ✗ | Status chrome — passes AA but close to threshold |
 | **STATUS_CAUTION / legacy WARNING** | `#c4862e` | **6.24:1** | ✓ | ✓ | ✗ | One caution visual — AA OK |
@@ -50,7 +50,7 @@ When STATUS_FAULT / STATUS_WARNING etc. is used as a **background** with ON_DEST
 | STATUS_CAUTION / legacy WARNING `#c4862e` | ON_DESTRUCTIVE `#e8eaf0` | **2.57:1** | ✗ | ✗ | ✗ |
 | STATUS_FAULT `#c44545` | ON_DESTRUCTIVE `#e8eaf0` | **4.07:1** | ✗ | ✓ | ✗ |
 | STATUS_INFO `#6490c4` | ON_DESTRUCTIVE `#e8eaf0` | **2.76:1** | ✗ | ✗ | ✗ |
-| ACCENT `#7c8cff` | ON_DESTRUCTIVE `#e8eaf0` | **2.48:1** | ✗ | ✗ | ✗ |
+| ACCENT `#6490c4` | ON_DESTRUCTIVE `#e8eaf0` | **2.76:1** | ✗ | ✗ | ✗ |
 
 **Implication:** All listed filled-pill contexts fail AA body with
 ON_DESTRUCTIVE. Only STATUS_OK and STATUS_FAULT reach the AA-large threshold;
@@ -75,7 +75,7 @@ When content sits on a secondary surface (CARD `#181a22`, SECONDARY `#22252f`, M
 |---|---|---|---|
 | FOREGROUND | **14.43:1** | **12.71:1** | **13.54:1** |
 | MUTED_FOREGROUND | **5.36:1** | **4.72:1** | **5.03:1** |
-| ACCENT | **5.83:1** | **5.13:1** | **5.47:1** |
+| ACCENT | **5.23:1** | **4.61:1** | **4.91:1** |
 | STATUS_OK | **4.21:1** (fails AA body!) | **3.70:1** (fails AA body!) | **3.95:1** (fails AA body!) |
 | STATUS_CAUTION / legacy WARNING | **5.62:1** | **4.95:1** | **5.27:1** |
 | STATUS_FAULT | **3.54:1** (fails AA body) | **3.12:1** (fails AA body) | **3.32:1** (fails AA body) |
@@ -96,9 +96,9 @@ WCAG 1.4.11 requires ≥ 3:1 for UI component boundaries (borders, form outlines
 | BORDER `#2d3038` vs BACKGROUND `#0d0e12` | **1.46:1** | ✗ |
 | BORDER vs CARD `#181a22` | **1.32:1** | ✗ |
 | BORDER vs SECONDARY `#22252f` | **1.16:1** | ✗ |
-| ACCENT (focus ring) vs BACKGROUND | **6.48:1** | ✓ (well above) |
+| ACCENT (focus ring) vs BACKGROUND | **5.81:1** | ✓ (well above) |
 
-**Implication:** BORDER fails the 3:1 non-text contrast threshold against every surface it is used on — it is a visual-grouping stroke, not a functional UI boundary. Card shape and surface-luminance difference (CARD vs BACKGROUND ≈ 1.1:1 luminance step) provide grouping even though the BORDER stroke itself is sub-threshold. For functional boundaries that must be perceivable — focus rings, active tabs, fault outlines, chart axes — always use ACCENT (6.48:1 vs BACKGROUND) or a STATUS_* token with a proven higher ratio. This gap is reflected in the 1.4.11 commitment in `accessibility/wcag-baseline.md`.
+**Implication:** BORDER fails the 3:1 non-text contrast threshold against every surface it is used on — it is a visual-grouping stroke, not a functional UI boundary. Card shape and surface-luminance difference (CARD vs BACKGROUND ≈ 1.1:1 luminance step) provide grouping even though the BORDER stroke itself is sub-threshold. For functional boundaries that must be perceivable — focus rings, active tabs, fault outlines, chart axes — always use ACCENT (5.81:1 vs BACKGROUND) or a STATUS_* token with a proven higher ratio. This gap is reflected in the 1.4.11 commitment in `accessibility/wcag-baseline.md`.
 
 ## Guidance tables
 
@@ -128,7 +128,7 @@ All AA-passing body colors above are safe; additionally, all tokens with ratio �
 ### For UI components (borders, axes, focus outlines)
 
 Safe (3:1 passes against BACKGROUND):
-- ACCENT (6.48:1), FOREGROUND, STATUS_OK (4.67:1), STATUS_CAUTION / legacy WARNING (6.24:1), STATUS_FAULT (3.94:1), STATUS_INFO (5.81:1), COLD_HIGHLIGHT (8.71:1)
+- ACCENT (5.81:1), FOREGROUND, STATUS_OK (4.67:1), STATUS_CAUTION / legacy WARNING (6.24:1), STATUS_FAULT (3.94:1), STATUS_INFO (5.81:1), COLD_HIGHLIGHT (8.71:1)
 
 Not safe as UI component borders:
 - BORDER on any surface (1.46:1 vs BACKGROUND, 1.32:1 vs CARD, 1.16:1 vs SECONDARY) — treat BORDER as visual grouping only, not a functional separator. Functional boundaries (focus, active, fault) must use ACCENT or STATUS_* tokens with proven ≥ 3:1 against the adjacent surface.
@@ -149,7 +149,7 @@ Some AA gaps are deliberate design trade-offs:
 - **TEXT_DISABLED 2.79:1** — disabled means unreachable; operator's eye should skip it. AA compliance on disabled text is not required per WCAG (explicitly excluded).
 - **STATUS_OK 4.67:1 body on BACKGROUND** — passes AA but close to threshold; fails on CARD/SECONDARY/MUTED. Acceptable because STATUS_OK is used mostly as chrome/indicator, not body text.
 - **STATUS_FAULT / DESTRUCTIVE 3.94:1 body on BACKGROUND** — fails AA body on every surface but passes AA large (≥3:1) on BACKGROUND/CARD/MUTED. Used as chrome, filled-pill background, or large semibold labels — never as body text.
-- **Filled-pill text 2.48–4.07:1** — ON_DESTRUCTIVE (`#e8eaf0`) on STATUS_* and ACCENT pill backgrounds fails AA body; caution (2.57:1), info (2.76:1), and ACCENT (2.48:1) fail even AA large. Retained pills therefore require multi-channel redundancy and an adjacent readable FOREGROUND label; the pill text is supplementary, not the sole state signal.
+- **Filled-pill text 2.57–4.07:1** — ON_DESTRUCTIVE (`#e8eaf0`) on STATUS_* and ACCENT pill backgrounds fails AA body; caution (2.57:1), and info/ACCENT (2.76:1) fail even AA large. Retained pills therefore require multi-channel redundancy and an adjacent readable FOREGROUND label; the pill text is supplementary, not the sole state signal.
 - **BORDER 1.46:1 non-text on BACKGROUND (and lower on CARD/SECONDARY)** — fails 1.4.11 (≥3:1) on every surface. Accepted as a visual-grouping stroke only; functional boundaries (focus, active, fault) use ACCENT or STATUS_* which do meet 3:1. This gap downgrades 1.4.11 to `Partial` in `accessibility/wcag-baseline.md`.
 
 None of these gaps is "we didn't notice"; each is a documented trade-off between accessibility and visual design density. Multi-channel redundancy (shape + color + icon + text) ensures operators never depend on a single sub-threshold pair to resolve state.
@@ -221,5 +221,6 @@ Any new token or background color added must go through this calculation + get a
 
 ## Changelog
 
+- 2026-08-15: Re-measured ACCENT (default_cool) for `#6490c4` (= STATUS_INFO, owner decision 2026-08-15): 5.81:1 vs BACKGROUND, 2.76:1 vs ON_DESTRUCTIVE, 5.23:1 vs CARD, 4.61:1 vs SECONDARY, 4.91:1 vs MUTED.
 - 2026-04-17: Initial version. Measured ratios for all 13 primary text/accent tokens vs BACKGROUND. Filled-pill context ratios. Non-text contrast for UI borders. Documented AA gaps with rationale. Light theme deferred.
 - 2026-04-17: v1.0.1 — Recomputed all ratios from theme.py. Fixed stale ON_DESTRUCTIVE input. Corrected BORDER non-text contrast.
