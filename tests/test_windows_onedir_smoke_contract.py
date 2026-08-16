@@ -111,7 +111,7 @@ def test_gui_smoke_refuses_live_descendant_holding_inherited_pipes(
 
     process = Process()
     job = Job()
-    ticks = iter((0.0, 0.0, 6.0))
+    ticks = iter((0.0, 0.0, 6.0, 6.0))
     monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(
         smoke, "_create_gui_process_job", lambda candidate: job if candidate is process else None, raising=False
