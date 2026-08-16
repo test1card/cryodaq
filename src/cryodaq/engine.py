@@ -6668,6 +6668,7 @@ async def _run_engine(
     calibration_acquisition = CalibrationAcquisitionService(
         writer,
         channel_manager=get_channel_manager(),
+        descriptor_catalog=live_descriptor_catalog,
     )
 
     # Планировщик — публикует в ОБА брокера, пишет на диск ДО публикации

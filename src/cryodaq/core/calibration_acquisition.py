@@ -24,9 +24,15 @@ class CalibrationAcquisitionService:
     :meth:`on_readings` after each LakeShore poll cycle.
     """
 
-    def __init__(self, writer: Any, channel_manager: Any = None) -> None:
+    def __init__(
+        self,
+        writer: Any,
+        channel_manager: Any = None,
+        descriptor_catalog: Any = None,
+    ) -> None:
         self._writer = writer
         self._channel_manager = channel_manager
+        self._descriptor_catalog = descriptor_catalog
         self._active = False
         self._reference_channel: str | None = None
         self._target_channels: list[str] = []
@@ -42,10 +48,19 @@ class CalibrationAcquisitionService:
             raise CalibrationCommandError(f"cannot resolve channel reference: {e}") from e
 
     def activate(self, reference_channel: str, target_channels: list[str]) -> None:
-        """Start recording SRDG for *target_channels*."""
+        """Start recording SRDG for *target_channels*.
+
+        When a live descriptor catalog is attached, activation refuses a
+        target whose ``<label>_raw`` channel is not bound: the raw readings
+        are persisted atomically with the poll, so a missing binding would
+        reject the whole KRDG/SRDG batch at the first calibration poll
+        instead of being caught here.
+        """
         if self._channel_manager is not None:
             reference_channel = self._resolve(reference_channel)
             target_channels = [self._resolve(t) for t in target_channels]
+        if self._descriptor_catalog is not None:
+            self._require_calibration_raw_coverage(target_channels)
         self._active = True
         self._reference_channel = reference_channel
         self._target_channels = list(target_channels)
@@ -57,6 +72,15 @@ class CalibrationAcquisitionService:
             reference_channel,
             target_channels,
         )
+
+    def _require_calibration_raw_coverage(self, target_channels: list[str]) -> None:
+        """Reject activation when a target's ``_raw`` channel is undeclared."""
+        if not target_channels:
+            return
+        try:
+            self._descriptor_catalog.require_calibration_raw_channels(tuple(target_channels))
+        except Exception as exc:
+            raise CalibrationCommandError(f"calibration activation rejected: {exc}") from exc
 
     def deactivate(self) -> None:
         """Stop recording SRDG."""

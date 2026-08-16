@@ -322,3 +322,94 @@ def test_reconstructed_readings_are_detached_from_caller_and_each_other() -> Non
     first.metadata["list"][1]["tuple"] = (77,)
 
     assert bound.reading.metadata == {"list": [1, {"tuple": (2, 3)}]}
+
+
+def _cal_descriptor(channel_id: str, *, quantity: object, unit: str, role: object) -> ChannelDescriptorV1:
+    return _descriptor(
+        channel_id=channel_id,
+        instrument_id="ls218",
+        source_key=f"input.{channel_id}",
+        quantity=quantity,
+        unit=unit,
+        role=role,
+        display_group="calibration",
+        display_name=channel_id,
+        visible_by_default=False,
+    )
+
+
+def test_require_calibration_raw_channels_accepts_bound_raw_labels() -> None:
+    base = _cal_descriptor(
+        "cal-a.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+    )
+    raw = _cal_descriptor(
+        "cal-a.raw",
+        quantity=ChannelQuantity.RAW_SENSOR,
+        unit="sensor_unit",
+        role=ChannelRole.REFERENCE_MEASUREMENT,
+    )
+    owner = LiveChannelDescriptorCatalog(
+        ChannelCatalog([base, raw]),
+        bindings={
+            ("ls218", "Т2 Криостат низ"): "cal-a.temperature",
+            ("ls218", "Т2 Криостат низ_raw"): "cal-a.raw",
+        },
+    )
+
+    owner.require_calibration_raw_channels(("Т2 Криостат низ",))
+    owner.require_calibration_raw_channels(["Т2 Криостат низ"])
+
+
+def test_require_calibration_raw_channels_rejects_missing_raw_binding() -> None:
+    base = _cal_descriptor(
+        "cal-a.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+    )
+    owner = LiveChannelDescriptorCatalog(
+        ChannelCatalog([base]),
+        bindings={("ls218", "Т2 Криостат низ"): "cal-a.temperature"},
+    )
+
+    with pytest.raises(ChannelDescriptorStorageError, match="ls218/Т2 Криостат низ_raw"):
+        owner.require_calibration_raw_channels(("Т2 Криостат низ",))
+
+
+def test_require_calibration_raw_channels_rejects_unbound_base_label() -> None:
+    owner = LiveChannelDescriptorCatalog(
+        ChannelCatalog(
+            [
+                _cal_descriptor(
+                    "cal-a.temperature",
+                    quantity=ChannelQuantity.TEMPERATURE,
+                    unit="K",
+                    role=ChannelRole.PRIMARY_MEASUREMENT,
+                )
+            ]
+        )
+    )
+
+    with pytest.raises(ChannelDescriptorStorageError, match="Т99_raw"):
+        owner.require_calibration_raw_channels(("Т99",))
+
+
+def test_require_calibration_raw_channels_rejects_non_collection_input() -> None:
+    owner = LiveChannelDescriptorCatalog(
+        ChannelCatalog(
+            [
+                _cal_descriptor(
+                    "cal-a.temperature",
+                    quantity=ChannelQuantity.TEMPERATURE,
+                    unit="K",
+                    role=ChannelRole.PRIMARY_MEASUREMENT,
+                )
+            ]
+        )
+    )
+
+    with pytest.raises(TypeError, match="explicit finite collection"):
+        owner.require_calibration_raw_channels("Т2 Криостат низ")

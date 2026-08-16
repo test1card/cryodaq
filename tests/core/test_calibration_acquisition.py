@@ -7,12 +7,20 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from cryodaq.channels.descriptors import (
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.core.calibration_acquisition import (
     CalibrationAcquisitionService,
     CalibrationCommandError,
 )
 from cryodaq.core.channel_manager import ChannelConfigError
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
 
 
 def _reading(channel: str, value: float, unit: str = "K") -> Reading:
@@ -238,9 +246,7 @@ class _MockChannelManager:
         info = self._channels.get(short_id)
         if info is None:
             known = sorted(self._channels.keys())
-            raise ChannelConfigError(
-                f"unknown channel reference '{reference}' — known channels: {', '.join(known)}"
-            )
+            raise ChannelConfigError(f"unknown channel reference '{reference}' — known channels: {', '.join(known)}")
         name = info.get("name", "")
         return f"{short_id} {name}" if name else short_id
 
@@ -285,3 +291,81 @@ def test_activate_rejects_empty_reference():
     service = CalibrationAcquisitionService(writer, channel_manager=_MockChannelManager())
     with pytest.raises(CalibrationCommandError, match="empty"):
         service.activate("", ["Т2"])
+
+
+def _catalog_descriptor(channel_id: str, *, quantity: object, unit: str, role: object) -> ChannelDescriptorV1:
+    return ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=channel_id,
+        instrument_id="ls218",
+        source_key=f"input.{channel_id}",
+        quantity=quantity,
+        unit=unit,
+        role=role,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="calibration",
+        display_name=channel_id,
+        visible_by_default=False,
+        display_order=1,
+        descriptor_revision=1,
+    )
+
+
+def _catalog_missing_raw_binding() -> LiveChannelDescriptorCatalog:
+    return LiveChannelDescriptorCatalog(
+        ChannelCatalog(
+            [
+                _catalog_descriptor(
+                    "cal-a.temperature",
+                    quantity=ChannelQuantity.TEMPERATURE,
+                    unit="K",
+                    role=ChannelRole.PRIMARY_MEASUREMENT,
+                )
+            ]
+        )
+    )
+
+
+def test_activate_validates_selected_raw_labels_against_descriptor_catalog() -> None:
+    """Activation with a catalog that lacks the target's _raw binding is refused."""
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer, descriptor_catalog=_catalog_missing_raw_binding())
+    with pytest.raises(CalibrationCommandError, match="calibration activation rejected"):
+        service.activate("Т1", ["Т2 Криостат низ"])
+    assert not service.is_active
+
+
+def test_activate_accepts_targets_with_bound_raw_labels() -> None:
+    """Activation succeeds when the catalog binds the selected raw labels."""
+    base = _catalog_descriptor(
+        "cal-a.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+    )
+    raw = _catalog_descriptor(
+        "cal-a.raw",
+        quantity=ChannelQuantity.RAW_SENSOR,
+        unit="sensor_unit",
+        role=ChannelRole.REFERENCE_MEASUREMENT,
+    )
+    catalog = LiveChannelDescriptorCatalog(
+        ChannelCatalog([base, raw]),
+        bindings={
+            ("ls218", "Т2 Криостат низ"): "cal-a.temperature",
+            ("ls218", "Т2 Криостат низ_raw"): "cal-a.raw",
+        },
+    )
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer, descriptor_catalog=catalog)
+    service.activate("Т1", ["Т2 Криостат низ"])
+    assert service.is_active
+    assert service.stats["target_channels"] == ["Т2 Криостат низ"]
+
+
+def test_activate_without_descriptor_catalog_keeps_legacy_behavior() -> None:
+    """A service without a catalog still activates without validation."""
+    writer = AsyncMock()
+    service = CalibrationAcquisitionService(writer)
+    service.activate("Т1", ["Т2 Криостат низ"])
+    assert service.is_active
