@@ -261,7 +261,9 @@ async def test_smoke_real_ollama() -> None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pytest.skip("ollama not installed or not responding")
 
-    if "gemma4:e4b" in available:
+    if "gemma4:12b" in available:
+        model = "gemma4:12b"
+    elif "gemma4:e4b" in available:
         model = "gemma4:e4b"
     elif "gemma4" in available:
         model = "gemma4:26b"
