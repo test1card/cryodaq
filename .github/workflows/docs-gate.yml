@@ -31,6 +31,51 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Bind strict trusted base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="$(git rev-parse --verify 'HEAD^{commit}')"
+          readonly candidate
+          case "${EVENT_NAME:?}" in
+            pull_request)
+              base_authority="${PR_BASE_SHA:?}"
+              ;;
+            push)
+              test "${PUSH_BEFORE:?}" != "0000000000000000000000000000000000000000"
+              base_authority="$PUSH_BEFORE"
+              ;;
+            workflow_dispatch)
+              test -n "${DEFAULT_BRANCH:?}"
+              git fetch --no-tags origin \
+                "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+              mapfile -t bases < <(git merge-base --all "$candidate" "refs/remotes/origin/${DEFAULT_BRANCH}")
+              test "${#bases[@]}" = 1
+              if [[ "${bases[0]}" == "$candidate" ]]; then
+                base_authority="$(git rev-parse --verify "${candidate}^1")"
+              else
+                base_authority="${bases[0]}"
+              fi
+              ;;
+            *)
+              echo "unsupported docs-gate event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          if ! git rev-parse --verify "${base_authority}^{commit}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "$base_authority"
+          fi
+          trusted_base="$(git rev-parse --verify "${base_authority}^{commit}")"
+          readonly trusted_base
+          test "$trusted_base" != "$candidate"
+          git merge-base --is-ancestor "$trusted_base" "$candidate"
+          printf 'TRUSTED_BASE_SHA=%s\n' "$trusted_base" >>"$GITHUB_ENV"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"

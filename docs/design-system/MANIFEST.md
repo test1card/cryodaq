@@ -1,15 +1,15 @@
 ---
 title: Design System Manifest
 status: canonical
-last_updated: 2026-07-20
-version: 4.1.0
+last_updated: 2026-08-10
+version: 4.2.0
 ---
 
 # CryoDAQ Design System — Manifest
 
-**Generated:** 2026-07-20
-**Session:** v4.0.3 operator-state semantic correction
-**Scope:** Design system v4.1.0 — foundation tokens + 79 widget rules + 4 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
+**Generated:** 2026-08-10
+**Session:** v4.2.0 design-system governance gate
+**Scope:** Design system v4.2.0 — foundation tokens + 79 widget rules + 5 governance rules + generic components + CryoDAQ domain primitives + cross-surface patterns + accessibility commitments + governance policies.
 
 ## Structure
 
@@ -26,20 +26,21 @@ design-system/
 │   ├── 001-light-theme-status-unlock.md
 │   └── 002-accent-status-decoupling.md
 │
-├── tokens/                             # Foundation: 11 files, what exists and why
+├── tokens/                             # Foundation: 12 files, what exists and why
 │   ├── colors.md                       # 77 color/runtime-color constants
 │   ├── typography.md                   # 36 typography tokens, Fira fonts, Cyrillic rules
 │   ├── spacing.md                      # 9 spacing tokens + semantic aliases
 │   ├── radius.md                       # 5 radius tokens, tight scale
 │   ├── layout.md                       # 7 layout tokens, including coupled constants
 │   ├── chart-tokens.md                 # pyqtgraph integration
+│   ├── runtime-authority.md            # theme.py token-category authority map
 │   ├── motion.md                       # 3 shipped durations; easing/expanded scale proposed
 │   ├── elevation.md                    # zero-shadow policy + z-index levels
 │   ├── icons.md                        # Lucide bundle + emoji prohibition
 │   ├── breakpoints.md                  # desktop-only responsive
 │   └── keyboard-shortcuts.md           # canonical bindings; Python constants proposed
 │
-├── rules/                              # Enforcement: 9 files, 83 rules total with code examples
+├── rules/                              # Enforcement: 9 files, 84 rules total with code examples
 │   ├── color-rules.md                  # COLOR-001..011
 │   ├── surface-rules.md                # SURF-001..010
 │   ├── typography-rules.md             # TYPO-001..010
@@ -48,9 +49,10 @@ design-system/
 │   ├── data-display-rules.md           # DATA-001..010
 │   ├── accessibility-rules.md          # A11Y-001..008
 │   ├── content-voice-rules.md          # COPY-001..008
-│   └── governance-rules.md             # GOV-001..003 (thin pointers to governance/*)
+│   └── governance-rules.md             # GOV-001..005 (thin pointers to governance/*)
 │
-├── components/                         # Generic primitives: 14 files, anatomy + invariants + code
+├── components/                         # Generic primitives: 15 files, anatomy + invariants + code
+    ├── legacy-common-runtime.md        # widgets/common.py compatibility authority
     ├── card.md                         # generic rounded container
     ├── button.md                       # secondary/ghost/destructive/icon/hold-confirm
     ├── input-field.md                  # text/numeric/search/password + validation
@@ -119,12 +121,659 @@ design-system/
     └── contribution.md                 # proposal process, 6 types, review gates
 ```
 
+## Machine gate contract
+
+The JSON block below is canonical data, not illustrative prose. Tests parse it directly from this real manifest. It defines the narrow governed-source map, exact WCAG 2.2 AA cases and exceptions, and canonical non-color state redundancy.
+
+<!-- MACHINE_GATES:BEGIN -->
+```json
+{
+  "schema_version": 1,
+  "co_versioning": {
+    "schema_version": 3,
+    "required_release_paths": [
+      "docs/design-system/VERSION",
+      "docs/design-system/CHANGELOG.md"
+    ],
+    "release_only_patterns": [
+      ".github/workflows/docs-gate.yml",
+      ".github/workflows/main.yml",
+      "docs/design-system/ANTI_PATTERNS.md",
+      "docs/design-system/GUI_MIGRATION_INVENTORY.md",
+      "docs/design-system/MANIFEST.md",
+      "docs/design-system/README.md",
+      "docs/design-system/accessibility/*.md",
+      "docs/design-system/adr/*.md",
+      "docs/design-system/components/*.md",
+      "docs/design-system/cryodaq-primitives/*.md",
+      "docs/design-system/governance/*.md",
+      "docs/design-system/patterns/*.md",
+      "docs/design-system/rules/*.md",
+      "docs/design-system/tokens/*.md",
+      "tests/docs/test_docs_freshness.py",
+      "tests/gui/test_theme_loader.py",
+      "tests/test_ci_candidate_evidence.py"
+    ],
+    "python_semantic_routes": [
+      {
+        "source_path": "src/cryodaq/gui/theme.py",
+        "aggregate_spec_path": "docs/design-system/tokens/runtime-authority.md",
+        "fallback_spec_paths": [
+          "docs/design-system/tokens/colors.md",
+          "docs/design-system/tokens/typography.md",
+          "docs/design-system/tokens/spacing.md",
+          "docs/design-system/tokens/layout.md",
+          "docs/design-system/tokens/radius.md",
+          "docs/design-system/tokens/motion.md",
+          "docs/design-system/tokens/chart-tokens.md"
+        ],
+        "assignment_routes": [
+          {
+            "name_patterns": [
+              "BACKGROUND",
+              "FOREGROUND",
+              "SURFACE_*",
+              "PRIMARY",
+              "SECONDARY",
+              "CARD",
+              "MUTED",
+              "CARD_FOREGROUND",
+              "BORDER*",
+              "ACCENT*",
+              "RING",
+              "SELECTION_BG",
+              "FOCUS_RING",
+              "ON_*",
+              "MUTED_FOREGROUND",
+              "STATUS_*",
+              "COLD_HIGHLIGHT",
+              "DESTRUCTIVE",
+              "QUANTITY_*",
+              "TEXT_*",
+              "STONE_*",
+              "SUCCESS_*",
+              "WARNING_*",
+              "DANGER_*",
+              "QDARKTHEME_ACCENT",
+              "PLOT_BG",
+              "PLOT_FG",
+              "PLOT_GRID_COLOR",
+              "PLOT_GRID_ALPHA",
+              "PLOT_LABEL_COLOR",
+              "PLOT_TICK_COLOR",
+              "PLOT_REGION_WARN_ALPHA",
+              "PLOT_REGION_FAULT_ALPHA",
+              "PLOT_LINE_PALETTE"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/colors.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "FONT_*"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/typography.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "SPACE_*",
+              "CARD_PADDING",
+              "GRID_GAP"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/spacing.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "HEADER_HEIGHT",
+              "TOOL_RAIL_WIDTH",
+              "BOTTOM_BAR_HEIGHT",
+              "ROW_HEIGHT"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/layout.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "RADIUS_*",
+              "QDARKTHEME_CORNER_SHAPE"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/radius.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "TRANSITION_*_MS"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/motion.md"
+            ]
+          },
+          {
+            "name_patterns": [
+              "PLOT_*"
+            ],
+            "required_spec_paths": [
+              "docs/design-system/tokens/chart-tokens.md"
+            ]
+          }
+        ]
+      }
+    ],    "routes": [
+
+      {
+        "source_pattern": "src/cryodaq/gui/_plot_style.py",
+        "required_spec_paths": [
+          "docs/design-system/tokens/chart-tokens.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/_theme_loader.py",
+        "required_spec_paths": [
+          "docs/design-system/accessibility/contrast-matrix.md",
+          "docs/design-system/tokens/colors.md"
+        ]
+      },
+      {
+        "source_pattern": "config/themes/*.yaml",
+        "required_spec_paths": [
+          "docs/design-system/accessibility/contrast-matrix.md",
+          "docs/design-system/tokens/colors.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/widgets/common.py",
+        "required_spec_paths": [
+          "docs/design-system/components/legacy-common-runtime.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/operator_components/*.py",
+        "required_spec_paths": [
+          "docs/design-system/cryodaq-primitives/operator-snapshot-components.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/bento_grid.py",
+        "required_spec_paths": [
+          "docs/design-system/components/bento-grid.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/drill_down_breadcrumb.py",
+        "required_spec_paths": [
+          "docs/design-system/components/breadcrumb.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/modal_card.py",
+        "required_spec_paths": [
+          "docs/design-system/components/modal.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/__init__.py",
+        "required_spec_paths": [
+          "docs/design-system/components/bento-grid.md",
+          "docs/design-system/components/breadcrumb.md",
+          "docs/design-system/components/modal.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/overlays/_design_system/_showcase.py",
+        "required_spec_paths": [
+          "docs/design-system/components/bento-grid.md",
+          "docs/design-system/components/breadcrumb.md",
+          "docs/design-system/components/modal.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/presentation_severity.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/operator_components/_visuals.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/operator_components/status.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/operator_snapshot.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/state/operator_view_models.py",
+        "required_spec_paths": [
+          "docs/design-system/MANIFEST.md",
+          "docs/design-system/patterns/state-visualization.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/tray_status.py",
+        "required_spec_paths": [
+          "docs/design-system/cryodaq-primitives/tray-status.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/views/operator_display.py",
+        "required_spec_paths": [
+          "docs/design-system/patterns/operator-display-composition.md"
+        ]
+      },
+      {
+        "source_pattern": "src/cryodaq/gui/shell/command_outcome.py",
+        "required_spec_paths": [
+          "docs/design-system/patterns/command-outcome-unknown.md"
+        ]
+      }
+    ],
+    "retired_routes": []
+  },  "mechanical_accessibility": {
+    "target": "WCAG 2.2 AA",
+    "contrast_cases": [
+      {
+        "id": "body_foreground_card",
+        "criterion": "1.4.3",
+        "role": "body_text",
+        "foreground": "FOREGROUND",
+        "background": "SURFACE_CARD",
+        "minimum": 4.5
+      },
+      {
+        "id": "body_secondary_card",
+        "criterion": "1.4.3",
+        "role": "body_text",
+        "foreground": "TEXT_SECONDARY",
+        "background": "SURFACE_CARD",
+        "minimum": 4.5
+      },
+      {
+        "id": "body_muted_card",
+        "criterion": "1.4.3",
+        "role": "supplementary_text",
+        "foreground": "MUTED_FOREGROUND",
+        "background": "SURFACE_CARD",
+        "minimum": 4.5
+      },
+      {
+        "id": "focus_elevated",
+        "criterion": "1.4.11",
+        "role": "focus_boundary",
+        "foreground": "FOCUS_RING",
+        "background": "SURFACE_ELEVATED",
+        "minimum": 3.0
+      },
+      {
+        "id": "status_ok_card",
+        "criterion": "1.4.11",
+        "role": "status_chrome",
+        "foreground": "STATUS_OK",
+        "background": "SURFACE_CARD",
+        "minimum": 3.0
+      },
+      {
+        "id": "status_caution_card",
+        "criterion": "1.4.11",
+        "role": "status_chrome",
+        "foreground": "STATUS_CAUTION",
+        "background": "SURFACE_CARD",
+        "minimum": 3.0
+      },
+      {
+        "id": "status_fault_card",
+        "criterion": "1.4.11",
+        "role": "status_chrome",
+        "foreground": "STATUS_FAULT",
+        "background": "SURFACE_CARD",
+        "minimum": 3.0
+      },
+      {
+        "id": "status_info_card",
+        "criterion": "1.4.11",
+        "role": "status_chrome",
+        "foreground": "STATUS_INFO",
+        "background": "SURFACE_CARD",
+        "minimum": 3.0
+      },
+      {
+        "id": "status_stale_card",
+        "criterion": "1.4.11",
+        "role": "status_chrome",
+        "foreground": "STATUS_STALE",
+        "background": "SURFACE_CARD",
+        "minimum": 3.0
+      },
+      {
+        "id": "filled_fault",
+        "criterion": "1.4.3",
+        "role": "filled_pill_text",
+        "foreground": "ON_DESTRUCTIVE",
+        "background": "STATUS_FAULT",
+        "minimum": 4.5
+      },
+      {
+        "id": "filled_accent",
+        "criterion": "1.4.3",
+        "role": "primary_action_text",
+        "foreground": "BACKGROUND",
+        "background": "ACCENT",
+        "minimum": 4.5
+      },
+      {
+        "id": "legacy_caution_inverse",
+        "criterion": "1.4.3",
+        "role": "legacy_caution_fill_text",
+        "foreground": "ON_PRIMARY",
+        "background": "STATUS_CAUTION",
+        "minimum": 4.5
+      },
+      {
+        "id": "border_background",
+        "criterion": "1.4.11",
+        "role": "grouping_stroke",
+        "foreground": "BORDER",
+        "background": "BACKGROUND",
+        "minimum": 3.0
+      }
+    ],
+    "contrast_exceptions": [
+      {
+        "id": "A11Y-EX-001",
+        "case_id": "body_muted_card",
+        "themes": [
+          "amber",
+          "anthropic_mono",
+          "braun",
+          "gost",
+          "instrument",
+          "ochre_bloom",
+          "rose_dusk",
+          "signal",
+          "taupe_quiet",
+          "warm_stone",
+          "xcode"
+        ],
+        "scope": "Supplementary or explicitly unavailable text only; never critical truth or action text.",
+        "rationale": "The muted token intentionally de-emphasizes secondary evidence and is not a general body-text color.",
+        "fallback_channels": [
+          "FOREGROUND text",
+          "explicit unavailable semantics"
+        ],
+        "human_verification": "Keyboard and NVDA walkthrough must confirm no required meaning depends on muted text alone.",
+        "ratio_floors": {
+          "amber": 3.7069,
+          "anthropic_mono": 2.950593,
+          "braun": 4.222376,
+          "gost": 4.109723,
+          "instrument": 3.725763,
+          "ochre_bloom": 2.966639,
+          "rose_dusk": 3.018188,
+          "signal": 3.268795,
+          "taupe_quiet": 3.210661,
+          "warm_stone": 3.094435,
+          "xcode": 3.851237
+        }
+      },
+      {
+        "id": "A11Y-EX-002",
+        "case_id": "focus_elevated",
+        "themes": [
+          "amber",
+          "anthropic_mono",
+          "default_cool",
+          "instrument",
+          "ochre_bloom",
+          "rose_dusk",
+          "taupe_quiet",
+          "warm_stone"
+        ],
+        "scope": "Known focus-ring gap on elevated operator controls.",
+        "rationale": "FOCUS_RING does not reach 3:1 on the listed real packs and cannot be the only focus cue.",
+        "fallback_channels": [
+          "2px focus geometry",
+          "ACCENT where the component contract permits"
+        ],
+        "human_verification": "Keyboard-only focus traversal remains required on the real Windows build.",
+        "ratio_floors": {
+          "amber": 2.170522,
+          "anthropic_mono": 2.401728,
+          "default_cool": 2.570572,
+          "instrument": 2.10437,
+          "ochre_bloom": 1.962009,
+          "rose_dusk": 1.919218,
+          "taupe_quiet": 2.354748,
+          "warm_stone": 2.086325
+        }
+      },
+      {
+        "id": "A11Y-EX-003",
+        "case_id": "status_fault_card",
+        "themes": [
+          "instrument",
+          "ochre_bloom",
+          "rose_dusk",
+          "taupe_quiet"
+        ],
+        "scope": "Fault hue is chrome, never body or numeric text.",
+        "rationale": "The listed packs miss 3:1 against card while preserving the canonical fault hue family.",
+        "fallback_channels": [
+          "\u0410\u0412\u0410\u0420\u0418\u042f text in FOREGROUND",
+          "square or fault-border geometry"
+        ],
+        "human_verification": "Operator scenarios must confirm fault recognition without color.",
+        "ratio_floors": {
+          "instrument": 2.702978,
+          "ochre_bloom": 2.946179,
+          "rose_dusk": 2.951782,
+          "taupe_quiet": 2.956365
+        }
+      },
+      {
+        "id": "A11Y-EX-004",
+        "case_id": "status_stale_card",
+        "themes": [
+          "amber",
+          "anthropic_mono",
+          "default_cool",
+          "instrument",
+          "ochre_bloom",
+          "rose_dusk",
+          "signal",
+          "taupe_quiet",
+          "warm_stone"
+        ],
+        "scope": "Stale hue is de-emphasized chrome, never body or numeric text.",
+        "rationale": "The stale token is deliberately quiet on dark cards, so text and hollow geometry are load-bearing.",
+        "fallback_channels": [
+          "\u0423\u0421\u0422\u0410\u0420\u0415\u041b\u041e text in FOREGROUND",
+          "hollow-circle geometry"
+        ],
+        "human_verification": "Operator scenarios must distinguish stale from disconnected and current values.",
+        "ratio_floors": {
+          "amber": 2.297509,
+          "anthropic_mono": 2.360812,
+          "default_cool": 2.6456,
+          "instrument": 2.019105,
+          "ochre_bloom": 2.200774,
+          "rose_dusk": 2.20496,
+          "signal": 2.961427,
+          "taupe_quiet": 2.208383,
+          "warm_stone": 2.25824
+        }
+      },
+      {
+        "id": "A11Y-EX-005",
+        "case_id": "filled_fault",
+        "themes": [
+          "default_cool"
+        ],
+        "scope": "Filled fault-pill text is supplementary in the affected pack.",
+        "rationale": "ON_DESTRUCTIVE on STATUS_FAULT measures below 4.5:1 in default_cool.",
+        "fallback_channels": [
+          "adjacent FOREGROUND label",
+          "fault icon or shape"
+        ],
+        "human_verification": "NVDA/manual review must confirm the adjacent label names the fault.",
+        "ratio_floors": {
+          "default_cool": 4.074971
+        }
+      },
+      {
+        "id": "A11Y-EX-006",
+        "case_id": "filled_accent",
+        "themes": [
+          "braun"
+        ],
+        "scope": "Primary-action text on the Braun accent requires redundant action naming.",
+        "rationale": "BACKGROUND on ACCENT measures below 4.5:1 only in the Braun pack.",
+        "fallback_channels": [
+          "accessible action name",
+          "stable button geometry"
+        ],
+        "human_verification": "Manual keyboard and visual review must verify the primary action remains readable.",
+        "ratio_floors": {
+          "braun": 4.086638
+        }
+      },
+      {
+        "id": "A11Y-EX-007",
+        "case_id": "legacy_caution_inverse",
+        "themes": [
+          "default_cool"
+        ],
+        "scope": "Legacy ON_PRIMARY caution-fill text is not a generally safe pair.",
+        "rationale": "The default_cool pair measures below 4.5:1 and must remain supplementary pending migration.",
+        "fallback_channels": [
+          "adjacent FOREGROUND label",
+          "caution triangle or text"
+        ],
+        "human_verification": "Manual review must confirm caution meaning without relying on the filled label.",
+        "ratio_floors": {
+          "default_cool": 2.568701
+        }
+      },
+      {
+        "id": "A11Y-EX-008",
+        "case_id": "border_background",
+        "themes": [
+          "amber",
+          "anthropic_mono",
+          "braun",
+          "default_cool",
+          "gost",
+          "instrument",
+          "ochre_bloom",
+          "rose_dusk",
+          "signal",
+          "taupe_quiet",
+          "warm_stone",
+          "xcode"
+        ],
+        "scope": "BORDER is grouping chrome only, never a functional boundary.",
+        "rationale": "Every bundled pack keeps the quiet grouping stroke below the 3:1 functional-boundary threshold.",
+        "fallback_channels": [
+          "ACCENT focus boundary",
+          "measured STATUS boundary",
+          "surface luminance step"
+        ],
+        "human_verification": "Manual review must confirm grouping loss does not hide a control or state boundary.",
+        "ratio_floors": {
+          "amber": 1.418847,
+          "anthropic_mono": 1.557383,
+          "braun": 2.134742,
+          "default_cool": 1.461852,
+          "gost": 2.407457,
+          "instrument": 1.856912,
+          "ochre_bloom": 1.635669,
+          "rose_dusk": 1.576828,
+          "signal": 1.118236,
+          "taupe_quiet": 1.438573,
+          "warm_stone": 1.527526,
+          "xcode": 1.385558
+        }
+      }
+    ],
+    "states": [
+      {
+        "source": "ok",
+        "canonical": "ok",
+        "token": "STATUS_OK",
+        "label": "\u041d\u041e\u0420\u041c\u0410",
+        "shape": "circle",
+        "accessible_label": "\u041d\u043e\u0440\u043c\u0430"
+      },
+      {
+        "source": "caution",
+        "canonical": "caution",
+        "token": "STATUS_CAUTION",
+        "label": "\u0412\u041d\u0418\u041c\u0410\u041d\u0418\u0415",
+        "shape": "triangle",
+        "accessible_label": "\u0422\u0440\u0435\u0431\u0443\u0435\u0442 \u0432\u043d\u0438\u043c\u0430\u043d\u0438\u044f"
+      },
+      {
+        "source": "warning",
+        "canonical": "caution",
+        "token": "STATUS_CAUTION",
+        "label": "\u0412\u041d\u0418\u041c\u0410\u041d\u0418\u0415",
+        "shape": "triangle",
+        "accessible_label": "\u0422\u0440\u0435\u0431\u0443\u0435\u0442 \u0432\u043d\u0438\u043c\u0430\u043d\u0438\u044f"
+      },
+      {
+        "source": "fault",
+        "canonical": "fault",
+        "token": "STATUS_FAULT",
+        "label": "\u0410\u0412\u0410\u0420\u0418\u042f",
+        "shape": "square",
+        "accessible_label": "\u0410\u0432\u0430\u0440\u0438\u044f"
+      },
+      {
+        "source": "stale",
+        "canonical": "stale",
+        "token": "STATUS_STALE",
+        "label": "\u0423\u0421\u0422\u0410\u0420\u0415\u041b\u041e",
+        "shape": "hollow_circle",
+        "accessible_label": "\u0414\u0430\u043d\u043d\u044b\u0435 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u0438"
+      },
+      {
+        "source": "disconnected",
+        "canonical": "disconnected",
+        "token": "STATUS_STALE",
+        "label": "\u041d\u0415\u0422 \u0421\u0412\u042f\u0417\u0418",
+        "shape": "diamond",
+        "accessible_label": "\u041d\u0435\u0442 \u0441\u0432\u044f\u0437\u0438"
+      }
+    ]
+  }
+}
+```
+<!-- MACHINE_GATES:END -->
+
 ## Statistics
 
-- **85 Markdown files in the design-system tree**: 81 contract/specification
+- **87 Markdown files in the design-system tree**: 83 contract/specification
   documents plus README, MANIFEST, CHANGELOG, and the GUI migration inventory;
-  `VERSION` is the additional non-Markdown release marker.
-- **79 rule IDs** across 9 rule categories (Batches 1+2+6)
+  `VERSION` is the additional non-Markdown release marker; the executable gate data is embedded below in this tracked manifest.
+- **84 rule IDs** across 9 rule categories (79 widget rules plus 5 governance rules)
 - **14 generic components** specified (Batch 3)
 - **19 CryoDAQ domain primitives** specified (Batch 4 + F36 + tray contract)
 - **13 cross-surface patterns** specified (including operator evidence
@@ -216,10 +865,10 @@ Batch 6 — accessibility + governance:
     requires implementation, discoverability, tests, and hazard review before
     becoming canonical.
 61. **Reduced motion respect via MotionPolicy** — centralized helper; duration=0 under reduce. HoldConfirm becomes discrete-step progress (safety preserved).
-62. **Design system remains flat-token in the current v4.0.3 line** — the v2.0.0
+62. **Design system remains flat-token in the current v4.2.0 line** — the v2.0.0
     instrument-identity major and v3.0.0 composition-contract major did not
     perform the separately reviewed future three-layer token migration.
-63. **STONE_* remains deprecated/read-only in the current v4.0.3 line** — neither
+63. **STONE_* remains deprecated/read-only in the current v4.2.0 line** — neither
     major claims or performs the unfinished cross-panel token migration.
 64. **SemVer independent from CryoDAQ package version** — design system evolves at its own cadence; CHANGELOG cross-references.
 65. **Architect is singular approval gate** — drafts and audits converge on Vladimir's approval before implementation. No self-approval.
@@ -246,9 +895,11 @@ F36 operator-snapshot additions:
     values; missing/refused identity uses fixed bounded Russian text and no
     vendor, model, channel-name, diagnostic, or payload fallback.
 
+82. **Co-versioned semantic authority** — a change to a mapped shared token, theme pack, component, pattern, or state owner must change its canonical specification, `VERSION`, and `CHANGELOG.md` in the same immutable-base slice. `theme.py` public Assign/AnnAssign/AugAssign/Delete deltas select exact category specs and multiple categories accumulate; unclassified symbols and every other residual semantic AST delta require the aggregate plus full owned set. Real-theme WCAG exceptions live as exact machine data, while keyboard/NVDA/operator/performance evidence remains human.
+
 ## Status
 
-**Design system v4.0.3 — informative and intentionally beautiful CryoDAQ composition is a breaking, corpus-wide GUI gate; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing are implemented, while remaining migration and external evidence stay open in `GUI_MIGRATION_INVENTORY.md`.** Existing
-83 rules (79 widget rules plus 4 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
-ONEDIR whole-shell/DPI/NVDA, operator-performance, and long-session evidence
+**Design system v4.2.0 — the F36.6 co-versioning and mechanical accessibility gate is active for mapped shared semantic authorities; panoramic dashboard home, descriptor-qualified identity, and the supplemental atomic briefing remain implemented, while manual and target-environment evidence stays open in `GUI_MIGRATION_INVENTORY.md`.** Existing
+84 rules (79 widget rules plus 5 governance rules) and the 142-constant runtime inventory are tracked. Real Windows
+ONEDIR whole-shell/DPI/NVDA, keyboard walkthrough, scripted operator, operator-performance, and long-session evidence
 remain open.

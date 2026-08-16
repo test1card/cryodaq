@@ -3,14 +3,30 @@ title: Testing Strategy
 keywords: testing, lint, token-lint, contrast-check, visual-regression, audit, automation
 applies_to: how design-system compliance is verified automatically + manually
 status: canonical
-references: governance/token-naming.md, accessibility/contrast-matrix.md, accessibility/wcag-baseline.md
+references: governance/token-naming.md, governance/versioning.md, accessibility/contrast-matrix.md, accessibility/wcag-baseline.md, ../MANIFEST.md
 external_reference: UI UX Pro Max v2.5.0 validate-tokens.cjs pattern
-last_updated: 2026-04-17
+last_updated: 2026-08-10
 ---
 
 # Testing Strategy
 
 How we verify that CryoDAQ code actually follows the design system. The rules and patterns in this system are only useful if they're enforced. Enforcement comes from three layers: automated linting, external audit, and manual review.
+
+## Shipped F36.6 machine gates
+
+| Gate | Real invocation surface | What it proves |
+|---|---|---|
+| Same-slice co-versioning | `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` in the active exact checkout and standalone docs workflow | A mapped shared semantic source cannot move without its canonical spec, an advanced `VERSION`, and a matching `CHANGELOG.md` heading relative to exact `TRUSTED_BASE_SHA`; `theme.py` public Assign/AnnAssign/AugAssign/Delete deltas select exact category specs, while unclassified symbols and every other residual AST delta require the full owned category set |
+| Multi-theme contrast | `tests/gui/test_theme_loader.py::test_machine_accessibility_contrast_contract_matches_all_real_themes` in the `gui` candidate partition | Thirteen bootstrap case IDs/token pairs/minima cannot be removed or repointed; every declared pair is recomputed from every real `config/themes/*.yaml`; exact failures and non-weakening per-theme floors must match `MANIFEST.md` |
+| Non-color state redundancy | `tests/gui/test_theme_loader.py::test_machine_accessibility_non_color_states_match_real_runtime_contract` in the `gui` candidate partition | Every source state matches exact production Russian labels and accessibility text; five pinned shapes render to distinct real `QImage` masks through `paint_state_shape`; `CanonicalStatusLabel` exposes the corresponding name/description, including the warning-to-caution alias |
+
+The co-versioning gate parses Git's actual NUL-delimited name-status stream: a pure D may retire with an empty rename map, while each R must persist its exact old/new pair and land on an active candidate route with the full retired specification set (or a superset). A later change to that destination still triggers its specifications plus release evidence.
+
+Semantic-source records remain additive audit authority rather than using ordinary retirement records. For an actual semantic-source R, parser-shaped controls reject an ungoverned or under-covered destination and accept only a nonweakening copy/superset of the complete semantic body under the new path, or one ordinary route covering the old body's full specification union. A pure semantic-source D needs no destination. A two-slice control changes the renamed destination with AugAssign and proves that its mapped category plus aggregate, `VERSION`, and `CHANGELOG.md` are still required.
+
+These checks cover only mechanical evidence. Whole-shell keyboard and focus traversal, NVDA on the real Windows build, scripted operator tasks, visual judgment, and target-machine performance measurements remain human or environment-specific gates. A screenshot does not close them.
+
+The lint and test snippets below describe intended rule checks. Unless a concrete repository node or tool is named as shipped above, a snippet is an implementation example rather than current CI evidence.
 
 ## Three enforcement layers
 
@@ -140,11 +156,11 @@ def check_channel_t(path: Path) -> list[str]:
     return [match.group(0) for match in LATIN_T_CHANNEL.finditer(text)]
 ```
 
-### Contrast lint (via contrast-matrix)
+### Contrast contract (shipped subset)
 
-Given token A used as foreground on background B, verify pair passes AA per `accessibility/contrast-matrix.md`. Semi-automated: requires knowing color context.
+`MANIFEST.md` declares the exact token pairs, WCAG criterion, threshold, and per-theme exception set. The GUI test fixes the 13 required case definitions and bootstrap exception floors, while allowing additive cases. It loads every real theme pack through the production validator and recomputes every ratio. A newly failing theme, stale exception, lowered/missing floor, ratio below its declared floor, or exception without scope, rationale, fallback channels, and human verification fails the partition.
 
-Phase II: AST-based analysis of QSS stylesheets to detect foreground/background token pairs and cross-check against matrix.
+This is not a general AST proof of every QSS foreground/background use. Context discovery across arbitrary stylesheets remains review work until a production-path checker exists.
 
 ## Layer 2: External audit
 
@@ -284,37 +300,12 @@ Not every test in every file, but systematic coverage via centralized fixtures.
 
 ## CI integration
 
-```yaml
-# .github/workflows/design-system-compliance.yml (example)
-name: Design System Compliance
+The real gates are already owned by repository CI:
 
-on: [pull_request]
-
-jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-      - run: pip install -e ".[dev]"
-      - run: python tools/lint_tokens.py
-      - run: python tools/lint_fonts.py
-      - run: python tools/lint_spacing.py
-      - run: python tools/lint_channel_cyrillic.py
-  
-  unit-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: pytest tests/gui/ --cov=cryodaq.gui
-  
-  visual-regression:
-    runs-on: ubuntu-latest
-    # Skip unless Qt display available; document that visual regression runs locally or in headless Qt
-    if: false  # enable when Qt headless display is set up
-    steps:
-      - run: pytest tests/gui/test_visual.py
-```
+- `python -m tools.ci_candidate_runner --suite gui` selects the GUI partition that contains the two mechanical accessibility nodes.
+- `python -m tools.ci_active_checkout_runner --suite remaining --trusted-base <exact-commit> ...` runs exact-checkout guards, including `tests/docs/test_docs_freshness.py`.
+- `.github/workflows/docs-gate.yml` also runs the full docs-freshness file. Pull requests use event base authority; manual dispatch derives the merge base with the default branch and, at the default-branch tip, the candidate first parent. A caller supplies no base input, and a root candidate fails closed.
+- `ruff check --no-cache src/ tests/` remains the repository lint command; it is not a substitute for parsing or for either design-system guard.
 
 ## Test failure response
 
@@ -323,7 +314,7 @@ When a test fails:
 1. **Automated lint fails:** fix the code. Don't silence the lint.
 2. **Rule compliance fails:** either fix code OR argue for rule amendment through `governance/contribution.md`. Don't both at once.
 3. **Visual regression fails:** compare diff; if intentional design change, regenerate reference screenshot + changelog entry.
-4. **Accessibility test fails:** fix immediately; accessibility is AA commitment (wcag-baseline.md).
+4. **Accessibility test fails:** fix the token/component or amend the exact structured exception with scope, fallback channels, and human verification; prose-only or blanket waivers are not accepted.
 
 ## Failure as data
 
@@ -361,5 +352,7 @@ Per vladimir-voice principle (errors as data, not occasions for apology): test f
 - `accessibility/contrast-matrix.md` — contrast test baseline data
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Documented the shipped exact-base co-versioning and real-theme accessibility nodes, fixed contrast definitions, non-weakening exception floors, production painter/widget checks, real CI ownership, and the human evidence boundary.
 
 - 2026-04-17: Initial version. Three enforcement layers (lint / audit / manual). Test categories (visual regression / token-usage / rule-compliance / accessibility / contrast). Tooling + CI integration. Failure-as-data principle applied.

@@ -7,6 +7,8 @@ and the locked-status-palette invariant across all shipped themes.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,6 +19,136 @@ import pytest
 import yaml
 
 from cryodaq.gui import _theme_loader as loader
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MANIFEST = _REPO_ROOT / "docs" / "design-system" / "MANIFEST.md"
+_MACHINE_GATE_START = "<!-- MACHINE_GATES:BEGIN -->\n```json\n"
+_MACHINE_GATE_END = "\n```\n<!-- MACHINE_GATES:END -->"
+
+_REQUIRED_CONTRAST_CASES: dict[str, tuple[str, str, float]] = {
+    "body_foreground_card": ("FOREGROUND", "SURFACE_CARD", 4.5),
+    "body_secondary_card": ("TEXT_SECONDARY", "SURFACE_CARD", 4.5),
+    "body_muted_card": ("MUTED_FOREGROUND", "SURFACE_CARD", 4.5),
+    "focus_elevated": ("FOCUS_RING", "SURFACE_ELEVATED", 3.0),
+    "status_ok_card": ("STATUS_OK", "SURFACE_CARD", 3.0),
+    "status_caution_card": ("STATUS_CAUTION", "SURFACE_CARD", 3.0),
+    "status_fault_card": ("STATUS_FAULT", "SURFACE_CARD", 3.0),
+    "status_info_card": ("STATUS_INFO", "SURFACE_CARD", 3.0),
+    "status_stale_card": ("STATUS_STALE", "SURFACE_CARD", 3.0),
+    "filled_fault": ("ON_DESTRUCTIVE", "STATUS_FAULT", 4.5),
+    "filled_accent": ("BACKGROUND", "ACCENT", 4.5),
+    "legacy_caution_inverse": ("ON_PRIMARY", "STATUS_CAUTION", 4.5),
+    "border_background": ("BORDER", "BACKGROUND", 3.0),
+}
+
+_REQUIRED_EXCEPTION_RATIO_FLOORS: dict[str, dict[str, float]] = {
+    "A11Y-EX-001": {
+        "amber": 3.7069,
+        "anthropic_mono": 2.950593,
+        "braun": 4.222376,
+        "gost": 4.109723,
+        "instrument": 3.725763,
+        "ochre_bloom": 2.966639,
+        "rose_dusk": 3.018188,
+        "signal": 3.268795,
+        "taupe_quiet": 3.210661,
+        "warm_stone": 3.094435,
+        "xcode": 3.851237,
+    },
+    "A11Y-EX-002": {
+        "amber": 2.170522,
+        "anthropic_mono": 2.401728,
+        "default_cool": 2.570572,
+        "instrument": 2.10437,
+        "ochre_bloom": 1.962009,
+        "rose_dusk": 1.919218,
+        "taupe_quiet": 2.354748,
+        "warm_stone": 2.086325,
+    },
+    "A11Y-EX-003": {
+        "instrument": 2.702978,
+        "ochre_bloom": 2.946179,
+        "rose_dusk": 2.951782,
+        "taupe_quiet": 2.956365,
+    },
+    "A11Y-EX-004": {
+        "amber": 2.297509,
+        "anthropic_mono": 2.360812,
+        "default_cool": 2.6456,
+        "instrument": 2.019105,
+        "ochre_bloom": 2.200774,
+        "rose_dusk": 2.20496,
+        "signal": 2.961427,
+        "taupe_quiet": 2.208383,
+        "warm_stone": 2.25824,
+    },
+    "A11Y-EX-005": {"default_cool": 4.074971},
+    "A11Y-EX-006": {"braun": 4.086638},
+    "A11Y-EX-007": {"default_cool": 2.568701},
+    "A11Y-EX-008": {
+        "amber": 1.418847,
+        "anthropic_mono": 1.557383,
+        "braun": 2.134742,
+        "default_cool": 1.461852,
+        "gost": 2.407457,
+        "instrument": 1.856912,
+        "ochre_bloom": 1.635669,
+        "rose_dusk": 1.576828,
+        "signal": 1.118236,
+        "taupe_quiet": 1.438573,
+        "warm_stone": 1.527526,
+        "xcode": 1.385558,
+    },
+}
+
+_SUPPORTED_CANONICAL_SHAPES = {
+    "ok": "circle",
+    "caution": "triangle",
+    "fault": "square",
+    "stale": "hollow_circle",
+    "disconnected": "diamond",
+}
+
+# Geometry probes for each canonical shape, rendered by paint_state_shape at
+# center=(16, 16), radius=6 on the 32x32 image. True means the pixel must be
+# painted (alpha > 0), False that it must be empty. Each point is chosen well
+# inside / outside its shape's outline (never on an anti-aliased boundary), so
+# a reversed drawing branch (e.g. fault and disconnected exchanging geometry)
+# fails on the pixels actually produced rather than on shape metadata.
+_SHAPE_PIXEL_PROBES: dict[str, dict[tuple[int, int], bool]] = {
+    "circle": {
+        (16, 16): True,  # filled disc interior
+        (11, 16): True,  # inside the disc, left of any triangle edge
+        (20, 19): True,  # inside the disc, outside an inscribed diamond outline
+        (10, 10): False,  # extreme corner, outside the disc
+    },
+    "triangle": {
+        (16, 16): True,  # apex-to-base interior
+        (16, 22): True,  # base midpoint
+        (11, 16): False,  # left of the slanted edge
+        (21, 16): False,  # right of the slanted edge
+        (10, 10): False,  # above-left of the apex
+    },
+    "square": {
+        (16, 16): True,
+        (10, 10): True,
+        (22, 10): True,
+        (10, 22): True,
+        (22, 22): True,
+    },
+    "hollow_circle": {
+        (16, 16): False,  # hollow interior
+        (10, 16): True,  # left ring extent
+        (20, 12): True,  # ring on the diagonal, outside a diamond outline
+        (10, 10): False,  # outside the outer ring
+    },
+    "diamond": {
+        (16, 16): False,  # hollow interior
+        (10, 16): True,  # left vertex
+        (20, 12): False,  # outside the L1 outline, where a ring would paint
+        (10, 10): False,  # extreme corner, outside the diamond
+    },
+}
 
 
 @pytest.fixture
@@ -453,6 +585,164 @@ def _contrast_ratio(fg: str, bg: str) -> float:
     lb = _relative_luminance(bg)
     lighter, darker = (lf, lb) if lf >= lb else (lb, lf)
     return (lighter + 0.05) / (darker + 0.05)
+
+
+def _mechanical_accessibility_contract() -> dict:
+    manifest = _MANIFEST.read_text(encoding="utf-8")
+    assert "\ufffd" not in manifest
+    assert manifest.count(_MACHINE_GATE_START) == 1
+    assert manifest.count(_MACHINE_GATE_END) == 1
+    payload = manifest.split(_MACHINE_GATE_START, 1)[1].split(_MACHINE_GATE_END, 1)[0]
+    gate = json.loads(payload)
+    assert gate["schema_version"] == 1
+    return gate["mechanical_accessibility"]
+
+
+def test_machine_accessibility_contrast_contract_matches_all_real_themes(real_themes_dir):
+    contract = _mechanical_accessibility_contract()
+    assert contract["target"] == "WCAG 2.2 AA"
+    cases = contract["contrast_cases"]
+    exceptions = contract["contrast_exceptions"]
+    case_by_id = {case["id"]: case for case in cases}
+    exception_by_id = {exception["id"]: exception for exception in exceptions}
+    assert len(case_by_id) == len(cases)
+    assert len(exception_by_id) == len(exceptions)
+
+    for case_id, required in _REQUIRED_CONTRAST_CASES.items():
+        assert case_id in case_by_id, f"missing required contrast case: {case_id}"
+        case = case_by_id[case_id]
+        actual = (case["foreground"], case["background"], case["minimum"])
+        assert actual == required, (case_id, actual, required)
+
+    for exception_id, required_floors in _REQUIRED_EXCEPTION_RATIO_FLOORS.items():
+        assert exception_id in exception_by_id, f"missing required contrast exception: {exception_id}"
+        exception = exception_by_id[exception_id]
+        manifest_floors = exception["ratio_floors"]
+        for theme_id, required_floor in required_floors.items():
+            assert theme_id in manifest_floors, (exception_id, theme_id)
+            assert manifest_floors[theme_id] >= required_floor, (
+                exception_id,
+                theme_id,
+                manifest_floors[theme_id],
+                required_floor,
+            )
+        assert set(exception["themes"]) == set(required_floors), (exception_id,)
+        assert set(manifest_floors) == set(required_floors), (exception_id,)
+
+    by_case = {exception["case_id"]: exception for exception in exceptions}
+    assert len(by_case) == len(exceptions)
+    minimum_by_criterion = {"1.4.3": 4.5, "1.4.11": 3.0}
+
+    packs = {path.stem: loader.validate_theme_pack(path.stem) for path in sorted(real_themes_dir.glob("*.yaml"))}
+    assert packs
+    for case in cases:
+        assert case["minimum"] == minimum_by_criterion[case["criterion"]], case
+        ratios = {
+            theme_id: _contrast_ratio(pack[case["foreground"]], pack[case["background"]])
+            for theme_id, pack in packs.items()
+        }
+        failed_themes = sorted(theme_id for theme_id, ratio in ratios.items() if ratio < case["minimum"])
+        exception = by_case.get(case["id"])
+        expected_failures = [] if exception is None else exception["themes"]
+        if exception is not None:
+            assert expected_failures == sorted(set(expected_failures)), exception["id"]
+            assert expected_failures, f"stale empty contrast exception: {exception['id']}"
+        assert failed_themes == expected_failures, (
+            case["id"],
+            case["foreground"],
+            case["background"],
+            failed_themes,
+            expected_failures,
+        )
+        if exception is not None:
+            assert exception["scope"].strip()
+            assert exception["rationale"].strip()
+            assert exception["fallback_channels"]
+            assert exception["human_verification"].strip()
+            ratio_floors = exception["ratio_floors"]
+            assert set(ratio_floors) == set(expected_failures), exception["id"]
+            for theme_id, floor in ratio_floors.items():
+                assert type(floor) in {int, float} and 0 < floor < case["minimum"], (exception["id"], theme_id)
+                assert round(ratios[theme_id], 6) >= floor, (
+                    exception["id"],
+                    theme_id,
+                    round(ratios[theme_id], 6),
+                    floor,
+                )
+
+    assert set(by_case) <= set(case_by_id)
+    assert set(exception_by_id) == set(_REQUIRED_EXCEPTION_RATIO_FLOORS), (
+        "new contrast exceptions require trusted-base approval before they can be registered"
+    )
+
+
+def test_machine_accessibility_non_color_states_match_real_runtime_contract():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtWidgets import QApplication
+
+    from cryodaq.gui import theme
+    from cryodaq.gui.presentation_severity import operator_state_for_display
+    from cryodaq.gui.shell.operator_components import CanonicalStatusLabel
+    from cryodaq.gui.shell.operator_components._visuals import paint_state_shape, state_visual
+    from cryodaq.operator_snapshot import OperatorPresentationState
+
+    app = QApplication.instance() or QApplication([])
+    states = _mechanical_accessibility_contract()["states"]
+    assert {item["source"] for item in states} == {state.value for state in OperatorPresentationState}
+    canonical_shapes: dict[str, str] = {}
+    rendered_masks: dict[str, tuple[bool, ...]] = {}
+    status_label = CanonicalStatusLabel()
+    try:
+        for item in states:
+            source_state = OperatorPresentationState(item["source"])
+            display_state = operator_state_for_display(source_state)
+            visual = state_visual(source_state)
+            assert display_state.value == item["canonical"]
+            assert visual.label == item["label"]
+            assert visual.accessible_label == item["accessible_label"]
+            assert visual.shape == item["shape"]
+            assert visual.color == getattr(theme, item["token"])
+            assert any("А" <= character <= "я" or character == "Ё" for character in visual.label)
+            canonical_shapes.setdefault(item["canonical"], item["shape"])
+            assert canonical_shapes[item["canonical"]] == item["shape"]
+
+            status_label.set_state(source_state)
+            assert status_label.accessibleName() == f"Состояние: {item['accessible_label']}"
+            assert status_label.accessibleDescription() == (
+                f"Каноническое состояние {item['canonical']}; обозначено формой и текстом {item['label']}."
+            )
+
+            if item["canonical"] not in rendered_masks:
+                image = QImage(32, 32, QImage.Format.Format_ARGB32_Premultiplied)
+                image.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(image)
+                try:
+                    paint_state_shape(painter, source_state, center_x=16, center_y=16, radius=6)
+                finally:
+                    painter.end()
+                mask = tuple(
+                    image.pixelColor(x, y).alpha() > 0 for y in range(image.height()) for x in range(image.width())
+                )
+                assert any(mask), item["canonical"]
+                rendered_masks[item["canonical"]] = mask
+                shape = _SUPPORTED_CANONICAL_SHAPES[item["canonical"]]
+                for (probe_x, probe_y), expected in _SHAPE_PIXEL_PROBES[shape].items():
+                    assert mask[probe_y * image.width() + probe_x] is expected, (
+                        item["canonical"],
+                        shape,
+                        (probe_x, probe_y),
+                        expected,
+                    )
+    finally:
+        status_label.deleteLater()
+        app.processEvents()
+
+    assert canonical_shapes == _SUPPORTED_CANONICAL_SHAPES
+    assert set(rendered_masks) == set(_SUPPORTED_CANONICAL_SHAPES)
+    assert len(set(rendered_masks.values())) == len(_SUPPORTED_CANONICAL_SHAPES)
 
 
 def test_status_palette_hue_locked_across_all_themes(real_themes_dir):

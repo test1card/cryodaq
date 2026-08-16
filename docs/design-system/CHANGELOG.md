@@ -1,8 +1,8 @@
 ---
 title: Design System Changelog
 status: canonical
-last_updated: 2026-08-05
-version: 4.1.0
+last_updated: 2026-08-10
+version: 4.2.0
 ---
 
 # Design System Changelog
@@ -12,6 +12,80 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
+
+## [4.2.0] — 2026-08-10
+
+### Added
+
+- `MANIFEST.md` — one machine-readable contract containing schema-v3 exact
+  source/specification routes, narrow release-only triggers, 13 fixed WCAG 2.2
+  contrast cases, non-weakening per-theme exception floors, and canonical
+  non-color states.
+- Corrected the semantic authority map: `theme.py` now uses AST-derived
+  public-symbol routes covering Assign/AnnAssign/AugAssign/Delete that require
+  its runtime authority plus the exact changed category, with every owned
+  category required for unclassified symbols or other residual AST deltas, while
+  `_plot_style.py` routes through chart tokens, `widgets/common.py` through its
+  compatibility authority, and each overlay module through its actual
+  component contracts.
+- Added persistent structured route retirement with exact trusted-specification,
+  D/R source, same-slice specification, current-version, and append-only-record
+  controls. Git R records persist their exact old/new map and require an active,
+  nonweakening destination route; pure deletions retain an empty map. Historical
+  schema-v2 authority is validated and migrated to the corrected bootstrap floor.
+- Added strict SemVer 2.0.0 parsing and precedence controls, including
+  prerelease ordering and build-metadata equality.
+- Exact-checkout F36.6 enforcement in
+  `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned`.
+  It loads the strict-ancestor trusted contract, permits only the immutable
+  historical pre-gate bases to lack a marker, rejects markerless post-gate bases, candidate narrowing or
+  repointing, accumulates every overlapping exact route, and requires the
+  applicable specifications plus `VERSION` and `CHANGELOG.md` changes.
+- Real-pack accessibility checks in `tests/gui/test_theme_loader.py` covering
+  all bundled theme YAML files, the production state visual mapper and painter,
+  and `CanonicalStatusLabel` accessibility properties.
+
+### Changed
+
+- Added RULE-GOV-005: reusable token, shared-component, pattern, and state
+  semantic owners are co-versioned through additive exact routes and release
+  evidence. Ordinary GUI consumers remain under the existing GUI review gate
+  and do not trigger a design-system release for every code edit.
+- Corrected the `theme.py` PLOT semantic map: the nine color/palette/alpha symbols
+  whose exact values are canonical in both `colors.md` and `chart-tokens.md`
+  now require both specifications, while chart-only geometry and width symbols
+  continue to require only `chart-tokens.md`.
+- Closed semantic-source rename escape: additive old-path semantic records remain
+  audit data, while every Git R destination must carry a nonweakening complete
+  semantic body under the new path or one ordinary route covering the old full
+  specification union. Pure D remains valid, and a two-slice control proves that
+  later destination changes still require their exact specification and release
+  evidence.
+- Removed caller-supplied trusted-base inputs from both docs and main CI.
+  Pull requests use their base, pushes use event authority, and manual runs use
+  the merge base with `origin/<default-branch>`; every result is canonicalized
+  and must be a strict ancestor of the tested candidate.
+- Reconciled stale v4.0.3/v4.1.0 marker prose onto the v4.2.0 release without
+  changing runtime tokens, components, state behavior, or performance budgets.
+
+### Accessibility evidence
+
+- WCAG 2.2 AA text (4.5:1) and non-text (3:1) ratios are recomputed from every
+  real bundled theme. The 13 required case IDs, token pairs, and minima cannot
+  be removed or repointed; exception membership must equal the real failures,
+  and each measured ratio must remain above its non-weakening per-theme floor.
+- Canonical `ok | caution | warning | fault | stale | disconnected` inputs are
+  checked against exact production Russian labels and accessible labels,
+  `CanonicalStatusLabel` names/descriptions, token values, and five pinned
+  geometries rendered through `paint_state_shape` into real `QImage` masks.
+  Legacy `warning` remains the `caution` presentation alias.
+
+### Open evidence
+
+- Whole-shell keyboard/focus traversal, NVDA on the real Windows build,
+  scripted operator task acceptance, visual judgment, and runtime
+  frame/startup/memory measurements remain human or target-environment gates.
+  This release does not claim those measurements from static checks.
 
 ## [4.1.0] — 2026-08-05
 

@@ -3,9 +3,9 @@ title: Performance Budget
 keywords: performance, budget, frame-rate, fps, latency, render-cost, update-rate, input-response
 applies_to: visual performance targets, render costs, input latency
 status: canonical
-references: rules/data-display-rules.md, patterns/real-time-data.md
+references: rules/data-display-rules.md, patterns/real-time-data.md, governance/testing-strategy.md
 external_reference: UI UX Pro Max v2.5.0 main-thread-budget + input-latency rules; Core Web Vitals adaptation
-last_updated: 2026-04-17
+last_updated: 2026-08-10
 ---
 
 # Performance Budget
@@ -26,6 +26,10 @@ Visual performance targets. These set ceilings on how much work the UI can do pe
 | Fault state render | Instant (< 16ms) | RULE-INTER-006 — one-frame transition |
 | App launch to interactive | < 2s | App cold start target |
 | ZMQ roundtrip to GUI update | < 500ms typical | Allows user to feel "responsive" |
+
+## F36.6 evidence status
+
+The co-versioning and accessibility guards are test/CI work and do not execute in the shipped GUI, so they introduce no runtime rendering path. This slice did not measure frame time, input latency, cold start, memory, long-session behavior, or the real Windows frozen build. The budgets above are unchanged targets and remain open target-environment evidence; static tests cannot mark them passed.
 
 ## Why a performance budget
 
@@ -251,5 +255,7 @@ Per `governance/testing-strategy.md`:
 - `rules/data-display-rules.md` — RULE-DATA-002 coalescing
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Recorded that the static F36.6 gates add no runtime GUI path and do not close frame/startup/memory/long-session or frozen-Windows performance evidence.
 
 - 2026-04-17: Initial version. Budget table consolidated from multiple rules + UXPM references. Frame breakdown. Specific subsystem rules (charts, stylesheets, signals). Measurement tooling. Future optimizations out of scope.

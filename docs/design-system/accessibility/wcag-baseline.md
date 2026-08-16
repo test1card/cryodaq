@@ -3,9 +3,9 @@ title: WCAG Baseline
 keywords: wcag, accessibility, aa, level, conformance, baseline, target, guidelines, wcag-2-2
 applies_to: accessibility conformance target and scope across the product
 status: canonical
-references: rules/accessibility-rules.md, tokens/colors.md, patterns/state-visualization.md
+references: rules/accessibility-rules.md, tokens/colors.md, patterns/state-visualization.md, contrast-matrix.md, ../MANIFEST.md
 external_reference: WCAG 2.2 (W3C Recommendation, October 2023)
-last_updated: 2026-04-17
+last_updated: 2026-08-10
 ---
 
 # WCAG Baseline
@@ -42,67 +42,69 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 
 ## Criterion-by-criterion commitment (Level AA, adjusted for scope)
 
+This table defines the product contract, not a blanket conformance verdict. “Target; evidence open” means the requirement remains binding but this corpus does not contain sufficient release-bound keyboard, NVDA, operator-scenario, or target-build evidence to call it met. Only rows labeled as mechanically measured have automated evidence in v4.2.0.
+
 ### Perceivable
 
 | WCAG | Commitment | CryoDAQ mapping |
 |---|---|---|
-| **1.1.1 Non-text Content** (A) | Met | All icons have label OR tooltip (RULE-INTER-008); decorative SVG uses aria-hidden |
+| **1.1.1 Non-text Content** (A) | Target; evidence open | All icons have label OR tooltip (RULE-INTER-008); decorative SVG uses aria-hidden |
 | **1.2.x Media** (A, AA) | N/A | No prerecorded/live media content |
-| **1.3.1 Info and Relationships** (A) | Met | ARIA roles on semantic groups; form labels via QLabel + buddy widget |
-| **1.3.2 Meaningful Sequence** (A) | Met | Tab order matches visual order (RULE-A11Y-006); F-pattern scan aligned with DOM |
-| **1.3.3 Sensory Characteristics** (A) | Met | Instructions never refer only to shape/color/position (e.g., "click the red one") |
-| **1.3.4 Orientation** (AA) | Met | Desktop-only; landscape is the only orientation |
-| **1.3.5 Identify Input Purpose** (AA) | Met | Form autocomplete attributes where applicable (operator login, if present) |
-| **1.4.1 Use of Color** (A) | Met | RULE-A11Y-002 two-channel signaling enforces this |
+| **1.3.1 Info and Relationships** (A) | Target; evidence open | ARIA roles on semantic groups; form labels via QLabel + buddy widget |
+| **1.3.2 Meaningful Sequence** (A) | Target; evidence open | Tab order matches visual order (RULE-A11Y-006); F-pattern scan aligned with DOM |
+| **1.3.3 Sensory Characteristics** (A) | Target; evidence open | Instructions never refer only to shape/color/position (e.g., "click the red one") |
+| **1.3.4 Orientation** (AA) | Target; evidence open | Desktop-only; landscape is the only orientation |
+| **1.3.5 Identify Input Purpose** (AA) | Target; evidence open | Form autocomplete attributes where applicable (operator login, if present) |
+| **1.4.1 Use of Color** (A) | Mechanically mapped; human scenarios open | Every production source state is checked against exact Russian visible/accessibility text, the real `CanonicalStatusLabel` name/description, and one of five pinned geometries rendered by the production painter; operator recognition remains a scripted human gate. |
 | **1.4.2 Audio Control** (A) | Open | Alarm beeps exist. Current dual-owner fail-loud behavior has no consolidated mute/volume surface; exact-activation acknowledgement and visible audio availability remain an explicit gate. |
-| **1.4.3 Contrast (Minimum)** (AA) | Met for text; documented exceptions for status chrome | See `contrast-matrix.md` |
+| **1.4.3 Contrast (Minimum)** (AA) | Mechanically measured subset with structured exceptions | The required case IDs/token pairs/minima are fixed, every declared text pair is recomputed across every real theme, and exact exception membership plus non-weakening per-theme floors live in `MANIFEST.md`. This is not an exhaustive proof of every rendered QSS context. |
 | **1.4.4 Resize Text** (AA) | Partial | Qt apps support OS-level DPI scaling; manual text zoom within app is out of scope |
-| **1.4.5 Images of Text** (AA) | Met | No images of text; all text is actual text |
+| **1.4.5 Images of Text** (AA) | Target; evidence open | No images of text; all text is actual text |
 | **1.4.10 Reflow** (AA) | Partial | Desktop-only; reflow at 320px viewport not targeted |
-| **1.4.11 Non-text Contrast** (AA) | Partial | BORDER token fails 3:1 against BACKGROUND (actual: 1.46:1). Card shapes provide visual grouping; focus rings use ACCENT (6.48:1, passes). Functional boundaries use ACCENT or STATUS_* with proven higher ratios. See `contrast-matrix.md`. |
-| **1.4.12 Text Spacing** (AA) | Met | Line-height 1.5 default; letter-spacing adjustable via QSS |
-| **1.4.13 Content on Hover / Focus** (AA) | Met | Tooltips dismissible (Escape closes); persistent while hovered; not obscuring |
+| **1.4.11 Non-text Contrast** (AA) | Mechanically measured subset with structured exceptions | Quiet BORDER grouping is below 3:1 in every pack; FOCUS_RING and some status chrome also miss 3:1 in named packs. Exact failure sets, non-weakening floors, and redundant channels live in `MANIFEST.md`; keyboard/visual verification remains open. |
+| **1.4.12 Text Spacing** (AA) | Target; evidence open | Line-height 1.5 default; letter-spacing adjustable via QSS |
+| **1.4.13 Content on Hover / Focus** (AA) | Target; evidence open | Tooltips dismissible (Escape closes); persistent while hovered; not obscuring |
 
 ### Operable
 
 | WCAG | Commitment | CryoDAQ mapping |
 |---|---|---|
-| **2.1.1 Keyboard** (A) | Met | All functionality keyboard-accessible per `accessibility/keyboard-navigation.md` |
-| **2.1.2 No Keyboard Trap** (A) | Met | Modal overlays trap focus deliberately; Escape always releases |
-| **2.1.4 Character Key Shortcuts** (A) | Met | All shortcuts use modifier keys (Ctrl, Alt, Shift) — no single-character shortcuts |
+| **2.1.1 Keyboard** (A) | Target; evidence open | All functionality keyboard-accessible per `accessibility/keyboard-navigation.md` |
+| **2.1.2 No Keyboard Trap** (A) | Target; evidence open | Modal overlays trap focus deliberately; Escape always releases |
+| **2.1.4 Character Key Shortcuts** (A) | Target; evidence open | All shortcuts use modifier keys (Ctrl, Alt, Shift) — no single-character shortcuts |
 | **2.2.1 Timing Adjustable** (A) | Partial | Hold-confirm buttons have fixed 1s timing; this is a safety feature, not a usability constraint — documented exception |
-| **2.2.2 Pause, Stop, Hide** (A) | Met | No content auto-updates faster than 5s intervals; charts updating at 2 Hz are operator-requested not page-animation |
-| **2.3.1 Three Flashes** (A) | Met | RULE-INTER-006 forbids flashing; fault indication is instant and persistent, not flashing |
-| **2.4.1 Bypass Blocks** (A) | Met | ToolRail provides section navigation (Ctrl+[1-9] shortcuts) |
-| **2.4.2 Page Titled** (A) | Met | QMainWindow.windowTitle always set and specific |
-| **2.4.3 Focus Order** (A) | Met | Tab order matches visual (RULE-A11Y-006) |
-| **2.4.4 Link Purpose** (A) | Met | Buttons have imperative verb labels (RULE-COPY-007); no «Click here» |
+| **2.2.2 Pause, Stop, Hide** (A) | Target; evidence open | No content auto-updates faster than 5s intervals; charts updating at 2 Hz are operator-requested not page-animation |
+| **2.3.1 Three Flashes** (A) | Target; evidence open | RULE-INTER-006 forbids flashing; fault indication is instant and persistent, not flashing |
+| **2.4.1 Bypass Blocks** (A) | Target; evidence open | ToolRail provides section navigation (Ctrl+[1-9] shortcuts) |
+| **2.4.2 Page Titled** (A) | Target; evidence open | QMainWindow.windowTitle always set and specific |
+| **2.4.3 Focus Order** (A) | Target; evidence open | Tab order matches visual (RULE-A11Y-006) |
+| **2.4.4 Link Purpose** (A) | Target; evidence open | Buttons have imperative verb labels (RULE-COPY-007); no «Click here» |
 | **2.4.5 Multiple Ways** (AA) | Partial | ToolRail + keyboard shortcuts; no search functionality across panels |
-| **2.4.6 Headings and Labels** (AA) | Met | Panel titles are descriptive; UPPERCASE category labels distinguish sections |
-| **2.4.7 Focus Visible** (AA) | Met | 2px ACCENT focus ring per RULE-A11Y-001; see `focus-management.md` |
-| **2.4.11 Focus Not Obscured** (AA, new in 2.2) | Met | Modal / Drawer overlays do not partially obscure the focused element within; focus-trap keeps it visible |
-| **2.5.1 Pointer Gestures** (A) | Met | No multi-point / path-based gestures; click / double-click only |
-| **2.5.2 Pointer Cancellation** (A) | Met | Destructive actions use up-event (mouseReleaseEvent), allow cancellation by dragging off |
-| **2.5.3 Label in Name** (A) | Met | Accessible name matches visible label |
+| **2.4.6 Headings and Labels** (AA) | Target; evidence open | Panel titles are descriptive; UPPERCASE category labels distinguish sections |
+| **2.4.7 Focus Visible** (AA) | Target; evidence open | 2px ACCENT focus ring per RULE-A11Y-001; see `focus-management.md` |
+| **2.4.11 Focus Not Obscured** (AA, new in 2.2) | Target; evidence open | Modal / Drawer overlays do not partially obscure the focused element within; focus-trap keeps it visible |
+| **2.5.1 Pointer Gestures** (A) | Target; evidence open | No multi-point / path-based gestures; click / double-click only |
+| **2.5.2 Pointer Cancellation** (A) | Target; evidence open | Destructive actions use up-event (mouseReleaseEvent), allow cancellation by dragging off |
+| **2.5.3 Label in Name** (A) | Target; evidence open | Accessible name matches visible label |
 | **2.5.4 Motion Actuation** (A) | N/A | No motion-triggered actions |
-| **2.5.7 Dragging Movements** (AA, new in 2.2) | Met | No drag-only interactions — all drag operations (rare in CryoDAQ) have click-based alternatives |
-| **2.5.8 Target Size (Minimum)** (AA, new in 2.2) | Met | Interactive targets ≥ 24×24 CSS pixels; default ROW_HEIGHT 36 and icon-button 32×32 both exceed |
+| **2.5.7 Dragging Movements** (AA, new in 2.2) | Target; evidence open | No drag-only interactions — all drag operations (rare in CryoDAQ) have click-based alternatives |
+| **2.5.8 Target Size (Minimum)** (AA, new in 2.2) | Target; evidence open | Interactive targets ≥ 24×24 CSS pixels; default ROW_HEIGHT 36 and icon-button 32×32 both exceed |
 
 ### Understandable
 
 | WCAG | Commitment | CryoDAQ mapping |
 |---|---|---|
-| **3.1.1 Language of Page** (A) | Met | `lang="ru"` on shell; technical Latin subsystem names (Engine, ZMQ) within Russian context don't count as language switch |
+| **3.1.1 Language of Page** (A) | Target; evidence open | `lang="ru"` on shell; technical Latin subsystem names (Engine, ZMQ) within Russian context don't count as language switch |
 | **3.1.2 Language of Parts** (AA) | Partial | Subsystem names in Latin not individually marked; operators treat them as borrowed vocabulary |
-| **3.2.1 On Focus** (A) | Met | Focus never triggers context change; opening a panel requires click or Enter |
-| **3.2.2 On Input** (A) | Met | Form input changes never trigger navigation |
-| **3.2.3 Consistent Navigation** (AA) | Met | ToolRail identical across all screens; BottomStatusBar identical |
-| **3.2.4 Consistent Identification** (AA) | Met | Same icon + label for same concept across surfaces (cross-surface-consistency.md) |
-| **3.3.1 Error Identification** (A) | Met | Input fields show inline error text (RULE-COPY-004) |
-| **3.3.2 Labels or Instructions** (A) | Met | QLabel + buddy for every input; no placeholder-as-label |
-| **3.3.3 Error Suggestion** (AA) | Met | Errors describe cause + remedy: «Введите число от 0 до 1» |
-| **3.3.4 Error Prevention (Legal, Financial, Data)** (AA) | Met | Destructive actions use Dialog confirmation (destructive-actions.md) |
-| **3.3.7 Redundant Entry** (A, new in 2.2) | Met | No forms require repeat entry of previously-provided info |
+| **3.2.1 On Focus** (A) | Target; evidence open | Focus never triggers context change; opening a panel requires click or Enter |
+| **3.2.2 On Input** (A) | Target; evidence open | Form input changes never trigger navigation |
+| **3.2.3 Consistent Navigation** (AA) | Target; evidence open | ToolRail identical across all screens; BottomStatusBar identical |
+| **3.2.4 Consistent Identification** (AA) | Target; evidence open | Same icon + label for same concept across surfaces (cross-surface-consistency.md) |
+| **3.3.1 Error Identification** (A) | Target; evidence open | Input fields show inline error text (RULE-COPY-004) |
+| **3.3.2 Labels or Instructions** (A) | Target; evidence open | QLabel + buddy for every input; no placeholder-as-label |
+| **3.3.3 Error Suggestion** (AA) | Target; evidence open | Errors describe cause + remedy: «Введите число от 0 до 1» |
+| **3.3.4 Error Prevention (Legal, Financial, Data)** (AA) | Target; evidence open | Destructive actions use Dialog confirmation (destructive-actions.md) |
+| **3.3.7 Redundant Entry** (A, new in 2.2) | Target; evidence open | No forms require repeat entry of previously-provided info |
 | **3.3.8 Accessible Authentication (Minimum)** (AA, new in 2.2) | N/A | No authentication in operator shell |
 
 ### Robust
@@ -110,8 +112,8 @@ Level A is the minimum-viable floor; Level AA is the target; specific AAA improv
 | WCAG | Commitment | CryoDAQ mapping |
 |---|---|---|
 | **4.1.1 Parsing** (A) — deprecated in 2.2 | N/A | |
-| **4.1.2 Name, Role, Value** (A) | Met | QAccessible interface implemented via PySide6 widgets; custom widgets set accessibleName |
-| **4.1.3 Status Messages** (AA) | Met | Alarms fire as Toasts with role="alert"; FSM state changes announced via BottomStatusBar (QAccessible notification) |
+| **4.1.2 Name, Role, Value** (A) | Target; evidence open | QAccessible interface implemented via PySide6 widgets; custom widgets set accessibleName |
+| **4.1.3 Status Messages** (AA) | Target; evidence open | Alarms fire as Toasts with role="alert"; FSM state changes announced via BottomStatusBar (QAccessible notification) |
 
 ## AAA aspirations (opportunistic, not committed)
 
@@ -133,21 +135,19 @@ Beyond WCAG, CryoDAQ has operator-specific accessibility features:
 
 ## Testing methodology
 
-Per `governance/testing-strategy.md` (Batch 6):
+Per `governance/testing-strategy.md`:
 
-1. **Automated** — token lint (no raw hex); contrast lint against BACKGROUND; focus-ring presence check via Qt test harness
-2. **Manual** — keyboard-only operation through full task flow (create experiment → run → abort); screen-reader sanity check (NVDA on Windows)
-3. **Browser/Qt** — visual regression via screenshot diff at known viewport sizes
+1. **Automated in v4.2.0** — load every real theme pack; recompute the fixed required WCAG 2.2 AA pairs; require exact failure membership and non-weakening per-theme exception floors; compare every production source state with exact Russian labels, `CanonicalStatusLabel` accessibility properties, token values, and five real `QImage`/`QPainter` geometry masks.
+2. **Human, still open** — keyboard-only whole-task traversal, focus visibility/restoration, NVDA on the real Windows build, and scripted operator recognition of non-color states.
+3. **Target environment, still open** — real frozen-build DPI/viewport behavior and runtime performance budgets. Screenshot approval alone is insufficient.
 
 ## Conformance statement
 
-When conformance is claimed externally (e.g., procurement doc, accessibility report):
+Do not claim that CryoDAQ conforms to WCAG 2.2 AA from this design-system release alone. The current defensible statement is:
 
-> CryoDAQ operator UI conforms to WCAG 2.2 Level AA with the following documented exceptions:
-> - Resize Text (1.4.4): supported via OS-level DPI scaling; manual in-app text zoom not provided
-> - Reflow (1.4.10): desktop-only product; reflow at 320px not targeted
-> - Non-text Contrast (1.4.11): BORDER token falls below 3:1 against BACKGROUND (1.46:1) — treated as visual grouping only; functional boundaries (focus, active, fault) use ACCENT or STATUS_* tokens that meet or exceed 3:1
-> - Status color contrast: STATUS_FAULT and STATUS_INFO used as chrome accents only, not for body text; body text uses FOREGROUND (16.04:1 contrast)
+> CryoDAQ targets WCAG 2.2 Level AA. Design-system v4.2.0 mechanically checks a fixed required contrast subset across all bundled themes, exact exception membership with non-weakening floors, and canonical non-color state rendering/accessibility properties. Whole-shell keyboard/focus, NVDA, scripted operator tasks, rendered-context completeness, and target-build evidence remain open.
+
+An external conformance statement requires those open procedures plus review of every applicable criterion and exception against the exact build.
 
 ## Rules applied
 
@@ -179,6 +179,8 @@ When conformance is claimed externally (e.g., procurement doc, accessibility rep
 - `accessibility/reduced-motion.md` — animation-related criteria
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Replaced unbound “Met” claims with explicit targets; fixed the required contrast subset and non-weakening exception floors; exercised production state painting and widget accessibility properties; and left keyboard, focus, NVDA, operator-scenario, rendered-context, and target-build evidence open.
 
 - 2026-07-15 (v4.0.0): Classified runtime alarm beeps accurately and left consolidated audio control/availability evidence open.
 - 2026-04-17: Initial version. WCAG 2.2 Level AA target committed. Criterion-by-criterion commitment table with CryoDAQ mapping. AAA aspirations opportunistic not committed.

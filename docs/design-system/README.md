@@ -3,14 +3,14 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-07-20
+last_updated: 2026-08-10
 status: canonical
-version: 4.1.0
+version: 4.2.0
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.1.0`
+**Current design-system version:** `4.2.0`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
@@ -101,7 +101,7 @@ CryoDAQ is **industrial precision instrumentation UI** for a cryogenic laborator
 ```
 docs/design-system/
 ├── README.md                        # this file
-├── MANIFEST.md                      # exact corpus inventory and encoded decisions
+├── MANIFEST.md                      # corpus inventory, decisions, and machine-gate data
 ├── GUI_MIGRATION_INVENTORY.md       # auditable v3 surface migration backlog
 ├── CHANGELOG.md                     # design-system release history
 ├── VERSION                          # authoritative version marker
@@ -217,7 +217,7 @@ Every enforceable statement has a unique ID. Format: `RULE-<CATEGORY>-<3DIGIT>`.
 | `RULE-DATA` | Real-time data display, numbers, stale | `rules/data-display-rules.md` |
 | `RULE-A11Y` | Accessibility, WCAG, keyboard, motion | `rules/accessibility-rules.md` |
 | `RULE-COPY` | Russian UI text, terminology, tone | `rules/content-voice-rules.md` |
-| `RULE-GOV` | Token naming, deprecation, versioning | `governance/*` |
+| `RULE-GOV` | Naming, deprecation, versioning, co-versioning | `governance/*` |
 
 Rules are numbered within category independently. `RULE-SURF-001` through `RULE-SURF-010` are the ten surface rules. Insertion of a new rule uses next available number; no gaps closed up.
 
@@ -306,6 +306,11 @@ From `src/cryodaq/gui/theme.py` inventory (v3.0.0, 142 exported uppercase consta
 
 ## Changelog
 
+- 2026-08-10: Released v4.2.0: added immutable-base co-versioning, exact
+  real-theme WCAG exception data, and runtime non-color state parity checks;
+  keyboard/NVDA/operator/performance evidence remains explicitly manual and open.
+- 2026-08-05: Released v4.1.0: specified descriptor classification as an
+  orthogonal state with a visible Russian marker while preserving readable values.
 - 2026-07-20: Released v4.0.3: removed remaining safety-green collisions from
   running/authorized, conductivity settling, and shift-handover presentation;
   normalized new operator-facing attention wording to the single caution rung

@@ -3,9 +3,9 @@ title: Versioning
 keywords: versioning, semver, breaking-change, major, minor, patch, release, changelog
 applies_to: how design-system releases are numbered and what changes go into each
 status: canonical
-references: governance/deprecation-policy.md, governance/contribution.md
+references: governance/deprecation-policy.md, governance/contribution.md, governance/testing-strategy.md, ../MANIFEST.md
 external_reference: Semantic Versioning 2.0.0 (semver.org)
-last_updated: 2026-07-20
+last_updated: 2026-08-10
 ---
 
 # Versioning
@@ -20,20 +20,43 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `4.0.3` — operator-state semantic correction: safety green
-is reserved for demonstrated health, ordinary activity/progress uses accent or
-neutral information, and new presentation producers use the single caution
-rung (see `CHANGELOG.md`).
+**Current version:** `4.2.0` — F36.6 adds an immutable-base co-versioning gate and exact machine-readable contrast/non-color evidence without changing runtime GUI semantics (see `CHANGELOG.md`).
 
 Version tracked in:
 - `docs/design-system/VERSION` (plain text, single-line) — committed alongside docs, authoritative
 - Top of `docs/design-system/README.md`
-- `docs/design-system/MANIFEST.md`
+- `docs/design-system/MANIFEST.md` (including the governed-source and mechanical-accessibility JSON block)
 - `docs/design-system/CHANGELOG.md` — human-readable release notes
 - `docs/design-system/GUI_MIGRATION_INVENTORY.md`
 - `docs/design-system/cryodaq-primitives/tray-status.md`
 - Tagged in git as `design-system-vX.Y.Z` (e.g., `design-system-v1.0.1`)
 
+## Same-slice co-versioning
+
+`VERSION` remains the only version number; F36.6 does not introduce a parallel scheme. `MANIFEST.md` carries `co_versioning` schema v3: exact active `routes`, additive `python_semantic_routes`, persistent `retired_routes`, exact `required_release_paths`, and narrow `release_only_patterns`. Every active ordinary route names one governed source pattern and exact specification paths; when patterns overlap, all matching specification requirements accumulate. Ordinary panel/view consumers stay under the roadmap-wide GUI review gate and do not force a design-system release for every local edit.
+
+For the monolithic `src/cryodaq/gui/theme.py`, the semantic route compares trusted and candidate Python ASTs. A changed, added, or removed top-level public symbol operation (`Assign`, annotated assignment, `AugAssign`, or `del NAME`) requires the aggregate runtime-authority specification plus only the category specifications matched by its symbol-name patterns; changes in several categories require their union. An unclassified public symbol requires the full owned category set. AST-equivalent comment-only edits add no semantic category requirement. Every other residual semantic AST change requires the aggregate and full owned category set so loops, calls, and dynamic constructs cannot mutate tokens behind aggregate-only evidence. Semantic pattern/spec, aggregate, and fallback edges are additive trusted authority. They remain as audit data if the source later retires, so source retirement does not require deleting and thereby weakening the semantic map. When Git records a semantic source as R, each candidate-tracked destination must either reproduce or supersede the old aggregate, fallback, and every symbol-pattern/specification edge under the new source path, or match an ordinary route covering the union of every specification in the old semantic body. Partial semantic and ordinary coverage does not combine into a pass. A pure D needs no replacement; the old semantic body remains inactive audit data. A later destination change is evaluated through its replacement route and still requires exact specification and release evidence.
+
+The workflow supplies an exact 40-character `TRUSTED_BASE_SHA` that must be a strict ancestor of candidate `HEAD`; a dispatch caller cannot choose it. When a manual run targets the default-branch tip, both workflows derive the candidate's first parent instead of accepting the candidate itself as its base; a root candidate has no valid predecessor and fails closed. The trusted contract is loaded from that commit and normalized with the candidate contract. Historical schema-v1 and schema-v2 payloads are fully validated as provenance and migrated to the corrected immutable schema-v3 bootstrap floor; their obsolete routes do not remain authority. Only commits in the historical pre-gate region (ancestors of immutable bootstrap `d05856ecb3e0d5002e37083f32f4b2d7acf5927f`) may lack the machine-gate marker; marker absence alone is not provenance.
+
+Active trusted routes and their exact specification sets cannot be removed, narrowed, or repointed. A route may leave the active map only when the same slice:
+
+1. deletes or renames every trusted-base source matched by that route, leaving no candidate match;
+2. adds one structured `retired_routes` record with the exact trusted source pattern and complete specification set, the current `VERSION` in `retired_in`, a non-empty reason, and an exact `renamed_paths` list of `{from_path, to_path}` objects for the Git R records (empty for pure deletion);
+3. changes every retired route specification plus all required release evidence; and
+4. records D/R evidence for every trusted-base source match.
+
+A rename destination must be candidate-tracked and covered by an active ordinary or semantic route whose exact specification set contains the retired route's complete set. The persisted rename map must exactly equal Git's R evidence, so a rename cannot masquerade as deletion and move outside governance; changes to the destination in later slices continue to require its active specifications and release evidence. A route cannot be active and retired together. Retirement records are append-only authority: later slices retain them byte-for-byte as structured data without repeating the original deletion or specification changes. New active routes remain additive, and active route specification sets remain non-weakening.
+
+When a mapped source or canonical contract changes, the same slice must:
+
+1. change every exact specification required by every matching source route;
+2. change every required release path, including `VERSION` and `CHANGELOG.md`; and
+3. carry the current version heading and advance by SemVer precedence beyond a trusted-base version when one exists.
+
+SemVer comparison follows SemVer 2.0.0 rather than PEP 440: build metadata is ignored for precedence, a release outranks its prerelease, numeric prerelease identifiers compare numerically and below alphanumeric identifiers, and a shorter equal prefix has lower precedence. Leading zeroes in core numbers or numeric prerelease identifiers are invalid. A build-metadata-only edit therefore does not advance `VERSION`.
+
+A release-only change requires the release paths and version/changelog evidence but no unrelated source specification. The release-only floor includes both workflow owners and their CI-evidence test, so the executable base-binding path cannot drift outside the design-system release. `tests/docs/test_docs_freshness.py::test_design_system_governed_sources_are_coversioned` enforces these rules against the real checkout; missing/malformed authority, self/non-ancestor bases, active-route narrowing, invalid retirement evidence, missing exact specs, or stale release evidence fails closed.
 ## What's in MAJOR
 
 Increment MAJOR when a change **breaks callers** — existing panel code using the design system must be modified to continue working correctly.
@@ -209,28 +232,17 @@ Design-system: v1.1.0 (adds ShiftHandover widget, SHIFT_* tokens)
 
 ## Release process (high-level)
 
-1. Complete planned changes on feature branches → merge to main
-2. Update `VERSION` file
-3. Update CHANGELOG.md with version section
-4. Update references to version number (README, MANIFEST)
-5. Run full audit (rules, contrast, tokens) via `governance/testing-strategy.md`
-6. Tag release in git
-7. Announce to operator team + any external consumers
+1. Complete the bounded change and its mapped canonical specification.
+2. Advance `VERSION` and add the matching `CHANGELOG.md` release section.
+3. Reconcile the release-marker documents (README, MANIFEST, inventory, and governed primitives).
+4. Run the exact-base co-versioning test plus the applicable GUI/docs partitions described in `governance/testing-strategy.md`.
+5. Complete independent review and any required human/target-environment evidence.
+6. Tag or announce only under separate publication authority.
 
 ## Current trajectory
 
-Anticipated versions:
-
-- **v2.0.0** (2026): breaking descriptor-qualified instrument identity API;
-  visual tokens and component anatomy otherwise remain unchanged.
-- **v3.0.0** (2026): the complete GUI corpus must be informative and
-  intentionally beautiful. The breaking compliance expansion rejects generic
-  LabVIEW-style dashboard assembly and requires migration of touched surfaces;
-  safety truth, legibility, provenance, freshness, uncertainty, and the next
-  safe action retain precedence.
-- **Later releases:** light theme, three-layer token migration, or palette
-  restructuring require their own compatibility analysis and release notes;
-  they are not implied by the v2.0.0 identity cutover.
+- **v4.2.0** (2026): exact-base co-versioning and the checkable WCAG 2.2 AA/non-color subset; runtime GUI semantics are unchanged.
+- **Later releases:** light-theme changes, three-layer token migration, or palette restructuring require their own compatibility analysis, mapped specification updates, and release notes.
 
 ## Rules applied
 
@@ -260,6 +272,8 @@ Anticipated versions:
 - `governance/testing-strategy.md` — audit gate before version tag
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Added schema-v3 exact routes, structured route retirement, and release-only triggers, additive trusted-contract comparison, strict workflow-derived base ancestry, and same-slice specification/version/changelog enforcement on the deliberately narrow shared-semantic surface.
 
 - 2026-04-17: Initial version. SemVer 2.0.0 baseline with CryoDAQ-specific definitions of "breaking". Release cadence expectations. Independence from CryoDAQ package version. Post-1.0.0 trajectory anticipated.
 - 2026-04-17 (v1.0.1): Created the `VERSION` and `CHANGELOG.md` artifacts that this document was referencing but which did not previously exist (FR-013). No process changes — the described release process is now actually wired up.

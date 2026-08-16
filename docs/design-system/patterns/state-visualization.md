@@ -3,8 +3,8 @@ title: State Visualization
 keywords: state, visualization, ok, warning, caution, fault, stale, status, color, border, icon, redundant-channels, unclassified, descriptor, н/о
 applies_to: how to visually communicate state (OK, warning, caution, fault, stale, disconnected, unclassified)
 status: canonical
-references: rules/color-rules.md, rules/accessibility-rules.md, rules/data-display-rules.md, tokens/colors.md, patterns/command-outcome-unknown.md
-last_updated: 2026-08-05
+references: rules/color-rules.md, rules/accessibility-rules.md, rules/data-display-rules.md, tokens/colors.md, patterns/command-outcome-unknown.md, ../MANIFEST.md
+last_updated: 2026-08-10
 ---
 
 # State Visualization
@@ -124,7 +124,7 @@ STATUS_FAULT (`#c44545`) and STATUS_STALE (`#5a5d68`) fail WCAG AA body-text con
 - **STATUS_CAUTION** (and the legacy WARNING alias) passes AA on the default dark background.
 - **STATUS_STALE** (2.94:1) fails all → intentional; stale items are visually de-emphasized by design.
 
-Filled pill contexts (e.g., filled STATUS_FAULT badge with ON_DESTRUCTIVE text) pass contrast because the white-ish text on dark-red background is different math from red text on dark background.
+Filled pill contexts do not automatically pass contrast. `MANIFEST.md` records the exact measured pairs and per-theme exceptions; every sub-threshold pill requires readable adjacent text plus icon/shape redundancy and the named human verification.
 
 ## State expression by element type
 
@@ -268,6 +268,8 @@ step visually and semantically distinct: fault.
   of this document's severity/freshness vocabulary and must not be folded into it
 
 ## Changelog
+
+- 2026-08-10 (v4.2.0): Bound the canonical Russian label/token/shape mapping to production tests and replaced the blanket filled-pill contrast claim with exact per-theme machine exceptions and redundant channels.
 
 - 2026-07-25: Cross-referenced the new `patterns/command-outcome-unknown.md`
   and clarified that mutation-outcome uncertainty is an orthogonal state, not
