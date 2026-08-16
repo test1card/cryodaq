@@ -5853,7 +5853,26 @@ class _EngineStartupRollback:
     async def call(self, operation: Callable[[], Any]) -> Any:
         try:
             result = operation()
-            if inspect.isawaitable(result):
+            # Await a COROUTINE, never a Task or Future.
+            #
+            # `inspect.isawaitable` is True for a Task, because a Task is a
+            # Future and a Future has `__await__`. But a Task returned by a
+            # registration helper is a HANDLE TO WORK THAT IS ALREADY RUNNING,
+            # not work to wait for. Awaiting it waits for that task to FINISH,
+            # and these tasks are supervised loops that never finish.
+            #
+            # This blocked engine startup permanently at the first such site:
+            # `supervisor.register(...)` for `safety_collect` returns its
+            # long-running monitor task, startup awaited it, and every later
+            # step -- including installing the SIGTERM handler -- was never
+            # reached. The process then died on the signal a real deployment
+            # sends, with no shutdown and no error line, which is how the
+            # nightly bounded mock soak failed for consecutive nights.
+            #
+            # The call sites are the evidence for the intent: they read
+            # `throttle_task = await startup.call(...)`, so they expect to
+            # RECEIVE the task, not its result.
+            if inspect.isawaitable(result) and not isinstance(result, asyncio.Future):
                 return await result
             return result
         except BaseException:
