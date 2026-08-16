@@ -109,6 +109,47 @@ _SUPPORTED_CANONICAL_SHAPES = {
     "disconnected": "diamond",
 }
 
+# Geometry probes for each canonical shape, rendered by paint_state_shape at
+# center=(16, 16), radius=6 on the 32x32 image. True means the pixel must be
+# painted (alpha > 0), False that it must be empty. Each point is chosen well
+# inside / outside its shape's outline (never on an anti-aliased boundary), so
+# a reversed drawing branch (e.g. fault and disconnected exchanging geometry)
+# fails on the pixels actually produced rather than on shape metadata.
+_SHAPE_PIXEL_PROBES: dict[str, dict[tuple[int, int], bool]] = {
+    "circle": {
+        (16, 16): True,  # filled disc interior
+        (11, 16): True,  # inside the disc, left of any triangle edge
+        (20, 19): True,  # inside the disc, outside an inscribed diamond outline
+        (10, 10): False,  # extreme corner, outside the disc
+    },
+    "triangle": {
+        (16, 16): True,  # apex-to-base interior
+        (16, 22): True,  # base midpoint
+        (11, 16): False,  # left of the slanted edge
+        (21, 16): False,  # right of the slanted edge
+        (10, 10): False,  # above-left of the apex
+    },
+    "square": {
+        (16, 16): True,
+        (10, 10): True,
+        (22, 10): True,
+        (10, 22): True,
+        (22, 22): True,
+    },
+    "hollow_circle": {
+        (16, 16): False,  # hollow interior
+        (10, 16): True,  # left ring extent
+        (20, 12): True,  # ring on the diagonal, outside a diamond outline
+        (10, 10): False,  # outside the outer ring
+    },
+    "diamond": {
+        (16, 16): False,  # hollow interior
+        (10, 16): True,  # left vertex
+        (20, 12): False,  # outside the L1 outline, where a ring would paint
+        (10, 10): False,  # extreme corner, outside the diamond
+    },
+}
+
 
 @pytest.fixture
 def real_themes_dir() -> Path:
@@ -575,7 +616,8 @@ def test_machine_accessibility_contrast_contract_matches_all_real_themes(real_th
 
     for exception_id, required_floors in _REQUIRED_EXCEPTION_RATIO_FLOORS.items():
         assert exception_id in exception_by_id, f"missing required contrast exception: {exception_id}"
-        manifest_floors = exception_by_id[exception_id]["ratio_floors"]
+        exception = exception_by_id[exception_id]
+        manifest_floors = exception["ratio_floors"]
         for theme_id, required_floor in required_floors.items():
             assert theme_id in manifest_floors, (exception_id, theme_id)
             assert manifest_floors[theme_id] >= required_floor, (
@@ -584,6 +626,8 @@ def test_machine_accessibility_contrast_contract_matches_all_real_themes(real_th
                 manifest_floors[theme_id],
                 required_floor,
             )
+        assert set(exception["themes"]) == set(required_floors), (exception_id,)
+        assert set(manifest_floors) == set(required_floors), (exception_id,)
 
     by_case = {exception["case_id"]: exception for exception in exceptions}
     assert len(by_case) == len(exceptions)
@@ -684,6 +728,14 @@ def test_machine_accessibility_non_color_states_match_real_runtime_contract():
                 )
                 assert any(mask), item["canonical"]
                 rendered_masks[item["canonical"]] = mask
+                shape = _SUPPORTED_CANONICAL_SHAPES[item["canonical"]]
+                for (probe_x, probe_y), expected in _SHAPE_PIXEL_PROBES[shape].items():
+                    assert mask[probe_y * image.width() + probe_x] is expected, (
+                        item["canonical"],
+                        shape,
+                        (probe_x, probe_y),
+                        expected,
+                    )
     finally:
         status_label.deleteLater()
         app.processEvents()
