@@ -60,6 +60,36 @@ def test_dialog_validates_empty_operator(app):
     assert dialog._operator_combo.accessibleDescription() == "Введите оператора"
 
 
+def test_editing_invalid_name_clears_fault_border_and_announcement(app):
+    dialog = NewExperimentDialog(available_templates=[])
+    dialog._name_edit.setText("")
+    dialog._operator_combo.setEditText("V")
+    dialog._on_create_clicked()
+
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._name_edit.styleSheet()
+    assert dialog._name_edit.accessibleDescription() == "Введите название"
+
+    dialog._name_edit.setText("Лабораторная")
+    assert dialog._name_edit.styleSheet() == "", "corrected name must drop the fault border"
+    assert dialog._name_edit.accessibleDescription() == "", "corrected name must clear stale announcement"
+    assert dialog._validation_label.isHidden(), "editing the invalid field must clear the visible error"
+
+
+def test_editing_invalid_operator_clears_fault_border_and_announcement(app):
+    dialog = NewExperimentDialog(available_templates=[])
+    dialog._name_edit.setText("Test")
+    dialog._operator_combo.setEditText("")
+    dialog._on_create_clicked()
+
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._operator_combo.styleSheet()
+    assert dialog._operator_combo.accessibleDescription() == "Введите оператора"
+
+    dialog._operator_combo.setEditText("Vladimir")
+    assert dialog._operator_combo.styleSheet() == "", "corrected operator must drop the fault border"
+    assert dialog._operator_combo.accessibleDescription() == "", "corrected operator must clear stale announcement"
+    assert dialog._validation_label.isHidden(), "editing the invalid field must clear the visible error"
+
+
 def test_dialog_emits_payload_on_valid_submit(app):
     dialog = NewExperimentDialog(available_templates=[])
     dialog._name_edit.setText("Test exp")

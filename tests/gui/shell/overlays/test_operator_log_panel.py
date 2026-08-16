@@ -359,6 +359,10 @@ def test_unresolved_submit_keeps_disabled_payload_fields_readable(app):
     for field in (panel._author_edit, panel._tags_edit, panel._message_edit):
         assert f"color: {theme.FOREGROUND};" in field.styleSheet()
         assert f"color: {theme.TEXT_DISABLED};" not in field.styleSheet()
+        # The disabled rule must carry a non-color cue so a locked composer
+        # field does not present as editable while the payload stays readable.
+        assert "dashed" in field.styleSheet()
+        assert f"background-color: {theme.SURFACE_MUTED};" in field.styleSheet()
 
 
 def test_ambiguous_persistence_failure_retains_draft_and_retry_identity(app):

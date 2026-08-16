@@ -146,13 +146,16 @@ Note: fault keeps value FOREGROUND per RULE-A11Y-003 (contrast); the border + ic
 |---|---|---|
 | ok | STATUS_OK | MUTED_FOREGROUND |
 | caution | STATUS_CAUTION | MUTED_FOREGROUND |
-| fault | STATUS_FAULT | FOREGROUND with STATUS_FAULT left border |
+| fault | FOREGROUND | FOREGROUND with STATUS_FAULT left border |
 | stale | STATUS_STALE | MUTED_FOREGROUND |
 
 Fault labels use neutral FOREGROUND text; the STATUS_FAULT left border is the
 only red fault cue. The safety dot inherits neutral text, and disk evidence
 does not render a dot. Other inline-state labels stay MUTED_FOREGROUND. This
 avoids RULE-A11Y-003 body contrast failure without removing the fault cue.
+`BottomStatusBar.set_safety_state()` keeps its fault dot FOREGROUND (neutral)
+with the status only carried by the left border; a generic InlineIndicator
+may instead use a STATUS_FAULT dot, but never in the BottomStatusBar case.
 
 ### Filled pills / badges (Mode badge, AlarmBadge, filled StatusBadge)
 

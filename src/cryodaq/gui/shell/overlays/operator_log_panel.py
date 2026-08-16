@@ -174,9 +174,12 @@ def _style_input(widget: QLineEdit | QPlainTextEdit) -> None:
         f"}}"
         # Disabled composer fields can retain an unresolved journal payload.
         # Keep that evidence readable while setEnabled(False) preserves the
-        # no-mutation boundary.
+        # no-mutation boundary, and carry a non-color disabled cue so a
+        # locked field never presents as editable.
         f" QLineEdit:disabled, QPlainTextEdit:disabled {{"
+        f" background-color: {theme.SURFACE_MUTED};"
         f" color: {theme.FOREGROUND};"
+        f" border: 1px dashed {theme.BORDER_SUBTLE};"
         f"}}"
     )
 

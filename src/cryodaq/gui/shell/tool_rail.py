@@ -222,7 +222,7 @@ class ToolRailButton(QToolButton):
         }:
             popup_focus = self._popup_keyboard_focus
             self._popup_keyboard_focus = None
-            self._set_keyboard_focus(True if popup_focus is None else popup_focus)
+            self._set_keyboard_focus(False if popup_focus is None else popup_focus)
             return
         self._set_keyboard_focus(
             event.reason()

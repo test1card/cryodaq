@@ -117,13 +117,52 @@ def test_popup_focus_return_preserves_keyboard_focus_ring() -> None:
     app.processEvents()
     assert button.property("keyboardFocus") is True
 
+    # A real popup round-trip: focus leaves with PopupFocusReason (capturing
+    # the keyboard ring) and returns with PopupFocusReason (restoring it).
+    button.focusOutEvent(QFocusEvent(QEvent.Type.FocusOut, Qt.FocusReason.PopupFocusReason))
+    assert button.property("keyboardFocus") is False
+    button.focusInEvent(QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.PopupFocusReason))
+    assert button.property("keyboardFocus") is True
+
+
+def test_popup_focus_return_without_captured_modality_keeps_non_keyboard() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
+    app.processEvents()
+
+    button = rail._buttons["home"]
+    other = rail._buttons["new_experiment"]
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    app.processEvents()
+    assert button.property("keyboardFocus") is True
+
+    # Focus leaves for a non-popup reason, then comes back with
+    # PopupFocusReason but no captured modality: the ring must stay off.
     other.setFocus(Qt.FocusReason.OtherFocusReason)
     app.processEvents()
     assert button.property("keyboardFocus") is False
 
-    button.setFocus(Qt.FocusReason.PopupFocusReason)
+    button.focusInEvent(QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.PopupFocusReason))
+    assert button.property("keyboardFocus") is False, "unmatched popup return must not invent a keyboard ring"
+
+
+def test_active_window_focus_without_capture_does_not_invent_keyboard_ring() -> None:
+    app = _app()
+    rail = ToolRail()
+    rail.show()
     app.processEvents()
-    assert button.property("keyboardFocus") is True
+
+    # NEW rail button: never Tab-focused, no capture recorded. Qt delivers
+    # ActiveWindowFocusReason when the window is first activated and the
+    # initially focused rail button receives focus. The ring must stay off.
+    button = rail._buttons["home"]
+    button.focusInEvent(QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.ActiveWindowFocusReason))
+    assert button.property("keyboardFocus") is False, (
+        "unmatched ActiveWindowFocusReason must not invent a keyboard ring"
+    )
 
 
 def test_active_window_focus_return_preserves_keyboard_focus_ring() -> None:

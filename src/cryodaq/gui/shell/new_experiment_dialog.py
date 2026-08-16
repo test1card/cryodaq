@@ -82,6 +82,7 @@ class NewExperimentDialog(QDialog):
         # Name
         self._name_edit = QLineEdit()
         self._name_edit.setMaxLength(100)
+        self._name_edit.textChanged.connect(self._on_field_edited)
         form.addRow("\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 *:", self._name_edit)
 
         # Operator (editable combobox with history)
@@ -93,6 +94,7 @@ class NewExperimentDialog(QDialog):
         known_ops = QSettings("FIAN", "CryoDAQ").value("known_operators", [])
         if isinstance(known_ops, list) and known_ops:
             self._operator_combo.addItems(known_ops)
+        self._operator_combo.lineEdit().textChanged.connect(self._on_field_edited)
         form.addRow("\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440 *:", self._operator_combo)
 
         # Sample
@@ -228,6 +230,9 @@ class NewExperimentDialog(QDialog):
             edit.setObjectName(f"custom_{fid}")
             self._custom_edits[fid] = edit
             self._custom_form.addRow(f"{field.get('label', fid)}:", edit)
+
+    def _on_field_edited(self, *_args: object) -> None:
+        self._clear_error()
 
     def _on_create_clicked(self) -> None:
         self._clear_error()
