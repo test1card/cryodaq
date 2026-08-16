@@ -116,7 +116,7 @@ def test_gui_smoke_refuses_live_descendant_holding_inherited_pipes(
     monkeypatch.setattr(
         smoke, "_create_gui_process_job", lambda candidate: job if candidate is process else None, raising=False
     )
-    monkeypatch.setattr(smoke, "_GUI_PIPE_SETTLEMENT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(smoke, "_GUI_PIPE_SETTLEMENT_TIMEOUT_S", 0.01, raising=False)
     monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
