@@ -21,12 +21,77 @@ _CONVENIENCE_LOADERS = {
     "unsafe_load_all",
 }
 _EXPLICIT_LOADERS = {"load", "load_all", "scan", "scan_all", "parse", "compose", "compose_all"}
-_LOADER_CLASSES = {"Loader", "SafeLoader", "UnsafeLoader", "FullLoader", "BaseLoader"}
+# PyYAML's C-backed loader classes are included because, on installations with
+# LibYAML support, `yaml.CSafeLoader(text).get_single_data()` is a parse path that
+# bypasses the owned loader exactly like the pure-Python classes, and `CSafeLoader`
+# shares `SafeLoader`'s mutable constructor and resolver tables by reference.
+_LOADER_CLASSES = {
+    "Loader",
+    "SafeLoader",
+    "UnsafeLoader",
+    "FullLoader",
+    "BaseLoader",
+    "CLoader",
+    "CSafeLoader",
+    "CFullLoader",
+    "CUnsafeLoader",
+}
+
+# The five mutable class attributes that subclassing `yaml.SafeLoader` shares BY
+# REFERENCE.  A subclass of the owned loader that rebinds one of these to PyYAML
+# state undoes the ownership snapshot and must not be trusted.
+_OWNED_TABLE_NAMES = frozenset(
+    {
+        "yaml_constructors",
+        "yaml_multi_constructors",
+        "yaml_implicit_resolvers",
+        "yaml_path_resolvers",
+        "bool_values",
+    }
+)
+
+
+def _yaml_module_names(tree: ast.Module) -> set[str]:
+    """Names bound to the ``yaml`` module in this tree (``import yaml as _yaml`` etc.)."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.asname or alias.name for alias in node.names if alias.name == "yaml")
+    return names
+
+
+def _references_yaml_module(value: ast.expr, yaml_modules: set[str]) -> bool:
+    """True when ``value`` reads PyYAML state through a ``yaml``-bound name."""
+    return any(
+        isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in yaml_modules
+        for node in ast.walk(value)
+    )
+
+
+def _subclass_reattaches_pyyaml_tables(class_node: ast.ClassDef, yaml_modules: set[str]) -> bool:
+    """True when a class body rebinds an owned mutable parser table to PyYAML state."""
+    for statement in class_node.body:
+        if isinstance(statement, ast.Assign):
+            targets = [(target, statement.value) for target in statement.targets]
+        elif isinstance(statement, ast.AnnAssign):
+            targets = [(statement.target, statement.value)]
+        else:
+            continue
+        for target, value in targets:
+            if (
+                isinstance(target, ast.Name)
+                and target.id in _OWNED_TABLE_NAMES
+                and value is not None
+                and _references_yaml_module(value, yaml_modules)
+            ):
+                return True
+    return False
 
 
 def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
     names: set[str] = set()
     modules: set[str] = set()
+    yaml_modules = _yaml_module_names(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module in {"_owned_yaml", "cryodaq._owned_yaml"}:
             names.update(alias.asname or alias.name for alias in node.names if alias.name == "OwnedSafeLoader")
@@ -56,7 +121,11 @@ def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
                 )
                 for base in node.bases
             ):
-                names.add(node.name)
+                if _subclass_reattaches_pyyaml_tables(node, yaml_modules):
+                    names.discard(node.name)
+                    modules.discard(node.name)
+                else:
+                    names.add(node.name)
             else:
                 names.discard(node.name)
                 modules.discard(node.name)
@@ -199,6 +268,11 @@ def test_guard_rejects_rebound_owned_loader_names(tmp_path: Path, source: str) -
         ("import yaml\nyaml.Loader('x').get_single_data()\n", "Loader"),
         ("from yaml import SafeLoader\nloader = SafeLoader('x')\n", "SafeLoader"),
         ("import yaml\nloader = yaml.BaseLoader('x')\n", "BaseLoader"),
+        ("import yaml\nloader = yaml.CLoader('x')\n", "CLoader"),
+        ("import yaml\nloader = yaml.CSafeLoader('x')\n", "CSafeLoader"),
+        ("import yaml\nloader = yaml.CFullLoader('x')\n", "CFullLoader"),
+        ("import yaml\nloader = yaml.CUnsafeLoader('x')\n", "CUnsafeLoader"),
+        ("from yaml import CSafeLoader\nloader = CSafeLoader('x')\n", "CSafeLoader"),
     ],
     ids=[
         "module-attr",
@@ -207,6 +281,11 @@ def test_guard_rejects_rebound_owned_loader_names(tmp_path: Path, source: str) -
         "construct-and-parse",
         "from-import",
         "module-attr-base",
+        "module-attr-cloader",
+        "module-attr-csafe",
+        "module-attr-cfull",
+        "module-attr-cunsafe",
+        "from-import-csafe",
     ],
 )
 def test_guard_finds_direct_loader_construction(tmp_path: Path, source: str, expected: str) -> None:
@@ -226,3 +305,63 @@ def test_guard_accepts_relative_import_of_owned_loader(tmp_path: Path) -> None:
     )
 
     assert _unsafe_yaml_calls(path, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("table", "source"),
+    [
+        (
+            "yaml_constructors",
+            """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    yaml_constructors = yaml.SafeLoader.yaml_constructors
+yaml.load('x', Loader=Reattached)
+""",
+        ),
+        (
+            "yaml_multi_constructors",
+            """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    yaml_multi_constructors = yaml.SafeLoader.yaml_multi_constructors
+yaml.load('x', Loader=Reattached)
+""",
+        ),
+        (
+            "yaml_implicit_resolvers",
+            """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    yaml_implicit_resolvers = yaml.SafeLoader.yaml_implicit_resolvers
+yaml.load('x', Loader=Reattached)
+""",
+        ),
+        (
+            "yaml_path_resolvers",
+            """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    yaml_path_resolvers = yaml.SafeLoader.yaml_path_resolvers
+yaml.load('x', Loader=Reattached)
+""",
+        ),
+        (
+            "bool_values",
+            """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    bool_values = yaml.SafeLoader.bool_values
+yaml.load('x', Loader=Reattached)
+""",
+        ),
+    ],
+    ids=["constructors", "multi-constructors", "implicit-resolvers", "path-resolvers", "bool-values"],
+)
+def test_guard_rejects_subclass_reattaching_owned_tables(tmp_path: Path, table: str, source: str) -> None:
+    path = tmp_path / "probe.py"
+    path.write_text(source, encoding="utf-8")
+
+    offenders = _unsafe_yaml_calls(path, tmp_path)
+    assert len(offenders) == 1
+    assert "PyYAML load bypasses cryodaq._owned_yaml.OwnedSafeLoader" in offenders[0]
