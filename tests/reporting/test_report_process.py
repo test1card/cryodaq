@@ -1085,6 +1085,40 @@ def test_windows_job_closes_on_ordinary_nonzero_exit(
     assert events == ["assign", "resume", "wait", "close"]
 
 
+def test_windows_job_close_failure_after_ordinary_exit_is_report_process_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    class FakeProcess:
+        pid = 321
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    class FakeJob:
+        def close(self) -> None:
+            raise OSError("CloseHandle failed")
+
+    runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
+    monkeypatch.setattr(module.os, "name", "nt")
+    monkeypatch.setattr(
+        module,
+        "_popen_windows_job",
+        lambda *_args, **_kwargs: (FakeProcess(), FakeJob()),
+    )
+
+    with pytest.raises(
+        ReportProcessError,
+        match="Job Object cleanup failed after exit",
+    ) as exc_info:
+        runner._run_process(["fixed-child"])
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert str(exc_info.value.__cause__) == "CloseHandle failed"
+
+
 def test_windows_job_closes_on_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

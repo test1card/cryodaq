@@ -1424,7 +1424,10 @@ class ReportProcessRunner:
             if os.name != "nt" and not timed_out:
                 terminate_process_tree(process.pid, grace_s=0.1)
             if windows_job is not None and not timed_out:
-                windows_job.close()
+                try:
+                    windows_job.close()
+                except Exception as exc:
+                    raise ReportProcessError("report child Windows Job Object cleanup failed after exit") from exc
         return return_code
 
     def _generate_experiment(
