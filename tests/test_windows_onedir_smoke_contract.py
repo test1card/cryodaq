@@ -56,17 +56,24 @@ def test_workflow_builds_and_executes_real_windows_onedir() -> None:
 
 def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
     source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
+    compact = "".join(source.split())
 
     assert 'command = [str(executable), "--mode=gui"]' in source
     assert '"QT_QPA_PLATFORM": "offscreen"' in source
-    assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
+    assert (
+        '_run_smoke_cell(cells,"gui_startup_offscreen",_run_gui_startup_cell,executable,runtime_root,evidence_dir,)'
+    ) in compact
 
 
 def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:
     source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
+    compact = "".join(source.split())
 
     assert 'return [str(executable), "--mode=verify-frozen-drivers"]' in source
-    assert "_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir)" in source
+    assert (
+        '_run_smoke_cell(cells,"frozen_driver_imports",_run_frozen_driver_import_cell,'
+        "executable,runtime_root,evidence_dir,)"
+    ) in compact
 
 
 def test_run_smoke_executes_frozen_driver_cell_as_required_production_step(
@@ -625,3 +632,132 @@ def test_run_smoke_reports_raised_gui_cell_identity(
     assert "cell gui_startup_offscreen: FAIL" in err
     assert "GUI_STARTUP_NOT_READY" in err
     assert "cell frozen_driver_imports" not in err
+
+
+def test_run_smoke_binds_every_cell_through_the_shared_helper() -> None:
+    """Every cell runs under the one shared binding, never a manual duplicate."""
+    source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
+    body = source[source.index("def run_smoke(") : source.index("def _parser(")]
+
+    assert "active_cell" not in body
+    assert body.count("_run_smoke_cell(") == len(EXPECTED_SMOKE_CELL_NAMES)
+    assert "cells.append(" not in body
+
+
+@pytest.mark.parametrize(
+    ("runner_attribute", "failing_name"),
+    [
+        ("_run_frozen_driver_import_cell", "frozen_driver_imports"),
+        ("_run_gui_startup_cell", "gui_startup_offscreen"),
+        ("_run_report_cell", "report_render_unicode"),
+        ("_run_job_timeout_cell", "windows_job_timeout"),
+        ("_run_assistant_cell", "assistant_h2_agent_off"),
+        ("_run_assistant_cell", "assistant_h2_agent_missing"),
+        ("_run_assistant_cell", "assistant_replay_exact_off"),
+        ("_run_assistant_cell", "assistant_h3_only_allowed_idle"),
+        ("_run_assistant_cell", "assistant_h3_only_restart_lock_release"),
+    ],
+)
+def test_raise_in_every_smoke_cell_is_bound_to_its_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner_attribute: str,
+    failing_name: str,
+) -> None:
+    """A raise in any one of the nine cells stays named by that cell."""
+    dist_dir = tmp_path / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "CryoDAQ.exe").write_bytes(b"frozen-executable")
+    evidence_dir = tmp_path / "evidence"
+
+    def named_runner(*_args: object, **kwargs: object) -> dict[str, str]:
+        name = str(kwargs["name"])
+        if name == failing_name:
+            raise RuntimeError(f"CONTROL_RAISE_{failing_name}")
+        return {"name": name, "status": "PASS"}
+
+    def fixed_runner(cell_name: str) -> object:
+        def runner(*_args: object, **_kwargs: object) -> dict[str, str]:
+            if cell_name == failing_name:
+                raise RuntimeError(f"CONTROL_RAISE_{failing_name}")
+            return {"name": cell_name, "status": "PASS"}
+
+        return runner
+
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke, "_run_frozen_driver_import_cell", fixed_runner("frozen_driver_imports"))
+    monkeypatch.setattr(smoke, "_run_gui_startup_cell", fixed_runner("gui_startup_offscreen"))
+    monkeypatch.setattr(smoke, "_run_report_cell", named_runner)
+    monkeypatch.setattr(smoke, "_run_job_timeout_cell", fixed_runner("windows_job_timeout"))
+    monkeypatch.setattr(smoke, "_run_assistant_cell", named_runner)
+    monkeypatch.setattr(smoke, "_write_periodic_config", lambda *_a, **_k: None)
+    monkeypatch.setattr(smoke, "_artifact_inventory", lambda *_a, **_k: {"schema": 1})
+
+    assert smoke.run_smoke(dist_dir, evidence_dir) == 1
+    payload = json.loads((evidence_dir / "smoke-result.json").read_text(encoding="utf-8"))
+    failed = payload["cells"][-1]
+    assert failed["name"] == failing_name
+    assert failed["status"] == "FAIL"
+    assert f"CONTROL_RAISE_{failing_name}" in failed["reason"]
+
+
+def test_frozen_driver_import_cell_emits_bounded_tail_diagnostic_on_nonzero_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real nonzero subprocess result raises with the bounded output tail."""
+    runtime_root = tmp_path / "runtime"
+    evidence_dir = tmp_path / "evidence"
+    runtime_root.mkdir()
+    evidence_dir.mkdir()
+    executable = runtime_root / "CryoDAQ.exe"
+    executable.write_bytes(b"test placeholder")
+
+    def failing_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=3,
+            stdout=b"HEAD-MARKER-LOST" + b"x" * 2048,
+            stderr=b"y" * 2048 + b"TAIL-MARKER-PRESERVED",
+        )
+
+    monkeypatch.setattr(smoke.subprocess, "run", failing_run)
+
+    with pytest.raises(RuntimeError, match="frozen_driver_imports returned 3") as excinfo:
+        smoke._run_frozen_driver_import_cell(executable, runtime_root, evidence_dir)
+
+    message = str(excinfo.value)
+    assert "TAIL-MARKER-PRESERVED" in message
+    assert "HEAD-MARKER-LOST" not in message
+
+
+def test_nonzero_frozen_subprocess_diagnostic_reaches_the_ordinary_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A nonzero EXE result through the real helper logs its causal output."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "CryoDAQ.exe").write_bytes(b"frozen-executable")
+    evidence = tmp_path / "evidence"
+
+    def failing_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=7,
+            stdout=b"stdout-line\n",
+            stderr=b"CRYODAQ-DIAGNOSTIC-MARKER: driver import exploded\n",
+        )
+
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke.subprocess, "run", failing_run)
+
+    assert smoke.run_smoke(dist, evidence) == 1
+    payload = json.loads((evidence / "smoke-result.json").read_text(encoding="utf-8"))
+    failed = payload["cells"][-1]
+    assert failed["name"] == "frozen_driver_imports"
+    assert failed["status"] == "FAIL"
+    assert "returned 7" in failed["reason"]
+    assert "CRYODAQ-DIAGNOSTIC-MARKER" in failed["reason"]
+    err = capsys.readouterr().err
+    assert "CRYODAQ-DIAGNOSTIC-MARKER" in err
+    assert "cell frozen_driver_imports: FAIL" in err

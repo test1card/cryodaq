@@ -6420,7 +6420,7 @@ records:
     green_evidence: pending
 
   - id: ONEDIR-SMOKE-CELL-DIAGNOSTIC-VISIBILITY-001
-    status: open
+    status: reopened
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
     applies_to: Windows one-directory smoke cells that raise before returning their result record.
@@ -6434,11 +6434,33 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#integration-and-publication-discipline
     guards:
+      - node: tests/test_windows_onedir_smoke_contract.py::test_run_smoke_reports_raised_gui_cell_identity
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_run_smoke_binds_every_cell_through_the_shared_helper
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_raise_in_every_smoke_cell_is_bound_to_its_identity
+        ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+
+  - id: ONEDIR-CHECK-WARNINGS-REASON-VISIBILITY-001
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Windows one-directory check-warnings gate runs that fail or report missing modules.
+    classification: warning_gate_reason_evidence_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A failed check-warnings run can leave its reason invisible in the ordinary CI log, recorded only inside the JSON artifact that an artifact-overwriting rerun destroys, so a transient failure becomes permanently undiagnosable.
+    invariant: Every failing check-warnings run prints its failure reason, including the required-module list and the missing-warning-file case, to the ordinary CI log in the same run that writes the JSON evidence.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#integration-and-publication-discipline
+    guards:
       - node: tests/test_windows_onedir_smoke_contract.py::test_check_warnings_prints_its_reason_not_only_the_json
         ci_partition: remaining
       - node: tests/test_windows_onedir_smoke_contract.py::test_check_warnings_reports_a_missing_warning_file_in_the_log
-        ci_partition: remaining
-      - node: tests/test_windows_onedir_smoke_contract.py::test_run_smoke_reports_raised_gui_cell_identity
         ci_partition: remaining
     red_evidence: pending
     green_evidence: pending

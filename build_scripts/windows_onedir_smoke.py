@@ -24,6 +24,7 @@ from typing import Any
 
 _JSON_LIMIT = 256 * 1024
 _RESULT_LIMIT = 64 * 1024
+_SMOKE_DIAGNOSTIC_BYTES = 512
 _REQUIRED_FROZEN_MODULES = (
     "aiohttp",
     "cryodaq.agents.assistant.periodic_png",
@@ -501,6 +502,19 @@ def _write_log(evidence_dir: Path, name: str, completed: subprocess.CompletedPro
     }
 
 
+def _subprocess_failure(name: str, completed: subprocess.CompletedProcess[bytes]) -> RuntimeError:
+    """Build the bounded failure raised when a frozen cell's EXE exits nonzero.
+
+    The bounded tail of the captured stdout/stderr travels inside the exception
+    so the ordinary CI log carries the causal output rather than only the exit
+    code, whose evidence artifact an artifact-overwriting rerun destroys. The
+    full capture remains in the evidence artifact.
+    """
+    tail = (completed.stdout + completed.stderr)[-_SMOKE_DIAGNOSTIC_BYTES:]
+    diagnostic = tail.decode("utf-8", errors="replace")
+    return RuntimeError(f"{name} returned {completed.returncode}: {diagnostic!r}")
+
+
 def _run_frozen_driver_import_cell(
     executable: Path,
     root: Path,
@@ -522,7 +536,7 @@ def _run_frozen_driver_import_cell(
     )
     logs = _write_log(evidence_dir, "frozen_driver_imports", completed)
     if completed.returncode != 0:
-        raise RuntimeError(f"frozen_driver_imports returned {completed.returncode}")
+        raise _subprocess_failure("frozen_driver_imports", completed)
     try:
         validation = _parse_frozen_driver_import_payload(completed.stdout)
     except (UnicodeError, ValueError) as exc:
@@ -567,7 +581,7 @@ def _run_report_cell(
     completed = subprocess.run(command, env=env, capture_output=True, timeout=timeout, check=False)
     logs = _write_log(evidence_dir, name, completed)
     if completed.returncode != 0:
-        raise RuntimeError(f"{name} returned {completed.returncode}")
+        raise _subprocess_failure(name, completed)
     validation = validate_report_evidence(data_dir, experiment_id, generation_id)
     return {
         "name": name,
@@ -857,7 +871,7 @@ def _run_assistant_cell(
         }
     )
     if completed.returncode != 0:
-        raise RuntimeError(f"{name} shutdown returned {completed.returncode}")
+        raise _subprocess_failure(f"{name} shutdown", completed)
     if _pid_exists(process.pid):
         raise RuntimeError(f"{name} process remained after shutdown")
     state_summary: dict[str, object] | None = None
@@ -946,6 +960,33 @@ def smoke_summary(cells: list[dict[str, Any]]) -> tuple[str, str | None]:
     return "PASS", None
 
 
+def _run_smoke_cell(
+    cells: list[dict[str, Any]],
+    cell_name: str,
+    runner: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    """Run one required smoke cell under a single bound identity.
+
+    Every cell invocation flows through this one binding, so a production
+    failure is always attributed to the same name the runner returns, and
+    removing or misnaming a binding cannot leave a raise unattributed while
+    every registered guard stays green.
+    """
+    try:
+        cells.append(runner(*args, **kwargs))
+    except BaseException as exc:
+        cells.append(
+            {
+                "name": cell_name,
+                "status": "FAIL",
+                "reason": f"{type(exc).__name__}:{str(exc)[:512]}",
+            }
+        )
+        raise
+
+
 def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
     evidence_dir = evidence_dir.resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -953,7 +994,6 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
     cells: list[dict[str, Any]] = []
     status = "FAIL"
     reason: str | None = None
-    active_cell: str | None = None
     try:
         if os.name != "nt":
             raise RuntimeError("WINDOWS_REQUIRED")
@@ -969,121 +1009,127 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         if executable.resolve() == source_exe.resolve():
             raise RuntimeError("UNICODE_COPY_NOT_USED")
 
-        active_cell = "frozen_driver_imports"
-        cells.append(_run_frozen_driver_import_cell(executable, runtime_root, evidence_dir))
-        active_cell = None
-        active_cell = "gui_startup_offscreen"
-        cells.append(_run_gui_startup_cell(executable, runtime_root, evidence_dir))
-        active_cell = None
-        active_cell = "report_render_unicode"
-        cells.append(
-            _run_report_cell(
-                executable,
-                runtime_root,
-                evidence_dir,
-                name="report_render_unicode",
-                experiment_id="exp-onedir",
-                generation_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
+        _run_smoke_cell(
+            cells,
+            "frozen_driver_imports",
+            _run_frozen_driver_import_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
         )
-        active_cell = None
-        active_cell = "windows_job_timeout"
-        cells.append(_run_job_timeout_cell(executable, runtime_root, evidence_dir))
-        active_cell = None
+        _run_smoke_cell(
+            cells,
+            "gui_startup_offscreen",
+            _run_gui_startup_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+        )
+        _run_smoke_cell(
+            cells,
+            "report_render_unicode",
+            _run_report_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+            name="report_render_unicode",
+            experiment_id="exp-onedir",
+            generation_id="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        _run_smoke_cell(
+            cells,
+            "windows_job_timeout",
+            _run_job_timeout_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+        )
 
         # H2 works independently with both an explicit LLM-off config and a
         # missing optional agent config.  The event SUB socket may be idle.
-        active_cell = "assistant_h2_agent_off"
-        cells.append(
-            _run_assistant_cell(
-                executable,
-                runtime_root,
-                evidence_dir,
-                name="assistant_h2_agent_off",
-                experiment_mode="1",
-                periodic_mode="0",
-                agent="false",
-                automatic=True,
-            )
+        _run_smoke_cell(
+            cells,
+            "assistant_h2_agent_off",
+            _run_assistant_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+            name="assistant_h2_agent_off",
+            experiment_mode="1",
+            periodic_mode="0",
+            agent="false",
+            automatic=True,
         )
-        active_cell = None
-        active_cell = "assistant_h2_agent_missing"
-        cells.append(
-            _run_assistant_cell(
-                executable,
-                runtime_root,
-                evidence_dir,
-                name="assistant_h2_agent_missing",
-                experiment_mode="1",
-                periodic_mode="0",
-                agent=None,
-                automatic=True,
-            )
+        _run_smoke_cell(
+            cells,
+            "assistant_h2_agent_missing",
+            _run_assistant_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+            name="assistant_h2_agent_missing",
+            experiment_mode="1",
+            periodic_mode="0",
+            agent=None,
+            automatic=True,
         )
-        active_cell = None
-
-        active_cell = "assistant_replay_exact_off"
-        cells.append(
-            _run_assistant_cell(
-                executable,
-                runtime_root,
-                evidence_dir,
-                name="assistant_replay_exact_off",
-                experiment_mode="0",
-                periodic_mode="0",
-                agent="false",
-                automatic=False,
-            )
+        _run_smoke_cell(
+            cells,
+            "assistant_replay_exact_off",
+            _run_assistant_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+            name="assistant_replay_exact_off",
+            experiment_mode="0",
+            periodic_mode="0",
+            agent="false",
+            automatic=False,
         )
-        active_cell = None
 
         # A valid synthetic config loads the complete frozen H3 stack.  No
         # engine publisher is present, so bounded non-ready durable health is
         # the expected allowed-idle outcome and no Telegram request is attempted.
         synthetic_token = "123456:abcdefghijklmnopqrstuvwxyzABCDE"
         _write_periodic_config(runtime_root, synthetic_token)
-        active_cell = "assistant_h3_only_allowed_idle"
-        cells.append(
-            _run_assistant_cell(
-                executable,
-                runtime_root,
-                evidence_dir,
-                name="assistant_h3_only_allowed_idle",
-                experiment_mode="0",
-                periodic_mode="1",
-                agent="false",
-                automatic=False,
-                expect_periodic_state=True,
-                forbidden_text=synthetic_token,
-            )
+        _run_smoke_cell(
+            cells,
+            "assistant_h3_only_allowed_idle",
+            _run_assistant_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+            name="assistant_h3_only_allowed_idle",
+            experiment_mode="0",
+            periodic_mode="1",
+            agent="false",
+            automatic=False,
+            expect_periodic_state=True,
+            forbidden_text=synthetic_token,
         )
-        active_cell = None
         # Reacquiring the durable leader and publishing health in the same
         # root proves the first frozen assistant released its kernel lock.
-        active_cell = "assistant_h3_only_restart_lock_release"
-        cells.append(
-            _run_assistant_cell(
-                executable,
-                runtime_root,
-                evidence_dir,
-                name="assistant_h3_only_restart_lock_release",
-                experiment_mode="0",
-                periodic_mode="1",
-                agent="false",
-                automatic=False,
-                expect_periodic_state=True,
-                forbidden_text=synthetic_token,
-            )
+        _run_smoke_cell(
+            cells,
+            "assistant_h3_only_restart_lock_release",
+            _run_assistant_cell,
+            executable,
+            runtime_root,
+            evidence_dir,
+            name="assistant_h3_only_restart_lock_release",
+            experiment_mode="0",
+            periodic_mode="1",
+            agent="false",
+            automatic=False,
+            expect_periodic_state=True,
+            forbidden_text=synthetic_token,
         )
-        active_cell = None
 
         inventory = _artifact_inventory(dist_dir)
         _atomic_json(evidence_dir / "artifact-hashes.json", inventory)
         status, reason = smoke_summary(cells)
     except BaseException as exc:
         reason = f"{type(exc).__name__}:{str(exc)[:512]}"
-        if active_cell is not None:
-            cells.append({"name": active_cell, "status": "FAIL", "reason": reason})
     finally:
         runtime_parent = evidence_dir.parent / "windows smoke runtime path with spaces"
         if runtime_parent.exists():
