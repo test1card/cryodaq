@@ -21,6 +21,7 @@ _CONVENIENCE_LOADERS = {
     "unsafe_load_all",
 }
 _EXPLICIT_LOADERS = {"load", "load_all", "scan", "scan_all", "parse", "compose", "compose_all"}
+_LOADER_CLASSES = {"Loader", "SafeLoader", "UnsafeLoader", "FullLoader", "BaseLoader"}
 
 
 def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
@@ -83,7 +84,7 @@ def _unsafe_yaml_calls(path: Path, root: Path) -> list[str]:
             yaml_functions.update(
                 (alias.asname or alias.name, alias.name)
                 for alias in node.names
-                if alias.name in _CONVENIENCE_LOADERS | _EXPLICIT_LOADERS
+                if alias.name in _CONVENIENCE_LOADERS | _EXPLICIT_LOADERS | _LOADER_CLASSES
             )
 
     owned_names, owned_modules = _owned_loader_names(tree)
@@ -107,6 +108,10 @@ def _unsafe_yaml_calls(path: Path, root: Path) -> list[str]:
             api in _EXPLICIT_LOADERS and not _uses_owned_loader(node, owned_names, owned_modules)
         ):
             offenders.append(f"{relative}:{node.lineno}: PyYAML {api} bypasses cryodaq._owned_yaml.OwnedSafeLoader")
+        elif api in _LOADER_CLASSES:
+            offenders.append(
+                f"{relative}:{node.lineno}: PyYAML {api} construction bypasses cryodaq._owned_yaml.OwnedSafeLoader"
+            )
     return offenders
 
 
@@ -183,6 +188,36 @@ def test_guard_rejects_rebound_owned_loader_names(tmp_path: Path, source: str) -
     offenders = _unsafe_yaml_calls(path, tmp_path)
     assert len(offenders) == 1
     assert "PyYAML load bypasses cryodaq._owned_yaml.OwnedSafeLoader" in offenders[0]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import yaml\nyaml.SafeLoader('x')\n", "SafeLoader"),
+        ("import yaml\nloader = yaml.UnsafeLoader('x')\n", "UnsafeLoader"),
+        ("import yaml\nloader = yaml.FullLoader('x')\n", "FullLoader"),
+        ("import yaml\nyaml.Loader('x').get_single_data()\n", "Loader"),
+        ("from yaml import SafeLoader\nloader = SafeLoader('x')\n", "SafeLoader"),
+        ("import yaml\nloader = yaml.BaseLoader('x')\n", "BaseLoader"),
+    ],
+    ids=[
+        "module-attr",
+        "module-attr-unsafe",
+        "module-attr-full",
+        "construct-and-parse",
+        "from-import",
+        "module-attr-base",
+    ],
+)
+def test_guard_finds_direct_loader_construction(tmp_path: Path, source: str, expected: str) -> None:
+    path = tmp_path / "probe.py"
+    path.write_text(source, encoding="utf-8")
+
+    offenders = _unsafe_yaml_calls(path, tmp_path)
+
+    assert offenders == [
+        f"probe.py:2: PyYAML {expected} construction bypasses cryodaq._owned_yaml.OwnedSafeLoader"
+    ]
 
 
 def test_guard_accepts_relative_import_of_owned_loader(tmp_path: Path) -> None:
