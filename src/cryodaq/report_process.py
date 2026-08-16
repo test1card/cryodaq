@@ -53,6 +53,7 @@ from cryodaq.reporting.periodic_input import (
 )
 
 DEFAULT_MANUAL_TIMEOUT_S = 48.0
+_WINDOWS_JOB_CLOSE_TIMEOUT_S = 5.0
 _RESULT_SCHEMA = 1
 _REPORT_FIELDS = {"docx_path", "pdf_path", "assets_dir", "sections", "skipped", "reason"}
 _PERIODIC_ENV_ALLOWLIST = frozenset(
@@ -1129,6 +1130,8 @@ class _WindowsJob:
             ctypes.c_void_p,
         ]
         kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
         job = kernel32.CreateJobObjectW(None, None)
@@ -1169,12 +1172,43 @@ class _WindowsJob:
         )
 
     def close(self) -> None:
-        if self._handle:
-            if not self._kernel32.CloseHandle(self._handle):
-                import ctypes
+        if not self._handle:
+            return
 
-                raise OSError(ctypes.get_last_error(), "CloseHandle for Windows Job Object failed")
+        import ctypes
+
+        settlement_error: Exception | None = None
+        try:
+            accounting = self.accounting()
+            if accounting.active_processes:
+                if not self._kernel32.TerminateJobObject(self._handle, 1):
+                    raise OSError(ctypes.get_last_error(), "TerminateJobObject failed")
+                deadline = time.monotonic() + _WINDOWS_JOB_CLOSE_TIMEOUT_S
+                while True:
+                    accounting = self.accounting()
+                    if accounting.active_processes == 0:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "Windows Job Object retained "
+                            f"{accounting.active_processes} active processes after termination"
+                        )
+                    time.sleep(0.01)
+        except Exception as exc:
+            settlement_error = exc
+
+        close_error: OSError | None = None
+        if not self._kernel32.CloseHandle(self._handle):
+            close_error = OSError(ctypes.get_last_error(), "CloseHandle for Windows Job Object failed")
+        else:
             self._handle = None
+
+        if close_error is not None:
+            if settlement_error is not None:
+                raise close_error from settlement_error
+            raise close_error
+        if settlement_error is not None:
+            raise settlement_error
 
 
 def _create_windows_job(process: subprocess.Popen[Any]) -> _WindowsJob:
@@ -1360,15 +1394,28 @@ class ReportProcessRunner:
             return_code = process.wait(timeout=self._timeout_s)
         except subprocess.TimeoutExpired as exc:
             timed_out = True
+            job_cleanup_error: Exception | None = None
             if windows_job is not None:
-                windows_job.close()
+                try:
+                    windows_job.close()
+                except Exception as job_close_exc:
+                    job_cleanup_error = job_close_exc
             else:
                 terminate_process_tree(process.pid)
+            process_cleanup_error: Exception | None = None
             try:
                 process.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2.0)
+                try:
+                    process.kill()
+                    process.wait(timeout=2.0)
+                except Exception as cleanup_exc:
+                    process_cleanup_error = cleanup_exc
+            cleanup_error = job_cleanup_error or process_cleanup_error
+            if cleanup_error is not None:
+                raise ReportProcessError(
+                    "report child Windows Job Object cleanup failed after timeout"
+                ) from cleanup_error
             raise ReportProcessError(f"report child timed out after {self._timeout_s:g}s") from exc
         finally:
             # A renderer may exit after orphaning a nested soffice process.
@@ -1376,7 +1423,7 @@ class ReportProcessRunner:
             # final group cleanup is safe even after the leader has exited.
             if os.name != "nt" and not timed_out:
                 terminate_process_tree(process.pid, grace_s=0.1)
-            if windows_job is not None:
+            if windows_job is not None and not timed_out:
                 windows_job.close()
         return return_code
 

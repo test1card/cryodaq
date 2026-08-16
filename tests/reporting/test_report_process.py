@@ -995,6 +995,49 @@ def test_windows_native_job_counts_and_kills_devnull_grandchild(tmp_path: Path) 
                     child.wait(timeout=2)
 
 
+def test_windows_job_close_terminates_and_waits_for_zero_active_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    events: list[tuple[str, int | float]] = []
+    active_counts = iter((1, 1, 0))
+
+    class FakeKernel32:
+        def TerminateJobObject(self, handle: int, exit_code: int) -> bool:
+            events.append(("terminate", exit_code))
+            assert handle == 123
+            return True
+
+        def CloseHandle(self, handle: int) -> bool:
+            events.append(("close", handle))
+            return True
+
+    job = object.__new__(module._WindowsJob)
+    job._handle = 123
+    job._kernel32 = FakeKernel32()
+
+    def accounting() -> object:
+        active_processes = next(active_counts)
+        events.append(("accounting", active_processes))
+        return module._WindowsJobAccounting(total_processes=2, active_processes=active_processes)
+
+    monkeypatch.setattr(job, "accounting", accounting)
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+
+    job.close()
+
+    assert events == [
+        ("accounting", 1),
+        ("terminate", 1),
+        ("accounting", 1),
+        ("sleep", 0.01),
+        ("accounting", 0),
+        ("close", 123),
+    ]
+    assert job._handle is None
+
+
 def test_windows_job_closes_on_ordinary_nonzero_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1082,6 +1125,47 @@ def test_windows_job_closes_on_timeout(
     with pytest.raises(ReportProcessError, match="timed out"):
         runner._run_process(["fixed-child"])
     assert job.closes >= 1
+
+
+def test_windows_job_close_failure_still_kills_and_settles_timed_out_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    class FakeProcess:
+        pid = 321
+        waits = 0
+        killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waits += 1
+            if not self.killed:
+                raise subprocess.TimeoutExpired("fixed-child", timeout)
+            return 1
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeJob:
+        closes = 0
+
+        def close(self) -> None:
+            self.closes += 1
+            raise OSError("CloseHandle failed")
+
+    process = FakeProcess()
+    job = FakeJob()
+    runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
+    monkeypatch.setattr(module.os, "name", "nt")
+    monkeypatch.setattr(module, "_popen_windows_job", lambda *_args, **_kwargs: (process, job))
+
+    with pytest.raises(ReportProcessError, match="Job Object cleanup failed after timeout"):
+        runner._run_process(["fixed-child"])
+
+    assert process.killed is True
+    assert process.waits == 3
+    assert job.closes == 1
 
 
 def test_windows_job_assignment_failure_kills_tree_and_fails_closed(
