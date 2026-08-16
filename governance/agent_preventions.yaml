@@ -384,6 +384,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: launcher_patch_inserted_test_code_at_repeated_local_anchor_causing_indentation_and_name_errors_before_py_compile_exposed_it_2026_07_23_pending_immutable_capture
     green_evidence: pending
+  - id: PYTHON-COMPILE-BEFORE-PYTEST-FALSE-GREEN-004
+    status: open
+    scope: repository
+    runtime_prevention_id: FALSE-GREEN-001
+    guard: tests/governance/test_agent_preventions.py::test_compile_check_fails_closed_when_required_source_directory_is_unavailable
+    ci_partition: remaining
+    red_evidence: missing_required_source_roots_were_compiled_and_the_candidate_runner_rendered_the_unavailable_evidence_source_as_a_pass_until_the_compile_preflight_failed_closed_2026_08_16_pending_immutable_capture
+    green_evidence: pending
   - id: ZMQ-QUARANTINE-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -3744,6 +3752,8 @@ records:
       - node: tests/governance/test_agent_preventions.py::test_pytest_raises_requires_a_specific_exception_contract
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_all_repository_python_sources_compile_before_pytest_evidence
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_compile_check_fails_closed_when_required_source_directory_is_unavailable
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths
         ci_partition: remaining

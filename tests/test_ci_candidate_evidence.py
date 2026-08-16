@@ -212,6 +212,13 @@ def _candidate_repository(tmp_path: Path) -> Path:
     return repository
 
 
+def _candidate_compile_roots(root: Path) -> None:
+    """Create the source directories the compile preflight requires of every candidate."""
+
+    for directory_name in ("src", "tests", "tools"):
+        (root / directory_name).mkdir(parents=True, exist_ok=True)
+
+
 def _candidate_identity_repository(tmp_path: Path) -> tuple[Path, str, str, str]:
     repository = _candidate_repository(tmp_path)
     base_commit = _git(repository, "rev-parse", "HEAD")
@@ -1235,6 +1242,7 @@ def test_gui_candidate_runner_executes_every_subcommand_and_aggregates_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _candidate_compile_roots(tmp_path)
     observed: list[tuple[str, ...]] = []
     observed_state_roots: list[str] = []
     returncodes = iter((7, 0, 9))
@@ -1270,6 +1278,7 @@ def test_candidate_runner_executes_strict_active_guard_phase_and_propagates_fail
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _candidate_compile_roots(tmp_path)
     node = "tests/gui/test_guard.py::test_guard"
     observed: list[tuple[str, ...]] = []
     observed_state_roots: list[str] = []
@@ -1457,6 +1466,7 @@ def test_candidate_runner_rejects_zero_exit_without_exact_passed_guard_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _candidate_compile_roots(tmp_path)
     node = "tests/core/test_guard.py::test_guard"
     calls = 0
 
@@ -1489,6 +1499,7 @@ def test_candidate_runner_rejects_green_pytest_without_population_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _candidate_compile_roots(tmp_path)
 
     def fake_run(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, stdout="1 passed\n", stderr="")
@@ -2097,6 +2108,7 @@ def test_candidate_runner_rejects_invalid_python_before_pytest(
 ) -> None:
     candidate = tmp_path / "candidate"
     candidate.mkdir()
+    _candidate_compile_roots(candidate)
     (candidate / "invalid.py").write_text("def broken(:\n", encoding="utf-8")
     observed: list[tuple[str, ...]] = []
 
@@ -2583,6 +2595,13 @@ def test_exported_candidate_runner_emits_structural_failure_receipt_after_enviro
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repository = _candidate_repository(tmp_path)
+    candidate_package = repository / "src" / "candidate_pkg"
+    candidate_package.mkdir(parents=True)
+    (candidate_package / "__init__.py").write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     for relative in (
         "tools/candidate_evidence.py",
         "tools/check_python_compile.py",
