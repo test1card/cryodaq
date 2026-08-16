@@ -215,9 +215,7 @@ def test_guard_finds_direct_loader_construction(tmp_path: Path, source: str, exp
 
     offenders = _unsafe_yaml_calls(path, tmp_path)
 
-    assert offenders == [
-        f"probe.py:2: PyYAML {expected} construction bypasses cryodaq._owned_yaml.OwnedSafeLoader"
-    ]
+    assert offenders == [f"probe.py:2: PyYAML {expected} construction bypasses cryodaq._owned_yaml.OwnedSafeLoader"]
 
 
 def test_guard_accepts_relative_import_of_owned_loader(tmp_path: Path) -> None:
