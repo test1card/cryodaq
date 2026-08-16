@@ -172,7 +172,6 @@ def test_run_soak_reports_the_specific_unreadable_reason(tmp_path):
     assert "no structured lines parsed" not in reason, reason
 
 
-
 def test_run_soak_keeps_parsed_violations_when_log_is_unreadable(tmp_path):
     error = _line("ERROR", "definite failure")
     script = (
@@ -220,3 +219,38 @@ def test_run_soak_forces_child_utf8_output(tmp_path, monkeypatch):
     )
     assert result.log_readable is True
     assert "Привет" in log_path.read_text(encoding="utf-8")
+
+
+def test_run_soak_fails_when_child_writes_invalid_utf8_bytes(tmp_path):
+    """Native bytes bypassing the child's stream encoding must fail the soak.
+
+    A child that emits a valid INFO record then writes an invalid-UTF-8 byte
+    straight to fd 1 (os.write, not through the text layer
+    PYTHONIOENCODING/PYTHONUTF8 control) produces a captured log that is not
+    valid UTF-8. Decoding it with errors="replace" would silently hide the
+    corruption and certify a clean run; the strict decode must mark the log
+    unreadable instead.
+    """
+    script = (
+        "import os, signal, sys, time\n"
+        "def _h(*_: object) -> None: sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _h)\n"
+        "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) "
+        "+ ' child ' + chr(0x2502) + ' started', flush=True)\n"
+        "os.write(1, b'ERR\\xffOR\\n')\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n"
+    )
+    log_path = tmp_path / "undecodable.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is False
+    assert result.ok is False
+    reason = getattr(result, "unreadable_reason", None)
+    assert reason is not None, "run_soak must report the decode failure"
+    assert "not valid UTF-8" in reason, reason

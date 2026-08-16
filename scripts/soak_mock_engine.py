@@ -47,11 +47,13 @@ DEFAULT_ALLOWLIST: tuple[str, ...] = (
 class UnreadableLogError(RuntimeError):
     """Raised when a log cannot be scanned well enough to certify it clean.
 
-    Two distinct causes, each carrying its own message: a non-empty log in which
-    no line carries the structured level field at all, and a log that does parse
-    but contains a recognizably malformed ERROR/CRITICAL record. The second case
-    is the dangerous one — the readable lines can all be clean while the record
-    that would have failed the scan is the one the parser could not read.
+    Three distinct causes, each carrying its own message: a non-empty log in
+    which no line carries the structured level field at all, a log that does
+    parse but contains a recognizably malformed ERROR/CRITICAL record, and a
+    log whose raw bytes are not valid UTF-8. The malformed-record and
+    undecodable cases are the dangerous ones — the readable lines can all be
+    clean while the record that would have failed the scan is the one the
+    parser could not read.
     """
 
     def __init__(self, message: str, violations: Sequence[str] = ()) -> None:
@@ -139,6 +141,24 @@ def _default_cmd() -> list[str]:
     return [sys.executable, "-m", "cryodaq.engine", "--mock"]
 
 
+def _read_captured_log(path: Path) -> str:
+    """Strictly decode the captured log, or fail the soak as unreadable.
+
+    ``errors="replace"`` would turn invalid UTF-8 written directly to the
+    captured fd (native code bypassing the child's Python stream encoding)
+    into U+FFFD replacement characters, which scan as ordinary text -- a
+    corrupted log would certify clean. A strict decode surfaces those bytes
+    as an unreadable result instead.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise UnreadableLogError(
+            f"could not read log: {exc}. The captured log contains bytes that "
+            "are not valid UTF-8, so the run cannot be certified clean"
+        ) from exc
+
+
 def run_soak(
     duration_s: float,
     *,
@@ -188,9 +208,8 @@ def run_soak(
                 proc.kill()
                 proc.wait(timeout=10.0)
 
-    log_text = log_path.read_text(encoding="utf-8", errors="replace")
-
     try:
+        log_text = _read_captured_log(log_path)
         violations = scan_log(log_text, allowlist)
         log_readable = True
         unreadable_reason = None
