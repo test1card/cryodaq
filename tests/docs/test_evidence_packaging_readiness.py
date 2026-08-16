@@ -61,11 +61,28 @@ def test_procedure_parser_rejects_duplicate_opener_outside_bounded_block():
 
 
 def test_g71_requires_a_slope_limited_profile_that_covers_the_run():
+    from scripts.soak_mock_stack import profile
+
     lines = CHECKLIST.read_text(encoding="utf-8").splitlines()
     block = "\n".join(_parse_procedure_gates(lines)["7.1"])
     assert "do not select the slope-free short profile for G7.1" in block
     assert "12 h for an intended run from 15 min through 12 h" in block
     assert "observe for that selected profile's full duration" in block
+
+    # Bind the prose selection rule to the production profiles it names, so a
+    # changed duration or a removed slope limit fails here rather than leaving
+    # the documented acceptance rule stale.
+    long12 = profile("12h")
+    long72 = profile("72h")
+    short = profile("short")
+    assert long12.duration_s == 12 * 3600
+    assert long72.duration_s == 72 * 3600
+    assert long12.rss_slope_limit_bytes_per_hour is not None
+    assert long12.descriptor_slope_limit_per_hour is not None
+    assert long72.rss_slope_limit_bytes_per_hour is not None
+    assert long72.descriptor_slope_limit_per_hour is not None
+    assert short.rss_slope_limit_bytes_per_hour is None
+    assert short.descriptor_slope_limit_per_hour is None
 
 
 def test_g71_defines_the_real_stack_capture_and_offline_verdict():
