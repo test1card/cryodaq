@@ -6429,5 +6429,7 @@ records:
         ci_partition: remaining
       - node: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed
         ci_partition: remaining
+      - node: tests/test_ci_safe_sqlite_contract.py::test_nightly_qt_guard_rejects_step_disabled_with_linux_text_echoed
+        ci_partition: remaining
     red_evidence: pending
     green_evidence: pending

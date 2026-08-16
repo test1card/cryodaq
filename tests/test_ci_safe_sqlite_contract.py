@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
 
@@ -129,33 +130,42 @@ _NIGHTLY_QT_JOB_NAMES = ("golden-replay", "mock-stack-short-soak")
 _QT_LINUX_LIBRARIES = ("libegl1", "libgl1", "libxkbcommon0", "libdbus-1-3")
 
 
-def _nightly_job_block(text: str, job_name: str) -> str:
-    """Return one top-level nightly job, refusing ambiguous workflow structure."""
+def _nightly_qt_install_step(text: str, job_name: str) -> tuple[int, int, dict]:
+    """Return (install index, dependencies index, parsed install step) for one job.
 
-    marker = f"  {job_name}:\n"
-    assert text.count(marker) == 1, f"nightly job {job_name!r} must occur exactly once"
-    start = text.index(marker)
-    cursor = start + len(marker)
-    for line in text[cursor:].splitlines(keepends=True):
-        if line.startswith("  ") and not line.startswith("   ") and line.rstrip().endswith(":"):
-            return text[start:cursor]
-        cursor += len(line)
-    return text[start:]
+    Parsing the workflow rather than slicing text is deliberate: the `if`
+    binding must be read from the step's effective condition field, not from a
+    substring anywhere in the slice. A mutation that disables the step with
+    `if: ${{ false }}` while echoing the Linux text as a comment must fail.
+    """
+
+    workflow = yaml.safe_load(text)
+    steps = workflow["jobs"][job_name]["steps"]
+    install_index = None
+    dependencies_index = None
+    for index, step in enumerate(steps):
+        if step.get("name") == "Install Qt offscreen system libraries (Linux)":
+            install_index = index
+        if step.get("name") == "Install dependencies":
+            dependencies_index = index
+    assert install_index is not None, f"{job_name} is missing the Qt offscreen install step"
+    assert dependencies_index is not None, f"{job_name} is missing the dependencies step"
+    return install_index, dependencies_index, steps[install_index]
 
 
 def _assert_nightly_qt_prerequisites(text: str) -> None:
     """Require each Qt lane to install its libraries, rather than merely name them."""
 
     for job_name in _NIGHTLY_QT_JOB_NAMES:
-        job = _nightly_job_block(text, job_name)
-        install = job.index("- name: Install Qt offscreen system libraries (Linux)")
-        dependencies = job.index("- name: Install dependencies")
+        install, dependencies, step = _nightly_qt_install_step(text, job_name)
         assert install < dependencies, f"{job_name} installs Qt libraries after Python dependencies"
-        step = job[install:dependencies]
-        assert "if: runner.os == 'Linux'" in step
-        assert "sudo apt-get update" in step
+        assert step.get("if") == "runner.os == 'Linux'", (
+            f"{job_name} install step must be gated by `runner.os == 'Linux'`, found {step.get('if')!r}"
+        )
+        run = step["run"]
+        assert "sudo apt-get update" in run
         install_commands = [
-            line.strip().split() for line in step.splitlines() if line.strip().startswith("sudo apt-get install ")
+            line.strip().split() for line in run.splitlines() if line.strip().startswith("sudo apt-get install ")
         ]
         assert len(install_commands) == 1, f"{job_name} must contain exactly one apt-get install command"
         command = install_commands[0]
@@ -180,4 +190,21 @@ def test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed()
     mutated = text.replace(install, "echo " + " ".join(_QT_LINUX_LIBRARIES))
 
     with pytest.raises(AssertionError, match="apt-get install command"):
+        _assert_nightly_qt_prerequisites(mutated)
+
+
+def test_nightly_qt_guard_rejects_step_disabled_with_linux_text_echoed() -> None:
+    """A step must carry the Linux condition in its parsed `if` field, not in a comment.
+
+    The reviewer's mutation sets `if: ${{ false }}` and keeps the Linux text as
+    a comment in the same slice. A substring assertion accepts it while GitHub
+    skips the install; the parsed effective `if` field must reject it.
+    """
+
+    text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+    condition = "if: runner.os == 'Linux'"
+    assert text.count(condition) == len(_NIGHTLY_QT_JOB_NAMES)
+    mutated = text.replace(condition, "if: ${{ false }}\n        # if: runner.os == 'Linux'")
+
+    with pytest.raises(AssertionError, match="runner.os == 'Linux'"):
         _assert_nightly_qt_prerequisites(mutated)
