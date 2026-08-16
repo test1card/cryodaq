@@ -64,6 +64,7 @@ _KNOWN_OPTIONAL_OR_NONMODULE_WARNINGS = frozenset(
 _MISSING_MODULE = re.compile(r"missing module named ['\"]?([^ '\",]+)")
 _H3_ALLOWED_IDLE_HEALTH = ("degraded_source", "periodic_engine_unavailable")
 _FROZEN_DRIVER_IMPORT_PREFIX = "CRYODAQ_FROZEN_DRIVER_IMPORTS="
+_GUI_PIPE_SETTLEMENT_TIMEOUT_S = 5.0
 _REQUIRED_SMOKE_CELLS = (
     "frozen_driver_imports",
     "gui_startup_offscreen",
@@ -558,6 +559,14 @@ def _run_report_cell(
     }
 
 
+def _create_gui_process_job(process: subprocess.Popen[Any]) -> Any | None:
+    if os.name != "nt":
+        return None
+    from cryodaq.report_process import _create_windows_job
+
+    return _create_windows_job(process)
+
+
 def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> dict[str, Any]:
     """Prove the bundled GUI imports and stays alive in an offscreen Qt session."""
 
@@ -580,19 +589,30 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
     )
     pipe_chunks: tuple[list[bytes], list[bytes]] = ([], [])
     pipe_locks = (threading.Lock(), threading.Lock())
+    pipe_errors: list[BaseException] = []
+    pipe_error_lock = threading.Lock()
+    pipe_readers: tuple[threading.Thread, ...] = ()
+    job: Any | None = None
 
     def read_pipe(stream: Any, chunks: list[bytes], lock: threading.Lock) -> None:
-        while data := stream.read1(64 * 1024):
-            with lock:
-                chunks.append(data)
+        try:
+            while data := stream.read1(64 * 1024):
+                with lock:
+                    chunks.append(data)
+        except BaseException as exc:
+            with pipe_error_lock:
+                pipe_errors.append(exc)
 
-    pipe_readers = tuple(
-        threading.Thread(target=read_pipe, args=(stream, chunks, lock), daemon=True)
-        for stream, chunks, lock in zip((process.stdout, process.stderr), pipe_chunks, pipe_locks, strict=True)
-    )
-    for reader in pipe_readers:
-        reader.start()
     try:
+        job = _create_gui_process_job(process)
+        if process.stdout is None or process.stderr is None:
+            raise RuntimeError("gui_startup_offscreen did not expose its output pipes")
+        pipe_readers = tuple(
+            threading.Thread(target=read_pipe, args=(stream, chunks, lock), daemon=True)
+            for stream, chunks, lock in zip((process.stdout, process.stderr), pipe_chunks, pipe_locks, strict=True)
+        )
+        for reader in pipe_readers:
+            reader.start()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -601,7 +621,11 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         process.send_signal(signal.CTRL_BREAK_EVENT)
         process.wait(timeout=20)
         for reader in pipe_readers:
-            reader.join(timeout=0.1)
+            reader.join(timeout=_GUI_PIPE_SETTLEMENT_TIMEOUT_S)
+        if any(reader.is_alive() for reader in pipe_readers):
+            raise RuntimeError("gui_startup_offscreen process tree kept inherited output pipes open")
+        if pipe_errors:
+            raise RuntimeError("gui_startup_offscreen output reader failed") from pipe_errors[0]
         with pipe_locks[0]:
             stdout = b"".join(pipe_chunks[0])
         with pipe_locks[1]:
@@ -612,6 +636,13 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         with suppress(Exception):
             process.wait(timeout=5)
         raise
+    finally:
+        try:
+            if job is not None:
+                job.close()
+        finally:
+            for reader in pipe_readers:
+                reader.join(timeout=_GUI_PIPE_SETTLEMENT_TIMEOUT_S)
     completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
     logs = _write_log(evidence_dir, "gui_startup_offscreen", completed)
     if b"Traceback (most recent call last)" in stdout + stderr:

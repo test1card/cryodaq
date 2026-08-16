@@ -4,7 +4,6 @@ import hashlib
 import importlib
 import io
 import json
-import subprocess
 import threading
 import zipfile
 from pathlib import Path
@@ -65,15 +64,23 @@ def test_smoke_matrix_starts_the_built_gui_offscreen() -> None:
     assert "_run_gui_startup_cell(executable, runtime_root, evidence_dir)" in source
 
 
-def test_gui_smoke_waits_for_process_not_inherited_pipe_eof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gui_smoke_refuses_live_descendant_holding_inherited_pipes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     release_pipe = threading.Event()
 
     class InheritedPipe(io.BytesIO):
+        def __init__(self, initial_bytes: bytes = b"") -> None:
+            super().__init__(initial_bytes)
+            self.settled = threading.Event()
+
         def read1(self, size: int = -1) -> bytes:
             data = super().read(size)
             if data:
                 return data
             release_pipe.wait(timeout=5)
+            self.settled.set()
             return b""
 
     class Process:
@@ -89,33 +96,80 @@ def test_gui_smoke_waits_for_process_not_inherited_pipe_eof(tmp_path: Path, monk
             return None
 
         def wait(self, timeout: float) -> int:
-            assert timeout == 20
+            assert timeout in {5, 20}
             return self.returncode
-
-        def communicate(self, timeout: float) -> tuple[bytes, bytes]:
-            raise subprocess.TimeoutExpired("CryoDAQ.exe", timeout)
 
         def terminate(self) -> None:
             return None
 
+    class Job:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            release_pipe.set()
+
     process = Process()
+    job = Job()
+    ticks = iter((0.0, 0.0, 6.0))
+    monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(smoke, "_create_gui_process_job", lambda candidate: job if candidate is process else None)
+    monkeypatch.setattr(smoke, "_GUI_PIPE_SETTLEMENT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
+
+    with pytest.raises(RuntimeError, match="process tree kept inherited output pipes open"):
+        smoke._run_gui_startup_cell(tmp_path / "CryoDAQ.exe", tmp_path, tmp_path)
+
+    assert job.closed is True
+    assert process.stdout.settled.wait(timeout=1)
+    assert process.stderr.settled.wait(timeout=1)
+
+
+def test_gui_smoke_passes_after_process_tree_closes_inherited_pipes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        pid = 1234
+        returncode = 0
+        stdout = io.BytesIO(b"gui output\n")
+        stderr = io.BytesIO()
+
+        def poll(self) -> None:
+            return None
+
+        def send_signal(self, _signal: int) -> None:
+            return None
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == 20
+            return self.returncode
+
+        def terminate(self) -> None:
+            return None
+
+    class Job:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    process = Process()
+    job = Job()
     ticks = iter((0.0, 0.0, 6.0, 6.0))
     monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(smoke, "_create_gui_process_job", lambda candidate: job if candidate is process else None)
     monkeypatch.setattr(smoke.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
     monkeypatch.setattr(smoke, "_pid_exists", lambda _pid: False)
 
-    outcome = None
-    try:
-        outcome = smoke._run_gui_startup_cell(tmp_path / "CryoDAQ.exe", tmp_path, tmp_path)
-    except subprocess.TimeoutExpired:
-        pass
-    finally:
-        release_pipe.set()
+    outcome = smoke._run_gui_startup_cell(tmp_path / "CryoDAQ.exe", tmp_path, tmp_path)
 
-    assert outcome is not None, "GUI smoke must wait for the direct process, not inherited pipe EOF"
     assert outcome["status"] == "PASS"
+    assert job.closed is True
     assert (tmp_path / "gui_startup_offscreen.stdout.log").read_bytes() == b"gui output\n"
 
 
