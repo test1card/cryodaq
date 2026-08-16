@@ -272,6 +272,22 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: roadmap_md_carried_the_phase_1_status_token_twice_the_real_marker_reading_IN_PROGRESS_and_the_comment_beneath_it_spelling_the_completed_value_so_ob_002_marker_trigger_fired_on_prose_while_the_descriptor_spine_was_unmerged_and_the_planned_ob_010_gate_would_have_reddened_for_a_sentence_with_the_cheap_repair_recording_a_phase_completion_that_never_happened_2026_08_14_pending_immutable_capture
     green_evidence: pending
+  - id: OBLIGATION-TRIGGER-RETARGET-FALSE-GREEN-340
+    status: open
+    scope: repository
+    runtime_prevention_id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
+    guard: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_retargeted_token
+    ci_partition: remaining
+    red_evidence: retargeting_OB_002_from_phase_1_status_to_absent_phase_1_other_makes_the_register_driven_guard_red_while_the_hardcoded_predecessor_stayed_green_2026_08_15_pending_immutable_capture
+    green_evidence: pending
+  - id: OBLIGATION-TRIGGER-TERMINAL-VALUE-FALSE-GREEN-341
+    status: open
+    scope: repository
+    runtime_prevention_id: OBLIGATION-TRIGGER-MARKER-AMBIGUITY-339
+    guard: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_requires_terminal_value
+    ci_partition: remaining
+    red_evidence: changing_OB_002s_Trigger_value_from_DONE_to_IN_PROGRESS_makes_the_terminal_value_guard_red_while_the_vocabulary_only_predecessor_stayed_green_2026_08_15_pending_immutable_capture
+    green_evidence: pending
   - id: SWEEP-COUNT-GUARD-MAGNITUDE-FALSE-GREEN-311
     status: open
     scope: repository
@@ -3443,45 +3459,11 @@ records:
     guards:
       - node: tests/docs/test_docs_freshness.py::test_roadmap_phase_marker_has_exactly_one_occurrence
         ci_partition: remaining
-    red_evidence: restoring_the_prose_mention_of_the_completed_value_turns_the_guard_red_with_two_occurrences_2026_08_14_pending_immutable_capture
-    green_evidence: pending
-  - id: OBLIGATION-TRIGGER-RETARGET-FALSE-GREEN-340
-    status: open
-    scope: repository
-    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: OB-002's register-derived marker file and token binding.
-    classification: evidence_misbinding
-    correction_owner: primary
-    guard_owner: primary
-    disposition_owner: reviewer
-    consequence: A guard that hardcodes its target keeps passing after the registered trigger is retargeted, leaving the evaluator's real token unprotected.
-    invariant: The OB-002 marker guard reads its file and token from the Trigger cell and fails when that declared token is absent from the declared target.
-    rule_refs:
-      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    guards:
       - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_rejects_retargeted_token
         ci_partition: remaining
-    red_evidence: retargeting_OB_002_from_phase_1_status_to_absent_phase_1_other_makes_the_register_driven_guard_red_while_the_hardcoded_predecessor_stayed_green_2026_08_15_pending_immutable_capture
-    green_evidence: pending
-  - id: OBLIGATION-TRIGGER-TERMINAL-VALUE-FALSE-GREEN-341
-    status: open
-    scope: repository
-    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: OB-002's register-derived terminal marker value.
-    classification: evidence_misbinding
-    correction_owner: primary
-    guard_owner: primary
-    disposition_owner: reviewer
-    consequence: A trigger accepting IN_PROGRESS fires the planned evaluator before Phase 1 is complete, so an unfinished phase can be represented as terminal work.
-    invariant: The OB-002 marker guard requires its Trigger cell to specify the terminal DONE value, not merely any value in the marker vocabulary.
-    rule_refs:
-      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    guards:
       - node: tests/docs/test_docs_freshness.py::test_ob_002_marker_trigger_requires_terminal_value
         ci_partition: remaining
-    red_evidence: changing_OB_002s_Trigger_value_from_DONE_to_IN_PROGRESS_makes_the_terminal_value_guard_red_while_the_vocabulary_only_predecessor_stayed_green_2026_08_15_pending_immutable_capture
+    red_evidence: restoring_the_prose_mention_of_the_completed_value_turns_the_guard_red_with_two_occurrences_2026_08_14_pending_immutable_capture
     green_evidence: pending
   - id: REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301
     status: open

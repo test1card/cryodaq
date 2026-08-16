@@ -838,10 +838,12 @@ and gating on nothing but the owner's time at the stand.**
      the VALUE of the token above from IN_PROGRESS to the completed value. OB-002 in
      docs/OBLIGATIONS.md keys its trigger to that token; do not reword it, translate
      it, or let an STE rewrite touch it.
-     THIS COMMENT MUST NEVER SPELL THE COMPLETED VALUE. It used to, and a marker
-     trigger reading the file for it fired on this sentence while the spine was not
-     merged. A guard in tests/docs/test_docs_freshness.py now pins the token to
-     exactly one occurrence. -->
+     THIS COMMENT MUST NEVER SPELL THE COMPLETED VALUE IN EXPLANATORY PROSE; the
+     marker assignment above is where the value belongs once Phase 1 closes. A
+     prose sentence used to spell it, and a marker trigger reading the file for
+     it fired on that sentence while the spine was not merged. A guard in
+     tests/docs/test_docs_freshness.py now pins the token to exactly one
+     occurrence. -->
 - **Phase 1 — the descriptor spine.** The engine-loader ownership fix; then
   OC-031's registry re-key; then the OC-008/OC-030 site migrations in bounded
   batches carrying rendering evidence for every touched surface; OC-023 rides

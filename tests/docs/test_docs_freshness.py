@@ -2810,12 +2810,48 @@ def _ob_002_marker_trigger() -> tuple[str, str, str]:
     """
 
     register = _read(REPO_ROOT / "docs" / "OBLIGATIONS.md")
-    row = next((line for line in register.splitlines() if line.startswith("| OB-002 |")), None)
-    assert row is not None, "OB-002 is missing from the obligations register"
-    trigger_cell = row.split("|")[5].strip()
+    rows = [line for line in register.splitlines() if line.startswith("| OB-002 |")]
+    assert len(rows) == 1, (
+        "OB-002 must occupy exactly one register row; "
+        f"found {len(rows)}. A duplicated row splits the registered trigger the "
+        "planned evaluator consumes."
+    )
+    trigger_cell = rows[0].split("|")[5].strip()
     trigger = re.fullmatch(r"marker:([^\s:|]+):([A-Za-z0-9_-]+)=([A-Za-z0-9_-]+)", trigger_cell)
     assert trigger is not None, f"OB-002's Trigger cell must be exactly one marker expression; got {trigger_cell!r}."
     return trigger.groups()
+
+
+def test_ob_002_marker_trigger_rejects_duplicate_register_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OB-002 must occupy exactly one register row.
+
+    The helper previously used `next(...)`, which silently selected the first of
+    two matching rows: appending a second `| OB-002 |` row with a different
+    Trigger cell left the whole marker suite green while the register's
+    one-row-per-obligation rule was violated and OB-002 no longer had a unique
+    trigger for the planned evaluator to consume.
+    """
+
+    original_read = _read
+
+    def _read_with_duplicate_ob002(path: Path) -> str:
+        text = original_read(path)
+        if path == REPO_ROOT / "docs" / "OBLIGATIONS.md":
+            rows = text.splitlines()
+            for index, line in enumerate(rows):
+                if line.startswith("| OB-002 |"):
+                    duplicate = line.replace(
+                        "marker:ROADMAP.md:phase-1-status=DONE",
+                        "marker:ROADMAP.md:phase-1-status=IN_PROGRESS",
+                        1,
+                    )
+                    rows.insert(index + 1, duplicate)
+                    return "\n".join(rows) + "\n"
+        return text
+
+    monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_duplicate_ob002)
+    with pytest.raises(AssertionError, match="exactly one register row"):
+        _ob_002_marker_trigger()
 
 
 def test_ob_002_marker_trigger_rejects_trailing_text(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2878,6 +2914,33 @@ def test_ob_002_marker_trigger_requires_terminal_value(monkeypatch: pytest.Monke
         test_roadmap_phase_marker_has_exactly_one_occurrence()
 
 
+def test_ob_002_marker_trigger_rejects_suffixed_target_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A target marker whose value carries a suffix must not match the vocabulary.
+
+    The target-file regex previously captured `[A-Za-z_]+`, which accepted a valid
+    prefix of a malformed value: `phase-1-status=DONE!` produced `DONE` in
+    `occurrences`, so the guard passed while the target carried a value outside the
+    declared vocabulary. The capture is now the complete non-whitespace value, so
+    `DONE!` and `IN_PROGRESS!` reach the vocabulary assertion and fail it.
+    """
+
+    original_read = _read
+
+    def _read_with_suffixed_target(path: Path) -> str:
+        text = original_read(path)
+        if path == REPO_ROOT / "ROADMAP.md":
+            return text.replace(
+                "phase-1-status=IN_PROGRESS",
+                "phase-1-status=IN_PROGRESS!",
+                1,
+            )
+        return text
+
+    monkeypatch.setitem(_ob_002_marker_trigger.__globals__, "_read", _read_with_suffixed_target)
+    with pytest.raises(AssertionError, match="unknown value"):
+        test_roadmap_phase_marker_has_exactly_one_occurrence()
+
+
 def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
     """OB-002's trigger token must be a MARKER, not a string that also appears in prose.
 
@@ -2904,7 +2967,7 @@ def test_roadmap_phase_marker_has_exactly_one_occurrence() -> None:
         "A non-terminal value fires the planned evaluator before Phase 1 is complete."
     )
     target = _read(REPO_ROOT / marker_file)
-    occurrences = re.findall(rf"{re.escape(token)}=([A-Za-z_]+)", target)
+    occurrences = re.findall(rf"{re.escape(token)}=(\S+)", target)
     assert len(occurrences) == 1, (
         f"{marker_file} must carry the {token} token exactly once; found "
         f"{len(occurrences)} occurrences with values {occurrences}. A second mention makes "
