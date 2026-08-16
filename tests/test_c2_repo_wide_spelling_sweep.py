@@ -2354,6 +2354,37 @@ def test_c2_repo_wide_spelling_sweep_accepts_declared_identity_equalities(tmp_pa
     assert _sites(root) == []
 
 
+def test_c2_sweep_documented_bypasses_return_zero_sites(tmp_path: Path) -> None:
+    """Drive the scope statement's three documented misses through `_sites()`.
+
+    The scope block claims each NOT COVERED example returns ZERO sites.  Substring
+    assertions cannot hold that claim to the detector: if `_reason` later learns
+    fnmatchcase (which production does not exercise, so the exact-registry guard
+    gains no site to turn red) or `.get()` mapping extraction, the scope statement
+    and OC-031 can keep promising zero sites while the detector has started
+    reporting them.  Running the exact documented source through `_sites()` makes
+    the boundary claim fail the moment detector behaviour changes.
+    """
+
+    root = tmp_path / "documented_bypasses"
+    target = root / "src" / "cryodaq" / "bypasses.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def mapped_identity(reading):\n"
+        "    key = reading.get('channel', '')\n"
+        "    return key.startswith('T')\n"
+        "\n"
+        "def outside_roster(reading):\n"
+        "    return fnmatchcase(reading.channel, 'T*')\n"
+        "\n"
+        "def unproven_authority(reading, stand_config):\n"
+        "    selected = stand_config['critical_sensor']\n"
+        "    return reading.channel == selected\n",
+        encoding="utf-8",
+    )
+    assert _sites(root) == []
+
+
 def _scope_statement() -> str:
     """Return ONLY the scope comment block, delimited by its two rule lines.
 
@@ -2403,6 +2434,20 @@ def test_c2_sweep_states_its_own_boundary() -> None:
         "is the exact claim OC-031 refuted"
     )
 
+    # PINNING THE POSITIVE DOMAIN IS WHAT MAKES THE COUNT MEANINGFUL.  The
+    # NOT COVERED assertions above survive the module dropping every positive
+    # claim: the whole COVERED paragraph can be deleted -- Python roots, file
+    # extensions, recognized identity flows, and the enumerated operations --
+    # and the guard stays green because it asserts only misses.  An exact count
+    # whose module no longer says what it is over is the exact failure this
+    # guard exists to stop, so the positive scan domain is asserted here, not
+    # proxied by the scope block's length floor.
+    assert "COVERED:" in scope, "the sweep does not state what it covers"
+    assert "Python files under `src/cryodaq`" in scope, "the sweep does not name the Python root it scans over"
+    assert "`*.py` and `*.pyw`" in scope, "the sweep does not name the file extensions it scans over"
+    assert "propagated through" in scope, "the sweep does not name the identity flows it follows"
+    assert "ENUMERATED roster" in scope, "the sweep does not state that its operation set is enumerated"
+
     # PINNING THE LABEL IS NOT PINNING THE CLAIM.  Review confirmed that rewriting
     # `not scheduled` to `scheduled` left the assertions above green, because they
     # search for `NOT FIXABLE HERE` and that string survives the rewrite.  A gap
@@ -2424,4 +2469,17 @@ def test_c2_sweep_states_its_own_boundary() -> None:
         assert scheduled_wording not in unfixable, (
             f"the unfixable gap is described as {scheduled_wording!r}; a matcher cannot decide "
             "authority provenance at all, so scheduling it is a promise nothing can keep"
+        )
+    # EQUALITY ON THE FIRST SENTENCE IS NOT ENOUGH.  Review confirmed that appending
+    # "This work was scheduled next quarter." immediately after the unscheduled
+    # clause left the checks above green: the equality compares only the first
+    # sentence, and the blacklist above omits bare `scheduled`.  Scheduling the
+    # gap anywhere in the remaining block presents it as reachable future work,
+    # so the rest of the block must reject scheduling language outright.
+    unfixable_rest = unfixable[len(unfixable_sentence) :]
+    for scheduled_wording in ("scheduled", "planned", "next quarter"):
+        assert scheduled_wording not in unfixable_rest, (
+            f"the unfixable gap is described as {scheduled_wording!r} after its unscheduled "
+            "clause; a matcher cannot decide authority provenance at all, so scheduling it is "
+            "a promise nothing can keep"
         )
