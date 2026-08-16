@@ -1441,6 +1441,7 @@ async def test_engine_startup_cancellation_settles_initialization_before_writer_
 @pytest.mark.asyncio
 async def test_run_engine_registers_safety_tasks_before_installing_startup_backstop(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     """The real startup path must advance past live safety-task registration."""
 
@@ -1463,6 +1464,7 @@ async def test_run_engine_registers_safety_tasks_before_installing_startup_backs
     def _stop_after_registration(*_args: object, **_kwargs: object) -> None:
         raise _ReachedPostRegistrationStartup
 
+    monkeypatch.setattr(engine_module, "_DATA_DIR", tmp_path)
     monkeypatch.setattr(TaskSupervisor, "register", _record_register)
     monkeypatch.setattr(engine_module, "install_loop_exception_backstop", _stop_after_registration)
 
