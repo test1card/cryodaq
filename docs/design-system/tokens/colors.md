@@ -146,7 +146,7 @@ Wrapper tokens with widget-API semantics. Prefer these over base palette in `set
 | `SELECTION_BG` | per-theme | Selected-row background (neutral) | QTableWidget selected row highlight, selected list item background. Phase III.A neutral — decoupled from STATUS semantics so safety-green never signals "selected". |
 | `FOCUS_RING` | per-theme | Focused-element outline (neutral) | `:focus` QSS border on inputs / buttons when accent bleed would collide with surrounding UI chrome. |
 | `ON_ACCENT` | `#0d0e12` | Text color on ACCENT background | When ACCENT used as button/chip background. |
-| `ON_PRIMARY` | per-theme (`default_cool` `#141210`) | Text on PRIMARY/status-filled surfaces | Theme-specific foreground selected for contrast-tested filled labels; `default_cool` uses dark text. |
+| `ON_PRIMARY` | per-theme (`default_cool` `#141210`) | Text on status-filled surfaces (alarm labels, acknowledge buttons) | Theme-specific foreground selected for contrast-tested filled labels; `default_cool` uses dark text. Never pair with the neutral `PRIMARY` surface — that surface uses `FOREGROUND`. |
 | `ON_SECONDARY` | `#e8eaf0` | Text on SECONDARY surfaces | Reserved for inversion scenarios. |
 | `ON_DESTRUCTIVE` | per-theme | Text on destructive button background | АВАР. ОТКЛ. button label; use the pack value and its measured contrast pair. |
 

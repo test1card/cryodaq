@@ -2,7 +2,7 @@
 title: Design System Changelog
 status: canonical
 last_updated: 2026-08-05
-version: 4.1.1
+version: 5.0.0
 ---
 
 # Design System Changelog
@@ -13,13 +13,24 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/) with
 the design-system-specific definitions of "breaking" from
 `governance/versioning.md`.
 
-## [4.1.1] — 2026-08-12
+## [5.0.0] — 2026-08-12
+
+### Breaking
+
+- The application's default GUI theme changed from `warm_stone` to `default_cool`.
+  Every fresh install, and every site without an explicit `theme:` selection in
+  `config/settings.local.yaml`, now renders the `default_cool` palette on the
+  next ordinary launch — including upgraded sites that never selected a theme.
+  `warm_stone` remains bundled and selectable.
+- `default_cool.ON_PRIMARY` changed from `#e8eaf0` to `#141210`, altering the
+  rendered foreground of status-filled alarm labels and acknowledge buttons.
+  This is a visual-state token change; the affected pairs are measured
+  explicitly in `accessibility/contrast-matrix.md`.
 
 ### Fixed
 
 - Reconciled the canonical color-token specification and filled-pill contrast
-  evidence with the shipped `default_cool` `ON_PRIMARY #141210` value. The
-  affected pairs are measured explicitly in `accessibility/contrast-matrix.md`.
+  evidence with the shipped `default_cool` `ON_PRIMARY #141210` value.
 
 ## [4.1.0] — 2026-08-05
 

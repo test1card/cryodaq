@@ -47,9 +47,11 @@
 
 ### Changed
 
-- Тема GUI по умолчанию для новой установки изменена с `warm_stone` на
-  `default_cool`; остальные пакеты, включая `warm_stone`, остаются доступны
-  через `config/themes/` и site-local `config/settings.local.yaml`.
+- Тема GUI по умолчанию изменена с `warm_stone` на `default_cool` для любой
+  установки без явного выбора темы — включая обновлённые, которые никогда не
+  выбирали тему явно. Чтобы сохранить прежний вид, задайте `theme: warm_stone`
+  в site-local `config/settings.local.yaml`; остальные пакеты, включая
+  `warm_stone`, остаются доступны через `config/themes/`.
 - Montana перераспределяет lifecycle и persistence authority из крупных
   composition roots в узкие проверяемые владельцы: persistence-before-
   publication, exact process identity, bounded cancellation/teardown,

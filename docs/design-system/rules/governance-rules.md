@@ -44,9 +44,9 @@ Version format `MAJOR.MINOR.PATCH`. MAJOR bump only when existing panel code bre
 
 **Enforcement:** governance review at release-tag time; changelog entry required per version; pre-release suffixes (alpha/beta/rc) for major version candidates.
 
-**Current version:** v4.1.1 (operator-state semantic correction: safety green is
-reserved for independently demonstrated health; ordinary activity uses accent,
-and new attention producers use the single caution rung; flat tokens unchanged).
+**Current version:** v5.0.0 (breaking palette default: `default_cool` becomes the
+GUI default and its `ON_PRIMARY` token is `#141210`, altering status-filled
+foregrounds; measured pairs in `accessibility/contrast-matrix.md`).
 
 ## RULE-GOV-003
 
@@ -85,7 +85,7 @@ Other governance concerns (testing, performance, contribution workflow) are docu
 
 ## Rules applied to themselves
 
-These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v4.1.1 state: all four Active, no pending removals.
+These four rules are themselves subject to the design system's evolution process. They can be deprecated, revised, or removed through the contribution process (`governance/contribution.md`). Current v5.0.0 state: all four Active, no pending removals.
 
 ## Related rules and patterns
 

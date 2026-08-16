@@ -447,7 +447,7 @@ rg -n "АВАР|Удалить|Delete|Emergency" src/cryodaq/gui/ -A 5 | grep "S
 
 **Statement:** Colored backgrounds have paired text colors defined via `ON_*` tokens:
 - `ON_ACCENT #0d0e12` — text on `ACCENT` background (darker because ACCENT is light violet)
-- `ON_PRIMARY #e8eaf0` — text on `PRIMARY` surface (same as CARD — this is a neutral pair)
+- `ON_PRIMARY` — per-theme foreground for STATUS-filled labels and alarm chips (e.g. `default_cool` `#141210`, measured in `accessibility/contrast-matrix.md`). **Never use it on the neutral `PRIMARY` surface** — with `default_cool` it is dark-on-dark and effectively invisible; the neutral `PRIMARY` surface pairs with `FOREGROUND`.
 - `ON_SECONDARY #e8eaf0` — text on `SECONDARY` surface (same as SURFACE_ELEVATED — neutral pair)
 - `ON_DESTRUCTIVE #e8eaf0` — text on `DESTRUCTIVE` / `STATUS_FAULT` red background (light foreground for contrast)
 
