@@ -281,7 +281,7 @@ async def test_smoke_real_ollama() -> None:
         result = await client.generate(
             "Reply with exactly the word: PASS",
             system="You are a test assistant. Reply with only the exact word requested.",
-            max_tokens=10,
+            max_tokens=2048,
             temperature=0.0,
         )
         assert not result.truncated, f"Timed out. model={model}"
