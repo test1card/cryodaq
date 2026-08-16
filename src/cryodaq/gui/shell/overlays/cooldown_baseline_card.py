@@ -334,9 +334,10 @@ class CooldownBaselineCard(QWidget):
         base, unreadable_baseline = get_baseline(self._history_dir)
         self._baseline_id = base.fingerprint_id if base else None
         if not self._entries:
-            unreadable_files += unreadable_baseline
             if unreadable_files:
                 self._show_empty(_unreadable_message(unreadable_files, "История недоступна"))
+            elif unreadable_baseline:
+                self._show_empty(_unreadable_message(unreadable_baseline, "Эталон недоступен"))
             else:
                 self._show_empty("История охлаждений пуста.")
             return
@@ -471,6 +472,8 @@ class CooldownVerdictBadge(QLabel):
     Compares the latest stored fingerprint against the golden baseline.
     Hidden when the feature is disabled, no baseline is pinned, or the
     history is empty — :meth:`verdict` returns ``None`` in that state.
+    An unreadable baseline or unreadable history records resolve to the
+    explicit ``unknown`` chip rather than hiding or an optimistic verdict.
     """
 
     def __init__(
@@ -537,10 +540,14 @@ class CooldownVerdictBadge(QLabel):
     def _compute_verdict(self) -> str | None:
         if not self._enabled:
             return None
-        baseline, _ = get_baseline(self._history_dir)
+        baseline, unreadable_baseline = get_baseline(self._history_dir)
         if baseline is None:
+            if unreadable_baseline:
+                return "unknown"
             return None
-        entries, _ = list_fingerprints(self._history_dir)
+        entries, unreadable_files = list_fingerprints(self._history_dir)
+        if unreadable_files:
+            return "unknown"
         if not entries:
             return None
         latest = max(entries, key=lambda fp: fp.cooldown_start_ts)

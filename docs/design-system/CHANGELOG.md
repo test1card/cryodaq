@@ -19,6 +19,10 @@ the design-system-specific definitions of "breaking" from
 
 - Cooldown history presentation contract for unreadable-baseline and
   partial-history states, with Russian count forms and regression coverage.
+- Presentation examples, accessibility evidence (measured contrast, non-color
+  multi-channel cues, no optimistic green), and performance evidence (deferred
+  card read, 5 s badge read throttle, measured offscreen suite time) for the
+  changed cooldown states.
 
 ## [4.1.0] — 2026-08-05
 

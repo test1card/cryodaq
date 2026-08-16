@@ -166,6 +166,33 @@ def test_badge_reflects_ok_verdict(tmp_path: Path) -> None:
     assert badge.verdict() == "ok"
 
 
+def test_badge_unknown_when_baseline_unreadable(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+    assert badge.verdict() == "unknown"
+    assert badge.text() == "Эталон: НЕТ ДАННЫХ"
+
+
+def test_badge_unknown_when_history_has_unreadable_record(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / "bad.json").write_text("{", encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+    assert badge.verdict() == "unknown"
+
+
+def test_badge_unknown_when_only_history_is_unreadable(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "cd_1000.json").write_text("{", encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+    assert badge.verdict() == "unknown"
+    assert badge.text() == "Эталон: НЕТ ДАННЫХ"
+
+
 # --------------------------------------------------------------------------
 # Fix A — strict-bool `enabled` parse (quoted YAML "false" must not enable)
 # --------------------------------------------------------------------------
@@ -295,3 +322,14 @@ def test_card_shows_unreadable_when_only_baseline_pointer_is_corrupt(tmp_path: P
 
     assert card._empty_label.isVisibleTo(card)
     assert "1" in card._empty_label.text()
+
+
+def test_card_empty_state_counts_corrupt_baseline_file_once(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "cd_1000.json").write_text("{", encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+
+    # The corrupt file is the baseline's target too — it must be counted once.
+    assert card._empty_label.text() == "История недоступна (1 файл не читается)."
