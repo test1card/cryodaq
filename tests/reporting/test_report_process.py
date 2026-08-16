@@ -1102,7 +1102,8 @@ def test_windows_job_close_failure_after_ordinary_exit_is_report_process_error(
             raise OSError("CloseHandle failed")
 
     runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
-    monkeypatch.setattr(module.os, "name", "nt")
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(module, "_creation_kwargs", lambda: {})
     monkeypatch.setattr(
         module,
         "_popen_windows_job",
