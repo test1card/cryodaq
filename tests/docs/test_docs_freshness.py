@@ -2811,43 +2811,41 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
 # by a closing guillemet, which occurs genuinely here, including "V = <<B>>" where B is
 # the Russian symbol for volts.  Measured: 26 of 26 sequences on the damaged register,
 # and zero hits across every tracked file on a clean tree.
-# These printable Latin-1 sources are pinned separately because their images consist
-# entirely of Cyrillic characters.  The live-inventory predicate below intentionally
-# excludes Cyrillic text, so a damaged file containing only such an image (for example
-# the two-character image of U+00E8, which is U+0413 U+0401) would otherwise be
-# invisible when its source character is absent
-# from the clean tree.
-_CYRILLIC_ONLY_MOJIBAKE_SOURCES = tuple(
-    chr(codepoint)
-    for codepoint in (
-        *range(0xA1, 0xA4),
-        0xA5,
-        0xA8,
-        0xAA,
-        0xAF,
-        *range(0xB2, 0xB5),
-        # U+00B8 is excluded: its image is the genuine Russian prefix U+0412 U+0451.
-        0xBA,
-        *range(0xBC, 0xC0),
-        0xC0,
-        0xC1,
-        0xC3,
-        0xCA,
-        *range(0xCC, 0xD1),
-        0xDA,
-        *range(0xDC, 0xE0),
-        *range(0xE1, 0xE4),
-        0xE5,
-        0xE8,
-        0xEA,
-        0xEF,
-        *range(0xF2, 0xF5),
-        0xF8,
-        0xFA,
-        *range(0xFC, 0x100),
-        0x101,
+def _cp1251_mojibake(source: str) -> str:
+    """Return the sequence a character becomes when its UTF-8 bytes are read as cp1251."""
+    return source.encode("utf-8").decode("cp1251")
+
+
+# A source whose cp1251 image is entirely Cyrillic looks like ordinary Russian, so the
+# live-inventory predicate below (which skips Cyrillic) can never see it, and that class
+# must be DERIVED here instead of grown one code point per review round.  Scope: the
+# printable Latin blocks that transliterated text plausibly carries -- Latin-1 Supplement
+# and Latin Extended-A (U+00A1..U+017F).  Sources whose image is a pair of genuine
+# Russian letters are excluded: their image is ordinary text and would flag every clean
+# document.  U+00B8 -> "Вё" (вёл, вёсла) and U+0128 -> "ДЁ", which tracked text carries
+# today in "ПЕРЕВЕДЁН" and "ПОДТВЕРЖДЁННЫХ", are the measured instances of that ground.
+def _cyrillic_only_mojibake_sources() -> tuple[str, ...]:
+    russian = frozenset(
+        {chr(codepoint) for codepoint in range(0x0410, 0x0430)}
+        | {chr(codepoint) for codepoint in range(0x0430, 0x0450)}
+        | {chr(0x0401), chr(0x0451)}
     )
-)
+    sources = []
+    for codepoint in range(0x00A1, 0x0180):
+        source = chr(codepoint)
+        try:
+            image = _cp1251_mojibake(source)
+        except UnicodeDecodeError:
+            continue
+        if not image or not all(0x0400 <= ord(char) <= 0x052F for char in image):
+            continue
+        if all(char in russian for char in image):
+            continue
+        sources.append(source)
+    return tuple(sources)
+
+
+_CYRILLIC_ONLY_MOJIBAKE_SOURCES = _cyrillic_only_mojibake_sources()
 
 _MOJIBAKE_BASE_SOURCES = (
     "\u00a7",
@@ -3005,25 +3003,107 @@ _MOJIBAKE_BASE_SOURCES = (
 )
 _MOJIBAKE_AT_RISK_SOURCES = tuple(sorted(set(_MOJIBAKE_BASE_SOURCES) | set(_CYRILLIC_ONLY_MOJIBAKE_SOURCES), key=ord))
 
-
-def _cp1251_mojibake(source: str) -> str:
-    """Return the sequence a character becomes when its UTF-8 bytes are read as cp1251."""
-    return source.encode("utf-8").decode("cp1251")
-
-
 _MOJIBAKE_SIGNATURES = tuple(_cp1251_mojibake(source) for source in _MOJIBAKE_AT_RISK_SOURCES)
+
+
+_TRACKED_TEXT_EXTENSIONS = frozenset(
+    {
+        ".bat",
+        ".example",
+        ".html",
+        ".json",
+        ".lua",
+        ".md",
+        ".ps1",
+        ".py",
+        ".sh",
+        ".spec",
+        ".svg",
+        ".toml",
+        ".txt",
+        ".typed",
+        ".yaml",
+        ".yml",
+    }
+)
+
+_TRACKED_TEXT_BASENAMES = frozenset({".gitattributes", ".gitignore", "LICENSE", "Makefile", "VERSION", ".gitkeep"})
+
+
+def _is_tracked_text_path(relative: str) -> bool:
+    """Known-text classification for one tracked path.
+
+    Only these paths fail closed on invalid UTF-8; every other tracked path is
+    treated as a binary and skipped.  The set is the tracked tree's own text
+    suffixes plus its extensionless text basenames.
+    """
+    name = relative.rsplit("/", 1)[-1]
+    if name in _TRACKED_TEXT_BASENAMES:
+        return True
+    return Path(relative).suffix.lower() in _TRACKED_TEXT_EXTENSIONS
+
+
+def _tracked_index_blobs() -> dict[str, bytes]:
+    """Return every tracked path's content from the INDEX, not the working tree.
+
+    Enumeration and content both read the index: ``git ls-files -s -z`` supplies
+    each blob SHA in the same snapshot the sweep enumerates, and ``git cat-file
+    --batch`` streams the blobs in one process.  A staged-but-overwritten working
+    tree can therefore never make the sweep certify the index clean.
+    """
+    raw = subprocess.run(
+        ["git", "ls-files", "-s", "-z"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    pairs: list[tuple[str, str]] = []
+    for entry in raw.decode(sys.getfilesystemencoding(), errors="surrogateescape").split("\0"):
+        if not entry:
+            continue
+        metadata, _, name = entry.partition("\t")
+        _mode, blob_sha, _stage = metadata.split(" ")
+        pairs.append((name, blob_sha))
+    cat = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=REPO_ROOT,
+        input="".join(blob_sha + "\n" for _, blob_sha in pairs).encode("utf-8"),
+        capture_output=True,
+        check=True,
+    ).stdout
+    blobs: dict[str, bytes] = {}
+    position = 0
+    for name, blob_sha in pairs:
+        newline = cat.index(b"\n", position)
+        _got_sha, _kind, size_text = cat[position:newline].decode("ascii").split(" ")
+        size = int(size_text)
+        blobs[name] = cat[newline + 1 : newline + 1 + size]
+        position = newline + 1 + size + 1
+    return blobs
+
+
+def _tracked_text_content(relative: str, raw: bytes) -> str | None:
+    """Decode one tracked path's index content as UTF-8.
+
+    Known text paths fail closed on invalid UTF-8: a corrupted text file must never
+    be skipped as if it were a binary, or a sweep could certify a tree clean while a
+    damaged text file sits in it.  Every other path is treated as a binary and
+    returns None, staying out of the sweep.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if _is_tracked_text_path(relative):
+            raise ValueError(f"tracked text file {relative!r} is not valid UTF-8") from exc
+        return None
 
 
 def _tracked_mojibake_hits() -> dict[str, int]:
     damaged: dict[str, int] = {}
-    for relative in _tracked_files():
-        path = REPO_ROOT / relative
-        try:
-            text = path.read_bytes().decode("utf-8")
-        except UnicodeDecodeError:
+    for relative, raw in _tracked_index_blobs().items():
+        text = _tracked_text_content(relative, raw)
+        if text is None:
             continue  # binary
-        except OSError as exc:
-            raise OSError(f"unable to read tracked file {relative!r}") from exc
         hits = _mojibake_hits(text)
         if hits:
             damaged[relative] = hits
@@ -3039,19 +3119,23 @@ def _mojibake_hits(text: str) -> int:
 # below exercise only a handful of signatures, so without this a single deleted source
 # would leave every test green -- the vacuous-pass condition, one entry at a time.  Any
 # removal, addition or substitution changes this digest.
-_MOJIBAKE_SOURCE_DIGEST = "sha256:dfaca1848d01d822260175539b79e6863d76ab20a9692b786cc43d9f6fc1457a"
+_MOJIBAKE_SOURCE_DIGEST = "sha256:d70ab9ad233af2e199bc7f200f95724f55ed00f37179cc6eed7f9688b934144b"
 
 
 def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
-    """The pinned source set must cover every eligible character in tracked text."""
+    """The pinned source set must cover every eligible character in tracked text.
+
+    The Cyrillic-only half of ``expected`` is derived INLINE here, never read from
+    ``_CYRILLIC_ONLY_MOJIBAKE_SOURCES``.  When the oracle reused that tuple, deleting a
+    source from it shrank the expected value with it and this guard could not fail;
+    recomputing the class independently makes this node an independent control for it
+    (pair 343).
+    """
     eligible: set[str] = set()
-    for relative in _tracked_files():
-        try:
-            text = (REPO_ROOT / relative).read_bytes().decode("utf-8")
-        except UnicodeDecodeError:
+    for relative, raw in _tracked_index_blobs().items():
+        text = _tracked_text_content(relative, raw)
+        if text is None:
             continue
-        except OSError as exc:
-            raise OSError(f"unable to read tracked file {relative!r}") from exc
         for character in text:
             if ord(character) <= 0x7F or 0x0400 <= ord(character) <= 0x052F or character in {"\u00b8", "\u00bb"}:
                 continue
@@ -3060,7 +3144,28 @@ def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
             except UnicodeDecodeError:
                 continue
             eligible.add(character)
-    expected = tuple(sorted(eligible | set(_CYRILLIC_ONLY_MOJIBAKE_SOURCES), key=ord))
+
+    russian = frozenset(
+        {chr(codepoint) for codepoint in range(0x0410, 0x0430)}
+        | {chr(codepoint) for codepoint in range(0x0430, 0x0450)}
+        | {chr(0x0401), chr(0x0451)}
+    )
+
+    def cyrillic_only_image(source: str) -> str | None:
+        try:
+            image = _cp1251_mojibake(source)
+        except UnicodeDecodeError:
+            return None
+        if (
+            image
+            and all(0x0400 <= ord(char) <= 0x052F for char in image)
+            and not all(char in russian for char in image)
+        ):
+            return image
+        return None
+
+    cyrillic_only = {chr(cp) for cp in range(0x00A1, 0x0180) if cyrillic_only_image(chr(cp)) is not None}
+    expected = tuple(sorted(eligible | cyrillic_only, key=ord))
     assert _MOJIBAKE_AT_RISK_SOURCES == expected, (
         "the mojibake source tuple is stale; re-derive it from tracked UTF-8 text"
     )
@@ -3086,7 +3191,7 @@ def test_mojibake_source_set_matches_its_pinned_digest() -> None:
 # Measured before this anchor existed: returning a dynamically assembled bogus signature
 # for a single source left all four guard nodes green, and the real corruption for that
 # character escaped the repository sweep.
-_MOJIBAKE_MAPPING_DIGEST = "sha256:9ef24dfa690bb3c40959a081bbc04c0fda7003518f8ba4c2b293f77b82c9434d"
+_MOJIBAKE_MAPPING_DIGEST = "sha256:61d5e6fb6cd0303070db4df97aa0ed4ac8f58ff2f3c5816e532697bdbc1c53d9"
 
 
 def test_mojibake_derivation_matches_its_pinned_mapping() -> None:
@@ -3141,6 +3246,7 @@ def test_mojibake_detector_fires_on_independently_specified_damage() -> None:
         ("ellipsis \u0432\u0402\u00a6 tail", 1),
         ("two \u0432\u0402\u201d and \u0412\u00b7", 2),
         ("non-Latin-1 \u0414\u0403", 1),
+        ("Latin-Extended-A \u0414\u0453", 1),
     )
     for text, expected in samples:
         assert _mojibake_hits(text) == expected, text
@@ -3187,13 +3293,45 @@ def test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file(tmp_path, monke
     assert _tracked_mojibake_hits() == {"damaged.md": 1}
 
 
+def test_mojibake_sweep_fails_closed_on_invalid_utf8_in_known_text_path(tmp_path, monkeypatch) -> None:
+    damaged = tmp_path / "damaged.md"
+    damaged.write_bytes(_cp1251_mojibake("\u2014").encode("utf-8") + b"\xff")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", damaged.name], cwd=tmp_path, check=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    with pytest.raises(ValueError, match="damaged.md"):
+        _tracked_mojibake_hits()
+    with pytest.raises(ValueError, match="damaged.md"):
+        test_mojibake_source_set_matches_live_tracked_inventory()
+
+
+def test_mojibake_sweep_still_skips_binary_paths_with_invalid_utf8(tmp_path, monkeypatch) -> None:
+    binary = tmp_path / "image.png"
+    binary.write_bytes(b"\x89PNG\r\n\x1a\n\xff")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", binary.name], cwd=tmp_path, check=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert _tracked_mojibake_hits() == {}
+
+
+def test_mojibake_sweep_reads_index_not_working_tree_when_they_diverge(tmp_path, monkeypatch) -> None:
+    candidate = tmp_path / "candidate.md"
+    candidate.write_text(_cp1251_mojibake("\u2014"), encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", candidate.name], cwd=tmp_path, check=True)
+    candidate.write_text("clean ASCII", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert _tracked_mojibake_hits() == {"candidate.md": 1}
+
+
 def test_mojibake_inventory_fails_when_a_tracked_file_cannot_be_read(monkeypatch) -> None:
-    monkeypatch.setattr(sys.modules[__name__], "_tracked_files", lambda: ["locked.md"])
+    def locked_snapshot():
+        raise PermissionError("unable to read tracked file 'locked.md'")
 
-    def locked_read(_path):
-        raise PermissionError("simulated locked tracked file")
-
-    monkeypatch.setattr(Path, "read_bytes", locked_read)
+    monkeypatch.setattr(sys.modules[__name__], "_tracked_index_blobs", locked_snapshot)
     with pytest.raises(OSError, match="locked.md"):
         _tracked_mojibake_hits()
     with pytest.raises(OSError, match="locked.md"):

@@ -6478,8 +6478,11 @@ records:
       non-ASCII character present in tracked text, restricted to non-Cyrillic sources because a Cyrillic
       source produces a Cyrillic-initial image that genuine Russian also produces; U+00BB is excluded on the
       same measured ground, its image being Cyrillic Ve before a closing guillemet, which occurs genuinely
-      including in the volts symbol. Tracked paths are read NUL-delimited, because core.quotePath is on by
-      default and would return a non-ASCII path as an octal-escaped literal that the sweep would silently skip.
+      including in the volts symbol. On top of that live inventory, the complete class of printable-Latin
+      sources whose cp1251 image is entirely Cyrillic is DERIVED, minus the images that are ordinary Russian
+      digraphs, so a corrupted accented-Latin letter can never hide as Cyrillic text. Tracked paths are read
+      NUL-delimited, because core.quotePath is on by default and would return a non-ASCII path as an
+      octal-escaped literal that the sweep would silently skip.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -6507,8 +6510,12 @@ records:
       sealed hosted remaining artifact can be produced without network access, so this record stays open.
       Stated coverage limits: the cp1251 round-trip only. Not a different codepage pair, not ASCII-only
       corruption, not replacement characters, not damage inside binary files, and not a corrupted U+00BB,
-      which is excluded by measurement. A new variant needs its source character added to the at-risk tuple.
-      The NUL-delimited path fix is verified behaviour-preserving here rather than merely asserted: 0
-      non-ASCII tracked paths exist today and both forms return the identical set of 1219 paths.
+      which is excluded by measurement. A new variant outside the derived Latin blocks needs its source
+      character added to the derivation that builds the at-risk set.
+      The NUL-delimited path fix is verified behaviour-preserving here rather than merely asserted: at the
+      evidence commit 6cbcd307a02617bcbb3edebd81db0ea57cec2601, 0 non-ASCII tracked paths existed and both
+      forms returned the identical set of 1219 paths. That count is historical, bound to that commit, not a
+      claim about this head; re-measured at head 8952a3b9427b2867ead02fa2f5e52b375bd456c0, git ls-files -z
+      returns 1222 paths, still 0 non-ASCII.
     red_evidence: local_executed_on_commit_6cbcd307a02617bcbb3edebd81db0ea57cec2601_tree_3e8b7ea27315c3daaae95d2ceae285f863a218b9_guard_blob_515338803489c6e11b2baa9678e9206856ca50a5_python_3_14_3_with_one_em_dash_in_docs_OBLIGATIONS_md_replaced_by_its_cp1251_mojibake_image_exact_node_selected_1_failed_exit_1_sweep_names_the_damaged_path_and_hit_count_stdout_stderr_sha256_5887732263826bc266201f686e3a1b4bca7a666f0e3dd8ed61135464ade4fd44
     green_evidence: local_executed_on_commit_6cbcd307a02617bcbb3edebd81db0ea57cec2601_tree_3e8b7ea27315c3daaae95d2ceae285f863a218b9_guard_blob_515338803489c6e11b2baa9678e9206856ca50a5_python_3_14_3_all_four_exact_nodes_selected_4_passed_exit_0_152_unique_signatures_stdout_stderr_sha256_00313f812180a456ffe7937fb2b03b4b821aaf1ef4e4604dbf9ca8f66d21b731_pending_sealed_hosted_remaining_artifact
