@@ -318,6 +318,60 @@ def test_main_refuses_stable_uncommitted_suite_inputs(tmp_path: Path, monkeypatc
     assert "uncommitted candidate inputs" in capsys.readouterr().out
 
 
+def test_main_refuses_ignored_collectable_suite_inputs(tmp_path: Path, monkeypatch, capsys) -> None:
+    repository = _repository(tmp_path / "candidate")
+    source = repository / "src" / "production.py"
+    source.parent.mkdir()
+    source.write_bytes(b"VALUE = 'base'\n")
+    _git(repository, "add", "src/production.py")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    source.write_bytes(b"VALUE = 'candidate'\n")
+    _git(repository, "commit", "-qam", "candidate")
+    ignored_test = repository / "tests" / "test_ignored_guard.py"
+    ignored_test.parent.mkdir()
+    ignored_test.write_bytes(b"def test_guard(): pass\n")
+    (repository / ".git" / "info" / "exclude").write_text("tests/test_ignored_guard.py\n", encoding="utf-8")
+
+    runs = 0
+
+    def covered_only_by_ignored_test(_suites: list[str], _cache: Path) -> list[str]:
+        nonlocal runs
+        runs += 1
+        return []
+
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(subject, "failures", covered_only_by_ignored_test)
+    monkeypatch.setattr(sys, "argv", ["unguarded_production_files", "--base", base, "--suite", "tests"])
+
+    assert subject.main() == 2
+    assert runs == 0
+    out = capsys.readouterr().out
+    assert "ignored files pytest would collect" in out
+    assert "tests/test_ignored_guard.py" in out
+
+
+def test_ignored_suite_inputs_select_only_files_pytest_collects(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    ignored_test = repository / "tests" / "test_ignored_guard.py"
+    ignored_test.parent.mkdir()
+    ignored_test.write_bytes(b"def test_guard(): pass\n")
+    conftest = repository / "tests" / "conftest.py"
+    conftest.write_bytes(b"")
+    runtime = repository / "data" / "runtime.db"
+    runtime.parent.mkdir()
+    runtime.write_bytes(b"db")
+    pycache = repository / "tests" / "__pycache__" / "x.pyc"
+    pycache.parent.mkdir()
+    pycache.write_bytes(b"pyc")
+    (repository / ".git" / "info" / "exclude").write_text(
+        "tests/test_ignored_guard.py\ntests/conftest.py\ndata/runtime.db\ntests/__pycache__/\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(repository)
+
+    assert subject._ignored_suite_inputs(["tests"]) == ["tests/conftest.py", "tests/test_ignored_guard.py"]
+
+
 def test_main_refuses_to_certify_multiple_independent_edits_as_one(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
@@ -395,6 +449,28 @@ def test_runtime_artifact_without_source_suffix_is_selected(tmp_path: Path, monk
     assert [artifact.label for artifact in selected] == ["src/cryodaq/web/static/index.html"]
 
 
+def test_failed_node_id_preserves_separators_inside_parametrized_ids() -> None:
+    alpha = subject._failed_node_id(
+        "FAILED tests/a.py::test_guard[same - alpha] - AssertionError: assert 'same - alpha' != 'same - beta'"
+    )
+    beta = subject._failed_node_id(
+        "FAILED tests/a.py::test_guard[same - beta] - AssertionError: assert 'same - beta' != 'same - alpha'"
+    )
+
+    assert alpha == "tests/a.py::test_guard[same - alpha]"
+    assert beta == "tests/a.py::test_guard[same - beta]"
+    assert alpha != beta
+
+
+def test_failed_node_id_splits_on_the_separator_not_the_message() -> None:
+    assert subject._failed_node_id("FAILED tests/a.py::test_guard - AssertionError: foo - bar") == (
+        "tests/a.py::test_guard"
+    )
+    assert subject._failed_node_id("FAILED tests/a.py::test_guard[param] - Failed: no - separator here") == (
+        "tests/a.py::test_guard[param]"
+    )
+
+
 def test_failures_keep_distinct_full_node_ids_for_identical_messages(monkeypatch, tmp_path: Path) -> None:
     output = "\n".join(
         [
@@ -443,6 +519,46 @@ def test_default_roster_derives_a_new_runtime_root_from_git_trees(tmp_path: Path
         for path in artifact.paths
     }
     assert runtime_path not in without_paths
+
+
+def test_top_level_launcher_files_are_selected_as_runtime_artifacts(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    launcher = repository / "start.bat"
+    launcher.write_bytes(b"@echo base\n")
+    _git(repository, "add", "start.bat")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    launcher.write_bytes(b"@echo candidate\n")
+    _git(repository, "commit", "-qam", "change launcher")
+    monkeypatch.chdir(repository)
+
+    includes = subject.default_runtime_includes(base, "HEAD")
+    selected = {
+        path for artifact in subject.changed_files(base, includes, subject._DEFAULT_SUFFIXES) for path in artifact.paths
+    }
+
+    assert "start.bat" in includes
+    assert "start.bat" in selected
+
+
+def test_top_level_documentation_files_are_not_runtime_artifacts(tmp_path: Path, monkeypatch) -> None:
+    repository = _repository(tmp_path / "candidate")
+    readme = repository / "README.md"
+    readme.write_bytes(b"base\n")
+    _git(repository, "add", "README.md")
+    _git(repository, "commit", "-qm", "base")
+    base = _git(repository, "rev-parse", "HEAD")
+    readme.write_bytes(b"candidate\n")
+    _git(repository, "commit", "-qam", "change readme")
+    monkeypatch.chdir(repository)
+
+    includes = subject.default_runtime_includes(base, "HEAD")
+    selected = {
+        path for artifact in subject.changed_files(base, includes, subject._DEFAULT_SUFFIXES) for path in artifact.paths
+    }
+
+    assert "README.md" not in includes
+    assert "README.md" not in selected
 
 
 def test_main_filters_are_additive_and_reconfirm_mutant_red_then_candidate_green(
@@ -688,6 +804,54 @@ def test_atomic_restore_replaces_only_from_complete_external_staging(tmp_path: P
     assert not staging_paths[0].exists()
 
 
+def test_atomic_restore_installs_only_when_the_path_still_holds_the_mutant(tmp_path: Path) -> None:
+    repository = tmp_path / "candidate"
+    target = repository / "src" / "production.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"MUTANT\n")
+    mutant = subject.path_identity(target)
+    original = subject.PathIdentity("file", b"CANDIDATE\n", 0o644)
+
+    assert subject.restore_path_atomically(repository, target, original, expected=mutant) is True
+    assert target.read_bytes() == b"CANDIDATE\n"
+
+
+def test_atomic_restore_refuses_to_overwrite_bytes_it_does_not_own(tmp_path: Path) -> None:
+    repository = tmp_path / "candidate"
+    target = repository / "src" / "production.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"MUTANT\n")
+    mutant = subject.path_identity(target)
+    original = subject.PathIdentity("file", b"CANDIDATE\n", 0o644)
+    target.write_bytes(b"WRITER\n")
+
+    assert subject.restore_path_atomically(repository, target, original, expected=mutant) is False
+    assert target.read_bytes() == b"WRITER\n"
+
+
+def test_atomic_restore_leaves_a_file_created_at_an_expected_absent_path(tmp_path: Path) -> None:
+    repository = tmp_path / "candidate"
+    target = repository / "src" / "new_name.py"
+    target.parent.mkdir(parents=True)
+    expected_absent = subject.PathIdentity("absent")
+    original = subject.PathIdentity("file", b"CANDIDATE\n", 0o644)
+    target.write_bytes(b"WRITER\n")
+
+    assert subject.restore_path_atomically(repository, target, original, expected=expected_absent) is False
+    assert target.read_bytes() == b"WRITER\n"
+
+
+def test_atomic_restore_refuses_when_an_expected_file_was_deleted(tmp_path: Path) -> None:
+    repository = tmp_path / "candidate"
+    target = repository / "src" / "production.py"
+    target.parent.mkdir(parents=True)
+    mutant = subject.PathIdentity("file", b"MUTANT\n", 0o644)
+    original = subject.PathIdentity("file", b"CANDIDATE\n", 0o644)
+
+    assert subject.restore_path_atomically(repository, target, original, expected=mutant) is False
+    assert not target.exists()
+
+
 def test_unverified_process_tree_blocks_restore_and_automatic_recovery(tmp_path: Path, monkeypatch, capsys) -> None:
     repository = _repository(tmp_path / "candidate")
     _git(repository, "config", "core.autocrlf", "false")
@@ -809,6 +973,62 @@ def test_failures_uses_a_fresh_pyc_cache_prefix_for_each_mutation_run(monkeypatc
     assert captured[0] != ""
     assert captured[1] != ""
     assert captured[0] != captured[1]
+
+
+def test_cache_prefixes_are_phase_neutral(monkeypatch, tmp_path: Path) -> None:
+    suite = ["tests"]
+    captured: list[str] = []
+
+    def capture_prefix(command, root=None, **kwargs) -> subprocess.CompletedProcess[bytes]:
+        environment = kwargs.get("environment", {})
+        captured.append(environment.get("PYTHONPYCACHEPREFIX", ""))
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(subject, "_run_candidate_process", capture_prefix)
+    monkeypatch.setattr(subject, "repository_root", lambda: tmp_path)
+
+    def allocate(prefix: str) -> str:
+        path = tmp_path / f"{prefix}{len(captured)}"
+        path.mkdir()
+        return str(path)
+
+    monkeypatch.setattr(subject.tempfile, "mkdtemp", allocate)
+
+    subject.fresh_failures(suite, subject._CACHE_PREFIX)
+    subject.repeated_mutant_failures(suite)
+
+    assert len(captured) == 3
+    assert len(set(captured)) == 3
+    for value in captured:
+        assert value.startswith(str(tmp_path / subject._CACHE_PREFIX)), value
+        assert not any(phase in value for phase in ("control", "mutant", "restored", "repeat")), value
+
+
+def test_fresh_failures_refuses_when_the_fresh_cache_cannot_be_removed(monkeypatch, tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(subject, "failures", lambda _suites, _cache: [])
+    monkeypatch.setattr(subject.tempfile, "mkdtemp", lambda **_kwargs: str(cache))
+
+    def refuse_removal(path, **_kwargs) -> None:
+        raise PermissionError(13, "file locked")
+
+    monkeypatch.setattr(subject.shutil, "rmtree", refuse_removal)
+
+    with pytest.raises(subject.MeasurementError, match="could not be removed after the run"):
+        subject.fresh_failures(["tests"], "cache-prefix-")
+
+
+def test_fresh_failures_accepts_a_cache_that_is_already_reclaimed(monkeypatch, tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(subject, "failures", lambda _suites, _cache: [])
+    monkeypatch.setattr(subject.tempfile, "mkdtemp", lambda **_kwargs: str(cache))
+
+    def already_gone(path, **_kwargs) -> None:
+        raise FileNotFoundError
+
+    monkeypatch.setattr(subject.shutil, "rmtree", already_gone)
+
+    assert subject.fresh_failures(["tests"], "cache-prefix-") == []
 
 
 def test_git_queries_strip_git_environment_from_repository_commands(monkeypatch, tmp_path: Path) -> None:

@@ -195,6 +195,24 @@ def disposition_state(
     return "evidence_complete"
 
 
+def _green_awaiting_sweep(entry: Mapping[str, Any]) -> bool:
+    """A closure may defer green only when the reviewer-owned signal makes it the sole work.
+
+    This is the validator's enforcement of the ``awaiting_green_sweep`` state
+    that ``disposition_state`` reports for open records: the reviewer-owned
+    ``correction_complete`` signal is what makes a recorded pending green merely
+    the post-merge capture. Without it, a pending green on a closed entry is a
+    missing half, not a deferred one, and the closure still requires both sealed
+    evidence halves.
+    """
+
+    return (
+        isinstance(entry.get("green_evidence"), str)
+        and entry.get("green_evidence") in _PENDING
+        and (entry.get("correction_complete") is True)
+    )
+
+
 def _validate_immutable_evidence(value: Any, field: str) -> None:
     if not isinstance(value, Mapping):
         raise GovernanceContractError(f"{field} immutable evidence shape is not exact")
@@ -1074,14 +1092,17 @@ def validate_registry(
             if "automation_limit" in record:
                 raise GovernanceContractError(f"{record_id} cannot close while its automation_limit remains")
             _validate_immutable_evidence(record["red_evidence"], f"{record_id}.red_evidence")
-            _validate_immutable_evidence(record["green_evidence"], f"{record_id}.green_evidence")
+            green_deferred = _green_awaiting_sweep(record)
+            if not green_deferred:
+                _validate_immutable_evidence(record["green_evidence"], f"{record_id}.green_evidence")
             guard_partitions = {guard["ci_partition"] for guard in guards}
             _validate_evidence_partition(
                 record["red_evidence"], guard_partitions, f"{record_id}.red_evidence", required_for_closure=False
             )
-            _validate_evidence_partition(
-                record["green_evidence"], guard_partitions, f"{record_id}.green_evidence", required_for_closure=True
-            )
+            if not green_deferred:
+                _validate_evidence_partition(
+                    record["green_evidence"], guard_partitions, f"{record_id}.green_evidence", required_for_closure=True
+                )
             _validate_guard_source_blobs(
                 record.get("guard_source_blobs"),
                 entry_id=record_id,
@@ -1182,14 +1203,17 @@ def validate_registry(
             if runtime["status"] not in {"closed", "expired"}:
                 raise GovernanceContractError(f"{pair_id} closes before its runtime prevention")
             _validate_immutable_evidence(pair["red_evidence"], f"{pair_id}.red_evidence")
-            _validate_immutable_evidence(pair["green_evidence"], f"{pair_id}.green_evidence")
+            green_deferred = _green_awaiting_sweep(pair)
+            if not green_deferred:
+                _validate_immutable_evidence(pair["green_evidence"], f"{pair_id}.green_evidence")
             pair_partitions = {pair["ci_partition"]}
             _validate_evidence_partition(
                 pair["red_evidence"], pair_partitions, f"{pair_id}.red_evidence", required_for_closure=False
             )
-            _validate_evidence_partition(
-                pair["green_evidence"], pair_partitions, f"{pair_id}.green_evidence", required_for_closure=True
-            )
+            if not green_deferred:
+                _validate_evidence_partition(
+                    pair["green_evidence"], pair_partitions, f"{pair_id}.green_evidence", required_for_closure=True
+                )
             _validate_guard_source_blobs(
                 pair.get("guard_source_blobs"),
                 entry_id=pair_id,

@@ -56,8 +56,10 @@ the same asymmetry the tool exists to exploit:
 * **Clobbering a concurrent writer.** The up-front porcelain check cannot see an
   edit made after it ran, and the restore was unconditional, so another worker's
   bytes could be destroyed in either window. The file is re-read immediately
-  before the mutation and again before the restore; a mismatch is preserved and
-  reported instead of overwritten.
+  before the mutation; the restore is a compare-and-swap that reads the identity
+  from the bytes actually moved aside, and its install never overwrites a path
+  that was recreated in the meantime. A mismatch is preserved and reported
+  instead of overwritten.
 * **Losing the file's identity.** An added artifact that was a symlink or
   carried an executable bit was restored with `write_bytes`, producing a plain
   file with default permissions. The byte assertion still passed while the TYPE
@@ -153,9 +155,40 @@ from tools.ci_active_checkout_runner import (
 # discovery gate.
 _DEFAULT_SUFFIXES: tuple[str, ...] = ()
 _NON_RUNTIME_TOP_LEVELS = frozenset({".github", "build_scripts", "docs", "governance", "scripts", "tests", "tools"})
+_NON_RUNTIME_TOP_LEVEL_FILES = frozenset(
+    {
+        ".gitattributes",
+        ".gitignore",
+        "README",
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "CLAUDE.md",
+        "LICENSE",
+        "PROJECT_STATUS.md",
+        "README.md",
+        "README.ru.md",
+        "RELEASE_CHECKLIST.md",
+        "ROADMAP.md",
+        "THIRD_PARTY_NOTICES.md",
+        "Makefile",
+        "environment.yml",
+        "install.bat",
+        "pyproject.toml",
+        "requirements-lock.txt",
+        "requirements-protected-ci-lock.txt",
+    }
+)
 _PYTEST_TIMEOUT_SECONDS = 120
 _RECOVERY_NAME = ".audit-unguarded-production-recovery.json"
 _STATE_DIRECTORY_NAME = "cryodaq-unguarded-production-files"
+# PHASE-NEUTRAL, deliberately: every fresh bytecode cache shares one prefix so
+# the control, mutant, repeated-mutant, and restored phases are
+# indistinguishable by ``PYTHONPYCACHEPREFIX``, which the suites (via
+# ``src/cryodaq/report_process.py``) propagate into their children. A
+# phase-identifying prefix let a suite fail on the phase label alone, so both
+# mutant runs returned the same node while control and restored stayed green,
+# certifying coverage the suite never measured.
+_CACHE_PREFIX = "unguarded-run-"
 
 
 @dataclass(frozen=True)
@@ -266,18 +299,88 @@ def _state_directory(root: Path) -> Path:
     return state
 
 
-def restore_path_atomically(root: Path, path: Path, identity: PathIdentity) -> None:
-    """Restore through a same-volume replacement so a killed writer cannot truncate the target."""
+def _move_no_clobber(source: Path, target: Path) -> bool:
+    """Atomically move ``source`` to ``target`` only while ``target`` is absent.
+
+    ``os.replace`` unconditionally clobbers a target created between an identity
+    check and an install, so the install must refuse to replace. On Windows
+    ``os.rename`` is a no-replace move and raises ``FileExistsError`` when the
+    target exists; on POSIX ``rename(2)`` replaces, so a hard link is used
+    instead (``link(2)`` fails on an existing target and the source is then
+    unlinked). Where neither is available, a pre-check rename remains, with the
+    documented residual window.
+    """
+
+    if os.name == "nt":
+        try:
+            os.rename(source, target)
+        except FileExistsError:
+            return False
+        return True
+    try:
+        os.link(source, target, follow_symlinks=False)
+    except FileExistsError:
+        return False
+    except (OSError, NotImplementedError):
+        if target.exists():
+            return False
+        os.rename(source, target)
+        return True
+    os.unlink(source)
+    return True
+
+
+def restore_path_atomically(
+    root: Path, path: Path, identity: PathIdentity, *, expected: PathIdentity | None = None
+) -> bool:
+    """Restore through a same-volume replacement; return False when `path` is not this tool's to restore.
+
+    A killed writer cannot truncate the target because the restore content is
+    fully materialized in external same-volume staging first and installed with
+    one atomic move. ``expected`` closes WINDOW TWO as a compare-and-swap: the
+    current ``path`` is first moved aside atomically, and only if the moved-aside
+    identity is exactly the mutant this tool placed is the restore installed --
+    the identity is read from the bytes actually moved, never from a re-read of
+    a path another writer could change between observation and replacement. The
+    install is itself a no-replace move, so a file created at ``path`` between
+    the capture and the install is left in place. A concurrent writer's bytes
+    are therefore never overwritten in any window; the caller receives False and
+    reports the artifact unmeasured.
+    """
 
     if identity.kind == "absent":
+        if expected is not None and path_identity(path) != expected:
+            return False
         path.unlink(missing_ok=True)
-        return
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-restore-", dir=_state_directory(root))
+        return True
+    state = _state_directory(root)
+    if expected is not None:
+        descriptor, current_name = tempfile.mkstemp(prefix=".audit-unguarded-current-", dir=state)
+        os.close(descriptor)
+        current = Path(current_name)
+        os.unlink(current)
+        try:
+            os.replace(path, current)
+        except FileNotFoundError:
+            current.unlink(missing_ok=True)
+            if expected.kind != "absent":
+                return False
+        else:
+            try:
+                if path_identity(current) != expected:
+                    _move_no_clobber(current, path)
+                    return False
+            finally:
+                current.unlink(missing_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".audit-unguarded-restore-", dir=state)
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
         restore_path(temporary, identity)
-        os.replace(temporary, path)
+        if expected is None:
+            os.replace(temporary, path)
+            return True
+        return _move_no_clobber(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -356,19 +459,41 @@ def merge_base(base: str) -> str:
 
 
 def default_runtime_includes(*points: str) -> tuple[str, ...]:
-    """Derive runtime-root candidates from immutable Git trees, fail-closed by exclusion."""
+    """Derive runtime-root candidates from immutable Git trees, fail-closed by exclusion.
+
+    Both directory roots and top-level runtime FILES are derived, so runtime
+    reach is not silently defined by directory placement: ``start.bat``,
+    ``start.sh``, the mock launchers and ``create_shortcut.py`` sit at the
+    repository root, and a directory-only scan would select nothing for a change
+    confined to one of them. Non-production top-level files -- documentation,
+    Git metadata, and packaging/build configuration -- are excluded by name,
+    exactly as the directory categories are.
+    """
 
     roots: set[str] = set()
     for point in points:
-        out = _git(["ls-tree", "-d", "--name-only", "-z", point])
+        out = _git(["ls-tree", "-z", point])
         out.check_returncode()
-        for name in out.stdout.split("\0"):
-            if not name:
+        for entry in out.stdout.split("\0"):
+            if not entry:
                 continue
+            metadata, separator, name = entry.partition("\t")
+            if separator != "\t":
+                raise MeasurementError(f"Git returned a malformed runtime-root entry: {entry!r}")
+            try:
+                _mode, kind, _object_id = metadata.split(" ")
+            except ValueError as exc:
+                raise MeasurementError(f"Git returned a malformed runtime-root entry: {entry!r}") from exc
             if "/" in name or name in {".", ".."}:
                 raise MeasurementError(f"Git returned a non-top-level runtime-root candidate: {name!r}")
-            if name not in _NON_RUNTIME_TOP_LEVELS:
-                roots.add(f"{name}/")
+            if kind == "tree":
+                if name not in _NON_RUNTIME_TOP_LEVELS:
+                    roots.add(f"{name}/")
+            elif kind == "blob":
+                if name not in _NON_RUNTIME_TOP_LEVEL_FILES:
+                    roots.add(name)
+            else:
+                raise MeasurementError(f"Git returned an unsupported top-level entry kind: {kind!r}")
     return tuple(sorted(roots))
 
 
@@ -439,6 +564,42 @@ class UnsettledProcessTree(MeasurementError):
 
 class SuiteInputDrift(MeasurementError):
     """The candidate or a possible suite input changed between observations."""
+
+
+def _ignored_suite_inputs(suites: list[str]) -> list[str]:
+    """Ignored untracked files pytest would collect for the given suites.
+
+    ``git ls-files --others --exclude-standard`` omits ignored files, and
+    ``git status --porcelain`` never shows them, so an ignored ``conftest.py``
+    or ``test_*.py`` is invisible to both the suite-input snapshot and the
+    pre-run cleanliness check -- yet pytest imports and executes it. A guard
+    that only exists as an ignored file can then certify a revert that is not
+    part of HEAD. Enumerate ignored files and refuse when one is collectable.
+    Only files pytest actually collects are considered, so ordinary ignored
+    artifacts (``__pycache__``, ``.venv``, editor files, runtime data the
+    suites themselves write) never block a measurement.
+    """
+
+    out = _git_bytes(["ls-files", "-z", "-o", "-i", "--exclude-standard"])
+    out.check_returncode()
+    suite_roots = tuple(PurePosixPath(suite) for suite in suites)
+    collectable: list[str] = []
+    for raw in out.stdout.split(b"\0"):
+        if not raw:
+            continue
+        relative = os.fsdecode(raw)
+        pure = PurePosixPath(relative)
+        name = pure.name
+        if name == "conftest.py":
+            parent = pure.parent
+            on_chain = any(parent.is_relative_to(root) or root.is_relative_to(parent) for root in suite_roots)
+            if on_chain:
+                collectable.append(relative)
+            continue
+        if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
+            if any(pure.is_relative_to(root) for root in suite_roots):
+                collectable.append(relative)
+    return sorted(collectable)
 
 
 def _suite_inputs_once(root: Path, excluded: set[str] | None = None) -> SuiteInputs:
@@ -713,11 +874,29 @@ def recover_pending(root: Path) -> bool:
 
 
 def _failed_node_id(line: str) -> str:
-    """Extract pytest's complete node ID while excluding only its message."""
+    """Extract pytest's complete node ID while excluding only its message.
+
+    pytest's short summary is ``FAILED <nodeid> - <message>``, but the message
+    separator is not the first `` - `` in the line. A parametrized ID may itself
+    contain `` - `` (pytest preserves it verbatim inside the ``[...]``), and the
+    message is trimmed to the terminal width, so it may contain `` - `` too.
+    Splitting on the first `` - `` collapsed ``test_guard[same - alpha]`` and
+    ``test_guard[same - beta]`` onto one prefix: two different flaky parameters
+    then looked like one repeated failure and could certify a revert. The
+    separator is the first `` - `` that appears OUTSIDE the nodeid's parameter
+    brackets, so the complete node ID is returned for any valid ID.
+    """
 
     body = line.removeprefix("FAILED ").strip()
-    node_id, separator, _message = body.partition(" - ")
-    return node_id.strip() if separator else body
+    depth = 0
+    for index, char in enumerate(body):
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and body.startswith(" - ", index):
+            return body[:index].strip()
+    return body
 
 
 def failures(suites: list[str], cache_prefix: Path) -> list[str]:
@@ -756,17 +935,36 @@ def failures(suites: list[str], cache_prefix: Path) -> list[str]:
     return found
 
 
-def fresh_failures(suites: list[str], prefix: str) -> list[str]:
-    cache = Path(tempfile.mkdtemp(prefix=prefix))
+def fresh_failures(suites: list[str], _prefix: str) -> list[str]:
+    cache = Path(tempfile.mkdtemp(prefix=_CACHE_PREFIX))
+    primary_error: BaseException | None = None
     try:
         return failures(suites, cache)
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        shutil.rmtree(cache, ignore_errors=True)
+        # A fresh cache is created for EVERY control, mutant, and restored run,
+        # so a cache that survives the run accumulates until the temp volume
+        # exhausts -- the throwaway-control-state-not-reclaimed failure. The
+        # removal is therefore verified, not assumed: a locked or permission
+        # error on a file inside the cache surfaces as an unmeasured run instead
+        # of silently reporting normally. A cache that is already gone satisfies
+        # reclamation, so that case is not a failure.
+        try:
+            shutil.rmtree(cache)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            cleanup_error = MeasurementError(f"fresh bytecode cache {cache} could not be removed after the run: {exc}")
+            if primary_error is not None:
+                cleanup_error.add_note(f"primary run error: {primary_error!r}")
+            raise cleanup_error from exc
 
 
 def repeated_mutant_failures(suites: list[str]) -> list[str]:
-    first = sorted(set(fresh_failures(suites, "unguarded-mutant-")))
-    second = sorted(set(fresh_failures(suites, "unguarded-mutant-repeat-")))
+    first = sorted(set(fresh_failures(suites, _CACHE_PREFIX)))
+    second = sorted(set(fresh_failures(suites, _CACHE_PREFIX)))
     if first != second:
         raise MeasurementError("mutant failures did not repeat exactly on the second run")
     return first
@@ -816,6 +1014,16 @@ def main() -> int:
         print(uncommitted)
         return 2
 
+    ignored_inputs = _ignored_suite_inputs(suites)
+    if ignored_inputs:
+        print(
+            "REFUSING: ignored files pytest would collect cannot be proven to belong to the candidate, "
+            "so a guard they supply is not part of HEAD:"
+        )
+        for path in ignored_inputs:
+            print(f"    {path}")
+        return 2
+
     try:
         suite_inputs = capture_suite_inputs(root)
     except MeasurementError as unreadable:
@@ -825,7 +1033,7 @@ def main() -> int:
     # THE CONTROL. Without it, a suite that already fails hands the same failure
     # to every reverted artifact and every one is reported guarded.
     try:
-        control = fresh_failures(suites, "unguarded-control-")
+        control = fresh_failures(suites, _CACHE_PREFIX)
     except MeasurementError as unreadable:
         print(f"REFUSING: the control run produced no readable result, so nothing can be attributed:\n{unreadable}")
         return 2
@@ -930,18 +1138,14 @@ def main() -> int:
                     if armed:
                         block_recovery(root, str(unsettled_error))
                 else:
-                    old_unchanged = old_mutant is not None and path_identity(old) == old_mutant
-                    new_unchanged = new_mutant is not None and path_identity(new) == new_mutant
-                    concurrent = old_mutant is not None and not (old_unchanged and new_unchanged)
-                    if old_unchanged:
-                        restore_path_atomically(root, old, old_original)
-                    if new_unchanged:
-                        restore_path_atomically(root, new, new_original)
+                    old_restored = restore_path_atomically(root, old, old_original, expected=old_mutant)
+                    new_restored = restore_path_atomically(root, new, new_original, expected=new_mutant)
+                    concurrent = not (old_restored and new_restored)
                     if concurrent:
                         clobbered.append(target.label)
                         print(f"| `{target.label}` | **NOT MEASURED** — rename pair changed during the run |")
                     if armed and (
-                        concurrent or (path_identity(old) == old_original and path_identity(new) == new_original)
+                        not concurrent or (path_identity(old) == old_original and path_identity(new) == new_original)
                     ):
                         clear_recovery(root)
             if unsettled_error is not None:
@@ -954,7 +1158,7 @@ def main() -> int:
                 continue
             if introduced:
                 try:
-                    restored = fresh_failures(suites, "unguarded-restored-")
+                    restored = fresh_failures(suites, _CACHE_PREFIX)
                     assert_suite_inputs_unchanged(suite_inputs, root)
                 except MeasurementError as unreadable:
                     unmeasured.append(target.label)
@@ -1034,15 +1238,17 @@ def main() -> int:
                 # WINDOW TWO. Another worker may have written while pytest ran. If
                 # what is on disk is no longer the mutant we placed there, those are
                 # someone else's bytes: leave them, and say so. An unconditional
-                # restore here would erase work this tool never owned.
-                concurrent = mutant is not None and path_identity(source) != mutant
-                if concurrent:
+                # restore here would erase work this tool never owned. The restore
+                # is a compare-and-swap: it restores only when the on-disk identity
+                # is still exactly the mutant, and its install never overwrites a
+                # path that was recreated in the meantime.
+                restored = restore_path_atomically(root, source, original, expected=mutant)
+                if not restored:
                     clobbered.append(path)
                     print(f"| `{path}` | **NOT MEASURED** — changed on disk during the run; left as found |")
                 else:
-                    restore_path_atomically(root, source, original)
                     assert path_identity(source) == original, f"{path} was NOT restored with its complete identity"
-                if armed and (concurrent or path_identity(source) == original):
+                if armed and (not restored or path_identity(source) == original):
                     clear_recovery(root)
         if unsettled_error is not None:
             print(f"REFUSING: {unsettled_error}; the mutant and blocked recovery journal were left intact")
@@ -1054,7 +1260,7 @@ def main() -> int:
             continue
         if introduced:
             try:
-                restored = fresh_failures(suites, "unguarded-restored-")
+                restored = fresh_failures(suites, _CACHE_PREFIX)
                 assert_suite_inputs_unchanged(suite_inputs, root)
             except MeasurementError as unreadable:
                 unmeasured.append(path)

@@ -177,6 +177,62 @@ def test_closed_records_have_collectable_default_ci_guards_and_immutable_evidenc
         validate_registry(prose)
 
 
+def test_closed_entries_may_await_the_post_merge_green_sweep() -> None:
+    """Pending green closes only with the reviewer-owned correction-complete signal.
+
+    Green evidence names a MERGED head, which cannot exist before the merge it
+    would gate. The post-merge sweep appends it, so a closed record or pair with
+    ``green_evidence: pending`` plus the reviewer-owned ``correction_complete``
+    signal and immutable red evidence is accepted -- the ``awaiting_green_sweep``
+    state is enforced here, not only computed by ``disposition_state``. Without
+    the signal a pending green is a missing half and the closure still fails.
+    """
+
+    payload = _registry()
+    deferred = copy.deepcopy(payload)
+    record = next(record for record in deferred["records"] if record["id"] == "GOVERNANCE-PREVENTION-MAP-001")
+    record["status"] = "closed"
+    record["red_evidence"] = {"locator": "git:" + "1" * 40, "sha256": "sha256:" + "1" * 64}
+    record["green_evidence"] = "pending"
+    record["correction_complete"] = True
+    record["guard_source_blobs"] = _guard_source_blobs(record)
+    record["closure_semantics_sha256"] = closure_semantics_sha256(record)
+    validate_registry(deferred)
+
+    missing_signal = copy.deepcopy(deferred)
+    signal_record = next(
+        record for record in missing_signal["records"] if record["id"] == "GOVERNANCE-PREVENTION-MAP-001"
+    )
+    del signal_record["correction_complete"]
+    with pytest.raises(GovernanceContractError, match="immutable evidence shape"):
+        validate_registry(missing_signal)
+
+    pair_payload = _registry()
+    pair = pair_payload["false_green_pairs"][0]
+    runtime = next(record for record in pair_payload["records"] if record["id"] == pair["runtime_prevention_id"])
+    runtime["status"] = "closed"
+    runtime["red_evidence"] = {"locator": "git:" + "3" * 40, "sha256": "sha256:" + "3" * 64}
+    runtime["green_evidence"] = "pending"
+    runtime["correction_complete"] = True
+    runtime["guard_source_blobs"] = _guard_source_blobs(runtime)
+    runtime["closure_semantics_sha256"] = closure_semantics_sha256(runtime)
+    pair["status"] = "closed"
+    pair["red_evidence"] = {"locator": "git:" + "4" * 40, "sha256": "sha256:" + "4" * 64}
+    pair["green_evidence"] = "pending"
+    pair["correction_complete"] = True
+    pair["guard_source_blobs"] = {
+        pair["guard"].split("::", 1)[0]: _git_blob_id((ROOT / pair["guard"].split("::", 1)[0]).read_bytes())
+    }
+    pair["closure_semantics_sha256"] = closure_semantics_sha256(pair)
+    validate_registry(pair_payload)
+
+    pair_missing_signal = copy.deepcopy(pair_payload)
+    signal_pair = next(item for item in pair_missing_signal["false_green_pairs"] if item["id"] == pair["id"])
+    del signal_pair["correction_complete"]
+    with pytest.raises(GovernanceContractError, match="immutable evidence shape"):
+        validate_registry(pair_missing_signal)
+
+
 def test_artifact_evidence_requires_receipt_tree_and_suite_binding() -> None:
     payload = _registry()
     record = next(
