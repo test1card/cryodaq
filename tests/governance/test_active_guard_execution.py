@@ -137,10 +137,6 @@ def _registry(
             "core": ["test (ubuntu-latest, core)", "test (windows-latest, core)"],
             "gui": ["test (ubuntu-latest, gui)", "test (windows-latest, gui)"],
             "remaining": ["test (ubuntu-latest, remaining)", "test (windows-latest, remaining)"],
-            # OB-006.  SETUP, not a property: this payload exists so the contract validates a
-            # structurally complete document, and it must therefore mirror the real map exactly.
-            # The partition-set REFUSAL lives in test_agent_preventions.py and is untouched.
-            "release": ["whole-tree artifact freshness"],
         },
         "false_green_pair_semantics": {
             "status": "required_and_linked",

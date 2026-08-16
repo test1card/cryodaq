@@ -67,12 +67,6 @@ _EXPECTED_DEFAULT_CI_JOBS = {
     "gui": ["test (ubuntu-latest, gui)", "test (windows-latest, gui)"],
     "agents": ["test (ubuntu-latest, agents)", "test (windows-latest, agents)"],
     "remaining": ["test (ubuntu-latest, remaining)", "test (windows-latest, remaining)"],
-    # OB-006.  NOT a test partition, and it must never be treated as one: it names the
-    # tag-triggered release job that runs the whole-tree artifact checks after they left
-    # every per-pull-request partition.  Registering them here rather than leaving them
-    # pointed at `remaining` is the difference between a registry that says which job runs
-    # a guard and one that names a job which no longer collects it.
-    "release": ["whole-tree artifact freshness"],
 }
 _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS = {
     "status": "required_and_linked",
@@ -877,15 +871,7 @@ def validate_registry(
     if payload["false_green_pair_semantics"] != _EXPECTED_FALSE_GREEN_PAIR_SEMANTICS:
         raise GovernanceContractError("false-green pair semantics are not exact")
     partitions = set(payload["default_ci_jobs"])
-    # OB-006 added "release".  THIS TRIPWIRE DID ITS JOB: it refused the fifth partition and forced
-    # a ruling instead of letting a registry edit slide through, and it is extended here only after
-    # that ruling (fable, 2026-08-14).  Before widening it again, re-run the audit that ruling
-    # rested on -- the pin duplicates the exact-map equality above, `_validate_guard` checks only
-    # membership in these keys, and `tools/ci_partition_execution_proof.py` pins its OWN
-    # `_REQUIRED_SUITES` and parses `main.yml` only, so a key added here is invisible to the
-    # per-pull-request evidence machinery.  If a consumer ever equates these keys with per-PR
-    # obligations, that reasoning no longer holds and this line must go back to four.
-    if partitions != {"agents", "core", "gui", "remaining", "release"}:
+    if partitions != {"agents", "core", "gui", "remaining"}:
         raise GovernanceContractError("default CI partitions are not exact")
     if any(not payload["default_ci_jobs"][name] for name in partitions):
         raise GovernanceContractError("default CI partition has no required jobs")

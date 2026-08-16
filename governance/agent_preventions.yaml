@@ -43,12 +43,6 @@ default_ci_jobs:
   remaining:
     - test (ubuntu-latest, remaining)
     - test (windows-latest, remaining)
-  # OB-006: the whole-tree artifact checks left every test partition and now run on a
-  # tag push. Naming the job keeps `ci_partition` meaning what it says -- which CI job
-  # runs this guard -- instead of leaving it pointed at a job that no longer collects it.
-  release:
-    - whole-tree artifact freshness
-
 false_green_pair_semantics:
   status: required_and_linked
   scope: inherited_from_runtime_prevention_id
@@ -2906,8 +2900,8 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: FALSE-GREEN-001
-    guard: tests/release/test_whole_tree_artifact_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot
-    ci_partition: release
+    guard: tests/docs/test_docs_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot
+    ci_partition: remaining
     red_evidence: exact_c14e02503e4847f27b5e79abc6f4fe09091bdbf3_table_only_guard_passed_while_header_executive_deltas_and_closing_reported_stale_candidate_metrics_and_489_plus_one_was_reported_as_493_paths_then_exact_6d91e1c71f41655e84b392f2c81a166d8a05cd7d_retained_uncovered_134090_and_130k_interim_metric_literals_2026_08_01
     green_evidence: pending
   - id: ACTIVE-GUARD-EXECUTION-ROOT-FALSE-GREEN-235
@@ -2938,8 +2932,8 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: FALSE-GREEN-001
-    guard: tests/release/test_whole_tree_artifact_freshness.py::test_claim_corrections_changed_python_count_matches_workflow_index
-    ci_partition: release
+    guard: tests/docs/test_docs_freshness.py::test_claim_corrections_changed_python_count_matches_workflow_index
+    ci_partition: remaining
     red_evidence: exact_7af2dbb971ec909f027ab4a7cf318f1d084664ee_docs_guard_passed_while_CLAIM_CORRECTIONS_called_659_the_current_workflow_exact_changed_Python_path_count_but_the_live_FORMAT_BASE_selected_670_and_a_non_ancestor_FORMAT_BASE_in_a_detached_checkout_escaped_the_guard_as_CalledProcessError_instead_of_a_fail_closed_AssertionError_2026_08_02
     green_evidence: pending
   - id: G4-SOURCE-CONTROL-AUTHORITY-FALSE-GREEN-209
@@ -3786,16 +3780,16 @@ records:
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cell_inventory_and_oc030_locator_match_live_tree
         ci_partition: remaining
-      - node: tests/release/test_whole_tree_artifact_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot
-        ci_partition: release
+      - node: tests/docs/test_docs_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot
+        ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_file_selected_guard_runs_only_from_git_index
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_open_cell_qualification_replay_scope_matches_production_workflow
         ci_partition: remaining
       - node: tests/docs/test_docs_freshness.py::test_shipped_architecture_artifact_does_not_claim_removed_companions
         ci_partition: remaining
-      - node: tests/release/test_whole_tree_artifact_freshness.py::test_claim_corrections_changed_python_count_matches_workflow_index
-        ci_partition: release
+      - node: tests/docs/test_docs_freshness.py::test_claim_corrections_changed_python_count_matches_workflow_index
+        ci_partition: remaining
     red_evidence: multiple_reviewer_reproductions_contradict_green_counts_pending_artifact_binding
     green_evidence: pending
   - id: ZMQ-MUTATION-QUARANTINE-001
