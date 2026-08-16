@@ -90,6 +90,50 @@ def test_editing_invalid_operator_clears_fault_border_and_announcement(app):
     assert dialog._validation_label.isHidden(), "editing the invalid field must clear the visible error"
 
 
+def test_editing_other_field_preserves_invalid_name_error(app):
+    dialog = NewExperimentDialog(available_templates=[])
+    dialog._name_edit.setText("")
+    dialog._operator_combo.setEditText("V")
+    dialog._on_create_clicked()
+
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._name_edit.styleSheet()
+    assert dialog._name_edit.accessibleDescription() == "Введите название"
+    assert not dialog._validation_label.isHidden()
+
+    dialog._operator_combo.setEditText("Vladimir")
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._name_edit.styleSheet(), (
+        "editing the already-valid operator must not clear the still-invalid name's fault border"
+    )
+    assert dialog._name_edit.accessibleDescription() == "Введите название", (
+        "editing the operator must not clear the name's announcement while the name remains empty"
+    )
+    assert not dialog._validation_label.isHidden(), (
+        "editing the operator must not hide the visible name error while the name remains empty"
+    )
+
+
+def test_editing_other_field_preserves_invalid_operator_error(app):
+    dialog = NewExperimentDialog(available_templates=[])
+    dialog._name_edit.setText("Test")
+    dialog._operator_combo.setEditText("")
+    dialog._on_create_clicked()
+
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._operator_combo.styleSheet()
+    assert dialog._operator_combo.accessibleDescription() == "Введите оператора"
+    assert not dialog._validation_label.isHidden()
+
+    dialog._name_edit.setText("Test 2")
+    assert f"border: 2px solid {theme.STATUS_FAULT}" in dialog._operator_combo.styleSheet(), (
+        "editing the name must not clear the still-invalid operator's fault border"
+    )
+    assert dialog._operator_combo.accessibleDescription() == "Введите оператора", (
+        "editing the name must not clear the operator's announcement while the operator remains empty"
+    )
+    assert not dialog._validation_label.isHidden(), (
+        "editing the name must not hide the visible operator error while the operator remains empty"
+    )
+
+
 def test_dialog_emits_payload_on_valid_submit(app):
     dialog = NewExperimentDialog(available_templates=[])
     dialog._name_edit.setText("Test exp")

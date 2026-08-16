@@ -50,6 +50,7 @@ class NewExperimentDialog(QDialog):
         self._templates = available_templates or []
         self._templates_by_id = {str(t.get("id", "")): t for t in self._templates if t.get("id")}
         self._custom_edits: dict[str, QLineEdit] = {}
+        self._invalid_field: QWidget | None = None
         self._preferences = UserPreferences(get_data_dir() / "user_preferences.json")
         self._build_ui()
         self._apply_preferences()
@@ -82,7 +83,7 @@ class NewExperimentDialog(QDialog):
         # Name
         self._name_edit = QLineEdit()
         self._name_edit.setMaxLength(100)
-        self._name_edit.textChanged.connect(self._on_field_edited)
+        self._name_edit.textChanged.connect(lambda *_: self._on_field_edited(self._name_edit))
         form.addRow("\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 *:", self._name_edit)
 
         # Operator (editable combobox with history)
@@ -94,7 +95,7 @@ class NewExperimentDialog(QDialog):
         known_ops = QSettings("FIAN", "CryoDAQ").value("known_operators", [])
         if isinstance(known_ops, list) and known_ops:
             self._operator_combo.addItems(known_ops)
-        self._operator_combo.lineEdit().textChanged.connect(self._on_field_edited)
+        self._operator_combo.lineEdit().textChanged.connect(lambda *_: self._on_field_edited(self._operator_combo))
         form.addRow("\u041e\u043f\u0435\u0440\u0430\u0442\u043e\u0440 *:", self._operator_combo)
 
         # Sample
@@ -231,7 +232,10 @@ class NewExperimentDialog(QDialog):
             self._custom_edits[fid] = edit
             self._custom_form.addRow(f"{field.get('label', fid)}:", edit)
 
-    def _on_field_edited(self, *_args: object) -> None:
+    def _on_field_edited(self, field: QWidget, *_args: object) -> None:
+        invalid = self._invalid_field
+        if invalid is not None and field is not invalid:
+            return
         self._clear_error()
 
     def _on_create_clicked(self) -> None:
@@ -292,6 +296,7 @@ class NewExperimentDialog(QDialog):
     def _clear_error(self) -> None:
         self._validation_label.clear()
         self._validation_label.setVisible(False)
+        self._invalid_field = None
         for field in (self._name_edit, self._operator_combo):
             field.setStyleSheet("")
             field.setAccessibleDescription("")
@@ -299,6 +304,7 @@ class NewExperimentDialog(QDialog):
     def _show_error(self, msg: str, field: QWidget) -> None:
         self._validation_label.setText(msg)
         self._validation_label.setVisible(True)
+        self._invalid_field = field
         selector = "QComboBox" if isinstance(field, QComboBox) else "QLineEdit"
         field.setStyleSheet(
             f"{selector} {{ border: 2px solid {theme.STATUS_FAULT};"
