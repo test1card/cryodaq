@@ -28,6 +28,7 @@ GitHub-hosted runners cap a job at 6h, so CI runs a short bounded window
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import signal
@@ -144,12 +145,21 @@ def run_soak(
     argv = list(cmd) if cmd is not None else _default_cmd()
 
     with log_path.open("w", encoding="utf-8") as log_fh:
+        child_env = dict(os.environ)
+        # The child writes its stderr into the inherited log handle using its
+        # OWN interpreter's stream encoding. On a Windows lab host whose active
+        # code page is not UTF-8 (e.g. CP1251), the Cyrillic readiness marker
+        # would be written in that code page and destroyed by the parent's
+        # UTF-8 log reads below. Force UTF-8 in the child so the marker and the
+        # whole log survive regardless of the host code page.
+        child_env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
             argv,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             text=True,
             creationflags=_SHUTDOWN_CREATION_FLAGS,
+            env=child_env,
         )
         try:
             ready_deadline = time.monotonic() + grace_s

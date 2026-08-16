@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from scripts.soak_mock_engine import _request_shutdown, run_soak
+from scripts.soak_mock_engine import _ENGINE_READY_MARKER, _request_shutdown, run_soak
 
 
 class _RecordingProc:
@@ -85,6 +86,38 @@ def test_posix_shutdown_still_uses_terminate(monkeypatch: pytest.MonkeyPatch) ->
 
     assert proc.terminated == 1
     assert proc.signals == []
+
+
+def test_readiness_gate_survives_non_utf8_child_locale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-UTF-8 lab host must not destroy the Cyrillic readiness marker.
+
+    On a Windows host whose active code page is CP1251, the child inherits the
+    log handle but encodes its stderr with its own locale; the parent's UTF-8
+    read then destroys the marker and the gate never trips, so a ready engine
+    is killed instead of asked to stop. The driver must force UTF-8 in the
+    child environment regardless of the host code page.
+    """
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1251")
+    child = tmp_path / "marker_child.py"
+    child.write_text(
+        "import sys\n"
+        "import time\n"
+        f"sys.stderr.write({_ENGINE_READY_MARKER!r} + chr(10))\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    result = run_soak(
+        duration_s=0.2,
+        grace_s=2.0,
+        poll_interval_s=0.05,
+        log_path=tmp_path / "engine.log",
+        cmd=[sys.executable, str(child)],
+    )
+
+    assert result.alive_before_shutdown
 
 
 def test_child_is_created_in_its_own_process_group_on_windows() -> None:
