@@ -289,6 +289,47 @@ async def test_external_process_reaches_published_thermal_calculator_result(
         await broker.unsubscribe("thermal_simulator_result")
 
 
+def test_engine_main_forwards_exact_external_simulator_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    sentinel_client = object()
+
+    def construct_client(endpoint: MockInstrumentEndpoint) -> object:
+        observed["endpoint"] = endpoint
+        return sentinel_client
+
+    async def record_run_engine(**kwargs: object) -> None:
+        observed.update(kwargs)
+
+    monkeypatch.delenv("CRYODAQ_MOCK", raising=False)
+    monkeypatch.setattr(
+        engine_module.sys,
+        "argv",
+        ["cryodaq-engine", "--mock", "--mock-thermal-simulator", "127.0.0.1:43123"],
+    )
+    monkeypatch.setattr(
+        engine_module,
+        "_consume_engine_launch_authority",
+        lambda: ("a" * 32, "b" * 64, "c" * 64, 71),
+    )
+    monkeypatch.setattr(engine_module, "ExternalMockInstrumentClient", construct_client)
+    monkeypatch.setattr(engine_module, "_acquire_engine_lock", lambda: 42)
+    monkeypatch.setattr(engine_module, "_release_engine_lock", lambda _fd: None)
+    monkeypatch.setattr(engine_module, "_run_engine", record_run_engine)
+    monkeypatch.setattr("cryodaq.logging_setup.setup_logging", lambda *_args, **_kwargs: None)
+
+    engine_module.main()
+
+    assert observed["endpoint"] == MockInstrumentEndpoint("127.0.0.1", 43123)
+    assert observed["mock"] is True
+    assert observed["mock_instrument_client"] is sentinel_client
+    assert observed["engine_instance_id"] == "a" * 32
+    assert observed["shutdown_capability"] == "b" * 64
+    assert observed["engine_ready_nonce"] == "c" * 64
+    assert observed["engine_ready_channel_fd"] == 71
+
+
 def test_engine_cli_rejects_external_simulator_without_mock(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

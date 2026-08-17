@@ -450,12 +450,13 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
     monkeypatch.setattr(engine_module, "_load_drivers", _fake_load_drivers)
     monkeypatch.setattr(engine_module, "SafetyManager", _RecordingSafetyManager)
 
+    external_client = object()
     with pytest.raises(_StopAfterSafetyBinding):
-        await _run_engine(mock=True)
+        await _run_engine(mock=True, mock_instrument_client=external_client)
 
     assert observed["config_path"] == config_dir / "instruments.yaml"
     assert observed["mock"] is True
     assert isinstance(observed["calibration_store"], CalibrationStore)
     assert observed["data_dir"] is data_dir
-    assert observed["mock_instrument_client"] is None
+    assert observed["mock_instrument_client"] is external_client
     assert observed["source"] is observed["expected_source"]
