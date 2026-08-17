@@ -2180,7 +2180,20 @@ class SafetyManager:
                 return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
 
             old_p = runtime.p_target
-            runtime.p_target = p_target
+            update_task = asyncio.create_task(
+                self._keithley.update_source_target(smu_channel, p_target),
+                name=f"safety_update_source_target_{smu_channel}",
+            )
+            _update_result, update_error, caller_cancelled = await _settle_shielded_hardware_task(update_task)
+            if caller_cancelled is not None:
+                raise caller_cancelled
+            if update_error is not None:
+                return {
+                    "ok": False,
+                    "channel": smu_channel,
+                    "p_target": runtime.p_target,
+                    "error": str(update_error),
+                }
             logger.info("SAFETY: P_target update %s: %.4f → %.4f W", smu_channel, old_p, p_target)
 
             return {"ok": True, "channel": smu_channel, "p_target": p_target}

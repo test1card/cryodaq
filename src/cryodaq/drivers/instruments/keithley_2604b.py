@@ -726,7 +726,8 @@ class Keithley2604B(InstrumentDriver):
                     f"{self.name}: disconnect refused without a readback-verified OFF for both outputs"
                 )
 
-            await self._sync_mock_thermal_power()
+            sync_cancel = await self._sync_mock_thermal_power_settled()
+            pending_cancel = pending_cancel or sync_cancel
 
             # Terminal current-generation OFF proof authorizes teardown.  Keep
             # the lifecycle barrier raised until disarm and close both settle.
@@ -1360,7 +1361,9 @@ class Keithley2604B(InstrumentDriver):
                     )
                 finally:
                     self._finish_off_operation([smu_channel])
-                await self._sync_mock_thermal_power()
+                sync_cancel = await self._sync_mock_thermal_power_settled()
+                if sync_cancel is not None:
+                    raise sync_cancel
                 return
             self._unsafe_output_state = True
             raise OutputStateUnverifiedError(
@@ -1372,14 +1375,17 @@ class Keithley2604B(InstrumentDriver):
             [smu_channel],
             context="stop_source",
         )
-        if pending_cancel is not None:
-            raise pending_cancel
         if not off_confirmed:
+            if pending_cancel is not None:
+                raise pending_cancel
             raise OutputStateUnverifiedError(
                 f"{self.name}: {smu_channel} output state UNVERIFIED after "
                 f"OUTPUT_OFF (readback did not confirm OFF) — output may still be ON"
             )
-        await self._sync_mock_thermal_power()
+        sync_cancel = await self._sync_mock_thermal_power_settled()
+        pending_cancel = pending_cancel or sync_cancel
+        if pending_cancel is not None:
+            raise pending_cancel
 
     async def read_buffer(self, start_idx: int = 1, count: int = 100) -> list[dict[str, float]]:
         self._require_operational_connection("read_buffer")
@@ -1420,17 +1426,20 @@ class Keithley2604B(InstrumentDriver):
                     )
             finally:
                 self._finish_off_operation(channels)
-            await self._sync_mock_thermal_power()
+            sync_cancel = await self._sync_mock_thermal_power_settled()
+            if sync_cancel is not None:
+                raise sync_cancel
             return SourceOffResult.DEVICE_REPORTED_OFF
 
         off_confirmed, pending_cancel = await self._attempt_owned_off(
             channels,
             context="emergency_off",
         )
+        if off_confirmed:
+            sync_cancel = await self._sync_mock_thermal_power_settled()
+            pending_cancel = pending_cancel or sync_cancel
         if pending_cancel is not None:
             raise pending_cancel
-        if off_confirmed:
-            await self._sync_mock_thermal_power()
         return SourceOffResult.DEVICE_REPORTED_OFF if off_confirmed else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     def _has_current_off_proof(self, smu_channel: SmuChannel) -> bool:
@@ -2257,6 +2266,20 @@ class Keithley2604B(InstrumentDriver):
         async with self._mock_power_sync_lock:
             power_w = sum(runtime.p_target for runtime in self._channels.values() if runtime.active)
             await self._mock_instrument_client.set_power(power_w)
+
+    async def _sync_mock_thermal_power_settled(self) -> asyncio.CancelledError | None:
+        if not self.mock or self._mock_instrument_client is None:
+            return None
+
+        async def _sync() -> bool:
+            await self._sync_mock_thermal_power()
+            return True
+
+        task = asyncio.create_task(_sync(), name=f"{self.name}_mock_thermal_power_sync")
+        _result, error, caller_cancelled = await self._settle_owned_bool_task(task)
+        if error is not None:
+            raise error
+        return caller_cancelled
 
     def _mock_r_of_t(self) -> float:
         return max(_MOCK_R0 * (1.0 + _MOCK_ALPHA * (self._mock_temp - _MOCK_T0)), 1.0)

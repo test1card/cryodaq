@@ -155,7 +155,7 @@ async def test_external_process_reaches_published_thermal_calculator_result(
         keithley_driver=keithley,
         reviewed_source_runtime_binding=binding,
         data_broker=broker,
-        mock=False,
+        mock=True,
     )
     scheduler = Scheduler(
         broker,
@@ -193,9 +193,10 @@ async def test_external_process_reaches_published_thermal_calculator_result(
 
         for power_w in (0.2, 0.35):
             if power_w == 0.2:
-                await keithley.start_source("smua", power_w, 10.0, 0.5)
+                result = await safety_manager.request_run(power_w, 10.0, 0.5, channel="smua")
             else:
-                await keithley.update_source_target("smua", power_w)
+                result = await safety_manager.update_target(power_w, channel="smua")
+            assert result["ok"] is True, result
             truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
             expected = truth["commanded_points"][-1]
             expected_r_thermal = 1.0 / expected["expected_g_w_per_k"]
@@ -211,7 +212,8 @@ async def test_external_process_reaches_published_thermal_calculator_result(
             assert product_result.metadata["cold_sensor"] == "Т7 Детектор"
             assert product_result.metadata["heater_channel"] == "Keithley_1/smua/power"
 
-        await keithley.stop_source("smua")
+        stop_result = await safety_manager.emergency_off(channel="smua")
+        assert stop_result["ok"] is True
         truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
         assert truth["commanded_points"][-1]["power_w"] == 0.0
     finally:
@@ -327,3 +329,33 @@ async def test_delayed_mock_update_cannot_reheat_external_plant_after_stop() -> 
     assert isinstance(update_result, RuntimeError)
     assert stop_result is None
     assert client.applied[-2:] == [0.3, 0.0]
+
+
+@pytest.mark.parametrize("operation", ["start", "update"])
+async def test_cancelled_stop_settles_zero_after_delayed_external_power(operation: str) -> None:
+    client = _DelayedPowerClient()
+    driver = Keithley2604B("K", "USB::MOCK", mock=True, mock_instrument_client=client)
+    await driver.connect()
+    if operation == "update":
+        await driver.start_source("smua", 0.1, 10.0, 0.5)
+    client.arm()
+
+    if operation == "start":
+        stale_task = asyncio.create_task(driver.start_source("smua", 0.2, 10.0, 0.5))
+        expected_tail = [0.2, 0.0]
+    else:
+        stale_task = asyncio.create_task(driver.update_source_target("smua", 0.3))
+        expected_tail = [0.3, 0.0]
+    await asyncio.wait_for(client.nonzero_started.wait(), timeout=1.0)
+    off_committed = _observe_mock_off_commit(driver)
+    stop_task = asyncio.create_task(driver.stop_source("smua"))
+    await asyncio.wait_for(off_committed.wait(), timeout=1.0)
+    stop_task.cancel()
+    client.release_nonzero.set()
+    stale_result, stop_result = await asyncio.gather(stale_task, stop_task, return_exceptions=True)
+
+    assert isinstance(stale_result, RuntimeError)
+    assert isinstance(stop_result, asyncio.CancelledError)
+    assert driver._channels["smua"].active is False
+    assert driver._channels["smua"].p_target == 0.0
+    assert client.applied[-2:] == expected_tail
