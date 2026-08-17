@@ -289,6 +289,24 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
     return captured
 
 
+def _runtime_library_identity_is_safe(identity: os.stat_result) -> bool:
+    """Accept writes only from the current user or its private primary group."""
+
+    if os.name != "posix" or identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o002:
+        return False
+    if not stat.S_IMODE(identity.st_mode) & 0o020:
+        return True
+    if identity.st_gid != os.getgid():
+        return False
+    import grp
+    import pwd
+
+    current_name = pwd.getpwuid(os.getuid()).pw_name
+    primary_members = {entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == identity.st_gid}
+    supplemental_members = set(grp.getgrgid(identity.st_gid).gr_mem)
+    return primary_members | supplemental_members == {current_name}
+
+
 def _runtime_library_root() -> Path:
     """Return the validated direct native-library search root."""
 
@@ -300,7 +318,7 @@ def _runtime_library_root() -> Path:
         raise _RunnerActivationDisabled("runtime native-library root is unavailable") from exc
     if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode) or resolved != root.absolute():
         raise _RunnerActivationDisabled("runtime native-library root is not a direct directory")
-    if os.name == "posix" and (identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o022):
+    if os.name == "posix" and not _runtime_library_identity_is_safe(identity):
         raise _RunnerActivationDisabled("runtime native-library root ownership is unsafe")
     return resolved
 
@@ -325,7 +343,7 @@ def _runtime_library_closure() -> dict[str, object]:
             if not resolved.is_relative_to(root) or not resolved.is_file():
                 raise _RunnerActivationDisabled("runtime native-library link escapes its closure")
             target_identity = resolved.stat()
-            if target_identity.st_uid != os.getuid() or stat.S_IMODE(target_identity.st_mode) & 0o022:
+            if not _runtime_library_identity_is_safe(target_identity):
                 raise _RunnerActivationDisabled("runtime native-library target ownership is unsafe")
             entries.append(
                 {
@@ -338,7 +356,7 @@ def _runtime_library_closure() -> dict[str, object]:
             continue
         if not stat.S_ISREG(identity.st_mode):
             raise _RunnerActivationDisabled("runtime native-library root contains a special entry")
-        if identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o022:
+        if not _runtime_library_identity_is_safe(identity):
             raise _RunnerActivationDisabled("runtime native-library file ownership is unsafe")
         entries.append({"kind": "file", "path": path.name, "sha256": _hash_regular_file(path)})
     if not entries:
