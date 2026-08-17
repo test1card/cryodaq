@@ -247,6 +247,9 @@ class ConductivityPanel(QWidget):
         # reply must retain the last-known ACTIVE state so external finalize
         # guards cannot be cleared by GUI inference.
         self._auto_outcome_unknown = False
+        self._auto_step_ack_wall_s: float | None = None
+        self._auto_step_temperature_values: dict[str, float] = {}
+        self._auto_step_power_value: float | None = None
 
         self._all_channels = _get_temperature_channels()
         get_channel_manager().on_change(self._on_channels_changed)
@@ -879,6 +882,8 @@ class ConductivityPanel(QWidget):
         ts = reading.timestamp.timestamp()
         # NaN-доктрина (A3): статус — дискриминатор годности; не годное
         # температурное показание не питает SteadyStatePredictor.
+        auto_step_fresh = self._auto_step_ack_wall_s is not None and ts >= self._auto_step_ack_wall_s
+        selected_auto_temperature = self._auto_state == "stabilizing" and ch_id in self._chain
         if ch_id is not None and reading.unit == "K" and reading.is_usable():
             # Hide the empty-state overlay only when a real temperature
             # reading lands — a power-only reading has nothing to plot,
@@ -890,10 +895,15 @@ class ConductivityPanel(QWidget):
             if ch_id in self._buffers:
                 self._buffers[ch_id].append((ts, reading.value))
                 self._rate_buffers[ch_id].append((ts, reading.value))
-            self._predictor.add_point(ch_id, ts, reading.value)
+            if not selected_auto_temperature or auto_step_fresh:
+                self._predictor.add_point(ch_id, ts, reading.value)
+            if selected_auto_temperature and auto_step_fresh:
+                self._auto_step_temperature_values[ch_id] = reading.value
         if ch == self._power_channel:
             self._power = reading.value
             self._power_received = True
+            if self._auto_state == "stabilizing" and auto_step_fresh and reading.is_usable():
+                self._auto_step_power_value = reading.value
 
     # ------------------------------------------------------------------
     # Refresh
@@ -1260,6 +1270,8 @@ class ConductivityPanel(QWidget):
                 self._commit_auto_stop()
             return
 
+        if command.get("cmd") == "keithley_set_target":
+            self._arm_auto_step_evidence()
         self._update_control_enablement()
 
     def _latch_auto_outcome_unknown(self, reason: str) -> None:
@@ -1272,6 +1284,20 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText("ИСХОД НЕИЗВЕСТЕН — последнее известное: АВТОИЗМЕРЕНИЕ АКТИВНО. " + reason)
         self._update_control_enablement()
+
+    def _invalidate_auto_step_evidence(self) -> None:
+        self._auto_step_ack_wall_s = None
+        self._auto_step_temperature_values.clear()
+        self._auto_step_power_value = None
+
+    def _arm_auto_step_evidence(self) -> None:
+        """Start one evidence epoch after the target command is acknowledged."""
+
+        self._auto_step_ack_wall_s = time.time()
+        self._auto_step_start = time.monotonic()
+        self._auto_step_temperature_values.clear()
+        self._auto_step_power_value = None
+        self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
 
     @Slot()
     def _on_auto_start(self) -> None:
@@ -1299,6 +1325,7 @@ class ConductivityPanel(QWidget):
         self._auto_operation_generation += 1
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
+        self._invalidate_auto_step_evidence()
 
         self._auto_start_btn.setEnabled(False)
         self._auto_stop_btn.setEnabled(True)
@@ -1382,7 +1409,9 @@ class ConductivityPanel(QWidget):
         min_settled = min(settled_values) if settled_values else 0.0
         threshold = self._settled_pct_spin.value()
         min_wait = self._min_wait_spin.value()
-        is_stable = elapsed >= min_wait and min_settled >= threshold
+        has_fresh_temperatures = all(ch in self._auto_step_temperature_values for ch in self._chain)
+        has_fresh_power = self._auto_step_power_value is not None
+        is_stable = elapsed >= min_wait and min_settled >= threshold and has_fresh_temperatures and has_fresh_power
 
         step_progress = min(min_settled / threshold, 1.0) if threshold > 0 else 1.0
         pct = int(((step_idx + step_progress) / step_total) * 100)
@@ -1400,7 +1429,7 @@ class ConductivityPanel(QWidget):
                 self._auto_complete()
             else:
                 next_p = self._auto_power_list[self._auto_step]
-                self._auto_step_start = time.monotonic()
+                self._invalidate_auto_step_evidence()
                 self._send_auto_cmd(
                     {
                         "cmd": "keithley_set_target",
@@ -1416,13 +1445,13 @@ class ConductivityPanel(QWidget):
                 )
 
     def _auto_record_point(self) -> None:
-        P = self._auto_power_list[self._auto_step]
-        if len(self._chain) < 2:
+        P = self._auto_step_power_value
+        if len(self._chain) < 2 or P is None:
             return
         hot_ch = self._chain[0]
         cold_ch = self._chain[-1]
-        T_hot = self._temps.get(hot_ch, float("nan"))
-        T_cold = self._temps.get(cold_ch, float("nan"))
+        T_hot = self._auto_step_temperature_values.get(hot_ch, float("nan"))
+        T_cold = self._auto_step_temperature_values.get(cold_ch, float("nan"))
         dT = T_hot - T_cold
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")

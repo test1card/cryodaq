@@ -661,6 +661,88 @@ def test_auto_tick_does_not_advance_before_min_wait(app, monkeypatch):
     assert panel._auto_step == initial_step
 
 
+def test_auto_tick_requires_fresh_power_and_temperature_samples_after_target_ack(app, monkeypatch):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.01))
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    panel._auto_timer.stop()
+
+
+def test_auto_tick_rejects_samples_taken_before_target_ack(app, monkeypatch):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    assert panel._auto_step_ack_wall_s is not None
+    stale_timestamp = datetime.fromtimestamp(panel._auto_step_ack_wall_s - 1.0, tz=UTC)
+    for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+        panel._handle_reading(
+            Reading(
+                timestamp=stale_timestamp,
+                instrument_id="LakeShore_1",
+                channel=channel,
+                value=value,
+                unit="K",
+            )
+        )
+    panel._handle_reading(
+        Reading(
+            timestamp=stale_timestamp,
+            instrument_id="Keithley_1",
+            channel="Keithley_1/smua/power",
+            value=0.01,
+            unit="W",
+        )
+    )
+
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    panel._auto_timer.stop()
+
+
 def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     import time as _time
 
@@ -681,6 +763,9 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     panel.set_connected(True)
     panel._on_auto_start()
     _DeferredWorker.instances[-1].finish({"ok": True})
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012))
 
     def _fake_get_prediction(ch: str):
         return _StubPrediction(percent_settled=99.0)
@@ -688,8 +773,6 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     panel._predictor.get_prediction = _fake_get_prediction  # type: ignore[method-assign]
     # Pretend min_wait elapsed.
     panel._auto_step_start = _time.monotonic() - 60.0
-    # Feed temps: T_hot=110, T_cold=100, P=0.01 → dT=10, R=1000, G=0.001
-    panel._temps = {"Т1": 110.0, "Т2": 100.0}
     panel._auto_tick()
 
     # Advanced to step 1 and recorded exactly one point.
@@ -698,16 +781,23 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
 
     # Assert exact recorded values in _auto_results[0].
     rec = panel._auto_results[0]
-    assert rec["P"] == pytest.approx(0.01, rel=1e-9), f"P={rec['P']}"
+    assert rec["P"] == pytest.approx(0.012, rel=1e-9), f"P={rec['P']}"
     assert rec["dT"] == pytest.approx(10.0, rel=1e-9), f"dT={rec['dT']}"
-    assert rec["R"] == pytest.approx(1000.0, rel=1e-6), f"R={rec['R']}"
-    assert rec["G"] == pytest.approx(0.001, rel=1e-6), f"G={rec['G']}"
+    assert rec["R"] == pytest.approx(10.0 / 0.012, rel=1e-6), f"R={rec['R']}"
+    assert rec["G"] == pytest.approx(0.0012, rel=1e-6), f"G={rec['G']}"
 
     # Next keithley_set_target must have been dispatched for step 2 (p=0.02).
     assert len(_DeferredWorker.instances) == 2
     next_cmd = _DeferredWorker.instances[-1].cmd
     assert next_cmd["cmd"] == "keithley_set_target"
     assert next_cmd["p_target"] == pytest.approx(0.02, rel=1e-9), f"next p={next_cmd}"
+
+    _DeferredWorker.instances[-1].finish({"ok": True})
+    panel._predictor.get_prediction = _fake_get_prediction  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
 
     # Progress bar must be between 0 and 99 (stepped past first point).
     progress = panel._auto_progress.value()
