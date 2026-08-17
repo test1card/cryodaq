@@ -3320,7 +3320,7 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_lakeshore_acquisition_false_green_081.json
-      sha256: sha256:46fb0144220c45b8969eab335a551d575427e644380441d2bcf119a72572b4ca
+      sha256: sha256:8a99c412508382f9ff0ea50db151867fdcba198c382e9e9ce800dde559c922f3
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081
     status: open
@@ -6531,5 +6531,5 @@ records:
         ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
-      sha256: sha256:4efad657fb69ff51181e4101c99a90cc9f353e3a704c841e2f7753bab5a2be49
+      sha256: sha256:6e448cedcdb391d47382388c1064e9531b606d36286b327f4b09afabb2a42516
     green_evidence: pending
