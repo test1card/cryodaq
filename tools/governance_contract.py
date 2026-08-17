@@ -52,6 +52,7 @@ _RED_REPRODUCTION_V2_FIELDS = frozenset(
         "schema_version",
         "record_ids",
         "provenance",
+        "expectation_authority",
         "defective_commit",
         "defective_tree",
         "defective_source_blobs",
@@ -59,10 +60,18 @@ _RED_REPRODUCTION_V2_FIELDS = frozenset(
         "environment",
         "python_version",
         "guard_nodes",
-        "expected_failure_lines",
+        "expected_failure_messages",
         "node_runs",
     }
 )
+_RED_REPRODUCTION_EXPECTATION_AUTHORITY_FIELDS = frozenset({"trusted_base_commit", "manifest_blob"})
+
+_RED_REPRODUCTION_V2_ENVIRONMENT = {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+    "TEMP": "<worktree>/.red-reproduction-tmp",
+    "TMP": "<worktree>/.red-reproduction-tmp",
+}
 _RED_REPRODUCTION_NODE_RUN_FIELDS = frozenset(
     {
         "command",
@@ -531,6 +540,15 @@ def _red_failure_summary_names_node(line: str, node: str) -> bool:
     return reported_node.replace("\\", "/") == node
 
 
+def _red_diagnostic_contains_message(lines: list[str], message: str) -> bool:
+    for message_line in message.splitlines():
+        if not any(
+            line == message_line or (line.startswith("E") and line[1:].lstrip() == message_line) for line in lines
+        ):
+            return False
+    return True
+
+
 def _validated_red_test_reports(
     value: Any,
     *,
@@ -608,12 +626,21 @@ def _validate_red_reproduction_v2_execution(
     entry_id: str,
     guard_nodes: set[str],
 ) -> None:
+    expectation_authority = receipt["expectation_authority"]
+    if (
+        not isinstance(expectation_authority, Mapping)
+        or set(expectation_authority) != _RED_REPRODUCTION_EXPECTATION_AUTHORITY_FIELDS
+        or not isinstance(expectation_authority["trusted_base_commit"], str)
+        or _GIT_OBJECT_ID.fullmatch(expectation_authority["trusted_base_commit"]) is None
+        or not isinstance(expectation_authority["manifest_blob"], str)
+        or _GIT_OBJECT_ID.fullmatch(expectation_authority["manifest_blob"]) is None
+    ):
+        raise GovernanceContractError(f"{entry_id}.red_evidence expectation authority is not exact")
+
     environment = receipt["environment"]
     if (
         not isinstance(environment, Mapping)
-        or not environment
-        or any(not isinstance(key, str) or not isinstance(item, str) for key, item in environment.items())
-        or not isinstance(environment.get("PYTHONPATH"), str)
+        or dict(environment) != _RED_REPRODUCTION_V2_ENVIRONMENT
         or not isinstance(receipt["python_version"], str)
         or not receipt["python_version"].strip()
     ):
@@ -637,22 +664,12 @@ def _validate_red_reproduction_v2_execution(
             f"{entry_id}.red_evidence failure signatures do not name selected registered guard nodes"
         )
 
-    expected = receipt["expected_failure_lines"]
+    expected = receipt["expected_failure_messages"]
     if not isinstance(expected, Mapping) or set(expected) != set(receipt_nodes):
         raise GovernanceContractError(f"{entry_id}.red_evidence expected failure bindings do not match guard nodes")
-    for node, lines in expected.items():
-        if (
-            not isinstance(node, str)
-            or not isinstance(lines, list)
-            or not lines
-            or any(
-                not isinstance(line, str) or not line.startswith("E   ") or line.splitlines() != [line]
-                for line in lines
-            )
-            or lines != sorted(lines)
-            or len(lines) != len(set(lines))
-        ):
-            raise GovernanceContractError(f"{entry_id}.red_evidence expected failure lines are invalid")
+    for node, message in expected.items():
+        if not isinstance(node, str) or not isinstance(message, str) or not message or message.strip() != message:
+            raise GovernanceContractError(f"{entry_id}.red_evidence expected failure messages are invalid")
 
     node_runs = receipt["node_runs"]
     if not isinstance(node_runs, Mapping) or set(node_runs) != set(receipt_nodes):
@@ -665,6 +682,7 @@ def _validate_red_reproduction_v2_execution(
             not isinstance(command, list)
             or len(command) != 11
             or any(not isinstance(item, str) or not item for item in command)
+            or command[0] != "<python>"
             or command[1:]
             != [
                 "-m",
@@ -706,15 +724,13 @@ def _validate_red_reproduction_v2_execution(
         assert isinstance(call_crash, Mapping)
         call_message = call_crash["message"]
         assert isinstance(call_message, str)
-        actual_failure_lines = [f"E   {line}" for line in call_message.splitlines()]
         call_longrepr_lines = call_report["longrepr_lines"]
         assert isinstance(call_longrepr_lines, list)
-        if expected[node] != actual_failure_lines or any(line not in call_longrepr_lines for line in expected[node]):
+        if expected[node] != call_message or not _red_diagnostic_contains_message(call_longrepr_lines, call_message):
             raise GovernanceContractError(
                 f"{entry_id}.red_evidence structured pytest failed call does not match its expected behavioral failure"
             )
-        missing = [line for line in expected[node] if line not in stdout_lines and line not in stderr_lines]
-        if missing:
+        if not _red_diagnostic_contains_message(output_lines, call_message):
             raise GovernanceContractError(
                 f"{entry_id}.red_evidence node run does not include its expected behavioral failure"
             )

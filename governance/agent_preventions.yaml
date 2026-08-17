@@ -3286,7 +3286,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
-    guard: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run
+    guard: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_v2_receipt_cannot_self_author_expected_failure
     ci_partition: remaining
     red_evidence: a_schema_v2_receipt_named_the_expected_guard_but_bound_a_setup_or_unrelated_failure_2026_08_17_pending_immutable_capture
     green_evidence: pending
@@ -3298,6 +3298,23 @@ false_green_pairs:
     guard: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist
     ci_partition: remaining
     red_evidence: a_candidate_added_schema_v1_receipt_and_self_approved_its_locator_and_digest_2026_08_17_pending_immutable_capture
+    green_evidence: pending
+  - id: RED-REPRODUCTION-PYTEST-DIAGNOSTIC-FALSE-GREEN-260
+    status: open
+    scope: repository
+    runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
+    guard: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_accepts_pytest_assertion_rewrite_indentation
+    ci_partition: remaining
+    red_evidence: schema_version_2_reconstructed_one_fixed_pytest_E_prefix_and_rejected_ordinary_assertion_rewrite_indentation_2026_08_17_pending_immutable_capture
+    green_evidence: pending
+
+  - id: RED-REPRODUCTION-AMBIENT-ENVIRONMENT-FALSE-GREEN-261
+    status: open
+    scope: repository
+    runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
+    guard: tests/governance/test_red_reproduction.py::test_producer_accepts_assertion_rewrite_and_redacts_local_environment
+    ci_partition: remaining
+    red_evidence: tracked_red_reproduction_receipts_serialized_raw_PATH_user_temporary_and_plugin_paths_2026_08_17_pending_immutable_capture
     green_evidence: pending
 
 records:
@@ -5908,8 +5925,8 @@ records:
     correction_owner: reviewer
     guard_owner: reviewer
     disposition_owner: reviewer
-    consequence: A candidate can alter inherited evidence, self-approve schema version 1, or bind a red result to an unrelated failure while the governance suite stays green.
-    invariant: The candidate preserves each inherited evidence binding. Only the four exact legacy receipts can use schema version 1. Each new binding uses schema version 2 and binds one failed guard call to its exact expected failure.
+    consequence: A candidate can alter inherited evidence, self-approve its failure cause, reject ordinary pytest diagnostics, or publish host paths while the governance suite stays green.
+    invariant: The candidate preserves each inherited evidence binding. Only the four exact legacy receipts can use schema version 1. Each new binding uses schema version 2. Its expected failure comes from the exact trusted-base manifest, accepts the structured pytest message across display indentation, and stores only canonical environment and command placeholders.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -5924,7 +5941,21 @@ records:
         ci_partition: remaining
       - node: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run
         ci_partition: remaining
+      - node: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_accepts_pytest_assertion_rewrite_indentation
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction.py::test_producer_accepts_assertion_rewrite_and_redacts_local_environment
+        ci_partition: remaining
       - node: tests/governance/test_red_reproduction.py::test_schema_v1_receipt_is_valid_only_at_an_approved_locator_and_digest
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_candidate_cannot_modify_or_delete_trusted_expectations
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_same_candidate_cannot_add_and_consume_expectation
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_later_candidate_can_consume_prior_trusted_expectation
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_v2_receipt_cannot_self_author_expected_failure
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_v2_receipt_rejects_wrong_expectation_authority
         ci_partition: remaining
       - node: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist
         ci_partition: remaining

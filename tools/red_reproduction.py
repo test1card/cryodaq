@@ -26,7 +26,18 @@ from pathlib import Path
 
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 _RECEIPT_DIRECTORY = Path("governance/red_reproductions")
+_EXPECTATION_MANIFEST = Path("governance/red_reproduction_expectations.json")
 _PROVENANCE = "local-executed-red-reproduction; lower provenance than sealed hosted CI"
+_PREVENTION_ID = re.compile(r"[A-Z0-9][A-Z0-9-]*")
+_EXPECTATION_COLLECTIONS = frozenset({"records", "false_green_pairs"})
+_EXPECTATION_ENTRY_FIELDS = frozenset({"collection", "prevention_id", "node", "expected_failure_message"})
+
+_RECEIPT_ENVIRONMENT = {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+    "TEMP": "<worktree>/.red-reproduction-tmp",
+    "TMP": "<worktree>/.red-reproduction-tmp",
+}
 _PYTEST_CAPTURE_PLUGIN = """\
 import json
 import os
@@ -134,23 +145,83 @@ def _parse_blob_bindings(values: list[str]) -> dict[str, str]:
     return dict(sorted(bindings.items()))
 
 
-def _parse_expected_failure_bindings(values: list[str]) -> dict[str, list[str]]:
-    bindings: dict[str, list[str]] = {}
-    for value in values:
-        node, separator, line = value.partition("=")
-        if not separator or "::" not in node:
-            raise RedReproductionError("expected failures must use NODE=EXACT-LINE form")
-        if not line.startswith("E   ") or line.splitlines() != [line]:
+def _validated_expectation_manifest(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, Mapping) or set(value) != {"schema_version", "expectations"}:
+        raise RedReproductionError("trusted expectation manifest shape is not exact")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise RedReproductionError("trusted expectation manifest schema version is unsupported")
+    entries = value["expectations"]
+    if not isinstance(entries, list) or not entries:
+        raise RedReproductionError("trusted expectation manifest has no expectations")
+    validated: list[dict[str, str]] = []
+    keys: list[tuple[str, str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping) or set(entry) != _EXPECTATION_ENTRY_FIELDS:
+            raise RedReproductionError("trusted expectation manifest entry shape is not exact")
+        collection = entry["collection"]
+        prevention_id = entry["prevention_id"]
+        node = entry["node"]
+        message = entry["expected_failure_message"]
+        if (
+            not isinstance(collection, str)
+            or collection not in _EXPECTATION_COLLECTIONS
+            or not isinstance(prevention_id, str)
+            or _PREVENTION_ID.fullmatch(prevention_id) is None
+            or not isinstance(node, str)
+            or "::" not in node
+            or not isinstance(message, str)
+            or not message
+            or message.strip() != message
+        ):
+            raise RedReproductionError("trusted expectation manifest entry is invalid")
+        key = (collection, prevention_id, node)
+        keys.append(key)
+        validated.append(
+            {
+                "collection": collection,
+                "prevention_id": prevention_id,
+                "node": node,
+                "expected_failure_message": message,
+            }
+        )
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise RedReproductionError("trusted expectation manifest entries must be sorted and unique")
+    return validated
+
+
+def _trusted_expected_failures(
+    root: Path,
+    *,
+    trusted_base: str,
+    record_ids: list[str],
+    nodes: list[str],
+) -> tuple[str, str, dict[str, str]]:
+    commit = _object_id(root, trusted_base, kind="commit")
+    manifest_path = _EXPECTATION_MANIFEST.as_posix()
+    manifest_blob = _object_id(root, f"{commit}:{manifest_path}", kind="blob")
+    try:
+        payload = json.loads(_git(root, "show", f"{commit}:{manifest_path}").decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionError("trusted expectation manifest is not valid UTF-8 JSON") from exc
+    entries = _validated_expectation_manifest(payload)
+    expected: dict[str, str] = {}
+    selected_nodes = set(nodes)
+    for record_id in record_ids:
+        selected = [
+            entry for entry in entries if entry["prevention_id"] == record_id and entry["node"] in selected_nodes
+        ]
+        if len(selected) != len(nodes) or {entry["node"] for entry in selected} != selected_nodes:
             raise RedReproductionError(
-                "expected failure lines must be one exact pytest diagnostic line starting 'E   '"
+                f"trusted expectation manifest does not bind every selected node for {record_id!r}"
             )
-        node_lines = bindings.setdefault(node, [])
-        if line in node_lines:
-            raise RedReproductionError(f"expected failure line is duplicated for {node!r}")
-        node_lines.append(line)
-    if not bindings:
-        raise RedReproductionError("at least one --expected-failure binding is required")
-    return {node: sorted(lines) for node, lines in sorted(bindings.items())}
+        for entry in selected:
+            node = entry["node"]
+            message = entry["expected_failure_message"]
+            prior = expected.setdefault(node, message)
+            if prior != message:
+                raise RedReproductionError(f"trusted expectation manifest disagrees across prevention IDs for {node!r}")
+
+    return commit, manifest_blob, dict(sorted(expected.items()))
 
 
 def _test_environment(worktree: Path, python: str) -> dict[str, str]:
@@ -169,25 +240,19 @@ def _test_environment(worktree: Path, python: str) -> dict[str, str]:
     return dict(sorted(environment.items()))
 
 
-def _validated_expected_failure_lines(
+def _validated_expected_failure_messages(
     value: Mapping[str, object] | None,
     nodes: list[str],
-) -> dict[str, list[str]]:
+) -> dict[str, str]:
     if not isinstance(value, Mapping):
-        raise RedReproductionError("expected behavioral failure lines are required")
+        raise RedReproductionError("expected behavioral failure messages are required")
     if set(value) != set(nodes):
         raise RedReproductionError("expected failure bindings must exactly match the selected guard nodes")
-    bindings: dict[str, list[str]] = {}
-    for node, lines in value.items():
-        if not isinstance(node, str) or not isinstance(lines, list) or not lines:
-            raise RedReproductionError(f"expected failure lines are invalid for {node!r}")
-        if any(
-            not isinstance(line, str) or not line.startswith("E   ") or line.splitlines() != [line] for line in lines
-        ):
-            raise RedReproductionError(f"expected failure lines are invalid for {node!r}")
-        if lines != sorted(lines) or len(lines) != len(set(lines)):
-            raise RedReproductionError(f"expected failure lines are invalid for {node!r}")
-        bindings[node] = list(lines)
+    bindings: dict[str, str] = {}
+    for node, message in value.items():
+        if not isinstance(node, str) or not isinstance(message, str) or not message or message.strip() != message:
+            raise RedReproductionError(f"expected failure message is invalid for {node!r}")
+        bindings[node] = message
     return dict(sorted(bindings.items()))
 
 
@@ -255,38 +320,47 @@ def _failure_summary_names_node(line: str, node: str) -> bool:
     return reported_node.replace("\\", "/") == node
 
 
+def _diagnostic_contains_message(lines: list[str], message: str) -> bool:
+    for message_line in message.splitlines():
+        if not any(
+            line == message_line or (line.startswith("E") and line[1:].lstrip() == message_line) for line in lines
+        ):
+            return False
+    return True
+
+
 def _failure_signatures(
     output: bytes,
     nodes: list[str],
-    expected_failure_lines: Mapping[str, object] | None = None,
+    expected_failure_messages: Mapping[str, object] | None = None,
     test_reports: object | None = None,
 ) -> dict[str, list[str]]:
     if len(nodes) != 1:
         raise RedReproductionError("failure signatures require one node-scoped pytest run")
     text = output.decode("utf-8", errors="replace")
     output_lines = text.splitlines()
-    expected = _validated_expected_failure_lines(expected_failure_lines, nodes)
+    expected = _validated_expected_failure_messages(expected_failure_messages, nodes)
     node = nodes[0]
     reports = _validated_test_reports(test_reports, node)
     call_crash = reports[1]["crash"]
     assert isinstance(call_crash, Mapping)
     call_message = call_crash["message"]
     assert isinstance(call_message, str)
-    actual_failure_lines = [f"E   {line}" for line in call_message.splitlines()]
     call_longrepr_lines = reports[1]["longrepr_lines"]
     assert isinstance(call_longrepr_lines, list)
-    if expected[node] != actual_failure_lines or any(line not in call_longrepr_lines for line in expected[node]):
+    if expected[node] != call_message:
         raise RedReproductionError(
             f"structured pytest failed call does not match its expected behavioral failure for {node!r}"
         )
+    if not _diagnostic_contains_message(call_longrepr_lines, call_message):
+        raise RedReproductionError(f"structured pytest failed call has no diagnostic for {node!r}")
     failure_lines = [line for line in output_lines if line.startswith("FAILED ")]
     matches = [line for line in failure_lines if _failure_summary_names_node(line, node)]
     if len(matches) != 1 or failure_lines != matches:
         raise RedReproductionError(f"reproduction did not fail exactly one unparameterized registered guard {node!r}")
-    missing = [line for line in expected[node] if line not in output_lines]
-    if missing:
+    if not _diagnostic_contains_message(output_lines, call_message):
         raise RedReproductionError(
-            f"reproduction did not include the expected behavioral failure for {node!r}: {missing!r}"
+            f"reproduction did not include the expected behavioral failure for {node!r}: {call_message!r}"
         )
     signatures: dict[str, list[str]] = {}
     signatures[node] = matches
@@ -302,7 +376,7 @@ def produce_red_reproduction(
     guard_blobs: dict[str, str],
     source_paths: list[str],
     nodes: list[str],
-    expected_failure_lines: Mapping[str, object],
+    trusted_base: str,
     python: str,
 ) -> dict[str, object]:
     """Execute a preserved-defect reproduction and atomically write its receipt."""
@@ -319,7 +393,12 @@ def produce_red_reproduction(
         raise RedReproductionError("guard nodes must be a sorted, unique, nonempty list")
     if any("::" not in node for node in nodes):
         raise RedReproductionError("guard nodes must be pytest node ids")
-    expected_failures = _validated_expected_failure_lines(expected_failure_lines, nodes)
+    trusted_base_commit, expectation_manifest_blob, expected_failures = _trusted_expected_failures(
+        root,
+        trusted_base=trusted_base,
+        record_ids=record_ids,
+        nodes=nodes,
+    )
     expected_paths = {node.split("::", 1)[0] for node in nodes}
     if set(guard_blobs) != expected_paths:
         raise RedReproductionError("guard blob paths must exactly match the selected guard-node files")
@@ -411,7 +490,7 @@ def produce_red_reproduction(
                 test_reports,
             )
             node_runs[node] = {
-                "command": command,
+                "command": ["<python>", *command[1:]],
                 "exit_code": completed.returncode,
                 "failure_signatures": signatures[node],
                 "stdout_bytes_base64": base64.b64encode(completed.stdout).decode("ascii"),
@@ -424,14 +503,18 @@ def produce_red_reproduction(
             "schema_version": 2,
             "record_ids": record_ids,
             "provenance": _PROVENANCE,
+            "expectation_authority": {
+                "trusted_base_commit": trusted_base_commit,
+                "manifest_blob": expectation_manifest_blob,
+            },
             "defective_commit": commit,
             "defective_tree": tree,
             "defective_source_blobs": source_blobs,
             "guard_blobs": guard_blobs,
-            "environment": environment,
+            "environment": dict(_RECEIPT_ENVIRONMENT),
             "python_version": python_version,
             "guard_nodes": nodes,
-            "expected_failure_lines": expected_failures,
+            "expected_failure_messages": expected_failures,
             "node_runs": node_runs,
         }
     finally:
@@ -440,7 +523,7 @@ def produce_red_reproduction(
     output.parent.mkdir(parents=True, exist_ok=True)
     rendered = json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     temporary_output = output.with_suffix(".tmp")
-    temporary_output.write_text(rendered, encoding="utf-8", newline="\r\n")
+    temporary_output.write_text(rendered, encoding="utf-8", newline="\n")
     temporary_output.replace(output)
     return receipt
 
@@ -451,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--defective-commit", required=True)
     parser.add_argument("--guard-blob", action="append", required=True)
     parser.add_argument("--source", action="append", required=True)
-    parser.add_argument("--expected-failure", action="append", required=True)
+    parser.add_argument("--trusted-base", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("nodes", nargs="+")
@@ -466,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
             guard_blobs=_parse_blob_bindings(args.guard_blob),
             source_paths=sorted(args.source),
             nodes=sorted(args.nodes),
-            expected_failure_lines=_parse_expected_failure_bindings(args.expected_failure),
+            trusted_base=args.trusted_base,
             python=args.python,
         )
     except RedReproductionError as exc:

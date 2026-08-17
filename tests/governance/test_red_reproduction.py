@@ -84,9 +84,10 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
         }
     )
     assert expected_lines
-    legacy_command = receipt.pop("command")
+    expected_message = "\n".join(line[1:].lstrip() for line in expected_lines)
+    receipt.pop("command")
     command = [
-        legacy_command[0],
+        "<python>",
         "-m",
         "pytest",
         "-p",
@@ -117,7 +118,7 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
             {
                 "crash": {
                     "lineno": 1,
-                    "message": "\n".join(line.removeprefix("E   ") for line in expected_lines),
+                    "message": expected_message,
                     "path": node.split("::", 1)[0],
                 },
                 "longrepr_lines": expected_lines,
@@ -136,7 +137,17 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
     }
     receipt.pop("failed_nodes")
     receipt["schema_version"] = 2
-    receipt["expected_failure_lines"] = {node: expected_lines}
+    receipt["expectation_authority"] = {
+        "trusted_base_commit": "1" * 40,
+        "manifest_blob": "2" * 40,
+    }
+    receipt["environment"] = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+        "TEMP": "<worktree>/.red-reproduction-tmp",
+        "TMP": "<worktree>/.red-reproduction-tmp",
+    }
+    receipt["expected_failure_messages"] = {node: expected_message}
     receipt["node_runs"] = {node: node_run}
 
 
@@ -311,9 +322,9 @@ def test_red_reproduction_receipt_refusals_are_independent(
 
 def test_red_reproduction_requires_the_expected_behavioral_failure() -> None:
     node = "tests/test_guard.py::test_guard"
-    expected_line = "E   Failed: DID NOT RAISE <class 'RuntimeError'>"
+    expected_message = "Failed: DID NOT RAISE <class 'RuntimeError'>"
     wrong_cause = (
-        f"F\n{expected_line}\nE   AttributeError: fixture setup failed\n"
+        f"F\nE   {expected_message}\nE   AttributeError: fixture setup failed\n"
         f"FAILED {node} - AttributeError: fixture setup failed\n"
     ).encode()
     reports = [
@@ -352,14 +363,14 @@ def test_red_reproduction_requires_the_expected_behavioral_failure() -> None:
             red_reproduction._failure_signatures(
                 wrong_cause,
                 [node],
-                {node: [expected_line]},
+                {node: expected_message},
                 reports,
             )
         else:
             red_reproduction._failure_signatures(
                 wrong_cause,
                 [node],
-                {node: [expected_line]},
+                {node: expected_message},
             )
 
 
@@ -373,21 +384,26 @@ def test_failure_signature_binding_rejects_cross_node_laundering() -> None:
             output,
             [first, second],
             {
-                first: ["E   Failed: DID NOT RAISE <class 'RuntimeError'>"],
-                second: ["E   Failed: DID NOT RAISE <class 'RuntimeError'>"],
+                first: "Failed: DID NOT RAISE <class 'RuntimeError'>",
+                second: "Failed: DID NOT RAISE <class 'RuntimeError'>",
             },
         )
 
 
-def test_expected_failure_cli_bindings_are_exact_and_per_node() -> None:
+def test_trusted_expectation_manifest_requires_exact_sorted_bindings() -> None:
     node = "tests/test_guard.py::test_guard"
-    expected_line = "E   Failed: DID NOT RAISE <class 'RuntimeError'>"
+    entry = {
+        "collection": "records",
+        "expected_failure_message": "assert 1 == 2",
+        "node": node,
+        "prevention_id": "RED-001",
+    }
+    payload = {"schema_version": 1, "expectations": [entry]}
 
-    assert red_reproduction._parse_expected_failure_bindings([f"{node}={expected_line}"]) == {node: [expected_line]}
-    with pytest.raises(red_reproduction.RedReproductionError, match="duplicated"):
-        red_reproduction._parse_expected_failure_bindings([f"{node}={expected_line}", f"{node}={expected_line}"])
-    with pytest.raises(red_reproduction.RedReproductionError, match="one exact pytest diagnostic line"):
-        red_reproduction._parse_expected_failure_bindings([f"{node}=AttributeError: wrong cause"])
+    assert red_reproduction._validated_expectation_manifest(payload) == [entry]
+    payload["expectations"] = [entry, copy.deepcopy(entry)]
+    with pytest.raises(red_reproduction.RedReproductionError, match="sorted and unique"):
+        red_reproduction._validated_expectation_manifest(payload)
 
 
 def test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run(tmp_path: Path) -> None:
@@ -425,6 +441,41 @@ def test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run(tmp_path: 
     reports[2]["when"] = "teardown"
     _rewrite_receipt(payload, directory, filename, receipt)
     with pytest.raises(GovernanceContractError, match="exactly one setup, call, and teardown report"):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_schema_v2_receipt_accepts_pytest_assertion_rewrite_indentation(tmp_path: Path) -> None:
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    filename = "alarm_phase_elapsed_subcondition_026.json"
+    receipt = json.loads((directory / filename).read_text(encoding="utf-8"))
+    _upgrade_single_node_receipt_to_v2(receipt)
+    [node] = receipt["guard_nodes"]
+    run = _single_node_run(receipt)
+    old_message = receipt["expected_failure_messages"][node]
+    new_message = "assert 1 == 2"
+    receipt["expected_failure_messages"][node] = new_message
+    run["test_reports"][1]["crash"]["message"] = new_message
+    run["test_reports"][1]["longrepr_lines"] = ["E       assert 1 == 2"]
+    stdout = base64.b64decode(run["stdout_bytes_base64"], validate=True)
+    old_diagnostic = f"E   {old_message}".encode()
+    assert stdout.count(old_diagnostic) == 1
+    stdout = stdout.replace(old_diagnostic, b"E       assert 1 == 2", 1)
+    run["stdout_bytes_base64"] = base64.b64encode(stdout).decode("ascii")
+    run["stdout_sha256"] = f"sha256:{hashlib.sha256(stdout).hexdigest()}"
+    _rewrite_receipt(payload, directory, filename, receipt)
+
+    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+
+def test_schema_v2_receipt_rejects_ambient_environment_values(tmp_path: Path) -> None:
+    payload, directory = _copy_reproduction_evidence(tmp_path)
+    filename = "alarm_phase_elapsed_subcondition_026.json"
+    receipt = json.loads((directory / filename).read_text(encoding="utf-8"))
+    _upgrade_single_node_receipt_to_v2(receipt)
+    receipt["environment"]["PATH"] = str(tmp_path)
+    _rewrite_receipt(payload, directory, filename, receipt)
+
+    with pytest.raises(GovernanceContractError, match="command or environment is not exact"):
         validate_registry(payload, root=tmp_path, git_repository=ROOT)
 
 
@@ -474,6 +525,37 @@ def test_schema_v2_receipt_rejects_malformed_record_ids(tmp_path: Path) -> None:
         validate_registry(payload, root=tmp_path, git_repository=ROOT)
 
 
+def _write_expectation_manifest(
+    repository: Path,
+    *,
+    record_id: str,
+    node: str,
+    message: str,
+) -> None:
+    path = repository / "governance" / "red_reproduction_expectations.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "expectations": [
+                    {
+                        "collection": "records",
+                        "expected_failure_message": message,
+                        "node": node,
+                        "prevention_id": record_id,
+                    }
+                ],
+                "schema_version": 1,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
 def test_producer_refuses_wrong_failure_cause_before_writing_receipt(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -481,34 +563,116 @@ def test_producer_refuses_wrong_failure_cause_before_writing_receipt(tmp_path: P
     _run_git(repository, "config", "user.email", "guard@example.invalid")
     _run_git(repository, "config", "user.name", "Guard Test")
     (repository / "defective.py").write_text("DEFECT = True\n", encoding="utf-8", newline="\n")
-    _run_git(repository, "add", "defective.py")
-    _run_git(repository, "commit", "-qm", "Add defective source")
-    defective_commit = _run_git(repository, "rev-parse", "HEAD").decode("ascii").strip()
 
     guard_path = "tests/test_wrong_failure.py"
     node = f"{guard_path}::test_wrong_failure_cause"
-    expected_line = "E   Failed: DID NOT RAISE <class 'RuntimeError'>"
-    guard_source = (
-        "def test_wrong_failure_cause() -> None:\n"
-        f"    print({expected_line!r})\n"
-        "    raise AttributeError('wrong failure cause')\n"
-    ).encode()
-    guard_blob = _run_git(repository, "hash-object", "-w", "--stdin", stdin=guard_source).decode("ascii").strip()
+    record_id = "RED-REPRODUCTION-BEHAVIORAL-FAILURE-BINDING-056"
+    expected_message = "Failed: DID NOT RAISE <class 'RuntimeError'>"
+    guard = repository / guard_path
+    guard.parent.mkdir(parents=True)
+    guard.write_text(
+        "def test_wrong_failure_cause() -> None:\n    raise AttributeError('wrong failure cause')\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _write_expectation_manifest(
+        repository,
+        record_id=record_id,
+        node=node,
+        message=expected_message,
+    )
+    _run_git(repository, "add", ".")
+    _run_git(repository, "commit", "-qm", "Add defective source and trusted expectation")
+    defective_commit = _run_git(repository, "rev-parse", "HEAD").decode("ascii").strip()
+    guard_blob = _run_git(repository, "rev-parse", f"HEAD:{guard_path}").decode("ascii").strip()
     output = repository / "governance" / "red_reproductions" / "wrong_failure.json"
 
     with pytest.raises(red_reproduction.RedReproductionError, match="expected behavioral failure"):
         red_reproduction.produce_red_reproduction(
             root=repository,
             output=output,
-            record_ids=["RED-REPRODUCTION-BEHAVIORAL-FAILURE-BINDING-056"],
+            record_ids=[record_id],
             defective_commit=defective_commit,
             guard_blobs={guard_path: guard_blob},
             source_paths=["defective.py"],
             nodes=[node],
-            expected_failure_lines={node: [expected_line]},
+            trusted_base=defective_commit,
             python=sys.executable,
         )
     assert not output.exists()
+
+
+def test_producer_accepts_assertion_rewrite_and_redacts_local_environment(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _run_git(repository, "init", "-q")
+    _run_git(repository, "config", "user.email", "guard@example.invalid")
+    _run_git(repository, "config", "user.name", "Guard Test")
+    (repository / "defective.py").write_text("DEFECT = True\n", encoding="utf-8", newline="\n")
+
+    guard_path = "tests/test_assertion_failure.py"
+    node = f"{guard_path}::test_assertion_failure"
+    record_id = "RED-ASSERTION-001"
+    expected_message = "assert 1 == 2"
+    guard = repository / guard_path
+    guard.parent.mkdir(parents=True)
+    guard.write_text(
+        "def test_assertion_failure() -> None:\n    assert 1 == 2\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _write_expectation_manifest(
+        repository,
+        record_id=record_id,
+        node=node,
+        message=expected_message,
+    )
+    manifest_path = repository / "governance" / "red_reproduction_expectations.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["expectations"].append(
+        {
+            "collection": "records",
+            "expected_failure_message": "unused sibling expectation",
+            "node": "tests/test_unused.py::test_unused",
+            "prevention_id": record_id,
+        }
+    )
+    manifest["expectations"].sort(key=lambda entry: (entry["collection"], entry["prevention_id"], entry["node"]))
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _run_git(repository, "add", ".")
+    _run_git(repository, "commit", "-qm", "Add assertion defect and trusted expectations")
+    defective_commit = _run_git(repository, "rev-parse", "HEAD").decode("ascii").strip()
+    guard_blob = _run_git(repository, "rev-parse", f"HEAD:{guard_path}").decode("ascii").strip()
+    output = repository / "governance" / "red_reproductions" / "assertion_failure.json"
+
+    receipt = red_reproduction.produce_red_reproduction(
+        root=repository,
+        output=output,
+        record_ids=[record_id],
+        defective_commit=defective_commit,
+        guard_blobs={guard_path: guard_blob},
+        source_paths=["defective.py"],
+        nodes=[node],
+        trusted_base=defective_commit,
+        python=sys.executable,
+    )
+
+    assert receipt["expected_failure_messages"] == {node: expected_message}
+    assert receipt["environment"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+        "TEMP": "<worktree>/.red-reproduction-tmp",
+        "TMP": "<worktree>/.red-reproduction-tmp",
+    }
+    assert receipt["node_runs"][node]["command"][0] == "<python>"
+    raw = output.read_bytes()
+    assert b"\r" not in raw
+    assert str(tmp_path).encode() not in raw
+    assert sys.executable.encode() not in raw
 
 
 def test_main_reports_schema_version_without_legacy_exit_code(
@@ -531,8 +695,8 @@ def test_main_reports_schema_version_without_legacy_exit_code(
             f"tests/test_guard.py={'0' * 40}",
             "--source",
             "defective.py",
-            "--expected-failure",
-            f"{node}=E   Failed: DID NOT RAISE <class 'RuntimeError'>",
+            "--trusted-base",
+            "0" * 40,
             "--output",
             "governance/red_reproductions/example.json",
             node,
