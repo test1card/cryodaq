@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,7 @@ async def _wait_for_reading(
     *,
     channel: str,
     predicate: Callable[[Reading], bool],
+    not_before: datetime | None = None,
 ) -> Reading:
     deadline = time.monotonic() + 2.0
     while True:
@@ -116,8 +118,35 @@ async def _wait_for_reading(
         if remaining <= 0.0:
             pytest.fail(f"no acceptable reading for {channel!r}")
         reading = await asyncio.wait_for(queue.get(), timeout=remaining)
-        if reading.channel == channel and predicate(reading):
+        if (
+            reading.channel == channel
+            and (not_before is None or reading.timestamp >= not_before)
+            and predicate(reading)
+        ):
             return reading
+
+
+async def _wait_for_truth_point(
+    client: ExternalMockInstrumentClient,
+    *,
+    prior_count: int,
+    requested_power_w: float,
+    timeout_s: float = 2.0,
+) -> dict[str, float]:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        truth = json.loads(await client.query("MOCK:TRUTH?"))
+        points = truth["commanded_points"]
+        if len(points) > prior_count:
+            assert len(points) == prior_count + 1
+            point = points[prior_count]
+            assert point["power_w"] == pytest.approx(requested_power_w)
+            return point
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"external simulator did not append requested power {requested_power_w} after point {prior_count}"
+            )
+        await asyncio.sleep(0.01)
 
 
 class _AcceptingWriter:
@@ -130,6 +159,7 @@ class _AcceptingWriter:
 
 async def test_external_process_reaches_published_thermal_calculator_result(
     external_simulator: ExternalMockInstrumentClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = DriverConstructionContext(mock=True, mock_instrument_client=external_simulator)
     lakeshore = construct_driver(_lakeshore_config(), context)
@@ -192,19 +222,54 @@ async def test_external_process_reaches_published_thermal_calculator_result(
         )
 
         for power_w in (0.2, 0.35):
+            truth_before = json.loads(await external_simulator.query("MOCK:TRUTH?"))
+            prior_count = len(truth_before["commanded_points"])
+            if power_w == 0.35:
+                real_set_power = external_simulator.set_power
+
+                async def skip_second_power(_power_w: float) -> None:
+                    return None
+
+                monkeypatch.setattr(external_simulator, "set_power", skip_second_power)
+                skipped_result = await safety_manager.update_target(power_w, channel="smua")
+                assert skipped_result["ok"] is True, skipped_result
+                with pytest.raises(AssertionError, match="did not append requested power"):
+                    await _wait_for_truth_point(
+                        external_simulator,
+                        prior_count=prior_count,
+                        requested_power_w=power_w,
+                        timeout_s=0.1,
+                    )
+                monkeypatch.setattr(external_simulator, "set_power", real_set_power)
+
+            command_cut = datetime.now(UTC)
             if power_w == 0.2:
                 result = await safety_manager.request_run(power_w, 10.0, 0.5, channel="smua")
             else:
                 result = await safety_manager.update_target(power_w, channel="smua")
             assert result["ok"] is True, result
-            truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
-            expected = truth["commanded_points"][-1]
+            expected = await _wait_for_truth_point(
+                external_simulator,
+                prior_count=prior_count,
+                requested_power_w=power_w,
+            )
+            power_reading = await _wait_for_reading(
+                raw_queue,
+                channel="Keithley_1/smua/power",
+                not_before=command_cut,
+                predicate=lambda reading: reading.value == pytest.approx(power_w, rel=0.01),
+            )
             expected_r_thermal = 1.0 / expected["expected_g_w_per_k"]
             product_result = await _wait_for_reading(
                 result_queue,
                 channel="analytics/thermal_calculator/R_thermal",
-                predicate=lambda reading: reading.value == pytest.approx(expected_r_thermal, rel=0.02),
+                not_before=power_reading.timestamp,
+                predicate=lambda reading: (
+                    reading.value == pytest.approx(expected_r_thermal, rel=0.02)
+                    and reading.metadata["P"] == pytest.approx(power_w, rel=0.01)
+                ),
             )
+            assert expected["power_w"] == pytest.approx(power_w)
             assert product_result.unit == "K/W"
             assert product_result.metadata["source"] == "analytics"
             assert product_result.metadata["plugin_id"] == "thermal_calculator"
@@ -253,6 +318,147 @@ def test_external_simulator_is_loopback_only_and_mock_only(
         MockInstrumentEndpoint.parse("192.0.2.1:1234")
     with pytest.raises(DriverRegistryError, match="only in mock mode"):
         DriverConstructionContext(mock=False, mock_instrument_client=external_simulator)
+
+
+class _StartAckLossClient(ExternalMockInstrumentClient):
+    def __init__(self) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.applied: list[float] = []
+        self._lose_positive_ack = True
+
+    async def set_power(self, power_w: float) -> None:
+        self.applied.append(power_w)
+        if power_w > 0.0 and self._lose_positive_ack:
+            self._lose_positive_ack = False
+            raise RuntimeError("reply lost after remote start apply")
+
+
+async def test_failed_start_lost_ack_reconciles_external_zero() -> None:
+    client = _StartAckLossClient()
+    driver = Keithley2604B("K", "USB::MOCK", mock=True, mock_instrument_client=client)
+    await driver.connect()
+
+    with pytest.raises(RuntimeError, match="reply lost after remote start apply"):
+        await driver.start_source("smua", 0.2, 10.0, 0.5)
+
+    runtime = driver._channels["smua"]
+    assert runtime.active is False
+    assert runtime.p_target == 0.0
+    assert client.applied[-2:] == [0.2, 0.0]
+
+
+class _TargetOutcomeClient(ExternalMockInstrumentClient):
+    def __init__(self, mode: str) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.mode = mode
+        self.applied: list[float] = []
+        self.target_entered = asyncio.Event()
+        self.release_target = asyncio.Event()
+
+    async def set_power(self, power_w: float) -> None:
+        if power_w != pytest.approx(0.35):
+            self.applied.append(power_w)
+            return
+        self.target_entered.set()
+        if self.mode == "fail_before":
+            raise RuntimeError("failed before remote apply")
+        self.applied.append(power_w)
+        if self.mode == "fail_after":
+            raise RuntimeError("reply lost after remote apply")
+        if self.mode == "block_after":
+            await self.release_target.wait()
+
+
+async def _running_external_safety_manager(
+    client: ExternalMockInstrumentClient,
+) -> tuple[SafetyManager, Keithley2604B]:
+    context = DriverConstructionContext(mock=True, mock_instrument_client=client)
+    driver = construct_driver(_keithley_config(), context)
+    assert isinstance(driver, Keithley2604B)
+    binding = runtime_binding_for_driver(driver)
+    assert binding is not None
+    manager = SafetyManager(
+        SafetyBroker(),
+        keithley_driver=driver,
+        reviewed_source_runtime_binding=binding,
+        mock=True,
+    )
+    await driver.connect()
+    await manager.start()
+    result = await manager.request_run(0.2, 10.0, 0.5, channel="smua")
+    assert result["ok"] is True, result
+    return manager, driver
+
+
+@pytest.mark.parametrize("mode", ["fail_before", "fail_after"])
+async def test_target_update_failure_forces_external_zero_and_latches_fault(mode: str) -> None:
+    client = _TargetOutcomeClient(mode)
+    manager, driver = await _running_external_safety_manager(client)
+    try:
+        result = await manager.update_target(0.35, channel="smua")
+        runtime = driver._channels["smua"]
+        assert result["ok"] is False
+        assert result["uncertain"] == ["p_target"]
+        assert manager.state.value == "fault_latched"
+        assert manager._active_sources == set()
+        assert runtime.active is False
+        assert runtime.p_target == 0.0
+        assert client.applied[-1] == 0.0
+    finally:
+        await manager.stop()
+
+
+async def test_cancelled_target_update_settles_external_zero_before_cancellation() -> None:
+    client = _TargetOutcomeClient("block_after")
+    manager, driver = await _running_external_safety_manager(client)
+    try:
+        update_task = asyncio.create_task(manager.update_target(0.35, channel="smua"))
+        await asyncio.wait_for(client.target_entered.wait(), timeout=1.0)
+        update_task.cancel()
+        client.release_target.set()
+        with pytest.raises(asyncio.CancelledError):
+            await update_task
+        runtime = driver._channels["smua"]
+        assert manager.state.value == "fault_latched"
+        assert manager._active_sources == set()
+        assert runtime.active is False
+        assert runtime.p_target == 0.0
+        assert client.applied[-2:] == [0.35, 0.0]
+    finally:
+        await manager.stop()
+
+
+async def test_target_update_cannot_report_success_after_emergency_off_authority() -> None:
+    client = _TargetOutcomeClient("block_after")
+    manager, driver = await _running_external_safety_manager(client)
+    try:
+        update_task = asyncio.create_task(manager.update_target(0.35, channel="smua"))
+        await asyncio.wait_for(client.target_entered.wait(), timeout=1.0)
+        abort_registered = asyncio.Event()
+        register_abort_intent = manager._register_abort_intent
+
+        def observe_abort_intent(*, full: bool) -> int:
+            generation = register_abort_intent(full=full)
+            abort_registered.set()
+            return generation
+
+        manager._register_abort_intent = observe_abort_intent  # type: ignore[method-assign]
+        off_task = asyncio.create_task(manager.emergency_off(channel="smua"))
+        await asyncio.wait_for(abort_registered.wait(), timeout=1.0)
+        client.release_target.set()
+        update_result, off_result = await asyncio.gather(update_task, off_task)
+        runtime = driver._channels["smua"]
+        assert update_result["ok"] is False
+        assert "authority was lost" in update_result["error"]
+        assert off_result["ok"] is True
+        assert manager.state.value == "safe_off"
+        assert manager._active_sources == set()
+        assert runtime.active is False
+        assert runtime.p_target == 0.0
+        assert 0.35 in client.applied
+        assert client.applied[-1] == 0.0
+    finally:
+        await manager.stop()
 
 
 class _DelayedPowerClient(ExternalMockInstrumentClient):
@@ -307,7 +513,8 @@ async def test_delayed_mock_start_cannot_reheat_external_plant_after_stop() -> N
 
     assert isinstance(start_result, RuntimeError)
     assert stop_result is None
-    assert client.applied[-2:] == [0.2, 0.0]
+    assert 0.2 in client.applied
+    assert client.applied[-1] == 0.0
 
 
 async def test_delayed_mock_update_cannot_reheat_external_plant_after_stop() -> None:
@@ -342,10 +549,10 @@ async def test_cancelled_stop_settles_zero_after_delayed_external_power(operatio
 
     if operation == "start":
         stale_task = asyncio.create_task(driver.start_source("smua", 0.2, 10.0, 0.5))
-        expected_tail = [0.2, 0.0]
+        expected_positive = 0.2
     else:
         stale_task = asyncio.create_task(driver.update_source_target("smua", 0.3))
-        expected_tail = [0.3, 0.0]
+        expected_positive = 0.3
     await asyncio.wait_for(client.nonzero_started.wait(), timeout=1.0)
     off_committed = _observe_mock_off_commit(driver)
     stop_task = asyncio.create_task(driver.stop_source("smua"))
@@ -358,4 +565,5 @@ async def test_cancelled_stop_settles_zero_after_delayed_external_power(operatio
     assert isinstance(stop_result, asyncio.CancelledError)
     assert driver._channels["smua"].active is False
     assert driver._channels["smua"].p_target == 0.0
-    assert client.applied[-2:] == expected_tail
+    assert expected_positive in client.applied
+    assert client.applied[-1] == 0.0

@@ -1071,6 +1071,20 @@ class Keithley2604B(InstrumentDriver):
                     cleanup_error,
                 )
 
+            if cleanup_exact:
+                try:
+                    sync_pending = await self._sync_mock_thermal_power_settled()
+                    cleanup_pending = cleanup_pending or sync_pending
+                except BaseException as sync_error:
+                    cleanup_exact = False
+                    self._unsafe_output_state = True
+                    log.critical(
+                        "%s: SAFETY: failed-start external zero synchronization raised on %s: %s",
+                        self.name,
+                        smu_channel,
+                        sync_error,
+                    )
+
             if not cleanup_exact:
                 self._source_regulation_epoch[smu_channel] = None
                 runtime.active = output_on_attempted
