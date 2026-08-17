@@ -1,4 +1,4 @@
-"""POSIX source-mode short-soak runner and durable R3b receipt authority."""
+"""POSIX source-mode soak runner and durable R3b receipt authority."""
 
 from __future__ import annotations
 
@@ -687,6 +687,58 @@ def _validate_short_soak_runtime_schedule(interval_s: int, now_epoch: float) -> 
     if not (395 <= next_offset_s <= 700 and next_offset_s + interval_s > 900):
         raise _RunnerFoundationError("short-soak startup consumed the exact two-receipt cadence reservation")
     return next_offset_s
+
+
+def _select_soak_report_schedule(selected: Any, now_epoch: float) -> tuple[int, int, int]:
+    """Select a profile-bound cadence and its exact receipt count."""
+
+    from scripts import soak_mock_stack as soak
+
+    if selected.name == "short":
+        interval_s, boundary_offset_s = _select_short_soak_report_schedule(now_epoch)
+        return interval_s, boundary_offset_s, 2
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError("long-soak schedule epoch is invalid")
+    first_fault_s = int(soak.first_assistant_fault_s(selected))
+    minimum_interval_s = first_fault_s + soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+    for interval_s in range(soak.LONG_REPORT_INTERVAL_MAX_S, minimum_interval_s - 1, -1):
+        boundary_offset_s = (-int(now_epoch)) % interval_s or interval_s
+        if boundary_offset_s < first_fault_s + 2 * soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S:
+            continue
+        expected_receipts = soak.expected_periodic_receipts(selected, interval_s, boundary_offset_s)
+        if not soak.periodic_schedule_errors(
+            selected,
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s,
+            expected_receipts=expected_receipts,
+        ):
+            return interval_s, boundary_offset_s, expected_receipts
+    raise _RunnerFoundationError("unable to align the reviewed long-soak report cadence")
+
+
+def _validate_soak_runtime_schedule(
+    selected: Any,
+    interval_s: int,
+    expected_receipts: int,
+    now_epoch: float,
+) -> int:
+    """Fail closed when startup changes the selected schedule contract."""
+
+    from scripts import soak_mock_stack as soak
+
+    if selected.name == "short":
+        return _validate_short_soak_runtime_schedule(interval_s, now_epoch)
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError("long-soak runtime epoch is invalid")
+    boundary_offset_s = (-int(now_epoch)) % interval_s or interval_s
+    if soak.periodic_schedule_errors(
+        selected,
+        interval_s=interval_s,
+        boundary_offset_s=boundary_offset_s,
+        expected_receipts=expected_receipts,
+    ):
+        raise _RunnerFoundationError("long-soak startup changed the reviewed receipt schedule")
+    return boundary_offset_s
 
 
 class _BoundedLauncherLogDrain:
@@ -2051,6 +2103,7 @@ class _OwnedRunResult:
     post_assistant_observation: _AssistantProcessObservation
     expected_launcher_pid: int
     report_interval_s: int
+    expected_receipts: int
     ledger_records: tuple[dict[str, object], ...]
     observations: tuple[Any, ...]
     survivors: tuple[Any, ...]
@@ -2086,6 +2139,7 @@ class _DeliveryEvidenceRegistry:
             post_assistant_observation=result.post_assistant_observation,
             expected_launcher_pid=result.expected_launcher_pid,
             expected_interval_s=result.report_interval_s,
+            expected_receipts=result.expected_receipts,
             ledger_records=result.ledger_records,
         )
 
@@ -2151,6 +2205,7 @@ def _validate_pre_post_receipts(
     post_assistant_observation: _AssistantProcessObservation,
     expected_launcher_pid: int,
     expected_interval_s: int,
+    expected_receipts: int,
     ledger_records: tuple[dict[str, object], ...],
 ) -> _PrePostReceiptEvidence:
     """Build both joins internally, then require exact assistant replacement."""
@@ -2188,24 +2243,42 @@ def _validate_pre_post_receipts(
         or post_active["config_fingerprint"] != pre_active["config_fingerprint"]
     ):
         raise _RunnerFoundationError("qualification receipts are not adjacent slots under one schedule")
-    if len(ledger_records) != 2:
-        raise _RunnerFoundationError("qualification requires exactly two receipt ledger records")
+    if type(expected_receipts) is not int or expected_receipts < 2 or len(ledger_records) != expected_receipts:
+        raise _RunnerFoundationError("qualification receipt ledger count differs from its schedule")
     if any(type(item) is not dict or not _ArtifactReceiptSink._valid_ledger_record(item) for item in ledger_records):
         raise _RunnerFoundationError("qualification ledger contains invalid records")
+    receipt_ids = tuple(str(item["receipt_id"]) for item in ledger_records)
+    if len(set(receipt_ids)) != len(receipt_ids):
+        raise _RunnerFoundationError("qualification ledger contains duplicate receipt identities")
+    if any(item["nonce"] != pre_ledger_record["nonce"] for item in ledger_records):
+        raise _RunnerFoundationError("qualification ledger changed the retained local capability authority")
     expected_ids = (pre_fault.receipt_id, post_fault.receipt_id)
     observed_hashes = tuple(
         "sha256:"
         + hashlib.sha256(
             json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         ).hexdigest()
-        for item in ledger_records
+        for item in ledger_records[:2]
     )
     if (
-        tuple(item["receipt_id"] for item in ledger_records) != expected_ids
+        receipt_ids[:2] != expected_ids
         or observed_hashes != (pre_fault.ledger_record_sha256, post_fault.ledger_record_sha256)
         or len(set(expected_ids)) != 2
     ):
         raise _RunnerFoundationError("qualification ledger is duplicate, reordered, or incomplete")
+    previous_generation = 0
+    previous_sequence = 0
+    for record in ledger_records:
+        generation = int(record["assistant_generation"])
+        sequence = int(record["sequence"])
+        if generation == previous_generation:
+            valid_progression = sequence == previous_sequence + 1
+        else:
+            valid_progression = generation == previous_generation + 1 and sequence == 1
+        if not valid_progression:
+            raise _RunnerFoundationError("qualification ledger generation sequence is incomplete")
+        previous_generation = generation
+        previous_sequence = sequence
     if (
         post_fault.assistant == pre_fault.assistant
         or pre_fault.sequence != 1
@@ -2456,9 +2529,7 @@ def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
             text = text[:_DIAGNOSTIC_OUTPUT_LIMIT] + "\n...[truncated]"
         return text if text else "<empty>"
 
-    return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
-        stderr
-    )
+    return f"exit code {exit_code}; captured stdout:\n{bounded(stdout)}; captured stderr:\n{bounded(stderr)}"
 
 
 def _parse_exact_collection(
@@ -3288,11 +3359,18 @@ class _CancellationCleanupContract:
 
 
 class _PosixSoakRunner:
-    """Single-use owner of the real Linux source-mode short qualification."""
+    """Single-use owner of one reviewed Linux source-mode qualification."""
 
-    __slots__ = ("_prior_subreaper", "_subreaper_restored", "_used")
+    __slots__ = ("_prior_subreaper", "_selected", "_subreaper_restored", "_used")
 
-    def __init__(self) -> None:
+    def __init__(self, selected: Any | None = None) -> None:
+        from scripts import soak_mock_stack as soak
+
+        if selected is None:
+            selected = soak.profile("short")
+        if type(selected) is not soak.SoakProfile or not any(selected is item for item in soak.REVIEWED_PROFILES):
+            raise TypeError("selected profile must be an exact reviewed profile")
+        self._selected = selected
         self._used = False
         self._prior_subreaper: bool | None = None
         self._subreaper_restored = False
@@ -3384,15 +3462,17 @@ class _PosixSoakRunner:
 
         from scripts import soak_mock_stack as soak
 
-        selected = soak.profile("short")
-        if selected.name != "short":
-            raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
+        selected = self._selected
+        if not any(selected is item for item in soak.REVIEWED_PROFILES):
+            raise _RunnerFoundationError("activation requires an exact reviewed profile")
         locked = _LockedPsutilObserver(psutil)
         owner_identity = locked.identity_for_pid(os.getpid())
         if locked.descendants(owner_identity, include_zombies=True):
             raise _RunnerFoundationError("qualification owner has unexpected live descendants")
         collector = _CleanShaCollector(_REPO_ROOT)
-        report_interval_s, report_boundary_offset_s = _select_short_soak_report_schedule(time.time())
+        report_interval_s, report_boundary_offset_s, expected_receipts = _select_soak_report_schedule(
+            selected, time.time()
+        )
         sha = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=_REPO_ROOT,
@@ -3416,7 +3496,7 @@ class _PosixSoakRunner:
                 ).payload
         evidence.write_manifest(
             {
-                "profile": "short",
+                "profile": selected.name,
                 "git_sha": sha,
                 "dirty": False,
                 "platform": platform.platform(),
@@ -3426,7 +3506,7 @@ class _PosixSoakRunner:
                 "periodic_schedule": {
                     "interval_s": report_interval_s,
                     "selection_boundary_offset_s": report_boundary_offset_s,
-                    "expected_receipts": 2,
+                    "expected_receipts": expected_receipts,
                 },
                 "source_fixture": source_fixture,
                 "fatal_log_allowlist": [],
@@ -3592,7 +3672,7 @@ class _PosixSoakRunner:
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
                         raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
 
-                    _validate_short_soak_runtime_schedule(report_interval_s, time.time())
+                    _validate_soak_runtime_schedule(selected, report_interval_s, expected_receipts, time.time())
 
                     start = time.monotonic()
                     next_sample = 0.0
@@ -3802,7 +3882,7 @@ class _PosixSoakRunner:
                         time.sleep(min(0.1, max(0.001, next_sample - (time.monotonic() - start))))
 
                     if pre_assistant_fault_cut is None or post_assistant_fault_cut is None:
-                        raise _RunnerFoundationError("short qualification lacks exact pre/post fault receipts")
+                        raise _RunnerFoundationError("qualification lacks exact pre/post fault receipts")
                     shutdown_start = time.monotonic()
                     locked.signal_exact(launcher_identity, signal.SIGTERM)
                     return_code = _wait_and_reap_owned_session(
@@ -3867,6 +3947,7 @@ class _PosixSoakRunner:
             post_assistant_observation=post_assistant_fault_cut[4],
             expected_launcher_pid=launcher_identity.pid,
             report_interval_s=report_interval_s,
+            expected_receipts=expected_receipts,
             ledger_records=all_ledger_records,
             observations=tuple(observations),
             survivors=tuple(survivors),

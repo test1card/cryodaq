@@ -80,7 +80,7 @@ def _faults(profile: soak.SoakProfile) -> list[dict[str, object]]:
     return records
 
 
-@pytest.mark.parametrize("profile_name", ("12h", "72h"))
+@pytest.mark.parametrize("profile_name", ("12h", "72h", "168h"))
 def test_long_profile_resources_and_faults_cover_real_schedule(profile_name: str) -> None:
     """The production hour-scale events pass both evidence validators."""
 
@@ -90,7 +90,7 @@ def test_long_profile_resources_and_faults_cover_real_schedule(profile_name: str
     assert soak._validate_faults(_faults(profile), profile, samples) == []
 
 
-@pytest.mark.parametrize("profile_name", ("12h", "72h"))
+@pytest.mark.parametrize("profile_name", ("12h", "72h", "168h"))
 def test_long_profile_contract_rejects_each_mutation(profile_name: str) -> None:
     """Reject the identity, epoch, and recovery-ceiling mutations described above."""
 

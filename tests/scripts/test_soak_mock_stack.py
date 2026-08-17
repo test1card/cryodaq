@@ -123,11 +123,62 @@ def test_profiles_have_exact_schedules_and_healthy_short_baseline() -> None:
         60,
         66,
     ]
+    assert [event.at_s / 3600 for event in soak.profile("168h").events] == [
+        1,
+        2,
+        12,
+        18,
+        24,
+        36,
+        48,
+        54,
+        60,
+        66,
+        84,
+        90,
+        108,
+        114,
+        132,
+        138,
+        156,
+        162,
+    ]
 
 
 def test_unknown_profile_fails_closed() -> None:
     with pytest.raises(ValueError, match="unknown profile"):
         soak.profile("week")
+
+
+@pytest.mark.parametrize("profile_name", ["12h", "72h", "168h"])
+@pytest.mark.parametrize("now_epoch", [0.0, 1.0, 1_700_000_000.0, 1_777_777_777.0])
+def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assistant_fault(
+    profile_name: str,
+    now_epoch: float,
+) -> None:
+    from scripts import soak_mock_stack_runner as runner
+
+    selected = soak.PROFILES[profile_name]
+    interval_s, boundary_offset_s, expected_receipts = runner._select_soak_report_schedule(selected, now_epoch)
+    assert (
+        soak.periodic_schedule_errors(
+            selected,
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s,
+            expected_receipts=expected_receipts,
+        )
+        == []
+    )
+    assert expected_receipts >= 3
+    runtime_offset_s = runner._validate_soak_runtime_schedule(selected, interval_s, expected_receipts, now_epoch + 300)
+    first_fault_s = soak.first_assistant_fault_s(selected)
+    assert first_fault_s + 300 <= runtime_offset_s <= first_fault_s + 900
+    assert soak.periodic_schedule_errors(
+        selected,
+        interval_s=interval_s,
+        boundary_offset_s=boundary_offset_s,
+        expected_receipts=expected_receipts - 1,
+    )
 
 
 def test_descendants_and_shutdown_survivors_use_exact_identity_after_reparenting() -> None:
@@ -1228,6 +1279,9 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
         def require_platform() -> None:
             return None
 
+        def __init__(self, selected: soak.SoakProfile) -> None:
+            assert selected is soak.PROFILES["short"]
+
         def run(self, evidence: soak.Evidence) -> None:
             evidence.write_manifest(
                 {
@@ -1259,33 +1313,35 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
     assert summary["manifest_sha256"].startswith("sha256:")
 
 
-@pytest.mark.parametrize("profile_name", ["12h", "72h"])
-def test_cli_distinguishes_defined_but_unactivated_profiles(
+@pytest.mark.parametrize("profile_name", ["12h", "72h", "168h"])
+@_POSIX_EVIDENCE
+def test_cli_passes_each_reviewed_long_profile_to_the_runner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
     profile_name: str,
 ) -> None:
     from scripts import soak_mock_stack_runner as runner
 
-    class PlatformOnly:
+    selected_profiles: list[soak.SoakProfile] = []
+
+    class ProfileBoundRunner:
         @staticmethod
         def require_platform() -> None:
-            pytest.fail("an unactivated long profile must be refused before platform activation")
+            return None
 
-        def __init__(self) -> None:
-            pytest.fail("an unactivated long profile must not construct the short-profile runner")
+        def __init__(self, selected: soak.SoakProfile) -> None:
+            selected_profiles.append(selected)
 
-    monkeypatch.setattr(runner, "_PosixSoakRunner", PlatformOnly)
+        def run(self, evidence: soak.Evidence) -> None:
+            raise RuntimeError("deterministic runner stop")
+
+    monkeypatch.setattr(runner, "_PosixSoakRunner", ProfileBoundRunner)
     evidence_dir = tmp_path / profile_name
 
-    assert soak.main(["--profile", profile_name, "--evidence-dir", str(evidence_dir)]) == 3
-    assert capsys.readouterr().err == (
-        f"soak profile {profile_name!r} is defined but not activated: "
-        "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
-        "long-duration evidence remains open\n"
-    )
-    assert not evidence_dir.exists()
+    assert soak.main(["--profile", profile_name, "--evidence-dir", str(evidence_dir)]) == 1
+    assert len(selected_profiles) == 1
+    assert selected_profiles[0] is soak.PROFILES[profile_name]
+    assert json.loads((evidence_dir / "summary.json").read_text())["status"] == "FAIL"
 
 
 @_POSIX_EVIDENCE
@@ -1301,6 +1357,10 @@ class FakeRunner:
     @staticmethod
     def require_platform():
         return None
+
+    def __init__(self, selected):
+        if selected.name != "short":
+            raise TypeError("unexpected profile")
 
     def run(self, evidence):
         from scripts import soak_mock_stack as soak

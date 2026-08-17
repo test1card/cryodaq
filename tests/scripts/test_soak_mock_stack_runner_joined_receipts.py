@@ -171,6 +171,7 @@ def _pre_post_kwargs(tmp_path: Path) -> dict[str, object]:
         "post_assistant_observation": post_observation,
         "expected_launcher_pid": 100,
         "expected_interval_s": 60,
+        "expected_receipts": 2,
         "ledger_records": (pre_record, post_record),
     }
 
@@ -493,13 +494,13 @@ def test_join_requires_ack_file_process_state_destination_and_health_cut(tmp_pat
             )
 
 
-def test_pre_post_requires_exact_two_new_generation_owner_slot_and_process(tmp_path: Path) -> None:
+def test_pre_post_requires_the_scheduled_count_new_generation_owner_slot_and_process(tmp_path: Path) -> None:
     kwargs = _pre_post_kwargs(tmp_path)
     proof = runner._validate_pre_post_receipts(**kwargs)
     assert proof.pre_fault.receipt_id == "g1:s1"
     assert proof.post_fault.receipt_id == "g2:s1"
 
-    with pytest.raises(runner._RunnerFoundationError, match="exactly two"):
+    with pytest.raises(runner._RunnerFoundationError, match="ledger count"):
         runner._validate_pre_post_receipts(**{**kwargs, "ledger_records": (kwargs["pre_ledger_record"],)})
     with pytest.raises(runner._RunnerFoundationError, match="duplicate"):
         runner._validate_pre_post_receipts(
@@ -514,6 +515,33 @@ def test_pre_post_requires_exact_two_new_generation_owner_slot_and_process(tmp_p
                 **kwargs,
                 "post_assistant_observation": kwargs["pre_assistant_observation"],
             }
+        )
+
+
+def test_long_receipt_ledger_requires_every_generation_in_order(tmp_path: Path) -> None:
+    kwargs = _pre_post_kwargs(tmp_path)
+    _joined, third, _delivery, _terminal, _photo, _observation = _joined_cut(
+        tmp_path,
+        serial=3,
+        slot_end=7_320,
+        nonce="a" * 64,
+    )
+    records = (*kwargs["ledger_records"], third)
+    proof = runner._validate_pre_post_receipts(**{**kwargs, "expected_receipts": 3, "ledger_records": records})
+    assert proof.post_fault.receipt_id == "g2:s1"
+
+    with pytest.raises(runner._RunnerFoundationError, match="ledger count"):
+        runner._validate_pre_post_receipts(**{**kwargs, "expected_receipts": 4, "ledger_records": records})
+
+    _joined, skipped, _delivery, _terminal, _photo, _observation = _joined_cut(
+        tmp_path,
+        serial=4,
+        slot_end=7_380,
+        nonce="a" * 64,
+    )
+    with pytest.raises(runner._RunnerFoundationError, match="generation sequence"):
+        runner._validate_pre_post_receipts(
+            **{**kwargs, "expected_receipts": 3, "ledger_records": (*kwargs["ledger_records"], skipped)}
         )
 
 

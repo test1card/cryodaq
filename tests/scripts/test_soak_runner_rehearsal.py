@@ -1,17 +1,8 @@
-"""The non-short refusal is bound to the profile's identity, not to its lookup key.
-
-`scripts/soak_mock_stack.py::main` refuses any profile whose own ``name`` is not
-``short``. That is stronger than refusing by the ``--profile`` argument: a
-profile substituted into the ``PROFILES`` mapping under the ``short`` key is
-still refused, so the mapping is not a way to smuggle a long-duration run past
-the gate. This module pins that property.
-
-"""
+"""Reviewed long-soak profiles keep exact identity and fault structure."""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -46,25 +37,21 @@ def test_the_rehearsal_preserves_the_reviewed_12h_fault_structure() -> None:
     assert rehearsal.duration_s < source.duration_s
 
 
-def test_the_12h_profile_carries_more_faults_than_the_activated_one() -> None:
-    """The multi-fault path the runner has never executed is real, not hypothetical."""
+def test_the_weekly_profile_extends_the_reviewed_72h_fault_schedule() -> None:
+    """The weekly run preserves the 72-hour prefix before later daily faults."""
 
-    assert len(soak.PROFILES["12h"].events) > len(soak.PROFILES["short"].events)
+    profile_72h = soak.PROFILES["72h"]
+    profile_168h = soak.PROFILES["168h"]
+    assert profile_168h.events[: len(profile_72h.events)] == profile_72h.events
+    assert profile_168h.duration_s == 7 * 24 * 3600
 
 
-def test_the_refusal_follows_the_profile_identity_not_the_lookup_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A long profile substituted under the ``short`` key is still refused.
+def test_runner_rejects_a_caller_built_profile_even_when_its_name_is_reviewed() -> None:
+    """Only the exact immutable profile objects can start a qualification."""
 
-    ``main`` compares ``selected.name``, so rebinding the mapping does not
-    launder a non-short profile into an activated run. Exit 3 is the refusal,
-    and no evidence directory is created for it.
-    """
+    from scripts import soak_mock_stack_runner as runner
 
-    renamed_short = replace(soak.PROFILES["short"], name="not-short")
-    monkeypatch.setitem(soak.PROFILES, "short", renamed_short)
-
-    evidence_dir = tmp_path / "rehearsal"
-    assert soak.main(["--profile", "short", "--evidence-dir", str(evidence_dir)]) == 3
-    assert not evidence_dir.exists()
+    runner._PosixSoakRunner(soak.PROFILES["12h"])
+    fabricated = replace(soak.PROFILES["12h"], duration_s=60)
+    with pytest.raises(TypeError, match="exact reviewed profile"):
+        runner._PosixSoakRunner(fabricated)

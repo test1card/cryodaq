@@ -1,10 +1,10 @@
 """Fail-closed source-mode CryoDAQ mock-stack qualification contracts.
 
-The reviewed Linux source path activates only the exact-clean-SHA ``short``
-profile with the locked observer, non-network artifact capability, bounded
-process ownership, and joined periodic-delivery receipts. Longer 12/72-hour
-profiles, Windows/frozen execution, production alarm topology, and physical
-hardware evidence remain separate open gates.
+The reviewed Linux source path activates exact-clean-SHA qualification profiles
+with the locked observer, non-network artifact capability, bounded process
+ownership, and joined periodic-delivery receipts. Windows/frozen execution,
+production alarm topology, and physical hardware evidence remain separate open
+gates.
 """
 
 from __future__ import annotations
@@ -72,6 +72,10 @@ FAULT_SIGNAL = "SIGTERM"
 FAULT_INJECTION_METHOD = "observer.signal_exact_identity/v1"
 SUMMARY_RESERVED = frozenset({"schema", "status", "reason", "finished_at", "manifest_sha256"})
 MANIFEST_RESERVED = frozenset({"schema"})
+LONG_REPORT_INTERVAL_MAX_S = 6 * 3600
+LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S = 5 * 60
+LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S = 15 * 60
+LONG_REPORT_EDGE_MARGIN_S = 5 * 60
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -189,7 +193,97 @@ PROFILES: Mapping[str, SoakProfile] = {
         final_descriptor_delta_per_process=16,
         recovery_descriptor_delta_aggregate=64,
     ),
+    "168h": SoakProfile(
+        name="168h",
+        duration_s=168 * 3600,
+        warmup_s=10 * 60,
+        events=tuple(
+            FaultEvent(target, hour * 3600)
+            for target, hour in (
+                ("engine", 1),
+                ("assistant", 2),
+                ("engine", 12),
+                ("assistant", 18),
+                ("engine", 24),
+                ("assistant", 36),
+                ("engine", 48),
+                ("assistant", 54),
+                ("engine", 60),
+                ("assistant", 66),
+                ("engine", 84),
+                ("assistant", 90),
+                ("engine", 108),
+                ("assistant", 114),
+                ("engine", 132),
+                ("assistant", 138),
+                ("engine", 156),
+                ("assistant", 162),
+            )
+        ),
+        rss_slope_limit_bytes_per_hour=1 * 1024 * 1024,
+        descriptor_slope_limit_per_hour=0.25,
+        recovery_descriptor_delta_per_process=16,
+        final_descriptor_delta_per_process=16,
+        recovery_descriptor_delta_aggregate=64,
+    ),
 }
+REVIEWED_PROFILES = tuple(PROFILES.values())
+
+
+def first_assistant_fault_s(selected: SoakProfile) -> float:
+    """Return the first scheduled assistant fault for a reviewed profile."""
+
+    try:
+        return next(event.at_s for event in selected.events if event.target == "assistant")
+    except StopIteration:
+        raise ValueError(f"profile {selected.name!r} has no assistant fault") from None
+
+
+def expected_periodic_receipts(selected: SoakProfile, interval_s: int, boundary_offset_s: int) -> int:
+    """Return the exact count for one immediate report and all scheduled reports."""
+
+    if boundary_offset_s > selected.duration_s:
+        return 1
+    return 2 + int((selected.duration_s - boundary_offset_s) // interval_s)
+
+
+def periodic_schedule_errors(
+    selected: SoakProfile,
+    *,
+    interval_s: object,
+    boundary_offset_s: object,
+    expected_receipts: object,
+) -> list[str]:
+    """Validate one profile-bound periodic schedule."""
+
+    if type(interval_s) is not int or type(boundary_offset_s) is not int or type(expected_receipts) is not int:
+        return ["periodic schedule values must be integers"]
+    if interval_s <= 0 or boundary_offset_s <= 0:
+        return ["periodic schedule values must be positive"]
+    if selected.name == "short":
+        if (
+            not 600 <= interval_s <= 3600
+            or not 450 <= boundary_offset_s <= 600
+            or boundary_offset_s + interval_s < 1050
+            or expected_receipts != 2
+        ):
+            return ["periodic schedule is outside the reviewed short-run bounds"]
+        return []
+    first_fault = first_assistant_fault_s(selected)
+    calculated = expected_periodic_receipts(selected, interval_s, boundary_offset_s)
+    last_offset_s = boundary_offset_s + (expected_receipts - 2) * interval_s
+    if (
+        interval_s < first_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+        or interval_s > LONG_REPORT_INTERVAL_MAX_S
+        or boundary_offset_s < first_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+        or boundary_offset_s > first_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S
+        or expected_receipts < 3
+        or expected_receipts != calculated
+        or last_offset_s > selected.duration_s - LONG_REPORT_EDGE_MARGIN_S
+        or last_offset_s + interval_s <= selected.duration_s + LONG_REPORT_EDGE_MARGIN_S
+    ):
+        return ["periodic schedule is outside the reviewed long-run bounds"]
+    return []
 
 
 class ProcessObserver(Protocol):
@@ -965,7 +1059,7 @@ def _validate_periodic_delivery_payload(
     *,
     ledger_validator: Callable[[dict[str, object]], bool],
 ) -> tuple[list[str], tuple[str, ...]]:
-    """Revalidate the runner-issued result and its exact two ledger records."""
+    """Revalidate the runner-issued result and its complete receipt ledger."""
 
     errors: list[str] = []
     if (
@@ -973,7 +1067,7 @@ def _validate_periodic_delivery_payload(
         or set(payload) != {"schema", "status", "pre_fault", "post_fault"}
         or payload.get("schema") != "cryodaq-soak-periodic-delivery-result/v1"
         or payload.get("status") != "PASS"
-        or len(receipts) != 2
+        or len(receipts) < 2
     ):
         return ["periodic-delivery result schema is invalid"], ()
     result_records = (payload.get("pre_fault"), payload.get("post_fault"))
@@ -982,7 +1076,7 @@ def _validate_periodic_delivery_payload(
     destinations: list[str] = []
     state_times: list[float] = []
     health_times: list[float] = []
-    for index, (result, receipt) in enumerate(zip(result_records, receipts, strict=True), start=1):
+    for index, (result, receipt) in enumerate(zip(result_records, receipts[:2], strict=True), start=1):
         label = "pre_fault" if index == 1 else "post_fault"
         if type(result) is not dict or set(result) != _PERIODIC_DELIVERY_RECORD_FIELDS:
             errors.append(f"periodic-delivery {label} record schema is invalid")
@@ -1071,6 +1165,35 @@ def _validate_periodic_delivery_payload(
             errors.append("periodic-delivery destination changed")
         if state_times[1] <= state_times[0] or health_times[1] <= health_times[0]:
             errors.append("periodic-delivery post-fault cut is not newer")
+    valid_ledger = all(type(receipt) is dict and ledger_validator(receipt) for receipt in receipts)
+    if not valid_ledger:
+        errors.append("periodic-delivery ledger contains invalid records")
+    else:
+        receipt_ids = tuple(str(receipt["receipt_id"]) for receipt in receipts)
+        if len(set(receipt_ids)) != len(receipt_ids):
+            errors.append("periodic-delivery ledger contains duplicate receipt identities")
+        previous_generation = 0
+        previous_sequence = 0
+        for receipt in receipts:
+            generation = int(receipt["assistant_generation"])
+            sequence = int(receipt["sequence"])
+            if generation == previous_generation:
+                valid_progression = sequence == previous_sequence + 1
+            else:
+                valid_progression = generation == previous_generation + 1 and sequence == 1
+            if not valid_progression:
+                errors.append("periodic-delivery ledger generation sequence is incomplete")
+                break
+            previous_generation = generation
+            previous_sequence = sequence
+        for receipt in receipts[2:]:
+            artifact_name = str(receipt["filename"])
+            if _flat_basename(artifact_name) != artifact_name:
+                errors.append("periodic-delivery later artifact name is invalid")
+            else:
+                artifact_names.append(artifact_name)
+    if len(set(artifact_names)) != len(artifact_names):
+        errors.append("periodic-delivery artifacts are not distinct")
     return errors, tuple(artifact_names)
 
 
@@ -2198,18 +2321,12 @@ class Evidence:
                 {"interval_s", "selection_boundary_offset_s", "expected_receipts"},
                 "manifest periodic schedule",
             )
-            interval_s = periodic_schedule.get("interval_s")
-            boundary_offset_s = periodic_schedule.get("selection_boundary_offset_s")
-            if (
-                type(interval_s) is not int
-                or not 600 <= interval_s <= 3600
-                or type(boundary_offset_s) is not int
-                or not 450 <= boundary_offset_s <= 600
-                or boundary_offset_s + interval_s < 1050
-                or type(periodic_schedule.get("expected_receipts")) is not int
-                or periodic_schedule.get("expected_receipts") != 2
-            ):
-                errors.append("manifest periodic schedule is outside the reviewed short-run bounds")
+            errors += periodic_schedule_errors(
+                selected,
+                interval_s=periodic_schedule.get("interval_s"),
+                boundary_offset_s=periodic_schedule.get("selection_boundary_offset_s"),
+                expected_receipts=periodic_schedule.get("expected_receipts"),
+            )
         source_command = manifest.get("source_command")
         if (
             not isinstance(source_command, list)
@@ -2242,13 +2359,17 @@ class Evidence:
             ledger_validator=runner._ArtifactReceiptSink._valid_ledger_record,
         )
         errors += periodic_errors
+        if (
+            isinstance(periodic_schedule, Mapping)
+            and type(periodic_schedule.get("expected_receipts")) is int
+            and len(periodic_receipts) != periodic_schedule["expected_receipts"]
+        ):
+            errors.append("periodic-delivery receipt count differs from the manifest schedule")
         if not periodic_errors:
-            for label, artifact_name, ledger_record in zip(
-                ("pre_fault", "post_fault"),
-                periodic_artifact_names,
-                periodic_receipts,
-                strict=True,
+            for index, (artifact_name, ledger_record) in enumerate(
+                zip(periodic_artifact_names, periodic_receipts, strict=True), start=1
             ):
+                label = "pre_fault" if index == 1 else "post_fault" if index == 2 else f"receipt_{index}"
                 try:
                     artifact, _identity = self._read(artifact_name)
                     if (
@@ -2626,14 +2747,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     selected = profile(args.profile)
-    if selected.name != "short":
-        print(
-            f"soak profile {selected.name!r} is defined but not activated: "
-            "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
-            "long-duration evidence remains open",
-            file=sys.stderr,
-        )
-        return 3
     from scripts import soak_mock_stack_runner as runner
 
     try:
@@ -2649,7 +2762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, interrupt_handler)
-        runner._PosixSoakRunner().run(evidence)
+        runner._PosixSoakRunner(selected).run(evidence)
         return 0
     except RunInterrupted as exc:
         evidence.finish_fail(
