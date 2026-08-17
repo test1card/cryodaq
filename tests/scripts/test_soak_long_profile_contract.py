@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -25,7 +26,7 @@ _SPEC.loader.exec_module(soak)
 def _samples(profile: soak.SoakProfile) -> list[dict[str, object]]:
     role_indexes = {role: index for index, role in enumerate(soak.ROLES)}
     result = []
-    for elapsed_s in range(0, int(profile.duration_s) + 1, int(soak.SAMPLE_INTERVAL_S)):
+    for elapsed_s in range(0, int(profile.duration_s) + 1, int(profile.sample_interval_s)):
         rows = {}
         for role, index in role_indexes.items():
             restart_count = sum(event.target == role and elapsed_s > event.at_s for event in profile.events)
@@ -72,7 +73,7 @@ def _faults(profile: soak.SoakProfile) -> list[dict[str, object]]:
                 "replacement_pid": 10 + index + after * 100,
                 "replacement_started_ns": 100 + index + after * 100,
                 "ready": True,
-                "recovery_s": float(soak.SAMPLE_INTERVAL_S),
+                "recovery_s": float(profile.sample_interval_s),
                 "bridge_data_resumed": event.target == "engine",
                 "newer_h3_health": event.target == "assistant",
             }
@@ -113,7 +114,7 @@ def test_long_profile_contract_rejects_each_mutation(profile_name: str) -> None:
     )
 
     excessive_recovery = copy.deepcopy(faults)
-    excessive_recovery[0]["recovery_s"] = soak.RECOVERY_CEILING_S + soak.SAMPLE_INTERVAL_S
+    excessive_recovery[0]["recovery_s"] = soak.RECOVERY_CEILING_S + profile.sample_interval_s
     assert any(
         "recovery exceeded ceiling" in error for error in soak._validate_faults(excessive_recovery, profile, samples)
     )
@@ -211,7 +212,7 @@ def test_long_profile_contract_rejects_schedule_and_recovery_mutations() -> None
 
     late = copy.deepcopy(faults)
     late_index = 1
-    late[late_index]["observed_s"] += soak.SAMPLE_INTERVAL_S + 1
+    late[late_index]["observed_s"] += profile.sample_interval_s + 1
     assert f"fault {late_index} exceeded schedule tolerance" in soak._validate_faults(late, profile, samples)
 
     recheck_changed = copy.deepcopy(faults)
@@ -248,7 +249,15 @@ def test_long_profile_contract_rejects_a_truncated_sample_tail() -> None:
 
     profile = soak.PROFILES["72h"]
     samples = _samples(profile)
-    truncated = [sample for sample in samples if sample["elapsed_s"] < profile.duration_s - soak.SAMPLE_INTERVAL_S]
+    truncated = [sample for sample in samples if sample["elapsed_s"] < profile.duration_s - profile.sample_interval_s]
 
     assert soak.validate_sample_series(samples, profile) == []
     assert "series does not cover profile duration" in soak.validate_sample_series(truncated, profile)
+
+
+def test_168h_sample_volume_has_an_explicit_terminal_validation_bound() -> None:
+    profile = soak.profile("168h")
+
+    assert profile.sample_interval_s == 30.0
+    assert soak._max_profile_sample_records(profile) < soak.MAX_SAMPLE_RECORDS
+    assert math.ceil(profile.duration_s / profile.sample_interval_s) + 1 == 20_161

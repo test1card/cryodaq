@@ -3918,7 +3918,7 @@ class _PosixSoakRunner:
                                     wall_time=datetime.now(UTC).isoformat(),
                                 ),
                             )
-                            next_sample = max(next_sample + soak.SAMPLE_INTERVAL_S, elapsed + 0.001)
+                            next_sample = max(next_sample + selected.sample_interval_s, elapsed + 0.001)
 
                         state = self._periodic_cut(data_dir)
                         active = None if state is None else state["active"]

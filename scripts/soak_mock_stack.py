@@ -42,6 +42,8 @@ SAMPLE_INTERVAL_S = 5.0
 MAX_CADENCE_GAP_S = 7.5
 MAX_SLOPE_POINTS = 257
 MAX_SLOPE_PAIRS = MAX_SLOPE_POINTS * (MAX_SLOPE_POINTS - 1) // 2
+MAX_SAMPLE_RECORDS = 25_000
+MAX_SAMPLE_ARTIFACT_BYTES = 64 * 1024 * 1024
 RECOVERY_CEILING_S = 60.0
 SHUTDOWN_CEILING_S = 20.0
 RSS_GROWTH_LIMIT_BYTES = 50 * 1024 * 1024
@@ -131,6 +133,8 @@ class SoakProfile:
     recovery_descriptor_delta_aggregate: int
     thread_delta_per_role: int = THREAD_DELTA_PER_ROLE
     rss_growth_limit_bytes_per_role: int = RSS_GROWTH_LIMIT_BYTES
+    sample_interval_s: float = SAMPLE_INTERVAL_S
+    max_cadence_gap_s: float = MAX_CADENCE_GAP_S
 
 
 PROFILES: Mapping[str, SoakProfile] = {
@@ -149,6 +153,8 @@ PROFILES: Mapping[str, SoakProfile] = {
     ),
     "12h": SoakProfile(
         name="12h",
+        sample_interval_s=30.0,
+        max_cadence_gap_s=45.0,
         duration_s=12 * 3600,
         warmup_s=10 * 60,
         events=tuple(
@@ -170,6 +176,8 @@ PROFILES: Mapping[str, SoakProfile] = {
     ),
     "72h": SoakProfile(
         name="72h",
+        sample_interval_s=30.0,
+        max_cadence_gap_s=45.0,
         duration_s=72 * 3600,
         warmup_s=10 * 60,
         events=tuple(
@@ -195,6 +203,8 @@ PROFILES: Mapping[str, SoakProfile] = {
     ),
     "168h": SoakProfile(
         name="168h",
+        sample_interval_s=30.0,
+        max_cadence_gap_s=45.0,
         duration_s=168 * 3600,
         warmup_s=10 * 60,
         events=tuple(
@@ -491,8 +501,15 @@ def _exact_positive_int(value: Any) -> bool:
     return type(value) is int and value > 0
 
 
+def _max_profile_sample_records(soak_profile: SoakProfile) -> int:
+    periodic = math.ceil(soak_profile.duration_s / soak_profile.sample_interval_s) + 1
+    return periodic + 4 * len(soak_profile.events) + 16
+
+
 def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: SoakProfile) -> list[str]:
     errors: list[str] = []
+    if len(samples) > _max_profile_sample_records(soak_profile) or len(samples) > MAX_SAMPLE_RECORDS:
+        errors.append("sample record count exceeds the reviewed profile bound")
     if len(samples) < 2:
         return ["insufficient samples"]
     previous: float | None = None
@@ -510,7 +527,7 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
         if previous is not None:
             if elapsed <= previous:
                 errors.append(f"sample {index} is not strictly monotonic")
-            elif elapsed - previous > MAX_CADENCE_GAP_S:
+            elif elapsed - previous > soak_profile.max_cadence_gap_s:
                 errors.append(f"sample {index} exceeds cadence gap")
         previous = elapsed
         roles = sample.get("roles")
@@ -552,9 +569,9 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
             errors.append(f"sample {index} has invalid wall_time")
     first = samples[0].get("elapsed_s")
     last = samples[-1].get("elapsed_s")
-    if _finite_nonnegative(first) and float(first) > SAMPLE_INTERVAL_S:
+    if _finite_nonnegative(first) and float(first) > soak_profile.sample_interval_s:
         errors.append("series does not cover startup")
-    if _finite_nonnegative(last) and float(last) < soak_profile.duration_s - SAMPLE_INTERVAL_S:
+    if _finite_nonnegative(last) and float(last) < soak_profile.duration_s - soak_profile.sample_interval_s:
         errors.append("series does not cover profile duration")
     for (role, _identity), epochs in identity_epochs.items():
         if len(epochs) > 1:
@@ -1586,7 +1603,7 @@ def _validate_faults(
                 errors.append(f"fault {index} scheduled time is invalid")
             if not math.isfinite(observed_s) or observed_s < 0:
                 errors.append(f"fault {index} observed time is invalid")
-            elif abs(observed_s - scheduled) > SAMPLE_INTERVAL_S:
+            elif abs(observed_s - scheduled) > selected.sample_interval_s:
                 errors.append(f"fault {index} exceeded schedule tolerance")
             for field in (
                 "pre_pid",
@@ -1924,8 +1941,14 @@ class Evidence:
         return "sha256:" + hashlib.sha256(payload).hexdigest()
 
     def _json_lines(self, name: str) -> list[Mapping[str, Any]]:
+        if name == "samples.jsonl":
+            identity = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(identity.st_mode) or identity.st_size > MAX_SAMPLE_ARTIFACT_BYTES:
+                raise ValueError("sample artifact exceeds the reviewed byte bound")
         rows: list[Mapping[str, Any]] = []
         for line in self._text(name).splitlines():
+            if name == "samples.jsonl" and len(rows) >= MAX_SAMPLE_RECORDS:
+                raise ValueError("sample artifact exceeds the reviewed record bound")
             value = json.loads(line)
             if not isinstance(value, Mapping):
                 raise ValueError(f"{name} contains a non-object record")
@@ -2819,8 +2842,8 @@ def _git_metadata() -> tuple[str | None, bool | None]:
 
 def effective_thresholds(selected: SoakProfile) -> dict[str, Any]:
     return {
-        "sample_interval_s": SAMPLE_INTERVAL_S,
-        "max_cadence_gap_s": MAX_CADENCE_GAP_S,
+        "sample_interval_s": selected.sample_interval_s,
+        "max_cadence_gap_s": selected.max_cadence_gap_s,
         "max_slope_points": MAX_SLOPE_POINTS,
         "max_slope_pairs": MAX_SLOPE_PAIRS,
         "recovery_ceiling_s": RECOVERY_CEILING_S,
