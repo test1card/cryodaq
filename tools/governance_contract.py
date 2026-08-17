@@ -25,6 +25,84 @@ _RED_REPRODUCTION_LOCATOR = re.compile(
     r"red-reproduction:governance/red_reproductions/[A-Za-z0-9][A-Za-z0-9_.-]*\.json"
 )
 _RED_REPRODUCTION_PROVENANCE = "local-executed-red-reproduction; lower provenance than sealed hosted CI"
+_RED_REPRODUCTION_V1_FIELDS = frozenset(
+    {
+        "schema_version",
+        "record_ids",
+        "provenance",
+        "defective_commit",
+        "defective_tree",
+        "defective_source_blobs",
+        "guard_blobs",
+        "command",
+        "environment",
+        "python_version",
+        "exit_code",
+        "guard_nodes",
+        "failed_nodes",
+        "failure_signatures",
+        "stdout_bytes_base64",
+        "stdout_sha256",
+        "stderr_bytes_base64",
+        "stderr_sha256",
+    }
+)
+_RED_REPRODUCTION_V2_FIELDS = frozenset(
+    {
+        "schema_version",
+        "record_ids",
+        "provenance",
+        "expectation_authority",
+        "defective_commit",
+        "defective_tree",
+        "defective_source_blobs",
+        "guard_blobs",
+        "environment",
+        "python_version",
+        "guard_nodes",
+        "expected_failure_messages",
+        "node_runs",
+    }
+)
+_RED_REPRODUCTION_EXPECTATION_AUTHORITY_FIELDS = frozenset({"trusted_base_commit", "manifest_blob"})
+
+_RED_REPRODUCTION_V2_ENVIRONMENT = {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "<worktree>/src",
+    "TEMP": "<worktree>/.red-reproduction-tmp",
+    "TMP": "<worktree>/.red-reproduction-tmp",
+}
+_RED_REPRODUCTION_NODE_RUN_FIELDS = frozenset(
+    {
+        "command",
+        "exit_code",
+        "failure_signatures",
+        "test_reports",
+    }
+)
+_RED_REPRODUCTION_TEST_REPORT_FIELDS = frozenset({"crash", "nodeid", "outcome", "when"})
+
+_RED_REPRODUCTION_TEST_REPORT_CRASH_FIELDS = frozenset({"lineno", "message", "path"})
+_GRANDFATHERED_RED_REPRODUCTIONS_V1 = frozenset(
+    {
+        (
+            "red-reproduction:governance/red_reproductions/alarm_mixed_selector_027.json",
+            "sha256:fcdb209b1f77ee9c8f4b630492d98447723288210c184835a7a464ef14f75f22",
+        ),
+        (
+            "red-reproduction:governance/red_reproductions/alarm_phase_elapsed_subcondition_026.json",
+            "sha256:5c2f64c78dddee10b943d9b3c0645fa377550fcadfa1e88eea2adff61835cb14",
+        ),
+        (
+            "red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_033.json",
+            "sha256:423bf8c0878c732f22f98f5bf23b6883f1bfc2d648c390c21d87a9e4434cc9ef",
+        ),
+        (
+            "red-reproduction:governance/red_reproductions/alarm_unknown_as_clear_false_green_201.json",
+            "sha256:c69145dee1f90c53ffe8f0f3a3fdf089ed93eeee5d5294665fbebcd132aec62a",
+        ),
+    }
+)
 _EXPECTED_STATUS_DEFINITIONS = {
     "open": "Required correction or evidence is incomplete.",
     "reopened": "A previously disposed invariant lost, weakened, skipped, or misbound enforcement.",
@@ -451,6 +529,172 @@ def _decode_receipt_bytes(value: Any, digest: Any, field: str) -> bytes:
     return raw
 
 
+def _red_failure_summary_names_node(line: str, node: str) -> bool:
+    if not line.startswith("FAILED "):
+        return False
+    reported_node = line.removeprefix("FAILED ").split(" - ", 1)[0]
+    return reported_node.replace("\\", "/") == node
+
+
+def _validated_red_test_reports(
+    value: Any,
+    *,
+    entry_id: str,
+    node: str,
+) -> list[Mapping[str, Any]]:
+    lifecycle_error = (
+        f"{entry_id}.red_evidence structured pytest report must contain exactly one setup, call, and teardown report"
+    )
+
+    if not isinstance(value, list) or len(value) != 3:
+        raise GovernanceContractError(lifecycle_error)
+    expected_lifecycle = (
+        (node, "setup", "passed"),
+        (node, "call", "failed"),
+        (node, "teardown", "passed"),
+    )
+    validated: list[Mapping[str, Any]] = []
+    for report, expected_phase in zip(value, expected_lifecycle, strict=True):
+        if not isinstance(report, Mapping) or set(report) != _RED_REPRODUCTION_TEST_REPORT_FIELDS:
+            raise GovernanceContractError(lifecycle_error)
+
+        nodeid = report["nodeid"]
+        when = report["when"]
+        outcome = report["outcome"]
+        if (
+            not isinstance(nodeid, str)
+            or not isinstance(when, str)
+            or not isinstance(outcome, str)
+            or (nodeid.replace("\\", "/"), when, outcome) != expected_phase
+        ):
+            raise GovernanceContractError(lifecycle_error)
+
+        crash = report["crash"]
+        if when != "call":
+            if crash is not None:
+                raise GovernanceContractError(lifecycle_error)
+        else:
+            if not isinstance(crash, Mapping) or set(crash) != _RED_REPRODUCTION_TEST_REPORT_CRASH_FIELDS:
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence structured pytest failed call has no exact failure location"
+                )
+            guard_path = node.split("::", 1)[0]
+            if (
+                not isinstance(crash["path"], str)
+                or crash["path"].replace("\\", "/") != guard_path
+                or type(crash["lineno"]) is not int
+                or crash["lineno"] < 0
+                or not isinstance(crash["message"], str)
+                or not crash["message"].splitlines()
+            ):
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence structured pytest failed call has no exact guard failure location"
+                )
+        validated.append(report)
+    return validated
+
+
+def _validate_red_reproduction_v2_execution(
+    receipt: Mapping[str, Any],
+    *,
+    entry_id: str,
+    guard_nodes: set[str],
+) -> None:
+    expectation_authority = receipt["expectation_authority"]
+    if (
+        not isinstance(expectation_authority, Mapping)
+        or set(expectation_authority) != _RED_REPRODUCTION_EXPECTATION_AUTHORITY_FIELDS
+        or not isinstance(expectation_authority["trusted_base_commit"], str)
+        or _GIT_OBJECT_ID.fullmatch(expectation_authority["trusted_base_commit"]) is None
+        or not isinstance(expectation_authority["manifest_blob"], str)
+        or _GIT_OBJECT_ID.fullmatch(expectation_authority["manifest_blob"]) is None
+    ):
+        raise GovernanceContractError(f"{entry_id}.red_evidence expectation authority is not exact")
+
+    environment = receipt["environment"]
+    if (
+        not isinstance(environment, Mapping)
+        or dict(environment) != _RED_REPRODUCTION_V2_ENVIRONMENT
+        or not isinstance(receipt["python_version"], str)
+        or not receipt["python_version"].strip()
+    ):
+        raise GovernanceContractError(f"{entry_id}.red_evidence command or environment is not exact")
+
+    receipt_nodes = receipt["guard_nodes"]
+    if (
+        not isinstance(receipt_nodes, list)
+        or not receipt_nodes
+        or any(not isinstance(node, str) or _NODE.fullmatch(node) is None for node in receipt_nodes)
+    ):
+        raise GovernanceContractError(
+            f"{entry_id}.red_evidence failure signatures do not name selected registered guard nodes"
+        )
+    if (
+        receipt_nodes != sorted(receipt_nodes)
+        or len(receipt_nodes) != len(set(receipt_nodes))
+        or not set(receipt_nodes) <= guard_nodes
+    ):
+        raise GovernanceContractError(
+            f"{entry_id}.red_evidence failure signatures do not name selected registered guard nodes"
+        )
+
+    expected = receipt["expected_failure_messages"]
+    if not isinstance(expected, Mapping) or set(expected) != set(receipt_nodes):
+        raise GovernanceContractError(f"{entry_id}.red_evidence expected failure bindings do not match guard nodes")
+    for node, message in expected.items():
+        if not isinstance(node, str) or not isinstance(message, str) or not message or message.strip() != message:
+            raise GovernanceContractError(f"{entry_id}.red_evidence expected failure messages are invalid")
+
+    node_runs = receipt["node_runs"]
+    if not isinstance(node_runs, Mapping) or set(node_runs) != set(receipt_nodes):
+        raise GovernanceContractError(f"{entry_id}.red_evidence node-scoped runs do not match guard nodes")
+    for node, run in node_runs.items():
+        if not isinstance(run, Mapping) or set(run) != _RED_REPRODUCTION_NODE_RUN_FIELDS:
+            raise GovernanceContractError(f"{entry_id}.red_evidence node-scoped run shape is not exact")
+        command = run["command"]
+        if (
+            not isinstance(command, list)
+            or any(not isinstance(item, str) or not item for item in command)
+            or command
+            != [
+                "<python>",
+                "<trusted-pytest-launcher>",
+                "<trusted-capture-plugin>",
+                "-p",
+                "no:cacheprovider",
+                "--color=no",
+                node,
+                "-q",
+                "--tb=short",
+            ]
+        ):
+            raise GovernanceContractError(f"{entry_id}.red_evidence node-scoped command is not exact")
+        if type(run["exit_code"]) is not int or run["exit_code"] != 1:
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence red reproduction exit code is not one failed pytest test"
+            )
+        signatures = run["failure_signatures"]
+        if (
+            not isinstance(signatures, list)
+            or len(signatures) != 1
+            or not isinstance(signatures[0], str)
+            or not _red_failure_summary_names_node(signatures[0], node)
+        ):
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence failure signatures do not include registered guard nodes"
+            )
+        reports = _validated_red_test_reports(run["test_reports"], entry_id=entry_id, node=node)
+        call_report = reports[1]
+        call_crash = call_report["crash"]
+        assert isinstance(call_crash, Mapping)
+        call_message = call_crash["message"]
+        assert isinstance(call_message, str)
+        if expected[node] != call_message:
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence structured pytest failed call does not match its expected behavioral failure"
+            )
+
+
 def _validate_red_reproduction_evidence(
     value: Any,
     *,
@@ -511,35 +755,27 @@ def _validate_red_reproduction_evidence(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt is not valid JSON") from exc
 
-    required = {
-        "schema_version",
-        "record_ids",
-        "provenance",
-        "defective_commit",
-        "defective_tree",
-        "defective_source_blobs",
-        "guard_blobs",
-        "command",
-        "environment",
-        "python_version",
-        "exit_code",
-        "guard_nodes",
-        "failed_nodes",
-        "failure_signatures",
-        "stdout_bytes_base64",
-        "stdout_sha256",
-        "stderr_bytes_base64",
-        "stderr_sha256",
-    }
-    if not isinstance(receipt, Mapping) or set(receipt) != required or receipt["schema_version"] != 1:
+    if not isinstance(receipt, Mapping) or type(receipt.get("schema_version")) is not int:
         raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt shape is not exact")
+    version = receipt["schema_version"]
+    if version == 1:
+        if set(receipt) != _RED_REPRODUCTION_V1_FIELDS or (locator, digest) not in _GRANDFATHERED_RED_REPRODUCTIONS_V1:
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence schema-v1 red reproduction is not an approved legacy receipt"
+            )
+    elif version == 2:
+        if set(receipt) != _RED_REPRODUCTION_V2_FIELDS:
+            raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction receipt shape is not exact")
+    else:
+        raise GovernanceContractError(f"{entry_id}.red_evidence red-reproduction schema version is unsupported")
     record_ids = receipt["record_ids"]
     if (
         not isinstance(record_ids, list)
-        or record_ids != sorted(set(record_ids))
+        or not record_ids
         or any(not isinstance(item, str) or _ID.fullmatch(item) is None for item in record_ids)
-        or entry_id not in record_ids
     ):
+        raise GovernanceContractError(f"{entry_id}.red_evidence receipt is not bound to this prevention id")
+    if record_ids != sorted(record_ids) or len(record_ids) != len(set(record_ids)) or entry_id not in record_ids:
         raise GovernanceContractError(f"{entry_id}.red_evidence receipt is not bound to this prevention id")
     if receipt["provenance"] != _RED_REPRODUCTION_PROVENANCE:
         raise GovernanceContractError(f"{entry_id}.red_evidence receipt provenance is not explicitly local-executed")
@@ -603,6 +839,9 @@ def _validate_red_reproduction_evidence(
             raise GovernanceContractError(
                 f"{entry_id}.red_evidence receipt guard blob does not match registry guard file"
             )
+    if version == 2:
+        _validate_red_reproduction_v2_execution(receipt, entry_id=entry_id, guard_nodes=guard_nodes)
+        return
     command = receipt["command"]
     environment = receipt["environment"]
     if (

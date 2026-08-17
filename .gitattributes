@@ -1,6 +1,7 @@
 *.ttf binary
 *.otf binary
 governance/red_reproductions/*.json -text
+governance/red_reproduction_expectations.json text eol=lf
 tests/core/test_alarm_config_validation.py text eol=lf
 tests/core/test_alarm_v2_integration.py text eol=lf
 

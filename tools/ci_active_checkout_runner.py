@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -35,6 +36,12 @@ _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _ZERO_SHA = "0" * 40
 _REGISTRY = PurePosixPath("governance/agent_preventions.yaml")
 _REPRODUCTIONS = PurePosixPath("governance/red_reproductions")
+_EXPECTATIONS = PurePosixPath("governance/red_reproduction_expectations.json")
+_EXPECTATION_COLLECTIONS = frozenset({"records", "false_green_pairs"})
+_EXPECTATION_ENTRY_FIELDS = frozenset({"collection", "prevention_id", "node", "expected_failure_message", "guard_blob"})
+
+_PREVENTION_ID = re.compile(r"[A-Z0-9][A-Z0-9-]*\Z")
+_GUARD_NODE = re.compile(r"tests/[A-Za-z0-9_./-]+\.py::[A-Za-z0-9_\[\].:-]+\Z")
 
 
 class RedReproductionComparisonError(RuntimeError):
@@ -567,6 +574,164 @@ def _tree_entry(root: Path, revision: str, path: PurePosixPath) -> tuple[str, st
     return mode, kind, object_id
 
 
+def _expectations_at(
+    root: Path,
+    revision: str,
+    *,
+    label: str,
+) -> tuple[str | None, dict[tuple[str, str, str], tuple[str, str]]]:
+    raw_entry = _git_bytes(root, "ls-tree", "-z", "--full-tree", revision, "--", f":(literal){_EXPECTATIONS}")
+    if not raw_entry:
+        return None, {}
+    mode, kind, object_id = _tree_entry(root, revision, _EXPECTATIONS)
+    if mode != "100644" or kind != "blob":
+        raise RedReproductionComparisonError(f"{label} expectation manifest must remain a regular file")
+    raw = _git_bytes(root, "cat-file", "blob", object_id)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionComparisonError(f"{label} expectation manifest is not valid UTF-8 JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {"schema_version", "expectations"}:
+        raise RedReproductionComparisonError(f"{label} expectation manifest shape is not exact")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        raise RedReproductionComparisonError(f"{label} expectation manifest schema version is unsupported")
+    entries = payload["expectations"]
+    if not isinstance(entries, list):
+        raise RedReproductionComparisonError(f"{label} expectation manifest entries are malformed")
+    expectations: dict[tuple[str, str, str], tuple[str, str]] = {}
+    ordered_keys: list[tuple[str, str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != _EXPECTATION_ENTRY_FIELDS:
+            raise RedReproductionComparisonError(f"{label} expectation manifest entry shape is not exact")
+        collection = entry["collection"]
+        prevention_id = entry["prevention_id"]
+        node = entry["node"]
+        message = entry["expected_failure_message"]
+        guard_blob = entry["guard_blob"]
+        if (
+            not isinstance(collection, str)
+            or collection not in _EXPECTATION_COLLECTIONS
+            or not isinstance(prevention_id, str)
+            or _PREVENTION_ID.fullmatch(prevention_id) is None
+            or not isinstance(node, str)
+            or _GUARD_NODE.fullmatch(node) is None
+            or not isinstance(message, str)
+            or not message
+            or message.strip() != message
+            or not isinstance(guard_blob, str)
+            or _SHA.fullmatch(guard_blob) is None
+        ):
+            raise RedReproductionComparisonError(f"{label} expectation manifest entry is invalid")
+        key = (collection, prevention_id, node)
+        if key in expectations:
+            raise RedReproductionComparisonError(f"{label} expectation manifest has a duplicate entry: {key}")
+        ordered_keys.append(key)
+        expectations[key] = (message, guard_blob)
+    if ordered_keys != sorted(ordered_keys):
+        raise RedReproductionComparisonError(f"{label} expectation manifest entries are not sorted")
+    return object_id, expectations
+
+
+def _compare_expectation_manifests(
+    root: Path,
+    *,
+    candidate: str,
+    trusted_base: str,
+) -> tuple[str | None, dict[tuple[str, str, str], tuple[str, str]]]:
+    base_blob, base_expectations = _expectations_at(root, trusted_base, label="trusted base")
+    _candidate_blob, candidate_expectations = _expectations_at(root, candidate, label="candidate")
+    if base_blob is not None and _candidate_blob is None:
+        raise RedReproductionComparisonError("candidate deleted the trusted-base expectation manifest")
+    for identity, expectation in base_expectations.items():
+        if candidate_expectations.get(identity) != expectation:
+            raise RedReproductionComparisonError(
+                f"candidate modified or deleted a trusted-base failure expectation: {identity}"
+            )
+    return base_blob, base_expectations
+
+
+def _require_candidate_added_schema_v2(
+    root: Path,
+    *,
+    candidate: str,
+    trusted_base: str,
+    trusted_manifest_blob: str | None,
+    trusted_expectations: dict[tuple[str, str, str], tuple[str, str]],
+    identity: tuple[str, str],
+    binding: tuple[str, str],
+) -> None:
+    path = _canonical_reproduction_path(binding[0])
+    _mode, kind, object_id = _tree_entry(root, candidate, path)
+    if kind != "blob":
+        raise RedReproductionComparisonError(f"candidate-added red-reproduction evidence is not a blob: {identity}")
+    raw = _git_bytes(root, "cat-file", "blob", object_id)
+    actual_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if binding[1] != actual_digest:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction digest does not match committed bytes: {identity}"
+        )
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction evidence is not valid UTF-8 JSON: {identity}"
+        ) from exc
+    schema_version = receipt.get("schema_version") if isinstance(receipt, dict) else None
+    if type(schema_version) is not int or schema_version != 2:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction evidence must use schema version 2: {identity}"
+        )
+    authority = receipt.get("expectation_authority")
+    if (
+        trusted_manifest_blob is None
+        or not isinstance(authority, dict)
+        or set(authority) != {"trusted_base_commit", "manifest_blob"}
+        or authority["trusted_base_commit"] != trusted_base
+        or authority["manifest_blob"] != trusted_manifest_blob
+    ):
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction expectation authority is not the trusted base: {identity}"
+        )
+    record_ids = receipt.get("record_ids")
+    nodes = receipt.get("guard_nodes")
+    expected = receipt.get("expected_failure_messages")
+    receipt_guard_blobs = receipt.get("guard_blobs")
+    if (
+        not isinstance(record_ids, list)
+        or identity[1] not in record_ids
+        or not isinstance(nodes, list)
+        or not nodes
+        or nodes != sorted(nodes)
+        or len(nodes) != len(set(nodes))
+        or not isinstance(expected, dict)
+        or set(expected) != set(nodes)
+        or not isinstance(receipt_guard_blobs, dict)
+        or set(receipt_guard_blobs) != {node.split("::", 1)[0] for node in nodes}
+    ):
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction expectation binding is malformed: {identity}"
+        )
+    trusted_messages: dict[str, str] = {}
+    trusted_blobs: dict[str, str] = {}
+    for node in nodes:
+        expectation = trusted_expectations.get((identity[0], identity[1], node))
+        if expectation is None:
+            raise RedReproductionComparisonError(
+                f"candidate-added red-reproduction consumes an expectation absent from the trusted base: {identity}"
+            )
+        message, guard_blob = expectation
+        trusted_messages[node] = message
+        trusted_blobs[node.split("::", 1)[0]] = guard_blob
+    if expected != trusted_messages:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction expected failure differs from the trusted base: {identity}"
+        )
+    if receipt_guard_blobs != trusted_blobs:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction guard blob differs from the trusted base: {identity}"
+        )
+
+
 def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_base: str) -> dict[str, str | int]:
     """Compare committed candidate evidence bindings against one trusted commit.
 
@@ -578,6 +743,11 @@ def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_bas
     base_commit = _commit(root, trusted_base, label="trusted base")
     base = _bindings(_registry_at(root, base_commit), label="trusted base")
     current = _bindings(_registry_at(root, candidate_commit), label="candidate")
+    trusted_manifest_blob, trusted_expectations = _compare_expectation_manifests(
+        root,
+        candidate=candidate_commit,
+        trusted_base=base_commit,
+    )
     for identity, binding in base.items():
         candidate_binding = current.get(identity)
         if candidate_binding is None:
@@ -600,6 +770,16 @@ def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_bas
             raise RedReproductionComparisonError(
                 f"candidate changed trusted-base red-reproduction mode or type: {path}"
             )
+    for identity in sorted(current.keys() - base.keys()):
+        _require_candidate_added_schema_v2(
+            root,
+            candidate=candidate_commit,
+            trusted_base=base_commit,
+            trusted_manifest_blob=trusted_manifest_blob,
+            trusted_expectations=trusted_expectations,
+            identity=identity,
+            binding=current[identity],
+        )
     return {
         "candidate_commit": candidate_commit,
         "candidate_tree": _git(root, "rev-parse", "--verify", f"{candidate_commit}^{{tree}}"),

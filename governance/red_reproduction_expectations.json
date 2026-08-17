@@ -1,0 +1,54 @@
+{
+  "expectations": [
+    {
+      "collection": "false_green_pairs",
+      "expected_failure_message": "Failed: DID NOT RAISE RedReproductionComparisonError",
+      "guard_blob": "5020569f7a48103fbf593ffa601380b04d61c898",
+      "node": "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist",
+      "prevention_id": "RED-REPRODUCTION-LEGACY-DOWNGRADE-FALSE-GREEN-259"
+    },
+    {
+      "collection": "false_green_pairs",
+      "expected_failure_message": "Failed: DID NOT RAISE RedReproductionComparisonError",
+      "guard_blob": "5020569f7a48103fbf593ffa601380b04d61c898",
+      "node": "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_v2_receipt_cannot_self_author_expected_failure",
+      "prevention_id": "RED-REPRODUCTION-WRONG-FAILURE-CAUSE-FALSE-GREEN-258"
+    },
+    {
+      "collection": "false_green_pairs",
+      "expected_failure_message": "Failed: DID NOT RAISE <class 'RuntimeError'>",
+      "guard_blob": "1a9ff794ca1ee37ff45aa6252012bfc099110541",
+      "node": "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof",
+      "prevention_id": "WINDOWS-ONEDIR-DESCENDANT-SETTLEMENT-FALSE-GREEN-257"
+    },
+    {
+      "collection": "records",
+      "expected_failure_message": "Failed: DID NOT RAISE <class 'tools.red_reproduction.RedReproductionError'>",
+      "guard_blob": "fa0bc4373f9dc98e28a96618a3a037e7820f99da",
+      "node": "tests/governance/test_red_reproduction.py::test_red_reproduction_requires_the_expected_behavioral_failure",
+      "prevention_id": "RED-REPRODUCTION-BEHAVIORAL-FAILURE-BINDING-056"
+    },
+    {
+      "collection": "records",
+      "expected_failure_message": "Failed: DID NOT RAISE RedReproductionComparisonError",
+      "guard_blob": "5020569f7a48103fbf593ffa601380b04d61c898",
+      "node": "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist",
+      "prevention_id": "RED-REPRODUCTION-TRUSTED-BASE-038"
+    },
+    {
+      "collection": "records",
+      "expected_failure_message": "Failed: DID NOT RAISE RedReproductionComparisonError",
+      "guard_blob": "5020569f7a48103fbf593ffa601380b04d61c898",
+      "node": "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_v2_receipt_cannot_self_author_expected_failure",
+      "prevention_id": "RED-REPRODUCTION-TRUSTED-BASE-038"
+    },
+    {
+      "collection": "records",
+      "expected_failure_message": "Failed: DID NOT RAISE <class 'RuntimeError'>",
+      "guard_blob": "1a9ff794ca1ee37ff45aa6252012bfc099110541",
+      "node": "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof",
+      "prevention_id": "WINDOWS-PROCESS-TREE-CONTAINMENT-055"
+    }
+  ],
+  "schema_version": 1
+}
