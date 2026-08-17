@@ -3282,6 +3282,24 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: RED-REPRODUCTION-WRONG-FAILURE-CAUSE-FALSE-GREEN-258
+    status: open
+    scope: repository
+    runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
+    guard: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run
+    ci_partition: remaining
+    red_evidence: a_schema_v2_receipt_named_the_expected_guard_but_bound_a_setup_or_unrelated_failure_2026_08_17_pending_immutable_capture
+    green_evidence: pending
+
+  - id: RED-REPRODUCTION-LEGACY-DOWNGRADE-FALSE-GREEN-259
+    status: open
+    scope: repository
+    runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
+    guard: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist
+    ci_partition: remaining
+    red_evidence: a_candidate_added_schema_v1_receipt_and_self_approved_its_locator_and_digest_2026_08_17_pending_immutable_capture
+    green_evidence: pending
+
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -5885,13 +5903,13 @@ records:
     status: open
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: Every committed red-reproduction file and locator/digest binding already present in the exact trusted base supplied to pull-request, merge-group, push, or manually dispatched candidate CI.
+    applies_to: Every committed red-reproduction file and locator/digest binding in a candidate or in the exact trusted base for candidate CI.
     classification: evidence_misbinding
     correction_owner: reviewer
     guard_owner: reviewer
     disposition_owner: reviewer
-    consequence: A candidate can silently modify, delete, replace, reassign, or change the committed type or mode of unique red-reproduction evidence while retaining a green governance suite.
-    invariant: For each records or false_green_pairs prevention identity bound to red-reproduction evidence in the exact CI-supplied trusted base, the candidate retains the same identity, locator, digest, literal path, Git object, type, and mode; additions remain permitted.
+    consequence: A candidate can alter inherited evidence, self-approve schema version 1, or bind a red result to an unrelated failure while the governance suite stays green.
+    invariant: The candidate preserves each inherited evidence binding. Only the four exact legacy receipts can use schema version 1. Each new binding uses schema version 2 and binds one failed guard call to its exact expected failure.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -5903,6 +5921,12 @@ records:
       - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_deleted_renamed_and_ancestry_accepted_replacement
         ci_partition: remaining
       - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_same_blob_mode_or_type_change
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction.py::test_schema_v1_receipt_is_valid_only_at_an_approved_locator_and_digest
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist
         ci_partition: remaining
       - node: tests/test_ci_candidate_evidence.py::test_workflow_dispatch_requires_trusted_base_and_executes_active_runner
         ci_partition: remaining
