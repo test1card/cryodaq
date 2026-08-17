@@ -20,7 +20,7 @@ from typing import Any
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.drivers.contracts import CommandEvidence, CommandOutcome, SourceOffResult, SourceSetpoint
-from cryodaq.drivers.thermal_simulator import ThermalSampleSimulator
+from cryodaq.drivers.transport.mock_instrument import ExternalMockInstrumentClient
 from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
@@ -362,7 +362,7 @@ class Keithley2604B(InstrumentDriver):
         watchdog_mode: str | WatchdogMode | None = None,
         watchdog_enabled: bool | None = None,
         watchdog_timeout_s: float = 5.0,
-        thermal_simulator: ThermalSampleSimulator | None = None,
+        mock_instrument_client: ExternalMockInstrumentClient | None = None,
     ) -> None:
         super().__init__(name, mock=mock)
         self._resource_str = resource_str
@@ -396,9 +396,9 @@ class Keithley2604B(InstrumentDriver):
         # Compliance tracking: consecutive cycles where SMU reports compliance.
         self._compliance_count: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
         self._mock_temp = _MOCK_T0
-        if not mock and thermal_simulator is not None:
-            raise ValueError("thermal_simulator is available only in mock mode")
-        self._thermal_simulator = thermal_simulator
+        if not mock and mock_instrument_client is not None:
+            raise ValueError("mock_instrument_client is available only in mock mode")
+        self._mock_instrument_client = mock_instrument_client
         # Exact negative cache: True whenever either channel lacks current
         # readback-verified OFF evidence, including connect recovery, source
         # start, unmanaged output ON, or unusable output readback.
@@ -566,7 +566,7 @@ class Keithley2604B(InstrumentDriver):
             runtime.p_target = 0.0
             self._last_v[smu_channel] = 0.0
             self._compliance_count[smu_channel] = 0
-        self._sync_mock_thermal_power()
+        await self._sync_mock_thermal_power()
         self._revoke_off_evidence()
         self._wdog_armed = False
         self._wdog_autonomous = False
@@ -724,6 +724,8 @@ class Keithley2604B(InstrumentDriver):
                 raise OutputStateUnverifiedError(
                     f"{self.name}: disconnect refused without a readback-verified OFF for both outputs"
                 )
+
+            await self._sync_mock_thermal_power()
 
             # Terminal current-generation OFF proof authorizes teardown.  Keep
             # the lifecycle barrier raised until disarm and close both settle.
@@ -1012,7 +1014,7 @@ class Keithley2604B(InstrumentDriver):
             if self.mock:
                 runtime.active = True
                 self._source_regulation_epoch[smu_channel] = start_token
-                self._sync_mock_thermal_power()
+                await self._sync_mock_thermal_power()
                 return CommandOutcome(CommandEvidence.REQUESTED)
 
             # Every hazardous write is bracketed by an ownership check.  OFF
@@ -1180,7 +1182,7 @@ class Keithley2604B(InstrumentDriver):
             command_epoch=update_epoch,
         )
         runtime.p_target = p_target
-        self._sync_mock_thermal_power()
+        await self._sync_mock_thermal_power()
 
     async def update_source_limits(
         self,
@@ -1351,6 +1353,7 @@ class Keithley2604B(InstrumentDriver):
                     )
                 finally:
                     self._finish_off_operation([smu_channel])
+                await self._sync_mock_thermal_power()
                 return
             self._unsafe_output_state = True
             raise OutputStateUnverifiedError(
@@ -1369,6 +1372,7 @@ class Keithley2604B(InstrumentDriver):
                 f"{self.name}: {smu_channel} output state UNVERIFIED after "
                 f"OUTPUT_OFF (readback did not confirm OFF) — output may still be ON"
             )
+        await self._sync_mock_thermal_power()
 
     async def read_buffer(self, start_idx: int = 1, count: int = 100) -> list[dict[str, float]]:
         self._require_operational_connection("read_buffer")
@@ -1409,6 +1413,7 @@ class Keithley2604B(InstrumentDriver):
                     )
             finally:
                 self._finish_off_operation(channels)
+            await self._sync_mock_thermal_power()
             return SourceOffResult.DEVICE_REPORTED_OFF
 
         off_confirmed, pending_cancel = await self._attempt_owned_off(
@@ -1417,6 +1422,8 @@ class Keithley2604B(InstrumentDriver):
         )
         if pending_cancel is not None:
             raise pending_cancel
+        if off_confirmed:
+            await self._sync_mock_thermal_power()
         return SourceOffResult.DEVICE_REPORTED_OFF if off_confirmed else SourceOffResult.PHYSICAL_STATE_UNKNOWN
 
     def _has_current_off_proof(self, smu_channel: SmuChannel) -> bool:
@@ -1616,7 +1623,6 @@ class Keithley2604B(InstrumentDriver):
         runtime.p_target = 0.0
         self._last_v[smu_channel] = 0.0
         self._compliance_count[smu_channel] = 0
-        self._sync_mock_thermal_power()
         self._unsafe_output_observations[smu_channel] = None
         self._output_off_verified[smu_channel] = True
         self._output_off_verified_generation[smu_channel] = self._connection_generation
@@ -2238,11 +2244,11 @@ class Keithley2604B(InstrumentDriver):
             )
         return results
 
-    def _sync_mock_thermal_power(self) -> None:
-        if not self.mock or self._thermal_simulator is None:
+    async def _sync_mock_thermal_power(self) -> None:
+        if not self.mock or self._mock_instrument_client is None:
             return
         power_w = sum(runtime.p_target for runtime in self._channels.values() if runtime.active)
-        self._thermal_simulator.set_power(power_w)
+        await self._mock_instrument_client.set_power(power_w)
 
     def _mock_r_of_t(self) -> float:
         return max(_MOCK_R0 * (1.0 + _MOCK_ALPHA * (self._mock_temp - _MOCK_T0)), 1.0)

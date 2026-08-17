@@ -161,6 +161,10 @@ from cryodaq.drivers.registry import (
     is_reviewed_source_binding,
     validate_instrument_entries,
 )
+from cryodaq.drivers.transport.mock_instrument import (
+    ExternalMockInstrumentClient,
+    MockInstrumentEndpoint,
+)
 from cryodaq.engine_wiring.operator_snapshot_production import build_operator_snapshot_publication_service
 from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
 from cryodaq.engine_wiring.runtime_tasks import (
@@ -2117,6 +2121,7 @@ def _load_drivers(
     mock: bool,
     calibration_store: CalibrationStore | None = None,
     data_dir: Path | None = None,
+    mock_instrument_client: ExternalMockInstrumentClient | None = None,
 ) -> DriverLoadResult:
     """Validate and atomically construct the configured built-in drivers."""
 
@@ -2142,6 +2147,7 @@ def _load_drivers(
             mock=mock,
             calibration_store=calibration_store,
             data_dir=_DATA_DIR if data_dir is None else data_dir,
+            mock_instrument_client=mock_instrument_client,
         )
         validated = validate_instrument_entries(raw.get("instruments", []))
     except DriverRegistryError as exc:
@@ -6480,6 +6486,7 @@ async def _run_engine(
     shutdown_capability: str = "",
     engine_ready_nonce: str = "",
     engine_ready_channel_fd: int | None = None,
+    mock_instrument_client: ExternalMockInstrumentClient | None = None,
 ) -> None:
     """Инициализировать и запустить все подсистемы engine."""
     engine_instance_id = _canonical_engine_instance_id(engine_instance_id)
@@ -6514,6 +6521,7 @@ async def _run_engine(
         mock=mock,
         calibration_store=calibration_store,
         data_dir=_DATA_DIR,
+        mock_instrument_client=mock_instrument_client,
     )
     driver_configs = driver_load.instrument_configs
     drivers_by_name = {cfg.driver.name: cfg.driver for cfg in driver_configs}
@@ -7892,6 +7900,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")
     parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
     parser.add_argument(
+        "--mock-thermal-simulator",
+        metavar="HOST:PORT",
+        help="Use an external thermal instrument simulator. Requires --mock.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Proceed only when the engine lock is free; never kill an unauthenticated owner",
@@ -7906,6 +7919,16 @@ def main() -> None:
         mock = _resolve_mock_mode(cli_mock=args.mock)
     except ValueError as exc:
         parser.error(str(exc))
+
+    mock_instrument_client = None
+    if args.mock_thermal_simulator is not None:
+        if not mock:
+            parser.error("--mock-thermal-simulator requires mock mode")
+        try:
+            endpoint = MockInstrumentEndpoint.parse(args.mock_thermal_simulator)
+        except ValueError as exc:
+            parser.error(str(exc))
+        mock_instrument_client = ExternalMockInstrumentClient(endpoint)
 
     if args.force:
         _force_kill_existing()
@@ -7929,6 +7952,7 @@ def main() -> None:
                             shutdown_capability=shutdown_capability,
                             engine_ready_nonce=engine_ready_nonce,
                             engine_ready_channel_fd=engine_ready_channel_fd,
+                            mock_instrument_client=mock_instrument_client,
                         )
                     )
             else:
@@ -7939,6 +7963,7 @@ def main() -> None:
                         shutdown_capability=shutdown_capability,
                         engine_ready_nonce=engine_ready_nonce,
                         engine_ready_channel_fd=engine_ready_channel_fd,
+                        mock_instrument_client=mock_instrument_client,
                     )
                 )
         except KeyboardInterrupt:

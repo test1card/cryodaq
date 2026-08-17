@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 from cryodaq.core.descriptor_transport import DescriptorQualifiedReading
 from cryodaq.drivers.base import Reading
 from cryodaq.drivers.contracts import parse_global_off_evidence
+from cryodaq.drivers.transport.mock_instrument import MockInstrumentEndpoint
 from cryodaq.engine import _resolve_mock_mode
 from cryodaq.gui.shell.annunciation_controller import decode_projection
 from cryodaq.gui.shell.main_window_v2 import MainWindowV2 as MainWindow
@@ -2120,6 +2121,7 @@ class LauncherWindow(QMainWindow):
         app: QApplication,
         *,
         mock: bool = False,
+        mock_thermal_simulator: str | None = None,
         tray_only: bool = False,
         replay_source: Path | None = None,
         replay_speed: float = 5.0,
@@ -2133,6 +2135,7 @@ class LauncherWindow(QMainWindow):
         super().__init__()
         self._app = app
         self._mock = mock
+        self._mock_thermal_simulator = mock_thermal_simulator
         self._tray_only = tray_only
         self._replay_source = replay_source
         self._replay_speed = replay_speed
@@ -2724,6 +2727,8 @@ class LauncherWindow(QMainWindow):
 
         if self._mock and self._replay_source is None:
             cmd.append("--mock")
+        if self._mock_thermal_simulator is not None and self._replay_source is None:
+            cmd.extend(["--mock-thermal-simulator", self._mock_thermal_simulator])
 
         stderr_logger, stderr_handler, stderr_path = _create_engine_stderr_logger()
         self._engine_stderr_logger = stderr_logger
@@ -6009,6 +6014,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CryoDAQ Launcher")
     parser.add_argument("--mock", action="store_true", help="Запустить engine в mock-режиме")
     parser.add_argument(
+        "--mock-thermal-simulator",
+        metavar="HOST:PORT",
+        help="Подключить внешний тепловой симулятор. Доступно только в mock-режиме.",
+    )
+    parser.add_argument(
         "--tray",
         action="store_true",
         help="Только иконка в трее — без полного GUI (для автозагрузки)",
@@ -6069,6 +6079,15 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
+    if args.mock_thermal_simulator is not None:
+        if not mock:
+            parser.error("--mock-thermal-simulator требует mock-режим")
+        try:
+            endpoint = MockInstrumentEndpoint.parse(args.mock_thermal_simulator)
+        except ValueError as exc:
+            parser.error(str(exc))
+        args.mock_thermal_simulator = f"{endpoint.host}:{endpoint.port}"
+
     soak_bridge_handshake = _consume_soak_bridge_handshake(
         cli_mock=args.mock,
         tray_only=args.tray,
@@ -6098,7 +6117,6 @@ def main() -> None:
     if mock and replay_source is not None:
         print("Ошибка: --mock и --replay взаимно исключают друг друга.", file=sys.stderr)
         sys.exit(1)
-
     app = QApplication(remaining)
     app.setApplicationName("CryoDAQ")
     app.setOrganizationName("АКЦ ФИАН")
@@ -6161,6 +6179,7 @@ def main() -> None:
         window = LauncherWindow(
             app,
             mock=mock,
+            mock_thermal_simulator=args.mock_thermal_simulator,
             tray_only=args.tray,
             replay_source=replay_source,
             replay_speed=args.replay_speed,

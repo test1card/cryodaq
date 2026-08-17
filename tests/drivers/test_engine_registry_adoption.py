@@ -42,8 +42,10 @@ def test_main_labels_registry_subclasses_and_exits_as_config_error(
         shutdown_capability: str,
         engine_ready_nonce: str,
         engine_ready_channel_fd: int | None,
+        mock_instrument_client: object | None = None,
     ) -> None:
         assert mock is True
+        assert mock_instrument_client is None
         assert engine_instance_id == "a" * 32
         assert shutdown_capability == "b" * 64
         assert engine_ready_nonce == "c" * 64
@@ -414,8 +416,10 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
         mock: bool,
         calibration_store: CalibrationStore | None = None,
         data_dir: Path | None = None,
+        mock_instrument_client: object | None = None,
     ) -> DriverLoadResult:
         observed["config_path"] = config_path
+        observed["mock_instrument_client"] = mock_instrument_client
         observed["mock"] = mock
         observed["calibration_store"] = calibration_store
         observed["data_dir"] = data_dir
@@ -453,4 +457,5 @@ async def test_run_engine_passes_live_dependencies_and_exact_recorded_source(
     assert observed["mock"] is True
     assert isinstance(observed["calibration_store"], CalibrationStore)
     assert observed["data_dir"] is data_dir
+    assert observed["mock_instrument_client"] is None
     assert observed["source"] is observed["expected_source"]
