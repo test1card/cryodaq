@@ -1102,6 +1102,7 @@ def test_exact_six_result_mutation_is_rejected(tmp_path: Path) -> None:
     samples = _qualification_samples()
     for sample in samples:
         evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
     for fault in _faults():
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
@@ -1122,6 +1123,7 @@ def test_arbitrary_source_command_and_missing_role_fail_terminally(tmp_path: Pat
     samples = _qualification_samples()
     for sample in samples:
         arbitrary.append("samples.jsonl", sample)
+    _write_runtime_closures(arbitrary, samples)
     for fault in _faults():
         arbitrary.append("faults.jsonl", fault)
     arbitrary.write_log("log-launcher.txt", "INFO │ healthy\n")
@@ -1186,6 +1188,7 @@ def test_fault_and_shutdown_identities_require_exact_positive_integers(tmp_path:
     samples = _qualification_samples()
     for sample in samples:
         evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
     faults = _faults()
     faults[0]["pre_pid"] = True
     for fault in faults:
