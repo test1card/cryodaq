@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -429,3 +430,25 @@ def test_clean_sha_collector_rejects_runtime_library_mutation(monkeypatch: pytes
     with pytest.raises(runner._RunnerFoundationError, match="native-library closure changed"):
         collector.observe(runner._ShaBoundary.BETWEEN_COLLECTION_AND_EXECUTION)
     assert manifest_closure["sha256"] != runner._runtime_library_closure()["sha256"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="loaded native closure is Linux-only")
+def test_loaded_native_closure_binds_fallback_system_objects(monkeypatch: pytest.MonkeyPatch) -> None:
+    closure = runner._loaded_native_closure(os.getpid())
+    runtime_root = (Path(sys.prefix) / "lib").resolve()
+    external = [
+        Path(entry["path"]) for entry in closure["entries"] if not Path(entry["path"]).is_relative_to(runtime_root)
+    ]
+    assert external
+
+    target = external[0].resolve()
+    original_hash = runner._hash_regular_file
+    monkeypatch.setattr(
+        runner,
+        "_hash_regular_file",
+        lambda path: "sha256:" + "0" * 64 if path.resolve() == target else original_hash(path),
+    )
+
+    changed = runner._loaded_native_closure(os.getpid())
+
+    assert changed["sha256"] != closure["sha256"]

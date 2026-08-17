@@ -562,6 +562,75 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
     return errors
 
 
+def _validate_runtime_closures(records: Sequence[Mapping[str, Any]], samples: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Require one reproducible native closure for every observed generation."""
+
+    errors: list[str] = []
+    expected: set[tuple[str, int, int, int]] = set()
+    for sample in samples:
+        roles = sample.get("roles")
+        if not isinstance(roles, Mapping):
+            continue
+        for role, value in roles.items():
+            if isinstance(value, Mapping) and all(key in value for key in ("epoch", "pid", "started_ns")):
+                expected.add((str(role), int(value["epoch"]), int(value["pid"]), int(value["started_ns"])))
+    actual: set[tuple[str, int, int, int]] = set()
+    role_digests: dict[str, str] = {}
+    for index, record in enumerate(records):
+        if set(record) != {"schema", "role", "epoch", "pid", "started_ns", "closure"}:
+            errors.append(f"runtime closure {index} fields are not exact")
+            continue
+        if record.get("schema") != "cryodaq-process-runtime-closure/v1":
+            errors.append(f"runtime closure {index} schema is invalid")
+        role = record.get("role")
+        if role not in ROLES:
+            errors.append(f"runtime closure {index} role is invalid")
+            continue
+        if not all(_exact_nonnegative_int(record.get(key)) for key in ("epoch", "pid", "started_ns")):
+            errors.append(f"runtime closure {index} identity is invalid")
+            continue
+        identity = (str(role), int(record["epoch"]), int(record["pid"]), int(record["started_ns"]))
+        if identity in actual:
+            errors.append(f"runtime closure {index} identity is duplicated")
+        actual.add(identity)
+        closure = record.get("closure")
+        if not isinstance(closure, Mapping) or set(closure) != {"schema", "entry_count", "entries", "sha256"}:
+            errors.append(f"runtime closure {index} payload is invalid")
+            continue
+        entries = closure.get("entries")
+        if closure.get("schema") != "cryodaq-loaded-native-closure/v1" or not isinstance(entries, list):
+            errors.append(f"runtime closure {index} payload schema is invalid")
+            continue
+        normalized: list[Mapping[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) != {"path", "device", "inode", "size", "sha256"}:
+                errors.append(f"runtime closure {index} entry is invalid")
+                continue
+            if not isinstance(entry["path"], str) or not entry["path"].startswith("/"):
+                errors.append(f"runtime closure {index} entry path is invalid")
+            if not all(_exact_nonnegative_int(entry[key]) for key in ("device", "inode", "size")):
+                errors.append(f"runtime closure {index} entry identity is invalid")
+            if not isinstance(entry["sha256"], str) or re.fullmatch(r"sha256:[0-9a-f]{64}", entry["sha256"]) is None:
+                errors.append(f"runtime closure {index} entry digest is invalid")
+            normalized.append(entry)
+        if closure.get("entry_count") != len(normalized) or not normalized:
+            errors.append(f"runtime closure {index} entry count is invalid")
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            ).hexdigest()
+        )
+        if closure.get("sha256") != digest:
+            errors.append(f"runtime closure {index} digest is invalid")
+        prior = role_digests.setdefault(str(role), digest)
+        if digest != prior:
+            errors.append(f"{role} loaded native closure changed across process generations")
+    if actual != expected:
+        errors.append("runtime closures do not equal every observed process generation")
+    return errors
+
+
 def evaluate_resources(samples: Sequence[Mapping[str, Any]], soak_profile: SoakProfile) -> list[str]:
     errors = validate_sample_series(samples, soak_profile)
     if errors:
@@ -2257,6 +2326,7 @@ class Evidence:
             "prerequisites.json",
             "exact-six-result.json",
             "samples.jsonl",
+            "runtime-closures.jsonl",
             "faults.jsonl",
             "log_capture.json",
             "shutdown.json",
@@ -2276,6 +2346,7 @@ class Evidence:
             prerequisites = json.loads(self._text("prerequisites.json"))
             exact_six_result = json.loads(self._text("exact-six-result.json"))
             samples = self._json_lines("samples.jsonl")
+            runtime_closures = self._json_lines("runtime-closures.jsonl")
             faults = self._json_lines("faults.jsonl")
             log_index = json.loads(self._text("log_capture.json"))
             shutdown = json.loads(self._text("shutdown.json"))
@@ -2403,6 +2474,8 @@ class Evidence:
                     errors.append(f"periodic-delivery {label} artifact is absent or unsafe")
         sample_errors = evaluate_resources(samples, selected)
         errors += [f"samples: {error}" for error in sample_errors]
+        runtime_closure_errors = _validate_runtime_closures(runtime_closures, samples)
+        errors += [f"runtime closures: {error}" for error in runtime_closure_errors]
         fault_errors = _validate_faults(faults, selected, samples)
         errors += [f"faults: {error}" for error in fault_errors]
         expected_log_index = {"allowlist", "artifacts"}

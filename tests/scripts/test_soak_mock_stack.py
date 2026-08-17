@@ -611,6 +611,48 @@ def _write_periodic_artifacts(evidence: soak.Evidence) -> None:
     soak.atomic_json(evidence.directory / "periodic-delivery-result.json", result)
 
 
+def _write_runtime_closures(evidence: soak.Evidence, samples: list[dict[str, object]]) -> None:
+    seen: set[tuple[str, int, int, int]] = set()
+    for sample in samples:
+        for role, process in sample["roles"].items():
+            identity = (role, process["epoch"], process["pid"], process["started_ns"])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            ordinal = soak.ROLES.index(role) + 1
+            entries = [
+                {
+                    "path": f"/test-runtime/{role}.so",
+                    "device": 1,
+                    "inode": ordinal,
+                    "size": 1024,
+                    "sha256": "sha256:" + str(ordinal) * 64,
+                }
+            ]
+            digest = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+                ).hexdigest()
+            )
+            evidence.append(
+                "runtime-closures.jsonl",
+                {
+                    "schema": "cryodaq-process-runtime-closure/v1",
+                    "role": role,
+                    "epoch": process["epoch"],
+                    "pid": process["pid"],
+                    "started_ns": process["started_ns"],
+                    "closure": {
+                        "schema": "cryodaq-loaded-native-closure/v1",
+                        "entry_count": 1,
+                        "entries": entries,
+                        "sha256": digest,
+                    },
+                },
+            )
+
+
 def _populate_complete(evidence: soak.Evidence) -> None:
     evidence.write_manifest(_manifest())
     _write_prerequisites(evidence)
@@ -618,6 +660,7 @@ def _populate_complete(evidence: soak.Evidence) -> None:
     samples = _qualification_samples()
     for sample in samples:
         evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
     for fault in _faults():
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")

@@ -377,6 +377,62 @@ def _runtime_library_closure() -> dict[str, object]:
     }
 
 
+def _loaded_native_closure(pid: int) -> dict[str, object]:
+    """Bind every executable file mapping of one live Linux process."""
+
+    if sys.platform != "linux" or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise _RunnerActivationDisabled("loaded native closure requires one Linux process")
+    try:
+        lines = Path(f"/proc/{pid}/maps").read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise _RunnerFoundationError("loaded native map is unavailable") from exc
+    entries: dict[tuple[int, int], dict[str, object]] = {}
+    for line in lines:
+        fields = line.split(maxsplit=5)
+        if len(fields) != 6 or "x" not in fields[1] or not fields[5].startswith("/"):
+            continue
+        raw_path = fields[5]
+        if raw_path.endswith(" (deleted)"):
+            raise _RunnerFoundationError("loaded native mapping was replaced or deleted")
+        try:
+            mapped_major, mapped_minor = (int(part, 16) for part in fields[3].split(":", 1))
+            mapped_inode = int(fields[4])
+            resolved = Path(raw_path).resolve(strict=True)
+            identity = resolved.stat()
+        except (OSError, ValueError) as exc:
+            raise _RunnerFoundationError("loaded native mapping identity is unavailable") from exc
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or os.major(identity.st_dev) != mapped_major
+            or os.minor(identity.st_dev) != mapped_minor
+            or identity.st_ino != mapped_inode
+        ):
+            raise _RunnerFoundationError("loaded native mapping no longer matches its pathname")
+        key = (identity.st_dev, identity.st_ino)
+        entries[key] = {
+            "path": str(resolved),
+            "device": identity.st_dev,
+            "inode": identity.st_ino,
+            "size": identity.st_size,
+            "sha256": _hash_regular_file(resolved),
+        }
+    ordered = sorted(entries.values(), key=lambda item: (str(item["path"]), int(item["inode"])))
+    if not ordered:
+        raise _RunnerFoundationError("loaded native closure is empty")
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(ordered, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return {
+        "schema": "cryodaq-loaded-native-closure/v1",
+        "entry_count": len(ordered),
+        "entries": ordered,
+        "sha256": digest,
+    }
+
+
 def _controlled_runtime_library_path() -> str:
     """Return the validated native-library root of the active interpreter."""
 
@@ -3666,6 +3722,8 @@ class _PosixSoakRunner:
         os.chmod(evidence.directory, 0o700)
         broad = soak.PsutilObserver(psutil)
         observations: set[Any] = set()
+        native_closures: dict[soak.ProcessIdentity, dict[str, object]] = {}
+        role_native_closures: dict[str, str] = {}
         receipt_cut_type = tuple[
             dict[str, object],
             dict[str, object],
@@ -3833,6 +3891,25 @@ class _PosixSoakRunner:
                             for role, identity in current.items():
                                 observations.add(identity)
                                 role_rows[role] = (epochs[role], tree[identity])
+                                if identity not in native_closures:
+                                    closure = _loaded_native_closure(identity.pid)
+                                    prior_digest = role_native_closures.setdefault(role, str(closure["sha256"]))
+                                    if closure["sha256"] != prior_digest:
+                                        raise _RunnerFoundationError(
+                                            f"{role} loaded native closure changed across process generations"
+                                        )
+                                    native_closures[identity] = closure
+                                    evidence.append(
+                                        "runtime-closures.jsonl",
+                                        {
+                                            "schema": "cryodaq-process-runtime-closure/v1",
+                                            "role": role,
+                                            "epoch": epochs[role],
+                                            "pid": identity.pid,
+                                            "started_ns": identity.started_ns,
+                                            "closure": closure,
+                                        },
+                                    )
                             evidence.append(
                                 "samples.jsonl",
                                 soak.stack_sample(
