@@ -735,6 +735,7 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
     monkeypatch.setenv("GIT_DIR", "attacker-git")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "alias.status")
     monkeypatch.setenv("LD_PRELOAD", "attacker.so")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "attacker-library-path")
     monkeypatch.setenv("PYTHONOPTIMIZE", "2")
     monkeypatch.setenv("QT_PLUGIN_PATH", "attacker-qt")
     monkeypatch.setenv("CRYODAQ_CONFIG", "attacker-config")
@@ -745,6 +746,7 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
         "HOME",
         "LANG",
         "LC_ALL",
+        "LD_LIBRARY_PATH",
         "PATH",
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONNOUSERSITE",
@@ -756,6 +758,8 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
         "XDG_CONFIG_HOME",
     }
     assert environment["PYTHONPATH"] == os.pathsep.join((str(root / "src"), str(root), str(site_packages)))
+    assert environment["LD_LIBRARY_PATH"] == str((Path(sys.prefix) / "lib").resolve())
+    assert environment["LD_LIBRARY_PATH"] != "attacker-library-path"
 
 
 def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypatch, tmp_path: Path) -> None:
@@ -763,6 +767,7 @@ def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypa
         "AWS_SECRET_ACCESS_KEY": "secret",
         "CRYODAQ_CONFIG_DIR": "hostile-config",
         "LD_PRELOAD": "hostile.so",
+        "LD_LIBRARY_PATH": "hostile-library-path",
         "PYTHONINSPECT": "1",
         "QT_PLUGIN_PATH": "hostile-plugins",
     }
@@ -791,17 +796,19 @@ def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypa
         timeout=10,
     )
     observed = json.loads(probe.stdout)
-    assert not hostile.keys() & observed.keys()
+    assert not (hostile.keys() - {"LD_LIBRARY_PATH"}) & observed.keys()
     assert observed["CRYODAQ_ROOT"] == str(root.resolve())
     assert observed[runner._BRIDGE_NONCE_ENV] == "a" * 64
     assert observed[runner._ARTIFACT_NONCE_ENV] == "b" * 64
     assert observed["PYTHONPATH"] == os.pathsep.join((str(source_root.resolve() / "src"), str(source_root.resolve())))
+    assert observed["LD_LIBRARY_PATH"] == str((Path(sys.prefix) / "lib").resolve())
     assert str(runner._REPO_ROOT) not in observed["PYTHONPATH"]
     assert set(environment) == {
         "CRYODAQ_ROOT",
         "HOME",
         "LANG",
         "LC_ALL",
+        "LD_LIBRARY_PATH",
         "PATH",
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONNOUSERSITE",

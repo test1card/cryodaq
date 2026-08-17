@@ -289,12 +289,19 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
     return captured
 
 
+def _controlled_runtime_library_path() -> str:
+    """Return the trusted native-library root of the active interpreter."""
+
+    return str((Path(sys.prefix) / "lib").resolve())
+
+
 def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[str, str]:
     root = Path(repo_root).resolve()
     return {
         "HOME": "/nonexistent",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        "LD_LIBRARY_PATH": _controlled_runtime_library_path(),
         "PATH": "/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
@@ -339,6 +346,7 @@ def _source_environment(
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        "LD_LIBRARY_PATH": _controlled_runtime_library_path(),
         "PATH": "/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
