@@ -4,7 +4,7 @@ keywords: conductivity, thermal, R, G, steady-state, auto-sweep, keithley, power
 applies_to: Thermal conductivity overlay (R/G measurement + auto power-sweep + flight recorder)
 status: active
 implements: src/cryodaq/gui/shell/overlays/conductivity_panel.py; removed v1 widget is historical only
-last_updated: 2026-07-20
+last_updated: 2026-08-17
 references: rules/data-display-rules.md, rules/interaction-rules.md, components/card.md, components/input-field.md, components/button.md, cryodaq-primitives/keithley-panel.md
 ---
 
@@ -136,8 +136,11 @@ to CSV for post-hoc analysis.
    run while a target reply is pending, but `_auto_tick()` must not advance. It
    is stopped for Stop-pending, completion-pending, outcome-unknown, and panel
    teardown. Therefore `stabilizing` does not imply an active timer.
-6. **A step advances only when elapsed time and minimum settling percentage both
-   pass, with no pending command, Stop intent, disconnect, or unknown outcome.**
+6. **A step uses samples from one evidence epoch.** Each driver records the
+   acquisition start before instrument I/O. The start must follow the target
+   acknowledgement. Each selected feed must remain usable and arrive within
+   10 seconds. The panel keeps the acknowledged power channel and temperature
+   chain until the step ends.
 7. **Stop dispatch is not OFF evidence.** Operator Stop and final completion
    retain `"stabilizing"` and block finalization until a successful current
    `keithley_stop` reply commits `"idle"` or `"done"` respectively.
@@ -214,7 +217,7 @@ class ConductivityPanel(QWidget):
 | **Chain ≥ 2, not connected** | Auto-sweep Start disabled; chain selection / export still enabled; status banner «Нет связи с engine» |
 | **Normal connected, idle** | All controls enabled; 1 Hz refresh drives table + plot + flight log |
 | **Target command pending** | Public state remains `stabilizing`; timer may run, but `_auto_tick()` cannot record or advance until the current reply settles |
-| **Normal stabilizing** | Start disabled, Stop enabled; timer advances only when elapsed-time and settling gates both pass |
+| **Normal stabilizing** | Start and channel selectors disabled; Stop enabled; advancement also requires current samples from the acknowledged evidence epoch |
 | **Operator Stop awaiting confirmation** | Remains `stabilizing`; timer stopped; both buttons disabled; status explicitly says confirmation is pending |
 | **Completion Stop awaiting confirmation** | Remains `stabilizing`; timer stopped; progress held at 99%; completion is not published |
 | **Outcome unknown while disconnected** | Remains `stabilizing`; timer and both controls disabled; «ИСХОД НЕИЗВЕСТЕН» remains visible |
@@ -243,6 +246,9 @@ class ConductivityPanel(QWidget):
    `PLOT_LINE_PALETTE[i]` via `series_pen(i)`; surfaces/status use tokens.
 9. **Reaching into `_auto_state` directly from external code.** Use
    `get_auto_state()` / `is_auto_sweep_active()`.
+10. **Using the reading creation time as the acquisition time.** A slow
+    instrument can return old data with a new object timestamp. Use the
+    driver-provided `acquisition_started_at` value.
 
 ## Related components
 
@@ -253,6 +259,8 @@ class ConductivityPanel(QWidget):
 
 ## Changelog
 
+- **2026-08-17 — step evidence freshness.** Each step now uses driver acquisition
+  epochs, fixed channel identities, usable feed state, and a 10-second arrival limit.
 - **2026-07-20 — fail-closed command settlement.** Retained the three public
   guard-state values while adding generation-bound replies, explicit
   outcome-unknown retention, Stop supersession of pending targets, and

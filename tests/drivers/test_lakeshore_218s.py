@@ -125,10 +125,15 @@ async def test_mock_returns_8_channels() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=True)
     await driver.connect()
 
+    acquisition_call_started_at = datetime.now(UTC).timestamp()
     readings = await driver.read_channels()
+    acquisition_call_finished_at = datetime.now(UTC).timestamp()
 
     assert len(readings) == 8
     for r in readings:
+        acquisition_started_at = r.metadata.get("acquisition_started_at")
+        assert isinstance(acquisition_started_at, float)
+        assert acquisition_call_started_at <= acquisition_started_at <= acquisition_call_finished_at
         assert isinstance(r, Reading)
         assert r.unit == "K"
         assert r.status == ChannelStatus.OK

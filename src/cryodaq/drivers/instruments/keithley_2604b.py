@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -785,9 +786,13 @@ class Keithley2604B(InstrumentDriver):
 
     async def read_channels(self) -> list[Reading]:
         self._require_operational_connection("read_channels")
+        acquisition_started_at = time.time()
 
         if self.mock:
-            return self._mock_readings()
+            readings = self._mock_readings()
+            for reading in readings:
+                reading.metadata["acquisition_started_at"] = acquisition_started_at
+            return readings
 
         await self._wdog_pet()
 
@@ -964,6 +969,8 @@ class Keithley2604B(InstrumentDriver):
                         compliance_evidence=compliance_evidence,
                     )
                 )
+        for reading in readings:
+            reading.metadata["acquisition_started_at"] = acquisition_started_at
         return readings
 
     async def start_source(

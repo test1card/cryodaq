@@ -1,0 +1,69 @@
+{
+  "command": [
+    "C:\\Python314\\python.exe",
+    "-m",
+    "pytest",
+    "-p",
+    "no:cacheprovider",
+    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only",
+    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels",
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof",
+    "-q",
+    "--tb=short"
+  ],
+  "defective_commit": "9cbcb2194bc1259006f4c34de21a8c46862775f0",
+  "defective_source_blobs": {
+    "src/cryodaq/drivers/instruments/keithley_2604b.py": "35f02896c4ff2efc0d3704f7ecd3cfd38b4ceca3",
+    "src/cryodaq/drivers/instruments/lakeshore_218s.py": "2180a18489054178c967feb3c3d5648c41e31c26",
+    "src/cryodaq/gui/shell/overlays/conductivity_panel.py": "483b82b8787789e5e3588216fb1c62dd35561360"
+  },
+  "defective_tree": "5fcd816eb818676a5aadc3015d85112951ca27fa",
+  "environment": {
+    "COMSPEC": "C:\\WINDOWS\\system32\\cmd.exe",
+    "PATH": "C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\3fall\\.codex\\tmp\\arg0\\codex-arg0o3r8cf;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\override;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\java8path;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath;C:\\Program Files\\Eclipse Adoptium\\jdk-25.0.2.10-hotspot\\bin;C:\\Python314\\Scripts\\;C:\\Python314\\;C:\\Program Files\\Microsoft MPI\\Bin\\;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\dotnet\\;C:\\Program Files (x86)\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\DTS\\Binn\\;C:\\Program Files (x86)\\Windows Kits\\8.1\\Windows Performance Toolkit\\;C:\\Program Files\\Siemens\\NX2506\\CAPITALINTEGRATION\\capitalnxremote\\;C:\\Program Files\\Git\\cmd;C:\\Program Files\\GitHub CLI\\;C:\\Program Files\\PowerToys\\DSCModules\\;C:\\Program Files\\nodejs\\;C:\\ProgramData\\chocolatey\\bin;C:\\Program Files\\Tailscale\\;C:\\Program Files\\Sunshine;C:\\Program Files\\Sunshine\\tools;C:\\Users\\3fall\\.kimi-code\\bin;C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\2026.0\\bin;C:\\Users\\3fall\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts;C:\\Users\\3fall\\AppData\\Local\\hermes\\bin;C:\\Users\\3fall\\.cargo\\bin;C:\\Users\\3fall\\.local\\bin;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\3fall\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts;C:\\Users\\3fall\\AppData\\Roaming\\npm;C:\\Users\\3fall\\AppData\\Local\\Programs\\Ollama;C:\\Users\\3fall\\AppData\\Local\\Programs\\MiKTeX\\miktex\\bin\\x64\\;C:\\Users\\3fall\\AppData\\Local\\Programs\\Antigravity\\bin;C:\\Users\\3fall\\.bun\\bin;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin;C:\\Users\\3fall\\.cache\\lm-studio\\bin;C:\\Users\\3fall\\.dotnet\\tools;C:\\Users\\3fall\\AppData\\Roaming\\Python\\Python314\\Scripts;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\fallback;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd;C:\\Users\\3fall\\AppData\\Local\\OpenAI\\Codex\\bin\\53c73f34a40c42be;C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.810.7004.0_x64__2p2nqsd0c76g0\\app\\resources",
+    "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW;.CPL",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-25svbxkm\\worktree\\src",
+    "SYSTEMROOT": "C:\\WINDOWS",
+    "TEMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-25svbxkm\\worktree\\.red-reproduction-tmp",
+    "TMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-25svbxkm\\worktree\\.red-reproduction-tmp"
+  },
+  "exit_code": 1,
+  "failed_nodes": [
+    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only",
+    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels",
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof"
+  ],
+  "failure_signatures": {
+    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only": [
+      "FAILED tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only"
+    ],
+    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels": [
+      "FAILED tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels - a..."
+    ],
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof": [
+      "FAILED tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof[before_ack]",
+      "FAILED tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof[missing]"
+    ]
+  },
+  "guard_blobs": {
+    "tests/drivers/test_keithley_disconnect_verified_off.py": "8891fe5ea70284012c478a02e32160fee0884295",
+    "tests/drivers/test_lakeshore_218s.py": "913edbd97902741fdc75db56dd80adb1ee991e54",
+    "tests/gui/shell/overlays/test_conductivity_panel.py": "0488e947e3e5de37c0e27b9bff8076f0e60f5b45"
+  },
+  "guard_nodes": [
+    "tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only",
+    "tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels",
+    "tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof"
+  ],
+  "provenance": "local-executed-red-reproduction; lower provenance than sealed hosted CI",
+  "python_version": "Python 3.14.3",
+  "record_ids": [
+    "CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081"
+  ],
+  "schema_version": 1,
+  "stderr_bytes_base64": "",
+  "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_bytes_base64": "RkZGRiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQ0KPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KX19fX19fX19fX19fIHRlc3RfbW9ja19jb25uZWN0aW9uX3VzZXNfc2ltdWxhdG9yX2xvY2FsX3Byb29mX29ubHkgX19fX19fX19fX19fXw0KdGVzdHNcZHJpdmVyc1x0ZXN0X2tlaXRobGV5X2Rpc2Nvbm5lY3RfdmVyaWZpZWRfb2ZmLnB5OjQ5MjogaW4gdGVzdF9tb2NrX2Nvbm5lY3Rpb25fdXNlc19zaW11bGF0b3JfbG9jYWxfcHJvb2Zfb25seQ0KICAgIGFzc2VydCBpc2luc3RhbmNlKGFjcXVpc2l0aW9uX3N0YXJ0ZWRfYXQsIGZsb2F0KQ0KRSAgIGFzc2VydCBGYWxzZQ0KRSAgICArICB3aGVyZSBGYWxzZSA9IGlzaW5zdGFuY2UoTm9uZSwgZmxvYXQpDQpfX19fX19fX19fX19fX19fX19fX19fX18gdGVzdF9tb2NrX3JldHVybnNfOF9jaGFubmVscyBfX19fX19fX19fX19fX19fX19fX19fX19fDQp0ZXN0c1xkcml2ZXJzXHRlc3RfbGFrZXNob3JlXzIxOHMucHk6MTM1OiBpbiB0ZXN0X21vY2tfcmV0dXJuc184X2NoYW5uZWxzDQogICAgYXNzZXJ0IGlzaW5zdGFuY2UoYWNxdWlzaXRpb25fc3RhcnRlZF9hdCwgZmxvYXQpDQpFICAgYXNzZXJ0IEZhbHNlDQpFICAgICsgIHdoZXJlIEZhbHNlID0gaXNpbnN0YW5jZShOb25lLCBmbG9hdCkNCl8gdGVzdF9hdXRvX3RpY2tfcmVqZWN0c19zYW1wbGVzX3dpdGhvdXRfcG9zdF9hY2tfYWNxdWlzaXRpb25fcHJvb2ZbYmVmb3JlX2Fja10gXw0KdGVzdHNcZ3VpXHNoZWxsXG92ZXJsYXlzXHRlc3RfY29uZHVjdGl2aXR5X3BhbmVsLnB5Ojc1MjogaW4gdGVzdF9hdXRvX3RpY2tfcmVqZWN0c19zYW1wbGVzX3dpdGhvdXRfcG9zdF9hY2tfYWNxdWlzaXRpb25fcHJvb2YNCiAgICBhc3NlcnQgcGFuZWwuX2F1dG9fc3RlcCA9PSAwDQpFICAgYXNzZXJ0IDEgPT0gMA0KRSAgICArICB3aGVyZSAxID0gPGNyeW9kYXEuZ3VpLnNoZWxsLm92ZXJsYXlzLmNvbmR1Y3Rpdml0eV9wYW5lbC5Db25kdWN0aXZpdHlQYW5lbCgweDFiNmM1ZjU2MGUwLCBuYW1lPSJjb25kdWN0aXZpdHlQYW5lbCIpIGF0IDB4MDAwMDAxQjZGNzQzMjAwMD4uX2F1dG9fc3RlcA0KXyB0ZXN0X2F1dG9fdGlja19yZWplY3RzX3NhbXBsZXNfd2l0aG91dF9wb3N0X2Fja19hY3F1aXNpdGlvbl9wcm9vZlttaXNzaW5nXSBfXw0KdGVzdHNcZ3VpXHNoZWxsXG92ZXJsYXlzXHRlc3RfY29uZHVjdGl2aXR5X3BhbmVsLnB5Ojc1MjogaW4gdGVzdF9hdXRvX3RpY2tfcmVqZWN0c19zYW1wbGVzX3dpdGhvdXRfcG9zdF9hY2tfYWNxdWlzaXRpb25fcHJvb2YNCiAgICBhc3NlcnQgcGFuZWwuX2F1dG9fc3RlcCA9PSAwDQpFICAgYXNzZXJ0IDEgPT0gMA0KRSAgICArICB3aGVyZSAxID0gPGNyeW9kYXEuZ3VpLnNoZWxsLm92ZXJsYXlzLmNvbmR1Y3Rpdml0eV9wYW5lbC5Db25kdWN0aXZpdHlQYW5lbCgweDFiNmM2NTA1ZGMwLCBuYW1lPSJjb25kdWN0aXZpdHlQYW5lbCIpIGF0IDB4MDAwMDAxQjZGNjZDREZDMD4uX2F1dG9fc3RlcA0KPT09PT09PT09PT09PT09PT09PT09PT09PT09IHNob3J0IHRlc3Qgc3VtbWFyeSBpbmZvID09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KRkFJTEVEIHRlc3RzL2RyaXZlcnMvdGVzdF9rZWl0aGxleV9kaXNjb25uZWN0X3ZlcmlmaWVkX29mZi5weTo6dGVzdF9tb2NrX2Nvbm5lY3Rpb25fdXNlc19zaW11bGF0b3JfbG9jYWxfcHJvb2Zfb25seQ0KRkFJTEVEIHRlc3RzL2RyaXZlcnMvdGVzdF9sYWtlc2hvcmVfMjE4cy5weTo6dGVzdF9tb2NrX3JldHVybnNfOF9jaGFubmVscyAtIGEuLi4NCkZBSUxFRCB0ZXN0cy9ndWkvc2hlbGwvb3ZlcmxheXMvdGVzdF9jb25kdWN0aXZpdHlfcGFuZWwucHk6OnRlc3RfYXV0b190aWNrX3JlamVjdHNfc2FtcGxlc193aXRob3V0X3Bvc3RfYWNrX2FjcXVpc2l0aW9uX3Byb29mW2JlZm9yZV9hY2tdDQpGQUlMRUQgdGVzdHMvZ3VpL3NoZWxsL292ZXJsYXlzL3Rlc3RfY29uZHVjdGl2aXR5X3BhbmVsLnB5Ojp0ZXN0X2F1dG9fdGlja19yZWplY3RzX3NhbXBsZXNfd2l0aG91dF9wb3N0X2Fja19hY3F1aXNpdGlvbl9wcm9vZlttaXNzaW5nXQ0KNCBmYWlsZWQgaW4gMC42NHMNCg==",
+  "stdout_sha256": "sha256:fc009b8ee6639623148ef8a3f2b31b3bcecc526684154b890aac2372f540e515"
+}

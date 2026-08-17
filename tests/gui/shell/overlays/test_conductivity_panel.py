@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel, _pct_color
 
@@ -77,25 +77,45 @@ class _DeferredWorker:
         self.finished.emit(result)
 
 
-def _temp_reading(channel: str, value: float) -> Reading:
+def _temp_reading(
+    channel: str,
+    value: float,
+    *,
+    acquisition_started_at: float | None = None,
+    status: ChannelStatus = ChannelStatus.OK,
+) -> Reading:
+    now = datetime.now(UTC)
     return Reading(
-        timestamp=datetime.now(UTC),
+        timestamp=now,
         instrument_id="LakeShore_1",
         channel=channel,
         value=value,
         unit="K",
-        metadata={},
+        status=status,
+        metadata={
+            "acquisition_started_at": now.timestamp() if acquisition_started_at is None else acquisition_started_at,
+        },
     )
 
 
-def _power_reading(value: float, *, channel: str = "Keithley_1/smua/power") -> Reading:
+def _power_reading(
+    value: float,
+    *,
+    channel: str = "Keithley_1/smua/power",
+    acquisition_started_at: float | None = None,
+    status: ChannelStatus = ChannelStatus.OK,
+) -> Reading:
+    now = datetime.now(UTC)
     return Reading(
-        timestamp=datetime.now(UTC),
+        timestamp=now,
         instrument_id="Keithley_1",
         channel=channel,
         value=value,
         unit="W",
-        metadata={},
+        status=status,
+        metadata={
+            "acquisition_started_at": now.timestamp() if acquisition_started_at is None else acquisition_started_at,
+        },
     )
 
 
@@ -693,7 +713,8 @@ def test_auto_tick_requires_fresh_power_and_temperature_samples_after_target_ack
     panel._auto_timer.stop()
 
 
-def test_auto_tick_rejects_samples_taken_before_target_ack(app, monkeypatch):
+@pytest.mark.parametrize("acquisition_proof", ["before_ack", "missing"])
+def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monkeypatch, acquisition_proof):
     import time as _time
 
     import cryodaq.gui.shell.overlays.conductivity_panel as module
@@ -713,26 +734,102 @@ def test_auto_tick_rejects_samples_taken_before_target_ack(app, monkeypatch):
     _DeferredWorker.instances[-1].finish({"ok": True})
 
     assert panel._auto_step_ack_wall_s is not None
-    stale_timestamp = datetime.fromtimestamp(panel._auto_step_ack_wall_s - 1.0, tz=UTC)
+    acquisition_start = panel._auto_step_ack_wall_s - 1.0 if acquisition_proof == "before_ack" else None
     for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
-        panel._handle_reading(
-            Reading(
-                timestamp=stale_timestamp,
-                instrument_id="LakeShore_1",
-                channel=channel,
-                value=value,
-                unit="K",
-            )
+        reading = _temp_reading(channel, value, acquisition_started_at=acquisition_start)
+        if acquisition_proof == "missing":
+            reading.metadata.clear()
+        panel._handle_reading(reading)
+    power_reading = _power_reading(0.01, acquisition_started_at=acquisition_start)
+    if acquisition_proof == "missing":
+        power_reading.metadata.clear()
+    panel._handle_reading(power_reading)
+
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    panel._auto_timer.stop()
+
+
+def test_auto_step_keeps_commanded_channels_when_controls_change(app, monkeypatch):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    assert _DeferredWorker.instances[-1].cmd["channel"] == "smua"
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    panel._on_power_changed("Keithley_1/smub/power")
+    panel._chain[:] = ["Т2", "Т3"]
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012, channel="Keithley_1/smua/power"))
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+
+    panel._auto_tick()
+
+    assert panel._auto_step == 1
+    assert panel._auto_results[0]["T_hot"] == pytest.approx(110.0)
+    assert panel._auto_results[0]["T_cold"] == pytest.approx(100.0)
+    assert _DeferredWorker.instances[-1].cmd["channel"] == "smua"
+    panel._on_auto_stop()
+    assert _DeferredWorker.instances[-1].cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    panel._auto_timer.stop()
+
+
+@pytest.mark.parametrize("failure_mode", ["sensor_error", "sensor_error_without_provenance", "silence"])
+def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012))
+
+    if failure_mode.startswith("sensor_error"):
+        reading = _temp_reading(
+            "Т1",
+            float("nan"),
+            status=ChannelStatus.SENSOR_ERROR,
         )
-    panel._handle_reading(
-        Reading(
-            timestamp=stale_timestamp,
-            instrument_id="Keithley_1",
-            channel="Keithley_1/smua/power",
-            value=0.01,
-            unit="W",
-        )
-    )
+        if failure_mode == "sensor_error_without_provenance":
+            reading.metadata.clear()
+        panel._handle_reading(reading)
+    else:
+        sample_max_age_s = getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0)
+        stale_received_at = _time.monotonic() - sample_max_age_s - 1.0
+        panel._auto_step_temperature_received_at = {"Т1": stale_received_at, "Т2": stale_received_at}
+        panel._auto_step_power_received_at = stale_received_at
 
     panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
     panel._auto_step_start = _time.monotonic() - 60.0
