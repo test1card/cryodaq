@@ -626,6 +626,16 @@ def _populate_complete(evidence: soak.Evidence) -> None:
 
 
 @_POSIX_EVIDENCE
+def test_runner_runtime_library_manifest_reaches_final_schema_validation(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+
+    _ledger, errors = evidence._build_ledger()
+
+    assert "manifest fields are not exact" not in errors
+
+
+@_POSIX_EVIDENCE
 def test_foundation_cannot_authorize_pass_without_execution_provenance(tmp_path: Path) -> None:
     invalid = soak.Evidence(tmp_path / "invalid")
     assert not hasattr(invalid, "finish")
