@@ -3290,7 +3290,7 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/windows_onedir_descendant_settlement_257.json
-      sha256: sha256:c8c0fcb55007263e9c66b38ced7e10e8c74d76e773259277a92319441206aba0
+      sha256: sha256:ea208b31eccf41a3f17be9c3fb583fdeb342129db503e4631325c6d68d10d92e
     green_evidence: pending
   - id: RED-REPRODUCTION-WRONG-FAILURE-CAUSE-FALSE-GREEN-258
     status: open
@@ -3300,7 +3300,7 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/red_reproduction_wrong_failure_cause_258.json
-      sha256: sha256:2f7a3ecce8593b1c26e3720ba7ae92f828869aaa2e34cebd701e507314afd13e
+      sha256: sha256:159da74e1ac78a65f6493e1ceafe422fd8459db0e359c83312bf0a544266720e
     green_evidence: pending
 
 records:
@@ -6499,7 +6499,7 @@ records:
         platform: windows
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/windows_onedir_descendant_settlement_257.json
-      sha256: sha256:c8c0fcb55007263e9c66b38ced7e10e8c74d76e773259277a92319441206aba0
+      sha256: sha256:ea208b31eccf41a3f17be9c3fb583fdeb342129db503e4631325c6d68d10d92e
     green_evidence: pending
   - id: RED-REPRODUCTION-BEHAVIORAL-FAILURE-BINDING-056
     status: open
@@ -6511,11 +6511,13 @@ records:
     guard_owner: reviewer
     disposition_owner: reviewer
     consequence: A receipt can name the correct guard while an import or setup error causes the red result.
-    invariant: Each schema-v2 receipt binds each node to an exact behavioral failure line from that node's run. Only four approved schema-v1 receipts remain valid.
+    invariant: Each schema-v2 receipt binds each node to exactly one failed pytest call report and the exact behavioral failure from that call. Setup, teardown, collection, and additional failures invalidate the evidence. Only four approved schema-v1 receipts remain valid.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
+      - node: tests/governance/test_red_reproduction.py::test_red_reproduction_receipt_refusals_are_independent
+        ci_partition: remaining
       - node: tests/governance/test_red_reproduction.py::test_red_reproduction_requires_the_expected_behavioral_failure
         ci_partition: remaining
       - node: tests/governance/test_red_reproduction.py::test_producer_refuses_wrong_failure_cause_before_writing_receipt
@@ -6526,5 +6528,5 @@ records:
         ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/red_reproduction_wrong_failure_cause_258.json
-      sha256: sha256:2f7a3ecce8593b1c26e3720ba7ae92f828869aaa2e34cebd701e507314afd13e
+      sha256: sha256:159da74e1ac78a65f6493e1ceafe422fd8459db0e359c83312bf0a544266720e
     green_evidence: pending

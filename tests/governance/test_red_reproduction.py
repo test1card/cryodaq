@@ -83,14 +83,55 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
         }
     )
     assert expected_lines
+    legacy_command = receipt.pop("command")
+    command = [
+        legacy_command[0],
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "_cryodaq_red_reproduction_capture",
+        "--color=no",
+        node,
+        "-q",
+        "--tb=short",
+    ]
     node_run = {
-        "command": receipt.pop("command"),
+        "command": command,
         "exit_code": receipt.pop("exit_code"),
         "failure_signatures": receipt.pop("failure_signatures")[node],
         "stdout_bytes_base64": receipt.pop("stdout_bytes_base64"),
         "stdout_sha256": receipt.pop("stdout_sha256"),
         "stderr_bytes_base64": receipt.pop("stderr_bytes_base64"),
         "stderr_sha256": receipt.pop("stderr_sha256"),
+        "test_reports": [
+            {
+                "crash": None,
+                "longrepr_lines": [],
+                "nodeid": node,
+                "outcome": "passed",
+                "when": "setup",
+            },
+            {
+                "crash": {
+                    "lineno": 1,
+                    "message": "\n".join(line.removeprefix("E   ") for line in expected_lines),
+                    "path": node.split("::", 1)[0],
+                },
+                "longrepr_lines": expected_lines,
+                "nodeid": node,
+                "outcome": "failed",
+                "when": "call",
+            },
+            {
+                "crash": None,
+                "longrepr_lines": [],
+                "nodeid": node,
+                "outcome": "passed",
+                "when": "teardown",
+            },
+        ],
     }
     receipt.pop("failed_nodes")
     receipt["schema_version"] = 2
@@ -168,6 +209,10 @@ def _successful_exit(receipt: dict[str, Any]) -> None:
     _single_node_run(receipt)["exit_code"] = 0
 
 
+def _non_test_failure_exit(receipt: dict[str, Any]) -> None:
+    _single_node_run(receipt)["exit_code"] = 2
+
+
 def _missing_failure_signature(receipt: dict[str, Any]) -> None:
     _single_node_run(receipt)["failure_signatures"].clear()
 
@@ -186,7 +231,8 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
         (_wrong_guard_blob, "guard blob does not match registry guard file"),
         (_missing_commit, "does not resolve to a local Git commit object"),
         (_wrong_tree, "defective tree does not match its defective commit"),
-        (_successful_exit, "exit code indicates success"),
+        (_successful_exit, "exit code is not one failed pytest test"),
+        (_non_test_failure_exit, "exit code is not one failed pytest test"),
         (_missing_failure_signature, "failure signatures do not include registered guard nodes"),
         (_forged_stdout_digest, "stdout digest does not match its recorded bytes"),
         (_forged_stderr_digest, "stderr digest does not match its recorded bytes"),
@@ -196,6 +242,7 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
         "missing-defective-commit",
         "wrong-defective-tree",
         "successful-red-run",
+        "collection-error-exit",
         "missing-registered-failure-signature",
         "forged-stdout-digest",
         "forged-stderr-digest",
@@ -229,15 +276,21 @@ def test_red_reproduction_receipt_refusals_are_independent(
 
 def test_red_reproduction_requires_the_expected_behavioral_failure() -> None:
     node = "tests/test_guard.py::test_guard"
+    expected_line = "E   Failed: DID NOT RAISE <class 'RuntimeError'>"
     wrong_cause = (
-        f"F\nE   AttributeError: fixture setup failed\nFAILED {node} - AttributeError: fixture setup failed\n"
+        f"F\n{expected_line}\nE   AttributeError: fixture setup failed\n"
+        f"FAILED {node} - AttributeError: fixture setup failed\n"
     ).encode()
 
     with pytest.raises(
         red_reproduction.RedReproductionError,
-        match="expected behavioral failure lines are required",
+        match="structured pytest call reports are required",
     ):
-        red_reproduction._failure_signatures(wrong_cause, [node])
+        red_reproduction._failure_signatures(
+            wrong_cause,
+            [node],
+            {node: [expected_line]},
+        )
 
 
 def test_failure_signature_binding_rejects_cross_node_laundering() -> None:
@@ -277,9 +330,31 @@ def test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run(tmp_path: 
     validate_registry(payload, root=tmp_path, git_repository=ROOT)
 
     [node] = receipt["guard_nodes"]
-    receipt["expected_failure_lines"][node] = ["E   Failed: expected line is absent"]
+    reports = _single_node_run(receipt)["test_reports"]
+    original_reports = copy.deepcopy(reports)
+    reports[1]["crash"]["message"] = "AttributeError: unrelated fixture failure"
     _rewrite_receipt(payload, directory, filename, receipt)
-    with pytest.raises(GovernanceContractError, match="does not include its expected behavioral failure"):
+    with pytest.raises(GovernanceContractError, match="failed call does not match its expected behavioral failure"):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    reports[:] = copy.deepcopy(original_reports)
+    reports.append(copy.deepcopy(reports[1]))
+    _rewrite_receipt(payload, directory, filename, receipt)
+    with pytest.raises(GovernanceContractError, match="exactly one setup, call, and teardown report"):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    reports[:] = copy.deepcopy(original_reports)
+    reports[0] = copy.deepcopy(reports[1])
+    reports[0]["when"] = "setup"
+    _rewrite_receipt(payload, directory, filename, receipt)
+    with pytest.raises(GovernanceContractError, match="exactly one setup, call, and teardown report"):
+        validate_registry(payload, root=tmp_path, git_repository=ROOT)
+
+    reports[:] = copy.deepcopy(original_reports)
+    reports[2] = copy.deepcopy(reports[1])
+    reports[2]["when"] = "teardown"
+    _rewrite_receipt(payload, directory, filename, receipt)
+    with pytest.raises(GovernanceContractError, match="exactly one setup, call, and teardown report"):
         validate_registry(payload, root=tmp_path, git_repository=ROOT)
 
 
@@ -342,7 +417,12 @@ def test_producer_refuses_wrong_failure_cause_before_writing_receipt(tmp_path: P
 
     guard_path = "tests/test_wrong_failure.py"
     node = f"{guard_path}::test_wrong_failure_cause"
-    guard_source = b"def test_wrong_failure_cause() -> None:\n    raise AttributeError('wrong failure cause')\n"
+    expected_line = "E   Failed: DID NOT RAISE <class 'RuntimeError'>"
+    guard_source = (
+        "def test_wrong_failure_cause() -> None:\n"
+        f"    print({expected_line!r})\n"
+        "    raise AttributeError('wrong failure cause')\n"
+    ).encode()
     guard_blob = _run_git(repository, "hash-object", "-w", "--stdin", stdin=guard_source).decode("ascii").strip()
     output = repository / "governance" / "red_reproductions" / "wrong_failure.json"
 
@@ -355,7 +435,7 @@ def test_producer_refuses_wrong_failure_cause_before_writing_receipt(tmp_path: P
             guard_blobs={guard_path: guard_blob},
             source_paths=["defective.py"],
             nodes=[node],
-            expected_failure_lines={node: ["E   Failed: DID NOT RAISE <class 'RuntimeError'>"]},
+            expected_failure_lines={node: [expected_line]},
             python=sys.executable,
         )
     assert not output.exists()

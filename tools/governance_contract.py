@@ -72,8 +72,12 @@ _RED_REPRODUCTION_NODE_RUN_FIELDS = frozenset(
         "stdout_sha256",
         "stderr_bytes_base64",
         "stderr_sha256",
+        "test_reports",
     }
 )
+_RED_REPRODUCTION_TEST_REPORT_FIELDS = frozenset({"crash", "longrepr_lines", "nodeid", "outcome", "when"})
+
+_RED_REPRODUCTION_TEST_REPORT_CRASH_FIELDS = frozenset({"lineno", "message", "path"})
 _GRANDFATHERED_RED_REPRODUCTIONS_V1 = frozenset(
     {
         (
@@ -527,6 +531,77 @@ def _red_failure_summary_names_node(line: str, node: str) -> bool:
     return reported_node.replace("\\", "/") == node
 
 
+def _validated_red_test_reports(
+    value: Any,
+    *,
+    entry_id: str,
+    node: str,
+) -> list[Mapping[str, Any]]:
+    lifecycle_error = (
+        f"{entry_id}.red_evidence structured pytest report must contain exactly one setup, call, and teardown report"
+    )
+
+    if not isinstance(value, list) or len(value) != 3:
+        raise GovernanceContractError(lifecycle_error)
+    expected_lifecycle = (
+        (node, "setup", "passed"),
+        (node, "call", "failed"),
+        (node, "teardown", "passed"),
+    )
+    validated: list[Mapping[str, Any]] = []
+    for report, expected_phase in zip(value, expected_lifecycle, strict=True):
+        if not isinstance(report, Mapping) or set(report) != _RED_REPRODUCTION_TEST_REPORT_FIELDS:
+            raise GovernanceContractError(lifecycle_error)
+
+        nodeid = report["nodeid"]
+        when = report["when"]
+        outcome = report["outcome"]
+        if (
+            not isinstance(nodeid, str)
+            or not isinstance(when, str)
+            or not isinstance(outcome, str)
+            or (nodeid.replace("\\", "/"), when, outcome) != expected_phase
+        ):
+            raise GovernanceContractError(lifecycle_error)
+
+        longrepr_lines = report["longrepr_lines"]
+        if not isinstance(longrepr_lines, list) or any(
+            not isinstance(line, str) or line.splitlines() != [line] for line in longrepr_lines
+        ):
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence structured pytest report contains invalid failure diagnostics"
+            )
+        crash = report["crash"]
+        if when != "call":
+            if longrepr_lines or crash is not None:
+                raise GovernanceContractError(lifecycle_error)
+
+        else:
+            if (
+                not longrepr_lines
+                or not isinstance(crash, Mapping)
+                or set(crash) != _RED_REPRODUCTION_TEST_REPORT_CRASH_FIELDS
+            ):
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence structured pytest failed call has no exact failure location"
+                )
+            if (
+                not isinstance(crash["path"], str)
+                or not crash["path"]
+                or Path(crash["path"]).is_absolute()
+                or ".." in Path(crash["path"]).parts
+                or type(crash["lineno"]) is not int
+                or crash["lineno"] < 0
+                or not isinstance(crash["message"], str)
+                or not crash["message"].splitlines()
+            ):
+                raise GovernanceContractError(
+                    f"{entry_id}.red_evidence structured pytest failed call has no exact failure location"
+                )
+        validated.append(report)
+    return validated
+
+
 def _validate_red_reproduction_v2_execution(
     receipt: Mapping[str, Any],
     *,
@@ -588,13 +663,27 @@ def _validate_red_reproduction_v2_execution(
         command = run["command"]
         if (
             not isinstance(command, list)
-            or len(command) != 8
+            or len(command) != 11
             or any(not isinstance(item, str) or not item for item in command)
-            or command[1:] != ["-m", "pytest", "-p", "no:cacheprovider", node, "-q", "--tb=short"]
+            or command[1:]
+            != [
+                "-m",
+                "pytest",
+                "-p",
+                "no:cacheprovider",
+                "-p",
+                "_cryodaq_red_reproduction_capture",
+                "--color=no",
+                node,
+                "-q",
+                "--tb=short",
+            ]
         ):
             raise GovernanceContractError(f"{entry_id}.red_evidence node-scoped command is not exact")
-        if type(run["exit_code"]) is not int or run["exit_code"] == 0:
-            raise GovernanceContractError(f"{entry_id}.red_evidence red reproduction exit code indicates success")
+        if type(run["exit_code"]) is not int or run["exit_code"] != 1:
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence red reproduction exit code is not one failed pytest test"
+            )
         stdout = _decode_receipt_bytes(run["stdout_bytes_base64"], run["stdout_sha256"], f"{entry_id}.stdout")
         stderr = _decode_receipt_bytes(run["stderr_bytes_base64"], run["stderr_sha256"], f"{entry_id}.stderr")
         stdout_lines = stdout.decode("utf-8", errors="replace").splitlines()
@@ -610,6 +699,19 @@ def _validate_red_reproduction_v2_execution(
         ):
             raise GovernanceContractError(
                 f"{entry_id}.red_evidence failure signatures do not include registered guard nodes"
+            )
+        reports = _validated_red_test_reports(run["test_reports"], entry_id=entry_id, node=node)
+        call_report = reports[1]
+        call_crash = call_report["crash"]
+        assert isinstance(call_crash, Mapping)
+        call_message = call_crash["message"]
+        assert isinstance(call_message, str)
+        actual_failure_lines = [f"E   {line}" for line in call_message.splitlines()]
+        call_longrepr_lines = call_report["longrepr_lines"]
+        assert isinstance(call_longrepr_lines, list)
+        if expected[node] != actual_failure_lines or any(line not in call_longrepr_lines for line in expected[node]):
+            raise GovernanceContractError(
+                f"{entry_id}.red_evidence structured pytest failed call does not match its expected behavioral failure"
             )
         missing = [line for line in expected[node] if line not in stdout_lines and line not in stderr_lines]
         if missing:
