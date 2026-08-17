@@ -2292,6 +2292,7 @@ class Evidence:
             "dirty",
             "platform",
             "python",
+            "runtime_library",
             "source_command",
             "thresholds",
             "periodic_schedule",
@@ -2302,6 +2303,26 @@ class Evidence:
         errors += _exact_keys(manifest, expected_manifest, "manifest")
         if manifest.get("schema") != SCHEMA:
             errors.append("manifest schema is invalid")
+        runtime_library = manifest.get("runtime_library")
+        if not isinstance(runtime_library, Mapping):
+            errors.append("manifest runtime library closure is invalid")
+        else:
+            errors += _exact_keys(
+                runtime_library,
+                {"schema", "root", "entry_count", "sha256"},
+                "manifest runtime library closure",
+            )
+            if runtime_library.get("schema") != "cryodaq-runtime-library-closure/v1":
+                errors.append("manifest runtime library closure schema is invalid")
+            root = runtime_library.get("root")
+            if not isinstance(root, str) or not root.startswith("/"):
+                errors.append("manifest runtime library closure root is invalid")
+            entry_count = runtime_library.get("entry_count")
+            if isinstance(entry_count, bool) or not isinstance(entry_count, int) or entry_count <= 0:
+                errors.append("manifest runtime library closure entry count is invalid")
+            digest = runtime_library.get("sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                errors.append("manifest runtime library closure digest is invalid")
         selected = PROFILES.get(str(manifest.get("profile")))
         if selected is None:
             errors.append("manifest profile is invalid")
