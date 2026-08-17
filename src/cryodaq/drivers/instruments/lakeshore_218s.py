@@ -11,6 +11,7 @@ from typing import Any
 
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
+from cryodaq.drivers.thermal_simulator import ThermalSampleSimulator
 from cryodaq.drivers.transport.gpib import GPIBTransport
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ class LakeShore218S(InstrumentDriver):
         calibration_store: CalibrationStore | None = None,
         connect_timeout_s: float = 3.0,
         read_timeout_s: float = 3.0,
+        thermal_simulator: ThermalSampleSimulator | None = None,
     ) -> None:
         super().__init__(name, mock=mock)
         for label, value in (
@@ -48,6 +50,9 @@ class LakeShore218S(InstrumentDriver):
         self._read_timeout_s = float(read_timeout_s)
         self._instrument_id: str = ""
         self._calibration_store = calibration_store
+        if not mock and thermal_simulator is not None:
+            raise ValueError("thermal_simulator is available only in mock mode")
+        self._thermal_simulator = thermal_simulator
         self._runtime_warning_cache: set[tuple[str, str]] = set()
         self._use_per_channel_krdg: bool = False
         self._use_per_channel_srdg: bool = False
@@ -492,11 +497,19 @@ class LakeShore218S(InstrumentDriver):
             )
         return readings
 
+    def _mock_base_temperatures(self) -> tuple[float, ...]:
+        if self._thermal_simulator is None:
+            return _MOCK_BASE_TEMPS
+        hot_k, cold_k = self._thermal_simulator.temperature_pair()
+        return (hot_k, cold_k, *_MOCK_BASE_TEMPS[2:])
+
     def _mock_readings(self) -> list[Reading]:
         readings: list[Reading] = []
-        for index, base_temp in enumerate(_MOCK_BASE_TEMPS, start=1):
+        for index, base_temp in enumerate(self._mock_base_temperatures(), start=1):
             channel_name = self._channel_labels.get(index, f"CH{index}")
-            noise = base_temp * random.uniform(-0.005, 0.005)
+            noise = (
+                0.0 if self._thermal_simulator is not None and index <= 2 else base_temp * random.uniform(-0.005, 0.005)
+            )
             value = round(base_temp + noise, 4)
             readings.append(
                 Reading.now(
@@ -516,7 +529,7 @@ class LakeShore218S(InstrumentDriver):
 
     def _mock_sensor_readings(self) -> list[Reading]:
         readings: list[Reading] = []
-        for index, base_temp in enumerate(_MOCK_BASE_TEMPS, start=1):
+        for index, base_temp in enumerate(self._mock_base_temperatures(), start=1):
             channel_name = self._channel_labels.get(index, f"CH{index}")
             raw_base = _mock_sensor_unit(base_temp)
             noise = raw_base * random.uniform(-0.002, 0.002)

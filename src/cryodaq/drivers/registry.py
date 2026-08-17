@@ -37,6 +37,7 @@ from cryodaq.drivers.contracts import (
     _bounded_identifier,
     _issue_registry_runtime_binding,
 )
+from cryodaq.drivers.thermal_simulator import ThermalSampleSimulator
 from cryodaq.health.contract import (
     HealthTelemetryError,
     HealthTelemetryReader,
@@ -163,6 +164,7 @@ class DriverConstructionContext:
     calibration_store: object | None = None
     data_dir: Path = Path("data")
     keithley_watchdog: Mapping[str, object] = field(default_factory=dict)
+    thermal_simulator: ThermalSampleSimulator | None = None
 
     def __post_init__(self) -> None:
         if type(self.mock) is not bool:
@@ -170,6 +172,13 @@ class DriverConstructionContext:
         object.__setattr__(self, "data_dir", Path(self.data_dir))
         normalized = _normalize_keithley_watchdog(self.keithley_watchdog, path="keithley.watchdog")
         object.__setattr__(self, "keithley_watchdog", MappingProxyType(normalized))
+        simulator = self.thermal_simulator
+        if simulator is not None and not isinstance(simulator, ThermalSampleSimulator):
+            raise DriverRegistryError("thermal_simulator must be a ThermalSampleSimulator")
+        if not self.mock and simulator is not None:
+            raise DriverRegistryError("thermal_simulator is available only in mock mode")
+        if self.mock and simulator is None:
+            object.__setattr__(self, "thermal_simulator", ThermalSampleSimulator())
 
     @classmethod
     def from_root_config(
@@ -347,6 +356,7 @@ def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConst
         calibration_store=context.calibration_store,  # type: ignore[arg-type]
         connect_timeout_s=float(values["connect_timeout_s"]),
         read_timeout_s=float(values["read_timeout_s"]),
+        thermal_simulator=context.thermal_simulator,
     )
 
 
@@ -451,6 +461,7 @@ def _construct_keithley(config: ValidatedInstrumentConfig, context: DriverConstr
         watchdog_mode=str(mode) if mode is not None else None,
         watchdog_enabled=enabled,
         watchdog_timeout_s=float(watchdog.get("timeout_s", 5.0)),
+        thermal_simulator=context.thermal_simulator,
     )
     timeout_s = float(watchdog.get("timeout_s", 5.0))
     poll_interval_s = float(config.values["poll_interval_s"])

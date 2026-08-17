@@ -20,6 +20,7 @@ from typing import Any
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.drivers.contracts import CommandEvidence, CommandOutcome, SourceOffResult, SourceSetpoint
+from cryodaq.drivers.thermal_simulator import ThermalSampleSimulator
 from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
@@ -361,6 +362,7 @@ class Keithley2604B(InstrumentDriver):
         watchdog_mode: str | WatchdogMode | None = None,
         watchdog_enabled: bool | None = None,
         watchdog_timeout_s: float = 5.0,
+        thermal_simulator: ThermalSampleSimulator | None = None,
     ) -> None:
         super().__init__(name, mock=mock)
         self._resource_str = resource_str
@@ -394,6 +396,9 @@ class Keithley2604B(InstrumentDriver):
         # Compliance tracking: consecutive cycles where SMU reports compliance.
         self._compliance_count: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
         self._mock_temp = _MOCK_T0
+        if not mock and thermal_simulator is not None:
+            raise ValueError("thermal_simulator is available only in mock mode")
+        self._thermal_simulator = thermal_simulator
         # Exact negative cache: True whenever either channel lacks current
         # readback-verified OFF evidence, including connect recovery, source
         # start, unmanaged output ON, or unusable output readback.
@@ -561,6 +566,7 @@ class Keithley2604B(InstrumentDriver):
             runtime.p_target = 0.0
             self._last_v[smu_channel] = 0.0
             self._compliance_count[smu_channel] = 0
+        self._sync_mock_thermal_power()
         self._revoke_off_evidence()
         self._wdog_armed = False
         self._wdog_autonomous = False
@@ -1006,6 +1012,7 @@ class Keithley2604B(InstrumentDriver):
             if self.mock:
                 runtime.active = True
                 self._source_regulation_epoch[smu_channel] = start_token
+                self._sync_mock_thermal_power()
                 return CommandOutcome(CommandEvidence.REQUESTED)
 
             # Every hazardous write is bracketed by an ownership check.  OFF
@@ -1173,6 +1180,7 @@ class Keithley2604B(InstrumentDriver):
             command_epoch=update_epoch,
         )
         runtime.p_target = p_target
+        self._sync_mock_thermal_power()
 
     async def update_source_limits(
         self,
@@ -1608,6 +1616,7 @@ class Keithley2604B(InstrumentDriver):
         runtime.p_target = 0.0
         self._last_v[smu_channel] = 0.0
         self._compliance_count[smu_channel] = 0
+        self._sync_mock_thermal_power()
         self._unsafe_output_observations[smu_channel] = None
         self._output_off_verified[smu_channel] = True
         self._output_off_verified_generation[smu_channel] = self._connection_generation
@@ -2228,6 +2237,12 @@ class Keithley2604B(InstrumentDriver):
                 }
             )
         return results
+
+    def _sync_mock_thermal_power(self) -> None:
+        if not self.mock or self._thermal_simulator is None:
+            return
+        power_w = sum(runtime.p_target for runtime in self._channels.values() if runtime.active)
+        self._thermal_simulator.set_power(power_w)
 
     def _mock_r_of_t(self) -> float:
         return max(_MOCK_R0 * (1.0 + _MOCK_ALPHA * (self._mock_temp - _MOCK_T0)), 1.0)
