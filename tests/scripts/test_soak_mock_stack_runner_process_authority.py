@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 from pathlib import Path
@@ -399,3 +400,32 @@ def test_clean_sha_collector_requires_order_same_sha_and_no_untracked_files(tmp_
     (repo / "untracked.txt").write_text("drift\n", encoding="utf-8")
     with pytest.raises(runner._RunnerFoundationError, match="drift"):
         collector.observe(runner._ShaBoundary.AFTER_EXECUTION)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_clean_sha_collector_rejects_runtime_library_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    library = library_root / "libproof.so"
+    library.write_bytes(b"before")
+    library.chmod(0o644)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "soak@example.invalid")
+    _git(repo, "config", "user.name", "Soak Test")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-qm", "initial")
+
+    collector = runner._CleanShaCollector(repo)
+    manifest_closure = collector.runtime_library_closure
+    collector.observe(runner._ShaBoundary.BEFORE_COLLECTION)
+    library.write_bytes(b"after")
+    with pytest.raises(runner._RunnerFoundationError, match="native-library closure changed"):
+        collector.observe(runner._ShaBoundary.BETWEEN_COLLECTION_AND_EXECUTION)
+    assert manifest_closure["sha256"] != runner._runtime_library_closure()["sha256"]

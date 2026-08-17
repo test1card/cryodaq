@@ -289,10 +289,78 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
     return captured
 
 
-def _controlled_runtime_library_path() -> str:
-    """Return the trusted native-library root of the active interpreter."""
+def _runtime_library_root() -> Path:
+    """Return the validated direct native-library search root."""
 
-    return str((Path(sys.prefix) / "lib").resolve())
+    root = Path(sys.prefix) / "lib"
+    try:
+        identity = root.lstat()
+        resolved = root.resolve(strict=True)
+    except OSError as exc:
+        raise _RunnerActivationDisabled("runtime native-library root is unavailable") from exc
+    if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode) or resolved != root.absolute():
+        raise _RunnerActivationDisabled("runtime native-library root is not a direct directory")
+    if os.name == "posix" and (identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o022):
+        raise _RunnerActivationDisabled("runtime native-library root ownership is unsafe")
+    return resolved
+
+
+def _runtime_library_closure() -> dict[str, object]:
+    """Hash every direct file that LD_LIBRARY_PATH can select."""
+
+    if os.name != "posix":
+        raise _RunnerActivationDisabled("runtime native-library closure requires POSIX")
+    root = _runtime_library_root()
+    entries: list[dict[str, object]] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise _RunnerActivationDisabled("runtime native-library root cannot be enumerated") from exc
+    for path in children:
+        identity = path.lstat()
+        if stat.S_ISDIR(identity.st_mode):
+            continue
+        if stat.S_ISLNK(identity.st_mode):
+            resolved = path.resolve(strict=True)
+            if not resolved.is_relative_to(root) or not resolved.is_file():
+                raise _RunnerActivationDisabled("runtime native-library link escapes its closure")
+            target_identity = resolved.stat()
+            if target_identity.st_uid != os.getuid() or stat.S_IMODE(target_identity.st_mode) & 0o022:
+                raise _RunnerActivationDisabled("runtime native-library target ownership is unsafe")
+            entries.append(
+                {
+                    "kind": "link",
+                    "path": path.name,
+                    "target": resolved.relative_to(root).as_posix(),
+                    "target_sha256": _hash_regular_file(resolved),
+                }
+            )
+            continue
+        if not stat.S_ISREG(identity.st_mode):
+            raise _RunnerActivationDisabled("runtime native-library root contains a special entry")
+        if identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o022:
+            raise _RunnerActivationDisabled("runtime native-library file ownership is unsafe")
+        entries.append({"kind": "file", "path": path.name, "sha256": _hash_regular_file(path)})
+    if not entries:
+        raise _RunnerActivationDisabled("runtime native-library closure is empty")
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return {
+        "schema": "cryodaq-runtime-library-closure/v1",
+        "root": str(root),
+        "entry_count": len(entries),
+        "sha256": digest,
+    }
+
+
+def _controlled_runtime_library_path() -> str:
+    """Return the validated native-library root of the active interpreter."""
+
+    return str(_runtime_library_root())
 
 
 def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[str, str]:
@@ -1372,7 +1440,7 @@ def _exact_child_role(argv: tuple[str, ...]) -> str:
 class _CleanShaCollector:
     """Collect ordered clean-SHA observations from fixed Git commands."""
 
-    __slots__ = ("_next", "_observations", "_repo_root", "_sha")
+    __slots__ = ("_next", "_observations", "_repo_root", "_runtime_library", "_sha")
 
     def __init__(self, repo_root: Path) -> None:
         root = Path(repo_root).resolve()
@@ -1381,12 +1449,15 @@ class _CleanShaCollector:
         self._repo_root = root
         self._next = 0
         self._observations: list[_CleanShaObservation] = []
+        self._runtime_library = _runtime_library_closure() if os.name == "posix" else None
         self._sha: str | None = None
 
     def observe(self, boundary: _ShaBoundary) -> _CleanShaObservation:
         boundaries = tuple(_ShaBoundary)
         if self._next >= len(boundaries) or boundary is not boundaries[self._next]:
             raise _RunnerFoundationError("clean SHA boundary is out of order")
+        if self._runtime_library is not None and _runtime_library_closure() != self._runtime_library:
+            raise _RunnerFoundationError("runtime native-library closure changed across runner boundaries")
         try:
             sha = subprocess.run(
                 ("git", "rev-parse", "HEAD"),
@@ -1422,6 +1493,12 @@ class _CleanShaCollector:
     @property
     def observations(self) -> tuple[_CleanShaObservation, ...]:
         return tuple(self._observations)
+
+    @property
+    def runtime_library_closure(self) -> dict[str, object]:
+        if self._runtime_library is None:
+            raise _RunnerActivationDisabled("runtime native-library closure requires POSIX")
+        return dict(self._runtime_library)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3531,6 +3608,7 @@ class _PosixSoakRunner:
                 "dirty": False,
                 "platform": platform.platform(),
                 "python": sys.version,
+                "runtime_library": collector.runtime_library_closure,
                 "source_command": list(_SOURCE_ARGV),
                 "thresholds": soak.effective_thresholds(selected),
                 "periodic_schedule": {
