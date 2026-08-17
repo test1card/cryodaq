@@ -240,6 +240,139 @@ def test_gui_smoke_passes_after_process_tree_closes_inherited_pipes(
     assert (tmp_path / "gui_startup_offscreen.stdout.log").read_bytes() == b"gui output\n"
 
 
+def test_windows_job_start_assigns_suspended_root_before_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as report_process
+
+    events: list[str] = []
+
+    class Process:
+        pid = 1234
+
+    class Job:
+        def accounting(self) -> SimpleNamespace:
+            events.append("accounting")
+            return SimpleNamespace(total_processes=1, active_processes=1)
+
+        def close(self) -> None:
+            events.append("close")
+
+    process = Process()
+    job = Job()
+
+    def fake_popen(
+        command: list[str],
+        *,
+        creationflags: int = 0,
+        **_kwargs: object,
+    ) -> Process:
+        assert command == ["child"]
+        assert creationflags == 0x00000004
+        events.append("popen_suspended")
+        return process
+
+    def fake_create_windows_job(candidate: Process) -> Job:
+        assert candidate is process
+        events.append("assign")
+        return job
+
+    def fake_resume(candidate: Process) -> None:
+        assert candidate is process
+        events.append("resume")
+
+    monkeypatch.setattr(report_process.os, "name", "nt")
+    monkeypatch.setattr(report_process.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(report_process, "_create_windows_job", fake_create_windows_job)
+    monkeypatch.setattr(report_process, "_resume_suspended_windows_process", fake_resume)
+
+    assert report_process._popen_windows_job(["child"]) == (process, job)
+    assert events == ["popen_suspended", "assign", "accounting", "resume"]
+
+
+@pytest.mark.skipif(smoke.os.name != "nt", reason="requires native Windows Job Objects")
+def test_windows_gui_start_uses_native_job_and_contains_devnull_grandchild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    import subprocess
+    import sys
+
+    import psutil
+
+    import cryodaq.report_process as report_process
+
+    child_pid_path = tmp_path / "gui-job-grandchild.pid"
+    grandchild_code = "import time; time.sleep(30)"
+    parent_code = (
+        "import pathlib, subprocess, sys;"
+        "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL, close_fds=True);"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')"
+    )
+    command = [sys.executable, "-u", "-c", parent_code, str(child_pid_path), grandchild_code]
+    env = os.environ.copy()
+    native_start_calls: list[str] = []
+    real_popen_windows_job = report_process._popen_windows_job
+
+    def tracked_popen_windows_job(candidate: list[str], **kwargs: object) -> tuple[object, object]:
+        assert candidate == command
+        assert kwargs == {
+            "env": env,
+            "stdout": smoke.subprocess.PIPE,
+            "stderr": smoke.subprocess.PIPE,
+            "close_fds": True,
+            "creationflags": getattr(smoke.subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        }
+        native_start_calls.append("native_job")
+        return real_popen_windows_job(candidate, **kwargs)
+
+    monkeypatch.setattr(report_process, "_popen_windows_job", tracked_popen_windows_job)
+    process: subprocess.Popen[bytes] | None = None
+    job: object | None = None
+    child: psutil.Process | None = None
+    child_create_time: float | None = None
+    job_closed = False
+    try:
+        process, job = smoke._start_gui_process(command, env)
+        assert native_start_calls == ["native_job"]
+        _stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
+        assert job is not None
+        assert child_pid_path.is_file()
+        child = psutil.Process(int(child_pid_path.read_text(encoding="ascii")))
+        child_create_time = child.create_time()
+        accounting = job.accounting()
+        assert accounting.total_processes == 2
+        assert accounting.active_processes == 1
+        assert child.is_running()
+
+        job.close()
+        job_closed = True
+        gone, alive = psutil.wait_procs([child], timeout=5)
+        assert child in gone
+        assert alive == []
+    finally:
+        try:
+            if job is not None and not job_closed:
+                job.close()
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            if child is not None and child.is_running():
+                assert child_create_time is not None
+                assert child.create_time() == child_create_time
+                child.terminate()
+                try:
+                    child.wait(timeout=2)
+                except psutil.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=2)
+
+
 def test_smoke_matrix_runs_frozen_driver_imports_from_the_built_exe() -> None:
     source = (ROOT / "build_scripts" / "windows_onedir_smoke.py").read_text(encoding="utf-8")
 
