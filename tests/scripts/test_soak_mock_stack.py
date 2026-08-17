@@ -450,6 +450,12 @@ def _manifest(*, dirty: bool = False) -> dict[str, object]:
         "dirty": dirty,
         "platform": "test-platform",
         "python": "test-python",
+        "runtime_library": {
+            "schema": "cryodaq-runtime-library-closure/v1",
+            "root": "/test-prefix/lib",
+            "entry_count": 1,
+            "sha256": "sha256:" + "1" * 64,
+        },
         "source_command": [sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray"],
         "thresholds": soak.effective_thresholds(selected),
         "periodic_schedule": {
@@ -1218,6 +1224,11 @@ def test_evidence_forbids_environment_capture_and_failure_has_typed_metadata(tmp
             "manifest.json",
             lambda value: {**value, "periodic_schedule": {"interval_s": 60}},
             "periodic schedule",
+        ),
+        (
+            "manifest.json",
+            lambda value: {**value, "runtime_library": {**value["runtime_library"], "entry_count": 0}},
+            "runtime library closure",
         ),
         (
             "log_capture.json",
