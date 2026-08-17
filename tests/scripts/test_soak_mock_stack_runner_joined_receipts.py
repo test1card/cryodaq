@@ -179,7 +179,9 @@ def _pre_post_kwargs(tmp_path: Path) -> dict[str, object]:
 def _prepare_real_periodic_acceptance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> tuple[soak.Evidence, runner._PosixSoakRunner, tuple[dict[str, object], dict[str, object]]]:
+    *,
+    extra_receipts: int = 0,
+) -> tuple[soak.Evidence, runner._PosixSoakRunner, tuple[dict[str, object], ...]]:
     """Prepare the real registry-to-Evidence acceptance path without a long source run."""
 
     kwargs = _pre_post_kwargs(tmp_path)
@@ -188,23 +190,37 @@ def _prepare_real_periodic_acceptance(
     typed_records = (records[0], records[1])
     assert all(type(record) is dict for record in typed_records)
 
+    all_records = list(typed_records)
+    photos = [kwargs["pre_artifact_bytes"], kwargs["post_artifact_bytes"]]
+    for serial in range(3, 3 + extra_receipts):
+        _joined, record, _delivery, _terminal, photo, _observation = _joined_cut(
+            tmp_path,
+            serial=serial,
+            slot_end=7_200 + serial * 60,
+            nonce="a" * 64,
+        )
+        all_records.append(record)
+        photos.append(photo)
+    accepted_records = tuple(all_records)
+
     evidence = soak.Evidence(tmp_path / "evidence")
     evidence.state = soak.RunState.RUNNING
-    photos = (kwargs["pre_artifact_bytes"], kwargs["post_artifact_bytes"])
-    for record, photo in zip(typed_records, photos, strict=True):
+    for record, photo in zip(accepted_records, photos, strict=True):
         assert isinstance(photo, bytes)
         artifact = evidence.directory / str(record["filename"])
         artifact.write_bytes(photo)
         artifact.chmod(0o600)
     receipts = evidence.directory / "periodic-receipts.jsonl"
     receipts.write_text(
-        "".join(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n" for record in typed_records),
+        "".join(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n" for record in accepted_records),
         encoding="ascii",
     )
     receipts.chmod(0o600)
 
     result_kwargs = dict(kwargs)
     result_kwargs["report_interval_s"] = result_kwargs.pop("expected_interval_s")
+    result_kwargs["expected_receipts"] = len(accepted_records)
+    result_kwargs["ledger_records"] = accepted_records
     private_result = runner._OwnedRunResult(
         **result_kwargs,
         observations=(),
@@ -217,14 +233,20 @@ def _prepare_real_periodic_acceptance(
     monkeypatch.setattr(runner._PosixSoakRunner, "_finish_owned", lambda self, candidate, result: None)
     owner = runner._PosixSoakRunner()
     owner._used = True
-    return evidence, owner, typed_records
+    return evidence, owner, accepted_records
 
 
 def _accept_real_periodic_evidence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> tuple[soak.Evidence, tuple[dict[str, object], dict[str, object]]]:
-    evidence, owner, records = _prepare_real_periodic_acceptance(monkeypatch, tmp_path)
+    *,
+    extra_receipts: int = 0,
+) -> tuple[soak.Evidence, tuple[dict[str, object], ...]]:
+    evidence, owner, records = _prepare_real_periodic_acceptance(
+        monkeypatch,
+        tmp_path,
+        extra_receipts=extra_receipts,
+    )
     try:
         runner._DELIVERY_EVIDENCE.run(owner, evidence)
         evidence._verify_periodic_delivery_seal()
@@ -247,6 +269,22 @@ def test_real_registry_acceptance_captures_private_periodic_seal(
             "periodic-receipts.jsonl",
             str(records[0]["filename"]),
             str(records[1]["filename"]),
+        )
+    finally:
+        evidence.close()
+
+
+@_POSIX_EVIDENCE
+def test_real_registry_acceptance_seals_every_long_profile_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    evidence, records = _accept_real_periodic_evidence(monkeypatch, tmp_path, extra_receipts=1)
+    try:
+        assert evidence._periodic_delivery_seal is not None
+        assert tuple(item[0] for item in evidence._periodic_delivery_seal) == (
+            "periodic-delivery-result.json",
+            "periodic-receipts.jsonl",
+            *(str(record["filename"]) for record in records),
         )
     finally:
         evidence.close()

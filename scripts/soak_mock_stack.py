@@ -2026,7 +2026,8 @@ class Evidence:
         )
         if errors:
             raise ValueError("; ".join(errors))
-        for label, name, record in zip(("pre_fault", "post_fault"), artifact_names, receipts, strict=True):
+        for index, (name, record) in enumerate(zip(artifact_names, receipts, strict=True), start=1):
+            label = "pre_fault" if index == 1 else "post_fault" if index == 2 else f"receipt_{index}"
             artifact, _identity = self._read(name)
             if not artifact.startswith(b"\x89PNG\r\n\x1a\n") or self._sha256(name) != record["artifact_sha256"]:
                 raise ValueError(f"periodic-delivery {label} PNG evidence is invalid")
