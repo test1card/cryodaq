@@ -340,6 +340,8 @@ def _runtime_library_closure() -> dict[str, object]:
             continue
         if stat.S_ISLNK(identity.st_mode):
             resolved = path.resolve(strict=True)
+            if resolved.is_dir():
+                continue
             if not resolved.is_relative_to(root) or not resolved.is_file():
                 raise _RunnerActivationDisabled("runtime native-library link escapes its closure")
             target_identity = resolved.stat()
