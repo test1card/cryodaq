@@ -8,18 +8,25 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 import cryodaq.engine as engine_module
+from cryodaq.analytics.plugin_loader import PluginPipeline
+from cryodaq.core.broker import DataBroker
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.scheduler import InstrumentConfig, Scheduler
+from cryodaq.drivers.base import Reading
 from cryodaq.drivers.instruments.keithley_2604b import Keithley2604B
 from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 from cryodaq.drivers.registry import (
     DriverConstructionContext,
     DriverRegistryError,
     construct_driver,
+    runtime_binding_for_driver,
     validate_instrument_entry,
 )
 from cryodaq.drivers.transport.mock_instrument import (
@@ -78,9 +85,10 @@ def _lakeshore_config():
     return validate_instrument_entry(
         {
             "type": "lakeshore_218s",
-            "name": "LS",
+            "name": "LS218_1",
             "resource": "GPIB0::12::INSTR",
-            "channels": {1: "sample.hot", 2: "sample.cold"},
+            "poll_interval_s": 0.01,
+            "channels": {1: "Т1 Криостат верх", 7: "Т7 Детектор"},
         }
     )
 
@@ -89,29 +97,38 @@ def _keithley_config():
     return validate_instrument_entry(
         {
             "type": "keithley_2604b",
-            "name": "K",
+            "name": "Keithley_1",
             "resource": "USB0::0x05E6::0x2604::MOCK00001::INSTR",
+            "poll_interval_s": 0.01,
         }
     )
 
 
-async def _wait_for_equilibrium(
-    lakeshore: LakeShore218S,
+async def _wait_for_reading(
+    queue: asyncio.Queue[Reading],
     *,
-    expected_delta_t_k: float,
-) -> dict[str, float]:
+    channel: str,
+    predicate: Callable[[Reading], bool],
+) -> Reading:
     deadline = time.monotonic() + 2.0
-    latest: dict[str, float] = {}
-    while time.monotonic() < deadline:
-        latest = {reading.channel: reading.value for reading in await lakeshore.read_channels()}
-        delta_t = latest["sample.hot"] - latest["sample.cold"]
-        if delta_t == pytest.approx(expected_delta_t_k, rel=0.02, abs=1e-5):
-            return latest
-        await asyncio.sleep(0.01)
-    pytest.fail(f"external simulator did not settle; latest={latest!r}")
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            pytest.fail(f"no acceptable reading for {channel!r}")
+        reading = await asyncio.wait_for(queue.get(), timeout=remaining)
+        if reading.channel == channel and predicate(reading):
+            return reading
 
 
-async def test_external_process_drives_normal_lakeshore_parser_and_keithley_mock(
+class _AcceptingWriter:
+    is_disk_full = False
+
+    async def write_immediate(self, readings: list[Reading]) -> bool:
+        assert readings
+        return True
+
+
+async def test_external_process_reaches_published_thermal_calculator_result(
     external_simulator: ExternalMockInstrumentClient,
 ) -> None:
     context = DriverConstructionContext(mock=True, mock_instrument_client=external_simulator)
@@ -120,40 +137,89 @@ async def test_external_process_drives_normal_lakeshore_parser_and_keithley_mock
     assert isinstance(lakeshore, LakeShore218S)
     assert isinstance(keithley, Keithley2604B)
 
-    await lakeshore.connect()
-    await keithley.connect()
-    baseline_readings = await lakeshore.read_channels()
-    baseline = {reading.channel: reading.value for reading in baseline_readings}
-    assert baseline["sample.hot"] == pytest.approx(4.2)
-    assert baseline["sample.cold"] == pytest.approx(4.2)
-    assert baseline_readings[0].raw == pytest.approx(4.2)
-
-    await keithley.start_source("smua", 0.2, 10.0, 0.5)
-    truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
-    expected = truth["commanded_points"][-1]
-    heated = await _wait_for_equilibrium(
-        lakeshore,
-        expected_delta_t_k=expected["equilibrium_delta_t_k"],
+    broker = DataBroker()
+    raw_queue = await broker.subscribe(
+        "thermal_simulator_raw",
+        filter_fn=lambda reading: not reading.channel.startswith("analytics/"),
     )
-    measured_delta_t = heated["sample.hot"] - heated["sample.cold"]
-    measured_g = 0.2 / measured_delta_t
-    assert measured_g == pytest.approx(expected["expected_g_w_per_k"], rel=0.02)
-
-    await keithley.update_source_target("smua", 0.35)
-    truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
-    expected = truth["commanded_points"][-1]
-    hotter = await _wait_for_equilibrium(
-        lakeshore,
-        expected_delta_t_k=expected["equilibrium_delta_t_k"],
+    result_queue = await broker.subscribe(
+        "thermal_simulator_result",
+        filter_fn=lambda reading: reading.channel == "analytics/thermal_calculator/R_thermal",
     )
-    assert hotter["sample.hot"] > heated["sample.hot"]
+    pipeline = PluginPipeline(broker, ROOT / "plugins", batch_interval_s=0.01)
+    safety_broker = SafetyBroker()
+    binding = runtime_binding_for_driver(keithley)
+    assert binding is not None
+    safety_manager = SafetyManager(
+        safety_broker,
+        keithley_driver=keithley,
+        reviewed_source_runtime_binding=binding,
+        data_broker=broker,
+        mock=False,
+    )
+    scheduler = Scheduler(
+        broker,
+        safety_broker=safety_broker,
+        sqlite_writer=_AcceptingWriter(),
+        reviewed_source_connect_begin=safety_manager.begin_reviewed_source_connect,
+        reviewed_source_connect_complete=safety_manager.complete_reviewed_source_connect,
+        reviewed_source_uncertain=safety_manager.mark_reviewed_source_uncertain,
+        reviewed_source_connect_abandon=safety_manager.abandon_reviewed_source_connect,
+        reviewed_source_disconnect=safety_manager.disconnect_reviewed_source,
+    )
+    scheduler.add(InstrumentConfig(driver=lakeshore))
+    scheduler.add(InstrumentConfig(driver=keithley))
 
-    await keithley.stop_source("smua")
-    truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
-    assert truth["commanded_points"][-1]["power_w"] == 0.0
+    await safety_manager.start()
+    await pipeline.start()
+    await scheduler.start()
+    try:
+        baseline_hot = await _wait_for_reading(
+            raw_queue,
+            channel="Т1 Криостат верх",
+            predicate=lambda reading: reading.value == pytest.approx(4.2),
+        )
+        await _wait_for_reading(
+            raw_queue,
+            channel="Т7 Детектор",
+            predicate=lambda reading: reading.value == pytest.approx(4.2),
+        )
+        assert baseline_hot.raw == pytest.approx(4.2)
+        await _wait_for_reading(
+            raw_queue,
+            channel="Keithley_1/smua/power",
+            predicate=lambda reading: reading.value == pytest.approx(0.0),
+        )
 
-    await keithley.disconnect()
-    await lakeshore.disconnect()
+        for power_w in (0.2, 0.35):
+            if power_w == 0.2:
+                await keithley.start_source("smua", power_w, 10.0, 0.5)
+            else:
+                await keithley.update_source_target("smua", power_w)
+            truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
+            expected = truth["commanded_points"][-1]
+            expected_r_thermal = 1.0 / expected["expected_g_w_per_k"]
+            product_result = await _wait_for_reading(
+                result_queue,
+                channel="analytics/thermal_calculator/R_thermal",
+                predicate=lambda reading: reading.value == pytest.approx(expected_r_thermal, rel=0.02),
+            )
+            assert product_result.unit == "K/W"
+            assert product_result.metadata["source"] == "analytics"
+            assert product_result.metadata["plugin_id"] == "thermal_calculator"
+            assert product_result.metadata["hot_sensor"] == "Т1 Криостат верх"
+            assert product_result.metadata["cold_sensor"] == "Т7 Детектор"
+            assert product_result.metadata["heater_channel"] == "Keithley_1/smua/power"
+
+        await keithley.stop_source("smua")
+        truth = json.loads(await external_simulator.query("MOCK:TRUTH?"))
+        assert truth["commanded_points"][-1]["power_w"] == 0.0
+    finally:
+        await scheduler.stop()
+        await pipeline.stop()
+        await safety_manager.stop()
+        await broker.unsubscribe("thermal_simulator_raw")
+        await broker.unsubscribe("thermal_simulator_result")
 
 
 def test_engine_cli_rejects_external_simulator_without_mock(
