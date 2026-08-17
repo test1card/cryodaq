@@ -860,6 +860,10 @@ def _validate_stream_record(name: str, payload: Any) -> None:
         }
         if set(payload) != expected:
             raise ValueError("fault fields are not exact")
+    elif name == "runtime-closures.jsonl":
+        expected = {"schema", "role", "epoch", "pid", "started_ns", "closure"}
+        if set(payload) != expected:
+            raise ValueError("runtime closure fields are not exact")
 
 
 def _flat_basename(name: str) -> str:
@@ -2184,9 +2188,9 @@ class Evidence:
     @_terminal_mutation("running")
     def append(self, name: str, payload: Mapping[str, Any]) -> None:
         self._require(RunState.RUNNING)
-        if name not in {"samples.jsonl", "faults.jsonl"}:
+        if name not in {"samples.jsonl", "runtime-closures.jsonl", "faults.jsonl"}:
             self.finish_fail("invalid typed evidence stream", phase="running", error_type="ValidationError")
-            raise ValueError("only typed samples/fault streams are accepted")
+            raise ValueError("only registered typed evidence streams are accepted")
         _validate_stream_record(name, payload)
         if _has_forbidden_capture_key(payload):
             self.finish_fail("evidence capture validation failed", phase="running", error_type="ValidationError")
