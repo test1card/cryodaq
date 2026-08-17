@@ -1,0 +1,95 @@
+{
+  "defective_commit": "58108c1ce77cae953ab0112bc2d70990045e7c09",
+  "defective_source_blobs": {
+    "tools/ci_active_checkout_runner.py": "5fa50f3e7338ec6f51ff963344d6f849f4825e8d"
+  },
+  "defective_tree": "8d35d443b73a91f18abd5e999b4546f859eb9a78",
+  "environment": {
+    "COMSPEC": "C:\\WINDOWS\\system32\\cmd.exe",
+    "CRYODAQ_RED_REPRODUCTION_REPORT": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-au2ruxz1\\pytest-plugin\\pytest-report.json",
+    "PATH": "C:\\Users\\3fall\\.codex\\tmp\\arg0\\codex-arg0o3r8cf;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\override;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\java8path;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath;C:\\Program Files\\Eclipse Adoptium\\jdk-25.0.2.10-hotspot\\bin;C:\\Python314\\Scripts\\;C:\\Python314\\;C:\\Program Files\\Microsoft MPI\\Bin\\;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\dotnet\\;C:\\Program Files (x86)\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\DTS\\Binn\\;C:\\Program Files (x86)\\Windows Kits\\8.1\\Windows Performance Toolkit\\;C:\\Program Files\\Siemens\\NX2506\\CAPITALINTEGRATION\\capitalnxremote\\;C:\\Program Files\\Git\\cmd;C:\\Program Files\\GitHub CLI\\;C:\\Program Files\\PowerToys\\DSCModules\\;C:\\Program Files\\nodejs\\;C:\\ProgramData\\chocolatey\\bin;C:\\Program Files\\Tailscale\\;C:\\Program Files\\Sunshine;C:\\Program Files\\Sunshine\\tools;C:\\Users\\3fall\\.kimi-code\\bin;C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\2026.0\\bin;C:\\Users\\3fall\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts;C:\\Users\\3fall\\AppData\\Local\\hermes\\bin;C:\\Users\\3fall\\.cargo\\bin;C:\\Users\\3fall\\.local\\bin;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\3fall\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts;C:\\Users\\3fall\\AppData\\Roaming\\npm;C:\\Users\\3fall\\AppData\\Local\\Programs\\Ollama;C:\\Users\\3fall\\AppData\\Local\\Programs\\MiKTeX\\miktex\\bin\\x64\\;C:\\Users\\3fall\\AppData\\Local\\Programs\\Antigravity\\bin;C:\\Users\\3fall\\.bun\\bin;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin;C:\\Users\\3fall\\.cache\\lm-studio\\bin;C:\\Users\\3fall\\.dotnet\\tools;C:\\Users\\3fall\\AppData\\Roaming\\Python\\Python314\\Scripts;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\fallback;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd;C:\\Users\\3fall\\AppData\\Local\\OpenAI\\Codex\\bin\\53c73f34a40c42be;C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.810.7004.0_x64__2p2nqsd0c76g0\\app\\resources",
+    "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW;.CPL",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-au2ruxz1\\pytest-plugin;C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-au2ruxz1\\worktree\\src",
+    "SYSTEMROOT": "C:\\WINDOWS",
+    "TEMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-au2ruxz1\\worktree\\.red-reproduction-tmp",
+    "TMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-au2ruxz1\\worktree\\.red-reproduction-tmp"
+  },
+  "expected_failure_lines": {
+    "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist": [
+      "E   Failed: DID NOT RAISE RedReproductionComparisonError"
+    ]
+  },
+  "guard_blobs": {
+    "tests/governance/test_red_reproduction_immutability.py": "acbdd8ce4ae4e4ba8745b2316519143a01ac894c"
+  },
+  "guard_nodes": [
+    "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist"
+  ],
+  "node_runs": {
+    "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist": {
+      "command": [
+        "C:\\Users\\3fall\\AppData\\Local\\Temp\\venv3146\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "_cryodaq_red_reproduction_capture",
+        "--color=no",
+        "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist",
+        "-q",
+        "--tb=short"
+      ],
+      "exit_code": 1,
+      "failure_signatures": [
+        "FAILED tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist"
+      ],
+      "stderr_bytes_base64": "",
+      "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes_base64": "RiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQ0KPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KXyB0ZXN0X2NhbmRpZGF0ZV9hZGRlZF9iaW5kaW5nX3JlcXVpcmVzX3NjaGVtYV92Ml9ldmVuX2lmX2NhbmRpZGF0ZV9leHRlbmRzX2xlZ2FjeV9hbGxvd2xpc3QgXw0KdGVzdHNcZ292ZXJuYW5jZVx0ZXN0X3JlZF9yZXByb2R1Y3Rpb25faW1tdXRhYmlsaXR5LnB5OjEyODogaW4gdGVzdF9jYW5kaWRhdGVfYWRkZWRfYmluZGluZ19yZXF1aXJlc19zY2hlbWFfdjJfZXZlbl9pZl9jYW5kaWRhdGVfZXh0ZW5kc19sZWdhY3lfYWxsb3dsaXN0DQogICAgX2Fzc2VydF9yZWplY3RlZChyb290LCBiYXNlLCAiY2FuZGlkYXRlLWFkZGVkIHJlZC1yZXByb2R1Y3Rpb24gZXZpZGVuY2UgbXVzdCB1c2Ugc2NoZW1hIHZlcnNpb24gMiIpDQp0ZXN0c1xnb3Zlcm5hbmNlXHRlc3RfcmVkX3JlcHJvZHVjdGlvbl9pbW11dGFiaWxpdHkucHk6NzU6IGluIF9hc3NlcnRfcmVqZWN0ZWQNCiAgICB3aXRoIHB5dGVzdC5yYWlzZXMoUmVkUmVwcm9kdWN0aW9uQ29tcGFyaXNvbkVycm9yLCBtYXRjaD1mcmFnbWVudCk6DQogICAgICAgICBeXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eDQpFICAgRmFpbGVkOiBESUQgTk9UIFJBSVNFIFJlZFJlcHJvZHVjdGlvbkNvbXBhcmlzb25FcnJvcg0KPT09PT09PT09PT09PT09PT09PT09PT09PT09IHNob3J0IHRlc3Qgc3VtbWFyeSBpbmZvID09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KRkFJTEVEIHRlc3RzL2dvdmVybmFuY2UvdGVzdF9yZWRfcmVwcm9kdWN0aW9uX2ltbXV0YWJpbGl0eS5weTo6dGVzdF9jYW5kaWRhdGVfYWRkZWRfYmluZGluZ19yZXF1aXJlc19zY2hlbWFfdjJfZXZlbl9pZl9jYW5kaWRhdGVfZXh0ZW5kc19sZWdhY3lfYWxsb3dsaXN0DQoxIGZhaWxlZCBpbiAwLjc0cw0K",
+      "stdout_sha256": "sha256:344f1b4f4d1ce022b01898af2d2f46b3679a8d1a56ef9752b44a777d94ce9f91",
+      "test_reports": [
+        {
+          "crash": null,
+          "longrepr_lines": [],
+          "nodeid": "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist",
+          "outcome": "passed",
+          "when": "setup"
+        },
+        {
+          "crash": {
+            "lineno": 75,
+            "message": "Failed: DID NOT RAISE RedReproductionComparisonError",
+            "path": "tests/governance/test_red_reproduction_immutability.py"
+          },
+          "longrepr_lines": [
+            "tests\\governance\\test_red_reproduction_immutability.py:128: in test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist",
+            "    _assert_rejected(root, base, \"candidate-added red-reproduction evidence must use schema version 2\")",
+            "tests\\governance\\test_red_reproduction_immutability.py:75: in _assert_rejected",
+            "    with pytest.raises(RedReproductionComparisonError, match=fragment):",
+            "         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+            "E   Failed: DID NOT RAISE RedReproductionComparisonError"
+          ],
+          "nodeid": "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist",
+          "outcome": "failed",
+          "when": "call"
+        },
+        {
+          "crash": null,
+          "longrepr_lines": [],
+          "nodeid": "tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist",
+          "outcome": "passed",
+          "when": "teardown"
+        }
+      ]
+    }
+  },
+  "provenance": "local-executed-red-reproduction; lower provenance than sealed hosted CI",
+  "python_version": "Python 3.14.6",
+  "record_ids": [
+    "RED-REPRODUCTION-LEGACY-DOWNGRADE-FALSE-GREEN-259",
+    "RED-REPRODUCTION-TRUSTED-BASE-038"
+  ],
+  "schema_version": 2
+}

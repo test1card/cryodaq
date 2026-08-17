@@ -3300,7 +3300,17 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/red_reproduction_wrong_failure_cause_258.json
-      sha256: sha256:4b96232fe8e47a30c5cfebf59f88405d9d93323f517f7ef2d445ccaa3eaded30
+      sha256: sha256:70049c44d50632b79ec479e7bc8669ff68757bb14804f59b2439c99faec749bd
+    green_evidence: pending
+  - id: RED-REPRODUCTION-LEGACY-DOWNGRADE-FALSE-GREEN-259
+    status: open
+    scope: repository
+    runtime_prevention_id: RED-REPRODUCTION-TRUSTED-BASE-038
+    guard: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/red_reproduction_legacy_downgrade_259.json
+      sha256: sha256:e4697411a5bcbe74b23531d6cd3428e13268089fcd33304a604320c46c47fdf8
     green_evidence: pending
 
 records:
@@ -5906,13 +5916,13 @@ records:
     status: open
     scope: repository
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: Every committed red-reproduction file and locator/digest binding already present in the exact trusted base supplied to pull-request, merge-group, push, or manually dispatched candidate CI.
+    applies_to: Every committed red-reproduction file and locator/digest binding in the candidate or in the exact trusted base supplied to pull-request, merge-group, push, or manually dispatched candidate CI.
     classification: evidence_misbinding
     correction_owner: reviewer
     guard_owner: reviewer
     disposition_owner: reviewer
-    consequence: A candidate can silently modify, delete, replace, reassign, or change the committed type or mode of unique red-reproduction evidence while retaining a green governance suite.
-    invariant: For each records or false_green_pairs prevention identity bound to red-reproduction evidence in the exact CI-supplied trusted base, the candidate retains the same identity, locator, digest, literal path, Git object, type, and mode; additions remain permitted.
+    consequence: A candidate can silently modify, delete, replace, reassign, or change the committed type or mode of unique red-reproduction evidence, or self-approve a newly added schema-v1 receipt, while retaining a green governance suite.
+    invariant: For each records or false_green_pairs prevention identity bound to red-reproduction evidence in the exact CI-supplied trusted base, the candidate retains the same identity, locator, digest, literal path, Git object, type, and mode. Only those inherited identities may retain schema version 1 unchanged. Every candidate-added identity resolves to a digest-bound committed blob whose schema_version is the exact integer 2.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -5924,6 +5934,8 @@ records:
       - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_deleted_renamed_and_ancestry_accepted_replacement
         ci_partition: remaining
       - node: tests/governance/test_red_reproduction_immutability.py::test_rejects_same_blob_mode_or_type_change
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist
         ci_partition: remaining
       - node: tests/test_ci_candidate_evidence.py::test_workflow_dispatch_requires_trusted_base_and_executes_active_runner
         ci_partition: remaining
@@ -6528,5 +6540,5 @@ records:
         ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/red_reproduction_wrong_failure_cause_258.json
-      sha256: sha256:4b96232fe8e47a30c5cfebf59f88405d9d93323f517f7ef2d445ccaa3eaded30
+      sha256: sha256:70049c44d50632b79ec479e7bc8669ff68757bb14804f59b2439c99faec749bd
     green_evidence: pending
