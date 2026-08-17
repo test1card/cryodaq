@@ -2788,3 +2788,12 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "no supported production health-node configuration" in section
     assert "::BUILTIN_DRIVER_SPECS" not in section
     assert "::get_driver_spec" not in section
+
+
+def test_lab_checklist_names_short_and_duration_soak_gates() -> None:
+    checklist = (REPO_ROOT / "docs" / "lab_verification_checklist.md").read_text(encoding="utf-8")
+
+    assert "exact-SHA Ubuntu 22.04 soak" in checklist
+    assert "Short preflight не закрывает duration gate" in checklist
+    assert "manifest.periodic_schedule.expected_receipts" in checklist
+    assert "Каждый duration gate остаётся OPEN" in checklist

@@ -1570,3 +1570,46 @@ def test_initial_summary_is_incomplete_fail(tmp_path: Path) -> None:
     assert summary["status"] == "FAIL"
     assert summary["reason"] == "incomplete"
     assert not evidence.terminal
+
+
+@_POSIX_EVIDENCE
+def test_process_generation_native_closure_change_is_rejected(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    evidence.write_manifest(_manifest())
+    _write_prerequisites(evidence)
+    evidence.begin_run()
+    samples = _qualification_samples()
+    for sample in samples:
+        evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
+    records = evidence._json_lines("runtime-closures.jsonl")
+    changed = next(record for record in records if record["role"] == "engine" and record["epoch"] == 1)
+    changed["closure"]["entries"][0]["sha256"] = "sha256:" + "f" * 64
+    changed["closure"]["sha256"] = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(changed["closure"]["entries"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+                "ascii"
+            )
+        ).hexdigest()
+    )
+
+    errors = soak._validate_runtime_closures(records, samples)
+
+    assert "engine loaded native closure changed across process generations" in errors
+
+
+@_POSIX_EVIDENCE
+def test_sample_reader_rejects_records_above_the_reviewed_bound(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    evidence = soak.Evidence(tmp_path)
+    evidence.write_manifest(_manifest())
+    _write_prerequisites(evidence)
+    evidence.begin_run()
+    evidence.append("samples.jsonl", _sample(0.0))
+    evidence.append("samples.jsonl", _sample(5.0))
+    monkeypatch.setattr(soak, "MAX_SAMPLE_RECORDS", 1)
+
+    with pytest.raises(ValueError, match="record bound"):
+        evidence._json_lines("samples.jsonl")
