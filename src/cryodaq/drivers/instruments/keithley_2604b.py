@@ -567,14 +567,17 @@ class Keithley2604B(InstrumentDriver):
             runtime.p_target = 0.0
             self._last_v[smu_channel] = 0.0
             self._compliance_count[smu_channel] = 0
-        await self._sync_mock_thermal_power()
-        self._revoke_off_evidence()
-        self._wdog_armed = False
-        self._wdog_autonomous = False
-
         family_authorized = False
         accepted_identity: str | None = None
         try:
+            # The external mock's initial zero belongs to this connect owner.
+            # Keep it inside the failed-connect cleanup boundary so any error
+            # or cancellation settles the lifecycle barrier before retry.
+            await self._sync_mock_thermal_power()
+            self._revoke_off_evidence()
+            self._wdog_armed = False
+            self._wdog_autonomous = False
+
             await self._transport.open(self._resource_str)
             idn_raw = await self._transport.query("*IDN?")
 

@@ -2727,8 +2727,9 @@ class LauncherWindow(QMainWindow):
 
         if self._mock and self._replay_source is None:
             cmd.append("--mock")
-        if self._mock_thermal_simulator is not None and self._replay_source is None:
-            cmd.extend(["--mock-thermal-simulator", self._mock_thermal_simulator])
+        mock_thermal_simulator = getattr(self, "_mock_thermal_simulator", None)
+        if mock_thermal_simulator is not None and self._replay_source is None:
+            cmd.extend(["--mock-thermal-simulator", mock_thermal_simulator])
 
         stderr_logger, stderr_handler, stderr_path = _create_engine_stderr_logger()
         self._engine_stderr_logger = stderr_logger

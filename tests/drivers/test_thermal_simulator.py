@@ -361,6 +361,94 @@ def test_external_simulator_is_loopback_only_and_mock_only(
         DriverConstructionContext(mock=False, mock_instrument_client=external_simulator)
 
 
+class _InitialZeroRetryClient(ExternalMockInstrumentClient):
+    def __init__(self, mode: str) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.mode = mode
+        self.attempted: list[float] = []
+        self.applied: list[float] = []
+        self.cleanup_entered = asyncio.Event()
+        self.release_cleanup = asyncio.Event()
+
+    async def set_power(self, power_w: float) -> None:
+        self.attempted.append(power_w)
+        if len(self.attempted) == 1:
+            if self.mode == "cancel":
+                raise asyncio.CancelledError
+            raise RuntimeError("external zero unavailable before apply")
+        if len(self.attempted) == 2:
+            self.cleanup_entered.set()
+            await self.release_cleanup.wait()
+        self.applied.append(power_w)
+
+
+@pytest.mark.parametrize("mode", ["fail_before", "cancel"])
+async def test_scheduler_retries_after_initial_external_zero_connect_failure(mode: str) -> None:
+    client = _InitialZeroRetryClient(mode)
+    context = DriverConstructionContext(mock=True, mock_instrument_client=client)
+    driver = construct_driver(_keithley_config(), context)
+    assert isinstance(driver, Keithley2604B)
+    binding = runtime_binding_for_driver(driver)
+    assert binding is not None
+
+    broker = DataBroker()
+    power_queue = await broker.subscribe(
+        "initial_zero_retry_power",
+        filter_fn=lambda reading: reading.channel == "Keithley_1/smua/power",
+    )
+    safety_broker = SafetyBroker()
+    manager = SafetyManager(
+        safety_broker,
+        keithley_driver=driver,
+        reviewed_source_runtime_binding=binding,
+        data_broker=broker,
+        mock=True,
+    )
+    scheduler = Scheduler(
+        broker,
+        safety_broker=safety_broker,
+        sqlite_writer=_AcceptingWriter(),
+        reviewed_source_connect_begin=manager.begin_reviewed_source_connect,
+        reviewed_source_connect_complete=manager.complete_reviewed_source_connect,
+        reviewed_source_uncertain=manager.mark_reviewed_source_uncertain,
+        reviewed_source_connect_abandon=manager.abandon_reviewed_source_connect,
+        reviewed_source_disconnect=manager.disconnect_reviewed_source,
+    )
+    scheduler.add(InstrumentConfig(driver=driver))
+    scheduler._instruments[driver.name].backoff_s = 0.01
+
+    await manager.start()
+    await scheduler.start()
+    try:
+        await asyncio.wait_for(client.cleanup_entered.wait(), timeout=2.0)
+        assert client.attempted == [0.0, 0.0]
+        assert client.applied == []
+        assert driver.connected is False
+        assert driver._connect_in_progress is False
+
+        client.release_cleanup.set()
+        power = await _wait_for_reading(
+            power_queue,
+            channel="Keithley_1/smua/power",
+            predicate=lambda reading: reading.value == pytest.approx(0.0),
+        )
+        assert power.instrument_id
+        assert client.attempted[:3] == [0.0, 0.0, 0.0]
+        assert client.applied[:2] == [0.0, 0.0]
+        assert driver.connected is True
+        assert driver._connect_in_progress is False
+        assert driver.output_state_unverified is False
+        assert manager._reviewed_source_off_evidence.verified_off is True
+        state = scheduler._instruments[driver.name]
+        assert state.reviewed_source_attempt is None
+        assert state.reviewed_source_disconnect_required is False
+    finally:
+        client.release_cleanup.set()
+        await scheduler.stop()
+        await manager.stop()
+        await broker.unsubscribe("initial_zero_retry_power")
+
+
 class _StartAckLossClient(ExternalMockInstrumentClient):
     def __init__(self) -> None:
         super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
