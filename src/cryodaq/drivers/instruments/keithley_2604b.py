@@ -399,6 +399,7 @@ class Keithley2604B(InstrumentDriver):
         if not mock and mock_instrument_client is not None:
             raise ValueError("mock_instrument_client is available only in mock mode")
         self._mock_instrument_client = mock_instrument_client
+        self._mock_power_sync_lock = asyncio.Lock()
         # Exact negative cache: True whenever either channel lacks current
         # readback-verified OFF evidence, including connect recovery, source
         # start, unmanaged output ON, or unusable output readback.
@@ -1015,6 +1016,7 @@ class Keithley2604B(InstrumentDriver):
                 runtime.active = True
                 self._source_regulation_epoch[smu_channel] = start_token
                 await self._sync_mock_thermal_power()
+                self._require_current_start(smu_channel, start_token)
                 return CommandOutcome(CommandEvidence.REQUESTED)
 
             # Every hazardous write is bracketed by an ownership check.  OFF
@@ -1183,6 +1185,11 @@ class Keithley2604B(InstrumentDriver):
         )
         runtime.p_target = p_target
         await self._sync_mock_thermal_power()
+        self._require_current_regulation(
+            smu_channel,
+            generation=update_generation,
+            command_epoch=update_epoch,
+        )
 
     async def update_source_limits(
         self,
@@ -2247,8 +2254,9 @@ class Keithley2604B(InstrumentDriver):
     async def _sync_mock_thermal_power(self) -> None:
         if not self.mock or self._mock_instrument_client is None:
             return
-        power_w = sum(runtime.p_target for runtime in self._channels.values() if runtime.active)
-        await self._mock_instrument_client.set_power(power_w)
+        async with self._mock_power_sync_lock:
+            power_w = sum(runtime.p_target for runtime in self._channels.values() if runtime.active)
+            await self._mock_instrument_client.set_power(power_w)
 
     def _mock_r_of_t(self) -> float:
         return max(_MOCK_R0 * (1.0 + _MOCK_ALPHA * (self._mock_temp - _MOCK_T0)), 1.0)

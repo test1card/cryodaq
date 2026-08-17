@@ -185,3 +185,79 @@ def test_external_simulator_is_loopback_only_and_mock_only(
         MockInstrumentEndpoint.parse("192.0.2.1:1234")
     with pytest.raises(DriverRegistryError, match="only in mock mode"):
         DriverConstructionContext(mock=False, mock_instrument_client=external_simulator)
+
+
+class _DelayedPowerClient(ExternalMockInstrumentClient):
+    def __init__(self) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.applied: list[float] = []
+        self.nonzero_started = asyncio.Event()
+        self.release_nonzero = asyncio.Event()
+        self._block_next_nonzero = False
+
+    def arm(self) -> None:
+        self.nonzero_started.clear()
+        self.release_nonzero.clear()
+        self._block_next_nonzero = True
+
+    async def set_power(self, power_w: float) -> None:
+        if power_w > 0.0 and self._block_next_nonzero:
+            self._block_next_nonzero = False
+            self.nonzero_started.set()
+            await self.release_nonzero.wait()
+        self.applied.append(power_w)
+
+
+def _observe_mock_off_commit(driver: Keithley2604B) -> asyncio.Event:
+    committed = asyncio.Event()
+    original = driver._mark_channel_off_verified
+
+    def observed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if result:
+            committed.set()
+        return result
+
+    driver._mark_channel_off_verified = observed  # type: ignore[method-assign]
+    return committed
+
+
+async def test_delayed_mock_start_cannot_reheat_external_plant_after_stop() -> None:
+    client = _DelayedPowerClient()
+    driver = Keithley2604B("K", "USB::MOCK", mock=True, mock_instrument_client=client)
+    await driver.connect()
+    client.arm()
+
+    start_task = asyncio.create_task(driver.start_source("smua", 0.2, 10.0, 0.5))
+    await asyncio.wait_for(client.nonzero_started.wait(), timeout=1.0)
+    off_committed = _observe_mock_off_commit(driver)
+    stop_task = asyncio.create_task(driver.stop_source("smua"))
+    await asyncio.wait_for(off_committed.wait(), timeout=1.0)
+    assert driver._channels["smua"].active is False
+    client.release_nonzero.set()
+    start_result, stop_result = await asyncio.gather(start_task, stop_task, return_exceptions=True)
+
+    assert isinstance(start_result, RuntimeError)
+    assert stop_result is None
+    assert client.applied[-2:] == [0.2, 0.0]
+
+
+async def test_delayed_mock_update_cannot_reheat_external_plant_after_stop() -> None:
+    client = _DelayedPowerClient()
+    driver = Keithley2604B("K", "USB::MOCK", mock=True, mock_instrument_client=client)
+    await driver.connect()
+    await driver.start_source("smua", 0.1, 10.0, 0.5)
+    client.arm()
+
+    update_task = asyncio.create_task(driver.update_source_target("smua", 0.3))
+    await asyncio.wait_for(client.nonzero_started.wait(), timeout=1.0)
+    off_committed = _observe_mock_off_commit(driver)
+    stop_task = asyncio.create_task(driver.stop_source("smua"))
+    await asyncio.wait_for(off_committed.wait(), timeout=1.0)
+    assert driver._channels["smua"].active is False
+    client.release_nonzero.set()
+    update_result, stop_result = await asyncio.gather(update_task, stop_task, return_exceptions=True)
+
+    assert isinstance(update_result, RuntimeError)
+    assert stop_result is None
+    assert client.applied[-2:] == [0.3, 0.0]
