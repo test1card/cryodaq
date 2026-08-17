@@ -162,16 +162,12 @@ def _assert_nightly_qt_prerequisites(text: str) -> None:
         assert step.get("if") == "runner.os == 'Linux'", (
             f"{job_name} install step must be gated by `runner.os == 'Linux'`, found {step.get('if')!r}"
         )
-        run = step["run"]
-        assert "sudo apt-get update" in run
-        install_commands = [
-            line.strip().split() for line in run.splitlines() if line.strip().startswith("sudo apt-get install ")
+        expected_commands = [
+            "sudo apt-get update",
+            "sudo apt-get install -y " + " ".join(_QT_LINUX_LIBRARIES),
         ]
-        assert len(install_commands) == 1, f"{job_name} must contain exactly one apt-get install command"
-        command = install_commands[0]
-        assert command[:4] == ["sudo", "apt-get", "install", "-y"]
-        for library in _QT_LINUX_LIBRARIES:
-            assert library in command[4:], f"{job_name} does not install required Qt library {library!r}"
+        commands = [line.strip() for line in step["run"].splitlines() if line.strip()]
+        assert commands == expected_commands, f"{job_name} must use the exact fail-closed Qt installation command block"
 
 
 def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> None:
@@ -182,15 +178,22 @@ def test_nightly_qt_jobs_install_linux_prerequisites_before_dependencies() -> No
 
 
 def test_nightly_qt_guard_rejects_libraries_merely_echoed_instead_of_installed() -> None:
-    """The prerequisite names alone are insufficient: apt-get must receive them."""
+    """The guard must reject named-only libraries and an early successful exit."""
 
     text = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
     install = "sudo apt-get install -y " + " ".join(_QT_LINUX_LIBRARIES)
     assert text.count(install) == len(_NIGHTLY_QT_JOB_NAMES)
     mutated = text.replace(install, "echo " + " ".join(_QT_LINUX_LIBRARIES))
 
-    with pytest.raises(AssertionError, match="apt-get install command"):
+    with pytest.raises(AssertionError, match="exact fail-closed"):
         _assert_nightly_qt_prerequisites(mutated)
+
+    update = "sudo apt-get update"
+    assert text.count(update) == len(_NIGHTLY_QT_JOB_NAMES)
+    early_exit = text.replace(update, update + "\n          exit 0")
+
+    with pytest.raises(AssertionError, match="exact fail-closed"):
+        _assert_nightly_qt_prerequisites(early_exit)
 
 
 def test_nightly_qt_guard_rejects_step_disabled_with_linux_text_echoed() -> None:
