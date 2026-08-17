@@ -1193,6 +1193,7 @@ def test_windows_job_close_failure_still_kills_and_settles_timed_out_root(
     job = FakeJob()
     runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
     monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(module, "_creation_kwargs", lambda: {})
     monkeypatch.setattr(module, "_popen_windows_job", lambda *_args, **_kwargs: (process, job))
 
     with pytest.raises(ReportProcessError, match="Job Object cleanup failed after timeout"):
