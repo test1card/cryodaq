@@ -68,7 +68,7 @@ _RED_REPRODUCTION_EXPECTATION_AUTHORITY_FIELDS = frozenset({"trusted_base_commit
 
 _RED_REPRODUCTION_V2_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+    "PYTHONPATH": "<worktree>/src",
     "TEMP": "<worktree>/.red-reproduction-tmp",
     "TMP": "<worktree>/.red-reproduction-tmp",
 }
@@ -77,14 +77,10 @@ _RED_REPRODUCTION_NODE_RUN_FIELDS = frozenset(
         "command",
         "exit_code",
         "failure_signatures",
-        "stdout_bytes_base64",
-        "stdout_sha256",
-        "stderr_bytes_base64",
-        "stderr_sha256",
         "test_reports",
     }
 )
-_RED_REPRODUCTION_TEST_REPORT_FIELDS = frozenset({"crash", "longrepr_lines", "nodeid", "outcome", "when"})
+_RED_REPRODUCTION_TEST_REPORT_FIELDS = frozenset({"crash", "nodeid", "outcome", "when"})
 
 _RED_REPRODUCTION_TEST_REPORT_CRASH_FIELDS = frozenset({"lineno", "message", "path"})
 _GRANDFATHERED_RED_REPRODUCTIONS_V1 = frozenset(
@@ -540,15 +536,6 @@ def _red_failure_summary_names_node(line: str, node: str) -> bool:
     return reported_node.replace("\\", "/") == node
 
 
-def _red_diagnostic_contains_message(lines: list[str], message: str) -> bool:
-    for message_line in message.splitlines():
-        if not any(
-            line == message_line or (line.startswith("E") and line[1:].lstrip() == message_line) for line in lines
-        ):
-            return False
-    return True
-
-
 def _validated_red_test_reports(
     value: Any,
     *,
@@ -582,39 +569,26 @@ def _validated_red_test_reports(
         ):
             raise GovernanceContractError(lifecycle_error)
 
-        longrepr_lines = report["longrepr_lines"]
-        if not isinstance(longrepr_lines, list) or any(
-            not isinstance(line, str) or line.splitlines() != [line] for line in longrepr_lines
-        ):
-            raise GovernanceContractError(
-                f"{entry_id}.red_evidence structured pytest report contains invalid failure diagnostics"
-            )
         crash = report["crash"]
         if when != "call":
-            if longrepr_lines or crash is not None:
+            if crash is not None:
                 raise GovernanceContractError(lifecycle_error)
-
         else:
-            if (
-                not longrepr_lines
-                or not isinstance(crash, Mapping)
-                or set(crash) != _RED_REPRODUCTION_TEST_REPORT_CRASH_FIELDS
-            ):
+            if not isinstance(crash, Mapping) or set(crash) != _RED_REPRODUCTION_TEST_REPORT_CRASH_FIELDS:
                 raise GovernanceContractError(
                     f"{entry_id}.red_evidence structured pytest failed call has no exact failure location"
                 )
+            guard_path = node.split("::", 1)[0]
             if (
                 not isinstance(crash["path"], str)
-                or not crash["path"]
-                or Path(crash["path"]).is_absolute()
-                or ".." in Path(crash["path"]).parts
+                or crash["path"].replace("\\", "/") != guard_path
                 or type(crash["lineno"]) is not int
                 or crash["lineno"] < 0
                 or not isinstance(crash["message"], str)
                 or not crash["message"].splitlines()
             ):
                 raise GovernanceContractError(
-                    f"{entry_id}.red_evidence structured pytest failed call has no exact failure location"
+                    f"{entry_id}.red_evidence structured pytest failed call has no exact guard failure location"
                 )
         validated.append(report)
     return validated
@@ -680,17 +654,14 @@ def _validate_red_reproduction_v2_execution(
         command = run["command"]
         if (
             not isinstance(command, list)
-            or len(command) != 11
             or any(not isinstance(item, str) or not item for item in command)
-            or command[0] != "<python>"
-            or command[1:]
+            or command
             != [
-                "-m",
-                "pytest",
+                "<python>",
+                "<trusted-pytest-launcher>",
+                "<trusted-capture-plugin>",
                 "-p",
                 "no:cacheprovider",
-                "-p",
-                "_cryodaq_red_reproduction_capture",
                 "--color=no",
                 node,
                 "-q",
@@ -702,17 +673,11 @@ def _validate_red_reproduction_v2_execution(
             raise GovernanceContractError(
                 f"{entry_id}.red_evidence red reproduction exit code is not one failed pytest test"
             )
-        stdout = _decode_receipt_bytes(run["stdout_bytes_base64"], run["stdout_sha256"], f"{entry_id}.stdout")
-        stderr = _decode_receipt_bytes(run["stderr_bytes_base64"], run["stderr_sha256"], f"{entry_id}.stderr")
-        stdout_lines = stdout.decode("utf-8", errors="replace").splitlines()
-        stderr_lines = stderr.decode("utf-8", errors="replace").splitlines()
-        output_lines = stdout_lines + stderr_lines
         signatures = run["failure_signatures"]
-        failure_lines = [line for line in output_lines if line.startswith("FAILED ")]
         if (
             not isinstance(signatures, list)
             or len(signatures) != 1
-            or signatures != failure_lines
+            or not isinstance(signatures[0], str)
             or not _red_failure_summary_names_node(signatures[0], node)
         ):
             raise GovernanceContractError(
@@ -724,15 +689,9 @@ def _validate_red_reproduction_v2_execution(
         assert isinstance(call_crash, Mapping)
         call_message = call_crash["message"]
         assert isinstance(call_message, str)
-        call_longrepr_lines = call_report["longrepr_lines"]
-        assert isinstance(call_longrepr_lines, list)
-        if expected[node] != call_message or not _red_diagnostic_contains_message(call_longrepr_lines, call_message):
+        if expected[node] != call_message:
             raise GovernanceContractError(
                 f"{entry_id}.red_evidence structured pytest failed call does not match its expected behavioral failure"
-            )
-        if not _red_diagnostic_contains_message(output_lines, call_message):
-            raise GovernanceContractError(
-                f"{entry_id}.red_evidence node run does not include its expected behavioral failure"
             )
 
 

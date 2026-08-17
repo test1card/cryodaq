@@ -5925,8 +5925,8 @@ records:
     correction_owner: reviewer
     guard_owner: reviewer
     disposition_owner: reviewer
-    consequence: A candidate can alter inherited evidence, self-approve its failure cause, reject ordinary pytest diagnostics, or publish host paths while the governance suite stays green.
-    invariant: The candidate preserves each inherited evidence binding. Only the four exact legacy receipts can use schema version 1. Each new binding uses schema version 2. Its expected failure comes from the exact trusted-base manifest, accepts the structured pytest message across display indentation, and stores only canonical environment and command placeholders.
+    consequence: A candidate can alter inherited evidence, self-approve a same-message failure from unrelated code, shadow the trusted capture plugin, change the manifest entry type, reject ordinary pytest diagnostics, or publish host paths while the governance suite stays green.
+    invariant: The candidate preserves each inherited evidence binding. Only the four exact legacy receipts can use schema version 1. Each new binding uses schema version 2. The trusted manifest is a regular file and binds the expected failure plus the exact guard blob. The failed call originates in that guard file. The producer loads its capture plugin from the verified external file. It accepts structured pytest messages across display indentation and stores no raw subprocess output or local host paths.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -5942,6 +5942,12 @@ records:
       - node: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run
         ci_partition: remaining
       - node: tests/governance/test_red_reproduction.py::test_schema_v2_receipt_accepts_pytest_assertion_rewrite_indentation
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction.py::test_failure_signature_rejects_same_message_from_unrelated_guard_origin
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction.py::test_producer_loads_capture_plugin_from_its_verified_external_file
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction_immutability.py::test_candidate_cannot_change_expectation_manifest_mode_or_type
         ci_partition: remaining
       - node: tests/governance/test_red_reproduction.py::test_producer_accepts_assertion_rewrite_and_redacts_local_environment
         ci_partition: remaining

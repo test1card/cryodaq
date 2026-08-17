@@ -10,8 +10,6 @@ sealed hosted-CI artifact.
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
 import io
 import json
 import os
@@ -30,11 +28,11 @@ _EXPECTATION_MANIFEST = Path("governance/red_reproduction_expectations.json")
 _PROVENANCE = "local-executed-red-reproduction; lower provenance than sealed hosted CI"
 _PREVENTION_ID = re.compile(r"[A-Z0-9][A-Z0-9-]*")
 _EXPECTATION_COLLECTIONS = frozenset({"records", "false_green_pairs"})
-_EXPECTATION_ENTRY_FIELDS = frozenset({"collection", "prevention_id", "node", "expected_failure_message"})
+_EXPECTATION_ENTRY_FIELDS = frozenset({"collection", "prevention_id", "node", "expected_failure_message", "guard_blob"})
 
 _RECEIPT_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
-    "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+    "PYTHONPATH": "<worktree>/src",
     "TEMP": "<worktree>/.red-reproduction-tmp",
     "TMP": "<worktree>/.red-reproduction-tmp",
 }
@@ -101,8 +99,26 @@ def pytest_sessionfinish(session, exitstatus):
     )
     temporary.replace(target)
 """
+_PYTEST_LAUNCHER = """\
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+plugin_path = Path(sys.argv[1]).resolve(strict=True)
+spec = importlib.util.spec_from_file_location("_cryodaq_trusted_red_capture", plugin_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError("trusted capture plugin has no file loader")
+plugin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(plugin)
+if Path(plugin.__file__).resolve(strict=True) != plugin_path:
+    raise RuntimeError("trusted capture plugin resolved from the wrong file")
+raise SystemExit(pytest.main(sys.argv[2:], plugins=[plugin]))
+"""
 _TEST_REPORT_FIELDS = frozenset({"crash", "longrepr_lines", "nodeid", "outcome", "when"})
 _TEST_REPORT_CRASH_FIELDS = frozenset({"lineno", "message", "path"})
+_RECEIPT_TEST_REPORT_FIELDS = frozenset({"crash", "nodeid", "outcome", "when"})
 
 
 class RedReproductionError(RuntimeError):
@@ -129,6 +145,21 @@ def _object_id(root: Path, revision: str, *, kind: str) -> str:
         raise RedReproductionError(f"Git did not resolve a {kind} object for {revision!r}")
     _git(root, "cat-file", "-e", f"{resolved}^{{{kind}}}")
     return resolved
+
+
+def _regular_blob_id(root: Path, revision: str, path: str) -> str:
+    raw = _git(root, "ls-tree", "-z", "--full-tree", revision, "--", f":(literal){path}")
+    records = raw.split(b"\0")
+    if len(records) != 2 or not records[0] or records[1]:
+        raise RedReproductionError(f"{revision!r} has no unique tree entry for {path!r}")
+    metadata, separator, recorded_path = records[0].partition(b"\t")
+    fields = metadata.split(b" ")
+    if separator != b"\t" or recorded_path != path.encode("utf-8") or len(fields) != 3:
+        raise RedReproductionError(f"{revision!r} has a malformed tree entry for {path!r}")
+    mode, kind, object_id = (field.decode("ascii") for field in fields)
+    if mode != "100644" or kind != "blob" or _OBJECT_ID.fullmatch(object_id) is None:
+        raise RedReproductionError("trusted expectation manifest must be a regular non-executable file")
+    return object_id
 
 
 def _parse_blob_bindings(values: list[str]) -> dict[str, str]:
@@ -162,6 +193,7 @@ def _validated_expectation_manifest(value: object) -> list[dict[str, str]]:
         prevention_id = entry["prevention_id"]
         node = entry["node"]
         message = entry["expected_failure_message"]
+        guard_blob = entry["guard_blob"]
         if (
             not isinstance(collection, str)
             or collection not in _EXPECTATION_COLLECTIONS
@@ -172,6 +204,8 @@ def _validated_expectation_manifest(value: object) -> list[dict[str, str]]:
             or not isinstance(message, str)
             or not message
             or message.strip() != message
+            or not isinstance(guard_blob, str)
+            or _OBJECT_ID.fullmatch(guard_blob) is None
         ):
             raise RedReproductionError("trusted expectation manifest entry is invalid")
         key = (collection, prevention_id, node)
@@ -182,6 +216,7 @@ def _validated_expectation_manifest(value: object) -> list[dict[str, str]]:
                 "prevention_id": prevention_id,
                 "node": node,
                 "expected_failure_message": message,
+                "guard_blob": guard_blob,
             }
         )
     if keys != sorted(keys) or len(keys) != len(set(keys)):
@@ -195,16 +230,17 @@ def _trusted_expected_failures(
     trusted_base: str,
     record_ids: list[str],
     nodes: list[str],
-) -> tuple[str, str, dict[str, str]]:
+) -> tuple[str, str, dict[str, str], dict[str, str]]:
     commit = _object_id(root, trusted_base, kind="commit")
     manifest_path = _EXPECTATION_MANIFEST.as_posix()
-    manifest_blob = _object_id(root, f"{commit}:{manifest_path}", kind="blob")
+    manifest_blob = _regular_blob_id(root, commit, manifest_path)
     try:
         payload = json.loads(_git(root, "show", f"{commit}:{manifest_path}").decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise RedReproductionError("trusted expectation manifest is not valid UTF-8 JSON") from exc
     entries = _validated_expectation_manifest(payload)
     expected: dict[str, str] = {}
+    trusted_guard_blobs: dict[str, str] = {}
     selected_nodes = set(nodes)
     for record_id in record_ids:
         selected = [
@@ -217,11 +253,15 @@ def _trusted_expected_failures(
         for entry in selected:
             node = entry["node"]
             message = entry["expected_failure_message"]
+            guard_blob = entry["guard_blob"]
             prior = expected.setdefault(node, message)
             if prior != message:
                 raise RedReproductionError(f"trusted expectation manifest disagrees across prevention IDs for {node!r}")
+            prior_blob = trusted_guard_blobs.setdefault(node, guard_blob)
+            if prior_blob != guard_blob:
+                raise RedReproductionError(f"trusted expectation manifest disagrees on guard blob for {node!r}")
 
-    return commit, manifest_blob, dict(sorted(expected.items()))
+    return commit, manifest_blob, dict(sorted(expected.items())), dict(sorted(trusted_guard_blobs.items()))
 
 
 def _test_environment(worktree: Path, python: str) -> dict[str, str]:
@@ -346,6 +386,11 @@ def _failure_signatures(
     assert isinstance(call_crash, Mapping)
     call_message = call_crash["message"]
     assert isinstance(call_message, str)
+    call_path = call_crash["path"]
+    assert isinstance(call_path, str)
+    guard_path = node.split("::", 1)[0]
+    if call_path.replace("\\", "/") != guard_path:
+        raise RedReproductionError(f"structured pytest failed call did not originate in its guard file for {node!r}")
     call_longrepr_lines = reports[1]["longrepr_lines"]
     assert isinstance(call_longrepr_lines, list)
     if expected[node] != call_message:
@@ -393,7 +438,7 @@ def produce_red_reproduction(
         raise RedReproductionError("guard nodes must be a sorted, unique, nonempty list")
     if any("::" not in node for node in nodes):
         raise RedReproductionError("guard nodes must be pytest node ids")
-    trusted_base_commit, expectation_manifest_blob, expected_failures = _trusted_expected_failures(
+    trusted_base_commit, expectation_manifest_blob, expected_failures, trusted_guard_blobs = _trusted_expected_failures(
         root,
         trusted_base=trusted_base,
         record_ids=record_ids,
@@ -402,6 +447,10 @@ def produce_red_reproduction(
     expected_paths = {node.split("::", 1)[0] for node in nodes}
     if set(guard_blobs) != expected_paths:
         raise RedReproductionError("guard blob paths must exactly match the selected guard-node files")
+    for node in nodes:
+        guard_path = node.split("::", 1)[0]
+        if guard_blobs[guard_path] != trusted_guard_blobs[node]:
+            raise RedReproductionError(f"selected guard blob differs from the trusted expectation for {node!r}")
     if not source_paths or source_paths != sorted(set(source_paths)):
         raise RedReproductionError("source paths must be a sorted, unique, nonempty list")
     if any(Path(path).is_absolute() or ".." in Path(path).parts for path in source_paths):
@@ -436,10 +485,12 @@ def produce_red_reproduction(
         plugin_dir.mkdir()
         plugin_path = plugin_dir / "_cryodaq_red_reproduction_capture.py"
         plugin_path.write_text(_PYTEST_CAPTURE_PLUGIN, encoding="utf-8", newline="\n")
+        launcher_path = plugin_dir / "run_trusted_pytest.py"
+        launcher_path.write_text(_PYTEST_LAUNCHER, encoding="utf-8", newline="\n")
         report_path = plugin_dir / "pytest-report.json"
         environment = _test_environment(worktree, python)
         environment["CRYODAQ_RED_REPRODUCTION_REPORT"] = str(report_path)
-        environment["PYTHONPATH"] = os.pathsep.join((str(plugin_dir), environment["PYTHONPATH"]))
+
         environment = dict(sorted(environment.items()))
         version = subprocess.run([python, "--version"], cwd=worktree, env=environment, capture_output=True, check=False)
         if version.returncode != 0:
@@ -452,12 +503,10 @@ def produce_red_reproduction(
             report_path.unlink(missing_ok=True)
             command = [
                 python,
-                "-m",
-                "pytest",
+                str(launcher_path),
+                str(plugin_path),
                 "-p",
                 "no:cacheprovider",
-                "-p",
-                "_cryodaq_red_reproduction_capture",
                 "--color=no",
                 node,
                 "-q",
@@ -489,15 +538,17 @@ def produce_red_reproduction(
                 {node: expected_failures[node]},
                 test_reports,
             )
+            receipt_reports = [{key: report[key] for key in _RECEIPT_TEST_REPORT_FIELDS} for report in test_reports]
             node_runs[node] = {
-                "command": ["<python>", *command[1:]],
+                "command": [
+                    "<python>",
+                    "<trusted-pytest-launcher>",
+                    "<trusted-capture-plugin>",
+                    *command[3:],
+                ],
                 "exit_code": completed.returncode,
                 "failure_signatures": signatures[node],
-                "stdout_bytes_base64": base64.b64encode(completed.stdout).decode("ascii"),
-                "stdout_sha256": f"sha256:{hashlib.sha256(completed.stdout).hexdigest()}",
-                "stderr_bytes_base64": base64.b64encode(completed.stderr).decode("ascii"),
-                "stderr_sha256": f"sha256:{hashlib.sha256(completed.stderr).hexdigest()}",
-                "test_reports": test_reports,
+                "test_reports": receipt_reports,
             }
         receipt = {
             "schema_version": 2,

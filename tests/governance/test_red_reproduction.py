@@ -88,12 +88,10 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
     receipt.pop("command")
     command = [
         "<python>",
-        "-m",
-        "pytest",
+        "<trusted-pytest-launcher>",
+        "<trusted-capture-plugin>",
         "-p",
         "no:cacheprovider",
-        "-p",
-        "_cryodaq_red_reproduction_capture",
         "--color=no",
         node,
         "-q",
@@ -103,14 +101,9 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
         "command": command,
         "exit_code": receipt.pop("exit_code"),
         "failure_signatures": receipt.pop("failure_signatures")[node],
-        "stdout_bytes_base64": receipt.pop("stdout_bytes_base64"),
-        "stdout_sha256": receipt.pop("stdout_sha256"),
-        "stderr_bytes_base64": receipt.pop("stderr_bytes_base64"),
-        "stderr_sha256": receipt.pop("stderr_sha256"),
         "test_reports": [
             {
                 "crash": None,
-                "longrepr_lines": [],
                 "nodeid": node,
                 "outcome": "passed",
                 "when": "setup",
@@ -121,20 +114,22 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
                     "message": expected_message,
                     "path": node.split("::", 1)[0],
                 },
-                "longrepr_lines": expected_lines,
                 "nodeid": node,
                 "outcome": "failed",
                 "when": "call",
             },
             {
                 "crash": None,
-                "longrepr_lines": [],
                 "nodeid": node,
                 "outcome": "passed",
                 "when": "teardown",
             },
         ],
     }
+    receipt.pop("stdout_bytes_base64")
+    receipt.pop("stdout_sha256")
+    receipt.pop("stderr_bytes_base64")
+    receipt.pop("stderr_sha256")
     receipt.pop("failed_nodes")
     receipt["schema_version"] = 2
     receipt["expectation_authority"] = {
@@ -143,7 +138,7 @@ def _upgrade_single_node_receipt_to_v2(receipt: dict[str, Any]) -> None:
     }
     receipt["environment"] = {
         "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+        "PYTHONPATH": "<worktree>/src",
         "TEMP": "<worktree>/.red-reproduction-tmp",
         "TMP": "<worktree>/.red-reproduction-tmp",
     }
@@ -245,14 +240,6 @@ def _missing_failure_signature(receipt: dict[str, Any]) -> None:
     _single_node_run(receipt)["failure_signatures"].clear()
 
 
-def _forged_stdout_digest(receipt: dict[str, Any]) -> None:
-    _single_node_run(receipt)["stdout_sha256"] = "sha256:" + "0" * 64
-
-
-def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
-    _single_node_run(receipt)["stderr_sha256"] = "sha256:" + "0" * 64
-
-
 @pytest.mark.parametrize(
     ("mutate", "message", "requires_git_resolution"),
     [
@@ -262,8 +249,6 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
         (_successful_exit, "exit code is not one failed pytest test", False),
         (_non_test_failure_exit, "exit code is not one failed pytest test", False),
         (_missing_failure_signature, "failure signatures do not include registered guard nodes", False),
-        (_forged_stdout_digest, "stdout digest does not match its recorded bytes", False),
-        (_forged_stderr_digest, "stderr digest does not match its recorded bytes", False),
     ],
     ids=(
         "guard-blob-mismatch",
@@ -272,8 +257,6 @@ def _forged_stderr_digest(receipt: dict[str, Any]) -> None:
         "successful-red-run",
         "collection-error-exit",
         "missing-registered-failure-signature",
-        "forged-stdout-digest",
-        "forged-stderr-digest",
     ),
 )
 def test_red_reproduction_receipt_refusals_are_independent(
@@ -374,6 +357,26 @@ def test_red_reproduction_requires_the_expected_behavioral_failure() -> None:
             )
 
 
+def test_failure_signature_rejects_same_message_from_unrelated_guard_origin() -> None:
+    node = "tests/test_guard.py::test_guard"
+    message = "Failed: DID NOT RAISE <class 'RuntimeError'>"
+    output = f"E   {message}\nFAILED {node} - {message}\n".encode()
+    reports = [
+        {"crash": None, "longrepr_lines": [], "nodeid": node, "outcome": "passed", "when": "setup"},
+        {
+            "crash": {"lineno": 999, "message": message, "path": "tests/unrelated_helper.py"},
+            "longrepr_lines": [f"E   {message}"],
+            "nodeid": node,
+            "outcome": "failed",
+            "when": "call",
+        },
+        {"crash": None, "longrepr_lines": [], "nodeid": node, "outcome": "passed", "when": "teardown"},
+    ]
+
+    with pytest.raises(red_reproduction.RedReproductionError, match="did not originate"):
+        red_reproduction._failure_signatures(output, [node], {node: message}, reports)
+
+
 def test_failure_signature_binding_rejects_cross_node_laundering() -> None:
     first = "tests/test_guard.py::test_first"
     second = "tests/test_guard.py::test_second"
@@ -395,6 +398,7 @@ def test_trusted_expectation_manifest_requires_exact_sorted_bindings() -> None:
     entry = {
         "collection": "records",
         "expected_failure_message": "assert 1 == 2",
+        "guard_blob": "0" * 40,
         "node": node,
         "prevention_id": "RED-001",
     }
@@ -445,26 +449,25 @@ def test_schema_v2_receipt_binds_the_expected_failure_to_its_node_run(tmp_path: 
 
 
 def test_schema_v2_receipt_accepts_pytest_assertion_rewrite_indentation(tmp_path: Path) -> None:
-    payload, directory = _copy_reproduction_evidence(tmp_path)
-    filename = "alarm_phase_elapsed_subcondition_026.json"
-    receipt = json.loads((directory / filename).read_text(encoding="utf-8"))
-    _upgrade_single_node_receipt_to_v2(receipt)
-    [node] = receipt["guard_nodes"]
-    run = _single_node_run(receipt)
-    old_message = receipt["expected_failure_messages"][node]
-    new_message = "assert 1 == 2"
-    receipt["expected_failure_messages"][node] = new_message
-    run["test_reports"][1]["crash"]["message"] = new_message
-    run["test_reports"][1]["longrepr_lines"] = ["E       assert 1 == 2"]
-    stdout = base64.b64decode(run["stdout_bytes_base64"], validate=True)
-    old_diagnostic = f"E   {old_message}".encode()
-    assert stdout.count(old_diagnostic) == 1
-    stdout = stdout.replace(old_diagnostic, b"E       assert 1 == 2", 1)
-    run["stdout_bytes_base64"] = base64.b64encode(stdout).decode("ascii")
-    run["stdout_sha256"] = f"sha256:{hashlib.sha256(stdout).hexdigest()}"
-    _rewrite_receipt(payload, directory, filename, receipt)
+    del tmp_path
+    node = "tests/test_guard.py::test_guard"
+    message = "assert 1 == 2"
+    output = f"E       {message}\nFAILED {node} - {message}\n".encode()
+    reports = [
+        {"crash": None, "longrepr_lines": [], "nodeid": node, "outcome": "passed", "when": "setup"},
+        {
+            "crash": {"lineno": 1, "message": message, "path": "tests/test_guard.py"},
+            "longrepr_lines": [f"E       {message}"],
+            "nodeid": node,
+            "outcome": "failed",
+            "when": "call",
+        },
+        {"crash": None, "longrepr_lines": [], "nodeid": node, "outcome": "passed", "when": "teardown"},
+    ]
 
-    validate_registry(payload, root=tmp_path, git_repository=ROOT)
+    assert red_reproduction._failure_signatures(output, [node], {node: message}, reports) == {
+        node: [f"FAILED {node} - {message}"]
+    }
 
 
 def test_schema_v2_receipt_rejects_ambient_environment_values(tmp_path: Path) -> None:
@@ -487,14 +490,7 @@ def test_schema_v2_receipt_accepts_exact_windows_node_separator_rendering(tmp_pa
     [node] = receipt["guard_nodes"]
     run = _single_node_run(receipt)
     old_signature = run["failure_signatures"][0]
-    windows_signature = old_signature.replace(node, node.replace("/", "\\"), 1)
-    run["failure_signatures"] = [windows_signature]
-    stdout = base64.b64decode(run["stdout_bytes_base64"], validate=True)
-    old_bytes = old_signature.encode("utf-8")
-    assert stdout.count(old_bytes) == 1
-    stdout = stdout.replace(old_bytes, windows_signature.encode("utf-8"), 1)
-    run["stdout_bytes_base64"] = base64.b64encode(stdout).decode("ascii")
-    run["stdout_sha256"] = f"sha256:{hashlib.sha256(stdout).hexdigest()}"
+    run["failure_signatures"] = [old_signature.replace(node, node.replace("/", "\\"), 1)]
     _rewrite_receipt(payload, directory, filename, receipt)
 
     validate_registry(payload, root=tmp_path, git_repository=ROOT)
@@ -532,6 +528,8 @@ def _write_expectation_manifest(
     node: str,
     message: str,
 ) -> None:
+    guard_path = node.split("::", 1)[0]
+    guard_blob = _run_git(repository, "hash-object", guard_path).decode("ascii").strip()
     path = repository / "governance" / "red_reproduction_expectations.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -541,6 +539,7 @@ def _write_expectation_manifest(
                     {
                         "collection": "records",
                         "expected_failure_message": message,
+                        "guard_blob": guard_blob,
                         "node": node,
                         "prevention_id": record_id,
                     }
@@ -617,7 +616,13 @@ def test_producer_accepts_assertion_rewrite_and_redacts_local_environment(tmp_pa
     guard = repository / guard_path
     guard.parent.mkdir(parents=True)
     guard.write_text(
-        "def test_assertion_failure() -> None:\n    assert 1 == 2\n",
+        "import os\n"
+        "import sys\n\n"
+        "def test_assertion_failure() -> None:\n"
+        "    print(os.environ['PATH'])\n"
+        "    print(os.environ['TMP'])\n"
+        "    print(sys.executable)\n"
+        "    assert 1 == 2\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -633,6 +638,7 @@ def test_producer_accepts_assertion_rewrite_and_redacts_local_environment(tmp_pa
         {
             "collection": "records",
             "expected_failure_message": "unused sibling expectation",
+            "guard_blob": "0" * 40,
             "node": "tests/test_unused.py::test_unused",
             "prevention_id": record_id,
         }
@@ -664,15 +670,68 @@ def test_producer_accepts_assertion_rewrite_and_redacts_local_environment(tmp_pa
     assert receipt["expected_failure_messages"] == {node: expected_message}
     assert receipt["environment"] == {
         "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONPATH": "<pytest-plugin><PATHSEP><worktree>/src",
+        "PYTHONPATH": "<worktree>/src",
         "TEMP": "<worktree>/.red-reproduction-tmp",
         "TMP": "<worktree>/.red-reproduction-tmp",
     }
     assert receipt["node_runs"][node]["command"][0] == "<python>"
     raw = output.read_bytes()
     assert b"\r" not in raw
+    assert b"stdout_bytes_base64" not in raw
+    assert b"stderr_bytes_base64" not in raw
+    assert b"longrepr_lines" not in raw
     assert str(tmp_path).encode() not in raw
     assert sys.executable.encode() not in raw
+
+
+def test_producer_loads_capture_plugin_from_its_verified_external_file(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _run_git(repository, "init", "-q")
+    _run_git(repository, "config", "user.email", "guard@example.invalid")
+    _run_git(repository, "config", "user.name", "Guard Test")
+    (repository / "defective.py").write_text("DEFECT = True\n", encoding="utf-8", newline="\n")
+    (repository / "_cryodaq_red_reproduction_capture.py").write_text(
+        "raise RuntimeError('defective checkout capture plugin imported')\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    guard_path = "tests/test_assertion_failure.py"
+    node = f"{guard_path}::test_assertion_failure"
+    record_id = "RED-ASSERTION-001"
+    expected_message = "assert 1 == 2"
+    guard = repository / guard_path
+    guard.parent.mkdir(parents=True)
+    guard.write_text(
+        "def test_assertion_failure() -> None:\n    assert 1 == 2\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _write_expectation_manifest(
+        repository,
+        record_id=record_id,
+        node=node,
+        message=expected_message,
+    )
+    _run_git(repository, "add", ".")
+    _run_git(repository, "commit", "-qm", "Add colliding checkout plugin")
+    defective_commit = _run_git(repository, "rev-parse", "HEAD").decode("ascii").strip()
+    guard_blob = _run_git(repository, "rev-parse", f"HEAD:{guard_path}").decode("ascii").strip()
+
+    receipt = red_reproduction.produce_red_reproduction(
+        root=repository,
+        output=repository / "governance" / "red_reproductions" / "assertion_failure.json",
+        record_ids=[record_id],
+        defective_commit=defective_commit,
+        guard_blobs={guard_path: guard_blob},
+        source_paths=["defective.py"],
+        nodes=[node],
+        trusted_base=defective_commit,
+        python=sys.executable,
+    )
+
+    assert receipt["expected_failure_messages"] == {node: expected_message}
 
 
 def test_main_reports_schema_version_without_legacy_exit_code(

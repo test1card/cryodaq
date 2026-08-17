@@ -20,10 +20,16 @@ EXPECTED_MESSAGE = "Failed: DID NOT RAISE <class 'RuntimeError'>"
 EXPECTATION_PATH = "governance/red_reproduction_expectations.json"
 
 
-def _expectation(prevention_id: str, *, message: str = EXPECTED_MESSAGE) -> dict[str, str]:
+def _expectation(
+    prevention_id: str,
+    *,
+    message: str = EXPECTED_MESSAGE,
+    guard_blob: str = "0" * 40,
+) -> dict[str, str]:
     return {
         "collection": "records",
         "expected_failure_message": message,
+        "guard_blob": guard_blob,
         "node": NODE,
         "prevention_id": prevention_id,
     }
@@ -96,6 +102,7 @@ def _v2_receipt_bytes(
     message: str = EXPECTED_MESSAGE,
     trusted_base_override: str | None = None,
     manifest_blob_override: str | None = None,
+    guard_blob_override: str | None = None,
 ) -> bytes:
     payload = {
         "expectation_authority": {
@@ -103,6 +110,7 @@ def _v2_receipt_bytes(
             "trusted_base_commit": trusted_base_override or trusted_base,
         },
         "expected_failure_messages": {NODE: message},
+        "guard_blobs": {"tests/test_guard.py": guard_blob_override or "0" * 40},
         "guard_nodes": [NODE],
         "record_ids": [record_id],
         "schema_version": 2,
@@ -189,6 +197,16 @@ def test_candidate_cannot_modify_or_delete_trusted_expectations(tmp_path: Path) 
     _assert_rejected(root, base, "modified or deleted")
 
 
+@pytest.mark.parametrize("mode", ["100755", "120000"])
+def test_candidate_cannot_change_expectation_manifest_mode_or_type(tmp_path: Path, mode: str) -> None:
+    root, base, _path = _seed(tmp_path)
+    manifest_blob = _git(root, "rev-parse", f"HEAD:{EXPECTATION_PATH}")
+    _git(root, "update-index", "--cacheinfo", f"{mode},{manifest_blob},{EXPECTATION_PATH}")
+    _commit_index(root, f"change expectation manifest mode to {mode}")
+
+    _assert_rejected(root, base, "regular file")
+
+
 def test_same_candidate_cannot_add_and_consume_expectation(tmp_path: Path) -> None:
     root, base, _path = _seed(tmp_path)
     manifest = json.loads((root / EXPECTATION_PATH).read_text(encoding="utf-8"))
@@ -242,12 +260,12 @@ def test_candidate_added_v2_receipt_cannot_self_author_expected_failure(tmp_path
             root,
             trusted_base=base,
             record_id="RED-SELF-AUTH",
-            message="AttributeError: unrelated fixture failure",
+            guard_blob_override="f" * 40,
         ),
     )
     _commit(root, "self-author unrelated failure as expected")
 
-    _assert_rejected(root, base, "expected failure differs from the trusted base")
+    _assert_rejected(root, base, "guard blob differs from the trusted base")
 
 
 @pytest.mark.parametrize(

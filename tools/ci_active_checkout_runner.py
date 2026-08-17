@@ -38,7 +38,7 @@ _REGISTRY = PurePosixPath("governance/agent_preventions.yaml")
 _REPRODUCTIONS = PurePosixPath("governance/red_reproductions")
 _EXPECTATIONS = PurePosixPath("governance/red_reproduction_expectations.json")
 _EXPECTATION_COLLECTIONS = frozenset({"records", "false_green_pairs"})
-_EXPECTATION_ENTRY_FIELDS = frozenset({"collection", "prevention_id", "node", "expected_failure_message"})
+_EXPECTATION_ENTRY_FIELDS = frozenset({"collection", "prevention_id", "node", "expected_failure_message", "guard_blob"})
 
 _PREVENTION_ID = re.compile(r"[A-Z0-9][A-Z0-9-]*\Z")
 _GUARD_NODE = re.compile(r"tests/[A-Za-z0-9_./-]+\.py::[A-Za-z0-9_\[\].:-]+\Z")
@@ -579,13 +579,13 @@ def _expectations_at(
     revision: str,
     *,
     label: str,
-) -> tuple[str | None, dict[tuple[str, str, str], str]]:
+) -> tuple[str | None, dict[tuple[str, str, str], tuple[str, str]]]:
     raw_entry = _git_bytes(root, "ls-tree", "-z", "--full-tree", revision, "--", f":(literal){_EXPECTATIONS}")
     if not raw_entry:
         return None, {}
-    _mode, kind, object_id = _tree_entry(root, revision, _EXPECTATIONS)
-    if kind != "blob":
-        raise RedReproductionComparisonError(f"{label} expectation manifest is not a blob")
+    mode, kind, object_id = _tree_entry(root, revision, _EXPECTATIONS)
+    if mode != "100644" or kind != "blob":
+        raise RedReproductionComparisonError(f"{label} expectation manifest must remain a regular file")
     raw = _git_bytes(root, "cat-file", "blob", object_id)
     try:
         payload = json.loads(raw.decode("utf-8"))
@@ -598,7 +598,7 @@ def _expectations_at(
     entries = payload["expectations"]
     if not isinstance(entries, list):
         raise RedReproductionComparisonError(f"{label} expectation manifest entries are malformed")
-    expectations: dict[tuple[str, str, str], str] = {}
+    expectations: dict[tuple[str, str, str], tuple[str, str]] = {}
     ordered_keys: list[tuple[str, str, str]] = []
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != _EXPECTATION_ENTRY_FIELDS:
@@ -607,6 +607,7 @@ def _expectations_at(
         prevention_id = entry["prevention_id"]
         node = entry["node"]
         message = entry["expected_failure_message"]
+        guard_blob = entry["guard_blob"]
         if (
             not isinstance(collection, str)
             or collection not in _EXPECTATION_COLLECTIONS
@@ -617,13 +618,15 @@ def _expectations_at(
             or not isinstance(message, str)
             or not message
             or message.strip() != message
+            or not isinstance(guard_blob, str)
+            or _SHA.fullmatch(guard_blob) is None
         ):
             raise RedReproductionComparisonError(f"{label} expectation manifest entry is invalid")
         key = (collection, prevention_id, node)
         if key in expectations:
             raise RedReproductionComparisonError(f"{label} expectation manifest has a duplicate entry: {key}")
         ordered_keys.append(key)
-        expectations[key] = message
+        expectations[key] = (message, guard_blob)
     if ordered_keys != sorted(ordered_keys):
         raise RedReproductionComparisonError(f"{label} expectation manifest entries are not sorted")
     return object_id, expectations
@@ -634,13 +637,13 @@ def _compare_expectation_manifests(
     *,
     candidate: str,
     trusted_base: str,
-) -> tuple[str | None, dict[tuple[str, str, str], str]]:
+) -> tuple[str | None, dict[tuple[str, str, str], tuple[str, str]]]:
     base_blob, base_expectations = _expectations_at(root, trusted_base, label="trusted base")
     _candidate_blob, candidate_expectations = _expectations_at(root, candidate, label="candidate")
     if base_blob is not None and _candidate_blob is None:
         raise RedReproductionComparisonError("candidate deleted the trusted-base expectation manifest")
-    for identity, message in base_expectations.items():
-        if candidate_expectations.get(identity) != message:
+    for identity, expectation in base_expectations.items():
+        if candidate_expectations.get(identity) != expectation:
             raise RedReproductionComparisonError(
                 f"candidate modified or deleted a trusted-base failure expectation: {identity}"
             )
@@ -653,7 +656,7 @@ def _require_candidate_added_schema_v2(
     candidate: str,
     trusted_base: str,
     trusted_manifest_blob: str | None,
-    trusted_expectations: dict[tuple[str, str, str], str],
+    trusted_expectations: dict[tuple[str, str, str], tuple[str, str]],
     identity: tuple[str, str],
     binding: tuple[str, str],
 ) -> None:
@@ -692,6 +695,7 @@ def _require_candidate_added_schema_v2(
     record_ids = receipt.get("record_ids")
     nodes = receipt.get("guard_nodes")
     expected = receipt.get("expected_failure_messages")
+    receipt_guard_blobs = receipt.get("guard_blobs")
     if (
         not isinstance(record_ids, list)
         or identity[1] not in record_ids
@@ -701,21 +705,30 @@ def _require_candidate_added_schema_v2(
         or len(nodes) != len(set(nodes))
         or not isinstance(expected, dict)
         or set(expected) != set(nodes)
+        or not isinstance(receipt_guard_blobs, dict)
+        or set(receipt_guard_blobs) != {node.split("::", 1)[0] for node in nodes}
     ):
         raise RedReproductionComparisonError(
             f"candidate-added red-reproduction expectation binding is malformed: {identity}"
         )
-    trusted_for_identity: dict[str, str] = {}
+    trusted_messages: dict[str, str] = {}
+    trusted_blobs: dict[str, str] = {}
     for node in nodes:
-        message = trusted_expectations.get((identity[0], identity[1], node))
-        if message is None:
+        expectation = trusted_expectations.get((identity[0], identity[1], node))
+        if expectation is None:
             raise RedReproductionComparisonError(
                 f"candidate-added red-reproduction consumes an expectation absent from the trusted base: {identity}"
             )
-        trusted_for_identity[node] = message
-    if expected != trusted_for_identity:
+        message, guard_blob = expectation
+        trusted_messages[node] = message
+        trusted_blobs[node.split("::", 1)[0]] = guard_blob
+    if expected != trusted_messages:
         raise RedReproductionComparisonError(
             f"candidate-added red-reproduction expected failure differs from the trusted base: {identity}"
+        )
+    if receipt_guard_blobs != trusted_blobs:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction guard blob differs from the trusted base: {identity}"
         )
 
 
