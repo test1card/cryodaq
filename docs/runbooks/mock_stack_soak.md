@@ -34,9 +34,11 @@ PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
 
 ## Profiles
 
-All profiles sample the launcher process and its ancestry-scoped descendants
-every 5 seconds. Identity is `(pid, OS start time)`, so PID reuse cannot select
-an unrelated process. Fault injection must re-check that identity immediately
+The `short` profile samples the launcher and its descendants every 5 seconds.
+The long profiles sample them every 30 seconds. The final validator rejects a
+sample file above 64 MiB or 25,000 records. Identity is `(pid, OS start time)`,
+so PID reuse cannot select an unrelated process. Fault injection must re-check
+that identity immediately
 before sending the allowlisted `SIGTERM` through
 `observer.signal_exact_identity/v1`; another signal, injection method,
 PID-only selector, or global process name is not qualification evidence.
