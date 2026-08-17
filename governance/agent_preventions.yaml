@@ -3282,6 +3282,27 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: WINDOWS-ONEDIR-DESCENDANT-SETTLEMENT-FALSE-GREEN-257
+    status: open
+    scope: product_contract
+    runtime_prevention_id: WINDOWS-PROCESS-TREE-CONTAINMENT-055
+    guard: tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/windows_onedir_descendant_settlement_257.json
+      sha256: sha256:fe25d4d9d6f1b4fe174634c8698b9e25aedb187fd4b9825b2dc79d6cf8a594a7
+    green_evidence: pending
+  - id: RED-REPRODUCTION-WRONG-FAILURE-CAUSE-FALSE-GREEN-258
+    status: open
+    scope: repository
+    runtime_prevention_id: RED-REPRODUCTION-BEHAVIORAL-FAILURE-BINDING-056
+    guard: tests/governance/test_red_reproduction.py::test_red_reproduction_requires_the_expected_behavioral_failure
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/red_reproduction_wrong_failure_cause_258.json
+      sha256: sha256:2f7a3ecce8593b1c26e3720ba7ae92f828869aaa2e34cebd701e507314afd13e
+    green_evidence: pending
+
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6448,4 +6469,49 @@ records:
       - node: tests/docs/test_evidence_packaging_readiness.py::test_procedure_parser_rejects_duplicate_opener_outside_bounded_block
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending
+  - id: WINDOWS-PROCESS-TREE-CONTAINMENT-055
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The production path is `run_smoke` to `_run_gui_startup_cell`, `CryoDAQ.exe --mode=gui`, `_dispatch`, `gui.app.main`, `ZmqBridge.start`, and the `zmq_bridge` process.
+    classification: late_side_effect
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The smoke test can report PASS while a GUI descendant remains active after the root process exits.
+    invariant: The smoke test assigns the root process to a Windows Job Object before execution. It reports PASS only after all job members and pipe readers stop.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof
+        ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/windows_onedir_descendant_settlement_257.json
+      sha256: sha256:fe25d4d9d6f1b4fe174634c8698b9e25aedb187fd4b9825b2dc79d6cf8a594a7
+    green_evidence: pending
+  - id: RED-REPRODUCTION-BEHAVIORAL-FAILURE-BINDING-056
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The production path is `main` to `produce_red_reproduction`, `_failure_signatures`, and each schema-v2 `node_runs` entry.
+    classification: evidence_misbinding
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A receipt can name the correct guard while an import or setup error causes the red result.
+    invariant: Each schema-v2 receipt binds each node to an exact behavioral failure line from that node's run. Only four approved schema-v1 receipts remain valid.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_red_reproduction.py::test_red_reproduction_requires_the_expected_behavioral_failure
+        ci_partition: remaining
+      - node: tests/governance/test_red_reproduction.py::test_producer_refuses_wrong_failure_cause_before_writing_receipt
+        ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/red_reproduction_wrong_failure_cause_258.json
+      sha256: sha256:2f7a3ecce8593b1c26e3720ba7ae92f828869aaa2e34cebd701e507314afd13e
     green_evidence: pending
