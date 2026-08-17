@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import queue
+import time
 from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel, _pct_color
+from cryodaq.gui.zmq_client import ZmqBridge
 
 
 @pytest.fixture(scope="session")
@@ -82,9 +85,12 @@ def _temp_reading(
     value: float,
     *,
     acquisition_started_at: float | None = None,
+    acquisition_started_monotonic: float | None = None,
+    bridge_ingress_monotonic: float | None = None,
     status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
     now = datetime.now(UTC)
+    now_monotonic = time.monotonic()
     return Reading(
         timestamp=now,
         instrument_id="LakeShore_1",
@@ -94,6 +100,12 @@ def _temp_reading(
         status=status,
         metadata={
             "acquisition_started_at": now.timestamp() if acquisition_started_at is None else acquisition_started_at,
+            "acquisition_started_monotonic": (
+                now_monotonic if acquisition_started_monotonic is None else acquisition_started_monotonic
+            ),
+            "bridge_ingress_monotonic": (
+                now_monotonic if bridge_ingress_monotonic is None else bridge_ingress_monotonic
+            ),
         },
     )
 
@@ -103,9 +115,12 @@ def _power_reading(
     *,
     channel: str = "Keithley_1/smua/power",
     acquisition_started_at: float | None = None,
+    acquisition_started_monotonic: float | None = None,
+    bridge_ingress_monotonic: float | None = None,
     status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
     now = datetime.now(UTC)
+    now_monotonic = time.monotonic()
     return Reading(
         timestamp=now,
         instrument_id="Keithley_1",
@@ -115,6 +130,12 @@ def _power_reading(
         status=status,
         metadata={
             "acquisition_started_at": now.timestamp() if acquisition_started_at is None else acquisition_started_at,
+            "acquisition_started_monotonic": (
+                now_monotonic if acquisition_started_monotonic is None else acquisition_started_monotonic
+            ),
+            "bridge_ingress_monotonic": (
+                now_monotonic if bridge_ingress_monotonic is None else bridge_ingress_monotonic
+            ),
         },
     )
 
@@ -713,7 +734,7 @@ def test_auto_tick_requires_fresh_power_and_temperature_samples_after_target_ack
     panel._auto_timer.stop()
 
 
-@pytest.mark.parametrize("acquisition_proof", ["before_ack", "missing"])
+@pytest.mark.parametrize("acquisition_proof", ["before_ack", "missing", "backlogged"])
 def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monkeypatch, acquisition_proof):
     import time as _time
 
@@ -734,16 +755,59 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
     _DeferredWorker.instances[-1].finish({"ok": True})
 
     assert panel._auto_step_ack_wall_s is not None
-    acquisition_start = panel._auto_step_ack_wall_s - 1.0 if acquisition_proof == "before_ack" else None
+    ack_monotonic = getattr(panel, "_auto_step_ack_monotonic_s", _time.monotonic())
+    acquisition_start = panel._auto_step_ack_wall_s + 100.0 if acquisition_proof == "before_ack" else None
+    acquisition_start_monotonic = ack_monotonic - 1.0 if acquisition_proof == "before_ack" else None
+    ingress_monotonic = (
+        _time.monotonic() - getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0) - 1.0
+        if acquisition_proof == "backlogged"
+        else None
+    )
+    queued_readings = []
     for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
-        reading = _temp_reading(channel, value, acquisition_started_at=acquisition_start)
+        reading = _temp_reading(
+            channel,
+            value,
+            acquisition_started_at=acquisition_start,
+            acquisition_started_monotonic=acquisition_start_monotonic,
+            bridge_ingress_monotonic=ingress_monotonic,
+        )
         if acquisition_proof == "missing":
             reading.metadata.clear()
-        panel._handle_reading(reading)
-    power_reading = _power_reading(0.01, acquisition_started_at=acquisition_start)
+        queued_readings.append(reading)
+    power_reading = _power_reading(
+        0.01,
+        acquisition_started_at=acquisition_start,
+        acquisition_started_monotonic=acquisition_start_monotonic,
+        bridge_ingress_monotonic=ingress_monotonic,
+    )
     if acquisition_proof == "missing":
         power_reading.metadata.clear()
-    panel._handle_reading(power_reading)
+    queued_readings.append(power_reading)
+    if acquisition_proof == "backlogged":
+        bridge = object.__new__(ZmqBridge)
+        bridge._data_queue = queue.Queue()
+        bridge._bridge_instance_id = "conductivity-backlog-test"
+        bridge._last_reading_time = 0.0
+        for reading in queued_readings:
+            bridge._data_queue.put_nowait(
+                {
+                    "timestamp": reading.timestamp.timestamp(),
+                    "instrument_id": reading.instrument_id,
+                    "channel": reading.channel,
+                    "value": reading.value,
+                    "unit": reading.unit,
+                    "status": reading.status.value,
+                    "raw": reading.raw,
+                    "metadata": {
+                        key: value for key, value in reading.metadata.items() if key != "bridge_ingress_monotonic"
+                    },
+                    "__bridge_ingress_monotonic": ingress_monotonic,
+                }
+            )
+        queued_readings = bridge.poll_readings()
+    for reading in queued_readings:
+        panel._handle_reading(reading)
 
     panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
     panel._auto_step_start = _time.monotonic() - 60.0
@@ -774,8 +838,15 @@ def test_auto_step_keeps_commanded_channels_when_controls_change(app, monkeypatc
     assert _DeferredWorker.instances[-1].cmd["channel"] == "smua"
     _DeferredWorker.instances[-1].finish({"ok": True})
 
+    original_checkboxes = dict(panel._checkboxes)
+    monkeypatch.setattr(module, "_get_temperature_channels", lambda: [("Т2", "Т2"), ("Т3", "Т3"), ("Т4", "Т4")])
+    panel._on_channels_changed()
+    assert panel._chain == ["Т1", "Т2"]
+    assert set(panel._checkboxes) == {"Т1", "Т2", "Т3", "Т4"}
+    assert all(panel._checkboxes[channel] is not original_checkboxes[channel] for channel in original_checkboxes)
+    assert all(not checkbox.isEnabled() for checkbox in panel._checkboxes.values())
+
     panel._on_power_changed("Keithley_1/smub/power")
-    panel._chain[:] = ["Т2", "Т3"]
     panel._handle_reading(_temp_reading("Т1", 110.0))
     panel._handle_reading(_temp_reading("Т2", 100.0))
     panel._handle_reading(_power_reading(0.012, channel="Keithley_1/smua/power"))
@@ -790,10 +861,18 @@ def test_auto_step_keeps_commanded_channels_when_controls_change(app, monkeypatc
     assert _DeferredWorker.instances[-1].cmd["channel"] == "smua"
     panel._on_auto_stop()
     assert _DeferredWorker.instances[-1].cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    _DeferredWorker.instances[-1].finish({"ok": True})
+    assert panel._auto_state == "idle"
+    assert set(panel._checkboxes) == {"Т2", "Т3", "Т4"}
+    assert panel._chain == ["Т2"]
+    assert all(checkbox.isEnabled() for checkbox in panel._checkboxes.values())
     panel._auto_timer.stop()
 
 
-@pytest.mark.parametrize("failure_mode", ["sensor_error", "sensor_error_without_provenance", "silence"])
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["sensor_error", "sensor_error_without_provenance", "power_sensor_error", "silence"],
+)
 def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode):
     import time as _time
 
@@ -825,6 +904,9 @@ def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode)
         if failure_mode == "sensor_error_without_provenance":
             reading.metadata.clear()
         panel._handle_reading(reading)
+    elif failure_mode == "power_sensor_error":
+        panel._handle_reading(_power_reading(float("nan"), status=ChannelStatus.SENSOR_ERROR))
+        panel._handle_reading(_power_reading(0.012))
     else:
         sample_max_age_s = getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0)
         stale_received_at = _time.monotonic() - sample_max_age_s - 1.0
@@ -837,6 +919,13 @@ def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode)
 
     assert panel._auto_step == 0
     assert panel._auto_results == []
+    if failure_mode == "power_sensor_error":
+        panel._handle_reading(_temp_reading("Т1", 110.0))
+        panel._handle_reading(_temp_reading("Т2", 100.0))
+        panel._handle_reading(_power_reading(0.012))
+        panel._auto_tick()
+        assert panel._auto_step == 1
+        assert len(panel._auto_results) == 1
     panel._auto_timer.stop()
 
 

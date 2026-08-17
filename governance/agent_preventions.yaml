@@ -3290,7 +3290,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_auto_evidence_authority_081.json
-      sha256: sha256:2bcca17a91cdd857451441f254c84ade135609dee02cf923bc8041c86826576c
+      sha256: sha256:61ae94697a9df4a85cfac5e02e799ceb58443f7eadd567e55c9bb2d455a51185
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-CHANNEL-IDENTITY-FALSE-GREEN-081
     status: open
@@ -3300,7 +3300,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_channel_identity_false_green_081.json
-      sha256: sha256:0d42fcd782b7917e04b7cbd39a70ca68189837dc45c574fe95e44c28efa5d10a
+      sha256: sha256:9e61e061815f852c39ddbe247baf260bb646e4735249eb72e15710fb9c2af0ca
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-UNUSABLE-FEED-FALSE-GREEN-081
     status: open
@@ -3310,7 +3310,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_unusable_feed_false_green_081.json
-      sha256: sha256:331742e0d8080df81faba2ab35ce87eea4d43904e7a9c2fd2da254066b87da47
+      sha256: sha256:fd63295708bddca6c28bfbc5e2f0e1151cdc547ab09d8a3b4d792be9bbcac939
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-LAKESHORE-ACQUISITION-FALSE-GREEN-081
     status: open
@@ -3320,7 +3320,7 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_lakeshore_acquisition_false_green_081.json
-      sha256: sha256:ecab6e71d1704aa5319284f5d64eead1e671fae05a74307f087fd3592dffd709
+      sha256: sha256:46fb0144220c45b8969eab335a551d575427e644380441d2bcf119a72572b4ca
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081
     status: open
@@ -3330,7 +3330,7 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_keithley_acquisition_false_green_081.json
-      sha256: sha256:7052510d3af2b5afea97666e49bd24dac85e463e798280c0643aa880a52d1cad
+      sha256: sha256:6b931afe319cac9a31aebba8dea01eb278bc59dab7199839250af96149383964
     green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
@@ -6508,8 +6508,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: The automatic sweep can advance or record a conductivity point from measurements acquired before the target acknowledgement, from stale or failed feeds, or from channels that differ from the commanded step.
-    invariant: Each automatic step binds one immutable Keithley channel and one immutable temperature chain. LakeShore and Keithley readings carry the acquisition start time. The panel accepts only usable samples whose acquisition started after the target acknowledgement and whose arrival age is at most 10 seconds. An unusable or silent selected feed clears the step evidence and the stability predictor. The next target and Stop use the bound Keithley channel. The panel does not advance without current qualified power and temperature evidence.
+    consequence: The automatic sweep can advance or record a conductivity point from a bridge backlog, from measurements acquired before the target acknowledgement after a wall-clock step, from temperature stability that spans a power-feed failure, or from controls rebuilt onto channels that differ from the commanded step.
+    invariant: Each automatic step binds one immutable Keithley channel and one immutable temperature chain. LakeShore and Keithley readings carry a monotonic acquisition start captured before I/O, and the bridge stamps monotonic ingress before its process queue. The panel accepts only usable samples acquired after the monotonic target acknowledgement and no more than 10 seconds old at bridge ingress. An unusable or silent selected power feed clears both power and temperature evidence plus the stability predictor. Channel-manager rebuilds preserve the bound chain and re-disable every rebuilt selector until settlement; inactive controls then reconcile to current settings. The next target and Stop use the bound Keithley channel. The panel does not advance without current qualified power and temperature evidence.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#architecture-and-extension-rules
@@ -6531,5 +6531,5 @@ records:
         ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
-      sha256: sha256:9e22ab9e74b7eb7584735a340c35770de8daec3f3e653cf43d1e06f2472d3c18
+      sha256: sha256:4efad657fb69ff51181e4101c99a90cc9f353e3a704c841e2f7753bab5a2be49
     green_evidence: pending

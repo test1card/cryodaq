@@ -484,13 +484,19 @@ async def test_mock_connection_uses_simulator_local_proof_only() -> None:
     await driver.connect()
     await driver.start_source("smua", 0.5, 40.0, 1.0)
     acquisition_call_started_at = time.time()
+    acquisition_call_started_monotonic = time.monotonic()
     readings = await driver.read_channels()
+    acquisition_call_finished_monotonic = time.monotonic()
     acquisition_call_finished_at = time.time()
     assert readings
     for reading in readings:
         acquisition_started_at = reading.metadata.get("acquisition_started_at")
         assert isinstance(acquisition_started_at, float)
         assert acquisition_call_started_at <= acquisition_started_at <= acquisition_call_finished_at
+        acquisition_started_monotonic = reading.metadata.get("acquisition_started_monotonic")
+        assert isinstance(acquisition_started_monotonic, float)
+        assert acquisition_call_started_monotonic <= acquisition_started_monotonic
+        assert acquisition_started_monotonic <= acquisition_call_finished_monotonic
     assert driver.output_state_unverified is True
     assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
     await driver.disconnect()

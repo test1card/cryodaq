@@ -136,11 +136,17 @@ to CSV for post-hoc analysis.
    run while a target reply is pending, but `_auto_tick()` must not advance. It
    is stopped for Stop-pending, completion-pending, outcome-unknown, and panel
    teardown. Therefore `stabilizing` does not imply an active timer.
-6. **A step uses samples from one evidence epoch.** Each driver records the
-   acquisition start before instrument I/O. The start must follow the target
-   acknowledgement. Each selected feed must remain usable and arrive within
-   10 seconds. The panel keeps the acknowledged power channel and temperature
-   chain until the step ends.
+6. **A step uses samples from one evidence epoch.** Each driver records a
+   monotonic acquisition start before instrument I/O. It must follow the
+   monotonic target acknowledgement even if the wall clock changes. The bridge
+   subprocess stamps monotonic ingress before its process queue, and the
+   10-second age limit is measured from that ingress rather than GUI dequeue.
+   Each selected feed must remain usable; an unusable or stale power feed also
+   clears the temperature predictor and evidence. The panel keeps the
+   acknowledged power channel and temperature chain until the step ends.
+   Channel-manager rebuilds preserve that bound chain and keep every rebuilt
+   selector disabled until the command settles; idle controls then reconcile
+   to the current channel settings.
 7. **Stop dispatch is not OFF evidence.** Operator Stop and final completion
    retain `"stabilizing"` and block finalization until a successful current
    `keithley_stop` reply commits `"idle"` or `"done"` respectively.
@@ -246,9 +252,11 @@ class ConductivityPanel(QWidget):
    `PLOT_LINE_PALETTE[i]` via `series_pen(i)`; surfaces/status use tokens.
 9. **Reaching into `_auto_state` directly from external code.** Use
    `get_auto_state()` / `is_auto_sweep_active()`.
-10. **Using the reading creation time as the acquisition time.** A slow
-    instrument can return old data with a new object timestamp. Use the
-    driver-provided `acquisition_started_at` value.
+10. **Using the reading creation or GUI dequeue time as evidence time.** A slow
+    instrument can return old data with a new object timestamp, and a bridge
+    backlog can dequeue old data as if it just arrived. Order samples with the
+    driver-provided `acquisition_started_monotonic` value and age them from the
+    bridge-provided `bridge_ingress_monotonic` value.
 
 ## Related components
 
@@ -259,8 +267,9 @@ class ConductivityPanel(QWidget):
 
 ## Changelog
 
-- **2026-08-17 — step evidence freshness.** Each step now uses driver acquisition
-  epochs, fixed channel identities, usable feed state, and a 10-second arrival limit.
+- **2026-08-17 — step evidence freshness.** Each step now uses monotonic driver
+  acquisition epochs, bridge-ingress age, fixed channel identities through
+  control rebuilds, usable feed state, and cross-feed invalidation on power loss.
 - **2026-07-20 — fail-closed command settlement.** Retained the three public
   guard-state values while adding generation-bound replies, explicit
   outcome-unknown retention, Stop supersession of pending targets, and

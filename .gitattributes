@@ -3,6 +3,9 @@
 governance/red_reproductions/*.json -text
 tests/core/test_alarm_config_validation.py text eol=lf
 tests/core/test_alarm_v2_integration.py text eol=lf
+tests/drivers/test_keithley_disconnect_verified_off.py text eol=lf
+tests/drivers/test_lakeshore_218s.py text eol=lf
+tests/gui/shell/overlays/test_conductivity_panel.py text eol=lf
 
 # *** PROTECTED PRODUCER BYTES. Do not remove or narrow. ***
 # tools/ci_candidate_evidence.py::_protected_producer_manifest hashes the RAW
