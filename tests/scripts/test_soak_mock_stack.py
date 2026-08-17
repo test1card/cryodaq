@@ -151,7 +151,7 @@ def test_unknown_profile_fails_closed() -> None:
 
 
 @pytest.mark.parametrize("profile_name", ["12h", "72h", "168h"])
-@pytest.mark.parametrize("now_epoch", [0.0, 1.0, 1_700_000_000.0, 1_777_777_777.0])
+@pytest.mark.parametrize("now_epoch", [0.0, 1.0, 15_600.0, 1_700_000_000.0, 1_777_777_777.0])
 def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assistant_fault(
     profile_name: str,
     now_epoch: float,
@@ -178,6 +178,30 @@ def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assis
         interval_s=interval_s,
         boundary_offset_s=boundary_offset_s,
         expected_receipts=expected_receipts - 1,
+    )
+
+
+def test_long_report_schedule_waits_through_a_temporarily_unavailable_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import soak_mock_stack_runner as runner
+
+    wall_epochs = iter((27_601.0, 27_602.0))
+    monotonic_epochs = iter((0.0, 0.0, 1.0))
+    sleeps: list[float] = []
+    monkeypatch.setattr(runner.time, "time", lambda: next(wall_epochs))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(monotonic_epochs))
+    monkeypatch.setattr(runner.time, "sleep", sleeps.append)
+
+    interval_s, boundary_offset_s, expected_receipts = runner._wait_for_soak_report_schedule(soak.PROFILES["12h"])
+
+    assert sleeps == [1]
+    assert (
+        soak.periodic_schedule_errors(
+            soak.PROFILES["12h"],
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s,
+            expected_receipts=expected_receipts,
+        )
+        == []
     )
 
 

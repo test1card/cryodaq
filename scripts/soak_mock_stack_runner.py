@@ -714,14 +714,38 @@ def _select_soak_report_schedule(selected: Any, now_epoch: float) -> tuple[int, 
         if boundary_offset_s < first_fault_s + 2 * soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S:
             continue
         expected_receipts = soak.expected_periodic_receipts(selected, interval_s, boundary_offset_s)
-        if not soak.periodic_schedule_errors(
+        selected_errors = soak.periodic_schedule_errors(
             selected,
             interval_s=interval_s,
             boundary_offset_s=boundary_offset_s,
             expected_receipts=expected_receipts,
-        ):
+        )
+        startup_floor_errors = soak.periodic_schedule_errors(
+            selected,
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s - soak.LONG_REPORT_EDGE_MARGIN_S,
+            expected_receipts=expected_receipts,
+        )
+        if not selected_errors and not startup_floor_errors:
             return interval_s, boundary_offset_s, expected_receipts
     raise _RunnerFoundationError("unable to align the reviewed long-soak report cadence")
+
+
+def _wait_for_soak_report_schedule(selected: Any) -> tuple[int, int, int]:
+    """Wait for a cadence that preserves the startup-time reservation."""
+
+    from scripts import soak_mock_stack as soak
+
+    deadline = time.monotonic() + soak.LONG_REPORT_EDGE_MARGIN_S + 2
+    while True:
+        try:
+            return _select_soak_report_schedule(selected, time.time())
+        except _RunnerFoundationError as exc:
+            if selected.name == "short" or str(exc) != "unable to align the reviewed long-soak report cadence":
+                raise
+            if time.monotonic() >= deadline:
+                raise _RunnerFoundationError("timed out while aligning the reviewed long-soak report cadence") from exc
+            time.sleep(1)
 
 
 def _validate_soak_runtime_schedule(
@@ -3478,9 +3502,7 @@ class _PosixSoakRunner:
         if locked.descendants(owner_identity, include_zombies=True):
             raise _RunnerFoundationError("qualification owner has unexpected live descendants")
         collector = _CleanShaCollector(_REPO_ROOT)
-        report_interval_s, report_boundary_offset_s, expected_receipts = _select_soak_report_schedule(
-            selected, time.time()
-        )
+        report_interval_s, report_boundary_offset_s, expected_receipts = _wait_for_soak_report_schedule(selected)
         sha = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=_REPO_ROOT,
