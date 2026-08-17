@@ -58,6 +58,13 @@ def _seed(tmp_path: Path) -> tuple[Path, str, str]:
     record = root / path
     record.parent.mkdir(parents=True)
     record.write_bytes(b'{"red": "seed"}\n')
+    contract = root / "tools/governance_contract.py"
+    contract.parent.mkdir(parents=True)
+    contract.write_text(
+        "_GRANDFATHERED_RED_REPRODUCTIONS_V1 = frozenset()\n",
+        encoding="utf-8",
+        newline="\n",
+    )
     digest = "sha256:" + hashlib.sha256(record.read_bytes()).hexdigest()
     _write_registry(root, locator=path, digest=digest)
     base = _commit(root, "seed trusted evidence")
@@ -69,12 +76,12 @@ def _assert_rejected(root: Path, base: str, fragment: str) -> None:
         compare_red_reproduction_bindings(root, candidate=_git(root, "rev-parse", "HEAD"), trusted_base=base)
 
 
-def test_unchanged_base_binding_and_new_binding_are_allowed(tmp_path: Path) -> None:
+def test_unchanged_base_binding_and_new_schema_v2_binding_are_allowed(tmp_path: Path) -> None:
     root, base, path = _seed(tmp_path)
     head = _git(root, "rev-parse", "HEAD")
     assert compare_red_reproduction_bindings(root, candidate=head, trusted_base=base)["outcome"] == "passed"
     extra = root / "governance/red_reproductions/new.json"
-    extra.write_bytes(b'{"red": "new"}\n')
+    extra.write_bytes(b'{"schema_version": 2}\n')
     _write_registry(root, locator=path, digest="sha256:" + hashlib.sha256((root / path).read_bytes()).hexdigest())
     registry = root / "governance/agent_preventions.yaml"
     registry.write_text(
@@ -90,6 +97,67 @@ def test_unchanged_base_binding_and_new_binding_are_allowed(tmp_path: Path) -> N
             "trusted_binding_count"
         ]
         == 1
+    )
+
+
+def test_candidate_added_binding_requires_schema_v2_even_if_candidate_extends_legacy_allowlist(
+    tmp_path: Path,
+) -> None:
+    root, base, path = _seed(tmp_path)
+    legacy_path = "governance/red_reproductions/candidate-legacy.json"
+    legacy = root / legacy_path
+    legacy.write_bytes(b'{"schema_version": 1}\n')
+    legacy_digest = "sha256:" + hashlib.sha256(legacy.read_bytes()).hexdigest()
+    _write_registry(root, locator=path, digest="sha256:" + hashlib.sha256((root / path).read_bytes()).hexdigest())
+    registry = root / "governance/agent_preventions.yaml"
+    registry.write_text(
+        registry.read_text(encoding="utf-8")
+        + "  - id: RED-CANDIDATE-LEGACY\n    red_evidence:\n"
+        + f"      locator: red-reproduction:{legacy_path}\n      sha256: {legacy_digest}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    (root / "tools/governance_contract.py").write_text(
+        "_GRANDFATHERED_RED_REPRODUCTIONS_V1 = frozenset(\n"
+        f"    {{('red-reproduction:{legacy_path}', '{legacy_digest}')}}\n"
+        ")\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    _commit(root, "downgrade candidate evidence and extend legacy allowlist")
+    _assert_rejected(root, base, "candidate-added red-reproduction evidence must use schema version 2")
+
+    legacy.write_bytes(b'{"schema_version": 2.0}\n')
+    float_digest = "sha256:" + hashlib.sha256(legacy.read_bytes()).hexdigest()
+    registry_text = registry.read_text(encoding="utf-8")
+    contract = root / "tools/governance_contract.py"
+    contract_text = contract.read_text(encoding="utf-8")
+    assert registry_text.count(legacy_digest) == 1
+    assert contract_text.count(legacy_digest) == 1
+    registry.write_text(registry_text.replace(legacy_digest, float_digest), encoding="utf-8", newline="\n")
+    contract.write_text(contract_text.replace(legacy_digest, float_digest), encoding="utf-8", newline="\n")
+    _commit(root, "bind candidate noninteger schema-v2 evidence")
+    _assert_rejected(root, base, "candidate-added red-reproduction evidence must use schema version 2")
+
+    legacy.write_bytes(b'{"schema_version": 2}\n')
+    schema_v2_digest = "sha256:" + hashlib.sha256(legacy.read_bytes()).hexdigest()
+    _commit(root, "change candidate evidence without changing its digest")
+    _assert_rejected(root, base, "candidate-added red-reproduction digest does not match committed bytes")
+
+    registry_text = registry.read_text(encoding="utf-8")
+    contract_text = contract.read_text(encoding="utf-8")
+    assert registry_text.count(float_digest) == 1
+    assert contract_text.count(float_digest) == 1
+    registry.write_text(registry_text.replace(float_digest, schema_v2_digest), encoding="utf-8", newline="\n")
+    contract.write_text(contract_text.replace(float_digest, schema_v2_digest), encoding="utf-8", newline="\n")
+    _commit(root, "bind candidate schema-v2 evidence to its committed digest")
+    assert (
+        compare_red_reproduction_bindings(
+            root,
+            candidate=_git(root, "rev-parse", "HEAD"),
+            trusted_base=base,
+        )["outcome"]
+        == "passed"
     )
 
 

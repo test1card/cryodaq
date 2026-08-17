@@ -1,8 +1,11 @@
 *.ttf binary
 *.otf binary
-governance/red_reproductions/*.json -text
+governance/red_reproductions/*.json -text whitespace=cr-at-eol
 tests/core/test_alarm_config_validation.py text eol=lf
 tests/core/test_alarm_v2_integration.py text eol=lf
+tests/governance/test_red_reproduction.py text eol=lf
+tests/governance/test_red_reproduction_immutability.py text eol=lf
+tests/test_windows_onedir_smoke_contract.py text eol=lf
 
 # *** PROTECTED PRODUCER BYTES. Do not remove or narrow. ***
 # tools/ci_candidate_evidence.py::_protected_producer_manifest hashes the RAW

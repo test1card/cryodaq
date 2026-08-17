@@ -684,6 +684,7 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     """A sealed tree must reject an in-place ``assert True`` guard weakening."""
 
     payload = _registry()
+    validate_registry(payload, root=ROOT)
     source_path = "tests/core/test_alarm_config_validation.py"
     # This proof needs a CLOSED entry carrying guard_source_blobs. Reading one out
     # of the live registry made the test hostage to registry state: the moment the
@@ -714,6 +715,17 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     sealed_integration.parent.mkdir(parents=True, exist_ok=True)
     sealed_integration.write_bytes((ROOT / integration_path).read_bytes())
     shutil.copytree(ROOT / "governance" / "red_reproductions", tmp_path / "governance" / "red_reproductions")
+    for receipt_path in (tmp_path / "governance" / "red_reproductions").glob("*.json"):
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        for guard_path in receipt["guard_blobs"]:
+            relative_guard_path = Path(guard_path)
+            assert not relative_guard_path.is_absolute()
+            assert ".." not in relative_guard_path.parts
+            sealed_receipt_guard = tmp_path / relative_guard_path
+            if sealed_receipt_guard.is_file():
+                continue
+            sealed_receipt_guard.parent.mkdir(parents=True, exist_ok=True)
+            sealed_receipt_guard.write_bytes((ROOT / relative_guard_path).read_bytes())
     validate_registry(payload, root=tmp_path)
 
     weakened = sealed_guard.read_text(encoding="utf-8").replace(

@@ -81,6 +81,58 @@ def test_receipt_bound_guards_are_checked_out_with_lf(tmp_path: Path) -> None:
     assert all(b"\r" not in (ROOT / path).read_bytes() for path in paths)
 
 
+def test_receipt_crlf_is_exact_and_diff_check_still_rejects_spaces(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / ".gitattributes").write_bytes((ROOT / ".gitattributes").read_bytes())
+    receipt_path = repository / "governance" / "red_reproductions" / "probe.json"
+    receipt_path.parent.mkdir(parents=True)
+    raw = b'{\r\n  "value": 1\r\n}\r\n'
+    receipt_path.write_bytes(raw)
+    subprocess.run(
+        ["git", "init", "--quiet"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "add", ".gitattributes", "governance/red_reproductions/probe.json"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    staged = subprocess.run(
+        ["git", "show", ":governance/red_reproductions/probe.json"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    assert staged.stdout == raw
+    clean = subprocess.run(
+        ["git", "diff", "--cached", "--check"],
+        cwd=repository,
+        check=False,
+        capture_output=True,
+    )
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    receipt_path.write_bytes(b'{\r\n  "value": 1 \r\n}\r\n')
+    subprocess.run(
+        ["git", "add", "governance/red_reproductions/probe.json"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    trailing_space = subprocess.run(
+        ["git", "diff", "--cached", "--check"],
+        cwd=repository,
+        check=False,
+        capture_output=True,
+    )
+    assert trailing_space.returncode != 0
+    assert b"trailing whitespace" in trailing_space.stdout + trailing_space.stderr
+
+
 def test_receipt_guard_blob_still_rejects_a_real_source_mismatch(tmp_path: Path) -> None:
     """Checkout normalization cannot make a changed guard source pass its receipt."""
 

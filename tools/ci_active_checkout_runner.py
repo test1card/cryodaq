@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import re
@@ -567,6 +568,36 @@ def _tree_entry(root: Path, revision: str, path: PurePosixPath) -> tuple[str, st
     return mode, kind, object_id
 
 
+def _require_candidate_added_schema_v2(
+    root: Path,
+    *,
+    candidate: str,
+    identity: tuple[str, str],
+    binding: tuple[str, str],
+) -> None:
+    path = _canonical_reproduction_path(binding[0])
+    _mode, kind, object_id = _tree_entry(root, candidate, path)
+    if kind != "blob":
+        raise RedReproductionComparisonError(f"candidate-added red-reproduction evidence is not a blob: {identity}")
+    raw = _git_bytes(root, "cat-file", "blob", object_id)
+    actual_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if binding[1] != actual_digest:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction digest does not match committed bytes: {identity}"
+        )
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction evidence is not valid UTF-8 JSON: {identity}"
+        ) from exc
+    schema_version = receipt.get("schema_version") if isinstance(receipt, dict) else None
+    if type(schema_version) is not int or schema_version != 2:
+        raise RedReproductionComparisonError(
+            f"candidate-added red-reproduction evidence must use schema version 2: {identity}"
+        )
+
+
 def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_base: str) -> dict[str, str | int]:
     """Compare committed candidate evidence bindings against one trusted commit.
 
@@ -600,6 +631,13 @@ def compare_red_reproduction_bindings(root: Path, *, candidate: str, trusted_bas
             raise RedReproductionComparisonError(
                 f"candidate changed trusted-base red-reproduction mode or type: {path}"
             )
+    for identity in sorted(current.keys() - base.keys()):
+        _require_candidate_added_schema_v2(
+            root,
+            candidate=candidate_commit,
+            identity=identity,
+            binding=current[identity],
+        )
     return {
         "candidate_commit": candidate_commit,
         "candidate_tree": _git(root, "rev-parse", "--verify", f"{candidate_commit}^{{tree}}"),

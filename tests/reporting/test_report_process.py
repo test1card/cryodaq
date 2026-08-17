@@ -9,6 +9,7 @@ import sys
 import time
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -845,6 +846,198 @@ def test_windows_cleanup_abstraction_uses_taskkill(monkeypatch: pytest.MonkeyPat
     assert calls == [["taskkill", "/PID", "321", "/T", "/F"]]
 
 
+def test_windows_report_process_starts_suspended_before_job_assignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    events: list[str] = []
+
+    class FakeProcess:
+        pid = 321
+
+        def wait(self, timeout: float | None = None) -> int:
+            events.append("wait")
+            return 0
+
+    class Accounting:
+        total_processes = 1
+        active_processes = 1
+
+    class FakeJob:
+        def __init__(self, process: FakeProcess | None = None) -> None:
+            events.append("job")
+            if process is not None:
+                self.assign(process)
+
+        def assign(self, process: FakeProcess) -> None:
+            assert process is fake_process
+            events.append("assign")
+
+        def accounting(self) -> Accounting:
+            return Accounting()
+
+        def close(self) -> None:
+            events.append("close")
+
+    fake_process = FakeProcess()
+
+    def fake_popen(*_args: object, creationflags: int = 0, **_kwargs: object) -> FakeProcess:
+        events.append(f"popen:{creationflags}")
+        assert creationflags & 0x00000004
+        return fake_process
+
+    runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
+    monkeypatch.setattr(module.os, "name", "nt")
+    monkeypatch.setattr(module.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module, "_WindowsJob", FakeJob)
+    monkeypatch.setattr(
+        module,
+        "_resume_suspended_windows_process",
+        lambda process: events.append("resume") if process is fake_process else None,
+        raising=False,
+    )
+
+    assert runner._run_process(["fixed-child"]) == 0
+    assert events == ["popen:516", "job", "assign", "resume", "wait", "close"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows Job Objects")
+def test_windows_native_job_starts_suspended_child_and_settles() -> None:
+    import cryodaq.report_process as module
+
+    process: subprocess.Popen[bytes] | None = None
+    job: object | None = None
+    try:
+        process, job = module._popen_windows_job(
+            [sys.executable, "-c", "pass"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+        _stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
+        accounting = job.accounting()
+        assert accounting.total_processes == 1
+        assert accounting.active_processes == 0
+    finally:
+        try:
+            if job is not None:
+                job.close()
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows Job Objects")
+def test_windows_native_job_counts_and_kills_devnull_grandchild(tmp_path: Path) -> None:
+    import psutil
+
+    import cryodaq.report_process as module
+
+    child_pid_path = tmp_path / "job-grandchild.pid"
+    grandchild_code = "import time; time.sleep(30)"
+    parent_code = (
+        "import pathlib, subprocess, sys;"
+        "child = subprocess.Popen([sys.executable, '-c', sys.argv[2]], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL, close_fds=True);"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')"
+    )
+    process: subprocess.Popen[bytes] | None = None
+    job: object | None = None
+    child: psutil.Process | None = None
+    child_create_time: float | None = None
+    job_closed = False
+    try:
+        process, job = module._popen_windows_job(
+            [sys.executable, "-u", "-c", parent_code, str(child_pid_path), grandchild_code],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+        _stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
+        assert child_pid_path.is_file()
+        child = psutil.Process(int(child_pid_path.read_text(encoding="ascii")))
+        child_create_time = child.create_time()
+        accounting = job.accounting()
+        assert accounting.total_processes == 2
+        assert accounting.active_processes == 1
+        assert child.is_running()
+
+        job.close()
+        job_closed = True
+        gone, alive = psutil.wait_procs([child], timeout=5)
+        assert child in gone
+        assert alive == []
+    finally:
+        try:
+            if job is not None and not job_closed:
+                job.close()
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            if child is not None and child.is_running():
+                assert child_create_time is not None
+                assert child.create_time() == child_create_time
+                child.terminate()
+                try:
+                    child.wait(timeout=2)
+                except psutil.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=2)
+
+
+def test_windows_job_close_terminates_and_waits_for_zero_active_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    events: list[tuple[str, int | float]] = []
+    active_counts = iter((1, 1, 0))
+
+    class FakeKernel32:
+        def TerminateJobObject(self, handle: int, exit_code: int) -> bool:
+            events.append(("terminate", exit_code))
+            assert handle == 123
+            return True
+
+        def CloseHandle(self, handle: int) -> bool:
+            events.append(("close", handle))
+            return True
+
+    job = object.__new__(module._WindowsJob)
+    job._handle = 123
+    job._kernel32 = FakeKernel32()
+
+    def accounting() -> object:
+        active_processes = next(active_counts)
+        events.append(("accounting", active_processes))
+        return module._WindowsJobAccounting(total_processes=2, active_processes=active_processes)
+
+    monkeypatch.setattr(job, "accounting", accounting)
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+
+    job.close()
+
+    assert events == [
+        ("accounting", 1),
+        ("terminate", 1),
+        ("accounting", 1),
+        ("sleep", 0.01),
+        ("accounting", 0),
+        ("close", 123),
+    ]
+    assert job._handle is None
+
+
 def test_windows_job_closes_on_ordinary_nonzero_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -863,6 +1056,9 @@ def test_windows_job_closes_on_ordinary_nonzero_exit(
     class FakeJob:
         closed = False
 
+        def accounting(self) -> SimpleNamespace:
+            return SimpleNamespace(total_processes=1, active_processes=1)
+
         def close(self) -> None:
             events.append("close")
             self.closed = True
@@ -878,10 +1074,50 @@ def test_windows_job_closes_on_ordinary_nonzero_exit(
         "_create_windows_job",
         lambda _process: events.append("assign") or job,
     )
+    monkeypatch.setattr(
+        module,
+        "_resume_suspended_windows_process",
+        lambda _process: events.append("resume"),
+    )
 
     assert runner._run_process(["fixed-child"]) == 7
     assert job.closed is True
-    assert events == ["assign", "wait", "close"]
+    assert events == ["assign", "resume", "wait", "close"]
+
+
+def test_windows_job_close_failure_after_ordinary_exit_is_report_process_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    class FakeProcess:
+        pid = 321
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    class FakeJob:
+        def close(self) -> None:
+            raise OSError("CloseHandle failed")
+
+    runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(module, "_creation_kwargs", lambda: {})
+    monkeypatch.setattr(
+        module,
+        "_popen_windows_job",
+        lambda *_args, **_kwargs: (FakeProcess(), FakeJob()),
+    )
+
+    with pytest.raises(
+        ReportProcessError,
+        match="Job Object cleanup failed after exit",
+    ) as exc_info:
+        runner._run_process(["fixed-child"])
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert str(exc_info.value.__cause__) == "CloseHandle failed"
 
 
 def test_windows_job_closes_on_timeout(
@@ -906,6 +1142,9 @@ def test_windows_job_closes_on_timeout(
     class FakeJob:
         closes = 0
 
+        def accounting(self) -> SimpleNamespace:
+            return SimpleNamespace(total_processes=1, active_processes=1)
+
         def close(self) -> None:
             self.closes += 1
 
@@ -916,10 +1155,53 @@ def test_windows_job_closes_on_timeout(
     monkeypatch.setattr(module, "_creation_kwargs", lambda: {})
     monkeypatch.setattr(module.subprocess, "Popen", lambda *_args, **_kwargs: process)
     monkeypatch.setattr(module, "_create_windows_job", lambda _process: job)
+    monkeypatch.setattr(module, "_resume_suspended_windows_process", lambda _process: None)
 
     with pytest.raises(ReportProcessError, match="timed out"):
         runner._run_process(["fixed-child"])
     assert job.closes >= 1
+
+
+def test_windows_job_close_failure_still_kills_and_settles_timed_out_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import cryodaq.report_process as module
+
+    class FakeProcess:
+        pid = 321
+        waits = 0
+        killed = False
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waits += 1
+            if not self.killed:
+                raise subprocess.TimeoutExpired("fixed-child", timeout)
+            return 1
+
+        def kill(self) -> None:
+            self.killed = True
+
+    class FakeJob:
+        closes = 0
+
+        def close(self) -> None:
+            self.closes += 1
+            raise OSError("CloseHandle failed")
+
+    process = FakeProcess()
+    job = FakeJob()
+    runner = ReportProcessRunner(tmp_path, timeout_s=0.5)
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(module, "_creation_kwargs", lambda: {})
+    monkeypatch.setattr(module, "_popen_windows_job", lambda *_args, **_kwargs: (process, job))
+
+    with pytest.raises(ReportProcessError, match="Job Object cleanup failed after timeout"):
+        runner._run_process(["fixed-child"])
+
+    assert process.killed is True
+    assert process.waits == 3
+    assert job.closes == 1
 
 
 def test_windows_job_assignment_failure_kills_tree_and_fails_closed(

@@ -1,0 +1,93 @@
+{
+  "defective_commit": "c2fea25da9449d9bf91e0b6c2011a014e4d8f000",
+  "defective_source_blobs": {
+    "build_scripts/windows_onedir_smoke.py": "1c145223d1ad000f40deb225e16ab27e2895406c"
+  },
+  "defective_tree": "933484f07d671fcd2b357c47363378b756d9d9c0",
+  "environment": {
+    "COMSPEC": "C:\\WINDOWS\\system32\\cmd.exe",
+    "CRYODAQ_RED_REPRODUCTION_REPORT": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-umsk61qs\\pytest-plugin\\pytest-report.json",
+    "PATH": "C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\3fall\\.codex\\tmp\\arg0\\codex-arg0o3r8cf;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\override;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\java8path;C:\\Program Files (x86)\\Common Files\\Oracle\\Java\\javapath;C:\\Program Files\\Eclipse Adoptium\\jdk-25.0.2.10-hotspot\\bin;C:\\Python314\\Scripts\\;C:\\Python314\\;C:\\Program Files\\Microsoft MPI\\Bin\\;C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem;C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\;C:\\WINDOWS\\System32\\OpenSSH\\;C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR;C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common;C:\\Program Files\\dotnet\\;C:\\Program Files (x86)\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\Client SDK\\ODBC\\170\\Tools\\Binn\\;C:\\Program Files\\Microsoft SQL Server\\160\\DTS\\Binn\\;C:\\Program Files (x86)\\Windows Kits\\8.1\\Windows Performance Toolkit\\;C:\\Program Files\\Siemens\\NX2506\\CAPITALINTEGRATION\\capitalnxremote\\;C:\\Program Files\\Git\\cmd;C:\\Program Files\\GitHub CLI\\;C:\\Program Files\\PowerToys\\DSCModules\\;C:\\Program Files\\nodejs\\;C:\\ProgramData\\chocolatey\\bin;C:\\Program Files\\Tailscale\\;C:\\Program Files\\Sunshine;C:\\Program Files\\Sunshine\\tools;C:\\Users\\3fall\\.kimi-code\\bin;C:\\Program Files (x86)\\Intel\\oneAPI\\compiler\\2026.0\\bin;C:\\Users\\3fall\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts;C:\\Users\\3fall\\AppData\\Local\\hermes\\bin;C:\\Users\\3fall\\.cargo\\bin;C:\\Users\\3fall\\.local\\bin;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\powershell;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\3fall\\AppData\\Local\\Programs\\Microsoft VS Code\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\bin;C:\\Users\\3fall\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts;C:\\Users\\3fall\\AppData\\Roaming\\npm;C:\\Users\\3fall\\AppData\\Local\\Programs\\Ollama;C:\\Users\\3fall\\AppData\\Local\\Programs\\MiKTeX\\miktex\\bin\\x64\\;C:\\Users\\3fall\\AppData\\Local\\Programs\\Antigravity\\bin;C:\\Users\\3fall\\.bun\\bin;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\BurntSushi.ripgrep.MSVC_Microsoft.Winget.Source_8wekyb3d8bbwe\\ripgrep-15.1.0-x86_64-pc-windows-msvc;C:\\Users\\3fall\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.1-full_build\\bin;C:\\Users\\3fall\\.cache\\lm-studio\\bin;C:\\Users\\3fall\\.dotnet\\tools;C:\\Users\\3fall\\AppData\\Roaming\\Python\\Python314\\Scripts;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin\\fallback;C:\\Users\\3fall\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\native\\git\\cmd;C:\\Users\\3fall\\AppData\\Local\\OpenAI\\Codex\\bin\\53c73f34a40c42be;C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.810.7004.0_x64__2p2nqsd0c76g0\\app\\resources",
+    "PATHEXT": ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.PY;.PYW;.CPL",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONPATH": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-umsk61qs\\pytest-plugin;C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-umsk61qs\\worktree\\src",
+    "SYSTEMROOT": "C:\\WINDOWS",
+    "TEMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-umsk61qs\\worktree\\.red-reproduction-tmp",
+    "TMP": "C:\\Users\\3fall\\AppData\\Local\\Temp\\cryodaq-red-reproduction-umsk61qs\\worktree\\.red-reproduction-tmp"
+  },
+  "expected_failure_lines": {
+    "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof": [
+      "E   Failed: DID NOT RAISE <class 'RuntimeError'>"
+    ]
+  },
+  "guard_blobs": {
+    "tests/test_windows_onedir_smoke_contract.py": "1a9ff794ca1ee37ff45aa6252012bfc099110541"
+  },
+  "guard_nodes": [
+    "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof"
+  ],
+  "node_runs": {
+    "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof": {
+      "command": [
+        "C:\\Python314\\python.exe",
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-p",
+        "_cryodaq_red_reproduction_capture",
+        "--color=no",
+        "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof",
+        "-q",
+        "--tb=short"
+      ],
+      "exit_code": 1,
+      "failure_signatures": [
+        "FAILED tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof"
+      ],
+      "stderr_bytes_base64": "",
+      "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes_base64": "RiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFsxMDAlXQ0KPT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PSBGQUlMVVJFUyA9PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PQ0KX19fX19fX19fX19fIHRlc3RfZ3VpX3Ntb2tlX3JlZnVzZXNfbGl2ZV9kZXNjZW5kYW50X2FmdGVyX3BpcGVfZW9mIF9fX19fX19fX19fXw0KdGVzdHNcdGVzdF93aW5kb3dzX29uZWRpcl9zbW9rZV9jb250cmFjdC5weToxODc6IGluIHRlc3RfZ3VpX3Ntb2tlX3JlZnVzZXNfbGl2ZV9kZXNjZW5kYW50X2FmdGVyX3BpcGVfZW9mDQogICAgd2l0aCBweXRlc3QucmFpc2VzKFJ1bnRpbWVFcnJvciwgbWF0Y2g9ImxlZnQgMSBsaXZlIHByb2Nlc3MiKToNCiAgICAgICAgIF5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eDQpFICAgRmFpbGVkOiBESUQgTk9UIFJBSVNFIDxjbGFzcyAnUnVudGltZUVycm9yJz4NCj09PT09PT09PT09PT09PT09PT09PT09PT09PSBzaG9ydCB0ZXN0IHN1bW1hcnkgaW5mbyA9PT09PT09PT09PT09PT09PT09PT09PT09PT0NCkZBSUxFRCB0ZXN0cy90ZXN0X3dpbmRvd3Nfb25lZGlyX3Ntb2tlX2NvbnRyYWN0LnB5Ojp0ZXN0X2d1aV9zbW9rZV9yZWZ1c2VzX2xpdmVfZGVzY2VuZGFudF9hZnRlcl9waXBlX2VvZg0KMSBmYWlsZWQgaW4gMC4xMnMNCg==",
+      "stdout_sha256": "sha256:686cd051f5fe9a54f8f2f888b68ef21c5006889264f947e38c8c92d7946769c1",
+      "test_reports": [
+        {
+          "crash": null,
+          "longrepr_lines": [],
+          "nodeid": "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof",
+          "outcome": "passed",
+          "when": "setup"
+        },
+        {
+          "crash": {
+            "lineno": 187,
+            "message": "Failed: DID NOT RAISE <class 'RuntimeError'>",
+            "path": "tests/test_windows_onedir_smoke_contract.py"
+          },
+          "longrepr_lines": [
+            "tests\\test_windows_onedir_smoke_contract.py:187: in test_gui_smoke_refuses_live_descendant_after_pipe_eof",
+            "    with pytest.raises(RuntimeError, match=\"left 1 live process\"):",
+            "         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+            "E   Failed: DID NOT RAISE <class 'RuntimeError'>"
+          ],
+          "nodeid": "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof",
+          "outcome": "failed",
+          "when": "call"
+        },
+        {
+          "crash": null,
+          "longrepr_lines": [],
+          "nodeid": "tests/test_windows_onedir_smoke_contract.py::test_gui_smoke_refuses_live_descendant_after_pipe_eof",
+          "outcome": "passed",
+          "when": "teardown"
+        }
+      ]
+    }
+  },
+  "provenance": "local-executed-red-reproduction; lower provenance than sealed hosted CI",
+  "python_version": "Python 3.14.3",
+  "record_ids": [
+    "WINDOWS-ONEDIR-DESCENDANT-SETTLEMENT-FALSE-GREEN-257",
+    "WINDOWS-PROCESS-TREE-CONTAINMENT-055"
+  ],
+  "schema_version": 2
+}
