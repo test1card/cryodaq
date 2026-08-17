@@ -2,16 +2,15 @@
 
 ## Purpose
 
-This lane is the active Linux source-mode short qualification for the launcher,
-mock engine, GUI ZMQ bridge, assistant child, and H3 coordinator. It is
-separate from `scripts/soak_mock_engine.py`: the existing engine-only nightly
-lane remains useful and must not be reported as whole-stack evidence.
+This runner qualifies the Linux source stack. The stack contains the launcher,
+mock engine, GUI ZMQ bridge, assistant child, and H3 coordinator. The runner is
+separate from `scripts/soak_mock_engine.py`. The engine-only nightly lane does
+not supply whole-stack evidence.
 
-The integrated runner supports the Linux source-mode `short` profile only. It
-owns the locked `psutil` observer, positive launcher bridge handshake, inherited
-AF_UNIX periodic-artifact capability, exact-six execution, source process
-session, scheduled fault injection, joined receipts, and bounded cleanup. It
-rejects Windows and non-Linux POSIX hosts before creating an evidence bundle.
+The integrated runner supports the reviewed `short`, `12h`, `72h`, and `168h`
+profiles. It owns process observation, fault injection, periodic artifacts, and
+bounded cleanup. It rejects Windows and non-Linux POSIX hosts before it creates
+an evidence bundle.
 
 Run the qualification only from an exact clean SHA under the worktree's
 `.venv/bin/python`:
@@ -21,11 +20,17 @@ PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
   --profile short --evidence-dir artifacts/mock-stack-soak/preflight
 ```
 
-There is no acknowledgement or caller-supplied prerequisite/PASS option. The
-12-hour and 72-hour profiles remain validation contracts and open duration
-gates; the active runner refuses them until separately reviewed activation.
-The short-profile activation gate also remains open until this candidate is
-committed at a clean SHA and the real Linux run completes with a sealed PASS.
+There is no caller-supplied prerequisite or PASS option. A profile run must use
+an exact clean SHA. Each duration gate stays open until its real Ubuntu 22.04
+run completes with a sealed PASS.
+
+Run a long profile only on the laboratory qualification host. Use one of the
+reviewed names: `12h`, `72h`, or `168h`. For example:
+
+```bash
+PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
+  --profile 168h --evidence-dir artifacts/mock-stack-soak/168h
+```
 
 ## Profiles
 
@@ -46,13 +51,14 @@ silently become the baseline.
 | `short` | 15 min | 3 min | 3 min 5 s | 5 min | screen only | screen only |
 | `12h` | 12 h | 10 min | 1, 4, 8 h | 2, 6, 10 h | < 4 MiB/h | <= 1/h |
 | `72h` | 72 h | 10 min | 1, 12, 24, 48, 60 h | 2, 18, 36, 54, 66 h | < 1 MiB/h | <= 0.25/h |
+| `168h` | 168 h | 10 min | 1, 12, 24, 48, 60, 84, 108, 132, 156 h | 2, 18, 36, 54, 66, 90, 114, 138, 162 h | < 1 MiB/h | <= 0.25/h |
 
 Every process replacement must have a new PID/start identity. Engine recovery
 also requires bridge data readiness; assistant recovery requires a strictly
 newer H3 health heartbeat/owner. Each recovery has a 60-second ceiling. Final
 graceful shutdown has a 20-second ceiling and zero recorded live descendants.
 
-Across 12/72-hour post-warm-up samples, robust fitted aggregate RSS growth must
+Across 12/72/168-hour post-warm-up samples, robust fitted aggregate RSS growth must
 remain below 50 MiB. The slope estimator deterministically keeps at most 257
 evenly spaced points, including both endpoints, and computes at most 32,896
 pairwise slopes. A 72-hour five-second series therefore cannot trigger an

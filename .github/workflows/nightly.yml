@@ -91,9 +91,9 @@ jobs:
     # demands signal.pthread_sigmask, and EXACT_SIX_COMMAND is pinned to
     # ".venv/bin/python".
     #
-    # This job makes the SHORT profile leave a receipt. It does NOT make the 12h
-    # or 72h profiles reachable: the CLI refuses every profile except short by
-    # deliberate activation gating, and this job does not touch that.
+    # This job runs only the SHORT profile because hosted jobs have a bounded
+    # time budget. The reviewed 12h, 72h, and 168h profiles run manually on the
+    # Ubuntu 22.04 laboratory qualification host.
     runs-on: ubuntu-latest
     env:
       PYTHONUTF8: "1"
