@@ -14,6 +14,14 @@ class MockInstrumentEndpoint:
     host: str
     port: int
 
+    def __post_init__(self) -> None:
+        """Reject direct construction that would bypass parser safety checks."""
+
+        if not isinstance(self.host, str) or self.host not in {"127.0.0.1", "localhost"}:
+            raise ValueError("mock instrument endpoint must use localhost or 127.0.0.1")
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
+            raise ValueError("mock instrument endpoint port must be an integer in 1..65535")
+
     @classmethod
     def parse(cls, value: str) -> MockInstrumentEndpoint:
         """Parse HOST:PORT without accepting remote hosts."""

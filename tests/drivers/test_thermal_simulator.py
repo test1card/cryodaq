@@ -361,6 +361,16 @@ def test_external_simulator_is_loopback_only_and_mock_only(
         DriverConstructionContext(mock=False, mock_instrument_client=external_simulator)
 
 
+def test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds() -> None:
+    assert MockInstrumentEndpoint("localhost", 1) == MockInstrumentEndpoint.parse("localhost:1")
+    assert MockInstrumentEndpoint("127.0.0.1", 65535) == MockInstrumentEndpoint.parse("127.0.0.1:65535")
+    with pytest.raises(ValueError, match="localhost"):
+        MockInstrumentEndpoint("192.0.2.1", 1234)
+    for invalid_port in (0, 65536, -1, True, 1.5, "1234"):
+        with pytest.raises(ValueError, match="port"):
+            MockInstrumentEndpoint("127.0.0.1", invalid_port)  # type: ignore[arg-type]
+
+
 class _InitialZeroRetryClient(ExternalMockInstrumentClient):
     def __init__(self, mode: str) -> None:
         super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
@@ -498,6 +508,38 @@ class _TargetOutcomeClient(ExternalMockInstrumentClient):
             await self.release_target.wait()
 
 
+class _AlreadyLatchedTargetFailureClient(ExternalMockInstrumentClient):
+    def __init__(self) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.applied: list[float] = []
+        self.target_entered = asyncio.Event()
+        self.release_target = asyncio.Event()
+        self.target_failed = asyncio.Event()
+        self.off_entered = asyncio.Event()
+        self.release_off = asyncio.Event()
+        self._armed = False
+
+    def arm(self) -> None:
+        self._armed = True
+
+    async def set_power(self, power_w: float) -> None:
+        if not self._armed:
+            self.applied.append(power_w)
+            return
+        if power_w == pytest.approx(0.35):
+            self.applied.append(power_w)
+            self.target_entered.set()
+            await self.release_target.wait()
+            self.target_failed.set()
+            raise RuntimeError("reply lost after remote target apply")
+        if power_w == pytest.approx(0.0):
+            self.off_entered.set()
+            await self.release_off.wait()
+            self.applied.append(power_w)
+            return
+        self.applied.append(power_w)
+
+
 async def _running_external_safety_manager(
     client: ExternalMockInstrumentClient,
 ) -> tuple[SafetyManager, Keithley2604B]:
@@ -534,6 +576,54 @@ async def test_target_update_failure_forces_external_zero_and_latches_fault(mode
         assert runtime.p_target == 0.0
         assert client.applied[-1] == 0.0
     finally:
+        await manager.stop()
+
+
+async def test_failed_target_update_waits_for_already_latched_external_off() -> None:
+    client = _AlreadyLatchedTargetFailureClient()
+    manager, driver = await _running_external_safety_manager(client)
+    client.arm()
+    update_task: asyncio.Task[dict[str, object]] | None = None
+    fault_task: asyncio.Task[None] | None = None
+    try:
+        update_task = asyncio.create_task(manager.update_target(0.35, channel="smua"))
+        await asyncio.wait_for(client.target_entered.wait(), timeout=1.0)
+        fault_latched = asyncio.Event()
+        begin_fault_latch = manager._begin_fault_latch
+
+        def observe_fault_latch(*args: object, **kwargs: object) -> bool:
+            latched = begin_fault_latch(*args, **kwargs)  # type: ignore[arg-type]
+            fault_latched.set()
+            return latched
+
+        manager._begin_fault_latch = observe_fault_latch  # type: ignore[method-assign]
+        fault_task = asyncio.create_task(manager._fault("concurrent fault", source="test"))
+        await asyncio.wait_for(fault_latched.wait(), timeout=1.0)
+        assert manager.state.value == "fault_latched"
+        client.release_target.set()
+        await asyncio.wait_for(client.target_failed.wait(), timeout=1.0)
+        await asyncio.wait_for(client.off_entered.wait(), timeout=1.0)
+        await asyncio.sleep(0)
+        assert not update_task.done()
+
+        client.release_off.set()
+        result = await update_task
+        await fault_task
+        runtime = driver._channels["smua"]
+        assert result["ok"] is False
+        assert result["uncertain"] == ["p_target"]
+        assert manager.state.value == "fault_latched"
+        assert manager._active_sources == set()
+        assert runtime.active is False
+        assert runtime.p_target == 0.0
+        assert client.applied[-2:] == [0.35, 0.0]
+    finally:
+        client.release_target.set()
+        client.release_off.set()
+        if update_task is not None and not update_task.done():
+            await update_task
+        if fault_task is not None and not fault_task.done():
+            await fault_task
         await manager.stop()
 
 

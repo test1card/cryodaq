@@ -2190,7 +2190,30 @@ class SafetyManager:
             if update_error is not None:
                 reason = f"Power-target update outcome is uncertain on {smu_channel}: {type(update_error).__name__}"
                 logger.critical("%s: %s", reason, update_error)
+                fault_was_already_latched = self._state is SafetyState.FAULT_LATCHED
                 await self._fault(reason, channel=smu_channel, source="safety_target_update")
+                if fault_was_already_latched:
+                    reconciliation_task = asyncio.create_task(
+                        self._ensure_output_off(
+                            owner_abort_generation=self._latched_fault_abort_generation,
+                        ),
+                        name=f"safety_target_update_existing_fault_off_{smu_channel}",
+                    )
+                    (
+                        reconciliation_result,
+                        reconciliation_error,
+                        reconciliation_cancelled,
+                    ) = await _settle_shielded_hardware_task(reconciliation_task)
+                    caller_cancelled = caller_cancelled or reconciliation_cancelled
+                    if reconciliation_error is None and reconciliation_result is True:
+                        self._active_sources.clear()
+                        self._refresh_operator_safety_snapshot()
+                    else:
+                        logger.critical(
+                            "Power-target update failure could not reconcile an already-latched "
+                            "fault to global OFF: %s",
+                            reconciliation_error,
+                        )
                 if caller_cancelled is not None:
                     raise caller_cancelled
                 return {
