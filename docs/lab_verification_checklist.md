@@ -12,11 +12,12 @@ Millimetron / АКЦ ФИАН). Каждый раздел: цель → кома
 
 ---
 
-## Software qualification перед лабораторией: exact-SHA WSL short soak
+## Software qualification перед лабораторией: exact-SHA Ubuntu 22.04 soak
 
 Эта проверка не требует приборов, но обязательна перед переносом кандидата в
-лабораторию. Qualification выполняется в отдельном WSL-клоне на нативной
-Linux-файловой системе (`ext4`), а не в `/mnt/c` (`drvfs`/`9p`). На `drvfs`
+лабораторию. Выполняйте short preflight и duration gate в дистрибутиве
+`CryoDAQ-Lab-Ubuntu-22.04` на нативной Linux-файловой системе (`ext4`). Не
+используйте `/mnt/c` (`drvfs`/`9p`). На `drvfs`
 разрешены быстрые developer-проверки (lint, docs и focused tests), но они не
 сертифицируют POSIX filesystem/process semantics и не заменяют этот гейт.
 Native-ext4 проверка доказывает lifecycle,
@@ -110,9 +111,10 @@ test -z "$(git status --porcelain=v1 --untracked-files=all)"
 exact-six содержит ровно 6 passed без skip/deselect; присутствуют и согласованы
 `samples.jsonl`, `faults.jsonl`, `shutdown.json`, `log_capture.json`,
 `periodic-delivery-result.json`, ровно две canonical receipt-записи и два
-content-addressed PNG. Первый receipt относится к latest completed slot,
-выделенному при старте; второй — к единственной следующей динамически выровненной
-границе после замены assistant. Ledger/manifest/artifact hashes пересчитываются,
+content-addressed PNG. Эти два receipt применимы только к профилю `short`.
+Первый receipt относится к latest completed slot, выделенному при старте.
+Второй receipt относится к следующей границе после замены assistant.
+Ledger/manifest/artifact hashes пересчитываются,
 после запуска Git tree остаётся чистым, Python/runtime hash и `pip freeze` не
 изменились, живых или zombie descendants нет.
 
@@ -122,6 +124,31 @@ node IDs и отсутствие skip/deselect в их pytest-выводе, SHA-
 summary, ledger и evidence tree. Сам `exact_six` — артефакт со списком узлов и
 хешами вывода, а не источник выдуманного числового поля `passed`. Не переносить
 результат на более новый commit.
+
+### Duration gate на Ubuntu 22.04
+
+Short preflight не закрывает duration gate. Запустите один reviewed profile на
+том же clean SHA: `12h`, `72h` или `168h`.
+
+```bash
+PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
+  --profile 168h \
+  --evidence-dir "artifacts/mock-stack-soak/168h-<FULL40>"
+```
+
+Не используйте существующую evidence directory. Не изменяйте runtime во время
+прогона. Каждый duration gate остаётся OPEN до получения sealed PASS на точном
+clean SHA.
+
+Для PASS число receipt-записей должно совпадать с
+`manifest.periodic_schedule.expected_receipts`. Каждая запись должна иметь один
+sealed content-addressed PNG. Проверьте весь период, cadence, fault recovery,
+resource bounds, bounded shutdown и отсутствие descendants. Запишите SHA,
+профиль, длительность, Ubuntu/kernel, filesystem, Python, SQLite, команды,
+summary, ledger и evidence-tree SHA-256.
+
+Software soak не закрывает dummy-load, physical hardware, frozen-build или
+лабораторные acceptance gates.
 
 ---
 
