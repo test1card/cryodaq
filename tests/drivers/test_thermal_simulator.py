@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 
 import cryodaq.engine as engine_module
 from cryodaq.analytics.plugin_loader import PluginPipeline
@@ -785,4 +786,36 @@ async def test_cancelled_stop_settles_zero_after_delayed_external_power(operatio
     assert driver._channels["smua"].active is False
     assert driver._channels["smua"].p_target == 0.0
     assert expected_positive in client.applied
+    assert client.applied[-1] == 0.0
+
+
+class _HeaterChannelTrackingClient(ExternalMockInstrumentClient):
+    def __init__(self) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.applied: list[float] = []
+
+    async def set_power(self, power_w: float) -> None:
+        self.applied.append(power_w)
+
+
+async def test_smua_only_drives_mock_thermal_plant_channel() -> None:
+    calculator_config = yaml.safe_load((ROOT / "plugins" / "thermal_calculator.yaml").read_text(encoding="utf-8"))
+    assert calculator_config["heater_channel"] == "Keithley_1/smua/power"
+
+    client = _HeaterChannelTrackingClient()
+    driver = Keithley2604B("Keithley_1", "USB::MOCK", mock=True, mock_instrument_client=client)
+    await driver.connect()
+
+    await driver.start_source("smua", 0.2, 10.0, 0.5)
+    await driver.start_source("smub", 0.3, 10.0, 0.5)
+    assert driver._channels["smua"].active is True
+    assert driver._channels["smub"].active is True
+    assert client.applied[-1] == pytest.approx(0.2)
+
+    await driver.update_source_target("smub", 0.4)
+    assert client.applied[-1] == pytest.approx(0.2)
+
+    await driver.stop_source("smua")
+    assert driver._channels["smua"].active is False
+    assert driver._channels["smub"].active is True
     assert client.applied[-1] == 0.0

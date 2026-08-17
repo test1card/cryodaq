@@ -77,6 +77,7 @@ _MOCK_T0 = 300.0
 _MOCK_ALPHA = 0.0033
 _MOCK_COOLING_RATE = 0.1
 _MOCK_SMUB_FACTOR = 0.7
+_EXTERNAL_THERMAL_HEATER_CHANNEL: SmuChannel = "smua"
 
 _IV_FIELDS = (
     ("voltage", "V"),
@@ -2281,7 +2282,8 @@ class Keithley2604B(InstrumentDriver):
         if not self.mock or self._mock_instrument_client is None:
             return
         async with self._mock_power_sync_lock:
-            power_w = sum(runtime.p_target for runtime in self._channels.values() if runtime.active)
+            heater_runtime = self._channels[_EXTERNAL_THERMAL_HEATER_CHANNEL]
+            power_w = heater_runtime.p_target if heater_runtime.active else 0.0
             await self._mock_instrument_client.set_power(power_w)
 
     async def _sync_mock_thermal_power_settled(self) -> asyncio.CancelledError | None:
