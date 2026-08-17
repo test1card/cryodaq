@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import inspect
 import json
 import shutil
 import subprocess
@@ -281,16 +282,51 @@ def test_red_reproduction_requires_the_expected_behavioral_failure() -> None:
         f"F\n{expected_line}\nE   AttributeError: fixture setup failed\n"
         f"FAILED {node} - AttributeError: fixture setup failed\n"
     ).encode()
+    reports = [
+        {
+            "crash": None,
+            "longrepr_lines": [],
+            "nodeid": node,
+            "outcome": "passed",
+            "when": "setup",
+        },
+        {
+            "crash": {
+                "lineno": 1,
+                "message": "AttributeError: fixture setup failed",
+                "path": "tests/test_guard.py",
+            },
+            "longrepr_lines": ["E   AttributeError: fixture setup failed"],
+            "nodeid": node,
+            "outcome": "failed",
+            "when": "call",
+        },
+        {
+            "crash": None,
+            "longrepr_lines": [],
+            "nodeid": node,
+            "outcome": "passed",
+            "when": "teardown",
+        },
+    ]
 
     with pytest.raises(
         red_reproduction.RedReproductionError,
-        match="structured pytest call reports are required",
+        match="expected behavioral failure",
     ):
-        red_reproduction._failure_signatures(
-            wrong_cause,
-            [node],
-            {node: [expected_line]},
-        )
+        if "test_reports" in inspect.signature(red_reproduction._failure_signatures).parameters:
+            red_reproduction._failure_signatures(
+                wrong_cause,
+                [node],
+                {node: [expected_line]},
+                reports,
+            )
+        else:
+            red_reproduction._failure_signatures(
+                wrong_cause,
+                [node],
+                {node: [expected_line]},
+            )
 
 
 def test_failure_signature_binding_rejects_cross_node_laundering() -> None:
