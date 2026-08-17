@@ -96,8 +96,7 @@ def _sample(
 
 def _full_series(selected: soak.SoakProfile) -> list[dict[str, object]]:
     return [
-        _sample(float(second))
-        for second in range(0, int(selected.duration_s) + 1, int(selected.sample_interval_s))
+        _sample(float(second)) for second in range(0, int(selected.duration_s) + 1, int(selected.sample_interval_s))
     ]
 
 
