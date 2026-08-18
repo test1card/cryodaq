@@ -363,6 +363,11 @@ def test_long_sample_series_accepts_a_bounded_recovery_gap_and_rejects_unbounded
     unrelated.extend(sample for sample in samples if sample["elapsed_s"] > 5060.0)
     assert any("exceeds cadence gap" in error for error in soak.validate_sample_series(unrelated, selected))
 
+    early_collapse = [sample for sample in samples if sample["elapsed_s"] <= engine_fault - 120.0]
+    early_collapse.append(_sample(engine_fault + soak.RECOVERY_CEILING_S))
+    early_collapse.extend(sample for sample in samples if sample["elapsed_s"] > engine_fault + soak.RECOVERY_CEILING_S)
+    assert any("exceeds cadence gap" in error for error in soak.validate_sample_series(early_collapse, selected))
+
 
 def test_resource_schema_rejects_identity_change_inside_epoch_and_bad_wall_time() -> None:
     selected = soak.profile("short")
@@ -955,6 +960,38 @@ def test_persistence_validator_rejects_uniform_slow_cadence(tmp_path: Path) -> N
     assert "persistence channel continuity is invalid" in errors
 
 
+def test_persistence_validator_rejects_inflated_duplicate_counts() -> None:
+    """A count above the cadence-derived ceiling (duplicate redelivery under a
+    fresh timestamp) must fail: the persistence check is a floor AND a ceiling."""
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = {
+        "schema": "cryodaq-soak-persistence/v1",
+        "integrity": "ok",
+        "expected_channels": 8,
+        "poll_interval_s": 1.0,
+        "database_files": [{"name": "data_2026-01-01.db", "bytes": 4096, "sha256": "sha256:" + "1" * 64}],
+        "channel_rows": [
+            {
+                "instrument_id": "LS218_1",
+                "channel": f"ch{index}",
+                "count": 900,
+                "first_timestamp": 1000.0,
+                "last_timestamp": 1900.0,
+            }
+            for index in range(8)
+        ],
+        "duplicate_rows": 0,
+        "invalid_rows": 0,
+        "interruptions": [],
+    }
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    for row in persistence["channel_rows"]:
+        row["count"] = 902
+    errors = "\n".join(soak._validate_persistence_evidence(persistence, selected, fixture))
+    assert "persistence channel continuity is invalid" in errors
+
+
 def test_storage_validator_rejects_a_false_green_live_wal(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
@@ -977,6 +1014,29 @@ def test_periodic_cadence_validator_rejects_clustered_receipts(tmp_path: Path) -
     assert soak._validate_periodic_cadence(cadence, receipts, selected) == []
     cadence["receipts"][1]["accepted_elapsed_s"] = 6.0
     assert soak._validate_periodic_cadence(cadence, receipts, selected)
+
+
+def test_periodic_cadence_slots_compare_a_single_clock_domain() -> None:
+    """Each later receipt is checked against the previous receipt in the same
+    (monotonic) domain, so a steady wall-clock drift below the per-interval
+    tolerance must not accumulate into a missed slot across many receipts."""
+    selected = soak.profile("12h")
+    interval_s = 600
+    boundary_offset_s = 450
+    receipt_ids = [f"r{index}" for index in range(5)]
+    accepted = [5.0]
+    accepted.extend(450.0 + (index - 1) * 610.0 for index in range(1, 5))
+    cadence = {
+        "schema": "cryodaq-soak-periodic-cadence/v1",
+        "interval_s": interval_s,
+        "boundary_offset_s": boundary_offset_s,
+        "receipts": [
+            {"receipt_id": receipt_id, "accepted_elapsed_s": elapsed}
+            for receipt_id, elapsed in zip(receipt_ids, accepted, strict=True)
+        ],
+    }
+    periodic_receipts = [{"receipt_id": receipt_id} for receipt_id in receipt_ids]
+    assert soak._validate_periodic_cadence(cadence, periodic_receipts, selected) == []
 
 
 @_POSIX_EVIDENCE

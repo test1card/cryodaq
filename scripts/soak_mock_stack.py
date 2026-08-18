@@ -542,7 +542,9 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
                 errors.append(f"sample {index} is not strictly monotonic")
             elif elapsed - previous > soak_profile.max_cadence_gap_s:
                 recovery_gap = any(
-                    previous <= fault_time <= elapsed and elapsed - fault_time <= RECOVERY_CEILING_S
+                    previous <= fault_time <= elapsed
+                    and elapsed - fault_time <= RECOVERY_CEILING_S
+                    and fault_time - previous <= soak_profile.max_cadence_gap_s
                     for fault_time in fault_times
                 )
                 if not recovery_gap:
@@ -1511,14 +1513,17 @@ def _validate_periodic_cadence(
             errors.append("periodic cadence receipt identity or ordering is invalid")
             continue
         accepted = float(elapsed)
-        last_elapsed = accepted
         if index == 0:
             if accepted > 60.0:
                 errors.append("periodic immediate receipt was late")
         else:
-            expected = float(boundary_offset_s + (index - 1) * interval_s)
+            if index == 1:
+                expected = float(boundary_offset_s)
+            else:
+                expected = last_elapsed + float(interval_s)
             if abs(accepted - expected) > 15.0:
                 errors.append(f"periodic receipt {index} missed its runtime slot")
+        last_elapsed = accepted
     if last_elapsed > selected.duration_s + 15.0:
         errors.append("periodic cadence extends beyond the profile")
     return errors
@@ -1612,6 +1617,7 @@ def _validate_persistence_evidence(
                 or count
                 < math.ceil((float(last) - float(first)) / float(poll_interval_s))
                 - engine_fault_count * recovery_budget_per_fault
+                or count > math.ceil((float(last) - float(first)) / float(poll_interval_s)) + 1
             ):
                 errors.append("persistence channel continuity is invalid")
             identities.add(identity)
