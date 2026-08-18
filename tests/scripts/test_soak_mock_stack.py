@@ -937,6 +937,24 @@ def test_persistence_validator_rejects_remapped_channel_identities(tmp_path: Pat
     )
 
 
+def test_persistence_validator_rejects_uniform_slow_cadence(tmp_path: Path) -> None:
+    """A uniformly slow poll (no individual gap above 1.5 * poll_interval) must
+    still fail: per-channel counts below the cadence-derived floor (after the
+    scheduled recovery budget) mean roughly a third of the expected readings
+    were never persisted."""
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = json.loads((tmp_path / "persistence.json").read_text())
+
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    for row in persistence["channel_rows"]:
+        row["count"] = int(selected.duration_s / 1.49)
+    errors = "\n".join(soak._validate_persistence_evidence(persistence, selected, fixture))
+    assert "persistence channel continuity is invalid" in errors
+
+
 def test_storage_validator_rejects_a_false_green_live_wal(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)

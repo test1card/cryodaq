@@ -742,6 +742,7 @@ def _persistence_evidence(
     selected: Any,
     expected_channels: int,
     poll_interval_s: float,
+    start_wall_s: float,
 ) -> dict[str, object]:
     database_files: list[dict[str, object]] = []
     aggregated: dict[tuple[str, str], dict[str, object]] = {}
@@ -811,15 +812,11 @@ def _persistence_evidence(
                 raw_interruptions.extend(
                     (key[0], key[1], float(previous), float(current)) for previous, current in gaps
                 )
-    first_timestamp = min(
-        (float(row["first_timestamp"]) for row in aggregated.values()),
-        default=None,
-    )
     engine_events = tuple(event.at_s for event in selected.events if event.target == "engine")
     interruptions: list[dict[str, object]] = []
     for instrument_id, channel, previous, current in raw_interruptions:
-        previous_elapsed = previous - float(first_timestamp or previous)
-        elapsed = current - float(first_timestamp or current)
+        previous_elapsed = previous - start_wall_s
+        elapsed = current - start_wall_s
         matched = next(
             (
                 event
@@ -4072,6 +4069,7 @@ class _PosixSoakRunner:
                     )
 
                     start = time.monotonic()
+                    start_wall_s = time.time()
                     next_sample = 0.0
                     event_index = 0
                     epochs = {role: 0 for role in soak.ROLES}
@@ -4334,6 +4332,7 @@ class _PosixSoakRunner:
                             selected=selected,
                             expected_channels=source_readings_per_sample,
                             poll_interval_s=source_poll_interval_s,
+                            start_wall_s=start_wall_s,
                         ),
                     )
                     evidence.write_qualification_artifact(

@@ -1578,6 +1578,10 @@ def _validate_persistence_evidence(
     if not isinstance(rows, list) or type(expected_channels) is not int or len(rows) != expected_channels:
         errors.append("persistence channel coverage is incomplete")
     else:
+        engine_fault_count = sum(1 for event in selected.events if event.target == "engine")
+        recovery_budget_per_fault = math.ceil(
+            (RECOVERY_CEILING_S + 1.5 * float(poll_interval_s)) / float(poll_interval_s)
+        )
         identities: set[tuple[str, str]] = set()
         counts: set[int] = set()
         for row in rows:
@@ -1602,7 +1606,12 @@ def _validate_persistence_evidence(
                 or count <= 0
                 or type(first) not in {int, float}
                 or type(last) not in {int, float}
+                or not math.isfinite(float(first))
+                or not math.isfinite(float(last))
                 or float(last) - float(first) < selected.duration_s - RECOVERY_CEILING_S
+                or count
+                < math.ceil((float(last) - float(first)) / float(poll_interval_s))
+                - engine_fault_count * recovery_budget_per_fault
             ):
                 errors.append("persistence channel continuity is invalid")
             identities.add(identity)

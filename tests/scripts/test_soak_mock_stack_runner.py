@@ -1244,6 +1244,7 @@ def test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes(
         selected=selected,
         expected_channels=8,
         poll_interval_s=1.0,
+        start_wall_s=1000.0,
     )
     fixture = {
         "instrument_id": "LS218_1",
@@ -1268,4 +1269,62 @@ def test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes(
             selected=selected,
             expected_channels=8,
             poll_interval_s=1.0,
+            start_wall_s=1000.0,
         )
+
+
+@_POSIX_EVIDENCE
+def test_persistence_engine_fault_gap_matches_with_a_delayed_start(tmp_path: Path) -> None:
+    """A real engine-fault gap must still match its scheduled fault when the
+    first persisted row precedes the runner start by more than two poll
+    intervals. Interruption elapsed values are anchored to the runner start,
+    not to the first database timestamp, so stack startup latency cannot shift
+    a gap out of its scheduled-fault window."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    selected = soak.profile("short")
+    poll_interval_s = 1.0
+    start_wall_s = 10_000.0
+    first_row_s = start_wall_s - 30.0
+    engine_fault_s = 185.0
+    gap_s = 5.0
+    database = data_dir / "data_2026-08-18.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "CREATE TABLE readings (id INTEGER PRIMARY KEY, timestamp REAL, instrument_id TEXT, "
+            "channel TEXT, value REAL, unit TEXT, status TEXT)"
+        )
+        rows = []
+        last_before = start_wall_s + engine_fault_s - poll_interval_s
+        for timestamp in range(int(first_row_s), int(last_before) + 1):
+            for channel in range(8):
+                rows.append((float(timestamp), "LS218_1", f"ch{channel}", 4.0 + channel, "K", "OK"))
+        first_after = last_before + gap_s
+        for timestamp in range(int(first_after), int(first_row_s) + 900):
+            for channel in range(8):
+                rows.append((float(timestamp), "LS218_1", f"ch{channel}", 4.0 + channel, "K", "OK"))
+        connection.executemany(
+            "INSERT INTO readings(timestamp,instrument_id,channel,value,unit,status) VALUES(?,?,?,?,?,?)",
+            rows,
+        )
+        connection.commit()
+
+    persistence = runner._persistence_evidence(
+        data_dir,
+        selected=selected,
+        expected_channels=8,
+        poll_interval_s=poll_interval_s,
+        start_wall_s=start_wall_s,
+    )
+    fixture = {
+        "instrument_id": "LS218_1",
+        "expected_readings_per_sample": 8,
+        "poll_interval_s": poll_interval_s,
+        "channel_ids": [f"ch{channel}" for channel in range(8)],
+    }
+    interruptions = persistence["interruptions"]
+    assert len(interruptions) == 8
+    assert all(item["matched_engine_fault_s"] == engine_fault_s for item in interruptions)
+    assert all(item["gap_s"] == gap_s for item in interruptions)
+    assert all(item["elapsed_s"] == engine_fault_s + gap_s - poll_interval_s for item in interruptions)
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []

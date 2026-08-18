@@ -142,7 +142,13 @@ clean SHA.
 
 Для PASS число receipt-записей должно совпадать с
 `manifest.periodic_schedule.expected_receipts`. Каждая запись должна иметь один
-sealed content-addressed PNG. Проверьте весь период, cadence, fault recovery,
+sealed content-addressed PNG. Независимо проверьте новые обязательные
+evidence-артефакты: `runtime-closures.jsonl` (loaded native closures неизменны
+по ролям на всех поколениях), `persistence.json` (integrity `ok`, покрытие всех
+sealed каналов, continuity в пределах recovery budget и привязка каждого разрыва
+к запланированному engine fault), `storage-samples.jsonl` и `storage-final.json`
+(рост storage в пределах byte limit и финальное осаждение без live WAL).
+Проверьте весь период, cadence, fault recovery,
 resource bounds, bounded shutdown и отсутствие descendants. Запишите SHA,
 профиль, длительность, Ubuntu/kernel, filesystem, Python, SQLite, команды,
 summary, ledger и evidence-tree SHA-256.
