@@ -295,27 +295,60 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
     return captured
 
 
-def _runtime_library_identity_is_safe(identity: os.stat_result) -> bool:
-    """Accept native bytes writable only by a trusted owner."""
+def _runtime_library_identity_unsafe_clause(identity: os.stat_result) -> str | None:
+    """Name the exact clause that rejects this identity, or ``None`` if it is safe.
 
+    ``_runtime_library_identity_is_safe`` is defined as this returning ``None``,
+    so a diagnostic can never drift from acceptance. Every ownership refusal
+    raised by ``_runtime_library_root`` and ``_runtime_library_closure`` names
+    the returned clause so an operator has the exact property to act on.
+    """
     mode = stat.S_IMODE(identity.st_mode)
-    if os.name != "posix" or mode & 0o002:
-        return False
+    if os.name != "posix":
+        return "non-posix"
+    if mode & 0o002:
+        return "world-writable"
     if identity.st_uid == 0:
-        return not mode & 0o020
+        if mode & 0o020:
+            return "root-owned-with-group-write"
+        return None
     if identity.st_uid != os.getuid():
-        return False
+        return "foreign-owned"
     if not mode & 0o020:
-        return True
+        return None
     if identity.st_gid != os.getgid():
-        return False
+        return "group-writable-foreign-group"
     import grp
     import pwd
 
     current_name = pwd.getpwuid(os.getuid()).pw_name
     primary_members = {entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == identity.st_gid}
     supplemental_members = set(grp.getgrgid(identity.st_gid).gr_mem)
-    return primary_members | supplemental_members == {current_name}
+    if primary_members | supplemental_members == {current_name}:
+        return None
+    return "group-writable-multi-member-group"
+
+
+def _runtime_library_identity_is_safe(identity: os.stat_result) -> bool:
+    """Accept native bytes writable only by a trusted owner."""
+
+    return _runtime_library_identity_unsafe_clause(identity) is None
+
+
+def _runtime_library_identity_refusal(path: Path, identity: os.stat_result) -> str:
+    """Serialize the path, numeric owner and group, octal mode, and rejecting clause.
+
+    ``identity`` must be one that ``_runtime_library_identity_unsafe_clause``
+    rejects; calling this on a safe identity is an internal contract error.
+    """
+
+    clause = _runtime_library_identity_unsafe_clause(identity)
+    if clause is None:
+        raise ValueError("identity is safe; there is no ownership refusal")
+    return (
+        f"path={path} uid={identity.st_uid} gid={identity.st_gid} "
+        f"mode={stat.S_IMODE(identity.st_mode):04o} clause={clause}"
+    )
 
 
 def _runtime_library_root() -> Path:
@@ -327,11 +360,17 @@ def _runtime_library_root() -> Path:
         identity = root.lstat()
         resolved = root.resolve(strict=True)
     except OSError as exc:
-        raise _RunnerActivationDisabled("runtime native-library root is unavailable") from exc
+        raise _RunnerActivationDisabled(f"runtime native-library root is unavailable: path={root}") from exc
     if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode) or resolved != root.absolute():
-        raise _RunnerActivationDisabled("runtime native-library root is not a direct directory")
+        raise _RunnerActivationDisabled(
+            "runtime native-library root is not a direct directory: "
+            f"path={root} uid={identity.st_uid} gid={identity.st_gid} "
+            f"mode={stat.S_IMODE(identity.st_mode):04o} resolved={resolved}"
+        )
     if os.name == "posix" and not _runtime_library_identity_is_safe(identity):
-        raise _RunnerActivationDisabled("runtime native-library root ownership is unsafe")
+        raise _RunnerActivationDisabled(
+            "runtime native-library root ownership is unsafe: " + _runtime_library_identity_refusal(root, identity)
+        )
     return resolved
 
 
@@ -345,7 +384,7 @@ def _runtime_library_closure() -> dict[str, object]:
     try:
         children = sorted(root.iterdir(), key=lambda item: item.name)
     except OSError as exc:
-        raise _RunnerActivationDisabled("runtime native-library root cannot be enumerated") from exc
+        raise _RunnerActivationDisabled(f"runtime native-library root cannot be enumerated: path={root}") from exc
     for path in children:
         identity = path.lstat()
         if stat.S_ISDIR(identity.st_mode):
@@ -354,32 +393,69 @@ def _runtime_library_closure() -> dict[str, object]:
             resolved = path.resolve(strict=True)
             if resolved.is_dir():
                 continue
-            if not resolved.is_relative_to(root) or not resolved.is_file():
-                raise _RunnerActivationDisabled("runtime native-library link escapes its closure")
+            if not resolved.is_file():
+                raise _RunnerActivationDisabled(
+                    "runtime native-library link escapes its closure: "
+                    f"path={path} resolved={resolved} uid={identity.st_uid} gid={identity.st_gid} "
+                    f"mode={stat.S_IMODE(identity.st_mode):04o}"
+                )
             for ancestor in resolved.parents:
                 if not ancestor.is_relative_to(root):
                     break
-                if not _runtime_library_identity_is_safe(ancestor.lstat()):
-                    raise _RunnerActivationDisabled("runtime native-library link ancestor ownership is unsafe")
+                ancestor_identity = ancestor.lstat()
+                if not _runtime_library_identity_is_safe(ancestor_identity):
+                    raise _RunnerActivationDisabled(
+                        "runtime native-library link ancestor ownership is unsafe: "
+                        + _runtime_library_identity_refusal(ancestor, ancestor_identity)
+                    )
+            if not resolved.is_relative_to(root):
+                # The resolved target of an escaping link is still bytes the
+                # loader can select, so the closure binds them: only the
+                # resolved target is ever executed, never the link's own name
+                # inside the root. Its external ancestors are as load-bearing
+                # as the in-root ones -- any of them writable by another party
+                # could swap the target the loader would follow. A stock
+                # Ubuntu /usr/lib contains such links (for example
+                # cpp -> /etc/alternatives/cpp), so refusing every escaping
+                # link refuses the reviewed target platform.
+                for ancestor in resolved.parents:
+                    if ancestor.is_relative_to(root):
+                        continue
+                    ancestor_identity = ancestor.lstat()
+                    if not _runtime_library_identity_is_safe(ancestor_identity):
+                        raise _RunnerActivationDisabled(
+                            "runtime native-library link ancestor ownership is unsafe: "
+                            + _runtime_library_identity_refusal(ancestor, ancestor_identity)
+                        )
             target_identity = resolved.stat()
             if not _runtime_library_identity_is_safe(target_identity):
-                raise _RunnerActivationDisabled("runtime native-library target ownership is unsafe")
+                raise _RunnerActivationDisabled(
+                    "runtime native-library target ownership is unsafe: "
+                    + _runtime_library_identity_refusal(resolved, target_identity)
+                )
+            target = resolved.relative_to(root).as_posix() if resolved.is_relative_to(root) else resolved.as_posix()
             entries.append(
                 {
                     "kind": "link",
                     "path": path.name,
-                    "target": resolved.relative_to(root).as_posix(),
+                    "target": target,
                     "target_sha256": _hash_regular_file(resolved),
                 }
             )
             continue
         if not stat.S_ISREG(identity.st_mode):
-            raise _RunnerActivationDisabled("runtime native-library root contains a special entry")
+            raise _RunnerActivationDisabled(
+                "runtime native-library root contains a special entry: "
+                f"path={path} uid={identity.st_uid} gid={identity.st_gid} "
+                f"mode={stat.S_IMODE(identity.st_mode):04o}"
+            )
         if not _runtime_library_identity_is_safe(identity):
-            raise _RunnerActivationDisabled("runtime native-library file ownership is unsafe")
+            raise _RunnerActivationDisabled(
+                "runtime native-library file ownership is unsafe: " + _runtime_library_identity_refusal(path, identity)
+            )
         entries.append({"kind": "file", "path": path.name, "sha256": _hash_regular_file(path)})
     if not entries:
-        raise _RunnerActivationDisabled("runtime native-library closure is empty")
+        raise _RunnerActivationDisabled(f"runtime native-library closure is empty: path={root}")
     digest = (
         "sha256:"
         + hashlib.sha256(

@@ -24,6 +24,31 @@ There is no caller-supplied prerequisite or PASS option. A profile run must use
 an exact clean SHA. Each duration gate stays open until its real Ubuntu 22.04
 run completes with a sealed PASS.
 
+## Native-library root precondition
+
+The runner refuses to start when the active interpreter's native-library search
+root is writable by any party other than a trusted owner: the bytes the loader
+can select are the bytes that produce the evidence, so they must not be
+replaceable by someone who did not run the qualification. Check the root with
+one command from the worktree root before a run:
+
+```bash
+PYTHONPATH="$PWD/src" .venv/bin/python -c \
+  "from scripts.soak_mock_stack_runner import _runtime_library_root, _runtime_library_closure; print(_runtime_library_root()); print('native-library closure entries:', _runtime_library_closure()['entry_count'])"
+```
+
+The root is the interpreter's base-prefix `lib` directory — a venv or conda
+environment has no usable `lib` of its own, so the run validates the base
+prefix's. It must be owned by `root` with no group write, or by the running
+user with no group write, or by the running user with group write only when
+that group's entire membership is that one user. The system Python at `/usr/lib`
+satisfies this as installed (root-owned, mode 0755). An interpreter whose `lib`
+root is owned by another user, or is group- or world-writable by anyone else,
+must be re-installed or re-owned to a root-owned or current-user-owned layout
+before the run. A refusal names the path, the numeric owner and group, the
+octal mode, and the exact rejected clause, so the failing property is
+actionable rather than opaque.
+
 Run a long profile only on the laboratory qualification host. Use one of the
 reviewed names: `12h`, `72h`, or `168h`. For example:
 

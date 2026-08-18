@@ -503,6 +503,130 @@ def test_runtime_library_closure_rejects_a_link_target_beneath_a_writable_ancest
     assert closure["entry_count"] == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader ownership is POSIX-only")
+def test_runtime_library_ownership_refusals_name_path_owner_group_mode_and_clause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every identity refusal must say what it refused, or the operator has no action.
+
+    This is the diagnostic counterpart of the acceptance rule: no refusal
+    becomes an acceptance, it simply reports the path, the numeric owner and
+    group, the octal mode, and the exact rejecting clause.
+    """
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    library = library_root / "libproof.so"
+    library.write_bytes(b"proof")
+    library.chmod(0o644)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    library.chmod(0o646)
+    with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+        runner._runtime_library_closure()
+    message = str(excinfo.value)
+    assert message.startswith("runtime native-library file ownership is unsafe: ")
+    assert f"path={library}" in message
+    assert "uid=" in message and "gid=" in message
+    assert "mode=0646" in message
+    assert "clause=world-writable" in message
+
+    library.chmod(0o644)
+    library_root.chmod(0o666)
+    with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+        runner._runtime_library_closure()
+    message = str(excinfo.value)
+    assert message.startswith("runtime native-library root ownership is unsafe: ")
+    assert f"path={library_root}" in message
+    assert "mode=0666" in message
+    assert "clause=world-writable" in message
+    library_root.chmod(0o755)
+
+    identity = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o664)
+    refusal = runner._runtime_library_identity_refusal(library, identity)
+    assert "path=" in refusal and "uid=0" in refusal and "gid=0" in refusal
+    assert "mode=0664" in refusal and "clause=root-owned-with-group-write" in refusal
+
+    if os.geteuid() == 0:
+        os.chown(library, 0, 0)
+        library.chmod(0o664)
+        with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+            runner._runtime_library_closure()
+        assert "clause=root-owned-with-group-write" in str(excinfo.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_runtime_library_closure_binds_an_escaping_link_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A link whose target escapes the closure root must bind the resolved bytes.
+
+    A stock Ubuntu /usr/lib contains exactly such a link (cpp -> /etc/
+    alternatives/cpp -> /usr/bin/...), so refusing every escaping link refuses
+    the reviewed target platform. The resolved target is what the loader can
+    select, so its bytes and identity are the evidence, not the link's name.
+    """
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    candidates = (Path("/usr/bin/x86_64-linux-gnu-cpp-11"), Path("/bin/cat"), Path("/bin/ls"))
+    target = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if target is None:
+        pytest.skip("no system file under a root-owned ancestor tree is available")
+    (library_root / "libescape.so").symlink_to(target)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    closure = runner._runtime_library_closure()
+    assert closure["entry_count"] == 1
+
+    if os.geteuid() == 0:
+        safe_tree = Path("/") / f"cryodaq-escape-test-{os.getpid()}"
+        safe_tree.mkdir(mode=0o755)
+        try:
+            external = safe_tree / "external"
+            external.mkdir(mode=0o755)
+            writable_target = external / "libprobe.so"
+            writable_target.write_bytes(b"bound-v1")
+            writable_target.chmod(0o644)
+            (library_root / "libprobe.so").symlink_to(writable_target)
+            first = runner._runtime_library_closure()
+            assert first["entry_count"] == 2
+            writable_target.write_bytes(b"bound-v2")
+            second = runner._runtime_library_closure()
+            assert second["sha256"] != first["sha256"], "the escaping target's bytes must be bound"
+        finally:
+            import shutil
+
+            shutil.rmtree(safe_tree, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_runtime_library_closure_refuses_an_escaping_link_target_beneath_an_unsafe_ancestor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Binding an escaping target does not relax the ownership rule for its tree."""
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    writable = tmp_path / "writable"
+    writable.mkdir(mode=0o755)
+    writable.chmod(0o777)
+    target = writable / "libescape.so"
+    target.write_bytes(b"evil")
+    target.chmod(0o644)
+    (library_root / "liblink.so").symlink_to(target)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+        runner._runtime_library_closure()
+    message = str(excinfo.value)
+    assert message.startswith("runtime native-library link ancestor ownership is unsafe: ")
+    assert f"path={writable}" in message
+    assert "mode=0777" in message
+    assert "clause=world-writable" in message
+
+
 @pytest.mark.skipif(os.name != "posix", reason="stock-venv native-library activation is POSIX-only")
 def test_stock_venv_activation_selects_base_prefix_native_library(tmp_path: Path) -> None:
     venv_dir = tmp_path / "venv"
