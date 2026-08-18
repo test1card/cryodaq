@@ -3317,6 +3317,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _diagnose(message: str, *, stream: Any = None) -> None:
+    """Emit one refusal/completion diagnostic without changing the exit code.
+
+    The soak's refusals are fail-closed: the non-zero return and the sealed
+    terminal summary are the authority, and a diagnostic write failure must
+    never turn a refusal into something else, so a failed write is swallowed.
+    The stream is resolved at call time so an active capture (capsys) sees the
+    diagnostic rather than the interpreter's import-time stderr.
+    """
+
+    if stream is None:
+        stream = sys.stderr
+    try:
+        print(message, file=stream, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     selected = profile(args.profile)
@@ -3324,11 +3342,31 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         runner._PosixSoakRunner.require_platform()
-    except runner._RunnerActivationDisabled:
+    except runner._RunnerActivationDisabled as exc:
+        _diagnose(
+            "cryodaq mock-stack soak refused to start: "
+            + redact_text(str(exc))
+            + "; run it on the Ubuntu 22.04 laboratory qualification host with a "
+            "trusted interpreter (see docs/runbooks/mock_stack_soak.md)."
+        )
         return 2
     try:
         evidence = Evidence(args.evidence_dir or _default_evidence_dir(selected))
-    except (FileExistsError, EvidenceCapabilityError):
+    except FileExistsError as exc:
+        _diagnose(
+            "cryodaq mock-stack soak refused to start: "
+            + redact_text(str(exc))
+            + "; pass --evidence-dir an empty or freshly-created directory and re-run."
+        )
+        return 2
+    except EvidenceCapabilityError as exc:
+        _diagnose(
+            "cryodaq mock-stack soak refused to start: "
+            + redact_text(str(exc))
+            + "; the evidence capability is not available on this host/platform, so "
+            "run it on the Ubuntu 22.04 laboratory qualification host (see "
+            "docs/runbooks/mock_stack_soak.md)."
+        )
         return 2
     previous_handlers: dict[int, Any] = {}
     interrupt_handler = _first_signal_interrupt_handler()
@@ -3336,6 +3374,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, interrupt_handler)
         runner._PosixSoakRunner(selected).run(evidence)
+        _diagnose(
+            f"cryodaq mock-stack soak PASSED; sealed evidence at {evidence.directory}",
+            stream=sys.stdout,
+        )
         return 0
     except RunInterrupted as exc:
         evidence.finish_fail(
@@ -3343,12 +3385,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             phase="runner",
             interrupted=True,
         )
+        _diagnose(
+            f"cryodaq mock-stack soak interrupted by signal {exc.signum}; "
+            f"terminal FAIL summary at {evidence.directory / 'summary.json'}"
+        )
         return 128 + exc.signum
     except KeyboardInterrupt:
         evidence.finish_fail("interrupted by signal 2", phase="runner", interrupted=True)
+        _diagnose(
+            "cryodaq mock-stack soak interrupted by signal 2; "
+            f"terminal FAIL summary at {evidence.directory / 'summary.json'}"
+        )
         return 130
     except BaseException as exc:
         evidence.finish_fail(str(exc), phase="runner", error_type=type(exc).__name__)
+        _diagnose(
+            "cryodaq mock-stack soak refused: "
+            + redact_text(str(exc))
+            + f"; terminal FAIL summary at {evidence.directory / 'summary.json'} — "
+            "read that reason, correct the condition, then re-run from a clean start."
+        )
         return 1
     finally:
         for signum, previous in previous_handlers.items():

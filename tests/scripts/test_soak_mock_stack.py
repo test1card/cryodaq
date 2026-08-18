@@ -35,12 +35,15 @@ def test_interrupt_handler_latches_first_signal(first: int, second: int) -> None
 
 
 @pytest.mark.skipif(os.name == "posix", reason="Windows fail-closed contract")
-def test_windows_rejects_evidence_without_creating_artifacts(tmp_path: Path) -> None:
+def test_windows_rejects_evidence_without_creating_artifacts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     evidence_dir = tmp_path / "evidence"
     with pytest.raises(soak.EvidenceCapabilityError, match="evidence capability is POSIX-only"):
         soak.Evidence(evidence_dir)
     assert not evidence_dir.exists()
     assert soak.main(["--evidence-dir", str(evidence_dir)]) == 2
+    assert "refused to start" in capsys.readouterr().err
     assert not evidence_dir.exists()
 
 

@@ -12,6 +12,25 @@ profiles. It owns process observation, fault injection, periodic artifacts, and
 bounded cleanup. It rejects Windows and non-Linux POSIX hosts before it creates
 an evidence bundle.
 
+## Environment
+
+Build the interpreter the runner uses as a `--system-site-packages` virtual
+environment. The soak and its exact-six pytest command import `yaml`, `psutil`,
+the `pytest_asyncio`/`pytest_timeout` plugins, and the Qt/GFX stack from the
+base prefix, and a venv has no native-library `lib` of its own, so the venv must
+see the base interpreter's site packages. From the worktree root:
+
+```bash
+python -m venv --system-site-packages .venv
+.venv/bin/python -V
+.venv/bin/python -c "import yaml"
+```
+
+`python` above is the laboratory interpreter (for example the `cryodaq` conda
+environment, which provides the reviewed Python and the installed packages);
+the venv is a wrapper around it. Verify the native-library root precondition
+below once, then run the soak through `.venv/bin/python` exactly as shown.
+
 Run the qualification only from an exact clean SHA under the worktree's
 `.venv/bin/python`:
 
