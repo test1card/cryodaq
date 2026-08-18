@@ -90,12 +90,13 @@ def _temp_reading(
     channel: str,
     value: float,
     *,
+    timestamp: datetime | None = None,
     acquisition_started_at: float | None = None,
     acquisition_started_monotonic: float | None = None,
     bridge_ingress_monotonic: float | None = None,
     status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
-    now = datetime.now(UTC)
+    now = timestamp or datetime.now(UTC)
     now_monotonic = time.monotonic()
     return Reading(
         timestamp=now,
@@ -120,12 +121,13 @@ def _power_reading(
     value: float,
     *,
     channel: str = "Keithley_1/smua/power",
+    timestamp: datetime | None = None,
     acquisition_started_at: float | None = None,
     acquisition_started_monotonic: float | None = None,
     bridge_ingress_monotonic: float | None = None,
     status: ChannelStatus = ChannelStatus.OK,
 ) -> Reading:
-    now = datetime.now(UTC)
+    now = timestamp or datetime.now(UTC)
     now_monotonic = time.monotonic()
     return Reading(
         timestamp=now,
@@ -947,7 +949,7 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
 
 def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
     """A healthy instrument configured with a 30-second acquisition cadence must
-    still advance the sweep.
+    still advance the sweep — driving the REAL SteadyStatePredictor.
 
     F81 finding: the freshness window was a fixed 10 seconds, so a configured
     poll_interval_s above 10 seconds (the registry allows up to 86,400) left a
@@ -956,6 +958,180 @@ def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
     window is now derived from the observed inter-sample acquisition cadence
     (3× the median gap, floor 10 s), so a 30-second cadence keeps the freshest
     sample current long enough to record the point.
+
+    F81 finding C: widening freshness alone still does not advance a
+    30-second-cadence sweep, because the predictor kept a fixed 300-second
+    window with a 30-point minimum — such a feed holds ~10 points and never
+    yields a valid prediction. This test therefore drives the REAL predictor
+    (no get_prediction stub): the window is derived from the observed cadence
+    (30 s × 30 points = 900 s), the real predictor accumulates 30 points, and
+    only then does the sweep advance.
+    """
+    import time as _time
+    from datetime import UTC, datetime
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    # Establish the 30-second acquisition cadence BEFORE Start, as the real
+    # instruments poll continuously and the panel observes their cadence while
+    # idle. Without this the predictor would be built before any cadence was
+    # known and could not accumulate the minimum inside its window.
+    now_mono = _time.monotonic()
+    for offset in (60.0, 30.0):
+        acquisition = now_mono - offset
+        ingress = acquisition + 1.0
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+        panel._handle_reading(
+            _power_reading(
+                0.012,
+                acquisition_started_monotonic=acquisition,
+                bridge_ingress_monotonic=ingress,
+            )
+        )
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    # The observed 30-second cadence must widen the freshness window past the
+    # old fixed 10-second limit AND derive the predictor window to 30 s x 30
+    # points = 900 s, so the real predictor can actually accumulate the minimum
+    # point count inside its window.
+    assert panel._auto_feed_max_age_s("Т1") > 10.0
+    assert panel._auto_feed_max_age_s("Keithley_1/smua/power") > 10.0
+    assert panel._predictor._window_s >= 900.0
+
+    # Simulate poll_interval_s = 30 s: feed 30 acquisition cycles spanning 900
+    # seconds, each channel's sample stamped 30 seconds after the previous one,
+    # arriving ~1 s later. Shift the ack epoch back so every cycle is post-ack
+    # (as the real engine stamps acquisition before I/O). The wall-clock
+    # timestamps span the window too, because the real predictor prunes by the
+    # wall-clock reading timestamp.
+    ack = panel._auto_step_ack_monotonic_s
+    panel._auto_step_ack_monotonic_s = ack - 1000.0
+    panel._auto_step_start = _time.monotonic() - 60.0
+    now_wall = _time.time()
+    for cycle in range(30):
+        offset = 870.0 - cycle * 30.0  # 870, 840, ..., 0
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
+        ts = datetime.fromtimestamp(now_wall - offset, tz=UTC)
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    timestamp=ts,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+        panel._handle_reading(
+            _power_reading(
+                0.012,
+                timestamp=ts,
+                acquisition_started_monotonic=acquisition,
+                bridge_ingress_monotonic=ingress,
+            )
+        )
+
+    # Drive the real predictor exactly as the production refresh tick does, then
+    # let _auto_tick read its real predictions (no get_prediction stub).
+    panel._predictor.update(_time.time())
+    pred = panel._predictor.get_prediction("Т1")
+    assert pred is not None and pred.valid, (
+        "the real predictor must yield a valid prediction for a 30-second cadence inside its cadence-derived window"
+    )
+
+    panel._auto_tick()
+
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
+    panel._auto_timer.stop()
+
+
+def test_auto_predictor_window_grows_when_slow_cadence_observed_mid_step(app, monkeypatch):
+    """The predictor window must grow if a slow cadence is first observed after
+    the step armed (the predictor was built before the feed's cadence was known).
+
+    F81 finding C: a sweep started before any temperature sample arrived is
+    armed with the base 300-second predictor window. If the bound feeds then
+    turn out to have a 30-second cadence, the predictor can never accumulate its
+    30-point minimum inside a 300-second window and the sweep would silently sit
+    in "stabilizing" forever. The moment the cadence is observed, the predictor
+    window must grow to match (30 s x 30 points = 900 s).
+    """
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    # No temperature sample arrived before the ack, so the predictor is still
+    # at the base window.
+    assert panel._predictor._window_s == 300.0
+
+    # Two temperature samples 30 seconds apart establish the cadence mid-step.
+    ack = panel._auto_step_ack_monotonic_s
+    for offset in (30.0, 0.0):
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+
+    # The predictor window must have grown to fit the observed 30-second
+    # cadence's minimum point count.
+    assert panel._predictor._window_s >= 900.0
+    panel._auto_timer.stop()
+
+
+def test_auto_tick_slow_temperature_cadence_does_not_relax_power_feed_bound(app, monkeypatch):
+    """A slow temperature feed must not widen the power feed's failure bound.
+
+    F81/P1 finding: the freshness window was computed once across all bound
+    feeds as 3x the slowest channel's median cadence and then applied to every
+    temperature AND power sample. A 30-second temperature feed therefore
+    expanded the power-feed window to 90 seconds; if the Keithley then went
+    silent after one usable sample, continuing temperature updates could still
+    satisfy settling and advance to the next power target using that stale
+    power value. Each selected feed now keeps its own cadence and its own
+    bound, so the fast power feed's bound stays tight regardless of how slow a
+    temperature channel is.
     """
     import time as _time
 
@@ -975,13 +1151,14 @@ def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
     panel._on_auto_start()
     _DeferredWorker.instances[-1].finish({"ok": True})
 
-    # Simulate poll_interval_s = 30 s: two acquisition cycles, each channel's
-    # sample stamped 30 seconds after the previous one, arriving ~1 s later.
-    # Shift the ack epoch back so both cycles are post-ack (as the real engine
-    # stamps acquisition before I/O), mirroring the backlogged-branch pattern.
+    # Simulate the mixed-cadence scenario: temperature feeds at a 30-second
+    # cadence (a slow channel), the power feed at a 1-second cadence (the
+    # normally-fast Keithley). Shift the ack epoch back so every sample is
+    # post-ack, as the real engine stamps acquisition before I/O.
     ack = panel._auto_step_ack_monotonic_s
     panel._auto_step_ack_monotonic_s = ack - 90.0
     panel._auto_step_start = _time.monotonic() - 60.0
+
     for offset in (60.0, 30.0):
         acquisition = ack - offset
         ingress = acquisition + 1.0
@@ -994,6 +1171,11 @@ def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
                     bridge_ingress_monotonic=ingress,
                 )
             )
+    # The fast power feed: two samples 1 second apart establish its own 1-second
+    # cadence, then it goes silent after the second (freshest) sample.
+    for offset in (16.0, 15.0):
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
         panel._handle_reading(
             _power_reading(
                 0.012,
@@ -1002,16 +1184,21 @@ def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
             )
         )
 
-    # The observed 30-second cadence must widen the window past the old fixed
-    # 10-second limit, so the freshest sample (29 s old at tick time) stays
-    # current and the sweep can record the point.
-    assert panel._auto_sample_max_age_s() > 10.0
+    # The slow temperature feed widened ITS OWN bound past 10 s, but must not
+    # have relaxed the fast power feed's bound (which stays at the 10-second
+    # floor: 3 x the 1-second cadence would be 3 s < 10 s).
+    assert panel._auto_feed_max_age_s("Т1") > 10.0
+    assert panel._auto_feed_max_age_s("Keithley_1/smua/power") == 10.0
 
+    # Continuing temperature updates can satisfy settling, but the last power
+    # sample (14 s old at tick) is far beyond the power feed's own 10-second
+    # bound — the sweep must NOT advance to the next power target on that stale
+    # power value.
     panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)
     panel._auto_tick()
 
-    assert panel._auto_step == 1
-    assert len(panel._auto_results) == 1
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
     panel._auto_timer.stop()
 
 

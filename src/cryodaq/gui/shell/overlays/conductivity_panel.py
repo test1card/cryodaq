@@ -93,6 +93,17 @@ _AUTO_SAMPLE_MAX_AGE_S = 10.0
 _AUTO_SAMPLE_AGE_CADENCE_FACTOR = 3.0
 _AUTO_CADENCE_SAMPLE_SLOTS = 9
 _ACQUISITION_STARTED_AT = "acquisition_started_at"
+# F81 finding C: a fixed 300-second predictor window with the default 30-point
+# minimum silently never yields a valid prediction for a cadence slower than
+# 10 seconds (300/30), so a healthy 30-second-cadence channel holds ~10 points
+# and the sweep sits in "stabilizing" forever. The predictor window is derived
+# from the observed cadence of the bound temperature feeds (window = cadence x
+# min_points, floored at 300 s) so every bound channel can accumulate the
+# minimum point count inside it. The minimum itself is not lowered: fewer
+# points would weaken the exponential fit.
+_PREDICTOR_BASE_WINDOW_S = 300.0
+_PREDICTOR_MIN_POINTS = 30
+_PREDICTOR_UPDATE_INTERVAL_S = 10.0
 
 _COL_HEADERS: tuple[str, ...] = (
     "Пара",
@@ -237,8 +248,6 @@ class ConductivityPanel(QWidget):
         self._checkboxes: dict[str, QCheckBox] = {}
         self._plot_items: dict[str, pg.PlotDataItem] = {}
 
-        self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
-
         # Public guard state. "stabilizing" is retained through settling,
         # command-pending, Stop-pending, and outcome-unknown substates until
         # current-authority Stop settlement permits idle/done publication.
@@ -274,6 +283,13 @@ class ConductivityPanel(QWidget):
         # healthy sample, while the 10-second floor stays fail-closed.
         self._auto_cadence_gaps: dict[str, deque[float]] = {}
         self._auto_last_acquisition_s: dict[str, float] = {}
+
+        # F81 finding C: the predictor is constructed after the step's channel
+        # state and cadence dictionaries so its window can be derived from the
+        # observed temperature cadence (see _make_auto_predictor). At this
+        # point no cadence has been observed yet, so the base window applies.
+        self._auto_predictor_window_s: float = _PREDICTOR_BASE_WINDOW_S
+        self._predictor = self._make_auto_predictor()
 
         self._all_channels = _get_temperature_channels()
         get_channel_manager().on_change(self._on_channels_changed)
@@ -862,6 +878,12 @@ class ConductivityPanel(QWidget):
         poll_interval_s above 10 seconds rejects every healthy sample. The gap
         is measured between successive samples of the same channel on the same
         monotonic clock (``acquisition_started_monotonic``).
+
+        F81 finding C: when a slow cadence is observed after the sweep has
+        already started (the predictor was built before the first samples of the
+        step arrived), the predictor window must be grown to match, or the feed
+        can never accumulate the 30-point minimum and the sweep sits in
+        "stabilizing" forever.
         """
         if acquisition_started_monotonic is None:
             return
@@ -870,39 +892,97 @@ class ConductivityPanel(QWidget):
         if previous is None:
             return
         gap = acquisition_started_monotonic - previous
-        if gap > 0:
-            self._auto_cadence_gaps.setdefault(channel, deque(maxlen=_AUTO_CADENCE_SAMPLE_SLOTS)).append(gap)
+        if gap <= 0:
+            return
+        self._auto_cadence_gaps.setdefault(channel, deque(maxlen=_AUTO_CADENCE_SAMPLE_SLOTS)).append(gap)
+        if self._auto_state != "stabilizing":
+            return
+        required = self._required_predictor_window_s()
+        if required > self._auto_predictor_window_s:
+            self._auto_predictor_window_s = required
+            self._predictor = SteadyStatePredictor(
+                window_s=required,
+                update_interval_s=_PREDICTOR_UPDATE_INTERVAL_S,
+            )
 
-    def _auto_sample_max_age_s(self) -> float:
-        """Fail-closed freshness window derived from the observed cadence.
+    def _auto_feed_max_age_s(self, channel: str) -> float:
+        """Fail-closed freshness window for ONE feed, from its own cadence.
 
-        Considers only the channels currently bound to the auto step (the
-        commanded temperature chain and the power channel), so an unrelated
-        slow channel cannot inflate the window. Uses the median of the most
-        recent per-channel inter-sample gaps so a single long gap (for example
-        a one-off slow read within the permitted 300-second timeout) cannot
-        inflate the window, while the 10-second floor keeps the guard
-        fail-closed: a genuinely dead feed still ages past any finite window.
-        When no cadence has been observed yet, the floor applies unchanged.
+        F81/P1 finding: the earlier helper computed a single window as the
+        maximum median cadence across every bound feed and applied it to every
+        temperature and power sample, so a slow temperature channel widened the
+        power-feed failure bound and a stale power value could advance the
+        heater. Each selected feed now carries its own cadence and its own
+        bound. Uses the median of that feed's most recent inter-sample gaps so
+        a single long gap (for example a one-off slow read within the permitted
+        300-second timeout) cannot inflate the window, while the 10-second
+        floor keeps the guard fail-closed: a genuinely dead feed still ages
+        past any finite window. When no cadence has been observed yet, the
+        floor applies unchanged.
         """
-        bound = set(self._auto_step_temperature_channels)
-        if self._auto_step_power_channel is not None:
-            bound.add(self._auto_step_power_channel)
-        medians = []
-        for channel in bound:
+        gaps = self._auto_cadence_gaps.get(channel)
+        if not gaps:
+            return _AUTO_SAMPLE_MAX_AGE_S
+        ordered = sorted(gaps)
+        return max(_AUTO_SAMPLE_MAX_AGE_S, _AUTO_SAMPLE_AGE_CADENCE_FACTOR * ordered[len(ordered) // 2])
+
+    def _reset_auto_temperature_evidence(self) -> None:
+        self._auto_step_temperature_values.clear()
+        self._auto_step_temperature_received_at.clear()
+        self._predictor = self._make_auto_predictor()
+
+    def _make_auto_predictor(self) -> SteadyStatePredictor:
+        """Construct the predictor sized to the observed temperature cadence.
+
+        F81 finding C: a fixed 300-second window with the 30-point minimum
+        holds only ~10 points of a 30-second-cadence feed, so the predictor
+        never yields a valid prediction and the sweep stays in "stabilizing"
+        forever. Derive the window from the slowest bound temperature feed so
+        every bound channel can accumulate the minimum point count inside it.
+        The 30-point minimum is not lowered: fewer points would weaken the
+        exponential fit. When no cadence has been observed yet, the base window
+        applies unchanged. The derived window is stored on the panel so
+        _observe_auto_cadence can grow it if a slow cadence arrives after the
+        sweep has started.
+        """
+        window_s = self._required_predictor_window_s()
+        self._auto_predictor_window_s = window_s
+        return SteadyStatePredictor(
+            window_s=window_s,
+            update_interval_s=_PREDICTOR_UPDATE_INTERVAL_S,
+        )
+
+    def _required_predictor_window_s(self) -> float:
+        """Predictor window the bound temperature feeds' cadence demands.
+
+        F81 finding C: the slowest temperature feed bound to the auto step
+        drives the predictor window, so a 30-second feed widens the window to
+        900 seconds instead of silently never producing a valid prediction.
+        When no cadence has been observed yet for any bound feed, the base
+        window applies unchanged.
+        """
+        cadence = self._bound_temperature_cadence_s()
+        if cadence is None:
+            return _PREDICTOR_BASE_WINDOW_S
+        return max(_PREDICTOR_BASE_WINDOW_S, cadence * _PREDICTOR_MIN_POINTS)
+
+    def _bound_temperature_cadence_s(self) -> float | None:
+        """Median of medians of the step's temperature feeds' observed cadence.
+
+        F81 finding C: the slowest temperature feed bound to the auto step
+        drives the predictor window, so a 30-second feed widens the window to
+        900 seconds instead of silently never producing a valid prediction.
+        Only channels actually bound to the current step are considered, so an
+        unrelated slow channel cannot inflate the predictor window.
+        """
+        medians: list[float] = []
+        for channel in self._auto_step_temperature_channels:
             gaps = self._auto_cadence_gaps.get(channel)
             if not gaps:
                 continue
             ordered = sorted(gaps)
             medians.append(ordered[len(ordered) // 2])
-        if not medians:
-            return _AUTO_SAMPLE_MAX_AGE_S
-        return max(_AUTO_SAMPLE_MAX_AGE_S, _AUTO_SAMPLE_AGE_CADENCE_FACTOR * max(medians))
-
-    def _reset_auto_temperature_evidence(self) -> None:
-        self._auto_step_temperature_values.clear()
-        self._auto_step_temperature_received_at.clear()
-        self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
+        return max(medians) if medians else None
 
     def _on_channels_changed(self) -> None:
         new_channels = _get_temperature_channels()
@@ -1002,7 +1082,7 @@ class ConductivityPanel(QWidget):
         auto_step_current = (
             auto_step_fresh
             and received_at is not None
-            and received_at - acquisition_started_monotonic <= self._auto_sample_max_age_s()
+            and received_at - acquisition_started_monotonic <= self._auto_feed_max_age_s(ch_id or ch)
         )
         selected_auto_temperature = self._auto_state == "stabilizing" and ch_id in self._auto_step_temperature_channels
         if selected_auto_temperature and not reading.is_usable():
@@ -1584,17 +1664,19 @@ class ConductivityPanel(QWidget):
         temperature_ages_are_current = bool(temperature_channels) and all(
             ch in self._auto_step_temperature_values
             and ch in self._auto_step_temperature_received_at
-            and now_monotonic - self._auto_step_temperature_received_at[ch] <= self._auto_sample_max_age_s()
+            and now_monotonic - self._auto_step_temperature_received_at[ch] <= self._auto_feed_max_age_s(ch)
             for ch in temperature_channels
         )
         if not temperature_ages_are_current and self._auto_step_temperature_values:
             self._reset_auto_temperature_evidence()
             settled_values = [0.0 for _ in temperature_channels]
             min_settled = 0.0
+        power_feed = self._auto_step_power_channel
         power_age_is_current = (
-            self._auto_step_power_value is not None
+            power_feed is not None
+            and self._auto_step_power_value is not None
             and self._auto_step_power_received_at is not None
-            and now_monotonic - self._auto_step_power_received_at <= self._auto_sample_max_age_s()
+            and now_monotonic - self._auto_step_power_received_at <= self._auto_feed_max_age_s(power_feed)
         )
         if not power_age_is_current:
             self._auto_step_power_value = None
