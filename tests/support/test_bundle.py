@@ -222,6 +222,45 @@ def test_pending_record_pseudonyms_are_idempotent_and_remain_distinct() -> None:
     assert _capture(records=records).records == records
 
 
+def test_pending_ordinals_follow_public_record_order_not_private_value_rank() -> None:
+    """Seal-time ordinals must follow the enclosing record's PUBLIC order, never the order of
+    the private value or its digest.  Every pending identity is a deterministic digest of its
+    value, so a recipient who guesses the low-entropy identities can reproduce a
+    digest-derived rank but cannot reproduce a record's place among the other records'
+    public evidence.  Value-rank assignment would therefore let a guess set be mapped back
+    onto the sealed records; public-record assignment carries no information about the value.
+    """
+    ok_child = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "compressor", **_snapshot_fields(role="child"), "state": "ok"},
+    )
+    warning_child = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "pump", **_snapshot_fields(role="child"), "state": "warning"},
+    )
+    plant_summary = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", **_snapshot_fields(role="summary"), "state": "warning"},
+    )
+    infrastructure_summary = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", **_snapshot_fields(role="summary"), "state": "fault"},
+    )
+    bundle = build_support_bundle(
+        _capture(records=(ok_child, warning_child, plant_summary, infrastructure_summary))
+    )
+    evidence = _evidence(bundle)
+    scope = bundle_module._canonical({"bundle_id": "support-0001", "created_at": evidence["created_at"]})
+    ordinal_zero = "redacted-id-" + hashlib.sha256(scope + (0).to_bytes(4, "big")).hexdigest()[:24]
+    ordinal_one = "redacted-id-" + hashlib.sha256(scope + (1).to_bytes(4, "big")).hexdigest()[:24]
+    sealed_by_state = {
+        item["payload"]["state"]: item["payload"]["source_id"]
+        for item in evidence["records"]
+        if item["payload"]["record_role"] == "child"
+    }
+    assert sealed_by_state == {"ok": ordinal_zero, "warning": ordinal_one}
+
+
 @pytest.mark.parametrize("version", ["al\u200bice", "1.0+al\u200bice"])
 def test_version_person_screening_uses_control_stripped_text(version: str) -> None:
     assert SoftwareVersion("driver-pack", version).version == "<redacted:private>"

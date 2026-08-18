@@ -160,8 +160,139 @@ _DELIMITED_PRIVATE_NAME_RE: Final = re.compile(r"(?<!\w)[^\W\d_]{2,64}(?:[-_.]+[
 _PHONE_RE: Final = re.compile(r"(?<![A-Za-z0-9-])\+?\d(?:[\s().-]*\d){6,14}(?![A-Za-z0-9-])")
 _DOTTED_NUMERIC_VERSION_RE: Final = re.compile(r"\d+(?:\.\d+){1,7}\Z")
 _DOTTED_PHONE_RE: Final = re.compile(r"(?:\+?\d{1,3}\.)?\d{3}\.\d{3}\.\d{4}\Z")
-_VERSION_PERSON_RE: Final = re.compile(r"(?i)^[^\W\d_]+(?:[ .,:;+\-\'?]+[^\W\d_\'?]+)*[.,]?$")
-_VERSION_PERSON_SUFFIX_RE: Final = re.compile(r"(?i)^\d+(?:\.\d+)*(?:[+._-])[^\W\d_]+$")
+_VERSION_PERSON_WORDS_RE: Final = re.compile(r"(?i)^[^\W\d_]+(?:[ .,:;+\-\'?]+[^\W\d_\'?]+){1,}[.,]?$")
+_VERSION_SINGLE_WORD_RE: Final = re.compile(r"(?i)^([^\W\d_]{2,64})$")
+_VERSION_NUMBER_SUFFIX_RE: Final = re.compile(r"(?i)^\d+(?:\.\d+)*(?:[+._-])([^\W\d_]+)$")
+# A single alphabetic token in a version label cannot be told apart from a personal
+# name by shape alone, so recognized technical/release tokens are allowlisted and any
+# other single token keeps the private-name rejection.  Plain single words that are
+# not technical, and alphabetic build suffixes that are not technical words, still
+# count as person-shaped and are redacted.
+_TECHNICAL_VERSION_TOKENS: Final = frozenset(
+    {
+        "abi",
+        "alma",
+        "alpine",
+        "amd64",
+        "android",
+        "aarch64",
+        "apk",
+        "arch",
+        "arm",
+        "arm64",
+        "bionic",
+        "bookworm",
+        "bsd",
+        "build",
+        "bullseye",
+        "buster",
+        "canary",
+        "centos",
+        "ci",
+        "community",
+        "conda",
+        "core",
+        "cuda",
+        "cudnn",
+        "cygwin",
+        "darwin",
+        "deb",
+        "debian",
+        "debug",
+        "desktop",
+        "dev",
+        "devel",
+        "docker",
+        "dmg",
+        "embedded",
+        "enterprise",
+        "express",
+        "fedora",
+        "final",
+        "focal",
+        "freebsd",
+        "frozen",
+        "full",
+        "ga",
+        "generic",
+        "git",
+        "github",
+        "glibc",
+        "gnu",
+        "headless",
+        "hotfix",
+        "i386",
+        "i486",
+        "i586",
+        "i686",
+        "ia64",
+        "intel",
+        "ios",
+        "jammy",
+        "latest",
+        "linux",
+        "lite",
+        "loongarch",
+        "lts",
+        "mac",
+        "macos",
+        "mainline",
+        "manjaro",
+        "manylinux",
+        "mingw",
+        "minimal",
+        "mips",
+        "mint",
+        "msvc",
+        "msys",
+        "musl",
+        "musllinux",
+        "netbsd",
+        "nightly",
+        "noarch",
+        "nvidia",
+        "official",
+        "oem",
+        "onedir",
+        "onefile",
+        "openbsd",
+        "opensuse",
+        "oss",
+        "osx",
+        "patch",
+        "pip",
+        "pop",
+        "portable",
+        "posix",
+        "ppc",
+        "ppc64",
+        "preview",
+        "pro",
+        "public",
+        "pure",
+        "pypi",
+        "rc",
+        "release",
+        "rhel",
+        "riscv",
+        "rtm",
+        "s390",
+        "snapshot",
+        "solaris",
+        "standard",
+        "stable",
+        "standalone",
+        "suse",
+        "ubuntu",
+        "universal",
+        "unix",
+        "win",
+        "windows",
+        "wsl",
+        "x86",
+        "x64",
+    }
+)
 _VERSION_CREDENTIAL_RE: Final = re.compile(r"(?i)\b(?:password|pwd|token)(?:[ ._:=]+|\s*&#x3d;|\s*->)\s*\S+")
 _SERIALIZED_BLOB_RE: Final = re.compile(r"(?:\{[\s\S]*\}|\[[\s\S]*\])")
 _KNOWN_CREDENTIAL_RE: Final = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}")
@@ -916,6 +1047,27 @@ def _version_privacy_screen_text(value: str) -> str:
     return value.translate(str.maketrans("", "", "\u200b\u200c\u200d\ufeff"))
 
 
+def _person_shaped_version_text(value: str) -> bool:
+    screened = _version_privacy_screen_text(value).strip()
+    if _VERSION_PERSON_WORDS_RE.fullmatch(screened) is not None:
+        # Two or more alphabetic words spell a personal name ("Alice Smith"),
+        # without needing any allowlist.
+        return True
+    single_word = _VERSION_SINGLE_WORD_RE.fullmatch(screened)
+    if (
+        single_word is not None
+        and single_word.groups()[0].casefold() not in _TECHNICAL_VERSION_TOKENS
+    ):
+        return True
+    build_suffix = _VERSION_NUMBER_SUFFIX_RE.fullmatch(screened)
+    if (
+        build_suffix is not None
+        and build_suffix.groups()[0].casefold() not in _TECHNICAL_VERSION_TOKENS
+    ):
+        return True
+    return False
+
+
 def _safe_version_text(value: str) -> str:
     safe = _safe_text(value)
     if _VERSION_CREDENTIAL_RE.search(value):
@@ -947,16 +1099,10 @@ def _safe_version_text(value: str) -> str:
         if _VERSION_CREDENTIAL_RE.search(decoded):
             raise ValueError("encoded credential-shaped version text is not permitted")
         decoded_screened = _version_privacy_screen_text(decoded)
-        if (
-            _VERSION_PERSON_RE.fullmatch(decoded_screened.strip()) is not None
-            or _VERSION_PERSON_SUFFIX_RE.fullmatch(decoded_screened.strip()) is not None
-        ):
+        if _person_shaped_version_text(decoded_screened):
             return "<redacted:private>"
         current = decoded
-    if (
-        _VERSION_PERSON_RE.fullmatch(_version_privacy_screen_text(value).strip()) is not None
-        or _VERSION_PERSON_SUFFIX_RE.fullmatch(_version_privacy_screen_text(value).strip()) is not None
-    ):
+    if _person_shaped_version_text(value):
         return "<redacted:private>"
     return safe
 
@@ -1284,8 +1430,64 @@ def _evidence_document(capture: BundleCapture) -> dict[str, object]:
                 collect_identifiers(item)
 
     collect_identifiers(evidence)
+
+    def nearby_pending(value: object) -> frozenset[str]:
+        found: set[str] = set()
+
+        def walk(node: object) -> None:
+            if type(node) is str:
+                if _PENDING_PSEUDONYM_RE.fullmatch(node) is not None:
+                    found.add(node)
+            elif type(node) is list:
+                for item in node:
+                    walk(item)
+            elif type(node) is dict:
+                for item in node.values():
+                    walk(item)
+
+        walk(value)
+        return frozenset(found)
+
+    # Assign ordinals in the order of the enclosing record's PUBLIC content, never in the
+    # order of the private values themselves.  Every pending identity is a deterministic
+    # digest of its value, so a recipient who guesses the low-entropy identities can
+    # reproduce a value-or-digest-derived rank; a rank derived from the record's own
+    # masked position carries no information about the value it hides.  Records are
+    # ordered by their payloads with each pending identity masked to one constant, so the
+    # ordinal of a value is fixed by its record's place among the other records' evidence
+    # (state, counts, timestamps, codes) -- non-private data -- and is not reproducible
+    # from the identity alone.  Pending identities that appear nowhere in a record (the
+    # bundle id itself) are assigned after the records, by their sorted order.
+    _PRIVATE_IDENTITY_PLACEHOLDER: Final = "redacted-pending-placeholder"
+    records_in_public_order = sorted(
+        evidence["records"],
+        key=lambda item: (
+            item["kind"],
+            _canonical(
+                {
+                    field: (
+                        _PRIVATE_IDENTITY_PLACEHOLDER
+                        if type(value) is str and _PENDING_PSEUDONYM_RE.fullmatch(value) is not None
+                        else value
+                    )
+                    for field, value in item["payload"].items()
+                }
+            ),
+        ),
+    )
+    ordered_pending: list[str] = []
+    placed: set[str] = set()
+    for item in records_in_public_order:
+        for value in sorted(nearby_pending(item["payload"])):
+            if value not in placed:
+                placed.add(value)
+                ordered_pending.append(value)
+    for value in sorted(pending_values - placed):
+        ordered_pending.append(value)
+    assert frozenset(ordered_pending) == pending_values
+
     ordinal = 0
-    for value in sorted(pending_values):
+    for value in ordered_pending:
         while True:
             digest = hashlib.sha256(scope + ordinal.to_bytes(4, "big")).hexdigest()[:24]
             ordinal += 1

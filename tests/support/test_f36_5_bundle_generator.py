@@ -422,6 +422,11 @@ def test_lowercase_person_shaped_version_text_is_redacted(value: str) -> None:
     assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
 
 
+@pytest.mark.parametrize("value", ("stable", "latest", "1.0+linux", "1.0+cuda", "1.0-dev"))
+def test_technical_version_labels_are_preserved(value: str) -> None:
+    assert SoftwareVersion("driver-pack", value).version == value
+
+
 @pytest.mark.parametrize(
     "value",
     (
