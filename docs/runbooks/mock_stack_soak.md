@@ -36,6 +36,24 @@ PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
 
 The short profile uses a 5-second sample interval and a 7.5-second maximum gap.
 The long profiles use a 30-second sample interval and a 45-second maximum gap.
+
+These are the ordinary inter-sample cadence bounds. Around each scheduled
+injected fault there is one deliberate exception, because an injected fault
+legitimately interrupts the observer: the allowlisted `SIGTERM` is followed by a
+role restart and recovery, so the single sampling gap that spans a scheduled
+fault may exceed the cadence. The validator exempts a gap only when a scheduled
+fault time lies inside it and both edges stay within their bounds —
+`max_cadence_gap_s` before the fault and `RECOVERY_CEILING_S` (60 seconds)
+after it. The widest exempted gap is therefore `max_cadence_gap_s + 60`
+seconds: 67.5 seconds for `short`, 105 seconds for `12h`, `72h`, and `168h`.
+Each scheduled fault earns at most one exempt gap, so the worst-case unvalidated
+observer time per profile, measured from the profile definitions in
+`scripts/soak_mock_stack.py`, is: `short` 2 faults x 67.5 s = 135 s
+(2.25 minutes); `12h` 6 faults x 105 s = 630 s (10.5 minutes); `72h` 10 faults
+x 105 s = 1050 s (17.5 minutes); `168h` 18 faults x 105 s = 1890 s (31.5
+minutes of the 168-hour run, 0.31%). Every gap that does not span a scheduled
+fault must still satisfy the stated cadence bound, and no other relaxation
+exists.
 The final validator rejects a
 sample file above 64 MiB or 25,000 records. Identity is `(pid, OS start time)`,
 so PID reuse cannot select an unrelated process. Fault injection must re-check
@@ -74,7 +92,9 @@ within every epoch and at the final boundary. Profile RSS and descriptor slopes
 are evaluated independently for every role and stable epoch, so one child's
 leak cannot be hidden by another child's decline. Elapsed times and counters must be finite
 and non-negative. Time must be strictly monotonic. The maximum cadence gap is
-7.5 seconds for `short` and 45 seconds for long profiles. The series must cover
+7.5 seconds for `short` and 45 seconds for long profiles, except the single
+gap spanning a scheduled injected fault described in the recovery-window
+exemption above. The series must cover
 startup through the profile duration.
 
 ## Evidence contract

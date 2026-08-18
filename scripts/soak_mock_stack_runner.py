@@ -321,7 +321,8 @@ def _runtime_library_identity_is_safe(identity: os.stat_result) -> bool:
 def _runtime_library_root() -> Path:
     """Return the validated direct native-library search root."""
 
-    root = Path(sys.prefix) / "lib"
+    library_prefix = sys.base_prefix if sys.prefix != sys.base_prefix else sys.prefix
+    root = Path(library_prefix) / "lib"
     try:
         identity = root.lstat()
         resolved = root.resolve(strict=True)

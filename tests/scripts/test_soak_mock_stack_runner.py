@@ -33,6 +33,11 @@ def _collection() -> bytes:
     return ("\n".join((*runner._EXACT_NODE_IDS, "7 tests collected in 0.12s")) + "\n").encode()
 
 
+def _runtime_library_root_expected() -> str:
+    library_prefix = sys.base_prefix if sys.prefix != sys.base_prefix else sys.prefix
+    return str((Path(library_prefix) / "lib").resolve())
+
+
 def _completed(payload: bytes, *, stderr: bytes = b"", exit_code: int = 0) -> runner._CompletedCommand:
     return runner._CompletedCommand(_evidence(payload), payload, _evidence(stderr), stderr, exit_code)
 
@@ -759,7 +764,7 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
         "XDG_CONFIG_HOME",
     }
     assert environment["PYTHONPATH"] == os.pathsep.join((str(root / "src"), str(root), str(site_packages)))
-    assert environment["LD_LIBRARY_PATH"] == str((Path(sys.prefix) / "lib").resolve())
+    assert environment["LD_LIBRARY_PATH"] == _runtime_library_root_expected()
     assert environment["LD_LIBRARY_PATH"] != "attacker-library-path"
 
 
@@ -802,7 +807,7 @@ def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypa
     assert observed[runner._BRIDGE_NONCE_ENV] == "a" * 64
     assert observed[runner._ARTIFACT_NONCE_ENV] == "b" * 64
     assert observed["PYTHONPATH"] == os.pathsep.join((str(source_root.resolve() / "src"), str(source_root.resolve())))
-    assert observed["LD_LIBRARY_PATH"] == str((Path(sys.prefix) / "lib").resolve())
+    assert observed["LD_LIBRARY_PATH"] == _runtime_library_root_expected()
     assert str(runner._REPO_ROOT) not in observed["PYTHONPATH"]
     assert set(environment) == {
         "CRYODAQ_ROOT",
