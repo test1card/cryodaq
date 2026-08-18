@@ -1,6 +1,6 @@
 """One owned PyYAML loader, shared by every module that must not inherit host state.
 
-Subclassing ``yaml.SafeLoader`` shares five mutable class attributes BY
+Subclassing ``yaml.SafeLoader`` shares its mutable class attributes BY
 REFERENCE.  Any library that calls ``yaml.SafeLoader.add_constructor(...)`` or
 ``add_implicit_resolver(...)`` -- documented public PyYAML APIs, ordinary use and
 not an attack -- then decides what those loaders parse.  Measured on the shipped
@@ -55,6 +55,16 @@ class OwnedSafeLoader(yaml.SafeLoader):
     yaml_implicit_resolvers = {key: list(value) for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()}
     yaml_path_resolvers = dict(yaml.SafeLoader.yaml_path_resolvers)
     bool_values = dict(yaml.SafeLoader.bool_values)
+    ESCAPE_REPLACEMENTS = dict(yaml.SafeLoader.ESCAPE_REPLACEMENTS)
+    ESCAPE_CODES = dict(yaml.SafeLoader.ESCAPE_CODES)
+    DEFAULT_TAGS = dict(yaml.SafeLoader.DEFAULT_TAGS)
+    inf_value = yaml.SafeLoader.inf_value
+    nan_value = yaml.SafeLoader.nan_value
+    timestamp_regexp = yaml.SafeLoader.timestamp_regexp
+    NON_PRINTABLE = yaml.SafeLoader.NON_PRINTABLE
+    DEFAULT_SCALAR_TAG = yaml.SafeLoader.DEFAULT_SCALAR_TAG
+    DEFAULT_SEQUENCE_TAG = yaml.SafeLoader.DEFAULT_SEQUENCE_TAG
+    DEFAULT_MAPPING_TAG = yaml.SafeLoader.DEFAULT_MAPPING_TAG
 
 
 def owned_safe_load(stream: object) -> object:

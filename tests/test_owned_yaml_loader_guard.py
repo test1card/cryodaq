@@ -37,10 +37,37 @@ _LOADER_CLASSES = {
     "CUnsafeLoader",
 }
 
-# The five mutable class attributes that subclassing `yaml.SafeLoader` shares BY
+# The mutable class attributes that subclassing `yaml.SafeLoader` shares BY
 # REFERENCE.  A subclass of the owned loader that rebinds one of these to PyYAML
 # state undoes the ownership snapshot and must not be trusted.
 _OWNED_TABLE_NAMES = frozenset(
+    {
+        "yaml_constructors",
+        "yaml_multi_constructors",
+        "yaml_implicit_resolvers",
+        "yaml_path_resolvers",
+        "bool_values",
+        "ESCAPE_REPLACEMENTS",
+        "ESCAPE_CODES",
+        "DEFAULT_TAGS",
+        "inf_value",
+        "nan_value",
+        "timestamp_regexp",
+        "NON_PRINTABLE",
+        "DEFAULT_SCALAR_TAG",
+        "DEFAULT_SEQUENCE_TAG",
+        "DEFAULT_MAPPING_TAG",
+    }
+)
+
+# The subset of owned tables that a locally-declared subclass of a raw PyYAML
+# loader class must define in its own body for it to count as owning its parsing
+# state rather than inheriting the host's.  `inf_value`, `nan_value`,
+# `timestamp_regexp`, the DEFAULT_* tag strings, ESCAPE_* and NON_PRINTABLE are
+# deliberately excluded: they are either immutable or read only by constructors
+# that a bounded grammar can drop, and `cryodaq.lab_profile` -- the sanctioned
+# in-package loader -- owns exactly this core set.
+_CORE_OWNED_TABLES = frozenset(
     {
         "yaml_constructors",
         "yaml_multi_constructors",
@@ -110,6 +137,28 @@ def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
             else:
                 names.difference_update(targets)
                 modules.difference_update(targets)
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in names
+                    and target.attr in _OWNED_TABLE_NAMES
+                    and _references_yaml_module(node.value, yaml_modules)
+                ):
+                    names.discard(target.value.id)
+                    modules.discard(target.value.id)
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id in names
+                and target.attr in _OWNED_TABLE_NAMES
+                and node.value is not None
+                and _references_yaml_module(node.value, yaml_modules)
+            ):
+                names.discard(target.value.id)
+                modules.discard(target.value.id)
         elif isinstance(node, ast.ClassDef):
             if any(
                 (isinstance(base, ast.Name) and base.id in names)
@@ -130,6 +179,81 @@ def _owned_loader_names(tree: ast.Module) -> tuple[set[str], set[str]]:
                 names.discard(node.name)
                 modules.discard(node.name)
     return names, modules
+
+
+def _bare_yaml_table_reference(value: ast.expr, yaml_modules: set[str]) -> bool:
+    """True when ``value`` is the host table itself, not a copy of it.
+
+    ``dict(yaml.SafeLoader.yaml_constructors)`` snapshots the table at class
+    definition and is ownership; ``yaml.SafeLoader.yaml_constructors`` reattaches
+    the host's mutable dict and is a bypass.
+    """
+
+    if not isinstance(value, ast.Attribute):
+        return False
+    if not isinstance(value.value, ast.Attribute):
+        return False
+    return isinstance(value.value.value, ast.Name) and value.value.value.id in yaml_modules
+
+
+def _class_owns_core_tables(class_node: ast.ClassDef, yaml_modules: set[str]) -> bool:
+    """True when a class body itself defines every core mutable parser table.
+
+    ``cryodaq.lab_profile`` owns its grammar in-package and is the sanctioned
+    way to subclass a raw PyYAML loader; a body that just ``pass``es inherits
+    the host's mutable state and must be rejected on construction.
+    """
+
+    assigned: set[str] = set()
+    for statement in class_node.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id in _CORE_OWNED_TABLES:
+                    if _bare_yaml_table_reference(statement.value, yaml_modules):
+                        return False
+                    assigned.add(target.id)
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id in _CORE_OWNED_TABLES
+        ):
+            if statement.value is not None and _bare_yaml_table_reference(statement.value, yaml_modules):
+                return False
+            assigned.add(statement.target.id)
+    return _CORE_OWNED_TABLES.issubset(assigned)
+
+
+def _local_loader_subclasses(
+    tree: ast.Module, yaml_modules: set[str], yaml_functions: dict[str, str]
+) -> dict[str, bool]:
+    """Map local subclass name -> owns_core_tables, for every class that
+    derives (directly or transitively) from a raw PyYAML loader class."""
+
+    subclass_state: dict[str, bool] = {}
+    for node in sorted(
+        (c for c in ast.walk(tree) if isinstance(c, ast.ClassDef)),
+        key=lambda item: (item.lineno, item.col_offset),
+    ):
+        derives_from_loader = False
+        inherited_owned = False
+        for base in node.bases:
+            if (
+                isinstance(base, ast.Attribute)
+                and isinstance(base.value, ast.Name)
+                and base.value.id in yaml_modules
+                and base.attr in _LOADER_CLASSES
+            ):
+                derives_from_loader = True
+            elif isinstance(base, ast.Name):
+                if base.id in subclass_state:
+                    derives_from_loader = True
+                    if subclass_state[base.id]:
+                        inherited_owned = True
+                elif yaml_functions.get(base.id) in _LOADER_CLASSES:
+                    derives_from_loader = True
+        if derives_from_loader:
+            subclass_state[node.name] = _class_owns_core_tables(node, yaml_modules) or inherited_owned
+    return subclass_state
 
 
 def _uses_owned_loader(call: ast.Call, names: set[str], modules: set[str]) -> bool:
@@ -157,6 +281,7 @@ def _unsafe_yaml_calls(path: Path, root: Path) -> list[str]:
             )
 
     owned_names, owned_modules = _owned_loader_names(tree)
+    local_loader_subclasses = _local_loader_subclasses(tree, yaml_modules, yaml_functions)
     offenders: list[str] = []
     relative = path.relative_to(root).as_posix()
     for node in ast.walk(tree):
@@ -180,6 +305,15 @@ def _unsafe_yaml_calls(path: Path, root: Path) -> list[str]:
         elif api in _LOADER_CLASSES:
             offenders.append(
                 f"{relative}:{node.lineno}: PyYAML {api} construction bypasses cryodaq._owned_yaml.OwnedSafeLoader"
+            )
+        elif (
+            isinstance(node.func, ast.Name)
+            and node.func.id in local_loader_subclasses
+            and not local_loader_subclasses[node.func.id]
+        ):
+            offenders.append(
+                f"{relative}:{node.lineno}: PyYAML {node.func.id} construction "
+                "bypasses cryodaq._owned_yaml.OwnedSafeLoader"
             )
     return offenders
 
@@ -355,8 +489,34 @@ class Reattached(OwnedSafeLoader):
 yaml.load('x', Loader=Reattached)
 """,
         ),
+        (
+            "ESCAPE_REPLACEMENTS",
+            """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    ESCAPE_REPLACEMENTS = yaml.SafeLoader.ESCAPE_REPLACEMENTS
+yaml.load('x', Loader=Reattached)
+""",
+        ),
+        (
+            "inf_value",
+            """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    inf_value = yaml.SafeLoader.inf_value
+yaml.load('x', Loader=Reattached)
+""",
+        ),
     ],
-    ids=["constructors", "multi-constructors", "implicit-resolvers", "path-resolvers", "bool-values"],
+    ids=[
+        "constructors",
+        "multi-constructors",
+        "implicit-resolvers",
+        "path-resolvers",
+        "bool-values",
+        "escape-replacements",
+        "inf-value",
+    ],
 )
 def test_guard_rejects_subclass_reattaching_owned_tables(tmp_path: Path, table: str, source: str) -> None:
     path = tmp_path / "probe.py"
@@ -365,3 +525,86 @@ def test_guard_rejects_subclass_reattaching_owned_tables(tmp_path: Path, table: 
     offenders = _unsafe_yaml_calls(path, tmp_path)
     assert len(offenders) == 1
     assert "PyYAML load bypasses cryodaq._owned_yaml.OwnedSafeLoader" in offenders[0]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    pass
+Reattached.yaml_constructors = yaml.SafeLoader.yaml_constructors
+yaml.load('x', Loader=Reattached)
+""",
+        """from cryodaq._owned_yaml import OwnedSafeLoader
+import yaml
+class Reattached(OwnedSafeLoader):
+    pass
+Reattached.ESCAPE_REPLACEMENTS = yaml.SafeLoader.ESCAPE_REPLACEMENTS
+yaml.load('x', Loader=Reattached)
+""",
+    ],
+    ids=["constructors", "escape-replacements"],
+)
+def test_guard_rejects_post_definition_table_reattachment(tmp_path: Path, source: str) -> None:
+    """A table rebound AFTER the class body reconnects the host's mutable state.
+
+    The class-body scan cannot see it: `Reattached.yaml_constructors = ...` is
+    an attribute assignment outside the class, and without tracking it the
+    subclass name stays trusted while the host's table comes back.
+    """
+
+    path = tmp_path / "probe.py"
+    path.write_text(source, encoding="utf-8")
+
+    offenders = _unsafe_yaml_calls(path, tmp_path)
+    assert len(offenders) == 1
+    assert "PyYAML load bypasses cryodaq._owned_yaml.OwnedSafeLoader" in offenders[0]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import yaml\nclass LocalLoader(yaml.SafeLoader):\n    pass\nLocalLoader('x: 1').get_single_data()\n",
+        "import yaml as _yaml\n"
+        "class LocalLoader(_yaml.UnsafeLoader):\n"
+        "    pass\n"
+        "LocalLoader('x: 1').get_single_data()\n",
+        "from yaml import SafeLoader\n"
+        "class LocalLoader(SafeLoader):\n"
+        "    pass\n"
+        "LocalLoader('x: 1').get_single_data()\n",
+    ],
+    ids=["module-attr", "module-alias", "from-import"],
+)
+def test_guard_rejects_direct_construction_of_local_pyyaml_loader_subclass(tmp_path: Path, source: str) -> None:
+    """A locally-declared subclass of a raw PyYAML loader inherits its mutable
+    parser state and must not be constructed directly."""
+
+    path = tmp_path / "probe.py"
+    path.write_text(source, encoding="utf-8")
+
+    offenders = _unsafe_yaml_calls(path, tmp_path)
+    assert len(offenders) == 1
+    assert "PyYAML LocalLoader construction bypasses cryodaq._owned_yaml.OwnedSafeLoader" in offenders[0]
+
+
+def test_guard_accepts_local_subclass_that_owns_its_core_tables(tmp_path: Path) -> None:
+    """The `cryodaq.lab_profile` pattern: an in-package subclass that defines its
+    own grammar is the sanctioned alternative, not a bypass."""
+
+    path = tmp_path / "probe.py"
+    path.write_text(
+        "import yaml\n"
+        "class OwnedGrammarLoader(yaml.SafeLoader):\n"
+        "    yaml_constructors = {'tag:yaml.org,2002:str': lambda l, n: l.construct_scalar(n)}\n"
+        "    yaml_multi_constructors = {}\n"
+        "    yaml_implicit_resolvers = {}\n"
+        "    yaml_path_resolvers = {}\n"
+        "    bool_values = {}\n"
+        "OwnedGrammarLoader('x: 1').get_single_data()\n",
+        encoding="utf-8",
+    )
+
+    assert _unsafe_yaml_calls(path, tmp_path) == []
