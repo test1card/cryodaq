@@ -387,6 +387,39 @@ async def test_outage_gap_does_not_expand_freshness_horizon(monkeypatch) -> None
     assert await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0)]) == []
 
 
+async def test_repeated_slow_interval_establishes_the_slow_producer_cadence(monkeypatch) -> None:
+    """A genuinely slow producer must be able to establish its own cadence.
+
+    Mirrors the cooldown service's source-cadence escape hatch: the first
+    arrival interval larger than the bootstrap horizon could be an outage gap OR
+    the start of a genuinely slow cadence, and one observation cannot certify
+    either. A SECOND arrival interval of the same magnitude certifies the slow
+    producer, so its R_thermal is not withheld forever by the bootstrap bound.
+    """
+    plugin = _configured_plugin()
+
+    def _at(wall_sec: float) -> None:
+        monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda _t=wall_sec: _t)
+        monkeypatch.setattr(thermal_calculator.time, "time", lambda _t=wall_sec: _t)
+
+    # First sample: no cadence learned yet.
+    _at(0.0)
+    await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
+    assert plugin._freshness_horizon_s(HEATER_CH) is None
+
+    # A single 600 s interval is NOT certified as cadence (outage vs slow producer).
+    _at(600.0)
+    await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
+    assert plugin._freshness_horizon_s(HEATER_CH) is None, "a single slow interval certified the cadence"
+
+    # A SECOND 600 s interval certifies the slow producer cadence.
+    _at(1200.0)
+    await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
+    assert plugin._freshness_horizon_s(HEATER_CH) == pytest.approx(3.0 * 600.0), (
+        "a repeated slow interval did not establish the slow producer cadence"
+    )
+
+
 async def test_broker_ingress_age_does_not_reset_freshness(monkeypatch) -> None:
     """A queued sample must retain its broker-ingress age when processed."""
     plugin = _configured_plugin()

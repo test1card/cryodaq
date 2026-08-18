@@ -716,6 +716,7 @@ class ZMQPublisher:
         self._alarm_snapshot: Callable[[], Any] | None = None
         self._applied_cold_stage_channel: str | None = None
         self._instrument_poll_intervals_s: dict[str, float] = {}
+        self._instrument_driver_types_s: dict[str, str] = {}
         if applied_cold_stage_channel is not None:
             self.configure_applied_cold_stage_channel(applied_cold_stage_channel)
 
@@ -772,6 +773,29 @@ class ZMQPublisher:
             validated[instrument_id.strip()] = float(interval_s)
         self._instrument_poll_intervals_s = validated
 
+    def configure_instrument_driver_types_s(self, types: dict[str, str]) -> None:
+        """Declare each instrument's code-owned driver type (instrument_id -> type_name).
+
+        Driver readings carry no driver-type identity of their own, so a
+        forwarded physical feed (e.g. the VSP63D pressure gauge) would reach
+        the GUI indistinguishable from a foreign ``/pressure`` channel of a
+        different driver. The publisher stamps ``driver_type`` from this
+        mapping so consumers can bind a slot to the code-defined driver type
+        (``thyracont_vsp63d``) rather than to a config-defined instrument name.
+        """
+        if self._running or self._session_id is not None:
+            raise RuntimeError("instrument driver types must be configured before publisher start")
+        if type(types) is not dict:
+            raise TypeError("instrument driver types must be a dict")
+        validated: dict[str, str] = {}
+        for instrument_id, type_name in types.items():
+            if type(instrument_id) is not str or not instrument_id.strip():
+                raise ValueError("instrument driver types keys must be non-empty strings")
+            if type(type_name) is not str or not type_name.strip():
+                raise ValueError("instrument driver types values must be non-empty strings")
+            validated[instrument_id.strip()] = type_name.strip()
+        self._instrument_driver_types_s = validated
+
     def _transport(self, sequence: int, *, authoritative: bool) -> dict[str, Any]:
         session_id = self._session_id
         if session_id is None:
@@ -817,6 +841,10 @@ class ZMQPublisher:
             poll_interval_s = self._instrument_poll_intervals_s.get(reading.instrument_id)
             if poll_interval_s is not None:
                 metadata["producer_interval_s"] = poll_interval_s
+        if "driver_type" not in metadata:
+            driver_type = self._instrument_driver_types_s.get(reading.instrument_id)
+            if driver_type is not None:
+                metadata["driver_type"] = driver_type
         async with self._send_lock:
             if "producer_interval_s" in metadata and "source_age_s" not in metadata:
                 source_age_s = time.time() - reading.timestamp.timestamp()

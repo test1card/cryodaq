@@ -794,9 +794,13 @@ async def test_replay_partial_publisher_start_rollback_resists_repeated_cancella
             self.stop_cancelled = False
             self.stop_completed = False
             self.configured_intervals_s: dict[str, float] | None = None
+            self.configured_driver_types_s: dict[str, str] | None = None
 
         def configure_instrument_poll_intervals_s(self, intervals: dict[str, float]) -> None:
             self.configured_intervals_s = dict(intervals)
+
+        def configure_instrument_driver_types_s(self, types: dict[str, str]) -> None:
+            self.configured_driver_types_s = dict(types)
 
         async def start(self, _queue) -> None:
             publisher_start_entered.set()

@@ -35,16 +35,22 @@ logger = logging.getLogger(__name__)
 _STALE_INTERVAL_MULTIPLIER = 3.0
 
 # Each context slot is bound to a DECLARED producer identity, never to
-# whichever producer happens to arrive first. Every slot names the shipped
-# producer's exact (instrument_id, channel) -- including the pressure slot,
-# which names the physical gauge feed ``VSP63D_1/pressure`` exactly as the
-# instrument descriptor declares it. First-arrival selection is how a producer
-# nobody chose ends up owning a phase readout, which is the display layer's
-# half of OC-004, so a slot with no declared producer accepts nothing.
+# whichever producer happens to arrive first. The analytics slots name the
+# shipped producer's exact (instrument_id, channel). The pressure slot binds
+# the shipped physical gauge feed by a CODE-OWNED identity -- the driver type
+# ``thyracont_vsp63d`` stamped onto the reading by the engine publisher -- not
+# by a config-defined instrument name: a renamed or second gauge of the same
+# driver keeps its feed (dashboard_view routes the same way, by the ``/pressure``
+# channel suffix), while a foreign ``/pressure`` channel of a different driver is
+# refused. First-arrival selection is how a producer nobody chose ends up owning
+# a phase readout, which is the display layer's half of OC-004, so a slot with
+# no declared producer accepts nothing.
+_PRESSURE_DRIVER_TYPE = "thyracont_vsp63d"
+
 _SLOT_DECLARED_PRODUCER: dict[str, tuple[str, str] | None] = {
     "eta": ("cooldown_predictor", "analytics/cooldown_predictor/cooldown_eta"),
     "r_thermal": ("thermal_calculator", "analytics/thermal_calculator/R_thermal"),
-    "pressure": ("VSP63D_1", "VSP63D_1/pressure"),
+    "pressure": (_PRESSURE_DRIVER_TYPE, "*pressure"),
 }
 
 _MAX_HEIGHT_PX = 55
@@ -92,6 +98,7 @@ class PhaseAwareWidget(QWidget):
         self._cached_at: dict[str, float | None] = {}
         self._stale_after_s: dict[str, float | None] = {}
         self._cached_producer: dict[str, tuple[str, str]] = {}
+        self._reported_pressure_refusals: set[tuple[str, str]] = set()
 
         self._build_ui()
         self._apply_inactive_state()
@@ -396,6 +403,7 @@ class PhaseAwareWidget(QWidget):
                 self._cached_at.clear()
                 self._stale_after_s.clear()
                 self._cached_producer.clear()
+                self._reported_pressure_refusals.clear()
             self._active_experiment_id = new_experiment_id
             self._current_phase = new_phase
             self._phase_started_at = new_started
@@ -447,8 +455,10 @@ class PhaseAwareWidget(QWidget):
         # permanent ownership and made every later shipped value invisible.
         bound = self._cached_producer.get(key)
         if bound is not None and bound != producer:
+            self._report_slot_refusal(key, reading, producer)
             return
         if bound is None and not self._reading_matches_declared_producer(key, reading, producer):
+            self._report_slot_refusal(key, reading, producer)
             return
         value = reading.value
         if key == "eta":
@@ -458,21 +468,48 @@ class PhaseAwareWidget(QWidget):
         else:
             self._cached_pressure = value
         self._cached_producer[key] = producer
+        self._reported_pressure_refusals.discard(producer)
         self._remember_freshness(key, reading)
         self._refresh_context_label()
+
+    def _report_slot_refusal(self, key: str, reading, producer: tuple[str, str]) -> None:
+        """Say once, at operator level, when a slot refuses a matching-suffix feed.
+
+        A renamed or second gauge (or any foreign feed) that a slot refuses must
+        not drop silently: the raw reading is still buffered and persisted, but
+        the phase readout going dark with no log line is the failure the
+        laboratory cannot diagnose. Report each refusing producer once until the
+        slot accepts it, so a 2 Hz foreign feed does not flood the log.
+        """
+        if key != "pressure":
+            return
+        if producer in self._reported_pressure_refusals:
+            return
+        self._reported_pressure_refusals.add(producer)
+        logger.warning(
+            "Pressure slot refused %s/%s: not a %s gauge feed",
+            producer[0],
+            producer[1],
+            _PRESSURE_DRIVER_TYPE,
+        )
 
     @staticmethod
     def _reading_matches_declared_producer(key: str, reading, producer: tuple[str, str]) -> bool:
         """Return whether an unbound slot may accept ``reading``.
 
-        A slot accepts ONLY its declared shipped producer, named in
-        ``_SLOT_DECLARED_PRODUCER``. The pressure slot names the physical gauge
-        feed ``VSP63D_1/pressure`` just like the analytics slots name their
-        producers, so both a site analytics value and a foreign non-analytics
-        gauge are refused. A slot with no declared producer accepts nothing:
-        first-arrival acceptance is precisely the implicit producer pick this
-        widget must not make.
+        Analytics slots accept only their declared shipped producer, named in
+        ``_SLOT_DECLARED_PRODUCER``. The pressure slot accepts the shipped
+        physical gauge feed by its CODE-OWNED driver type, stamped onto the
+        reading by the engine publisher (``driver_type`` metadata) and never by
+        a config-defined instrument name -- so a renamed or second VSP63D gauge
+        keeps its feed, and a foreign ``/pressure`` channel of a different
+        driver (or an analytics value) is refused. A slot with no declared
+        producer accepts nothing: first-arrival acceptance is precisely the
+        implicit producer pick this widget must not make.
         """
+        if key == "pressure":
+            metadata = getattr(reading, "metadata", None)
+            return type(metadata) is dict and metadata.get("driver_type") == _PRESSURE_DRIVER_TYPE
         declared = _SLOT_DECLARED_PRODUCER.get(key)
         if declared is not None:
             return producer == declared
@@ -516,6 +553,7 @@ class PhaseAwareWidget(QWidget):
         self._cached_at.clear()
         self._stale_after_s.clear()
         self._cached_producer.clear()
+        self._reported_pressure_refusals.clear()
         self._stepper.setVisible(False)
         self._duration_label.setText("")
         self._controls.setVisible(False)

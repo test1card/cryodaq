@@ -135,9 +135,11 @@ def _pressure_reading(
 ) -> Reading:
     """The shipped physical pressure feed, produced with declared cadence+age.
 
-    ``instrument_id`` matches the real driver, which publishes ``self.name``
-    (the configured instrument name ``VSP63D_1``, config/instruments.yaml), so
-    the reading is accepted by the pressure slot's declared-producer binding.
+    ``driver_type`` mirrors the engine publisher stamp (zmq_bridge
+    ``configure_instrument_driver_types_s``): the pressure slot binds the
+    shipped physical gauge feed by the code-owned driver type, not by the
+    configured instrument name. ``instrument_id`` is the configured name
+    ``VSP63D_1`` exactly as the real driver publishes it.
     """
     source_metadata = {}
     if cadence_s is not None:
@@ -150,7 +152,7 @@ def _pressure_reading(
         channel="VSP63D_1/pressure",
         value=value,
         unit="mbar",
-        metadata=source_metadata,
+        metadata={"driver_type": "thyracont_vsp63d", **source_metadata},
     )
     socket = _PublisherSocket()
     publisher = ZMQPublisher()
@@ -621,7 +623,7 @@ def test_analytics_pressure_cannot_claim_the_physical_pressure_slot(app, tmp_pat
         value=1.5e-6,
         unit="mbar",
         status=ChannelStatus.OK,
-        metadata={"producer_interval_s": 2.0, "source_age_s": 0.0},
+        metadata={"driver_type": "thyracont_vsp63d", "producer_interval_s": 2.0, "source_age_s": 0.0},
     )
     view.on_reading(gauge)
     assert widget._cached_producer["pressure"] == ("VSP63D_1", "VSP63D_1/pressure"), (
@@ -667,6 +669,72 @@ def test_foreign_non_analytics_pressure_cannot_claim_the_physical_pressure_slot(
     )
     assert widget._cached_pressure == pytest.approx(2.0)
     assert "mbar" in widget._context_label.text(), "the shipped pressure feed did not render after a foreign arrival"
+
+
+def test_renamed_gauge_of_the_shipped_driver_type_keeps_the_pressure_slot(app, tmp_path, monkeypatch) -> None:
+    """A fork that renames the gauge must not silently darken the pressure readout.
+
+    The pressure slot binds the shipped physical gauge feed by its CODE-OWNED
+    driver type (``thyracont_vsp63d``), stamped onto the reading by the engine
+    publisher -- never by a config-defined instrument name. A renamed gauge
+    (``RenamedGauge_1`` instead of ``VSP63D_1``) therefore claims the slot and
+    renders, where the old config-name binding silently dropped it.
+    """
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0, phase="vacuum")
+    widget = view._phase_widget
+
+    renamed = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="RenamedGauge_1",
+        channel="RenamedGauge_1/pressure",
+        value=2.5e-6,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={"driver_type": "thyracont_vsp63d", "producer_interval_s": 2.0, "source_age_s": 0.0},
+    )
+    view.on_reading(renamed)
+
+    assert widget._cached_producer["pressure"] == ("RenamedGauge_1", "RenamedGauge_1/pressure"), (
+        "a renamed gauge of the shipped driver type could not claim the pressure slot"
+    )
+    assert widget._cached_pressure == pytest.approx(2.5e-6)
+    assert "mbar" in widget._context_label.text(), "the renamed gauge feed did not render"
+
+
+def test_foreign_driver_type_pressure_feed_is_refused_with_a_log_line(app, tmp_path, monkeypatch, caplog) -> None:
+    """A foreign /pressure channel of a DIFFERENT driver type is refused loudly.
+
+    The producer check must survive the driver-type binding: a ``/pressure``
+    feed from a gauge that is not the shipped ``thyracont_vsp63d`` driver (or
+    carries no driver-type stamp) never owns the slot, and the refusal is
+    reported once at operator level rather than dropping the readout silently.
+    """
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0, phase="vacuum")
+    widget = view._phase_widget
+
+    foreign = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="gauge_c",
+        channel="gauge_c/pressure",
+        value=3.0,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={"driver_type": "other_driver", "producer_interval_s": 1.0, "source_age_s": 0.0},
+    )
+    with caplog.at_level("WARNING", logger="cryodaq.gui.dashboard.phase_aware_widget"):
+        view.on_reading(foreign)
+        view.on_reading(foreign)
+
+    assert widget._cached_producer.get("pressure") is None, (
+        "a foreign driver-type /pressure feed claimed the unbound pressure slot"
+    )
+    assert "mbar" not in widget._context_label.text(), "a foreign value rendered in the pressure slot"
+    assert caplog.text.count("gauge_c/pressure") >= 1, "the pressure-slot refusal was not reported to the log"
+    assert caplog.text.count("gauge_c/pressure") == 1, "the pressure-slot refusal was logged more than once"
 
 
 def test_gui_queue_age_follows_declared_cadence_not_channel_spelling(monkeypatch) -> None:

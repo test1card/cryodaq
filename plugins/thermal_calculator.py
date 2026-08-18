@@ -65,6 +65,13 @@ class ThermalCalculator(AnalyticsPlugin):
         self._last_required_input_arrival_monotonic: dict[str, float] = {}
         self._last_required_input_ingress_monotonic: dict[str, float | None] = {}
         self._required_input_arrival_intervals: dict[str, deque[float]] = {}
+        # The first arrival interval larger than the bootstrap horizon is not
+        # certified as cadence (a single outage gap must not certify
+        # freshness). It is held here instead; a second arrival interval
+        # consistent with it certifies a genuinely slow producer cadence that
+        # the bootstrap bound alone could never establish. Mirrors the cooldown
+        # service's source-cadence escape hatch (cooldown_service.py).
+        self._arrival_cadence_candidate: dict[str, float | None] = {}
 
     # ------------------------------------------------------------------
     # Конфигурация
@@ -101,6 +108,11 @@ class ThermalCalculator(AnalyticsPlugin):
             self._hot_sensor: deque(maxlen=5),
             self._cold_sensor: deque(maxlen=5),
             self._heater_channel: deque(maxlen=5),
+        }
+        self._arrival_cadence_candidate = {
+            self._hot_sensor: None,
+            self._cold_sensor: None,
+            self._heater_channel: None,
         }
 
     # ------------------------------------------------------------------
@@ -171,9 +183,37 @@ class ThermalCalculator(AnalyticsPlugin):
                 arrival_interval = now_monotonic - previous_arrival
                 if arrival_interval > 0.0:
                     established_horizon = self._freshness_horizon_s(reading.channel)
-                    allowed_interval = established_horizon or _BOOTSTRAP_FRESHNESS_HORIZON_S
-                    if arrival_interval <= allowed_interval:
+                    if established_horizon is not None:
+                        if arrival_interval <= established_horizon:
+                            intervals.append(arrival_interval)
+                    elif arrival_interval <= _BOOTSTRAP_FRESHNESS_HORIZON_S:
                         intervals.append(arrival_interval)
+                        self._arrival_cadence_candidate[reading.channel] = None
+                    else:
+                        # The first interval larger than the bootstrap horizon
+                        # could be an early outage gap OR the start of a
+                        # genuinely slow producer cadence (e.g. a replayed curve
+                        # sampled every 10 minutes). One observation cannot
+                        # distinguish them, so do not certify either; hold it as
+                        # a candidate. A SECOND arrival interval of the same
+                        # magnitude certifies the cadence: a real slow producer
+                        # repeats its interval, while a one-off gap does not.
+                        # Without this path a slow-cadence source could never
+                        # establish an arrival cadence, collapsing the horizon
+                        # to the bootstrap bound and withholding every R_thermal
+                        # from a healthy producer. Mirrors the cooldown
+                        # service's source-cadence escape hatch.
+                        candidate = self._arrival_cadence_candidate[reading.channel]
+                        if (
+                            candidate is not None
+                            and arrival_interval <= 3.0 * candidate
+                            and candidate <= 3.0 * arrival_interval
+                        ):
+                            intervals.append(candidate)
+                            intervals.append(arrival_interval)
+                            self._arrival_cadence_candidate[reading.channel] = None
+                        else:
+                            self._arrival_cadence_candidate[reading.channel] = arrival_interval
             self._last_required_input_arrival_monotonic[reading.channel] = now_monotonic
             raw_ingress = reading.metadata.get(BROKER_INGRESS_MONOTONIC_METADATA_KEY)
             if raw_ingress is None:

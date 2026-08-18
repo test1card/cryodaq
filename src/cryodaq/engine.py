@@ -6819,6 +6819,14 @@ async def _run_engine(
     zmq_pub.configure_instrument_poll_intervals_s(
         {config.driver.name: config.poll_interval_s for config in driver_configs}
     )
+    # The same raw driver feed also carries no code-owned driver-type identity,
+    # so the dashboard phase widget binds its pressure slot to the shipped
+    # physical gauge by the driver type (thyracont_vsp63d) rather than by the
+    # config-defined instrument name. The publisher stamps driver_type from the
+    # canonical registry specs, so a renamed or second gauge keeps its feed.
+    zmq_pub.configure_instrument_driver_types_s(
+        {config.name: config.spec.type_name for config in driver_load.validated_configs}
+    )
     # P2-5: interlock non-usable readings emit alarm-v2 events via the same
     # AlarmStateManager the sensor-diagnostics engine uses (built after the
     # InterlockEngine, so wired here by setter).
