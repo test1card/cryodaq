@@ -291,8 +291,15 @@ irreducible hardware milestone above with that in mind: **Keithley A8-0 on real
 2604B firmware is the heater-control gate, and no soak substitutes for it.**
 
 **The laboratory computer is on an uninterruptible power supply** (owner,
-2026-08-18). The "host dies mid-profile" risk is therefore a schedule risk for
-that machine, not a data risk.
+2026-08-18). That removes ONE cause of host death — mains power loss — and only
+that one. A kernel panic, an out-of-memory kill, a storage or filesystem
+failure, or a crash of the program itself still kills the host mid-profile and
+still drops whatever measurements are not yet persisted.
+
+**So host-death persistence remains OPEN, and the A8c host-death gate above
+remains a physical blocker.** Do not read the uninterruptible supply as closing
+either. What it does close is the specific case that interrupted work on
+2026-08-18: a mains outage on the development machine, which has no such supply.
 
 #### The soak starts on Ubuntu 22.04, and its next barrier is named
 
