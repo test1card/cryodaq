@@ -9,7 +9,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -1218,7 +1218,7 @@ def test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes(
     for day, first, last in (("2026-08-18", 1000, 1450), ("2026-08-19", 1451, 1900)):
         database = data_dir / f"data_{day}.db"
         databases.append(database)
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection:
             connection.execute(
                 "CREATE TABLE readings (id INTEGER PRIMARY KEY, timestamp REAL, instrument_id TEXT, "
                 "channel TEXT, value REAL, unit TEXT, status TEXT)"
@@ -1231,6 +1231,7 @@ def test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes(
                     for channel in range(8)
                 ],
             )
+            connection.commit()
 
     selected = soak.profile("short")
     monkeypatch.setattr(
