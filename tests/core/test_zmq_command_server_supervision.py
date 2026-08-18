@@ -445,7 +445,7 @@ def test_engine_main_consumes_authority_before_force_child_environment(
     monkeypatch.setattr(
         argparse.ArgumentParser,
         "parse_args",
-        lambda _self: SimpleNamespace(mock=True, force=True),
+        lambda _self: SimpleNamespace(mock=True, mock_thermal_simulator=None, force=True),
     )
     monkeypatch.setattr(logging_setup, "setup_logging", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(logging_setup, "resolve_log_level", lambda: logging.INFO)
@@ -466,7 +466,9 @@ def test_engine_main_consumes_authority_before_force_child_environment(
         shutdown_capability: str,
         engine_ready_nonce: str,
         engine_ready_channel_fd: int,
+        mock_instrument_client: object | None = None,
     ) -> None:
+        assert mock_instrument_client is None
         assert engine_ready_channel_fd == write_fd
         assert os.get_inheritable(engine_ready_channel_fd) is False
         run_arguments.append(

@@ -811,6 +811,8 @@ async def test_status_refresh_failure_marks_cached_status_stale() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     driver._connected = True
     driver._last_status_result = {1: 17}
+    # Fresh WSL instances can have monotonic uptime below the 60 s refresh interval.
+    driver._last_status_check = -float("inf")
     driver.read_status = AsyncMock(side_effect=RuntimeError("RDGST unavailable"))  # type: ignore[method-assign]
     driver._read_krdg_channels = AsyncMock(
         return_value=[
