@@ -464,12 +464,42 @@ def render_experiment_metadata_section(document: Document, dataset: ReportDatase
     # Summary stats
     if summary:
         parts = []
-        if "reading_count" in summary:
-            parts.append(f"Измерений: {summary['reading_count']:,}")
-        if "run_count" in summary:
-            parts.append(f"Прогонов: {summary['run_count']}")
+
+        # OC-015.  These printed the recorded summary verbatim, so a dataset carrying stale
+        # zero counts rendered zeros while loaded readings, runs and artifacts existed --
+        # an absence rendered as a fact.  The loaded count is now authoritative.
+        #
+        # `run_records` and `artifact_index` come from the SAME metadata mapping as the
+        # summary, so a disagreement there is staleness.  `readings` does NOT: it is bounded
+        # by the report window, so the loaded length answers "in this report" while the
+        # summary answers "in the experiment".  Neither number is discarded, and a
+        # disagreement is SHOWN rather than silently resolved.
+        def _counted(label: str, key: str, loaded: int, comparable: int | None = None) -> str:
+            recorded = summary.get(key)
+            against = loaded if comparable is None else comparable
+            if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded != against:
+                return f"{label}: {loaded:,} (в записи: {recorded:,})"
+            return f"{label}: {loaded:,}"
+
+        # `_build_archive_snapshot` takes `artifact_count` BEFORE appending its own
+        # summary_metadata entry, so a fully consistent archive loads an index exactly one
+        # longer than the number it recorded.  Compare the recorded number against the
+        # membership it actually counted; the number SHOWN stays the whole loaded index.
+        recorded_artifact_members = sum(
+            1 for item in dataset.artifact_index if str(item.get("role", "")) != "summary_metadata"
+        )
+
+        # Keys are the producer's own (`ExperimentManager._build_archive_snapshot`).  They were
+        # `reading_count` / `run_count`, which no producer has ever written, so both branches
+        # were dead for every generated archive.
+        if "measured_value_rows" in summary:
+            parts.append(_counted("Измерений", "measured_value_rows", len(dataset.readings)))
+        if "run_record_count" in summary:
+            parts.append(_counted("Прогонов", "run_record_count", len(dataset.run_records)))
         if "artifact_count" in summary:
-            parts.append(f"Артефактов: {summary['artifact_count']}")
+            parts.append(
+                _counted("Артефактов", "artifact_count", len(dataset.artifact_index), recorded_artifact_members)
+            )
         if parts:
             document.add_paragraph(xml_safe(" │ ".join(parts)))
 
