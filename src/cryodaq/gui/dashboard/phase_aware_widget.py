@@ -34,6 +34,17 @@ logger = logging.getLogger(__name__)
 
 _STALE_INTERVAL_MULTIPLIER = 3.0
 
+# Each context slot is bound to a DECLARED producer identity, never to
+# whichever producer happens to arrive first. The analytics slots name the
+# shipped producer's exact (instrument_id, channel); the pressure slot is the
+# physical gauge feed -- any non-analytics reading whose channel ends with
+# "/pressure" -- so a renamed or second gauge keeps its feed without ever
+# letting an analytics value own the slot.
+_SLOT_DECLARED_PRODUCER: dict[str, tuple[str, str] | None] = {
+    "eta": ("cooldown_predictor", "analytics/cooldown_predictor/cooldown_eta"),
+    "r_thermal": ("thermal_calculator", "analytics/thermal_calculator/R_thermal"),
+    "pressure": None,
+}
 
 _MAX_HEIGHT_PX = 55
 _BUTTON_HEIGHT_PX = 28
@@ -429,13 +440,14 @@ class PhaseAwareWidget(QWidget):
                 self._cached_at[key] = None
                 self._refresh_context_label()
             return
-        # A slot binds to the FIRST producer whose usable reading populates it.
-        # A later same-suffix producer must not take ownership: transferring
-        # identity on every usable match let a foreign value replace the
-        # shipped predictor's value and made the shipped producer's subsequent
-        # failures invisible.
+        # A slot binds to its DECLARED producer before any reading is accepted.
+        # First-arrival binding was a startup race: a site analytics plugin that
+        # published a usable matching suffix before the shipped producer took
+        # permanent ownership and made every later shipped value invisible.
         bound = self._cached_producer.get(key)
         if bound is not None and bound != producer:
+            return
+        if bound is None and not self._reading_matches_declared_producer(key, reading, producer):
             return
         value = reading.value
         if key == "eta":
@@ -447,6 +459,21 @@ class PhaseAwareWidget(QWidget):
         self._cached_producer[key] = producer
         self._remember_freshness(key, reading)
         self._refresh_context_label()
+
+    @staticmethod
+    def _reading_matches_declared_producer(key: str, reading, producer: tuple[str, str]) -> bool:
+        """Return whether an unbound slot may accept ``reading``.
+
+        Analytics slots accept only their declared shipped producer. The
+        pressure slot tracks the physical gauge feed, so an analytics value
+        (which the plugin pipeline marks with ``source: analytics``) can never
+        own it even when it is the first usable ``/pressure`` sample.
+        """
+        declared = _SLOT_DECLARED_PRODUCER.get(key)
+        if declared is not None:
+            return producer == declared
+        metadata = getattr(reading, "metadata", None)
+        return not (type(metadata) is dict and metadata.get("source") == "analytics")
 
     # ------------------------------------------------------------------
     # State application

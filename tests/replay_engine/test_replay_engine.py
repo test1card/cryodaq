@@ -935,6 +935,22 @@ def _write_readings_db(path: Path, *, ts_start: float, n_rows: int) -> None:
     conn.close()
 
 
+def _write_pressure_db(path: Path, *, interval_s: float, n_rows: int) -> None:
+    """SQLite file with n_rows of VSP63D_1/pressure at a fixed poll cadence."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE readings (timestamp REAL, channel TEXT, value REAL, unit TEXT, status TEXT, instrument_id TEXT)"
+    )
+    base = time.time() - n_rows * interval_s
+    for i in range(n_rows):
+        conn.execute(
+            "INSERT INTO readings VALUES (?,?,?,?,?,?)",
+            (base + i * interval_s, "VSP63D_1/pressure", 1.5e-6, "mbar", "ok", "VSP63D_1"),
+        )
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Source resolution — no ZMQ required
 # ---------------------------------------------------------------------------
@@ -973,6 +989,61 @@ def test_resolve_source_unsupported_suffix_raises(tmp_path):
     p.write_text("a,b", encoding="utf-8")
     with pytest.raises(ValueError, match="Unsupported"):
         resolve_source(p)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_replay_stamps_replay_clock_freshness_on_pressure(tmp_path: Path) -> None:
+    """Replayed pressure carries producer_interval_s + source_age_s from the first sample.
+
+    Without a replay-clock cadence/age basis the forwarded pressure feed reaches
+    the phase widget's _remember_freshness with neither field and its first
+    healthy sample is marked stale immediately (PR #22 finding).
+    """
+    from cryodaq.drivers.base import Reading
+
+    db = tmp_path / "data_2026-01-01.db"
+    _write_pressure_db(db, interval_s=2.0, n_rows=5)
+
+    replay = SQLiteReplay(db, speed=10.0, loop=False)
+    received: list[Reading] = []
+
+    async def cb(r: Reading) -> None:
+        received.append(r)
+
+    await replay.run(cb)
+
+    assert len(received) == 5
+    for r in received:
+        assert r.metadata.get("source") == "replay"
+        assert r.metadata["producer_interval_s"] == pytest.approx(0.2), (
+            "replay cadence was not the recorded cadence scaled by speed"
+        )
+        assert r.metadata["source_age_s"] == pytest.approx(0.0), (
+            "a freshly emitted replay sample was not current on the replay clock"
+        )
+
+
+@pytest.mark.asyncio
+async def test_directory_replay_stamps_replay_clock_freshness_on_pressure(tmp_path: Path) -> None:
+    """DirectoryReplay._publish_rows supplies the same freshness basis."""
+    from cryodaq.drivers.base import Reading
+
+    db = tmp_path / "data_2026-01-01.db"
+    _write_pressure_db(db, interval_s=2.0, n_rows=5)
+
+    replay = DirectoryReplay(tmp_path, speed=10.0, loop=False)
+    received: list[Reading] = []
+
+    async def cb(r: Reading) -> None:
+        received.append(r)
+
+    await replay.run(cb)
+
+    assert len(received) == 5
+    for r in received:
+        assert r.metadata.get("source") == "replay"
+        assert r.metadata["producer_interval_s"] == pytest.approx(0.2)
+        assert r.metadata["source_age_s"] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

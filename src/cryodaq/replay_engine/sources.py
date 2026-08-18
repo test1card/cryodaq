@@ -45,6 +45,50 @@ def _replay_status(raw: object) -> ChannelStatus:
         raise ValueError(f"Unknown replay status: {raw!r}") from exc
 
 
+def _instrument_recorded_cadence_s(
+    rows: list[tuple[float, str, float, str, str, str]],
+) -> dict[str, float]:
+    """Median positive interval between consecutive rows of each instrument.
+
+    Rows are globally ascending by timestamp, so consecutive rows of one
+    instrument bracket one recorded poll interval. Median (not mean) so a
+    single outage gap between two samples cannot inflate the cadence that
+    later certifies freshness.
+    """
+    intervals_by_instrument: dict[str, list[float]] = {}
+    last_ts_by_instrument: dict[str, float] = {}
+    for ts_posix, _channel, _value, _unit, _status_str, inst_id in rows:
+        previous = last_ts_by_instrument.get(inst_id)
+        if previous is not None and ts_posix > previous:
+            intervals_by_instrument.setdefault(inst_id, []).append(ts_posix - previous)
+        last_ts_by_instrument[inst_id] = ts_posix
+    cadence: dict[str, float] = {}
+    for inst_id, intervals in intervals_by_instrument.items():
+        intervals.sort()
+        count = len(intervals)
+        median = intervals[count // 2] if count % 2 else (intervals[count // 2 - 1] + intervals[count // 2]) / 2.0
+        if math.isfinite(median) and median > 0.0:
+            cadence[inst_id] = float(median)
+    return cadence
+
+
+def _replay_freshness_basis(recorded_cadence_s: float | None, speed: float) -> dict[str, float]:
+    """Replay-clock freshness basis for one instrument's replayed feed.
+
+    ``producer_interval_s`` is the wall-clock arrival cadence (recorded
+    cadence scaled by replay speed) -- the cadence at which the GUI can expect
+    the next replayed sample. ``source_age_s`` is 0 because the replay clock
+    re-bases the series onto ``now`` and emits each sample as it is reached,
+    so a freshly emitted sample is current on its own clock. Without these the
+    forwarded pressure feed reaches ``_remember_freshness()`` with neither
+    field and the phase widget marks its first healthy sample stale.
+    """
+    if recorded_cadence_s is None:
+        return {}
+    interval_s = recorded_cadence_s / speed if speed > 0.0 else recorded_cadence_s
+    return {"producer_interval_s": float(interval_s), "source_age_s": 0.0}
+
+
 class SQLiteReplay:
     """Replay a single SQLite daily file, publishing readings at replay speed."""
 
@@ -80,6 +124,7 @@ class SQLiteReplay:
             if not rows:
                 logger.warning("SQLiteReplay: no rows in %s", self._db_path.name)
                 break
+            cadence_by_instrument = _instrument_recorded_cadence_s(rows)
             _base_offset = base_offset if base_offset is not None else datetime.now(tz=UTC).timestamp() - rows[0][0]
             cycle_span = max(0.0, rows[-1][0] - rows[0][0]) + 1e-6
             cycle_offset = cycle_index * cycle_span
@@ -102,7 +147,10 @@ class SQLiteReplay:
                     value=value,
                     unit=unit,
                     status=status,
-                    metadata={"source": "replay"},
+                    metadata={
+                        "source": "replay",
+                        **_replay_freshness_basis(cadence_by_instrument.get(inst_id), self._speed),
+                    },
                 )
                 await publish_cb(reading)
             if not self._loop:
@@ -354,6 +402,7 @@ class DirectoryReplay:
         base_offset: float,
         previous_timestamp: float | None,
     ) -> float | None:
+        cadence_by_instrument = _instrument_recorded_cadence_s(rows)
         for ts_posix, channel, value, unit, status_str, inst_id in rows:
             if not self._running:
                 return previous_timestamp
@@ -370,7 +419,10 @@ class DirectoryReplay:
                 value=decode(value, status.value),
                 unit=unit,
                 status=status,
-                metadata={"source": "replay"},
+                metadata={
+                    "source": "replay",
+                    **_replay_freshness_basis(cadence_by_instrument.get(inst_id), self._speed),
+                },
             )
             await publish_cb(reading)
         return previous_timestamp

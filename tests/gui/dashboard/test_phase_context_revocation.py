@@ -466,6 +466,75 @@ def test_usable_foreign_same_suffix_does_not_take_over_the_slot(app, tmp_path, m
     )
 
 
+def test_foreign_producer_cannot_claim_a_slot_before_the_declared_producer_arrives(app, tmp_path, monkeypatch) -> None:
+    """A first-arriving foreign producer must not own the eta slot.
+
+    First-arrival binding gave a site analytics plugin permanent ownership of a
+    slot it reached first (its one-second output arriving before the shipped
+    predictor's first 30 s prediction) and ignored every later shipped value.
+    The slot is bound to its declared producer before any reading is accepted.
+    """
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    widget = view._phase_widget
+
+    foreign = replace(
+        _eta_reading(datetime.now(UTC), cadence_s=1.0),
+        instrument_id="site_predictor",
+        channel="analytics/site/cooldown_eta",
+        value=99.0,
+    )
+    view.on_reading(foreign)
+
+    assert widget._cached_producer.get("eta") is None, "a first-arriving foreign producer claimed the unbound eta slot"
+    assert "ETA" not in widget._context_label.text(), "a foreign value rendered in the eta slot"
+
+    shipped = _eta_reading(datetime.now(UTC), cadence_s=30.0)
+    view.on_reading(shipped)
+
+    assert widget._cached_producer["eta"] == (shipped.instrument_id, shipped.channel), (
+        "the declared producer could not claim its own slot after a foreign arrival"
+    )
+    assert widget._cached_eta_s == pytest.approx(2.0 * 3600), (
+        "the shipped value was ignored after the foreign producer arrived first"
+    )
+
+
+def test_analytics_pressure_cannot_claim_the_physical_pressure_slot(app, tmp_path, monkeypatch) -> None:
+    """An analytics value can never own the pressure slot, even when first."""
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    widget = view._phase_widget
+
+    analytics_pressure = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="site_predictor",
+        channel="analytics/site/pressure",
+        value=2.0,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={"source": "analytics", "producer_interval_s": 1.0, "source_age_s": 0.0},
+    )
+    view.on_reading(analytics_pressure)
+    assert widget._cached_producer.get("pressure") is None, "an analytics value claimed the pressure slot"
+
+    gauge = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="VSP63D_1",
+        channel="VSP63D_1/pressure",
+        value=1.5e-6,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={"producer_interval_s": 2.0, "source_age_s": 0.0},
+    )
+    view.on_reading(gauge)
+    assert widget._cached_producer["pressure"] == ("VSP63D_1", "VSP63D_1/pressure"), (
+        "the physical gauge feed could not claim the pressure slot"
+    )
+    assert widget._cached_pressure == pytest.approx(1.5e-6)
+
+
 def test_gui_queue_age_follows_declared_cadence_not_channel_spelling(monkeypatch) -> None:
     """GUI queue residence must age a cadence-declared reading regardless of spelling.
 
