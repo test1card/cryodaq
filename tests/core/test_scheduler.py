@@ -221,6 +221,31 @@ async def test_successful_sqlite_commit_marks_published_reading_authoritative(
     assert reading.metadata[PERSISTENCE_AUTHORITATIVE_METADATA_KEY] is True
 
 
+async def test_published_reading_declares_the_instrument_poll_cadence(
+    broker: DataBroker,
+) -> None:
+    """Freshness consumers need the poll cadence on the reading itself.
+
+    The dashboard phase widget establishes a staleness horizon from
+    ``producer_interval_s`` on the reading. A physical feed (e.g. the shipped
+    ``VSP63D_1/pressure``) gets that basis from the instrument's configured
+    poll cadence here; without it the widget's ``_remember_freshness()`` stores
+    ``None`` and even the first healthy sample renders stale.
+    """
+
+    queue = await broker.subscribe("cadence_consumer", maxsize=10)
+    driver = MockDriver("cadence_probe")
+    sched = Scheduler(broker, publish_unpersisted_readings=True)
+    sched.add(InstrumentConfig(driver=driver, poll_interval_s=2.5))
+    state = sched._instruments[driver.name]
+
+    await sched._process_readings(state, await driver.read_channels())
+
+    reading = queue.get_nowait()
+    queue.task_done()
+    assert reading.metadata["producer_interval_s"] == 2.5
+
+
 # ---------------------------------------------------------------------------
 # 3. Registering the same driver name twice raises ValueError
 # ---------------------------------------------------------------------------

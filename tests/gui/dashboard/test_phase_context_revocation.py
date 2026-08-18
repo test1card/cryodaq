@@ -53,7 +53,7 @@ def _set_clock(monkeypatch, now: float) -> None:
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: now), raising=False)
 
 
-def _configured_dashboard(tmp_path, monkeypatch, *, cadence_s: float) -> DashboardView:
+def _configured_dashboard(tmp_path, monkeypatch, *, cadence_s: float, phase: str = "cooldown") -> DashboardView:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / "cooldown.yaml").write_text(
@@ -65,7 +65,7 @@ def _configured_dashboard(tmp_path, monkeypatch, *, cadence_s: float) -> Dashboa
     view._phase_widget.on_status_update(
         {
             "active_experiment": {"experiment_id": "exp-1"},
-            "current_phase": "cooldown",
+            "current_phase": phase,
             "phase_started_at": 1.0,
             "phases": [],
         }
@@ -114,6 +114,46 @@ def _eta_reading(
         assert payload["meta"]["source_age_s"] == source_age_s
     if source_age_s is None:
         payload["meta"].pop("source_age_s", None)
+    return Reading(
+        timestamp=datetime.fromtimestamp(payload["ts"], tz=UTC),
+        instrument_id=payload["iid"],
+        channel=payload["ch"],
+        value=payload["v"],
+        unit=payload["u"],
+        status=ChannelStatus(payload["st"]),
+        raw=payload.get("raw"),
+        metadata=payload["meta"],
+    )
+
+
+def _pressure_reading(
+    timestamp: datetime,
+    value: float = 2.0,
+    *,
+    cadence_s: float | None = 1.0,
+    source_age_s: float | None = 0.5,
+) -> Reading:
+    """The shipped physical pressure feed, produced with declared cadence+age."""
+    source_metadata = {}
+    if cadence_s is not None:
+        source_metadata["producer_interval_s"] = cadence_s
+    if source_age_s is not None:
+        source_metadata["source_age_s"] = source_age_s
+    source = Reading(
+        timestamp=timestamp,
+        instrument_id="thyracont_vsp63d",
+        channel="VSP63D_1/pressure",
+        value=value,
+        unit="mbar",
+        metadata=source_metadata,
+    )
+    socket = _PublisherSocket()
+    publisher = ZMQPublisher()
+    publisher._socket = socket  # type: ignore[assignment]
+    publisher._session_id = "test-session"
+    publisher._running = True
+    asyncio.run(publisher._publish_reading(source))
+    payload = msgpack.unpackb(socket.frames[0][1], raw=False)
     return Reading(
         timestamp=datetime.fromtimestamp(payload["ts"], tz=UTC),
         instrument_id=payload["iid"],
@@ -253,6 +293,56 @@ def test_gui_queue_residence_cannot_refresh_an_old_transport_value(app, tmp_path
     text = view._phase_widget._context_label.text()
     assert "ETA" in text and "2ч" in text, f"transport delay hid the retained value: {text!r}"
     assert STALE_MARK in text, f"four seconds of GUI queue residence reset a dead 1 s feed to fresh: {text!r}"
+
+
+def test_fresh_shipped_pressure_reading_is_not_marked_stale(app, tmp_path, monkeypatch) -> None:
+    """A first healthy pressure sample with declared cadence+age renders current.
+
+    RESTORED shape (lab PC). The shipped ``VSP63D_1/pressure`` reaches this
+    route with no driver-supplied freshness basis; the engine now declares the
+    configured poll cadence on the reading, and the engine bridge derives
+    ``source_age_s``. With both present, ``_remember_freshness()`` establishes
+    a real horizon instead of ``None``/``None`` and the first healthy sample is
+    no longer marked stale immediately.
+    """
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0, phase="vacuum")
+    view.on_reading(_pressure_reading(datetime.now(UTC)))
+
+    text = view._phase_widget._context_label.text()
+    assert "mbar" in text, f"the pressure route did not render the shipped feed: {text!r}"
+    assert STALE_MARK not in text, f"a value that has just arrived was rendered stale: {text!r}"
+
+
+def test_pressure_queue_residence_is_aged_by_declared_cadence_not_channel_spelling(app, tmp_path, monkeypatch) -> None:
+    """A cadence-declared pressure feed keeps its transport age through the GUI queue.
+
+    The publisher contract classifies a cadence reading by ``producer_interval_s``,
+    not by an ``analytics/`` channel spelling. A physical feed that declared its
+    poll cadence must therefore still get its multiprocessing-queue residence
+    folded into ``source_age_s``; otherwise a four-second queue delay presents
+    dead pressure as fresh.
+    """
+
+    _set_clock(monkeypatch, 1004.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=1.0, phase="vacuum")
+    reading = _pressure_reading(datetime.now(UTC), cadence_s=1.0, source_age_s=0.5)
+
+    monkeypatch.setattr(subprocess_module, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+    queued = _decode_reading_frames([DEFAULT_TOPIC, _pack_reading(reading)])
+    bridge = ZmqBridge()
+    bridge._bridge_instance_id = "a" * 32
+    bridge._data_queue = queue.Queue()
+    bridge._data_queue.put_nowait(queued)
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: 1004.0))
+
+    [qualified] = bridge.poll_readings_with_descriptor()
+    view.on_reading(qualified.reading)
+
+    text = view._phase_widget._context_label.text()
+    assert "mbar" in text, f"transport delay hid the retained pressure: {text!r}"
+    assert STALE_MARK in text, f"four seconds of GUI queue residence reset a dead 1 s pressure feed to fresh: {text!r}"
 
 
 def test_overflowed_producer_horizon_fails_closed_to_stale(app, tmp_path, monkeypatch) -> None:
