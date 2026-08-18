@@ -3310,10 +3310,58 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
-    guard: tests/scripts/test_soak_mock_stack.py::test_sample_reader_rejects_records_above_the_reviewed_bound
+    guard: tests/scripts/test_soak_long_profile_contract.py::test_168h_sample_volume_has_an_explicit_terminal_validation_bound
     ci_partition: remaining
     red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_sample_reader_had_no_byte_or_record_bound_pending_immutable_mutation_capture
     green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-PERSISTENCE-CONTINUITY-FALSE-GREEN-059
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_persistence_validator_rejects_a_false_green_duplicate
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_duration_PASS_had_no_persisted_reading_continuity_or_no_loss_evidence
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-STORAGE-GROWTH-FALSE-GREEN-060
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_storage_validator_rejects_a_false_green_live_wal
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_duration_PASS_had_no_database_WAL_archive_or_disk_growth_bound
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-PERIODIC-CADENCE-FALSE-GREEN-061
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_periodic_cadence_validator_rejects_clustered_receipts
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_periodic_cadence_accepted_receipt_count_and_order_without_runtime_slot_timing
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-PREFLIGHT-BUDGET-FALSE-GREEN-062
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_long_profile_contract.py::test_long_schedule_reserves_the_complete_sequential_preflight
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_long_schedule_reserved_less_time_than_the_bounded_sequential_preflight
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-RUNBOOK-CADENCE-FALSE-GREEN-063
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/docs/test_docs_freshness.py::test_mock_stack_runbook_names_each_profile_cadence
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_runbook_long_profile_cadence_contradicted_the_implemented_profile_values
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-BOUNDED-EVIDENCE-FALSE-GREEN-064
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_self_audit_storage_stream_could_be_fully_materialized_without_byte_or_record_bound
+    green_evidence: pending_exact_final_review_and_hosted_remaining
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -5712,6 +5760,7 @@ records:
       repeat_threshold: 2
       covered_classifications:
         - coverage_escape
+        - evidence_false_acceptance
         - evidence_misbinding
         - instrument_authority_escape
         - late_side_effect
@@ -6507,7 +6556,56 @@ records:
         ci_partition: remaining
       - node: tests/scripts/test_soak_long_profile_contract.py::test_168h_sample_volume_has_an_explicit_terminal_validation_bound
         ci_partition: remaining
-      - node: tests/scripts/test_soak_mock_stack.py::test_sample_reader_rejects_records_above_the_reviewed_bound
-        ci_partition: remaining
     red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_cold_breadth_report_sha256_0e5c671e1fb8b131c11039a485aad40b45d268f3121e30c51159d632002888bf_confirmed_three_P1_and_one_P2
     green_evidence: pending_final_candidate_independent_review_and_hosted_remaining
+  - id: LONG-SOAK-DATA-CONTINUITY-059
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: >-
+      Ubuntu 22.04 short, 12-hour, 72-hour, and 168-hour whole-stack qualification evidence.
+      This record covers persistence, storage growth, periodic delivery, startup timing, and documented cadence.
+    classification: evidence_false_acceptance
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: >-
+      A duration run can report PASS after it loses or duplicates readings.
+      It can leave WAL data unsettled, exceed storage limits, or miss periodic delivery slots.
+      A valid run can fail if its schedule does not reserve the complete preflight time.
+      Wrong runbook values can cause a reviewer to apply the wrong cadence limit.
+    invariant: >-
+      Final acceptance requires persistence, storage, and periodic-cadence evidence.
+      Persistence evidence covers every expected channel and detects lost or duplicate readings.
+      Only reviewed engine faults can explain allowed gaps.
+      The production helper hashes each persistence database as a bounded stream and refuses symlink databases.
+      Storage evidence measures database, WAL, archive, and total bytes.
+      It also measures file count, free space, and the reviewed byte limit.
+      Final WAL bytes are zero.
+      Every periodic receipt binds to its runtime slot and meets the reviewed lag limit.
+      A long schedule reserves the complete sequential preflight budget and its margin.
+      The runbook cadence values match the implemented profiles.
+      Both samples.jsonl and storage-samples.jsonl have byte and record bounds.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#integration-and-publication-discipline
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_soak_mock_stack.py::test_final_acceptance_requires_persistence_and_storage_evidence
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_persistence_validator_rejects_a_false_green_duplicate
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner.py::test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_storage_validator_rejects_a_false_green_live_wal
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_periodic_cadence_validator_rejects_clustered_receipts
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_long_profile_contract.py::test_long_schedule_reserves_the_complete_sequential_preflight
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mock_stack_runbook_names_each_profile_cadence
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound
+        ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_three_P1_and_two_P2_findings_plus_exact_candidate_self_audit_found_an_unbounded_storage_stream
+    green_evidence: pending_exact_final_review_and_hosted_remaining
