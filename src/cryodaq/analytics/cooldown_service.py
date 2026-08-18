@@ -287,6 +287,15 @@ class CooldownService:
             self._channel_cold: deque(maxlen=5),
             self._channel_warm: deque(maxlen=5),
         }
+        # The first source interval larger than the bootstrap horizon is not
+        # certified as cadence (a single outage gap must not certify
+        # freshness). It is held here instead; a second source interval
+        # consistent with it certifies a genuinely slow producer cadence that
+        # the bootstrap bound alone could never establish.
+        self._source_cadence_candidate: dict[str, float | None] = {
+            self._channel_cold: None,
+            self._channel_warm: None,
+        }
         self._required_input_arrival_intervals: dict[str, deque[float]] = {
             self._channel_cold: deque(maxlen=5),
             self._channel_warm: deque(maxlen=5),
@@ -692,13 +701,38 @@ class CooldownService:
                     # unclassified startup gap must not certify freshness.
                     if not source_outage and not arrival_outage:
                         if source_interval is not None and source_interval > 0.0:
-                            allowed_source_interval = (
-                                3.0 * float(np.median(source_cadence))
-                                if source_cadence
-                                else _BOOTSTRAP_FRESHNESS_HORIZON_S
-                            )
-                            if source_interval <= allowed_source_interval:
+                            if source_cadence:
+                                if source_interval <= 3.0 * float(np.median(source_cadence)):
+                                    source_cadence.append(source_interval)
+                            elif source_interval <= _BOOTSTRAP_FRESHNESS_HORIZON_S:
                                 source_cadence.append(source_interval)
+                                self._source_cadence_candidate[reading.channel] = None
+                            else:
+                                # The first interval larger than the bootstrap
+                                # horizon could be an early outage gap OR the
+                                # start of a genuinely slow producer cadence
+                                # (e.g. a replayed curve sampled every 10
+                                # minutes). One observation cannot distinguish
+                                # them, so do not certify either; hold it as a
+                                # candidate. A SECOND source interval of the
+                                # same magnitude certifies the cadence: a real
+                                # slow producer repeats its interval, while a
+                                # one-off gap does not. Without this path a
+                                # slow-cadence source could never establish a
+                                # source cadence, collapsing the horizon to the
+                                # burst arrival cadence and withholding every
+                                # prediction from a healthy producer.
+                                candidate = self._source_cadence_candidate[reading.channel]
+                                if (
+                                    candidate is not None
+                                    and source_interval <= 3.0 * candidate
+                                    and candidate <= 3.0 * source_interval
+                                ):
+                                    source_cadence.append(candidate)
+                                    source_cadence.append(source_interval)
+                                    self._source_cadence_candidate[reading.channel] = None
+                                else:
+                                    self._source_cadence_candidate[reading.channel] = source_interval
                         if arrival_interval is not None and arrival_interval > 0.0:
                             allowed_arrival_interval = (
                                 3.0 * float(np.median(arrival_cadence))
