@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mmap
 import os
 import signal
 import subprocess
@@ -433,22 +434,42 @@ def test_clean_sha_collector_rejects_runtime_library_mutation(monkeypatch: pytes
 
 
 @pytest.mark.skipif(os.name != "posix", reason="loaded native closure is Linux-only")
-def test_loaded_native_closure_binds_fallback_system_objects(monkeypatch: pytest.MonkeyPatch) -> None:
-    closure = runner._loaded_native_closure(os.getpid())
-    runtime_root = (Path(sys.prefix) / "lib").resolve()
-    external = [
-        Path(entry["path"]) for entry in closure["entries"] if not Path(entry["path"]).is_relative_to(runtime_root)
-    ]
-    assert external
+def test_loaded_native_closure_binds_fallback_system_objects(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    mapped_path = tmp_path / "deleted-native-object.so"
+    mapped_path.write_bytes(b"\0" * 4096)
+    mapped_fd = os.open(mapped_path, os.O_RDONLY)
+    try:
+        deleted_mapping = mmap.mmap(mapped_fd, 4096, prot=mmap.PROT_READ | mmap.PROT_EXEC)
+    finally:
+        os.close(mapped_fd)
+    mapped_path.unlink()
 
-    target = external[0].resolve()
-    original_hash = runner._hash_regular_file
-    monkeypatch.setattr(
-        runner,
-        "_hash_regular_file",
-        lambda path: "sha256:" + "0" * 64 if path.resolve() == target else original_hash(path),
+    process = subprocess.Popen(
+        (sys.executable, "-c", "import time; time.sleep(60)"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
+    try:
+        closure = runner._loaded_native_closure(process.pid)
+        runtime_root = (Path(sys.prefix) / "lib").resolve()
+        external = [
+            Path(entry["path"]) for entry in closure["entries"] if not Path(entry["path"]).is_relative_to(runtime_root)
+        ]
+        assert external
 
-    changed = runner._loaded_native_closure(os.getpid())
+        target = external[0].resolve()
+        original_hash = runner._hash_regular_file
+        monkeypatch.setattr(
+            runner,
+            "_hash_regular_file",
+            lambda path: "sha256:" + "0" * 64 if path.resolve() == target else original_hash(path),
+        )
 
-    assert changed["sha256"] != closure["sha256"]
+        changed = runner._loaded_native_closure(process.pid)
+
+        assert changed["sha256"] != closure["sha256"]
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+        deleted_mapping.close()
