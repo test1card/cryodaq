@@ -44,6 +44,7 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         *(name for name, _content in runner._ISOLATED_STATIC_CONFIGS),
         "instruments.yaml",
         "channel_descriptors.yaml",
+        "physical_alarms.yaml",
         "themes",
     }
     assert {path.name for path in tmp_path.iterdir()} == expected
@@ -144,6 +145,41 @@ def test_isolated_config_safety_declarations_resolve_through_the_real_liveness_c
     assert manager._critical_input_bindings, (
         "generated safety.yaml critical_channels must install live critical-input bindings"
     )
+
+
+def test_isolated_config_set_matches_engine_startup_requirements(tmp_path) -> None:
+    """The materialized isolated config set must satisfy the engine's startup cut.
+
+    Rounds 7 (missing theme pack), 9 (missing live safety declarations) and 10
+    (physical alarms document lacking cooldown/vacuum/landmarks) were each found
+    by the engine refusing at the next thing. This guard checks the SET against
+    the engine's startup requirements instead of against the last error: every
+    engine-required config document must be present, and every document the set
+    generates must be accepted by its own production loader.
+
+    Red: a set with a document removed, or a generated document its own loader
+    rejects. Green: the complete materialized set.
+    """
+    runner._materialize_isolated_mock_config(tmp_path)
+
+    assert runner._validate_isolated_config_set(tmp_path) == []
+
+    removed = tmp_path / "physical_alarms.yaml"
+    original = removed.read_bytes()
+    removed.unlink()
+    problems = runner._validate_isolated_config_set(tmp_path)
+    assert any("physical_alarms.yaml" in problem for problem in problems), problems
+    removed.write_bytes(original)
+
+    removed.write_text(
+        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    problems = runner._validate_isolated_config_set(tmp_path)
+    assert any("physical_alarms.yaml" in problem for problem in problems), problems
+    removed.write_bytes(original)
+
+    assert runner._validate_isolated_config_set(tmp_path) == []
 
 
 @_LINUX_PROCESS_AUTHORITY

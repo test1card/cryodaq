@@ -185,10 +185,6 @@ _ISOLATED_STATIC_CONFIGS: Final = (
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
-    (
-        "physical_alarms.yaml",
-        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n  escalate_to_safety: false\n",
-    ),
     ("plugins.yaml", "{}\n"),
     ("cooldown.yaml", "{}\n"),
 )
@@ -628,6 +624,180 @@ def _source_environment(
     }
 
 
+def _render_isolated_physical_alarms_document() -> str:
+    """Render the isolated ``physical_alarms.yaml`` from the module's own defaults.
+
+    The production loader ``load_production_physical_alarms_config`` demands a
+    document that carries exactly the ``cooldown``, ``vacuum`` and ``landmarks``
+    sections, with each section holding exactly the module default key set and
+    landmarks exactly Т11/Т12 with non-empty aliases
+    (src/cryodaq/core/physical_alarms_config.py:375-391). Rendering from the
+    module's own default tables keeps the fixture aligned to that contract
+    rather than to the last error text; production alarms stay deliberately
+    disabled (``enabled: false``), matching the passive-mock fixture boundary.
+    """
+    from cryodaq.core.physical_alarms_config import _COOLDOWN_DEFAULTS, _VACUUM_DEFAULTS
+
+    cooldown = dict(_COOLDOWN_DEFAULTS)
+    cooldown["enabled"] = False
+    vacuum = dict(_VACUUM_DEFAULTS)
+    vacuum["enabled"] = False
+    vacuum["escalate_to_safety"] = False
+    document = {
+        "cooldown": cooldown,
+        "vacuum": vacuum,
+        "landmarks": {
+            "Т11": {
+                "role": "warm_stage",
+                "physical": "1-я ступень GM-cooler, ~40K при работе",
+                "aliases": [
+                    "азотная плита",
+                    "плита",
+                    "плита 1-й ступени",
+                    "первая ступень",
+                    "первая ступень GM",
+                    "1-я ступень",
+                    "т warm",
+                    "t warm",
+                    "warm channel",
+                ],
+            },
+            "Т12": {
+                "role": "cold_stage",
+                "physical": "2-я ступень GM-cooler, ~2.9K при работе",
+                "aliases": [
+                    "вторая ступень",
+                    "вторая ступень GM",
+                    "2-я ступень",
+                    "холодная точка",
+                    "холодный палец",
+                    "т cold",
+                    "t cold",
+                    "cold channel",
+                ],
+            },
+        },
+    }
+    return yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
+
+
+# Engine config documents the engine fails closed on when missing. The engine
+# resolves its config directory at engine.py:6503-6507 (via
+# ``_engine_config_path``), then loads or validates each of these before it
+# reports readiness: instruments (engine.py:6524 ``_load_drivers``),
+# interlocks (engine.py:6596/6740), housekeeping (engine.py:6591),
+# safety (engine.py:6584), alarms_v3 (engine.py:6601/6796/6797),
+# physical_alarms (engine.py:6829/6830), channel_descriptors
+# (engine.py:2316/6589 ``_load_live_descriptor_authority``), and channels.yaml
+# (ChannelManager default, channel_manager.py:25/75). cooldown.yaml/plugins.yaml/
+# notifications.yaml are optional in the engine (only loaded if present), and
+# agent.yaml belongs to the assistant role; the isolated set generates them, so
+# the guard validates them too when present but never requires their presence.
+_ENGINE_REQUIRED_CONFIG_DOCUMENTS: Final = (
+    "instruments.yaml",
+    "interlocks.yaml",
+    "housekeeping.yaml",
+    "safety.yaml",
+    "alarms_v3.yaml",
+    "physical_alarms.yaml",
+    "channel_descriptors.yaml",
+    "channels.yaml",
+)
+
+_ISOLATED_GENERATED_CONFIG_DOCUMENTS: Final = _ENGINE_REQUIRED_CONFIG_DOCUMENTS + (
+    "cooldown.yaml",
+    "plugins.yaml",
+    "notifications.yaml",
+    "agent.yaml",
+)
+
+
+def _validate_single_config_document(config_dir: Path, name: str) -> str | None:
+    """Run one generated config document through the same loader the engine runs.
+
+    Returns a problem string when the document is rejected by its own loader,
+    or ``None`` when it is accepted. Presence is not checked here; the caller
+    decides which documents must exist.
+    """
+    path = config_dir / name
+    if not path.is_file():
+        return None
+    try:
+        if name == "instruments.yaml":
+            from cryodaq.drivers.registry import validate_instrument_entries
+
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if type(raw) is not dict or type(raw.get("instruments")) is not list:
+                return f"{name}: root config must be a mapping with an instruments list"
+            validated = validate_instrument_entries(raw["instruments"])
+            if len(validated) != 1 or validated[0].name != _ISOLATED_MOCK_INSTRUMENT_NAME:
+                return f"{name}: passive soak instrument is not unique"
+        elif name == "channel_descriptors.yaml":
+            from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+
+            catalog = load_live_channel_descriptor_catalog(path)
+            catalog.require_exact_instruments((_ISOLATED_MOCK_INSTRUMENT_NAME,))
+        elif name == "safety.yaml":
+            from cryodaq.core.safety_broker import SafetyBroker
+            from cryodaq.core.safety_manager import SafetyManager
+
+            SafetyManager(SafetyBroker()).load_config(path)
+        elif name == "interlocks.yaml":
+            from cryodaq.core.broker import DataBroker
+            from cryodaq.core.interlock import InterlockEngine
+
+            InterlockEngine(DataBroker(), actions={}).load_config(path)
+        elif name == "housekeeping.yaml":
+            from cryodaq.core.housekeeping import load_housekeeping_config
+
+            load_housekeeping_config(path)
+        elif name == "alarms_v3.yaml":
+            from cryodaq.core.alarm_config import load_alarm_config
+            from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
+
+            load_alarm_config(path)
+            load_critical_channels_from_alarms_v3(path)
+        elif name == "physical_alarms.yaml":
+            from cryodaq.core.physical_alarms_config import load_production_physical_alarms_config
+
+            load_production_physical_alarms_config(path)
+        elif name == "channels.yaml":
+            from cryodaq.core.channel_manager import ChannelManager
+
+            ChannelManager(config_path=path)
+        elif name in ("cooldown.yaml", "plugins.yaml", "notifications.yaml", "agent.yaml"):
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, dict):
+                return f"{name}: generated document must be a YAML mapping"
+        else:
+            return f"{name}: no registered generator validator"
+    except Exception as exc:  # noqa: BLE001 - every loader rejection is a guard finding
+        return f"{name}: rejected by its own loader: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _validate_isolated_config_set(config_dir: Path) -> list[str]:
+    """Return every problem the materialized isolated config set has against the
+    engine's startup requirements, or an empty list when it is complete.
+
+    Mirrors the engine's startup consumption (engine.py:6503-6507 config path
+    selection, then each fail-closed loader). Every document the engine requires
+    before readiness must be present, and every document the set generates must
+    be accepted by the same loader the engine runs. A missing or loader-rejected
+    document is the defect class rounds 7/9/10 each patched one file at a time;
+    this guard checks the SET.
+    """
+    problems: list[str] = []
+    for name in _ENGINE_REQUIRED_CONFIG_DOCUMENTS:
+        if not (config_dir / name).is_file():
+            problems.append(f"engine-required config document is missing: {name}")
+    for name in _ISOLATED_GENERATED_CONFIG_DOCUMENTS:
+        problem = _validate_single_config_document(config_dir, name)
+        if problem is not None:
+            problems.append(problem)
+    return problems
+
+
 def _materialize_isolated_mock_config(
     config_dir: Path,
     *,
@@ -645,6 +815,10 @@ def _materialize_isolated_mock_config(
         (config_dir / name).write_bytes(source.read_bytes())
     for name, content in _ISOLATED_STATIC_CONFIGS:
         (config_dir / name).write_text(content, encoding="utf-8")
+    (config_dir / "physical_alarms.yaml").write_text(
+        _render_isolated_physical_alarms_document(),
+        encoding="utf-8",
+    )
 
     themes_source = source_dir / "themes"
     if not themes_source.is_dir():
@@ -795,6 +969,11 @@ asyncio.run(probe())
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+    problems = _validate_isolated_config_set(config_dir)
+    if problems:
+        raise _RunnerFoundationError(
+            "materialized isolated config set fails the engine startup guard: " + "; ".join(problems)
+        )
     if readings_per_sample is None:
         return None
     return readings_per_sample, channel_ids
