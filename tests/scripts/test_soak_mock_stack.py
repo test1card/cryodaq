@@ -1755,27 +1755,29 @@ def test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound(
     stream: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     evidence = soak.Evidence(tmp_path)
-    evidence.write_manifest(_manifest())
-    _write_prerequisites(evidence)
-    evidence.begin_run()
-    if stream == "samples.jsonl":
-        evidence.append(stream, _sample(0.0))
-        evidence.append(stream, _sample(5.0))
-    else:
-        storage = {
-            "schema": "cryodaq-soak-storage-sample/v1",
-            "elapsed_s": 0.0,
-            "total_bytes": 4096,
-            "database_bytes": 4096,
-            "wal_bytes": 0,
-            "archive_bytes": 0,
-            "file_count": 1,
-            "free_bytes": 10**9,
-            "byte_limit": 10**8,
-        }
-        evidence.append(stream, storage)
-        evidence.append(stream, {**storage, "elapsed_s": 5.0})
-    monkeypatch.setattr(soak, "MAX_SAMPLE_RECORDS", 1)
+    _populate_complete(evidence)
+    real_reader = soak._read_owned_regular_at
+    observed_limits: list[int | None] = []
 
-    with pytest.raises(ValueError, match="record bound"):
-        evidence._json_lines(stream)
+    def observed_reader(
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[bytes, os.stat_result]:
+        if name == stream:
+            observed_limits.append(max_bytes)
+        if max_bytes is None:
+            return real_reader(directory_fd, name)
+        return real_reader(directory_fd, name, max_bytes=max_bytes)
+
+    byte_limit = (tmp_path / stream).stat().st_size - 1
+    monkeypatch.setattr(soak, "MAX_SAMPLE_ARTIFACT_BYTES", byte_limit)
+    monkeypatch.setattr(soak, "_read_owned_regular_at", observed_reader)
+
+    with pytest.raises(ValueError, match="secret detection prevented sealing"):
+        evidence.seal()
+
+    assert observed_limits
+    assert all(limit == byte_limit for limit in observed_limits)
+    assert evidence.state == soak.RunState.FAIL

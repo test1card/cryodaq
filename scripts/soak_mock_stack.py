@@ -44,6 +44,7 @@ MAX_SLOPE_POINTS = 257
 MAX_SLOPE_PAIRS = MAX_SLOPE_POINTS * (MAX_SLOPE_POINTS - 1) // 2
 MAX_SAMPLE_RECORDS = 25_000
 MAX_SAMPLE_ARTIFACT_BYTES = 64 * 1024 * 1024
+BOUNDED_EVIDENCE_STREAMS = frozenset({"samples.jsonl", "storage-samples.jsonl"})
 RECOVERY_CEILING_S = 60.0
 SHUTDOWN_CEILING_S = 20.0
 RSS_GROWTH_LIMIT_BYTES = 50 * 1024 * 1024
@@ -903,7 +904,12 @@ def _flat_basename(name: str) -> str:
     return name
 
 
-def _read_owned_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_result]:
+def _read_owned_regular_at(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[bytes, os.stat_result]:
     """Read one flat artifact without following links or accepting replacement.
 
     The opened descriptor is the authority.  Device/inode, size and mtime must
@@ -917,6 +923,8 @@ def _read_owned_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat
         before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("artifact is not a regular file")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ValueError("artifact exceeds the reviewed byte bound")
         file_fd = os.open(
             name,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
@@ -929,10 +937,17 @@ def _read_owned_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat
         ):
             raise ValueError("artifact changed before no-follow open")
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
-            chunk = os.read(file_fd, 1024 * 1024)
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes - total_bytes + 1)
+            chunk = os.read(file_fd, read_size)
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise ValueError("artifact exceeds the reviewed byte bound")
             chunks.append(chunk)
         after = os.fstat(file_fd)
         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -2153,24 +2168,25 @@ class Evidence:
         return True
 
     def _read(self, name: str) -> tuple[bytes, os.stat_result]:
-        return _read_owned_regular_at(self._directory_fd, name)
+        max_bytes = MAX_SAMPLE_ARTIFACT_BYTES if name in BOUNDED_EVIDENCE_STREAMS else None
+        return _read_owned_regular_at(self._directory_fd, name, max_bytes=max_bytes)
 
     def _text(self, name: str, *, errors: str = "strict") -> str:
-        return _read_owned_text_at(self._directory_fd, name, errors=errors)
+        payload, _identity = self._read(name)
+        return payload.decode("utf-8", errors=errors)
 
     def _sha256(self, name: str) -> str:
         payload, _identity = self._read(name)
         return "sha256:" + hashlib.sha256(payload).hexdigest()
 
     def _json_lines(self, name: str) -> list[Mapping[str, Any]]:
-        bounded_streams = {"samples.jsonl", "storage-samples.jsonl"}
-        if name in bounded_streams:
+        if name in BOUNDED_EVIDENCE_STREAMS:
             identity = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
             if not stat.S_ISREG(identity.st_mode) or identity.st_size > MAX_SAMPLE_ARTIFACT_BYTES:
                 raise ValueError(f"{name} exceeds the reviewed byte bound")
         rows: list[Mapping[str, Any]] = []
         for line in self._text(name).splitlines():
-            if name in bounded_streams and len(rows) >= MAX_SAMPLE_RECORDS:
+            if name in BOUNDED_EVIDENCE_STREAMS and len(rows) >= MAX_SAMPLE_RECORDS:
                 raise ValueError(f"{name} exceeds the reviewed record bound")
             value = json.loads(line)
             if not isinstance(value, Mapping):
