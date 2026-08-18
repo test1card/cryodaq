@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import importlib.abc
 import importlib.util
 import inspect
 import logging
@@ -39,6 +41,28 @@ _SUBSCRIBE_NAME = "plugin_pipeline"
 
 class _PluginCleanupAmbiguity(RuntimeError):
     """A constructed but inactive plugin owner could not be torn down exactly."""
+
+
+class _FrozenPluginRefusal(RuntimeError):
+    """The import would execute plugin bytes the qualification did not measure."""
+
+
+class _InMemoryBytesLoader(importlib.abc.Loader):
+    """Execute one exact bytes snapshot; never re-reads the plugin file."""
+
+    def __init__(self, path: Path, raw: bytes) -> None:
+        self._path = str(path)
+        self._raw = raw
+
+    def get_source(self, fullname: str) -> str:
+        return self._raw.decode("utf-8")
+
+    def exec_module(self, module: types.ModuleType) -> None:
+        exec(compile(self._raw, self._path, "exec"), module.__dict__)
+
+
+def _plugin_file_digest(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _create_owned_task(
@@ -101,6 +125,7 @@ class PluginPipeline:
         *,
         batch_interval_s: float = 1.0,
         hot_reload: bool = True,
+        frozen_plugin_digests: dict[str, str] | None = None,
     ) -> None:
         """Инициализировать пайплайн.
 
@@ -108,12 +133,25 @@ class PluginPipeline:
             broker:            Экземпляр :class:`~cryodaq.core.broker.DataBroker`.
             plugins_dir:       Директория с файлами плагинов (``.py``).
             batch_interval_s:  Интервал накопления пакета показаний в секундах.
+            hot_reload:        Перезагружать ли плагины при изменении файлов.
+            frozen_plugin_digests:
+                Карта ``{posix_relative_path: sha256-hex}`` плагинов, измеренных
+                квалификационной подписью.  При задании она привязывает и
+                начальную загрузку к измеренным байтам: файл, изменившийся
+                после измерения, или не входивший в измерение, приводит к
+                отказу запуска.  Обязательна, когда ``hot_reload=False``.
         """
+        if hot_reload == (frozen_plugin_digests is not None):
+            raise ValueError(
+                "analytics plugin pipeline: hot_reload must be off exactly when "
+                "frozen plugin digests pin the measured build"
+            )
         self._broker = broker
         self._plugins_dir = plugins_dir
         self._plugins: dict[str, AnalyticsPlugin] = {}
         self._batch_interval_s = batch_interval_s
         self._hot_reload = hot_reload
+        self._frozen_plugin_digests = frozen_plugin_digests
         self._queue: asyncio.Queue[Reading] | None = None
         self._process_task: asyncio.Task[None] | None = None
         self._watch_task: asyncio.Task[None] | None = None
@@ -212,7 +250,25 @@ class PluginPipeline:
 
             self._plugins_dir.mkdir(parents=True, exist_ok=True)
             for path in sorted(self._plugins_dir.glob("*.py")):
-                self._load_plugin(path)
+                if self._frozen_plugin_digests is None:
+                    self._load_plugin(path)
+                    continue
+                # A qualified build imports only what the receipt measured. The
+                # bytes read here, verified against the frozen snapshot, are the
+                # exact bytes executed -- never a later re-read of the file.
+                frozen_raw = path.read_bytes()
+                mismatch = self._frozen_plugin_mismatch(path.name, frozen_raw)
+                if mismatch is not None:
+                    raise _FrozenPluginRefusal(mismatch)
+                config_path = path.with_suffix(".yaml")
+                if config_path.is_file():
+                    config_mismatch = self._frozen_plugin_mismatch(
+                        config_path.name,
+                        config_path.read_bytes(),
+                    )
+                    if config_mismatch is not None:
+                        raise _FrozenPluginRefusal(config_mismatch)
+                self._load_plugin(path, frozen_raw=frozen_raw)
 
             self._process_task = _create_owned_task(
                 self._process_loop(),
@@ -433,7 +489,24 @@ class PluginPipeline:
     # Загрузка / выгрузка плагинов
     # ------------------------------------------------------------------
 
-    def _load_plugin(self, path: Path) -> bool:
+    def _frozen_plugin_mismatch(self, relative: str, raw: bytes) -> str | None:
+        """Return why the bytes are not the measured plugin, or None when they are."""
+
+        expected = self._frozen_plugin_digests
+        if expected is None:
+            return None
+        want = expected.get(relative)
+        if want is None:
+            return f"analytics plugin {relative!r} was not measured by the qualification receipt"
+        actual = _plugin_file_digest(raw)
+        if actual != want:
+            return (
+                f"analytics plugin {relative!r} changed after the qualification measurement "
+                f"(expected sha256:{want}, found sha256:{actual})"
+            )
+        return None
+
+    def _load_plugin(self, path: Path, *, frozen_raw: bytes | None = None) -> bool:
         """Загрузить плагин из файла.
 
         Импортирует модуль, находит первый конкретный подкласс
@@ -454,12 +527,22 @@ class PluginPipeline:
                     plugin_id,
                 )
                 return False
-            spec = importlib.util.spec_from_file_location(f"cryodaq_plugin_{plugin_id}", path)
+            spec = (
+                importlib.util.spec_from_loader(
+                    f"cryodaq_plugin_{plugin_id}",
+                    _InMemoryBytesLoader(path, frozen_raw),
+                    origin=str(path),
+                )
+                if frozen_raw is not None
+                else importlib.util.spec_from_file_location(f"cryodaq_plugin_{plugin_id}", path)
+            )
             if spec is None or spec.loader is None:
                 logger.error("Не удалось создать spec для плагина '%s': %s", plugin_id, path)
                 return False
 
             module: types.ModuleType = importlib.util.module_from_spec(spec)
+            if frozen_raw is not None:
+                module.__file__ = str(path)
             spec.loader.exec_module(module)  # type: ignore[union-attr]
 
             plugin_cls: type[AnalyticsPlugin] | None = None
@@ -759,8 +842,12 @@ class PluginPipeline:
         обработку данных.
         """
         if not self._hot_reload:
-            while self._running:
-                await asyncio.sleep(_WATCH_INTERVAL_S)
+            # A qualified build pins its plugins; the watch task parks until
+            # cancellation instead of scanning a frozen directory.
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return
             return
 
         known_files: dict[str, float] | None

@@ -6514,6 +6514,7 @@ async def _run_engine(
 
     qualification_receipt = None
     qualification_path = _DATA_DIR / "qualification" / "receipt.json"
+    plugin_snapshot: dict[str, str] = {}
     if (
         not mock
         and qualification_path.is_file()
@@ -6527,6 +6528,7 @@ async def _run_engine(
                 reviewed_source=driver_load.reviewed_source,
                 runtime_binding=reviewed_source_runtime_binding,
                 instrument_configuration_path=instruments_cfg,
+                plugins_snapshot=plugin_snapshot,
             )
             qualification_receipt = verify_qualification_receipt(
                 qualification_path.read_bytes(),
@@ -7004,7 +7006,12 @@ async def _run_engine(
     command_ingress = ZMQCommandIngressPair(ordinary=cmd_server, safe=safe_cmd_server)
 
     # Plugin Pipeline
-    plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR, hot_reload=qualification_receipt is None)
+    plugin_pipeline = PluginPipeline(
+        broker,
+        _PLUGINS_DIR,
+        hot_reload=qualification_receipt is None,
+        frozen_plugin_digests=plugin_snapshot if qualification_receipt is not None else None,
+    )
 
     # --- CooldownService (прогноз охлаждения) ---
     cooldown_service: Any = None

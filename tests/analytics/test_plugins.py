@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from pathlib import Path
 
@@ -343,13 +344,20 @@ async def test_watch_loop_skips_unstable_file(tmp_path: Path, monkeypatch):
 
     assert loaded == ["simple_plugin.py"], "file must load exactly once, only after its mtime stabilised"
 
+
 async def test_qualified_pipeline_disables_plugin_hot_reload(tmp_path: Path, monkeypatch) -> None:
     """A qualified source identity must not survive a changed plugin reload."""
 
     import cryodaq.analytics.plugin_loader as plugin_loader
 
     broker = DataBroker()
-    pipeline = PluginPipeline(broker, tmp_path, batch_interval_s=0.01, hot_reload=False)
+    pipeline = PluginPipeline(
+        broker,
+        tmp_path,
+        batch_interval_s=0.01,
+        hot_reload=False,
+        frozen_plugin_digests={},
+    )
     scans: list[object] = []
     monkeypatch.setattr(plugin_loader, "_WATCH_INTERVAL_S", 0.001)
     monkeypatch.setattr(pipeline, "_scan_plugins", lambda *args: scans.append(args))
@@ -358,5 +366,101 @@ async def test_qualified_pipeline_disables_plugin_hot_reload(tmp_path: Path, mon
     try:
         await asyncio.sleep(0.02)
         assert scans == []
+    finally:
+        await pipeline.stop()
+
+
+def test_frozen_pipeline_requires_the_measured_digests(tmp_path: Path) -> None:
+    """A jobless "frozen" pipeline is a contradiction and must fail at construction."""
+
+    with pytest.raises(ValueError, match="hot_reload must be off"):
+        PluginPipeline(DataBroker(), tmp_path, hot_reload=True, frozen_plugin_digests={})
+    with pytest.raises(ValueError, match="hot_reload must be off"):
+        PluginPipeline(DataBroker(), tmp_path, hot_reload=False)
+
+
+async def test_qualified_pipeline_refuses_changed_plugin_at_initial_import(tmp_path: Path) -> None:
+    """Plugin bytes that changed after the measurement must abort a qualified start."""
+
+    plugin_path = tmp_path / "runtime_plugin.py"
+    measured_bytes = b"__marker__ = 41\n"
+    plugin_path.write_bytes(measured_bytes)
+    measured_digest = hashlib.sha256(measured_bytes).hexdigest()
+
+    plugin_path.write_bytes(b"__marker__ = 42\n")
+
+    broker = DataBroker()
+    pipeline = PluginPipeline(
+        broker,
+        tmp_path,
+        batch_interval_s=0.01,
+        hot_reload=False,
+        frozen_plugin_digests={plugin_path.name: measured_digest},
+    )
+
+    with pytest.raises(RuntimeError, match="changed after the qualification measurement"):
+        await pipeline.start()
+
+    assert pipeline._plugins == {}
+    assert "plugin_pipeline" not in broker._subscribers
+
+
+async def test_qualified_pipeline_refuses_plugin_missing_from_measurement(tmp_path: Path) -> None:
+    """A plugin file that the receipt never measured must not run either."""
+
+    plugin_path = tmp_path / "unreviewed.py"
+    plugin_path.write_text(_SIMPLE_PLUGIN_SRC, encoding="utf-8")
+
+    broker = DataBroker()
+    pipeline = PluginPipeline(
+        broker,
+        tmp_path,
+        batch_interval_s=0.01,
+        hot_reload=False,
+        frozen_plugin_digests={},
+    )
+
+    with pytest.raises(RuntimeError, match="was not measured"):
+        await pipeline.start()
+
+    assert pipeline._plugins == {}
+    assert "plugin_pipeline" not in broker._subscribers
+
+
+async def test_qualified_pipeline_imports_the_measured_plugin_bytes(tmp_path: Path) -> None:
+    """The exact measured bytes load and run when the disk still matches them."""
+
+    plugin_path = tmp_path / "measured_plugin.py"
+    plugin_path.write_text(
+        """
+from cryodaq.analytics.base_plugin import AnalyticsPlugin
+
+class MeasuredPlugin(AnalyticsPlugin):
+    plugin_id = "measured_plugin"
+
+    def __init__(self):
+        super().__init__(self.plugin_id)
+
+    async def process(self, readings):
+        return []
+""".lstrip(),
+        encoding="utf-8",
+    )
+    measured_digest = hashlib.sha256(plugin_path.read_bytes()).hexdigest()
+
+    broker = DataBroker()
+    pipeline = PluginPipeline(
+        broker,
+        tmp_path,
+        batch_interval_s=0.01,
+        hot_reload=False,
+        frozen_plugin_digests={plugin_path.name: measured_digest},
+    )
+
+    try:
+        await pipeline.start()
+        assert "measured_plugin" in pipeline._plugins
+        plugin = pipeline._plugins["measured_plugin"]
+        assert type(plugin).__name__ == "MeasuredPlugin"
     finally:
         await pipeline.stop()

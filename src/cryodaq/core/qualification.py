@@ -17,7 +17,7 @@ import secrets
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -281,16 +281,29 @@ def verify_artifact_qualification_receipt(
     )
 
 
-def _manifest_digest(root: Path, paths: list[Path]) -> str:
-    digest = hashlib.sha256()
+def _manifest_files(root: Path, paths: list[Path]) -> dict[str, bytes]:
+    """Read every manifest file exactly once, keyed by its root-relative POSIX path."""
+
+    files: dict[str, bytes] = {}
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        raw = path.read_bytes()
-        digest.update(len(relative).to_bytes(4, "big"))
-        digest.update(relative)
+        files[path.relative_to(root).as_posix()] = path.read_bytes()
+    return files
+
+
+def _manifest_files_digest(root: Path, files: Mapping[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for relative in sorted(files):
+        relative_bytes = relative.encode("utf-8")
+        raw = files[relative]
+        digest.update(len(relative_bytes).to_bytes(4, "big"))
+        digest.update(relative_bytes)
         digest.update(len(raw).to_bytes(8, "big"))
         digest.update(raw)
     return f"sha256:{digest.hexdigest()}"
+
+
+def _manifest_digest(root: Path, paths: list[Path]) -> str:
+    return _manifest_files_digest(root, _manifest_files(root, paths))
 
 
 def source_checkout_qualification_context(
@@ -300,8 +313,16 @@ def source_checkout_qualification_context(
     reviewed_source: object,
     runtime_binding: DriverRuntimeBinding,
     instrument_configuration_path: Path | None = None,
+    plugins_snapshot: MutableMapping[str, str] | None = None,
 ) -> QualificationContext:
-    """Measure an unfrozen source checkout; frozen builds need packaging evidence."""
+    """Measure an unfrozen source checkout; frozen builds need packaging evidence.
+
+    ``plugins_snapshot``, when given, receives ``{posix_relative_path: sha256-hex}``
+    for every runtime plugin file below ``project_root/plugins``, derived from the
+    exact same bytes that produced this context's ``artifact_sha256``. It is the
+    recorded snapshot the engine hands to the plugin pipeline so the initial import
+    can refuse plugin bytes the qualification receipt did not measure.
+    """
 
     if getattr(sys, "frozen", False):
         raise QualificationReceiptError("frozen artifact identity requires the separately owned packaging hook")
@@ -339,19 +360,31 @@ def source_checkout_qualification_context(
     ]
     if not package_paths:
         raise QualificationReceiptError("source package manifest is empty")
-    artifact_paths = package_paths + [
-        path
-        for path in plugins_root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
-    ] if plugins_root.is_dir() else package_paths
+    artifact_paths = (
+        package_paths
+        + [
+            path
+            for path in plugins_root.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+        ]
+        if plugins_root.is_dir()
+        else package_paths
+    )
     config_paths = [
         path for path in config_directory.rglob("*") if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}
     ]
     if not artifact_paths or not config_paths:
         raise QualificationReceiptError("source artifact or configuration manifest is empty")
 
-    artifact_sha256 = _manifest_digest(project_root, artifact_paths)
+    artifact_files = _manifest_files(project_root, artifact_paths)
+    artifact_sha256 = _manifest_files_digest(project_root, artifact_files)
     configuration_sha256 = _manifest_digest(config_directory, config_paths)
+    if plugins_snapshot is not None:
+        plugins_snapshot.clear()
+        plugins_prefix = f"{plugins_root.relative_to(project_root).as_posix()}/"
+        for relative, raw in artifact_files.items():
+            if relative.startswith(plugins_prefix):
+                plugins_snapshot[relative[len(plugins_prefix) :]] = hashlib.sha256(raw).hexdigest()
     binding_payload = _canonical_payload(
         {
             "driver_class": f"{type(reviewed_source).__module__}.{type(reviewed_source).__qualname__}",
