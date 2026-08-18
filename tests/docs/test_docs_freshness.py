@@ -2778,7 +2778,8 @@ def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None
     # The registered whole-tree guards are back in the default-CI ``remaining`` partition,
     # so release-gate.yml may not carry them again as tag-only obligations.  What remains in
     # ``tests/release`` is the unregistered SVG check, which still runs through the strict
-    # active-guard runner (not plain pytest) so a skip/xfail marker cannot pass it unseen.
+    # active-guard runner (not plain pytest): the runner feeds the release selection files to
+    # the strict plugin as required files, so a skip/xfail marker cannot pass it unseen.
     assert all("pytest" not in command.split() for command in commands), (
         "release gate must not select release tests with plain pytest"
     )

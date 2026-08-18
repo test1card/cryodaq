@@ -308,6 +308,8 @@ def _normalized_nodeid(nodeid: str) -> str:
 def _matches(guard: str, concrete: str) -> bool:
     if concrete == guard:
         return True
+    if "::" not in guard:
+        return concrete.startswith(f"{guard}::")
     return "[" not in guard.rsplit("::", 1)[-1] and concrete.startswith(f"{guard}[")
 
 
@@ -499,6 +501,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         dest="cryodaq_active_guard_execution_root",
         help="Bind strict guard execution to its declared filesystem authority.",
     )
+    group.addoption(
+        "--cryodaq-active-guard-required-files",
+        action="append",
+        default=None,
+        dest="cryodaq_active_guard_required_files",
+        help="Treat these exact-checkout files as required guards (skip/xfail/deselect refused).",
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -510,9 +519,18 @@ def pytest_configure(config: pytest.Config) -> None:
     root = Path(config.rootpath).resolve(strict=True)
     platform = current_guard_platform()
     execution_root = config.getoption("cryodaq_active_guard_execution_root")
+    required_files = tuple(config.getoption("cryodaq_active_guard_required_files") or ())
+    expected = active_guard_specs(root, suite, platform=platform, execution_root=execution_root)
+    if required_files:
+        # A suite may have no registered guards yet still need strict execution of its
+        # whole selection (the release suite).  Treat each required file as a platform-free
+        # guard whose every collected item must execute to one passing phase: the same
+        # marker/deselection/phase machinery then refuses skip, xfail, dynamic-skip and
+        # deselection on it.  This is the release gate's "not plain pytest" promise.
+        expected = expected + tuple(GuardSpec(node=path, ci_partition=suite, platform=None) for path in required_files)
     state = _GuardState(
         suite=suite,
-        expected=active_guard_specs(root, suite, platform=platform, execution_root=execution_root),
+        expected=expected,
         platform=platform,
         collect_only=bool(config.option.collectonly),
     )

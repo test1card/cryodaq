@@ -266,13 +266,23 @@ def _strict_guard_command(
     basetemp: Path,
     execution_root: str = "exported-commit",
     pytest_command: tuple[str, ...] = _PYTEST,
+    required_files: tuple[str, ...] = (),
 ) -> tuple[str, ...] | None:
-    """Build the Windows-safe exact active-guard command for one suite."""
+    """Build the Windows-safe exact active-guard command for one suite.
 
-    if not active_nodes:
+    ``required_files`` supplies a suite that has no registered guards (the
+    release suite) with its whole selection as platform-free guards, so the
+    strict plugin still refuses skip/xfail/dynamic-skip/deselection on it.  The
+    command stays ``None`` only when there is genuinely nothing to run strictly.
+    """
+
+    if not active_nodes and not required_files:
         return None
     argsfile = basetemp / f"{suite}-active-guards.args"
-    _write_response_file(argsfile, active_nodes)
+    _write_response_file(argsfile, (*active_nodes, *required_files))
+    required_arguments = tuple(
+        argument for path in required_files for argument in ("--cryodaq-active-guard-required-files", path)
+    )
     return (
         pytest_command
         + (
@@ -282,6 +292,7 @@ def _strict_guard_command(
             suite,
             "--cryodaq-active-guard-execution-root",
             execution_root,
+            *required_arguments,
             "-W",
             "error",
             "--basetemp",
@@ -460,7 +471,10 @@ def _validate_strict_guard_receipt(
             raise GuardExecutionError("strict guard skipif count does not match its platform scope")
         if phases != {phase: ["passed"] for phase in ("setup", "call", "teardown")}:
             raise GuardExecutionError("strict guard concrete node lacks exactly one passing phase receipt")
-        if not any(nodeid == guard or nodeid.startswith(f"{guard}[") for guard in guards):
+        if not any(
+            nodeid == guard or nodeid.startswith(f"{guard}[") or ("::" not in guard and nodeid.startswith(f"{guard}::"))
+            for guard in guards
+        ):
             raise GuardExecutionError("strict guard concrete node is not bound to its declared guard")
         nodeids.add(nodeid)
         bound.update(guards)

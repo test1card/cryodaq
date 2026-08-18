@@ -654,6 +654,12 @@ def run_suite(
         require_git_resolution=protected_producer_root is not None,
     )
     guard_nodes = tuple(spec.node for spec in guard_specs)
+    # The release suite deliberately registers no guards (the whole-tree guards live
+    # in `remaining`), so its exact-checkout selection must itself be executed
+    # strictly: feed the selection files to the strict command as required files so
+    # a skip/xfail/dynamic-skip marker cannot pass unseen.  Other suites keep their
+    # registry-bound strict pass unchanged.
+    required_files = files if (not guard_nodes and suite == "release") else ()
     basetemp.mkdir(parents=True, exist_ok=True)
     environment = _checkout_environment(root)
 
@@ -663,6 +669,7 @@ def run_suite(
         basetemp=basetemp,
         execution_root="git-index",
         pytest_command=_PYTEST,
+        required_files=required_files,
     )
     if protected_producer_root is not None:
         if strict is not None:
@@ -688,12 +695,15 @@ def run_suite(
         _validate_strict_guard_receipt(
             completed.stdout + completed.stderr,
             suite=suite,
-            expected=guard_nodes,
-            expected_platforms={spec.node: spec.platform for spec in guard_specs},
+            expected=(*guard_nodes, *required_files),
+            expected_platforms={
+                **{spec.node: spec.platform for spec in guard_specs},
+                **{path: None for path in required_files},
+            },
             platform=platform,
         )
 
-    ordinary = (*files, *selected_nodes)
+    ordinary = tuple(path for path in (*files, *selected_nodes) if path not in required_files)
     if ordinary:
         command = _PYTEST + ("--basetemp", str(basetemp / "ordinary"), *ordinary)
         command += tuple(argument for node in guard_nodes for argument in ("--deselect", node)) + _TAIL

@@ -151,9 +151,12 @@ jobs:
         run: python -m pip install -r requirements-lock.txt
 
       # Registered guards may not become skipped, deselected, or non-default enforcement, so the
-      # release nodes run through the same strict active-guard runner `main.yml` uses for the
+      # release selection runs through the same strict active-guard runner `main.yml` uses for the
       # `remaining` suite -- NOT plain pytest, which cannot tell a skipped guard from a passing
-      # one. The revision and trusted base are the ones `candidate_identity` derived from this
+      # one.  The release suite registers no guards (the whole-tree guards live in `remaining`),
+      # so the runner feeds the exact-checkout selection files to the strict plugin as required
+      # files, which refuses a skip/xfail/dynamic-skip marker on them. The revision and trusted
+      # base are the ones `candidate_identity` derived from this
       # event: a tag push IS a push event, and the `bind` step's push branch resolves the trusted
       # base from `github.event.before`. For a newly CREATED tag it derives nothing and
       # REFUSES: a fresh tag usually points at the default tip, so a merge base against that
