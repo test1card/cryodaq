@@ -3338,6 +3338,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_and_guard_red_the_external_plant_received_0_5_W_from_smua_0_2_W_plus_smub_0_3_W_while_the_shipped_calculator_consumed_only_smua_power_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_and_guard_red_a_renamed_Keithley_aux_smua_received_the_external_client_and_applied_0_0_then_0_2_W_while_the_shipped_calculator_consumed_only_Keithley_1_smua
     green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-THERMOMETER-IDENTITY-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_auxiliary_lakeshore_uses_internal_mock_transport
+    ci_partition: remaining
+    red_evidence: exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_and_guard_red_LS218_2_queried_the_external_LakeShore_endpoint_instead_of_its_internal_mock_transport
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6509,13 +6517,13 @@ records:
     status: open
     scope: product_contract
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: External mock thermal endpoint construction and selection, and the SafetyManager to Keithley connect, start, target-update, OFF, Scheduler, and ThermalCalculator path.
+    applies_to: External mock thermal endpoint construction and instrument selection, and the SafetyManager to Keithley connect, start, target-update, OFF, Scheduler, and ThermalCalculator path.
     classification: late_side_effect
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A directly constructed remote or invalid endpoint can escape parser-only confinement; a failed or cancelled initial zero can wedge reviewed-source connect ownership; a delayed, failed, cancelled, or misrouted power command can leave the external plant nonzero or divergent from CryoDAQ truth, combine a non-heater source with the configured heater, return before an already-latched external OFF settles, return stale success after OFF authority, or let a queued earlier analytic certify the wrong automatic-sweep point.
-    invariant: Every external mock endpoint, including direct construction, is loopback-only with an integer port in 1..65535; external mock power uses the exact CLI-selected client through engine and registry construction and only the full shipped ThermalCalculator heater identity Keithley_1/smua can receive the client and drive the single external plant; initial-zero failure or cancellation settles the Scheduler-owned connect attempt and permits a later safe retry; every uncertain start or target update settles a confirmed final zero before failure or cancellation escapes, including when a concurrent fault already owns the retained global-OFF operation; competing OFF authority cannot receive stale update success; and each published thermal point binds one new simulator command, a post-command Scheduler power reading, matching calculator metadata P, and reciprocal truth for that same point.
+    consequence: A directly constructed remote or invalid endpoint can escape parser-only confinement; a failed or cancelled initial zero can wedge reviewed-source connect ownership; a delayed, failed, cancelled, or misrouted power command can leave the external plant nonzero or divergent from CryoDAQ truth, combine a non-heater source with the configured heater, replay one external thermometer stream under auxiliary instrument identities, return before an already-latched external OFF settles, return stale success after OFF authority, or let a queued earlier analytic certify the wrong automatic-sweep point.
+    invariant: Every external mock endpoint, including direct construction, is loopback-only with an integer port in 1..65535; the exact CLI-selected client reaches only the canonical simulated instruments through engine and registry construction; only Keithley_1/smua can drive the single external plant; only LS218_1 can read the external plant, while auxiliary LakeShore instruments keep independent internal mock transports; initial-zero failure or cancellation settles the Scheduler-owned connect attempt and permits a later safe retry; every uncertain start or target update settles a confirmed final zero before failure or cancellation escapes, including when a concurrent fault already owns the retained global-OFF operation; competing OFF authority cannot receive stale update success; and each published thermal point binds one new simulator command, a post-command Scheduler power reading, matching calculator metadata P, and reciprocal truth for that same point.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#architecture-and-extension-rules
@@ -6549,5 +6557,7 @@ records:
         ci_partition: remaining
       - node: tests/drivers/test_thermal_simulator.py::test_smua_only_drives_mock_thermal_plant_channel
         ci_partition: remaining
-    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate
+      - node: tests/drivers/test_thermal_simulator.py::test_auxiliary_lakeshore_uses_internal_mock_transport
+        ci_partition: remaining
+    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
     green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition

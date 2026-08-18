@@ -53,6 +53,7 @@ from cryodaq.health.simulator import (
 
 DRIVER_REGISTRY_COMPAT_VERSION: Final = 1
 _EXTERNAL_MOCK_HEATER_INSTRUMENT: Final = "Keithley_1"
+_EXTERNAL_MOCK_LAKESHORE_INSTRUMENT: Final = "LS218_1"
 logger = logging.getLogger(__name__)
 
 
@@ -357,7 +358,9 @@ def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConst
         calibration_store=context.calibration_store,  # type: ignore[arg-type]
         connect_timeout_s=float(values["connect_timeout_s"]),
         read_timeout_s=float(values["read_timeout_s"]),
-        mock_instrument_client=context.mock_instrument_client,
+        mock_instrument_client=(
+            context.mock_instrument_client if config.name == _EXTERNAL_MOCK_LAKESHORE_INSTRUMENT else None
+        ),
     )
 
 

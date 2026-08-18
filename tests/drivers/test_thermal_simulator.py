@@ -837,3 +837,35 @@ async def test_smua_only_drives_mock_thermal_plant_channel() -> None:
     await renamed.connect()
     await renamed.start_source("smua", 0.2, 10.0, 0.5)
     assert renamed_client.applied == []
+
+
+class _NoExternalLakeShoreQueryClient(ExternalMockInstrumentClient):
+    def __init__(self) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.queries = 0
+
+    async def query(self, _command: str, timeout_ms: int | None = None) -> str:
+        self.queries += 1
+        raise AssertionError("external lakeshore query client was unexpectedly invoked")
+
+
+async def test_auxiliary_lakeshore_uses_internal_mock_transport() -> None:
+    client = _NoExternalLakeShoreQueryClient()
+    context = DriverConstructionContext(mock=True, mock_instrument_client=client)
+    aux_config = validate_instrument_entry(
+        {
+            "type": "lakeshore_218s",
+            "name": "LS218_2",
+            "resource": "GPIB0::21::INSTR",
+            "poll_interval_s": 0.01,
+            "channels": {1: "T9", 2: "T10"},
+        }
+    )
+    driver = construct_driver(aux_config, context)
+    assert isinstance(driver, LakeShore218S)
+
+    await driver.connect()
+    readings = await driver.read_channels()
+    assert {reading.channel for reading in readings}.issuperset({"T9", "T10"})
+    assert client.queries == 0
+    await driver.disconnect()
