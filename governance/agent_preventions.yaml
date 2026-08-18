@@ -3314,6 +3314,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_sample_reader_had_no_byte_or_record_bound_pending_immutable_mutation_capture
     green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-RUNTIME-LIBRARY-OWNERSHIP-FALSE-GREEN-065
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers
+    ci_partition: remaining
+    red_evidence: exact_2198fe461ac5d95ba58d3ebd1102a994b23315d1_ubuntu_22_04_guard_rejected_root_owned_mode_0644_runtime_library_identity_exit_1
+    green_evidence: pending_final_candidate_and_hosted_remaining
   - id: LONG-SOAK-PERSISTENCE-CONTINUITY-FALSE-GREEN-059
     status: open
     scope: product_contract
@@ -6539,14 +6547,16 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A duration run can finish after hours or days but fail final acceptance, combine process generations that loaded different native bytes, follow a contradictory checklist, or exhaust memory during terminal validation.
-    invariant: The production manifest passes its exact final schema. Every process generation records the executable native objects it actually loaded, including fallback system objects, and one role keeps one closure across generations. The authoritative checklist separates short preflight from Ubuntu duration gates. Long profiles use a bounded cadence, and final sample input has explicit byte and record limits.
+    consequence: A duration run can finish after hours or days but fail final acceptance, reject a safe immutable runtime, combine process generations that loaded different native bytes, follow a contradictory checklist, or exhaust memory during terminal validation.
+    invariant: The production manifest passes its exact final schema. A POSIX runtime library identity is accepted when it is current-user-owned under the private-group rule or root-owned without group or world write access; foreign non-root ownership and unsafe write access are refused. Every process generation records the executable native objects it actually loaded, including fallback system objects, and one role keeps one closure across generations. The authoritative checklist separates short preflight from Ubuntu duration gates. Long profiles use a bounded cadence, and final sample input has explicit byte and record limits.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#integration-and-publication-discipline
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/scripts/test_soak_mock_stack.py::test_runner_runtime_library_manifest_reaches_final_schema_validation
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers
         ci_partition: remaining
       - node: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_loaded_native_closure_binds_fallback_system_objects
         ci_partition: remaining

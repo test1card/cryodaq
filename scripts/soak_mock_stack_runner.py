@@ -292,11 +292,16 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
 
 
 def _runtime_library_identity_is_safe(identity: os.stat_result) -> bool:
-    """Accept writes only from the current user or its private primary group."""
+    """Accept native bytes writable only by a trusted owner."""
 
-    if os.name != "posix" or identity.st_uid != os.getuid() or stat.S_IMODE(identity.st_mode) & 0o002:
+    mode = stat.S_IMODE(identity.st_mode)
+    if os.name != "posix" or mode & 0o002:
         return False
-    if not stat.S_IMODE(identity.st_mode) & 0o020:
+    if identity.st_uid == 0:
+        return not mode & 0o020
+    if identity.st_uid != os.getuid():
+        return False
+    if not mode & 0o020:
         return True
     if identity.st_gid != os.getgid():
         return False

@@ -4,9 +4,11 @@ import mmap
 import os
 import select
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -403,6 +405,21 @@ def test_clean_sha_collector_requires_order_same_sha_and_no_untracked_files(tmp_
     (repo / "untracked.txt").write_text("drift\n", encoding="utf-8")
     with pytest.raises(runner._RunnerFoundationError, match="drift"):
         collector.observe(runner._ShaBoundary.AFTER_EXECUTION)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader ownership is POSIX-only")
+def test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers() -> None:
+    current_uid = os.getuid()
+    current_gid = os.getgid()
+
+    def identity(*, uid: int, gid: int, mode: int) -> SimpleNamespace:
+        return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=stat.S_IFREG | mode)
+
+    assert runner._runtime_library_identity_is_safe(identity(uid=current_uid, gid=current_gid, mode=0o644))
+    assert runner._runtime_library_identity_is_safe(identity(uid=0, gid=0, mode=0o644))
+    assert not runner._runtime_library_identity_is_safe(identity(uid=1, gid=1, mode=0o644))
+    assert not runner._runtime_library_identity_is_safe(identity(uid=0, gid=0, mode=0o664))
+    assert not runner._runtime_library_identity_is_safe(identity(uid=current_uid, gid=current_gid, mode=0o646))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
