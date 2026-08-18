@@ -130,7 +130,13 @@ class HDF5Exporter:
         # Readings across hot SQLite + cold Parquet. query_rows already decodes
         # the NaN-доктрина sentinel (a masked reading is NaN, status verbatim) and
         # keeps the range end-exclusive, so a rotated day still exports.
-        rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, None, None)
+        reader = ArchiveReader(self._data_dir, self._archive_dir)
+        rows = reader.query_rows(start, end, None, None)
+        # Fail closed before writing: a non-null descriptor_hash with no
+        # descriptor-catalog row is a dangling reference, not declared identity.
+        # The bounded reader refuses it as DESCRIPTOR_CATALOG_MISSING, and the
+        # exporter must not publish it as if a descriptor declared it.
+        reader.verify_descriptor_references({row[6] for row in rows if row[6] is not None})
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         hot_db = self._data_dir / f"data_{d.isoformat()}.db"

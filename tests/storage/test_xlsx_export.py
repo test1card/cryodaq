@@ -249,6 +249,15 @@ async def test_xlsx_preserves_small_vacuum_values(tmp_path: Path) -> None:
 
 def test_xlsx_preserves_same_channel_readings_with_distinct_descriptor_hashes(tmp_path: Path) -> None:
     """A timestamp/channel collision must retain each descriptor identity."""
+    from cryodaq.channels.descriptors import (
+        ChannelCatalog,
+        ChannelDescriptorV1,
+        ChannelQuantity,
+        ChannelRole,
+        ChannelSafetyClass,
+    )
+    from cryodaq.storage.channel_descriptors import install_catalog
+
     data_dir = tmp_path / "data"
     ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
     _populate_db(
@@ -259,14 +268,33 @@ def test_xlsx_preserves_same_channel_readings_with_distinct_descriptor_hashes(tm
         ],
     )
 
+    def _descriptor(revision: int) -> ChannelDescriptorV1:
+        return ChannelDescriptorV1(
+            schema_version=1,
+            channel_id="CH1",
+            instrument_id="ls218s",
+            source_key="input.ch1.temperature",
+            quantity=ChannelQuantity.TEMPERATURE,
+            unit="K",
+            role=ChannelRole.PRIMARY_MEASUREMENT,
+            safety_class=ChannelSafetyClass.OBSERVATIONAL,
+            display_group="Cryostat",
+            display_name="Термопара",
+            visible_by_default=True,
+            display_order=1,
+            descriptor_revision=revision,
+        )
+
+    first = _descriptor(revision=1)
+    second = _descriptor(revision=2)
     db_path = data_dir / f"data_{ts.date().isoformat()}.db"
-    first_hash = "sha256:first"
-    second_hash = "sha256:second"
     with sqlite3.connect(str(db_path)) as conn:
+        install_catalog(conn, ChannelCatalog([first]))
+        install_catalog(conn, ChannelCatalog([second], historical=[first, second]))
         row_ids = [row[0] for row in conn.execute("SELECT id FROM readings ORDER BY id")]
         assert len(row_ids) == 2
-        conn.execute("UPDATE readings SET descriptor_hash=? WHERE id=?", (first_hash, row_ids[0]))
-        conn.execute("UPDATE readings SET descriptor_hash=? WHERE id=?", (second_hash, row_ids[1]))
+        conn.execute("UPDATE readings SET descriptor_hash=? WHERE id=?", (first.descriptor_hash, row_ids[0]))
+        conn.execute("UPDATE readings SET descriptor_hash=? WHERE id=?", (second.descriptor_hash, row_ids[1]))
         conn.commit()
 
     output_path = tmp_path / "descriptor-collision.xlsx"
@@ -279,7 +307,17 @@ def test_xlsx_preserves_same_channel_readings_with_distinct_descriptor_hashes(tm
         if ws.cell(row=1, column=column).value == "ls218s" and ws.cell(row=2, column=column).value == "CH1"
     }
 
-    assert values_by_hash == {first_hash: 4.5, second_hash: 7.5}
+    assert values_by_hash == {first.descriptor_hash: 4.5, second.descriptor_hash: 7.5}
+
+    ws_info = openpyxl.load_workbook(output_path)["Информация"]
+    rows = {
+        ws_info.cell(row=row, column=1).value: ws_info.cell(row=row, column=2).value
+        for row in range(1, ws_info.max_row + 1)
+    }
+    assert rows.get("Идентичностей") == 2, (
+        "two descriptor-qualified identities for one channel must be reported as identities"
+    )
+    assert "Каналов" not in rows, "the info sheet must not present descriptor identities as channels"
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,16 @@ from pathlib import Path
 
 import pytest
 
+from cryodaq.channels.descriptors import (
+    ChannelCatalog,
+    ChannelDescriptorV1,
+    ChannelQuantity,
+    ChannelRole,
+    ChannelSafetyClass,
+)
 from cryodaq.drivers.base import ChannelStatus, Reading
+from cryodaq.storage.archive_reader import ArchiveUnavailableError
+from cryodaq.storage.channel_descriptors import install_catalog
 from cryodaq.storage.csv_export import CSVExporter
 from cryodaq.storage.sentinel import SENTINEL
 from cryodaq.storage.sqlite_writer import SQLiteWriter
@@ -95,13 +104,32 @@ async def test_correct_columns(tmp_path: Path) -> None:
     assert header == _EXPECTED_HEADER, f"Unexpected CSV header: {header}"
 
 
-def test_descriptor_hash_column_carries_reader_identity(tmp_path: Path) -> None:
+def _declared_descriptor(channel: str = "CH1", instrument: str = "ls218s") -> ChannelDescriptorV1:
+    return ChannelDescriptorV1(
+        schema_version=1,
+        channel_id=channel,
+        instrument_id=instrument,
+        source_key="input.ch1.temperature",
+        quantity=ChannelQuantity.TEMPERATURE,
+        unit="K",
+        role=ChannelRole.PRIMARY_MEASUREMENT,
+        safety_class=ChannelSafetyClass.OBSERVATIONAL,
+        display_group="Cryostat",
+        display_name="Термопара",
+        visible_by_default=True,
+        display_order=1,
+        descriptor_revision=1,
+    )
+
+
+def test_descriptor_hash_column_carries_declared_identity(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
-    descriptor_hash = "sha256:" + "a" * 64
+    descriptor = _declared_descriptor()
     _populate_db(data_dir, [_reading(ts=ts)])
     with closing(sqlite3.connect(data_dir / "data_2026-03-14.db")) as connection:
-        connection.execute("UPDATE readings SET descriptor_hash = ?", (descriptor_hash,))
+        install_catalog(connection, ChannelCatalog([descriptor]))
+        connection.execute("UPDATE readings SET descriptor_hash = ?", (descriptor.descriptor_hash,))
         # closing() closes the handle; it does NOT commit.
         connection.commit()
 
@@ -110,7 +138,29 @@ def test_descriptor_hash_column_carries_reader_identity(tmp_path: Path) -> None:
 
     header, rows = _read_csv(output_path)
     assert header == _EXPECTED_HEADER, f"Unexpected CSV header: {header}"
-    assert rows[0]["descriptor_hash"] == descriptor_hash
+    assert rows[0]["descriptor_hash"] == descriptor.descriptor_hash
+
+
+def test_csv_export_fails_closed_on_dangling_descriptor_hash(tmp_path: Path) -> None:
+    """A non-null descriptor_hash with no descriptor-catalog row must not export.
+
+    A restored/legacy/damaged hot DB can carry a hash that no catalog row
+    declares. The bounded reader refuses that as DESCRIPTOR_CATALOG_MISSING;
+    the exporter must fail closed rather than publish it as declared identity.
+    """
+    data_dir = tmp_path / "data"
+    ts = datetime(2026, 3, 14, 12, 0, 0, tzinfo=UTC)
+    _populate_db(data_dir, [_reading(ts=ts)])
+    with closing(sqlite3.connect(data_dir / "data_2026-03-14.db")) as connection:
+        connection.execute("UPDATE readings SET descriptor_hash = ?", ("sha256:" + "a" * 64,))
+        connection.commit()
+
+    output_path = tmp_path / "must-not-exist.csv"
+    with pytest.raises(ArchiveUnavailableError) as caught:
+        CSVExporter(data_dir).export(output_path)
+
+    assert "descriptor_hash_missing" in str(caught.value)
+    assert not output_path.exists(), "dangling-hash export must not write a file"
 
 
 def test_legacy_archive_without_descriptor_hash_exports_blank(tmp_path: Path) -> None:

@@ -110,7 +110,13 @@ class XLSXExporter:
 
         # Read across hot SQLite + cold Parquet: rotated days live only in the
         # archive, so a plain SQLite scan would drop them silently.
-        rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, None)
+        reader = ArchiveReader(self._data_dir, self._archive_dir)
+        rows = reader.query_rows(start, end, channels, None)
+        # Fail closed before writing: a non-null descriptor_hash with no
+        # descriptor-catalog row is a dangling reference, not declared identity.
+        # The bounded reader refuses it as DESCRIPTOR_CATALOG_MISSING, and the
+        # exporter must not publish it as if a descriptor declared it.
+        reader.verify_descriptor_references({row[6] for row in rows if row[6] is not None})
         all_rows: list[dict[str, Any]] = [
             {
                 "timestamp": raw_ts,
@@ -194,7 +200,7 @@ class XLSXExporter:
             ("Система", "CryoDAQ"),
             ("Дата экспорта", datetime.now().isoformat()),
             ("Записей", data_row_count),
-            ("Каналов", len(identities)),
+            ("Идентичностей", len(identities)),
         ]
         if start is not None:
             info_rows.append(("Начало диапазона", start.isoformat()))
@@ -221,7 +227,7 @@ class XLSXExporter:
 
         wb.save(str(output_path))
         logger.info(
-            "XLSX экспорт: %s (%d записей, %d каналов)",
+            "XLSX экспорт: %s (%d записей, %d идентичностей)",
             output_path,
             data_row_count,
             len(identities),
