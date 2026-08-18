@@ -120,6 +120,7 @@ def _caught_timeout_error_names(handler: ast.ExceptHandler) -> set[str]:
 def _discovery_wait_get_aliases(function: ast.AST) -> set[str]:
     aliases: set[str] = set()
     name_assignments: list[tuple[str, str]] = []
+    task_wrapper_assignments: list[tuple[str, ast.AST]] = []
     for node in ast.walk(function):
         if isinstance(node, ast.Assign):
             if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
@@ -137,6 +138,8 @@ def _discovery_wait_get_aliases(function: ast.AST) -> set[str]:
             isinstance(value, ast.Attribute) and value.attr == "get"
         ):
             aliases.add(target.id)
+        elif isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "create_task":
+            task_wrapper_assignments.append((target.id, value))
         elif isinstance(value, ast.Name):
             name_assignments.append((target.id, value.id))
     # Resolve simple Name aliases of queue-get aliases transitively: with
@@ -148,6 +151,10 @@ def _discovery_wait_get_aliases(function: ast.AST) -> set[str]:
         changed = False
         for target, source in name_assignments:
             if source in aliases and target not in aliases:
+                aliases.add(target)
+                changed = True
+        for target, value in task_wrapper_assignments:
+            if target not in aliases and value.args and _is_queue_get_call(value.args[0], aliases):
                 aliases.add(target)
                 changed = True
     return aliases
@@ -193,6 +200,56 @@ def _is_publication_discovery_wait(
     return _is_queue_get_call(future, queue_get_aliases) if future is not None else False
 
 
+def _asyncio_timeout_signatures(tree: ast.AST) -> set[tuple[str, str]]:
+    signatures: set[tuple[str, str]] = {("asyncio", "timeout")}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "asyncio":
+                    signatures.add((alias.asname or "asyncio", "timeout"))
+        elif isinstance(node, ast.ImportFrom) and node.module == "asyncio":
+            for alias in node.names:
+                if alias.name == "timeout":
+                    signatures.add((alias.asname or "timeout", "timeout"))
+    return signatures
+
+
+def _asyncio_timeout_scope_timeouts(
+    function: ast.AST, queue_get_aliases: set[str], timeout_signatures: set[tuple[str, str]]
+) -> list[ast.AST]:
+    """Return the ``asyncio.timeout`` budget expressions of publication-discovery scopes.
+
+    A governed regression may bound a queue-get discovery with the Python 3.12
+    context-manager spelling ``async with asyncio.timeout(2.0): await q.get()``
+    instead of ``asyncio.wait_for(q.get(), timeout=2.0)``.  That spelling has no
+    ``wait_for`` call to match, so discovery analysis must look at the timeout
+    context manager directly: a ``with`` whose single context expression resolves
+    to ``asyncio.timeout`` and whose body performs a queue-get is a publication
+    discovery scope, and its budget is the timeout call's first argument.
+    """
+    timeouts: list[ast.AST] = []
+    for node in ast.walk(function):
+        if not isinstance(node, (ast.With, ast.AsyncWith)) or not node.items:
+            continue
+        context = node.items[0].context_expr
+        if not isinstance(context, ast.Call):
+            continue
+        call_signature = _call_signature(context)
+        direct_timeout = isinstance(context.func, ast.Name) and (context.func.id, "timeout") in timeout_signatures
+        if call_signature not in timeout_signatures and not direct_timeout:
+            continue
+        if not any(_is_queue_get_call(descendant, queue_get_aliases) for descendant in ast.walk(node)):
+            continue
+        timeout = (
+            context.args[0]
+            if context.args
+            else next((keyword.value for keyword in context.keywords if keyword.arg in {"seconds", "delay"}), None)
+        )
+        if timeout is not None:
+            timeouts.append(timeout)
+    return timeouts
+
+
 def _swallows_timeout_handler(handler: ast.ExceptHandler) -> bool:
     def flow(statements: list[ast.stmt]) -> tuple[bool, bool]:
         swallows = False
@@ -211,10 +268,16 @@ def _swallows_timeout_handler(handler: ast.ExceptHandler) -> bool:
                 if not body_falls_through and not else_falls_through:
                     return swallows, False
                 continue
-            elif isinstance(statement, (ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While, ast.Try)):
+            elif isinstance(statement, (ast.With, ast.AsyncWith)):
+                nested_swallows, nested_falls_through = flow(statement.body)
+                if nested_swallows:
+                    return True, False
+                if not nested_falls_through:
+                    return swallows, False
+                continue
+            elif isinstance(statement, (ast.For, ast.AsyncFor, ast.While, ast.Try)):
                 nested_bodies = [statement.body]
-                if isinstance(statement, (ast.For, ast.AsyncFor, ast.While, ast.Try)):
-                    nested_bodies.append(statement.orelse)
+                nested_bodies.append(statement.orelse)
                 if isinstance(statement, ast.Try):
                     nested_bodies.extend(handler.body for handler in statement.handlers)
                     nested_bodies.append(statement.finalbody)
@@ -1242,8 +1305,11 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
         # Publication *discovery* must not be load-sensitive, in either spelling. This guard originally
         # inspected only `asyncio.wait`, so a discovery wait written as `asyncio.wait_for(queue.get())`
         # passed straight through it — which is exactly how a two-second discovery budget reached the
-        # protected runner and went red there instead of here.
+        # protected runner and went red there instead of here. The repository-supported Python 3.12
+        # `async with asyncio.timeout(2.0): await q.get()` form has no wait_for call to match, so it
+        # must be inspected through the context manager scope instead.
         wait_for_signatures = _wait_for_signatures(tree)
+        timeout_signatures = _asyncio_timeout_signatures(tree)
 
         def is_queue_discovery(call: ast.Call) -> bool:
             return _is_publication_discovery_wait(call, _discovery_wait_get_aliases(function), wait_for_signatures)
@@ -1264,6 +1330,12 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
                 timeout = wait.args[1]
             assert isinstance(timeout, ast.Constant) and type(timeout.value) in {int, float}
             assert timeout.value >= 5.0, f"{name} uses a load-sensitive publication discovery timeout"
+
+        for timeout in _asyncio_timeout_scope_timeouts(
+            function, _discovery_wait_get_aliases(function), timeout_signatures
+        ):
+            assert isinstance(timeout, ast.Constant) and type(timeout.value) in {int, float}
+            assert timeout.value >= 5.0, f"{name} uses a load-sensitive asyncio.timeout publication discovery budget"
 
         # A discovery timeout caught and turned into a silent `return` converts a slow runner into a
         # hang: the envelope arrives after the test stopped listening, nobody claims it, and the real
@@ -1374,6 +1446,51 @@ async def under_test(queue: asyncio.Queue):
         if isinstance(node, ast.Call) and _is_publication_discovery_wait(node, aliases)
     ]
     assert len(discovery_waits) == 1
+
+
+def test_durable_ack_guard_tracks_task_wrapped_queue_get_in_discovery_timeout() -> None:
+    snippet = """import asyncio
+
+async def under_test(queue: asyncio.Queue):
+    publication_owner = asyncio.create_task(required_queue.get())
+    await asyncio.wait_for(publication_owner, timeout=2.0)
+"""
+    function = _first_function(ast.parse(snippet), "under_test")
+    aliases = _discovery_wait_get_aliases(function)
+    assert aliases == {"publication_owner"}
+    discovery_waits = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and _is_publication_discovery_wait(node, aliases)
+    ]
+    assert len(discovery_waits) == 1
+
+
+def test_durable_ack_guard_tracks_asyncio_timeout_discovery_scope_in_discovery_timeout() -> None:
+    snippet = """import asyncio
+
+async def under_test(queue: asyncio.Queue):
+    async with asyncio.timeout(2.0):
+        await required_queue.get()
+"""
+    function = _first_function(ast.parse(snippet), "under_test")
+    timeouts = _asyncio_timeout_scope_timeouts(function, set(), _asyncio_timeout_signatures(ast.parse(snippet)))
+    assert len(timeouts) == 1
+    assert isinstance(timeouts[0], ast.Constant) and type(timeouts[0].value) in {int, float}
+    assert timeouts[0].value == 2.0
+
+
+def test_durable_ack_guard_tracks_asyncio_timeout_discovery_scope_with_keyword_budget() -> None:
+    snippet = """import asyncio
+
+async def under_test(queue: asyncio.Queue):
+    async with asyncio.timeout(seconds=2.0):
+        await required_queue.get()
+"""
+    function = _first_function(ast.parse(snippet), "under_test")
+    timeouts = _asyncio_timeout_scope_timeouts(function, set(), _asyncio_timeout_signatures(ast.parse(snippet)))
+    assert len(timeouts) == 1
+    assert isinstance(timeouts[0], ast.Constant) and timeouts[0].value == 2.0
 
 
 def test_durable_ack_guard_tracks_transitively_aliased_stored_queue_get_awaitable_in_discovery_timeout() -> None:
@@ -1509,6 +1626,21 @@ def test_durable_ack_guard_flags_nested_timeout_handler_exit_as_swallow() -> Non
     )
     handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
     assert _swallows_timeout_handler(handler)
+
+
+def test_durable_ack_guard_accepts_nested_diagnostic_timeout_reraise() -> None:
+    function = _first_function(
+        ast.parse("""async def under_test():
+    try:
+        await asyncio.wait_for(queue.get(), timeout=5.0)
+    except TimeoutError:
+        with diagnostics():
+            raise
+"""),
+        "under_test",
+    )
+    handler = next(node for node in ast.walk(function) if isinstance(node, ast.ExceptHandler))
+    assert not _swallows_timeout_handler(handler)
 
 
 def test_durable_ack_guard_treats_os_error_handlers_as_timeout_handlers() -> None:
