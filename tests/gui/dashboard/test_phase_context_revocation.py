@@ -133,7 +133,12 @@ def _pressure_reading(
     cadence_s: float | None = 1.0,
     source_age_s: float | None = 0.5,
 ) -> Reading:
-    """The shipped physical pressure feed, produced with declared cadence+age."""
+    """The shipped physical pressure feed, produced with declared cadence+age.
+
+    ``instrument_id`` matches the real driver, which publishes ``self.name``
+    (the configured instrument name ``VSP63D_1``, config/instruments.yaml), so
+    the reading is accepted by the pressure slot's declared-producer binding.
+    """
     source_metadata = {}
     if cadence_s is not None:
         source_metadata["producer_interval_s"] = cadence_s
@@ -141,7 +146,7 @@ def _pressure_reading(
         source_metadata["source_age_s"] = source_age_s
     source = Reading(
         timestamp=timestamp,
-        instrument_id="thyracont_vsp63d",
+        instrument_id="VSP63D_1",
         channel="VSP63D_1/pressure",
         value=value,
         unit="mbar",
@@ -623,6 +628,45 @@ def test_analytics_pressure_cannot_claim_the_physical_pressure_slot(app, tmp_pat
         "the physical gauge feed could not claim the pressure slot"
     )
     assert widget._cached_pressure == pytest.approx(1.5e-6)
+
+
+def test_foreign_non_analytics_pressure_cannot_claim_the_physical_pressure_slot(app, tmp_path, monkeypatch) -> None:
+    """A non-analytics foreign gauge can never own the pressure slot.
+
+    The analytics-source exclusion is not enough: the pressure slot must bind to
+    its DECLARED producer (``VSP63D_1``/``VSP63D_1/pressure``) before any
+    reading is accepted, exactly like the eta and r_thermal slots. A foreign
+    non-analytics ``/pressure`` feed that arrives first would otherwise own the
+    readout -- phase context from a producer nobody chose -- and every later
+    reading from the real gauge would be dropped as ``bound != producer``.
+    """
+
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0, phase="vacuum")
+    widget = view._phase_widget
+
+    foreign_gauge = Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="gauge_b",
+        channel="gauge_b/pressure",
+        value=9.9,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={"producer_interval_s": 1.0, "source_age_s": 0.0},
+    )
+    view.on_reading(foreign_gauge)
+    assert widget._cached_producer.get("pressure") is None, (
+        "a foreign non-analytics gauge claimed the unbound pressure slot"
+    )
+    assert "mbar" not in widget._context_label.text(), "a foreign value rendered in the pressure slot"
+
+    shipped = _pressure_reading(datetime.now(UTC))
+    view.on_reading(shipped)
+    assert widget._cached_producer["pressure"] == (shipped.instrument_id, shipped.channel), (
+        "the declared gauge could not claim its own slot after a foreign arrival"
+    )
+    assert widget._cached_pressure == pytest.approx(2.0)
+    assert "mbar" in widget._context_label.text(), "the shipped pressure feed did not render after a foreign arrival"
 
 
 def test_gui_queue_age_follows_declared_cadence_not_channel_spelling(monkeypatch) -> None:

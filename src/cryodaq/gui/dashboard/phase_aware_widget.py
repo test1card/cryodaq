@@ -35,15 +35,16 @@ logger = logging.getLogger(__name__)
 _STALE_INTERVAL_MULTIPLIER = 3.0
 
 # Each context slot is bound to a DECLARED producer identity, never to
-# whichever producer happens to arrive first. The analytics slots name the
-# shipped producer's exact (instrument_id, channel); the pressure slot is the
-# physical gauge feed -- any non-analytics reading whose channel ends with
-# "/pressure" -- so a renamed or second gauge keeps its feed without ever
-# letting an analytics value own the slot.
+# whichever producer happens to arrive first. Every slot names the shipped
+# producer's exact (instrument_id, channel) -- including the pressure slot,
+# which names the physical gauge feed ``VSP63D_1/pressure`` exactly as the
+# instrument descriptor declares it. First-arrival selection is how a producer
+# nobody chose ends up owning a phase readout, which is the display layer's
+# half of OC-004, so a slot with no declared producer accepts nothing.
 _SLOT_DECLARED_PRODUCER: dict[str, tuple[str, str] | None] = {
     "eta": ("cooldown_predictor", "analytics/cooldown_predictor/cooldown_eta"),
     "r_thermal": ("thermal_calculator", "analytics/thermal_calculator/R_thermal"),
-    "pressure": None,
+    "pressure": ("VSP63D_1", "VSP63D_1/pressure"),
 }
 
 _MAX_HEIGHT_PX = 55
@@ -464,16 +465,18 @@ class PhaseAwareWidget(QWidget):
     def _reading_matches_declared_producer(key: str, reading, producer: tuple[str, str]) -> bool:
         """Return whether an unbound slot may accept ``reading``.
 
-        Analytics slots accept only their declared shipped producer. The
-        pressure slot tracks the physical gauge feed, so an analytics value
-        (which the plugin pipeline marks with ``source: analytics``) can never
-        own it even when it is the first usable ``/pressure`` sample.
+        A slot accepts ONLY its declared shipped producer, named in
+        ``_SLOT_DECLARED_PRODUCER``. The pressure slot names the physical gauge
+        feed ``VSP63D_1/pressure`` just like the analytics slots name their
+        producers, so both a site analytics value and a foreign non-analytics
+        gauge are refused. A slot with no declared producer accepts nothing:
+        first-arrival acceptance is precisely the implicit producer pick this
+        widget must not make.
         """
         declared = _SLOT_DECLARED_PRODUCER.get(key)
         if declared is not None:
             return producer == declared
-        metadata = getattr(reading, "metadata", None)
-        return not (type(metadata) is dict and metadata.get("source") == "analytics")
+        return False
 
     # ------------------------------------------------------------------
     # State application

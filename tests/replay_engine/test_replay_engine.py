@@ -793,6 +793,10 @@ async def test_replay_partial_publisher_start_rollback_resists_repeated_cancella
         def __init__(self, _address: str) -> None:
             self.stop_cancelled = False
             self.stop_completed = False
+            self.configured_intervals_s: dict[str, float] | None = None
+
+        def configure_instrument_poll_intervals_s(self, intervals: dict[str, float]) -> None:
+            self.configured_intervals_s = dict(intervals)
 
         async def start(self, _queue) -> None:
             publisher_start_entered.set()
@@ -867,6 +871,9 @@ async def test_replay_partial_publisher_start_rollback_resists_repeated_cancella
     assert not owner.done()
     assert len(publishers) == 1
     assert publishers[0].applied_cold_stage_channel == "cold"
+    assert publishers[0].configured_intervals_s is not None, (
+        "the replay publisher was not configured with the instrument poll cadence"
+    )
     assert publishers[0].stop_cancelled is False
     assert publishers[0].stop_completed is False
     assert engine._pub is publishers[0]
@@ -1044,6 +1051,81 @@ async def test_directory_replay_stamps_replay_clock_freshness_on_pressure(tmp_pa
         assert r.metadata.get("source") == "replay"
         assert r.metadata["producer_interval_s"] == pytest.approx(0.2)
         assert r.metadata["source_age_s"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_replay_publisher_stamps_configured_pressure_cadence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    start_replay_engine,
+) -> None:
+    """A raw replayed pressure feed without its own cadence gets the configured one.
+
+    The replay engine's publisher must declare the instrument poll cadence the
+    same way the live engine's does: the live engine configures
+    ``configure_instrument_poll_intervals_s`` and the bridge stamps
+    ``producer_interval_s`` from that mapping (zmq_bridge._publish_reading),
+    while the GUI's aging path keys on that declared cadence rather than a
+    channel spelling. A replayed reading that carries no ``producer_interval_s``
+    of its own is otherwise invisible to that path and its first healthy sample
+    renders marked stale.
+    """
+    from datetime import UTC, datetime
+
+    import msgpack
+
+    from cryodaq.drivers.base import ChannelStatus, Reading
+    from cryodaq.replay_engine.server import ReplayEngine
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "instruments.yaml").write_text(
+        "instruments:\n  - type: thyracont_vsp63d\n    name: VSP63D_1\n    resource: COM3\n    poll_interval_s: 2.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
+
+    j = tmp_path / "curve.json"
+    _write_curve_json(j)
+    engine, endpoints = await start_replay_engine(
+        lambda ports: ReplayEngine(
+            j,
+            speed=0.0,
+            pub_addr=ports.pub_addr,
+            cmd_addr=ports.cmd_addr,
+            safe_cmd_addr=ports.safe_cmd_addr,
+        )
+    )
+
+    ctx = zmq.asyncio.Context()
+    sub = ctx.socket(zmq.SUB)
+    sub.setsockopt(zmq.LINGER, 0)
+    sub.connect(endpoints.pub_addr)
+    sub.subscribe(b"readings")
+    await asyncio.sleep(0.05)
+    try:
+        reading = Reading(
+            timestamp=datetime.now(UTC),
+            instrument_id="VSP63D_1",
+            channel="VSP63D_1/pressure",
+            value=1.5e-6,
+            unit="mbar",
+            status=ChannelStatus.OK,
+            metadata={},
+        )
+        await engine._publish_reading(reading)
+        parts = await asyncio.wait_for(sub.recv_multipart(), timeout=2.0)
+        data = msgpack.unpackb(parts[1], raw=False)
+        assert data["meta"]["producer_interval_s"] == pytest.approx(2.0), (
+            "the replay publisher did not stamp the configured VSP63D_1 poll cadence"
+        )
+        assert "source_age_s" in data["meta"], (
+            "the replay publisher did not derive the transport age for the replayed feed"
+        )
+    finally:
+        sub.close(linger=0)
+        ctx.term()
+        await engine.stop()
 
 
 # ---------------------------------------------------------------------------
