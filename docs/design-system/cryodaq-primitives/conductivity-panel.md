@@ -140,7 +140,10 @@ to CSV for post-hoc analysis.
    monotonic acquisition start before instrument I/O. It must follow the
    monotonic target acknowledgement even if the wall clock changes. The bridge
    subprocess stamps monotonic ingress before its process queue, and the
-   10-second age limit is measured from that ingress rather than GUI dequeue.
+   freshness bound is measured from that ingress rather than GUI dequeue — a
+   fail-closed floor of ten seconds, widened to three times the largest
+   per-channel median acquisition gap when the observed cadence of the bound
+   channels is slower.
    Each selected feed must remain usable; an unusable or stale power feed also
    clears the temperature predictor and evidence. The panel keeps the
    acknowledged power channel and temperature chain until the step ends.
