@@ -52,6 +52,7 @@ from cryodaq.health.simulator import (
 )
 
 DRIVER_REGISTRY_COMPAT_VERSION: Final = 1
+_EXTERNAL_MOCK_HEATER_INSTRUMENT: Final = "Keithley_1"
 logger = logging.getLogger(__name__)
 
 
@@ -461,7 +462,9 @@ def _construct_keithley(config: ValidatedInstrumentConfig, context: DriverConstr
         watchdog_mode=str(mode) if mode is not None else None,
         watchdog_enabled=enabled,
         watchdog_timeout_s=float(watchdog.get("timeout_s", 5.0)),
-        mock_instrument_client=context.mock_instrument_client,
+        mock_instrument_client=(
+            context.mock_instrument_client if config.name == _EXTERNAL_MOCK_HEATER_INSTRUMENT else None
+        ),
     )
     timeout_s = float(watchdog.get("timeout_s", 5.0))
     poll_interval_s = float(config.values["poll_interval_s"])

@@ -819,3 +819,21 @@ async def test_smua_only_drives_mock_thermal_plant_channel() -> None:
     assert driver._channels["smua"].active is False
     assert driver._channels["smub"].active is True
     assert client.applied[-1] == 0.0
+
+    renamed_client = _HeaterChannelTrackingClient()
+    renamed_config = validate_instrument_entry(
+        {
+            "type": "keithley_2604b",
+            "name": "Keithley_aux",
+            "resource": "USB0::0x05E6::0x2604::MOCK00002::INSTR",
+            "poll_interval_s": 0.01,
+        }
+    )
+    renamed = construct_driver(
+        renamed_config,
+        DriverConstructionContext(mock=True, mock_instrument_client=renamed_client),
+    )
+    assert isinstance(renamed, Keithley2604B)
+    await renamed.connect()
+    await renamed.start_source("smua", 0.2, 10.0, 0.5)
+    assert renamed_client.applied == []
