@@ -3360,8 +3360,8 @@ false_green_pairs:
     runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
     guard: tests/scripts/test_soak_mock_stack.py::test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound
     ci_partition: remaining
-    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_self_audit_storage_stream_could_be_fully_materialized_without_byte_or_record_bound
-    green_evidence: pending_exact_final_review_and_hosted_remaining
+    red_evidence: exact_4e575caa205fa67d47af23e24d57d1c805021649_cold_breadth_report_sha256_ab768001c99b127d85d22ac70ca2e6333d6e30a1e9c3eea72097c66d05e3e1fb_P2_confirmed_direct_bounded_parser_guard_missed_production_seal_paths_disposition_requires_the_same_guard_node_to_drive_seal_and_prove_both_streams_apply_the_byte_ceiling_to_every_read_text_secrecy_required_artifact_hash_materialization_and_seal_read_with_growth_checked_during_streaming
+    green_evidence: pending_final_correction_review_and_hosted_remaining
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6586,6 +6586,10 @@ records:
       A long schedule reserves the complete sequential preflight budget and its margin.
       The runbook cadence values match the implemented profiles.
       Both samples.jsonl and storage-samples.jsonl have byte and record bounds.
+      Their byte ceiling applies in every production _read, _text, secrecy scan,
+      required-artifact, hash, materialization, and seal path rather than only in a parser helper.
+      Each stream is rejected before allocation when its declared size exceeds the ceiling,
+      and accumulated growth is checked while streaming so a file cannot grow through the bound.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#integration-and-publication-discipline
@@ -6607,5 +6611,5 @@ records:
         ci_partition: remaining
       - node: tests/scripts/test_soak_mock_stack.py::test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound
         ci_partition: remaining
-    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_three_P1_and_two_P2_findings_plus_exact_candidate_self_audit_found_an_unbounded_storage_stream
-    green_evidence: pending_exact_final_review_and_hosted_remaining
+    red_evidence: exact_4e575caa205fa67d47af23e24d57d1c805021649_cold_breadth_report_sha256_ab768001c99b127d85d22ac70ca2e6333d6e30a1e9c3eea72097c66d05e3e1fb_P2_confirmed_both_bounded_streams_reached_unbounded_whole_file_read_text_secrecy_required_artifact_hash_materialization_and_seal_paths_before_the_direct_parser_limit
+    green_evidence: pending_final_correction_review_and_hosted_remaining
