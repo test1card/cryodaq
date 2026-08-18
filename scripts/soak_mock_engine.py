@@ -23,6 +23,7 @@ GitHub-hosted runners cap a job at 6h, so CI runs a short bounded window
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -42,6 +43,29 @@ DEFAULT_ALLOWLIST: tuple[str, ...] = (
     r"detector_warmup",
 )
 
+#: Logging levels the structured formatter can emit (``%(levelname)-8s`` uses
+#: the standard names, padded; no custom level is registered in
+#: ``cryodaq.logging_setup``). A line whose second field is not one of these is
+#: not a parsed structured record.
+VALID_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+class UnreadableLogError(RuntimeError):
+    """Raised when a log cannot be scanned well enough to certify it clean.
+
+    Three distinct causes, each carrying its own message: a non-empty log in
+    which no line forms a complete structured record, a log that does parse
+    but contains a recognizably malformed ERROR/CRITICAL record, and a log
+    whose raw bytes are not valid UTF-8. The malformed-record and undecodable
+    cases are the dangerous ones — the readable lines can all be clean while
+    the record that would have failed the scan is the one the parser could not
+    read.
+    """
+
+    def __init__(self, message: str, violations: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.violations = list(violations)
+
 
 def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[str]:
     """Return ERROR/CRITICAL log lines not matched by ``allowlist``.
@@ -54,19 +78,55 @@ def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[st
     A multi-line traceback's continuation lines (no level-field prefix) are
     not separately scanned; the header line that carries the level already
     flags the violation, so nothing is missed.
+
+    A line counts as parsed only when it has the complete formatter shape
+    (asctime, level, name and message — four fields) AND a recognized logging
+    level. A line that merely contains one delimiter with an invalid or
+    missing level field, such as ``not-a-log │ arbitrary text``, is truncated
+    or corrupt, not a parsed record — otherwise a capture reduced to such a
+    line would certify as readable and clean. An ERROR/CRITICAL level that
+    still fails the full-shape check is a recognizably malformed record and
+    fails the log as unreadable, as do the same records behind an escaped
+    ``\\u2502`` delimiter.
     """
     compiled = [re.compile(p) for p in allowlist]
     violations = []
+    parsed_lines = 0
+    malformed_error_record = False
+    delimiter = chr(0x2502)
+    escaped_delimiter = r"\u2502"
     for line in text.splitlines():
-        parts = line.split(" │ ")
-        if len(parts) < 2:
+        parts = line.split(f" {delimiter} ")
+        level = parts[1].strip() if len(parts) >= 2 else ""
+        if len(parts) >= 4 and level in VALID_LOG_LEVELS:
+            parsed_lines += 1
+            if level not in ("ERROR", "CRITICAL"):
+                continue
+            if any(p.search(line) for p in compiled):
+                continue
+            violations.append(line)
             continue
-        level = parts[1].strip()
-        if level not in ("ERROR", "CRITICAL"):
+        # Not a complete, valid structured record. A level field of ERROR/CRITICAL
+        # that failed the full-shape check — real or escaped delimiter — is a
+        # recognizably malformed record: the readable lines cannot establish a
+        # clean run. Any other non-record line is neither parsed nor a violation.
+        if level in ("ERROR", "CRITICAL"):
+            malformed_error_record = True
             continue
-        if any(p.search(line) for p in compiled):
-            continue
-        violations.append(line)
+        escaped_parts = line.split(f" {escaped_delimiter} ")
+        if len(escaped_parts) >= 2 and escaped_parts[1].strip() in ("ERROR", "CRITICAL"):
+            malformed_error_record = True
+    # Order matters, and the more fundamental fact wins. A log in which nothing
+    # parsed is reported as such even when it also holds a malformed record: the
+    # mixed-log message would imply the rest of the log was read, and it was not.
+    if text and parsed_lines == 0:
+        raise UnreadableLogError("could not read log: no structured lines parsed from non-empty log")
+    if malformed_error_record:
+        raise UnreadableLogError(
+            "could not read log: a malformed ERROR/CRITICAL record was found, "
+            "so the readable lines do not establish a clean run",
+            violations,
+        )
     return violations
 
 
@@ -78,10 +138,20 @@ class SoakResult:
     violations: list[str]
     log_path: Path
     duration_s: float
+    log_readable: bool
+    # The exact reason the log could not be read, or None when it was readable.
+    # scan_log distinguishes two causes and the command must report the right one.
+    unreadable_reason: str | None = None
 
     @property
     def ok(self) -> bool:
-        return self.alive_before_shutdown and self.clean_shutdown and self.exit_code == 0 and not self.violations
+        return (
+            self.alive_before_shutdown
+            and self.clean_shutdown
+            and self.exit_code == 0
+            and self.log_readable
+            and not self.violations
+        )
 
 
 def _default_cmd() -> list[str]:
@@ -92,6 +162,36 @@ def _default_cmd() -> list[str]:
     if exe:
         return [exe, "--mock"]
     return [sys.executable, "-m", "cryodaq.engine", "--mock"]
+
+
+def _read_captured_log(path: Path, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> str:
+    """Strictly decode the captured log, or fail the soak as unreadable.
+
+    ``errors="replace"`` would turn invalid UTF-8 written directly to the
+    captured fd (native code bypassing the child's Python stream encoding)
+    into U+FFFD replacement characters, which scan as ordinary text -- a
+    corrupted log would certify clean. A strict decode surfaces those bytes
+    as an unreadable result instead.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # The run is still failed as unreadable, but a strict whole-file decode
+        # would also throw away ERROR/CRITICAL lines that were readable before
+        # the invalid bytes. Preserve those definite violations so the CLI does
+        # not report violations=0 for a log that visibly holds one; the decode
+        # failure stays the reason. Best-effort: scan_log's own rejections do
+        # not override the decode cause.
+        violations: list[str] = []
+        try:
+            violations = scan_log(path.read_text(encoding="utf-8", errors="replace"), allowlist)
+        except UnreadableLogError as scan_exc:
+            violations = list(scan_exc.violations)
+        raise UnreadableLogError(
+            f"could not read log: {exc}. The captured log contains bytes that "
+            "are not valid UTF-8, so the run cannot be certified clean",
+            violations,
+        ) from exc
 
 
 def run_soak(
@@ -108,7 +208,16 @@ def run_soak(
     argv = list(cmd) if cmd is not None else _default_cmd()
 
     with log_path.open("w", encoding="utf-8") as log_fh:
-        proc = subprocess.Popen(argv, stdout=log_fh, stderr=subprocess.STDOUT, text=True)
+        child_env = os.environ.copy()
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUTF8"] = "1"
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=child_env,
+        )
         try:
             deadline = time.monotonic() + duration_s
             alive_before_shutdown = True
@@ -134,8 +243,19 @@ def run_soak(
                 proc.kill()
                 proc.wait(timeout=10.0)
 
-    log_text = log_path.read_text(encoding="utf-8", errors="replace")
-    violations = scan_log(log_text, allowlist)
+    try:
+        log_text = _read_captured_log(log_path, allowlist)
+        violations = scan_log(log_text, allowlist)
+        log_readable = True
+        unreadable_reason = None
+    except UnreadableLogError as exc:
+        # Keep the exact reason. `scan_log` distinguishes "nothing parsed at all" from
+        # "a malformed ERROR record was found among readable lines", and discarding that
+        # here made the command report the first cause for both -- sending an operator
+        # investigating a failed long soak toward a log that had in fact parsed.
+        violations = exc.violations
+        log_readable = False
+        unreadable_reason = str(exc)
 
     return SoakResult(
         alive_before_shutdown=alive_before_shutdown,
@@ -144,6 +264,8 @@ def run_soak(
         violations=violations,
         log_path=log_path,
         duration_s=duration_s,
+        log_readable=log_readable,
+        unreadable_reason=unreadable_reason,
     )
 
 
@@ -194,8 +316,10 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"[soak] alive_before_shutdown={result.alive_before_shutdown} "
         f"clean_shutdown={result.clean_shutdown} exit_code={result.exit_code} "
-        f"violations={len(result.violations)}"
+        f"violations={len(result.violations)} log_readable={result.log_readable}"
     )
+    if not result.log_readable:
+        print(f"[soak] COULD NOT READ LOG — {result.unreadable_reason or 'reason unavailable'}")
     if result.violations:
         print("[soak] VIOLATIONS (unexpected ERROR/CRITICAL log lines):")
         for line in result.violations[:50]:
