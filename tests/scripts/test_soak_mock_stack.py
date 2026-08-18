@@ -13,6 +13,9 @@ from pathlib import Path
 import pytest
 
 from scripts import soak_mock_stack as soak
+from scripts import soak_mock_stack_runner as runner
+from tests.scripts import test_soak_mock_stack_runner as exact_support
+from tests.scripts import test_soak_mock_stack_runner_joined_receipts as periodic_support
 
 _POSIX_EVIDENCE = pytest.mark.skipif(os.name != "posix", reason="evidence capability is POSIX-only")
 
@@ -755,6 +758,72 @@ def _populate_complete(evidence: soak.Evidence) -> None:
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(evidence)
     evidence.record_shutdown(_shutdown(samples))
+
+
+def _populate_sealable_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+) -> soak.Evidence:
+    evidence = soak.Evidence(tmp_path / name)
+    evidence.write_manifest(_manifest())
+
+    class Collector:
+        def __init__(self, repo_root: Path) -> None:
+            assert repo_root == runner._REPO_ROOT
+
+        def observe(self, boundary: runner._ShaBoundary) -> runner._CleanShaObservation:
+            return runner._CleanShaObservation(boundary, "a" * 40, True)
+
+    def execute(
+        argv: tuple[str, ...],
+        *,
+        observer: object,
+        snapshot: object,
+    ) -> runner._CompletedCommand:
+        del observer, snapshot
+        payload = (
+            exact_support._collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n"
+        )
+        return exact_support._completed(payload)
+
+    exact_support._install_execution_fakes(monkeypatch, Collector)
+    monkeypatch.setattr(runner, "_execute_bounded_process", execute)
+    runner._collect_and_execute_exact_six(evidence)
+    result_hash = soak._sha256(evidence.directory / "exact-six-result.json")
+    evidence.write_prerequisites(_prerequisites(result_sha256=result_hash))
+    evidence.begin_run()
+
+    samples = _qualification_samples()
+    for sample in samples:
+        evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
+    _write_continuity_evidence(evidence)
+    for fault in _faults():
+        evidence.append("faults.jsonl", fault)
+    evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
+
+    periodic_tmp = tmp_path / f"{name}-periodic"
+    periodic_tmp.mkdir()
+    evidence, receipts = periodic_support._accept_real_periodic_evidence(
+        monkeypatch,
+        periodic_tmp,
+        evidence=evidence,
+    )
+    soak.atomic_json(
+        evidence.directory / "periodic-cadence.json",
+        {
+            "schema": "cryodaq-soak-periodic-cadence/v1",
+            "interval_s": 600,
+            "boundary_offset_s": 450,
+            "receipts": [
+                {"receipt_id": receipts[0]["receipt_id"], "accepted_elapsed_s": 5.0},
+                {"receipt_id": receipts[1]["receipt_id"], "accepted_elapsed_s": 450.0},
+            ],
+        },
+    )
+    evidence.record_shutdown(_shutdown(samples))
+    return evidence
 
 
 @_POSIX_EVIDENCE
@@ -1754,10 +1823,47 @@ def test_process_generation_native_closure_change_is_rejected(tmp_path: Path) ->
 def test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound(
     stream: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    evidence = soak.Evidence(tmp_path)
-    _populate_complete(evidence)
+    valid = _populate_sealable_complete(monkeypatch, tmp_path, "valid")
     real_reader = soak._read_owned_regular_at
     observed_limits: list[int | None] = []
+    reader_failures: list[str] = []
+    observed_stages: set[str] = set()
+    real_text = soak.Evidence._text
+    real_json_lines = soak.Evidence._json_lines
+    real_sha256 = soak.Evidence._sha256
+    real_secret_findings = soak.Evidence._secret_findings
+    real_build_ledger = soak.Evidence._build_ledger
+
+    def traced_text(evidence: soak.Evidence, name: str, *, errors: str = "strict") -> str:
+        if evidence is valid and name == stream:
+            observed_stages.add("text")
+        return real_text(evidence, name, errors=errors)
+
+    def traced_json_lines(evidence: soak.Evidence, name: str) -> list[dict[str, object]]:
+        if evidence is valid and name == stream:
+            observed_stages.add("json-lines")
+        return real_json_lines(evidence, name)
+
+    def traced_sha256(evidence: soak.Evidence, name: str) -> str:
+        if evidence is valid and name == stream:
+            observed_stages.add("sha256")
+        return real_sha256(evidence, name)
+
+    def traced_secret_findings(evidence: soak.Evidence) -> list[dict[str, object]]:
+        if evidence is valid:
+            observed_stages.add("secret-findings")
+        return real_secret_findings(evidence)
+
+    def traced_build_ledger(evidence: soak.Evidence):
+        if evidence is valid:
+            observed_stages.add("build-ledger")
+        return real_build_ledger(evidence)
+
+    monkeypatch.setattr(soak.Evidence, "_text", traced_text)
+    monkeypatch.setattr(soak.Evidence, "_json_lines", traced_json_lines)
+    monkeypatch.setattr(soak.Evidence, "_sha256", traced_sha256)
+    monkeypatch.setattr(soak.Evidence, "_secret_findings", traced_secret_findings)
+    monkeypatch.setattr(soak.Evidence, "_build_ledger", traced_build_ledger)
 
     def observed_reader(
         directory_fd: int,
@@ -1767,17 +1873,60 @@ def test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound(
     ) -> tuple[bytes, os.stat_result]:
         if name == stream:
             observed_limits.append(max_bytes)
-        if max_bytes is None:
-            return real_reader(directory_fd, name)
-        return real_reader(directory_fd, name, max_bytes=max_bytes)
+        try:
+            if max_bytes is None:
+                return real_reader(directory_fd, name)
+            return real_reader(directory_fd, name, max_bytes=max_bytes)
+        except ValueError as exc:
+            if name == stream:
+                reader_failures.append(str(exc))
+            raise
 
-    byte_limit = (tmp_path / stream).stat().st_size - 1
-    monkeypatch.setattr(soak, "MAX_SAMPLE_ARTIFACT_BYTES", byte_limit)
     monkeypatch.setattr(soak, "_read_owned_regular_at", observed_reader)
+    valid.seal()
+
+    assert valid.state == soak.RunState.EVIDENCE_SEALED
+    assert len(observed_limits) >= 6
+    assert all(limit == soak.MAX_SAMPLE_ARTIFACT_BYTES for limit in observed_limits)
+    assert {"text", "json-lines", "secret-findings", "build-ledger"} <= observed_stages
+    if stream == "samples.jsonl":
+        assert "sha256" in observed_stages
+    else:
+        assert "sha256" not in observed_stages
+
+    growth = _populate_sealable_complete(monkeypatch, tmp_path, "growth")
+    target = growth.directory / stream
+    target_identity = target.stat()
+    byte_limit = target_identity.st_size
+    real_os_read = soak.os.read
+    appended = False
+    target_read_calls = 0
+
+    def read_then_grow(file_fd: int, size: int) -> bytes:
+        nonlocal appended, target_read_calls
+        chunk = real_os_read(file_fd, size)
+        opened = soak.os.fstat(file_fd)
+        is_target = (opened.st_dev, opened.st_ino) == (target_identity.st_dev, target_identity.st_ino)
+        if is_target:
+            target_read_calls += 1
+        if not appended and chunk and is_target:
+            with target.open("ab") as stream_file:
+                stream_file.write(b"\n")
+                stream_file.flush()
+                soak.os.fsync(stream_file.fileno())
+            appended = True
+        return chunk
+
+    observed_limits.clear()
+    monkeypatch.setattr(soak, "MAX_SAMPLE_ARTIFACT_BYTES", byte_limit)
+    monkeypatch.setattr(soak.os, "read", read_then_grow)
 
     with pytest.raises(ValueError, match="secret detection prevented sealing"):
-        evidence.seal()
+        growth.seal()
 
+    assert appended
     assert observed_limits
+    assert target_read_calls >= 2
+    assert reader_failures[0] == "artifact exceeds the reviewed byte bound"
     assert all(limit == byte_limit for limit in observed_limits)
-    assert evidence.state == soak.RunState.FAIL
+    assert growth.state == soak.RunState.FAIL

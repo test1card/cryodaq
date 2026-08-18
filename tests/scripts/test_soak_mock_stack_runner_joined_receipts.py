@@ -181,6 +181,7 @@ def _prepare_real_periodic_acceptance(
     tmp_path: Path,
     *,
     extra_receipts: int = 0,
+    evidence: soak.Evidence | None = None,
 ) -> tuple[soak.Evidence, runner._PosixSoakRunner, tuple[dict[str, object], ...]]:
     """Prepare the real registry-to-Evidence acceptance path without a long source run."""
 
@@ -203,8 +204,11 @@ def _prepare_real_periodic_acceptance(
         photos.append(photo)
     accepted_records = tuple(all_records)
 
-    evidence = soak.Evidence(tmp_path / "evidence")
-    evidence.state = soak.RunState.RUNNING
+    if evidence is None:
+        evidence = soak.Evidence(tmp_path / "evidence")
+        evidence.state = soak.RunState.RUNNING
+    else:
+        assert evidence.state is soak.RunState.RUNNING
     for record, photo in zip(accepted_records, photos, strict=True):
         assert isinstance(photo, bytes)
         artifact = evidence.directory / str(record["filename"])
@@ -241,11 +245,13 @@ def _accept_real_periodic_evidence(
     tmp_path: Path,
     *,
     extra_receipts: int = 0,
+    evidence: soak.Evidence | None = None,
 ) -> tuple[soak.Evidence, tuple[dict[str, object], ...]]:
     evidence, owner, records = _prepare_real_periodic_acceptance(
         monkeypatch,
         tmp_path,
         extra_receipts=extra_receipts,
+        evidence=evidence,
     )
     try:
         runner._DELIVERY_EVIDENCE.run(owner, evidence)
