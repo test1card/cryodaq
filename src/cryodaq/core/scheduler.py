@@ -1487,8 +1487,29 @@ class Scheduler:
 
         # Step 2: Publish to brokers
         if committed_publish_readings:
+            # A physical reading from this instrument is produced once per poll
+            # cycle, so freshness consumers (e.g. the dashboard phase widget)
+            # need the poll cadence declared on the reading itself; analytics
+            # producers already declare the same metadata before publishing. The
+            # engine ZMQ bridge derives ``source_age_s`` from a cadence-declared
+            # reading exactly once (zmq_bridge._publish_reading), so downstream
+            # never derives it again against engine wall time.
+            commit_publish_interval_s = (
+                float(state.config.poll_interval_s) if state.config.poll_interval_s is not None else None
+            )
+            broker_readings: list[Reading] = committed_publish_readings
+            if commit_publish_interval_s is not None:
+                broker_readings = []
+                for r in committed_publish_readings:
+                    existing = r.metadata.get("producer_interval_s") if type(r.metadata) is dict else None
+                    if type(existing) in (int, float):
+                        broker_readings.append(r)
+                    else:
+                        broker_readings.append(
+                            replace(r, metadata={**r.metadata, "producer_interval_s": commit_publish_interval_s})
+                        )
             await self._broker.publish_batch(
-                committed_publish_readings,
+                broker_readings,
                 persistence_authoritative=persistence_authoritative,
                 descriptor_envelopes=descriptor_envelopes,
             )

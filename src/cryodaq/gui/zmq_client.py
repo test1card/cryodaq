@@ -254,7 +254,14 @@ def _increment_shared_counter(counter: Any) -> int | None:
 
 def _metadata_with_transport_age(d: dict[str, Any]) -> object:
     metadata = d.get("metadata", {})
-    if type(metadata) is not dict or not str(d.get("channel", "")).startswith("analytics/"):
+    if type(metadata) is not dict:
+        return metadata
+    # Classify by the declared producer cadence rather than by an
+    # ``analytics/`` channel spelling: the publisher contract identifies a
+    # cadence-declared reading by ``producer_interval_s``, so a renamed
+    # analytics channel -- or a physical instrument reading that declared its
+    # poll cadence -- keeps its queue-residence aging here.
+    if type(metadata.get("producer_interval_s")) not in (int, float):
         return metadata
 
     public = dict(metadata)

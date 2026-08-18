@@ -50,6 +50,10 @@ from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
 
+# Before the first cadence interval is learned, an interval this large is an
+# outage, not evidence of normal cadence. Mirrors plugins/thermal_calculator.py.
+_BOOTSTRAP_FRESHNESS_HORIZON_S = 30.0
+
 
 # ============================================================================
 # Cooldown detector: state machine for cycle detection
@@ -664,14 +668,18 @@ class CooldownService:
                     source_outage = (
                         source_interval is not None
                         and source_interval > 0.0
-                        and bool(source_cadence)
-                        and source_interval > 3.0 * float(np.median(source_cadence))
+                        and source_interval
+                        > (3.0 * float(np.median(source_cadence)) if source_cadence else _BOOTSTRAP_FRESHNESS_HORIZON_S)
                     )
                     arrival_outage = (
                         arrival_interval is not None
                         and arrival_interval > 0.0
-                        and bool(arrival_cadence)
-                        and arrival_interval > 3.0 * float(np.median(arrival_cadence))
+                        and arrival_interval
+                        > (
+                            3.0 * float(np.median(arrival_cadence))
+                            if arrival_cadence
+                            else _BOOTSTRAP_FRESHNESS_HORIZON_S
+                        )
                     )
                     # A gap that is already an outage in either clock domain
                     # is not evidence of normal cadence. Keep the resumed
