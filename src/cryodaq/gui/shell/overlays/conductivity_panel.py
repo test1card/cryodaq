@@ -82,7 +82,16 @@ _STABILITY_THRESHOLD = 0.01  # К/мин
 _BANNER_AUTO_CLEAR_MS = 4000
 _REFRESH_INTERVAL_MS = 1000
 _AUTO_TIMER_INTERVAL_MS = 1000
+# F81 finding: a fixed freshness window silently rejects every sample of an
+# otherwise healthy instrument whose configured poll_interval_s (registry allows
+# up to 86_400 s) or successful read (up to 300 s) exceeds 10 seconds, leaving
+# the sweep in "stabilizing" forever. The window is therefore derived from the
+# observed acquisition cadence of the bound channels (median of recent
+# inter-sample monotonic acquisition gaps), with this constant kept as the
+# fail-closed floor: a dead feed still ages past any finite window.
 _AUTO_SAMPLE_MAX_AGE_S = 10.0
+_AUTO_SAMPLE_AGE_CADENCE_FACTOR = 3.0
+_AUTO_CADENCE_SAMPLE_SLOTS = 9
 _ACQUISITION_STARTED_AT = "acquisition_started_at"
 
 _COL_HEADERS: tuple[str, ...] = (
@@ -257,6 +266,14 @@ class ConductivityPanel(QWidget):
         self._auto_step_temperature_received_at: dict[str, float] = {}
         self._auto_step_power_value: float | None = None
         self._auto_step_power_received_at: float | None = None
+
+        # F81 finding: per-channel observed acquisition cadence (monotonic gap
+        # between successive samples of the same channel). The freshness window
+        # is derived from the median of the most recent gaps so a configured
+        # poll_interval_s or slow read above 10 seconds does not reject every
+        # healthy sample, while the 10-second floor stays fail-closed.
+        self._auto_cadence_gaps: dict[str, deque[float]] = {}
+        self._auto_last_acquisition_s: dict[str, float] = {}
 
         self._all_channels = _get_temperature_channels()
         get_channel_manager().on_change(self._on_channels_changed)
@@ -837,6 +854,51 @@ class ConductivityPanel(QWidget):
             return None
         return monotonic_value if math.isfinite(monotonic_value) else None
 
+    def _observe_auto_cadence(self, channel: str, acquisition_started_monotonic: float | None) -> None:
+        """Record the inter-sample acquisition gap for one channel.
+
+        F81 finding: the freshness window must track the instrument's actual
+        acquisition cadence, not a fixed 10-second constant, or a configured
+        poll_interval_s above 10 seconds rejects every healthy sample. The gap
+        is measured between successive samples of the same channel on the same
+        monotonic clock (``acquisition_started_monotonic``).
+        """
+        if acquisition_started_monotonic is None:
+            return
+        previous = self._auto_last_acquisition_s.get(channel)
+        self._auto_last_acquisition_s[channel] = acquisition_started_monotonic
+        if previous is None:
+            return
+        gap = acquisition_started_monotonic - previous
+        if gap > 0:
+            self._auto_cadence_gaps.setdefault(channel, deque(maxlen=_AUTO_CADENCE_SAMPLE_SLOTS)).append(gap)
+
+    def _auto_sample_max_age_s(self) -> float:
+        """Fail-closed freshness window derived from the observed cadence.
+
+        Considers only the channels currently bound to the auto step (the
+        commanded temperature chain and the power channel), so an unrelated
+        slow channel cannot inflate the window. Uses the median of the most
+        recent per-channel inter-sample gaps so a single long gap (for example
+        a one-off slow read within the permitted 300-second timeout) cannot
+        inflate the window, while the 10-second floor keeps the guard
+        fail-closed: a genuinely dead feed still ages past any finite window.
+        When no cadence has been observed yet, the floor applies unchanged.
+        """
+        bound = set(self._auto_step_temperature_channels)
+        if self._auto_step_power_channel is not None:
+            bound.add(self._auto_step_power_channel)
+        medians = []
+        for channel in bound:
+            gaps = self._auto_cadence_gaps.get(channel)
+            if not gaps:
+                continue
+            ordered = sorted(gaps)
+            medians.append(ordered[len(ordered) // 2])
+        if not medians:
+            return _AUTO_SAMPLE_MAX_AGE_S
+        return max(_AUTO_SAMPLE_MAX_AGE_S, _AUTO_SAMPLE_AGE_CADENCE_FACTOR * max(medians))
+
     def _reset_auto_temperature_evidence(self) -> None:
         self._auto_step_temperature_values.clear()
         self._auto_step_temperature_received_at.clear()
@@ -923,6 +985,7 @@ class ConductivityPanel(QWidget):
         ts = reading.timestamp.timestamp()
         received_at = self._reading_monotonic_metadata(reading, "bridge_ingress_monotonic")
         acquisition_started_monotonic = self._reading_monotonic_metadata(reading, "acquisition_started_monotonic")
+        self._observe_auto_cadence(ch_id or ch, acquisition_started_monotonic)
         # NaN-доктрина (A3): статус — дискриминатор годности; не годное
         # температурное показание не питает SteadyStatePredictor.
         auto_step_fresh = (
@@ -933,13 +996,13 @@ class ConductivityPanel(QWidget):
         # F81-1: the engine-side publisher queue can stall before the bridge
         # ingress stamp, so a post-ack sample can wait upstream and arrive
         # with a fresh ingress stamp after publication resumes. Bound the
-        # acquisition-to-ingress age with the same 10-second window
+        # acquisition-to-ingress age with the same cadence-derived window
         # _auto_tick applies to bridge ingress, so a stale sample that merely
         # looks fresh cannot refill the predictor or advance the sweep.
         auto_step_current = (
             auto_step_fresh
             and received_at is not None
-            and received_at - acquisition_started_monotonic <= _AUTO_SAMPLE_MAX_AGE_S
+            and received_at - acquisition_started_monotonic <= self._auto_sample_max_age_s()
         )
         selected_auto_temperature = self._auto_state == "stabilizing" and ch_id in self._auto_step_temperature_channels
         if selected_auto_temperature and not reading.is_usable():
@@ -1521,7 +1584,7 @@ class ConductivityPanel(QWidget):
         temperature_ages_are_current = bool(temperature_channels) and all(
             ch in self._auto_step_temperature_values
             and ch in self._auto_step_temperature_received_at
-            and now_monotonic - self._auto_step_temperature_received_at[ch] <= _AUTO_SAMPLE_MAX_AGE_S
+            and now_monotonic - self._auto_step_temperature_received_at[ch] <= self._auto_sample_max_age_s()
             for ch in temperature_channels
         )
         if not temperature_ages_are_current and self._auto_step_temperature_values:
@@ -1531,7 +1594,7 @@ class ConductivityPanel(QWidget):
         power_age_is_current = (
             self._auto_step_power_value is not None
             and self._auto_step_power_received_at is not None
-            and now_monotonic - self._auto_step_power_received_at <= _AUTO_SAMPLE_MAX_AGE_S
+            and now_monotonic - self._auto_step_power_received_at <= self._auto_sample_max_age_s()
         )
         if not power_age_is_current:
             self._auto_step_power_value = None

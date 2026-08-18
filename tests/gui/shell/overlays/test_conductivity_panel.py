@@ -8,6 +8,7 @@ import socket
 import threading
 import time
 from datetime import UTC, datetime
+from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -145,12 +146,29 @@ def _power_reading(
     )
 
 
-def _find_free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+def _reserve_bridge_endpoints() -> tuple[Any, Any, int, Any, int]:
+    """Reserve two demonstrably distinct loopback ZMQ bridge ports.
+
+    F81 finding: ``_find_free_port()`` released its port before the parent
+    bound it, so the OS could reassign the number, or hand the same number to
+    a second ``_find_free_port()`` call — either made the registered backlog
+    guard fail nondeterministically under parallel CI. The PUB endpoint is now
+    bound directly by ZMQ (port 0, actual port read from LAST_ENDPOINT) and
+    the command endpoint is held open on a plain socket for the whole test, so
+    the two are distinct by construction and neither is ever released before
+    use. Returns (context, pub_socket, pub_port, cmd_reservation, cmd_port).
+    """
+    ctx = zmq.Context()
+    pub = ctx.socket(zmq.PUB)
+    pub.setsockopt(zmq.LINGER, 0)
+    pub.bind("tcp://127.0.0.1:0")
+    endpoint = pub.getsockopt(zmq.LAST_ENDPOINT)
+    pub_port = int(endpoint.rsplit(b":", 1)[-1])
+    cmd_reservation = socket.socket()
+    cmd_reservation.bind(("127.0.0.1", 0))
+    cmd_port = cmd_reservation.getsockname()[1]
+    assert pub_port != cmd_port, f"bridge endpoints collided: pub={pub_port}, cmd={cmd_port}"
+    return ctx, pub, pub_port, cmd_reservation, cmd_port
 
 
 def _stub_channels(panel: ConductivityPanel, ids: list[str]) -> None:
@@ -812,8 +830,12 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
         # subprocess and publish over a real ZMQ SUB/PUB pair, so the
         # production stamp at core/zmq_subprocess.py is what supplies the
         # freshness proof instead of a hand-inserted queue item.
-        pub_port = _find_free_port()
-        cmd_port = _find_free_port()
+        # F81 finding: the endpoints must stay reserved until they are bound —
+        # a released port can be reassigned by the OS, and two successive
+        # _find_free_port() calls can return the same port, so the guard could
+        # fail nondeterministically. _reserve_bridge_endpoints() holds the PUB
+        # on the live ZMQ socket and the command port on an open reservation.
+        ctx, pub, pub_port, cmd_reservation, cmd_port = _reserve_bridge_endpoints()
         data_q: mp.Queue = mp.Queue(maxsize=10_000)
         cmd_q: mp.Queue = mp.Queue(maxsize=1_000)
         reply_q: mp.Queue = mp.Queue(maxsize=1_000)
@@ -832,10 +854,6 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
         )
         bridge_proc.start()
 
-        ctx = zmq.Context()
-        pub = ctx.socket(zmq.PUB)
-        pub.setsockopt(zmq.LINGER, 0)
-        pub.bind(f"tcp://127.0.0.1:{pub_port}")
         time.sleep(0.3)
 
         stop_emit = threading.Event()
@@ -889,6 +907,7 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
             emitter.join(timeout=1.0)
             pub.close(linger=0)
             ctx.term()
+            cmd_reservation.close()
             shutdown_event.set()
             bridge_proc.join(timeout=3.0)
             if bridge_proc.is_alive():
@@ -923,6 +942,76 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
 
     assert panel._auto_step == 0
     assert panel._auto_results == []
+    panel._auto_timer.stop()
+
+
+def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
+    """A healthy instrument configured with a 30-second acquisition cadence must
+    still advance the sweep.
+
+    F81 finding: the freshness window was a fixed 10 seconds, so a configured
+    poll_interval_s above 10 seconds (the registry allows up to 86,400) left a
+    healthy sweep in "stabilizing" forever — the freshest sample aged past the
+    fixed window between arrivals and evidence was cleared every tick. The
+    window is now derived from the observed inter-sample acquisition cadence
+    (3× the median gap, floor 10 s), so a 30-second cadence keeps the freshest
+    sample current long enough to record the point.
+    """
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    # Simulate poll_interval_s = 30 s: two acquisition cycles, each channel's
+    # sample stamped 30 seconds after the previous one, arriving ~1 s later.
+    # Shift the ack epoch back so both cycles are post-ack (as the real engine
+    # stamps acquisition before I/O), mirroring the backlogged-branch pattern.
+    ack = panel._auto_step_ack_monotonic_s
+    panel._auto_step_ack_monotonic_s = ack - 90.0
+    panel._auto_step_start = _time.monotonic() - 60.0
+    for offset in (60.0, 30.0):
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+        panel._handle_reading(
+            _power_reading(
+                0.012,
+                acquisition_started_monotonic=acquisition,
+                bridge_ingress_monotonic=ingress,
+            )
+        )
+
+    # The observed 30-second cadence must widen the window past the old fixed
+    # 10-second limit, so the freshest sample (29 s old at tick time) stays
+    # current and the sweep can record the point.
+    assert panel._auto_sample_max_age_s() > 10.0
+
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)
+    panel._auto_tick()
+
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
     panel._auto_timer.stop()
 
 
