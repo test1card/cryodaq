@@ -168,7 +168,20 @@ _ISOLATED_TRACKED_THEME_PACKS: Final = (
     "xcode.yaml",
 )
 _ISOLATED_STATIC_CONFIGS: Final = (
-    ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
+    (
+        "safety.yaml",
+        "critical_channels:\n"
+        "  - 'Т1'\n"
+        "  - 'Т2'\n"
+        "  - 'Т3'\n"
+        "  - 'Т4'\n"
+        "  - 'Т5'\n"
+        "  - 'Т6'\n"
+        "  - 'Т7'\n"
+        "  - 'Т8'\n"
+        "require_keithley_for_run: false\n"
+        "keithley_channels: []\n",
+    ),
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
@@ -766,6 +779,18 @@ asyncio.run(probe())
         raise _RunnerFoundationError("tracked passive soak descriptor cardinality changed")
     if descriptor_ids != binding_ids:
         raise _RunnerFoundationError("tracked passive soak descriptor bindings do not match")
+    # The isolated fixture's temperature channels are its safety-critical
+    # inputs. safety.yaml declares exactly these canonical ids as
+    # critical_channels, and the engine's startup liveness check refuses any
+    # critical declaration whose descriptor is not safety_critical_input
+    # (src/cryodaq/core/safety_pattern_liveness.py
+    # _resolve_critical_input_bindings). A declaration that resolves to nothing
+    # never fires (F-1 silent safety kill), so the fixture must genuinely
+    # classify the channels it protects; otherwise the soak config set cannot
+    # pass the engine's own startup cut. Raw-sensor channels stay observational.
+    for item in descriptor_manifest["descriptors"]:
+        if type(item) is dict and item.get("quantity") == "temperature":
+            item["safety_class"] = "safety_critical_input"
     (config_dir / "channel_descriptors.yaml").write_text(
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
         encoding="utf-8",

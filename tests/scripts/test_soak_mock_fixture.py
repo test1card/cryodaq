@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.drivers.registry import (
     DriverAuthority,
     DriverConstructionContext,
@@ -108,6 +111,39 @@ def test_isolated_config_theme_resolves_through_the_real_loader(tmp_path) -> Non
     )
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout.strip() == "warm_stone"
+
+
+def test_isolated_config_safety_declarations_resolve_through_the_real_liveness_check(tmp_path) -> None:
+    """The isolated config set's safety declarations must resolve to live
+    channels on the plane their consumer sees.
+
+    The engine runs the startup liveness check (src/cryodaq/core/
+    safety_pattern_liveness.py) over the ACTUALLY-SELECTED descriptor manifest
+    before acquisition boots, so a generated config set that fails it can never
+    produce a soak. Before the fix, the generated safety.yaml declared ``.*``
+    as a critical channel, which the check treats as a literal canonical
+    identity and rejects as dead (F-1 silent safety kill) — a safety reference
+    that resolves to nothing never fires. This guard runs the same check over
+    the materialized isolated config set and demands that every critical
+    declaration installs an exact live binding."""
+    runner._materialize_isolated_mock_config(tmp_path)
+
+    catalog = load_live_channel_descriptor_catalog(tmp_path / "channel_descriptors.yaml")
+    manager = SafetyManager(SafetyBroker())
+    manager.load_config(tmp_path / "safety.yaml")
+    manager._config.require_keithley_for_run = False
+
+    validate_safety_pattern_liveness(
+        descriptor_catalog=catalog,
+        interlocks_config_path=tmp_path / "interlocks.yaml",
+        safety_manager=manager,
+        adaptive_throttle_patterns=[],
+        alarms_config_path=tmp_path / "alarms_v3.yaml",
+    )
+
+    assert manager._critical_input_bindings, (
+        "generated safety.yaml critical_channels must install live critical-input bindings"
+    )
 
 
 @_LINUX_PROCESS_AUTHORITY
