@@ -159,7 +159,12 @@ from cryodaq.drivers.registry import (
     ValidatedInstrumentConfig,
     construct_driver,
     is_reviewed_source_binding,
+    require_complete_external_mock_roster,
     validate_instrument_entries,
+)
+from cryodaq.drivers.transport.mock_instrument import (
+    ExternalMockInstrumentClient,
+    MockInstrumentEndpoint,
 )
 from cryodaq.engine_wiring.operator_snapshot_production import build_operator_snapshot_publication_service
 from cryodaq.engine_wiring.recording_lifecycle_feed import RecordingLifecycleFeed
@@ -2117,6 +2122,7 @@ def _load_drivers(
     mock: bool,
     calibration_store: CalibrationStore | None = None,
     data_dir: Path | None = None,
+    mock_instrument_client: ExternalMockInstrumentClient | None = None,
 ) -> DriverLoadResult:
     """Validate and atomically construct the configured built-in drivers."""
 
@@ -2142,8 +2148,13 @@ def _load_drivers(
             mock=mock,
             calibration_store=calibration_store,
             data_dir=_DATA_DIR if data_dir is None else data_dir,
+            mock_instrument_client=mock_instrument_client,
         )
         validated = validate_instrument_entries(raw.get("instruments", []))
+        require_complete_external_mock_roster(
+            validated,
+            mock_instrument_client=mock_instrument_client,
+        )
     except DriverRegistryError as exc:
         raise DriverRegistryError(f"{config_path}: {exc}") from exc
 
@@ -5853,7 +5864,26 @@ class _EngineStartupRollback:
     async def call(self, operation: Callable[[], Any]) -> Any:
         try:
             result = operation()
-            if inspect.isawaitable(result):
+            # Await a COROUTINE, never a Task or Future.
+            #
+            # `inspect.isawaitable` is True for a Task, because a Task is a
+            # Future and a Future has `__await__`. But a Task returned by a
+            # registration helper is a HANDLE TO WORK THAT IS ALREADY RUNNING,
+            # not work to wait for. Awaiting it waits for that task to FINISH,
+            # and these tasks are supervised loops that never finish.
+            #
+            # This blocked engine startup permanently at the first such site:
+            # `supervisor.register(...)` for `safety_collect` returns its
+            # long-running monitor task, startup awaited it, and every later
+            # step -- including installing the SIGTERM handler -- was never
+            # reached. The process then died on the signal a real deployment
+            # sends, with no shutdown and no error line, which is how the
+            # nightly bounded mock soak failed for consecutive nights.
+            #
+            # The call sites are the evidence for the intent: they read
+            # `throttle_task = await startup.call(...)`, so they expect to
+            # RECEIVE the task, not its result.
+            if inspect.isawaitable(result) and not isinstance(result, asyncio.Future):
                 return await result
             return result
         except BaseException:
@@ -6461,6 +6491,7 @@ async def _run_engine(
     shutdown_capability: str = "",
     engine_ready_nonce: str = "",
     engine_ready_channel_fd: int | None = None,
+    mock_instrument_client: ExternalMockInstrumentClient | None = None,
 ) -> None:
     """Инициализировать и запустить все подсистемы engine."""
     engine_instance_id = _canonical_engine_instance_id(engine_instance_id)
@@ -6495,6 +6526,7 @@ async def _run_engine(
         mock=mock,
         calibration_store=calibration_store,
         data_dir=_DATA_DIR,
+        mock_instrument_client=mock_instrument_client,
     )
     driver_configs = driver_load.instrument_configs
     drivers_by_name = {cfg.driver.name: cfg.driver for cfg in driver_configs}
@@ -7873,6 +7905,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CryoDAQ Engine")
     parser.add_argument("--mock", action="store_true", help="Mock mode (simulated instruments)")
     parser.add_argument(
+        "--mock-thermal-simulator",
+        metavar="HOST:PORT",
+        help="Use an external thermal instrument simulator. Requires --mock.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Proceed only when the engine lock is free; never kill an unauthenticated owner",
@@ -7887,6 +7924,16 @@ def main() -> None:
         mock = _resolve_mock_mode(cli_mock=args.mock)
     except ValueError as exc:
         parser.error(str(exc))
+
+    mock_instrument_client = None
+    if args.mock_thermal_simulator is not None:
+        if not mock:
+            parser.error("--mock-thermal-simulator requires mock mode")
+        try:
+            endpoint = MockInstrumentEndpoint.parse(args.mock_thermal_simulator)
+        except ValueError as exc:
+            parser.error(str(exc))
+        mock_instrument_client = ExternalMockInstrumentClient(endpoint)
 
     if args.force:
         _force_kill_existing()
@@ -7910,6 +7957,7 @@ def main() -> None:
                             shutdown_capability=shutdown_capability,
                             engine_ready_nonce=engine_ready_nonce,
                             engine_ready_channel_fd=engine_ready_channel_fd,
+                            mock_instrument_client=mock_instrument_client,
                         )
                     )
             else:
@@ -7920,6 +7968,7 @@ def main() -> None:
                         shutdown_capability=shutdown_capability,
                         engine_ready_nonce=engine_ready_nonce,
                         engine_ready_channel_fd=engine_ready_channel_fd,
+                        mock_instrument_client=mock_instrument_client,
                     )
                 )
         except KeyboardInterrupt:

@@ -69,7 +69,7 @@ def _flap_quietly(
     """Refire continuously from ``frm`` to ``to`` and assert nothing was admitted.
 
     THIS EXISTS BECAUSE THE SAME MISTAKE HAS BEEN MADE THREE TIMES in this
-    file.  ``_seen`` is refreshed on every call, so a test that simply jumps the
+    file.  ``_activity`` is refreshed on every call, so a test that simply jumps the
     clock forward leaves the alarm looking QUIET -- and the ordinary
     quiet-for-a-full-window branch then admits the dispatch, while the branch
     actually under test is never reached.  The node passes, or fails, for a
@@ -122,6 +122,51 @@ def test_a_continuously_flapping_critical_is_re_narrated_not_silenced_forever(cl
     )
     # And the ceiling the dedup window exists for must still hold.
     assert min(gaps) >= ESCALATE, f"re-narrated after only {min(gaps):.0f}s -- the spam bound is gone"
+
+
+def test_critical_flap_every_20_seconds_is_re_narrated_over_620_seconds(clock) -> None:
+    """Reproducer from field: sustained 20 s refires should not hold silence forever."""
+
+    ledger = _ledger()
+    event_id = "alarm:sustained"
+    start = 1000.0
+
+    clock.return_value = start
+    assert ledger.should_dispatch(event_id) is True
+    ledger.note_outcome(event_id, delivered=True)
+    last_seen = ledger._seen[event_id]
+
+    admitted = 1
+    for step in range(1, 32):  # 620 seconds at 20 s cadence
+        clock.return_value = start + step * 20.0
+        admitted_now = ledger.should_dispatch(event_id)
+        if admitted_now:
+            admitted += 1
+            ledger.note_outcome(event_id, delivered=True)
+            last_seen = ledger._seen[event_id]
+            continue
+        assert ledger._seen[event_id] == last_seen, (
+            f"suppressed refire at {clock.return_value} extended the silence window"
+        )
+
+    assert admitted > 1, "sustained flap did not re-escalate at all"
+
+
+def test_critical_flap_every_40_seconds_admits_every_refire(clock) -> None:
+    """Positive control: once refires exceed the 30 s window they all admit."""
+
+    ledger = _ledger()
+    event_id = "alarm:quiet_gap"
+
+    admitted = 0
+    start = 1000.0
+    for step in range(10):  # 10 attempts over 360 s, every 40 s
+        clock.return_value = start + step * 40.0
+        assert ledger.should_dispatch(event_id) is True
+        ledger.note_outcome(event_id, delivered=True)
+        admitted += 1
+
+    assert admitted == 10
 
 
 def test_the_dedup_window_still_suppresses_an_ordinary_flap_burst(clock) -> None:
@@ -504,6 +549,42 @@ def test_the_escalation_clock_starts_when_the_operator_was_told(clock) -> None:
     assert ledger.should_dispatch("alarm:latency") is True
 
 
+def test_late_delivery_preserves_freshness_without_rearming_the_source_clock(clock) -> None:
+    ledger = _ledger()
+    start = 1000.0
+
+    assert ledger.should_dispatch("alarm:late") is True
+    attempt = ledger.current_attempt("alarm:late")
+
+    clock.return_value = start + ESCALATE + WINDOW + 20.0
+    ledger.note_outcome("alarm:late", delivered=True, attempt=attempt)
+    assert ledger._activity["alarm:late"] == start
+
+    # No refire occurred before delivery, so delivery freshness must prevent
+    # retirement on the next source event.  `_activity` remains the source
+    # clock: delivery must not make a quiet-gap re-arm look non-quiet.
+    clock.return_value += 1.0
+    assert ledger.should_dispatch("alarm:other") is True
+    assert ledger.should_dispatch("alarm:late") is False
+    assert ledger.current_attempt("alarm:late") == attempt
+    assert ledger._activity["alarm:late"] == start + ESCALATE + WINDOW + 21.0
+
+
+def test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap(clock) -> None:
+    ledger = _ledger()
+    event_id = "alarm:backpressure-late"
+    assert ledger.should_dispatch(event_id) is True
+    attempt = ledger.current_attempt(event_id)
+    for index in range(63):
+        assert ledger.should_dispatch(f"alarm:filler-{index}") is True
+    clock.return_value = 1010.0
+    assert ledger.should_dispatch(event_id) is False
+    clock.return_value = 1035.0
+    ledger.note_outcome(event_id, delivered=True, attempt=attempt)
+    clock.return_value = 1041.0
+    assert ledger.should_dispatch(event_id) is True
+
+
 def test_the_ledger_bounds_admissions_and_claims_nothing_about_delivery(clock) -> None:
     """Assert the bound this class OWNS, and refuse to assert the one it does not.
 
@@ -662,6 +743,32 @@ def test_a_slow_delivery_does_not_leave_the_quiet_branch_armed(clock) -> None:
     )
 
 
+def test_a_quiet_gap_clears_suppression_before_escalation_retirement(clock) -> None:
+    ledger = _ledger()
+    assert ledger.should_dispatch("alarm:quietgap") is True
+    ledger.note_outcome("alarm:quietgap", delivered=True)
+
+    clock.return_value = 1010.0
+    assert ledger.should_dispatch("alarm:quietgap") is False
+
+    clock.return_value = 1041.0
+    assert ledger.should_dispatch("alarm:quietgap") is True
+
+
+def test_late_delivery_does_not_reset_source_activity_for_returning_alarm(clock) -> None:
+    ledger = _ledger()
+    event_id = "alarm:delayed"
+    assert ledger.should_dispatch(event_id) is True
+    attempt = ledger.current_attempt(event_id)
+
+    clock.return_value = 1010.0
+    assert ledger.should_dispatch(event_id) is False
+    clock.return_value = 1035.0
+    ledger.note_outcome(event_id, delivered=True, attempt=attempt)
+    clock.return_value = 1041.0
+    assert ledger.should_dispatch(event_id) is True
+
+
 def test_an_outstanding_attempt_keeps_its_settled_identity(clock) -> None:
     """Idempotence cannot be bounded by id distance when delivery is unbounded.
 
@@ -743,7 +850,7 @@ def test_a_success_from_a_pruned_occurrence_does_not_suppress_the_current_one(cl
     old_attempt = ledger.current_attempt("alarm:generations")
 
     # The alarm goes quiet past the prune horizon.  `_prune` runs inside
-    # `should_dispatch` AFTER `_seen` is refreshed, so this alarm's own refire
+    # `should_dispatch` AFTER `_activity` is refreshed, so this alarm's own refire
     # can never prune it -- a DIFFERENT alarm has to fire in the gap.  That is
     # the production shape too: the ledger is shared across alarms.
     clock.return_value = start + ESCALATE + WINDOW + 60.0
@@ -1317,7 +1424,7 @@ async def test_the_event_loop_bounds_handlers_across_retirement_cycles(cycles: i
             peak = saturated
             for cycle in range(cycles):
                 # The alarm stays active and keeps firing well past the
-                # escalation interval.  Each refire keeps `_seen` fresh, so the
+                # escalation interval.  Each refire keeps `_activity` fresh, so the
                 # escalation branch IS reached -- nothing else in this node
                 # would notice if the gate stopped refusing.
                 held = agent._dedup.current_attempt("alarm:cycling")
@@ -1492,7 +1599,7 @@ def test_a_pruned_occurrence_returning_under_backpressure_is_admitted(clock) -> 
     orphan = ledger.current_attempt("alarm:returning")
 
     # THE OTHERS KEEP FIRING while the target goes quiet. That is what makes
-    # this the prune path and not the retire path: `_seen` for the target ages
+    # this the prune path and not the retire path: `_activity` for the target ages
     # past the horizon and `_prune` drops it during someone else's dispatch,
     # so the target never reaches `_retire` at all.
     at = start + _MAX_OUTSTANDING_ATTEMPTS
@@ -1568,7 +1675,7 @@ def test_settled_state_costs_nothing_per_admission(clock) -> None:
 def test_a_lone_alarm_retires_its_own_stale_state(clock) -> None:
     """The same-id-only path, which no amount of pruning can reach.
 
-    `_prune` runs AFTER `_seen` is refreshed, so it can never retire the alarm
+    `_prune` runs AFTER `_activity` is refreshed, so it can never retire the alarm
     that is currently firing.  A lone CRITICAL -- the only one qualifying, which
     is the ordinary case on a quiet rig -- therefore kept its `_attempt` and
     `_generation` across an arbitrarily long silence, and a success from that
