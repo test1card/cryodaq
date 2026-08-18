@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
-import queue
+import socket
+import threading
 import time
 from datetime import UTC, datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import msgpack
 import pytest
+import zmq
 from PySide6.QtWidgets import QApplication
 
+from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, zmq_bridge_main
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel, _pct_color
@@ -138,6 +143,14 @@ def _power_reading(
             ),
         },
     )
+
+
+def _find_free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def _stub_channels(panel: ConductivityPanel, ids: list[str]) -> None:
@@ -756,13 +769,20 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
 
     assert panel._auto_step_ack_wall_s is not None
     ack_monotonic = getattr(panel, "_auto_step_ack_monotonic_s", _time.monotonic())
-    acquisition_start = panel._auto_step_ack_wall_s + 100.0 if acquisition_proof == "before_ack" else None
-    acquisition_start_monotonic = ack_monotonic - 1.0 if acquisition_proof == "before_ack" else None
-    ingress_monotonic = (
-        _time.monotonic() - getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0) - 1.0
-        if acquisition_proof == "backlogged"
-        else None
-    )
+    acquisition_start = None
+    acquisition_start_monotonic = None
+    ingress_monotonic = None
+    if acquisition_proof == "before_ack":
+        acquisition_start = panel._auto_step_ack_wall_s + 100.0
+        acquisition_start_monotonic = ack_monotonic - 1.0
+    elif acquisition_proof == "backlogged":
+        # A post-ack reading held in the engine-side publisher queue. Push the
+        # ack epoch 30 s into the past and acquire 10 s after it; the real
+        # bridge stamps a fresh ingress timestamp on arrival, so only the
+        # acquisition-to-ingress age bound can reject the sample.
+        panel._auto_step_ack_monotonic_s = ack_monotonic - 30.0
+        ack_monotonic = ack_monotonic - 30.0
+        acquisition_start_monotonic = ack_monotonic + 10.0
     queued_readings = []
     for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
         reading = _temp_reading(
@@ -785,27 +805,115 @@ def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monke
         power_reading.metadata.clear()
     queued_readings.append(power_reading)
     if acquisition_proof == "backlogged":
+        # F81-2: exercise the production bridge ingress path. The engine-side
+        # publisher queue can stall BEFORE the bridge ingress stamp, so a
+        # post-ack reading can wait upstream and receive a fresh ingress stamp
+        # only when publication resumes. Spawn the real zmq_bridge_main
+        # subprocess and publish over a real ZMQ SUB/PUB pair, so the
+        # production stamp at core/zmq_subprocess.py is what supplies the
+        # freshness proof instead of a hand-inserted queue item.
+        pub_port = _find_free_port()
+        cmd_port = _find_free_port()
+        data_q: mp.Queue = mp.Queue(maxsize=10_000)
+        cmd_q: mp.Queue = mp.Queue(maxsize=1_000)
+        reply_q: mp.Queue = mp.Queue(maxsize=1_000)
+        shutdown_event: mp.Event = mp.Event()
+        bridge_proc = mp.Process(
+            target=zmq_bridge_main,
+            args=(
+                f"tcp://127.0.0.1:{pub_port}",
+                f"tcp://127.0.0.1:{cmd_port}",
+                data_q,
+                cmd_q,
+                reply_q,
+                shutdown_event,
+            ),
+            daemon=True,
+        )
+        bridge_proc.start()
+
+        ctx = zmq.Context()
+        pub = ctx.socket(zmq.PUB)
+        pub.setsockopt(zmq.LINGER, 0)
+        pub.bind(f"tcp://127.0.0.1:{pub_port}")
+        time.sleep(0.3)
+
+        stop_emit = threading.Event()
+
+        def _emit_readings() -> None:
+            while not stop_emit.is_set():
+                for reading in queued_readings:
+                    payload = msgpack.packb(
+                        {
+                            "ts": reading.timestamp.timestamp(),
+                            "iid": reading.instrument_id,
+                            "ch": reading.channel,
+                            "v": reading.value,
+                            "u": reading.unit,
+                            "st": reading.status.value,
+                            "meta": {
+                                key: value
+                                for key, value in reading.metadata.items()
+                                if key != "bridge_ingress_monotonic"
+                            },
+                        }
+                    )
+                    try:
+                        pub.send_multipart([DEFAULT_TOPIC, payload])
+                    except zmq.ZMQError:
+                        return
+                time.sleep(0.05)
+
+        emitter = threading.Thread(target=_emit_readings, daemon=True)
+        emitter.start()
+
         bridge = object.__new__(ZmqBridge)
-        bridge._data_queue = queue.Queue()
+        bridge._data_queue = data_q
         bridge._bridge_instance_id = "conductivity-backlog-test"
         bridge._last_reading_time = 0.0
-        for reading in queued_readings:
-            bridge._data_queue.put_nowait(
-                {
-                    "timestamp": reading.timestamp.timestamp(),
-                    "instrument_id": reading.instrument_id,
-                    "channel": reading.channel,
-                    "value": reading.value,
-                    "unit": reading.unit,
-                    "status": reading.status.value,
-                    "raw": reading.raw,
-                    "metadata": {
-                        key: value for key, value in reading.metadata.items() if key != "bridge_ingress_monotonic"
-                    },
-                    "__bridge_ingress_monotonic": ingress_monotonic,
-                }
-            )
-        queued_readings = bridge.poll_readings()
+        bridge._last_heartbeat = 0.0
+        bridge._last_cmd_timeout = 0.0
+        received_readings = []
+        seen = set()
+        deadline = _time.monotonic() + 10.0
+        try:
+            while _time.monotonic() < deadline and len(seen) < 3:
+                for reading in bridge.poll_readings():
+                    key = (reading.channel, reading.value)
+                    if key not in seen:
+                        seen.add(key)
+                        received_readings.append(reading)
+                time.sleep(0.05)
+        finally:
+            stop_emit.set()
+            emitter.join(timeout=1.0)
+            pub.close(linger=0)
+            ctx.term()
+            shutdown_event.set()
+            bridge_proc.join(timeout=3.0)
+            if bridge_proc.is_alive():
+                bridge_proc.kill()
+                bridge_proc.join(timeout=2.0)
+        assert len(received_readings) == 3, (
+            f"production bridge ingress produced {len(received_readings)} readings, expected 3"
+        )
+        # The production stamp at core/zmq_subprocess.py must be what supplied
+        # the freshness proof — deleting it must turn this guard red.
+        ingress_stamps = []
+        for reading in received_readings:
+            metadata = reading.metadata if isinstance(reading.metadata, dict) else {}
+            ingress_stamps.append(metadata.get("bridge_ingress_monotonic"))
+        assert all(isinstance(value, float) for value in ingress_stamps), (
+            "production bridge ingress stamp missing — core/zmq_subprocess.py stamp deleted?"
+        )
+        fresh_ingress = max(ingress_stamps)
+        stale_acquisition = min(
+            float(reading.metadata["acquisition_started_monotonic"]) for reading in received_readings
+        )
+        assert fresh_ingress - stale_acquisition > getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0), (
+            "backlogged scenario does not exceed the acquisition-to-ingress age bound"
+        )
+        queued_readings = received_readings
     for reading in queued_readings:
         panel._handle_reading(reading)
 

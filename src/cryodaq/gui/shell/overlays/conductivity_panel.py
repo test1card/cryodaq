@@ -930,7 +930,17 @@ class ConductivityPanel(QWidget):
             and acquisition_started_monotonic is not None
             and acquisition_started_monotonic >= self._auto_step_ack_monotonic_s
         )
-        auto_step_current = auto_step_fresh and received_at is not None
+        # F81-1: the engine-side publisher queue can stall before the bridge
+        # ingress stamp, so a post-ack sample can wait upstream and arrive
+        # with a fresh ingress stamp after publication resumes. Bound the
+        # acquisition-to-ingress age with the same 10-second window
+        # _auto_tick applies to bridge ingress, so a stale sample that merely
+        # looks fresh cannot refill the predictor or advance the sweep.
+        auto_step_current = (
+            auto_step_fresh
+            and received_at is not None
+            and received_at - acquisition_started_monotonic <= _AUTO_SAMPLE_MAX_AGE_S
+        )
         selected_auto_temperature = self._auto_state == "stabilizing" and ch_id in self._auto_step_temperature_channels
         if selected_auto_temperature and not reading.is_usable():
             self._reset_auto_temperature_evidence()

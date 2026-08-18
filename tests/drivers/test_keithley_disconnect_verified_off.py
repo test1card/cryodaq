@@ -504,6 +504,29 @@ async def test_mock_connection_uses_simulator_local_proof_only() -> None:
 
     assert await driver.emergency_off() is SourceOffResult.DEVICE_REPORTED_OFF
 
+    # The real-instrument path attaches the same acquisition proof
+    # independently (keithley_2604b.py lines 974-976). The mock-only checks
+    # above stay green if that real-path annotation is removed or broken
+    # while every hardware power reading is then rejected for missing
+    # acquisition proof. Drive the normal read branch (mock=False) through
+    # a transport stub so the real annotation is exercised, not only the
+    # simulator-local block.
+    real_driver, _real_transport = _connected_driver(readbacks=["0"])
+    real_acq_started_at = time.time()
+    real_acq_started_monotonic = time.monotonic()
+    real_readings = await real_driver.read_channels()
+    real_acq_finished_monotonic = time.monotonic()
+    real_acq_finished_at = time.time()
+    assert real_readings
+    for reading in real_readings:
+        real_acquisition_started_at = reading.metadata.get("acquisition_started_at")
+        assert isinstance(real_acquisition_started_at, float)
+        assert real_acq_started_at <= real_acquisition_started_at <= real_acq_finished_at
+        real_acquisition_started_monotonic = reading.metadata.get("acquisition_started_monotonic")
+        assert isinstance(real_acquisition_started_monotonic, float)
+        assert real_acq_started_monotonic <= real_acquisition_started_monotonic
+        assert real_acquisition_started_monotonic <= real_acq_finished_monotonic
+
 
 async def test_stale_generation_proof_cannot_skip_disconnect_readback() -> None:
     driver, transport = _connected_driver(readbacks=["1"])
