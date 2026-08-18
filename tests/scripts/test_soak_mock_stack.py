@@ -914,6 +914,7 @@ def test_final_acceptance_requires_persistence_and_storage_evidence(tmp_path: Pa
     assert "storage-final.json" in joined
 
 
+@_POSIX_EVIDENCE
 def test_persistence_validator_rejects_a_false_green_duplicate(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
@@ -926,6 +927,7 @@ def test_persistence_validator_rejects_a_false_green_duplicate(tmp_path: Path) -
     assert soak._validate_persistence_evidence(persistence, selected, fixture)
 
 
+@_POSIX_EVIDENCE
 def test_persistence_validator_rejects_remapped_channel_identities(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
@@ -942,6 +944,7 @@ def test_persistence_validator_rejects_remapped_channel_identities(tmp_path: Pat
     )
 
 
+@_POSIX_EVIDENCE
 def test_persistence_validator_rejects_uniform_slow_cadence(tmp_path: Path) -> None:
     """A uniformly slow poll (no individual gap above 1.5 * poll_interval) must
     still fail: per-channel counts below the cadence-derived floor (after the
@@ -992,6 +995,7 @@ def test_persistence_validator_rejects_inflated_duplicate_counts() -> None:
     assert "persistence channel continuity is invalid" in errors
 
 
+@_POSIX_EVIDENCE
 def test_storage_validator_rejects_a_false_green_live_wal(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
@@ -1004,6 +1008,7 @@ def test_storage_validator_rejects_a_false_green_live_wal(tmp_path: Path) -> Non
     assert soak._validate_storage_evidence(samples, final, selected)
 
 
+@_POSIX_EVIDENCE
 def test_periodic_cadence_validator_rejects_clustered_receipts(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)
