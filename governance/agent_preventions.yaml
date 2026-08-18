@@ -3328,7 +3328,7 @@ false_green_pairs:
     runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
     guard: tests/drivers/test_thermal_simulator.py::test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds
     ci_partition: remaining
-    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898486_and_guard_red_direct_construction_accepted_a_remote_host_and_unbounded_ports_while_parser_only_guards_stayed_green
+    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898486_and_guard_red_direct_construction_accepted_a_remote_host_and_unbounded_ports_while_parser_only_guards_stayed_green_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_localhost_literal_was_accepted_without_peer_resolution_proof
     green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
   - id: EXTERNAL-MOCK-HEATER-IDENTITY-FALSE-GREEN-007
     status: open
@@ -3344,7 +3344,7 @@ false_green_pairs:
     runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
     guard: tests/drivers/test_thermal_simulator.py::test_auxiliary_lakeshore_uses_internal_mock_transport
     ci_partition: remaining
-    red_evidence: exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_and_guard_red_LS218_2_queried_the_external_LakeShore_endpoint_instead_of_its_internal_mock_transport
+    red_evidence: exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_and_guard_red_LS218_2_queried_the_external_LakeShore_endpoint_instead_of_its_internal_mock_transport_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_rebinding_to_a_future_auxiliary_LakeShore_left_the_closed_enumeration_guard_green
     green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
@@ -6523,7 +6523,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: A directly constructed remote or invalid endpoint can escape parser-only confinement; a failed or cancelled initial zero can wedge reviewed-source connect ownership; a delayed, failed, cancelled, or misrouted power command can leave the external plant nonzero or divergent from CryoDAQ truth, combine a non-heater source with the configured heater, replay one external thermometer stream under auxiliary instrument identities, return before an already-latched external OFF settles, return stale success after OFF authority, or let a queued earlier analytic certify the wrong automatic-sweep point.
-    invariant: Every external mock endpoint, including direct construction, is loopback-only with an integer port in 1..65535; the exact CLI-selected client reaches only the canonical simulated instruments through engine and registry construction; only Keithley_1/smua can drive the single external plant; only LS218_1 can read the external plant, while auxiliary LakeShore instruments keep independent internal mock transports; initial-zero failure or cancellation settles the Scheduler-owned connect attempt and permits a later safe retry; every uncertain start or target update settles a confirmed final zero before failure or cancellation escapes, including when a concurrent fault already owns the retained global-OFF operation; competing OFF authority cannot receive stale update success; and each published thermal point binds one new simulator command, a post-command Scheduler power reading, matching calculator metadata P, and reciprocal truth for that same point.
+    invariant: Every external mock endpoint, including direct construction, uses the literal numeric loopback address 127.0.0.1 with an integer port in 1..65535; the exact CLI-selected client reaches only the canonical simulated instruments through engine and registry construction, and the production roster proves exactly one LakeShore owns that client; only Keithley_1/smua can drive the single external plant; only LS218_1 can read the external plant, while auxiliary LakeShore instruments keep independent internal mock transports; initial-zero failure or cancellation settles the Scheduler-owned connect attempt and permits a later safe retry; every uncertain start or target update settles a confirmed final zero before failure or cancellation escapes, including when a concurrent fault already owns the retained global-OFF operation; competing OFF authority cannot receive stale update success; and each published thermal point binds one new simulator command, a post-command Scheduler power reading, matching calculator metadata P, and reciprocal truth for that same point.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#architecture-and-extension-rules

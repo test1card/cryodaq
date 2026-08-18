@@ -17,8 +17,8 @@ class MockInstrumentEndpoint:
     def __post_init__(self) -> None:
         """Reject direct construction that would bypass parser safety checks."""
 
-        if not isinstance(self.host, str) or self.host not in {"127.0.0.1", "localhost"}:
-            raise ValueError("mock instrument endpoint must use localhost or 127.0.0.1")
+        if self.host != "127.0.0.1":
+            raise ValueError("mock instrument endpoint must use the literal address 127.0.0.1")
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not 1 <= self.port <= 65535:
             raise ValueError("mock instrument endpoint port must be an integer in 1..65535")
 
@@ -29,8 +29,8 @@ class MockInstrumentEndpoint:
         if not isinstance(value, str) or value.count(":") != 1:
             raise ValueError("mock instrument endpoint must use HOST:PORT")
         host, port_text = (part.strip() for part in value.split(":", 1))
-        if host not in {"127.0.0.1", "localhost"}:
-            raise ValueError("mock instrument endpoint must use localhost or 127.0.0.1")
+        if host != "127.0.0.1":
+            raise ValueError("mock instrument endpoint must use the literal address 127.0.0.1")
         try:
             port = int(port_text)
         except ValueError as exc:

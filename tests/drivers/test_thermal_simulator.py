@@ -355,18 +355,19 @@ def test_engine_cli_rejects_external_simulator_without_mock(
 def test_external_simulator_is_loopback_only_and_mock_only(
     external_simulator: ExternalMockInstrumentClient,
 ) -> None:
-    assert MockInstrumentEndpoint.parse("localhost:1234") == MockInstrumentEndpoint("localhost", 1234)
-    with pytest.raises(ValueError, match="localhost"):
-        MockInstrumentEndpoint.parse("192.0.2.1:1234")
+    assert MockInstrumentEndpoint.parse("127.0.0.1:1234") == MockInstrumentEndpoint("127.0.0.1", 1234)
+    for host in ("localhost", "192.0.2.1"):
+        with pytest.raises(ValueError, match="literal address"):
+            MockInstrumentEndpoint.parse(f"{host}:1234")
     with pytest.raises(DriverRegistryError, match="only in mock mode"):
         DriverConstructionContext(mock=False, mock_instrument_client=external_simulator)
 
 
 def test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds() -> None:
-    assert MockInstrumentEndpoint("localhost", 1) == MockInstrumentEndpoint.parse("localhost:1")
     assert MockInstrumentEndpoint("127.0.0.1", 65535) == MockInstrumentEndpoint.parse("127.0.0.1:65535")
-    with pytest.raises(ValueError, match="localhost"):
-        MockInstrumentEndpoint("192.0.2.1", 1234)
+    for host in ("localhost", "192.0.2.1"):
+        with pytest.raises(ValueError, match="literal address"):
+            MockInstrumentEndpoint(host, 1234)
     for invalid_port in (0, 65536, -1, True, 1.5, "1234"):
         with pytest.raises(ValueError, match="port"):
             MockInstrumentEndpoint("127.0.0.1", invalid_port)  # type: ignore[arg-type]
@@ -849,33 +850,17 @@ class _NoExternalLakeShoreQueryClient(ExternalMockInstrumentClient):
         raise AssertionError("external lakeshore query client was unexpectedly invoked")
 
 
-@pytest.mark.parametrize(
-    ("instrument_name", "channels"),
-    [
-        ("LS218_2", {1: "T9", 2: "T10"}),
-        ("LS218_3", {1: "T17", 2: "T18"}),
-    ],
-)
 async def test_auxiliary_lakeshore_uses_internal_mock_transport(
-    instrument_name: str,
-    channels: dict[int, str],
+    tmp_path: Path,
 ) -> None:
     client = _NoExternalLakeShoreQueryClient()
-    context = DriverConstructionContext(mock=True, mock_instrument_client=client)
-    aux_config = validate_instrument_entry(
-        {
-            "type": "lakeshore_218s",
-            "name": instrument_name,
-            "resource": "GPIB0::21::INSTR",
-            "poll_interval_s": 0.01,
-            "channels": channels,
-        }
+    loaded = engine_module._load_drivers(
+        ROOT / "config" / "instruments.yaml",
+        mock=True,
+        data_dir=tmp_path,
+        mock_instrument_client=client,
     )
-    driver = construct_driver(aux_config, context)
-    assert isinstance(driver, LakeShore218S)
-
-    await driver.connect()
-    readings = await driver.read_channels()
-    assert {reading.channel for reading in readings}.issuperset(channels.values())
-    assert client.queries == 0
-    await driver.disconnect()
+    lakeshores = [config.driver for config in loaded.instrument_configs if isinstance(config.driver, LakeShore218S)]
+    assert [driver.name for driver in lakeshores] == ["LS218_1", "LS218_2", "LS218_3"]
+    assert [driver.name for driver in lakeshores if driver._mock_instrument_client is client] == ["LS218_1"]
+    assert all(driver._mock_instrument_client is None for driver in lakeshores if driver.name != "LS218_1")
