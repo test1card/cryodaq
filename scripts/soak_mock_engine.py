@@ -43,17 +43,23 @@ DEFAULT_ALLOWLIST: tuple[str, ...] = (
     r"detector_warmup",
 )
 
+#: Logging levels the structured formatter can emit (``%(levelname)-8s`` uses
+#: the standard names, padded; no custom level is registered in
+#: ``cryodaq.logging_setup``). A line whose second field is not one of these is
+#: not a parsed structured record.
+VALID_LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
 
 class UnreadableLogError(RuntimeError):
     """Raised when a log cannot be scanned well enough to certify it clean.
 
     Three distinct causes, each carrying its own message: a non-empty log in
-    which no line carries the structured level field at all, a log that does
-    parse but contains a recognizably malformed ERROR/CRITICAL record, and a
-    log whose raw bytes are not valid UTF-8. The malformed-record and
-    undecodable cases are the dangerous ones — the readable lines can all be
-    clean while the record that would have failed the scan is the one the
-    parser could not read.
+    which no line forms a complete structured record, a log that does parse
+    but contains a recognizably malformed ERROR/CRITICAL record, and a log
+    whose raw bytes are not valid UTF-8. The malformed-record and undecodable
+    cases are the dangerous ones — the readable lines can all be clean while
+    the record that would have failed the scan is the one the parser could not
+    read.
     """
 
     def __init__(self, message: str, violations: Sequence[str] = ()) -> None:
@@ -72,6 +78,16 @@ def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[st
     A multi-line traceback's continuation lines (no level-field prefix) are
     not separately scanned; the header line that carries the level already
     flags the violation, so nothing is missed.
+
+    A line counts as parsed only when it has the complete formatter shape
+    (asctime, level, name and message — four fields) AND a recognized logging
+    level. A line that merely contains one delimiter with an invalid or
+    missing level field, such as ``not-a-log │ arbitrary text``, is truncated
+    or corrupt, not a parsed record — otherwise a capture reduced to such a
+    line would certify as readable and clean. An ERROR/CRITICAL level that
+    still fails the full-shape check is a recognizably malformed record and
+    fails the log as unreadable, as do the same records behind an escaped
+    ``\\u2502`` delimiter.
     """
     compiled = [re.compile(p) for p in allowlist]
     violations = []
@@ -81,18 +97,25 @@ def scan_log(text: str, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> list[st
     escaped_delimiter = r"\u2502"
     for line in text.splitlines():
         parts = line.split(f" {delimiter} ")
-        if len(parts) < 2:
-            escaped_parts = line.split(f" {escaped_delimiter} ")
-            if len(escaped_parts) >= 2 and escaped_parts[1].strip() in ("ERROR", "CRITICAL"):
-                malformed_error_record = True
+        level = parts[1].strip() if len(parts) >= 2 else ""
+        if len(parts) >= 4 and level in VALID_LOG_LEVELS:
+            parsed_lines += 1
+            if level not in ("ERROR", "CRITICAL"):
+                continue
+            if any(p.search(line) for p in compiled):
+                continue
+            violations.append(line)
             continue
-        parsed_lines += 1
-        level = parts[1].strip()
-        if level not in ("ERROR", "CRITICAL"):
+        # Not a complete, valid structured record. A level field of ERROR/CRITICAL
+        # that failed the full-shape check — real or escaped delimiter — is a
+        # recognizably malformed record: the readable lines cannot establish a
+        # clean run. Any other non-record line is neither parsed nor a violation.
+        if level in ("ERROR", "CRITICAL"):
+            malformed_error_record = True
             continue
-        if any(p.search(line) for p in compiled):
-            continue
-        violations.append(line)
+        escaped_parts = line.split(f" {escaped_delimiter} ")
+        if len(escaped_parts) >= 2 and escaped_parts[1].strip() in ("ERROR", "CRITICAL"):
+            malformed_error_record = True
     # Order matters, and the more fundamental fact wins. A log in which nothing
     # parsed is reported as such even when it also holds a malformed record: the
     # mixed-log message would imply the rest of the log was read, and it was not.

@@ -130,6 +130,54 @@ def test_scan_log_clean_structured_log_is_readable():
     assert soak.scan_log(_line("INFO", "engine started")) == []
 
 
+def test_scan_log_corrupt_line_with_one_delimiter_is_unreadable():
+    """A capture reduced to ``not-a-log │ arbitrary text`` retains one real
+    delimiter but carries no valid level and no name/message fields. It must
+    not count as a parsed record, or scan_log would return [] and certify a
+    corrupt capture as readable and clean."""
+    text = "not-a-log " + chr(0x2502) + " arbitrary text"
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert "no structured lines parsed from non-empty log" in str(exc), str(exc)
+    else:
+        raise AssertionError("corrupt single-delimiter log was accepted as readable")
+
+
+def test_scan_log_truncated_missing_fields_is_unreadable():
+    """A line with a recognized level but missing the name and message fields
+    is not a complete structured record; a log of only such lines must be
+    unreadable, not clean."""
+    delimiter = chr(0x2502)
+    text = f"2026-07-09 16:00:00 {delimiter} INFO     {delimiter} cryodaq.engine"
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert "no structured lines parsed from non-empty log" in str(exc), str(exc)
+    else:
+        raise AssertionError("truncated missing-field line was accepted as readable")
+
+
+def test_scan_log_mixed_log_with_truncated_error_record_is_unreadable():
+    """A truncated ERROR record beside a readable INFO line must fail the log
+    as unreadable rather than be silently skipped and certify the run clean.
+    This is the real-delimiter sibling of the escaped-``\\u2502`` case covered
+    by test_scan_log_rejects_mixed_log_with_literal_escaped_error_record."""
+    text = "\n".join(
+        [
+            _line("INFO", "engine started"),
+            "not-a-log " + chr(0x2502) + " ERROR",
+        ]
+    )
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert "malformed ERROR/CRITICAL record" in str(exc), str(exc)
+        assert "no structured lines parsed" not in str(exc), str(exc)
+    else:
+        raise AssertionError("mixed log with truncated ERROR record was accepted")
+
+
 def test_run_soak_reports_the_specific_unreadable_reason(tmp_path):
     """The retained reason must name the cause that actually occurred.
 
