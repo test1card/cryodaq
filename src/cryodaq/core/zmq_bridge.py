@@ -715,6 +715,7 @@ class ZMQPublisher:
         self._reading_drop_count: Callable[[], int] | None = None
         self._alarm_snapshot: Callable[[], Any] | None = None
         self._applied_cold_stage_channel: str | None = None
+        self._instrument_poll_intervals_s: dict[str, float] = {}
         if applied_cold_stage_channel is not None:
             self.configure_applied_cold_stage_channel(applied_cold_stage_channel)
 
@@ -747,6 +748,29 @@ class ZMQPublisher:
         if type(channel) is not str or not channel.strip():
             raise ValueError("applied cold-stage channel must be a non-empty string")
         self._applied_cold_stage_channel = channel.strip()
+
+    def configure_instrument_poll_intervals_s(self, intervals: dict[str, float]) -> None:
+        """Declare each instrument's configured poll cadence (instrument_id -> seconds).
+
+        Driver readings carry no cadence metadata of their own, so a forwarded
+        raw feed (e.g. the VSP63D pressure gauge) would otherwise reach the GUI
+        without the freshness basis ``producer_interval_s``/``source_age_s`` and
+        be marked stale on first arrival. The publisher stamps
+        ``producer_interval_s`` from this mapping and then derives the transport
+        age as ``source_age_s`` in :meth:`_publish_reading`.
+        """
+        if self._running or self._session_id is not None:
+            raise RuntimeError("instrument poll intervals must be configured before publisher start")
+        if type(intervals) is not dict:
+            raise TypeError("instrument poll intervals must be a dict")
+        validated: dict[str, float] = {}
+        for instrument_id, interval_s in intervals.items():
+            if type(instrument_id) is not str or not instrument_id.strip():
+                raise ValueError("instrument poll intervals keys must be non-empty strings")
+            if type(interval_s) not in (int, float) or not math.isfinite(interval_s) or interval_s <= 0:
+                raise ValueError("instrument poll intervals must be finite positive seconds")
+            validated[instrument_id.strip()] = float(interval_s)
+        self._instrument_poll_intervals_s = validated
 
     def _transport(self, sequence: int, *, authoritative: bool) -> dict[str, Any]:
         session_id = self._session_id
@@ -789,6 +813,10 @@ class ZMQPublisher:
         authoritative = metadata.pop(PERSISTENCE_AUTHORITATIVE_METADATA_KEY, False) is True
         if self._applied_cold_stage_channel is not None:
             metadata["engine_applied"] = {"cooldown": {"channel_cold": self._applied_cold_stage_channel}}
+        if "producer_interval_s" not in metadata:
+            poll_interval_s = self._instrument_poll_intervals_s.get(reading.instrument_id)
+            if poll_interval_s is not None:
+                metadata["producer_interval_s"] = poll_interval_s
         async with self._send_lock:
             if "producer_interval_s" in metadata and "source_age_s" not in metadata:
                 source_age_s = time.time() - reading.timestamp.timestamp()

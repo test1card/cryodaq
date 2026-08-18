@@ -50,6 +50,14 @@ from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
 
+# A bounded horizon for the FIRST learned cadence interval. Until a channel
+# has at least one normal interval, an early outage gap must not certify
+# future freshness: a single multi-minute gap recorded as "normal cadence"
+# would establish a horizon that keeps publishing ETA values from cached
+# inputs long after the sensor has failed again. Mirrors the thermal path's
+# bootstrap bound (plugins/thermal_calculator.py).
+_BOOTSTRAP_FRESHNESS_HORIZON_S = 30.0
+
 
 # ============================================================================
 # Cooldown detector: state machine for cycle detection
@@ -677,11 +685,28 @@ class CooldownService:
                     # is not evidence of normal cadence. Keep the resumed
                     # sample as the new baseline, then accept the next normal
                     # interval.
+                    #
+                    # With no cadence established yet, outage classification
+                    # has no median to compare against, so bound the first
+                    # learned interval by the bootstrap horizon as well: an
+                    # unclassified startup gap must not certify freshness.
                     if not source_outage and not arrival_outage:
                         if source_interval is not None and source_interval > 0.0:
-                            source_cadence.append(source_interval)
+                            allowed_source_interval = (
+                                3.0 * float(np.median(source_cadence))
+                                if source_cadence
+                                else _BOOTSTRAP_FRESHNESS_HORIZON_S
+                            )
+                            if source_interval <= allowed_source_interval:
+                                source_cadence.append(source_interval)
                         if arrival_interval is not None and arrival_interval > 0.0:
-                            arrival_cadence.append(arrival_interval)
+                            allowed_arrival_interval = (
+                                3.0 * float(np.median(arrival_cadence))
+                                if arrival_cadence
+                                else _BOOTSTRAP_FRESHNESS_HORIZON_S
+                            )
+                            if arrival_interval <= allowed_arrival_interval:
+                                arrival_cadence.append(arrival_interval)
                     self._last_required_input_timestamp[reading.channel] = reading_ts
                     self._last_required_input_arrival_monotonic[reading.channel] = arrival_monotonic
 

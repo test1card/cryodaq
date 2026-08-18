@@ -7,6 +7,7 @@ from importlib import import_module
 
 import pytest
 
+from cryodaq.analytics.base_plugin import BROKER_INGRESS_MONOTONIC_METADATA_KEY
 from cryodaq.drivers.base import ChannelStatus, Reading
 from plugins.thermal_calculator import ThermalCalculator
 
@@ -160,7 +161,7 @@ async def test_partial_batch_accumulates():
 
 
 async def test_only_ok_status_used():
-    """Readings with SENSOR_ERROR status are ignored; only OK readings count."""
+    """Failed readings keep the last legible value but invalidate freshness."""
     plugin = _configured_plugin()
 
     # Good readings with OK status
@@ -171,7 +172,10 @@ async def test_only_ok_status_used():
     ]
     await plugin.process(readings_ok)
 
-    # Now send a batch where hot sensor has SENSOR_ERROR — cache must keep old value
+    # Now send a batch where hot sensor has SENSOR_ERROR. The value cache must
+    # keep the old legible value (a failed reading must not overwrite it), but
+    # the failed update must invalidate hot's freshness anchors so the cached
+    # value cannot be re-emitted as current while the sensor reports error.
     readings_err = [
         _make_reading(HOT_CH, 999.0, status=ChannelStatus.SENSOR_ERROR),
         _make_reading(COLD_CH, 10.0),
@@ -179,9 +183,47 @@ async def test_only_ok_status_used():
     ]
     metrics = await plugin.process(readings_err)
 
-    # Plugin should still compute using cached T_hot = 50.0
-    assert len(metrics) == 1
-    assert metrics[0].value == pytest.approx((50.0 - 10.0) / 8.0)
+    assert plugin._last[HOT_CH] == pytest.approx(50.0), "a failed reading must not overwrite the cached value"
+    assert metrics == [], "R_thermal was emitted from an input whose channel had explicitly failed"
+
+    # Recovery: a fresh usable hot reading resumes emission.
+    recovery = [
+        _make_reading(HOT_CH, 60.0),
+        _make_reading(COLD_CH, 10.0),
+        _make_heater_reading(8.0),
+    ]
+    metrics2 = await plugin.process(recovery)
+    assert len(metrics2) == 1
+    assert metrics2[0].value == pytest.approx((60.0 - 10.0) / 8.0)
+
+
+async def test_failed_update_invalidates_freshness_within_learned_horizon(monkeypatch) -> None:
+    """A SENSOR_ERROR shortly after a usable sample must not keep the cached
+    input certifying a fresh R_thermal while the other inputs stay current."""
+    plugin = _configured_plugin()
+
+    def _at(wall_sec: float) -> None:
+        monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda _t=wall_sec: _t)
+        monkeypatch.setattr(thermal_calculator.time, "time", lambda _t=wall_sec: _t)
+
+    for wall_sec in (0.0, 1.0):
+        _at(wall_sec)
+        await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
+
+    # Hot reports SENSOR_ERROR while cold and heater stay fresh inside the horizon.
+    _at(2.0)
+    metrics = await plugin.process(
+        [
+            _make_reading(HOT_CH, 40.0, status=ChannelStatus.SENSOR_ERROR),
+            _make_reading(COLD_CH, 10.0),
+            _make_heater_reading(10.0),
+        ]
+    )
+    assert metrics == [], "R_thermal was emitted from a hot channel that had explicitly failed"
+
+    # The other inputs remain fresh; only the failed channel's anchor was removed.
+    assert plugin._last_required_input_arrival_monotonic.get(COLD_CH) is not None
+    assert plugin._last_required_input_arrival_monotonic.get(HOT_CH) is None
 
 
 async def test_metric_has_correct_metadata():
@@ -289,6 +331,29 @@ async def test_single_sample_bootstrap_expires(monkeypatch) -> None:
     await plugin.process([_make_reading(HOT_CH, 40.0), _make_reading(COLD_CH, 10.0), _make_heater_reading(10.0)])
     monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 31.0)
     assert await plugin.process([_make_heater_reading(10.0)]) == []
+
+
+async def test_first_batch_with_stale_broker_ingress_is_not_accepted(monkeypatch) -> None:
+    """A first batch with hours-old broker ingress must not emit R_thermal.
+
+    During bootstrap no cadence horizon exists, so the arrival delta alone
+    (just-dequeued now) would bless inputs that actually sat in a queue or
+    preceding plugin for hours. The ingress anchor must be compared against the
+    bounded bootstrap horizon before unknown-cadence inputs are accepted.
+    """
+    plugin = _configured_plugin()
+    monkeypatch.setattr(thermal_calculator.time, "monotonic", lambda: 100.0)
+    readings = [
+        _make_reading(HOT_CH, 40.0),
+        _make_reading(COLD_CH, 10.0),
+        _make_heater_reading(10.0),
+    ]
+    for reading in readings:
+        reading.metadata[BROKER_INGRESS_MONOTONIC_METADATA_KEY] = -100.0
+
+    metrics = await plugin.process(readings)
+
+    assert metrics == [], "a first batch with hours-old ingress emitted a freshly timestamped R_thermal"
 
 
 async def test_outage_gap_does_not_expand_freshness_horizon(monkeypatch) -> None:

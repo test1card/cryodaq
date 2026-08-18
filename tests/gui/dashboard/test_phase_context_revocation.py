@@ -427,3 +427,82 @@ def test_unusable_same_suffix_from_another_producer_does_not_revoke_cached_fresh
 
     text = view._phase_widget._context_label.text()
     assert STALE_MARK not in text, "a same-suffix foreign producer revoked the cached ETA"
+
+
+def test_usable_foreign_same_suffix_does_not_take_over_the_slot(app, tmp_path, monkeypatch) -> None:
+    """A usable same-suffix reading must not transfer slot ownership.
+
+    A foreign producer that merely reuses the recognized suffix must not replace
+    the shipped predictor's value and identity; otherwise the shipped producer's
+    later failures become invisible (its unusable update no longer matches the
+    slot's producer).
+    """
+    _set_clock(monkeypatch, 1000.0)
+    view = _configured_dashboard(tmp_path, monkeypatch, cadence_s=30.0)
+    shipped = _eta_reading(datetime.now(UTC), cadence_s=30.0)
+    view.on_reading(shipped)
+    assert STALE_MARK not in view._phase_widget._context_label.text(), "premise: shipped value starts fresh"
+
+    foreign = replace(
+        shipped,
+        instrument_id="site_predictor",
+        channel="analytics/site/cooldown_eta",
+        value=99.0,
+    )
+    view.on_reading(foreign)
+
+    widget = view._phase_widget
+    assert widget._cached_producer["eta"] == (shipped.instrument_id, shipped.channel), (
+        "a usable foreign producer took over the eta slot"
+    )
+    assert widget._cached_eta_s == pytest.approx(2.0 * 3600), "a usable foreign value replaced the shipped value"
+
+    # The shipped producer fails after the foreign takeover attempt — its
+    # failure must still invalidate the slot.
+    broken = replace(shipped, status=ChannelStatus.SENSOR_ERROR, value=float("nan"))
+    view.on_reading(broken)
+    assert STALE_MARK in view._phase_widget._context_label.text(), (
+        "the shipped producer's failure became invisible after a foreign takeover attempt"
+    )
+
+
+def test_gui_queue_age_follows_declared_cadence_not_channel_spelling(monkeypatch) -> None:
+    """GUI queue residence must age a cadence-declared reading regardless of spelling.
+
+    The engine-side publisher classifies transport age by the declared
+    ``producer_interval_s`` (see ``test_source_age_follows_declared_producer_cadence_not_channel_spelling``),
+    not by an ``analytics/`` prefix. The GUI-side reconstruction must classify
+    the same way: a renamed derived channel must not lose its queue residence,
+    and a channel that merely looks derived without declaring a cadence must
+    not be awarded one.
+    """
+    received_key = subprocess_module.READING_RECEIVED_MONOTONIC_KEY
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: 1004.0))
+
+    declared = {
+        "timestamp": datetime(2026, 7, 10, tzinfo=UTC).timestamp(),
+        "instrument_id": "thermal_calculator",
+        "channel": "renamed-derived/thermal/R_thermal",
+        "value": 4.2,
+        "unit": "K/W",
+        "status": ChannelStatus.OK.value,
+        "raw": None,
+        "metadata": {"producer_interval_s": 1.0, "source_age_s": 0.5},
+        received_key: 1000.0,
+    }
+    spelling_only = dict(declared)
+    spelling_only.update(
+        {
+            "instrument_id": "unclassified_source",
+            "channel": "analytics/looks-derived-but-is-not-declared",
+            "metadata": {},
+        }
+    )
+
+    declared_reading = client_module._reading_from_dict(declared)
+    spelling_reading = client_module._reading_from_dict(spelling_only)
+
+    assert declared_reading.metadata["source_age_s"] == pytest.approx(4.5), (
+        "four seconds of GUI queue residence was not added to the declared cadence reading"
+    )
+    assert "source_age_s" not in spelling_reading.metadata, "a cadence-less channel spelling was awarded a source age"

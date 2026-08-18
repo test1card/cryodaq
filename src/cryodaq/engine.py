@@ -6779,6 +6779,14 @@ async def _run_engine(
         reading_drop_count=functools.partial(_zmq_publisher_drop_count, broker),
         alarm_snapshot=alarm_v2_state_mgr.snapshot_active_canonical,
     )
+    # P2 (PR #22 review): raw driver readings carry no cadence metadata, so a
+    # forwarded physical feed (VSP63D pressure) reached the GUI without the
+    # freshness basis and was marked stale on first arrival. The publisher
+    # stamps producer_interval_s from each instrument's configured poll cadence
+    # and derives the transport age (source_age_s) itself.
+    zmq_pub.configure_instrument_poll_intervals_s(
+        {config.driver.name: config.poll_interval_s for config in driver_configs}
+    )
     # P2-5: interlock non-usable readings emit alarm-v2 events via the same
     # AlarmStateManager the sensor-diagnostics engine uses (built after the
     # InterlockEngine, so wired here by setter).

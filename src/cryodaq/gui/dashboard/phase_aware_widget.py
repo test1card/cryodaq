@@ -429,6 +429,14 @@ class PhaseAwareWidget(QWidget):
                 self._cached_at[key] = None
                 self._refresh_context_label()
             return
+        # A slot binds to the FIRST producer whose usable reading populates it.
+        # A later same-suffix producer must not take ownership: transferring
+        # identity on every usable match let a foreign value replace the
+        # shipped predictor's value and made the shipped producer's subsequent
+        # failures invisible.
+        bound = self._cached_producer.get(key)
+        if bound is not None and bound != producer:
+            return
         value = reading.value
         if key == "eta":
             self._cached_eta_s = value * 3600 if value > 0 else None

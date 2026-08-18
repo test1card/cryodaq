@@ -254,7 +254,7 @@ def _increment_shared_counter(counter: Any) -> int | None:
 
 def _metadata_with_transport_age(d: dict[str, Any]) -> object:
     metadata = d.get("metadata", {})
-    if type(metadata) is not dict or not str(d.get("channel", "")).startswith("analytics/"):
+    if type(metadata) is not dict or "producer_interval_s" not in metadata:
         return metadata
 
     public = dict(metadata)

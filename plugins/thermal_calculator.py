@@ -120,7 +120,12 @@ class ThermalCalculator(AnalyticsPlugin):
 
         horizon = self._freshness_horizon_s(channel)
         if horizon is None:
-            return (now_monotonic - last_arrival) > _BOOTSTRAP_FRESHNESS_HORIZON_S
+            if (now_monotonic - last_arrival) > _BOOTSTRAP_FRESHNESS_HORIZON_S:
+                return True
+            ingress = self._last_required_input_ingress_monotonic.get(channel)
+            if ingress is None:
+                return True
+            return (now_monotonic - ingress) > _BOOTSTRAP_FRESHNESS_HORIZON_S
 
         if (now_monotonic - last_arrival) > horizon:
             return True
@@ -181,6 +186,27 @@ class ThermalCalculator(AnalyticsPlugin):
                 self._last_required_input_ingress_monotonic[reading.channel] = (
                     ingress if math.isfinite(ingress) else None
                 )
+
+        # An unusable target-channel update is EVIDENCE THE FEED IS BROKEN, not
+        # an absence of news. The last legible value stays cached (a failed
+        # reading must not overwrite it), but the channel's freshness anchors
+        # are invalidated so process() cannot re-emit R_thermal from that
+        # cached input as if it were current. A usable reading at or after the
+        # failed one in the same batch supersedes it.
+        latest_usable_by_channel: dict[str, float | None] = {channel: None for channel in target_channels}
+        for reading in relevant:
+            ts = reading.timestamp.timestamp()
+            latest = latest_usable_by_channel[reading.channel]
+            if latest is None or ts >= latest:
+                latest_usable_by_channel[reading.channel] = ts
+        for reading in readings:
+            if reading.channel not in target_channels or reading.status is ChannelStatus.OK:
+                continue
+            latest_usable = latest_usable_by_channel[reading.channel]
+            if latest_usable is not None and latest_usable >= reading.timestamp.timestamp():
+                continue
+            self._last_required_input_arrival_monotonic.pop(reading.channel, None)
+            self._last_required_input_ingress_monotonic.pop(reading.channel, None)
 
         # Проверить, что все три канала известны
         missing = target_channels - self._last.keys()

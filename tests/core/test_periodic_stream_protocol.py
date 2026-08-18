@@ -131,6 +131,41 @@ async def test_source_age_follows_declared_producer_cadence_not_channel_spelling
     assert "source_age_s" not in spelling_only_payload["meta"]
 
 
+async def test_raw_driver_reading_gets_cadence_and_transport_age_from_poll_mapping(monkeypatch) -> None:
+    """A raw forwarded driver feed carries the freshness basis before the GUI.
+
+    A VSP63D pressure reading is produced without ``producer_interval_s`` or
+    ``source_age_s``, so the phase widget would mark even its first healthy
+    sample stale. The publisher stamps the instrument's configured poll cadence
+    and derives the transport age so the GUI can judge freshness.
+    """
+    publisher = ZMQPublisher()
+    publisher.configure_instrument_poll_intervals_s({"VSP63D_1": 2.0})
+    fake = _Socket()
+    publisher._socket = fake  # type: ignore[assignment]
+    publisher._running = True
+    publisher._session_id = "a" * 32
+    publisher._sequence = 0
+    publisher._publish_failure_count = 0
+    publisher._send_lock = asyncio.Lock()
+    reading = Reading(
+        timestamp=datetime(2026, 7, 10, tzinfo=UTC),
+        instrument_id="VSP63D_1",
+        channel="VSP63D_1/pressure",
+        value=1.5e-6,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={"status_code": 0},
+    )
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: reading.timestamp.timestamp() + 1.5)
+
+    await publisher._publish_reading(reading)
+
+    payload = msgpack.unpackb(fake.frames[0][1], raw=False)
+    assert payload["meta"]["producer_interval_s"] == 2.0
+    assert payload["meta"]["source_age_s"] == 1.5
+
+
 async def test_analytics_source_age_is_measured_after_waiting_for_the_send_lock(monkeypatch) -> None:
     publisher, socket = _prime_publisher()
     reading = Reading(

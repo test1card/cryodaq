@@ -1006,6 +1006,37 @@ async def test_outage_gap_is_not_used_as_cadence(tmp_path: Path) -> None:
         await service.stop()
 
 
+async def test_first_outage_gap_does_not_establish_cadence(tmp_path: Path) -> None:
+    """An early outage before any cadence exists must not certify freshness."""
+    import time
+    from datetime import timedelta
+
+    from cryodaq.analytics.cooldown_service import CooldownService
+
+    broker = DataBroker()
+    service = CooldownService(broker, _make_config(tmp_path), tmp_path / "model")
+    await service.start()
+    try:
+        base = datetime.now(UTC)
+        for channel in (service._channel_cold, service._channel_warm):
+            for offset in (0.0, 600.0):
+                await broker.publish(_reading(channel, 10.0, base + timedelta(seconds=offset)))
+                await asyncio.sleep(0)
+
+        second_sample_ts = base + timedelta(seconds=600.0)
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while (
+            service._last_required_input_timestamp.get(service._channel_cold) != second_sample_ts
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.to_thread(time.sleep, 0.01)
+
+        for channel in (service._channel_cold, service._channel_warm):
+            assert list(service._required_input_intervals[channel]) == []
+    finally:
+        await service.stop()
+
+
 async def test_backlog_preserves_sample_age_in_freshness_anchor(tmp_path: Path) -> None:
     """Draining old queued readings must not make them appear newly received."""
     import time
