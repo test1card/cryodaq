@@ -849,16 +849,26 @@ class _NoExternalLakeShoreQueryClient(ExternalMockInstrumentClient):
         raise AssertionError("external lakeshore query client was unexpectedly invoked")
 
 
-async def test_auxiliary_lakeshore_uses_internal_mock_transport() -> None:
+@pytest.mark.parametrize(
+    ("instrument_name", "channels"),
+    [
+        ("LS218_2", {1: "T9", 2: "T10"}),
+        ("LS218_3", {1: "T17", 2: "T18"}),
+    ],
+)
+async def test_auxiliary_lakeshore_uses_internal_mock_transport(
+    instrument_name: str,
+    channels: dict[int, str],
+) -> None:
     client = _NoExternalLakeShoreQueryClient()
     context = DriverConstructionContext(mock=True, mock_instrument_client=client)
     aux_config = validate_instrument_entry(
         {
             "type": "lakeshore_218s",
-            "name": "LS218_2",
+            "name": instrument_name,
             "resource": "GPIB0::21::INSTR",
             "poll_interval_s": 0.01,
-            "channels": {1: "T9", 2: "T10"},
+            "channels": channels,
         }
     )
     driver = construct_driver(aux_config, context)
@@ -866,6 +876,6 @@ async def test_auxiliary_lakeshore_uses_internal_mock_transport() -> None:
 
     await driver.connect()
     readings = await driver.read_channels()
-    assert {reading.channel for reading in readings}.issuperset({"T9", "T10"})
+    assert {reading.channel for reading in readings}.issuperset(channels.values())
     assert client.queries == 0
     await driver.disconnect()
