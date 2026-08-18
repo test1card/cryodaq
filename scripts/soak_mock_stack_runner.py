@@ -151,6 +151,20 @@ os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 """
 _ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
+_ISOLATED_TRACKED_THEME_PACKS: Final = (
+    "amber.yaml",
+    "anthropic_mono.yaml",
+    "braun.yaml",
+    "default_cool.yaml",
+    "gost.yaml",
+    "instrument.yaml",
+    "ochre_bloom.yaml",
+    "rose_dusk.yaml",
+    "signal.yaml",
+    "taupe_quiet.yaml",
+    "warm_stone.yaml",
+    "xcode.yaml",
+)
 _ISOLATED_STATIC_CONFIGS: Final = (
     ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
     ("interlocks.yaml", "interlocks: []\n"),
@@ -617,6 +631,19 @@ def _materialize_isolated_mock_config(
     for name, content in _ISOLATED_STATIC_CONFIGS:
         (config_dir / name).write_text(content, encoding="utf-8")
 
+    themes_source = source_dir / "themes"
+    if not themes_source.is_dir():
+        raise _RunnerFoundationError("required tracked soak theme directory is unavailable")
+    themes_dest = config_dir / "themes"
+    themes_dest.mkdir(mode=0o700)
+    for name in _ISOLATED_TRACKED_THEME_PACKS:
+        source = themes_source / name
+        if not source.is_file():
+            raise _RunnerFoundationError(f"required tracked soak theme pack is unavailable: {name}")
+        dest = themes_dest / name
+        dest.write_bytes(source.read_bytes())
+        dest.chmod(0o600)
+
     instruments_raw = yaml.safe_load((source_dir / "instruments.yaml").read_text(encoding="utf-8"))
     if type(instruments_raw) is not dict or type(instruments_raw.get("instruments")) is not list:
         raise _RunnerFoundationError("tracked instrument config is malformed")
@@ -988,7 +1015,7 @@ def _source_fixture_seal(
             or stat.S_IMODE(directory_opened.st_mode) != 0o700
         ):
             raise _RunnerFoundationError("passive source fixture directory identity is unsafe")
-        expected_names = expected_files | {"experiment_templates"}
+        expected_names = expected_files | {"experiment_templates", "themes"}
         if set(os.listdir(directory_fd)) != expected_names:
             raise _RunnerFoundationError("passive source fixture topology is not exact")
 
@@ -1009,12 +1036,16 @@ def _source_fixture_seal(
         finally:
             os.close(template_fd)
 
-        entries: list[dict[str, object]] = [{"path": "experiment_templates", "kind": "directory"}]
+        entries: list[dict[str, object]] = [
+            {"path": "experiment_templates", "kind": "directory"},
+            {"path": "themes", "kind": "directory"},
+        ]
         nofollow = getattr(os, "O_NOFOLLOW", 0)
-        for name in sorted(expected_files):
-            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+
+        def seal_regular_file(path: str, name: str, parent_fd: int) -> None:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             try:
-                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent_fd)
             except OSError as exc:
                 raise _RunnerFoundationError("passive source fixture file identity is unsafe") from exc
             try:
@@ -1038,18 +1069,39 @@ def _source_fixture_seal(
                     raise _RunnerFoundationError("passive source fixture changed during sealing")
             finally:
                 os.close(fd)
-            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if identity(after) != identity(opened):
                 raise _RunnerFoundationError("passive source fixture changed during sealing")
-            identities.append((name, *identity(opened)))
+            identities.append((path, *identity(opened)))
             entries.append(
                 {
-                    "path": name,
+                    "path": path,
                     "kind": "file",
                     "bytes": content_bytes,
                     "sha256": f"sha256:{content_sha256.hexdigest()}",
                 }
             )
+
+        for name in sorted(expected_files):
+            seal_regular_file(name, name, directory_fd)
+
+        themes_info = os.stat("themes", dir_fd=directory_fd, follow_symlinks=False)
+        themes_fd = os.open("themes", flags, dir_fd=directory_fd)
+        try:
+            themes_opened = os.fstat(themes_fd)
+            if (
+                not stat.S_ISDIR(themes_opened.st_mode)
+                or not os.path.samestat(themes_info, themes_opened)
+                or themes_opened.st_uid != os.getuid()
+                or stat.S_IMODE(themes_opened.st_mode) != 0o700
+                or set(os.listdir(themes_fd)) != set(_ISOLATED_TRACKED_THEME_PACKS)
+            ):
+                raise _RunnerFoundationError("passive source fixture theme directory is unsafe")
+            identities.append(("themes", *identity(themes_opened)))
+            for name in sorted(_ISOLATED_TRACKED_THEME_PACKS):
+                seal_regular_file(f"themes/{name}", name, themes_fd)
+        finally:
+            os.close(themes_fd)
         if set(os.listdir(directory_fd)) != expected_names:
             raise _RunnerFoundationError("passive source fixture topology changed during sealing")
         if identity(os.fstat(directory_fd)) != identity(directory_opened):

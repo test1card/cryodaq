@@ -491,7 +491,10 @@ def _source_fixture() -> dict[str, object]:
         "plugins.yaml",
         "safety.yaml",
     )
-    entries = [{"path": "experiment_templates", "kind": "directory"}]
+    entries = [
+        {"path": "experiment_templates", "kind": "directory"},
+        {"path": "themes", "kind": "directory"},
+    ]
     entries.extend(
         {
             "path": name,
@@ -500,6 +503,15 @@ def _source_fixture() -> dict[str, object]:
             "sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
         }
         for name in files
+    )
+    entries.extend(
+        {
+            "path": f"themes/{name}",
+            "kind": "file",
+            "bytes": 0,
+            "sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
+        }
+        for name in runner._ISOLATED_TRACKED_THEME_PACKS
     )
     entries.sort(key=lambda item: item["path"])
     tree_sha = (

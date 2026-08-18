@@ -1715,6 +1715,12 @@ def _validate_source_fixture(payload: object) -> list[str]:
         "plugins.yaml",
         "safety.yaml",
     }
+    from scripts import soak_mock_stack_runner as runner
+
+    expected_theme_packs = runner._ISOLATED_TRACKED_THEME_PACKS
+    expected_theme_paths = {f"themes/{name}" for name in expected_theme_packs}
+    expected_file_paths = expected_files | expected_theme_paths
+    expected_names = expected_file_paths | {"experiment_templates", "themes"}
     expected_top = {
         "schema",
         "instrument_id",
@@ -1731,7 +1737,7 @@ def _validate_source_fixture(payload: object) -> list[str]:
     if type(payload) is not dict or set(payload) != expected_top:
         return ["source fixture schema is invalid"]
     entries = payload.get("entries")
-    if not isinstance(entries, list) or len(entries) != len(expected_files) + 1:
+    if not isinstance(entries, list) or len(entries) != len(expected_names):
         return ["source fixture entries are invalid"]
     paths: list[str] = []
     for entry in entries:
@@ -1739,11 +1745,11 @@ def _validate_source_fixture(payload: object) -> list[str]:
             return ["source fixture entry schema is invalid"]
         path = entry["path"]
         paths.append(path)
-        if path == "experiment_templates":
+        if path == "experiment_templates" or path == "themes":
             if entry != {"path": path, "kind": "directory"}:
                 return ["source fixture directory entry is invalid"]
         elif (
-            path not in expected_files
+            path not in expected_file_paths
             or set(entry) != {"path", "kind", "bytes", "sha256"}
             or entry.get("kind") != "file"
             or type(entry.get("bytes")) is not int
@@ -1761,7 +1767,7 @@ def _validate_source_fixture(payload: object) -> list[str]:
     )
     if (
         paths != sorted(paths)
-        or set(paths) != expected_files | {"experiment_templates"}
+        or set(paths) != expected_names
         or payload.get("schema") != "cryodaq-soak-source-fixture/v1"
         or payload.get("instrument_id") != "LS218_1"
         or payload.get("authority") != "passive_measurement"

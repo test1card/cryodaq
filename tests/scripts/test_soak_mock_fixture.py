@@ -41,9 +41,17 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         *(name for name, _content in runner._ISOLATED_STATIC_CONFIGS),
         "instruments.yaml",
         "channel_descriptors.yaml",
+        "themes",
     }
     assert {path.name for path in tmp_path.iterdir()} == expected
     assert all(".local." not in name for name in expected)
+
+    themes_dir = tmp_path / "themes"
+    assert themes_dir.is_dir()
+    assert (themes_dir / "warm_stone.yaml").is_file()
+    assert (themes_dir / "warm_stone.yaml").read_bytes() == (
+        runner._REPO_ROOT / "config" / "themes" / "warm_stone.yaml"
+    ).read_bytes()
 
     config = yaml.safe_load((tmp_path / "instruments.yaml").read_text(encoding="utf-8"))
     validated = validate_instrument_entries(config["instruments"])
@@ -72,6 +80,34 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         assert all(item.descriptor.instrument_id == runner._ISOLATED_MOCK_INSTRUMENT_NAME for item in bound)
     finally:
         await driver.disconnect()
+
+
+def test_isolated_config_theme_resolves_through_the_real_loader(tmp_path) -> None:
+    """The isolated config set must include the theme pack the GUI role's
+    module import needs. A fresh ``cryodaq.gui._theme_loader`` import with
+    ``CRYODAQ_ROOT`` pointed at the isolated root must resolve the default
+    pack; before the themes copy landed, this raised
+    ``Default theme pack invalid: theme pack 'warm_stone' is unavailable``."""
+    root = tmp_path / "soak-root"
+    config_dir = root / "config"
+    config_dir.mkdir(parents=True)
+    runner._materialize_isolated_mock_config(config_dir)
+
+    environment = dict(os.environ)
+    environment["CRYODAQ_ROOT"] = str(root)
+    environment["PYTHONPATH"] = os.pathsep.join((str(runner._REPO_ROOT / "src"), str(runner._REPO_ROOT)))
+    probe = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            "from cryodaq.gui import _theme_loader; print(_theme_loader.resolve_theme()[0])",
+        ),
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "warm_stone"
 
 
 @_LINUX_PROCESS_AUTHORITY
