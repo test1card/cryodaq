@@ -57,7 +57,9 @@ async def test_run_engine_initializes_calibration_store_before_loading_drivers(
         mock: bool,
         calibration_store: CalibrationStore | None = None,
         data_dir: Path | None = None,
+        mock_instrument_client: object | None = None,
     ):
+        assert mock_instrument_client is None
         assert mock is True
         assert config_path == config_dir / "instruments.yaml"
         assert calibration_store is not None
