@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mmap
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -445,12 +446,16 @@ def test_loaded_native_closure_binds_fallback_system_objects(monkeypatch: pytest
     mapped_path.unlink()
 
     process = subprocess.Popen(
-        (sys.executable, "-c", "import time; time.sleep(60)"),
+        (sys.executable, "-c", "import time; print('READY', flush=True); time.sleep(60)"),
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
     try:
+        assert process.stdout is not None
+        readable, _, _ = select.select((process.stdout,), (), (), 10)
+        assert readable
+        assert process.stdout.readline() == b"READY\n"
         closure = runner._loaded_native_closure(process.pid)
         runtime_root = (Path(sys.prefix) / "lib").resolve()
         external = [
@@ -468,8 +473,17 @@ def test_loaded_native_closure_binds_fallback_system_objects(monkeypatch: pytest
 
         changed = runner._loaded_native_closure(process.pid)
 
+        original_by_path = {entry["path"]: entry for entry in closure["entries"]}
+        changed_by_path = {entry["path"]: entry for entry in changed["entries"]}
+        assert changed_by_path.keys() == original_by_path.keys()
+        assert changed_by_path[str(target)]["sha256"] == "sha256:" + "0" * 64
+        assert {path: entry for path, entry in changed_by_path.items() if path != str(target)} == {
+            path: entry for path, entry in original_by_path.items() if path != str(target)
+        }
         assert changed["sha256"] != closure["sha256"]
     finally:
         process.terminate()
         process.wait(timeout=10)
+        if process.stdout is not None:
+            process.stdout.close()
         deleted_mapping.close()
