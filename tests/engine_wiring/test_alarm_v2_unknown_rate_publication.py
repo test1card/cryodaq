@@ -179,6 +179,88 @@ async def test_alarm_v2_publication_uses_canonical_activation_time_and_identity(
 
 
 @pytest.mark.asyncio
+async def test_telegram_not_scheduled_when_durable_publication_fails() -> None:
+    """A direct notification must never outrun a rejected durable incident."""
+    triggered_at = datetime(2026, 8, 15, 10, 0, tzinfo=UTC)
+    evaluator = SimpleNamespace(
+        evaluate=lambda *_args, **_kwargs: AlarmEvent(
+            alarm_id="tg-settle-alarm",
+            level="CRITICAL",
+            message="settlement-first fan-out",
+            triggered_at=triggered_at.timestamp(),
+            channels=[_CHANNEL],
+            values={_CHANNEL: 85.0},
+        )
+    )
+    state_mgr = AlarmStateManager()
+    config = AlarmConfig(alarm_id="tg-settle-alarm", config={}, notify=["telegram"])
+    event_bus = EventBus()
+
+    sent: list[str] = []
+
+    class _Bot:
+        async def _send_to_all(self, message: str) -> None:
+            sent.append(message)
+
+    def _rejecting_publish(_event: object) -> object:
+        raise RuntimeError("retained SQLite observer rejected the incident")
+
+    event_bus.publish = _rejecting_publish
+    dispatch_tasks: set[asyncio.Task[object]] = set()
+    await _alarm_v2_tick_configs(
+        configs=[config],
+        phase_provider=SimpleNamespace(get_current_phase=lambda: None),
+        evaluator=evaluator,
+        state_mgr=state_mgr,
+        telegram_bot=_Bot(),
+        alarm_dispatch_tasks=dispatch_tasks,
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="experiment-settle"),
+    )
+    assert not dispatch_tasks, "a Telegram task must not be scheduled before durable settlement"
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_still_delivered_after_successful_durable_publication() -> None:
+    """Settlement-first ordering must keep the direct notification working."""
+    triggered_at = datetime(2026, 8, 15, 10, 30, tzinfo=UTC)
+    evaluator = SimpleNamespace(
+        evaluate=lambda *_args, **_kwargs: AlarmEvent(
+            alarm_id="tg-success-alarm",
+            level="WARNING",
+            message="settled then notified",
+            triggered_at=triggered_at.timestamp(),
+            channels=[_CHANNEL],
+            values={_CHANNEL: 60.0},
+        )
+    )
+    state_mgr = AlarmStateManager()
+    config = AlarmConfig(alarm_id="tg-success-alarm", config={}, notify=["telegram"])
+    event_bus = EventBus()
+
+    sent: list[str] = []
+
+    class _Bot:
+        async def _send_to_all(self, message: str) -> None:
+            sent.append(message)
+
+    dispatch_tasks: set[asyncio.Task[object]] = set()
+    await _alarm_v2_tick_configs(
+        configs=[config],
+        phase_provider=SimpleNamespace(get_current_phase=lambda: None),
+        evaluator=evaluator,
+        state_mgr=state_mgr,
+        telegram_bot=_Bot(),
+        alarm_dispatch_tasks=dispatch_tasks,
+        event_bus=event_bus,
+        experiment_manager=SimpleNamespace(active_experiment_id="experiment-settle-ok"),
+    )
+    await asyncio.sleep(0)
+    assert sent == ["\u26a0 [WARNING] tg-success-alarm\nsettled then notified"]
+
+
+@pytest.mark.asyncio
 async def test_physical_alarm_publication_captures_pre_tick_experiment_and_canonical_event() -> None:
     triggered_at = datetime(2026, 8, 10, 6, 45, tzinfo=UTC)
     state_mgr = AlarmStateManager()

@@ -365,16 +365,16 @@ async def _alarm_v2_tick_configs(
                 canonical = state_mgr.get_active().get(alarm_cfg.alarm_id)
                 if type(canonical) is not AlarmEvent:
                     raise RuntimeError("triggered alarm has no canonical activation")
+                await event_bus.publish(_canonical_alarm_fired_event(canonical, experiment_id))
                 # GUI polls via alarm_v2_status command; optionally notify via Telegram
                 if "telegram" in alarm_cfg.notify and telegram_bot is not None:
                     msg = f"\N{WARNING SIGN} [{canonical.level}] {canonical.alarm_id}\n{canonical.message}"
                     t = asyncio.create_task(
                         telegram_bot._send_to_all(msg),
-                        name=f"alarm_v2_tg_{alarm_cfg.alarm_id}",
+                        name=f"alarm_v2_tg_{canonical.alarm_id}",
                     )
                     alarm_dispatch_tasks.add(t)
                     t.add_done_callback(alarm_dispatch_tasks.discard)
-                await event_bus.publish(_canonical_alarm_fired_event(canonical, experiment_id))
             elif transition == "CLEARED":
                 await event_bus.publish(
                     _canonical_alarm_cleared_event(
