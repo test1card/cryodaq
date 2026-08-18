@@ -254,3 +254,38 @@ def test_run_soak_fails_when_child_writes_invalid_utf8_bytes(tmp_path):
     reason = getattr(result, "unreadable_reason", None)
     assert reason is not None, "run_soak must report the decode failure"
     assert "not valid UTF-8" in reason, reason
+
+
+def test_run_soak_preserves_readable_violations_before_invalid_bytes(tmp_path):
+    """A strict whole-file decode must not hide violations that were readable.
+
+    When the captured log opens with a valid structured ERROR record and a
+    later line carries an invalid-UTF-8 byte (native code bypassing the child's
+    text stream), the log is correctly failed as unreadable — but the readable
+    ERROR line is a definite violation and must still be reported, not collapsed
+    into violations=0.
+    """
+    error = _line("ERROR", "definite failure")
+    script = (
+        "import os, signal, sys, time\n"
+        "def _h(*_: object) -> None: sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _h)\n"
+        "print(" + repr(error) + ", flush=True)\n"
+        "os.write(1, b'bad\\xffbytes\\n')\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n"
+    )
+    log_path = tmp_path / "undecodable-with-error.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is False
+    assert result.ok is False
+    reason = getattr(result, "unreadable_reason", None)
+    assert reason is not None, "run_soak must report the decode failure"
+    assert "not valid UTF-8" in reason, reason
+    assert result.violations == [error]

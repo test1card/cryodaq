@@ -141,7 +141,7 @@ def _default_cmd() -> list[str]:
     return [sys.executable, "-m", "cryodaq.engine", "--mock"]
 
 
-def _read_captured_log(path: Path) -> str:
+def _read_captured_log(path: Path, allowlist: Sequence[str] = DEFAULT_ALLOWLIST) -> str:
     """Strictly decode the captured log, or fail the soak as unreadable.
 
     ``errors="replace"`` would turn invalid UTF-8 written directly to the
@@ -153,9 +153,21 @@ def _read_captured_log(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
+        # The run is still failed as unreadable, but a strict whole-file decode
+        # would also throw away ERROR/CRITICAL lines that were readable before
+        # the invalid bytes. Preserve those definite violations so the CLI does
+        # not report violations=0 for a log that visibly holds one; the decode
+        # failure stays the reason. Best-effort: scan_log's own rejections do
+        # not override the decode cause.
+        violations: list[str] = []
+        try:
+            violations = scan_log(path.read_text(encoding="utf-8", errors="replace"), allowlist)
+        except UnreadableLogError as scan_exc:
+            violations = list(scan_exc.violations)
         raise UnreadableLogError(
             f"could not read log: {exc}. The captured log contains bytes that "
-            "are not valid UTF-8, so the run cannot be certified clean"
+            "are not valid UTF-8, so the run cannot be certified clean",
+            violations,
         ) from exc
 
 
@@ -209,7 +221,7 @@ def run_soak(
                 proc.wait(timeout=10.0)
 
     try:
-        log_text = _read_captured_log(log_path)
+        log_text = _read_captured_log(log_path, allowlist)
         violations = scan_log(log_text, allowlist)
         log_readable = True
         unreadable_reason = None
