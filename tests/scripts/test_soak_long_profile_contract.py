@@ -125,7 +125,14 @@ def test_long_schedule_reserves_the_complete_sequential_preflight(monkeypatch: p
     from scripts import soak_mock_stack_runner as runner
 
     monkeypatch.setattr(runner, "os", SimpleNamespace(name="posix"))
-    required_margin = 2 * runner._EXACT_SIX_TIMEOUT_S + runner._SOURCE_START_TIMEOUT_S
+    required_margin = (
+        2 * runner._EXACT_SIX_TIMEOUT_S
+        + 2 * runner._DRIVER_PROBE_TIMEOUT_S
+        + 2 * runner._SNAPSHOT_ARCHIVE_TIMEOUT_S
+        + 2 * runner._SNAPSHOT_IMPORT_TIMEOUT_S
+        + runner._GIT_HEAD_TIMEOUT_S
+        + runner._SOURCE_START_TIMEOUT_S
+    )
 
     assert soak.LONG_REPORT_EDGE_MARGIN_S >= required_margin
     assert soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S >= (

@@ -156,7 +156,7 @@ def test_unknown_profile_fails_closed() -> None:
 
 
 @pytest.mark.parametrize("profile_name", ["12h", "72h", "168h"])
-@pytest.mark.parametrize("now_epoch", [0.0, 1.0, 15_600.0, 1_700_000_000.0, 1_777_777_777.0])
+@pytest.mark.parametrize("now_epoch", [0.0, 1.0, 236_890.0, 1_700_000_000.0, 1_777_777_777.0])
 def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assistant_fault(
     profile_name: str,
     now_epoch: float,
@@ -198,10 +198,32 @@ def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assis
     )
 
 
+def test_long_report_schedule_requires_a_receipt_after_the_final_assistant_fault() -> None:
+    selected = soak.profile("12h")
+    final_fault = soak.last_assistant_fault_s(selected)
+    last_offset_s = 8_160 + 20_732
+    assert last_offset_s <= final_fault + soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+    assert soak.periodic_schedule_errors(
+        selected,
+        interval_s=20_732,
+        boundary_offset_s=8_160,
+        expected_receipts=3,
+    )
+    assert (
+        soak.periodic_schedule_errors(
+            selected,
+            interval_s=11_000,
+            boundary_offset_s=8_160,
+            expected_receipts=5,
+        )
+        == []
+    )
+
+
 def test_long_report_schedule_waits_through_a_temporarily_unavailable_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import soak_mock_stack_runner as runner
 
-    wall_epochs = iter(27_601.0 + offset for offset in range(int(soak.LONG_REPORT_EDGE_MARGIN_S) + 2))
+    wall_epochs = iter(237_177.0 + offset for offset in range(int(soak.LONG_REPORT_EDGE_MARGIN_S) + 2))
     monotonic_epoch = [0.0]
     sleeps: list[float] = []
     monkeypatch.setattr(runner.time, "time", lambda: next(wall_epochs))
@@ -314,6 +336,32 @@ def test_resource_schema_rejects_nan_reverse_gap_short_duration_and_unknown_desc
     expected = ["invalid elapsed_s", "not strictly monotonic", "cadence gap", "profile duration", "invalid descriptors"]
     for samples, marker in zip(cases, expected, strict=True):
         assert any(marker in error for error in soak.evaluate_resources(samples, selected))
+
+
+def test_long_sample_series_accepts_a_bounded_recovery_gap_and_rejects_unbounded_ones() -> None:
+    selected = soak.profile("12h")
+    samples = _full_series(selected)
+    assert soak.validate_sample_series(samples, selected) == []
+    engine_fault = next(event.at_s for event in selected.events if event.target == "engine")
+
+    recovery = [sample for sample in samples if sample["elapsed_s"] <= engine_fault]
+    recovery.append(_sample(engine_fault + 50.0))
+    recovery.extend(sample for sample in samples if sample["elapsed_s"] > engine_fault + 50.0)
+    assert soak.validate_sample_series(recovery, selected) == []
+
+    excessive = [sample for sample in samples if sample["elapsed_s"] <= engine_fault]
+    excessive.append(_sample(engine_fault + soak.RECOVERY_CEILING_S + selected.sample_interval_s))
+    excessive.extend(
+        sample
+        for sample in samples
+        if sample["elapsed_s"] > engine_fault + soak.RECOVERY_CEILING_S + selected.sample_interval_s
+    )
+    assert any("exceeds cadence gap" in error for error in soak.validate_sample_series(excessive, selected))
+
+    unrelated = [sample for sample in samples if sample["elapsed_s"] <= 5000]
+    unrelated.append(_sample(5060.0))
+    unrelated.extend(sample for sample in samples if sample["elapsed_s"] > 5060.0)
+    assert any("exceeds cadence gap" in error for error in soak.validate_sample_series(unrelated, selected))
 
 
 def test_resource_schema_rejects_identity_change_inside_epoch_and_bad_wall_time() -> None:
@@ -460,6 +508,7 @@ def _source_fixture() -> dict[str, object]:
         "descriptor_count": 16,
         "binding_count": 16,
         "expected_readings_per_sample": 8,
+        "channel_ids": [f"ch{index}" for index in range(8)],
         "poll_interval_s": 1.0,
         "entries": entries,
         "tree_sha256": tree_sha,
@@ -870,6 +919,22 @@ def test_persistence_validator_rejects_a_false_green_duplicate(tmp_path: Path) -
     assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
     persistence["duplicate_rows"] = 1
     assert soak._validate_persistence_evidence(persistence, selected, fixture)
+
+
+def test_persistence_validator_rejects_remapped_channel_identities(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = json.loads((tmp_path / "persistence.json").read_text())
+
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    persistence["channel_rows"] = [
+        {**row, "channel": f"wrong{index}"} for index, row in enumerate(persistence["channel_rows"])
+    ]
+    assert "persistence channel identities differ from the sealed fixture" in "\n".join(
+        soak._validate_persistence_evidence(persistence, selected, fixture)
+    )
 
 
 def test_storage_validator_rejects_a_false_green_live_wal(tmp_path: Path) -> None:
@@ -1825,7 +1890,10 @@ def test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound(
 ) -> None:
     valid = _populate_sealable_complete(monkeypatch, tmp_path, "valid")
     real_reader = soak._read_owned_regular_at
+    real_json_lines_at = soak._json_lines_at
+    real_hash_owned_regular_at = soak._hash_owned_regular_at
     observed_limits: list[int | None] = []
+    observed_record_limits: list[int | None] = []
     reader_failures: list[str] = []
     observed_stages: set[str] = set()
     real_text = soak.Evidence._text
@@ -1882,10 +1950,35 @@ def test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound(
                 reader_failures.append(str(exc))
             raise
 
+    def observed_json_lines_at(
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int | None = None,
+        max_records: int | None = None,
+    ) -> list[dict[str, object]]:
+        if name == stream:
+            observed_limits.append(max_bytes)
+            observed_record_limits.append(max_records)
+        return real_json_lines_at(directory_fd, name, max_bytes=max_bytes, max_records=max_records)
+
+    def observed_hash_owned_regular_at(
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[str, int]:
+        if name == stream:
+            observed_limits.append(max_bytes)
+        return real_hash_owned_regular_at(directory_fd, name, max_bytes=max_bytes)
+
     monkeypatch.setattr(soak, "_read_owned_regular_at", observed_reader)
+    monkeypatch.setattr(soak, "_json_lines_at", observed_json_lines_at)
+    monkeypatch.setattr(soak, "_hash_owned_regular_at", observed_hash_owned_regular_at)
     valid.seal()
 
     assert valid.state == soak.RunState.EVIDENCE_SEALED
+    assert observed_record_limits == [soak.MAX_SAMPLE_RECORDS]
     assert len(observed_limits) >= 6
     assert all(limit == soak.MAX_SAMPLE_ARTIFACT_BYTES for limit in observed_limits)
     assert {"text", "json-lines", "secret-findings", "build-ledger"} <= observed_stages

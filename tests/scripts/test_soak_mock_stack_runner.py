@@ -1245,7 +1245,12 @@ def test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes(
         expected_channels=8,
         poll_interval_s=1.0,
     )
-    fixture = {"instrument_id": "LS218_1", "expected_readings_per_sample": 8, "poll_interval_s": 1.0}
+    fixture = {
+        "instrument_id": "LS218_1",
+        "expected_readings_per_sample": 8,
+        "poll_interval_s": 1.0,
+        "channel_ids": [f"ch{channel}" for channel in range(8)],
+    }
     assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
     assert len(persistence["channel_rows"]) == 8
     assert {row["count"] for row in persistence["channel_rows"]} == {901}

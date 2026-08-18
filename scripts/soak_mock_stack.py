@@ -77,8 +77,8 @@ SUMMARY_RESERVED = frozenset({"schema", "status", "reason", "finished_at", "mani
 MANIFEST_RESERVED = frozenset({"schema"})
 LONG_REPORT_INTERVAL_MAX_S = 6 * 3600
 LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S = 5 * 60
-LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S = 16 * 60
-LONG_REPORT_EDGE_MARGIN_S = 11 * 60
+LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S = 18 * 60
+LONG_REPORT_EDGE_MARGIN_S = 13 * 60
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -250,6 +250,15 @@ def first_assistant_fault_s(selected: SoakProfile) -> float:
         raise ValueError(f"profile {selected.name!r} has no assistant fault") from None
 
 
+def last_assistant_fault_s(selected: SoakProfile) -> float:
+    """Return the final scheduled assistant fault for a reviewed profile."""
+
+    assistant_events = [event.at_s for event in selected.events if event.target == "assistant"]
+    if not assistant_events:
+        raise ValueError(f"profile {selected.name!r} has no assistant fault")
+    return max(assistant_events)
+
+
 def expected_periodic_receipts(selected: SoakProfile, interval_s: int, boundary_offset_s: int) -> int:
     """Return the exact count for one immediate report and all scheduled reports."""
 
@@ -281,6 +290,7 @@ def periodic_schedule_errors(
             return ["periodic schedule is outside the reviewed short-run bounds"]
         return []
     first_fault = first_assistant_fault_s(selected)
+    last_fault = last_assistant_fault_s(selected)
     calculated = expected_periodic_receipts(selected, interval_s, boundary_offset_s)
     last_offset_s = boundary_offset_s + (expected_receipts - 2) * interval_s
     if (
@@ -290,6 +300,7 @@ def periodic_schedule_errors(
         or boundary_offset_s > first_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S
         or expected_receipts < 3
         or expected_receipts != calculated
+        or last_offset_s <= last_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
         or last_offset_s > selected.duration_s - LONG_REPORT_EDGE_MARGIN_S
         or last_offset_s + interval_s <= selected.duration_s + LONG_REPORT_EDGE_MARGIN_S
     ):
@@ -513,6 +524,7 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
         errors.append("sample record count exceeds the reviewed profile bound")
     if len(samples) < 2:
         return ["insufficient samples"]
+    fault_times = tuple(event.at_s for event in soak_profile.events)
     previous: float | None = None
     epoch_identities: dict[tuple[str, int], tuple[int, int]] = {}
     identity_epochs: dict[tuple[str, tuple[int, int]], set[int]] = {}
@@ -529,7 +541,12 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
             if elapsed <= previous:
                 errors.append(f"sample {index} is not strictly monotonic")
             elif elapsed - previous > soak_profile.max_cadence_gap_s:
-                errors.append(f"sample {index} exceeds cadence gap")
+                recovery_gap = any(
+                    previous <= fault_time <= elapsed and elapsed - fault_time <= RECOVERY_CEILING_S
+                    for fault_time in fault_times
+                )
+                if not recovery_gap:
+                    errors.append(f"sample {index} exceeds cadence gap")
         previous = elapsed
         roles = sample.get("roles")
         if not isinstance(roles, Mapping) or set(roles) != set(ROLES):
@@ -960,6 +977,151 @@ def _read_owned_regular_at(
         ) != continuity:
             raise ValueError("artifact changed during no-follow read")
         return b"".join(chunks), opened
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+
+
+def _json_lines_at(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int | None = None,
+    max_records: int | None = None,
+) -> list[Mapping[str, Any]]:
+    """Parse one flat JSONL artifact record by record without buffering the stream.
+
+    The opened descriptor is the authority.  Device/inode, size and mtime must
+    remain continuous from the no-follow topology check through EOF and the
+    final pathname check.  Byte and record bounds are enforced as the stream is
+    consumed, so a week-long bounded stream is never materialised in full.
+    """
+
+    name = _flat_basename(name)
+    file_fd: int | None = None
+    rows: list[Mapping[str, Any]] = []
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("artifact is not a regular file")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ValueError("artifact exceeds the reviewed byte bound")
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise ValueError("artifact changed before no-follow open")
+        pending = b""
+        total_bytes = 0
+        while True:
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes - total_bytes + 1)
+            chunk = os.read(file_fd, read_size)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise ValueError("artifact exceeds the reviewed byte bound")
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                if max_records is not None and len(rows) >= max_records:
+                    raise ValueError(f"{name} exceeds the reviewed record bound")
+                if line.endswith(b"\r"):
+                    line = line[:-1]
+                value = json.loads(line.decode("utf-8"))
+                if not isinstance(value, Mapping):
+                    raise ValueError(f"{name} contains a non-object record")
+                rows.append(value)
+        if pending:
+            if max_records is not None and len(rows) >= max_records:
+                raise ValueError(f"{name} exceeds the reviewed record bound")
+            if pending.endswith(b"\r"):
+                pending = pending[:-1]
+            value = json.loads(pending.decode("utf-8"))
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{name} contains a non-object record")
+            rows.append(value)
+        after = os.fstat(file_fd)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        continuity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != continuity or (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        ) != continuity:
+            raise ValueError("artifact changed during no-follow read")
+        return rows
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+
+
+def _hash_owned_regular_at(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[str, int]:
+    """Hash one flat artifact incrementally without buffering the stream.
+
+    The opened descriptor is the authority.  Device/inode, size and mtime must
+    remain continuous from the no-follow topology check through EOF and the
+    final pathname check.  The byte bound is enforced as the stream is consumed,
+    so a week-long bounded stream is hashed without materialising it in full.
+    """
+
+    name = _flat_basename(name)
+    file_fd: int | None = None
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("artifact is not a regular file")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ValueError("artifact exceeds the reviewed byte bound")
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise ValueError("artifact changed before no-follow open")
+        digest = hashlib.sha256()
+        total_bytes = 0
+        while True:
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes - total_bytes + 1)
+            chunk = os.read(file_fd, read_size)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise ValueError("artifact exceeds the reviewed byte bound")
+            digest.update(chunk)
+        after = os.fstat(file_fd)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        continuity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != continuity or (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        ) != continuity:
+            raise ValueError("artifact changed during no-follow read")
+        return "sha256:" + digest.hexdigest(), total_bytes
     finally:
         if file_fd is not None:
             os.close(file_fd)
@@ -1445,6 +1607,10 @@ def _validate_persistence_evidence(
                 errors.append("persistence channel continuity is invalid")
             identities.add(identity)
             counts.add(int(count))
+        if {identity[1] for identity in identities if isinstance(identity[1], str)} != set(
+            source_fixture.get("channel_ids", [])
+        ):
+            errors.append("persistence channel identities differ from the sealed fixture")
         if len(counts) != 1:
             errors.append("persistence channel row counts differ")
     interruptions = payload.get("interruptions")
@@ -1542,6 +1708,7 @@ def _validate_source_fixture(payload: object) -> list[str]:
         "descriptor_count",
         "binding_count",
         "expected_readings_per_sample",
+        "channel_ids",
         "poll_interval_s",
         "entries",
         "tree_sha256",
@@ -1590,6 +1757,10 @@ def _validate_source_fixture(payload: object) -> list[str]:
         or type(payload.get("binding_count")) is not int
         or payload.get("expected_readings_per_sample") != 8
         or type(payload.get("expected_readings_per_sample")) is not int
+        or type(payload.get("channel_ids")) is not list
+        or len(payload["channel_ids"]) != payload.get("expected_readings_per_sample")
+        or any(type(item) is not str or not item for item in payload["channel_ids"])
+        or len(set(payload["channel_ids"])) != len(payload["channel_ids"])
         or type(payload.get("poll_interval_s")) not in {int, float}
         or isinstance(payload.get("poll_interval_s"), bool)
         or not math.isfinite(float(payload["poll_interval_s"]))
@@ -2176,18 +2347,26 @@ class Evidence:
         return payload.decode("utf-8", errors=errors)
 
     def _sha256(self, name: str) -> str:
-        payload, _identity = self._read(name)
-        return "sha256:" + hashlib.sha256(payload).hexdigest()
+        digest, _size = self._hash_and_size(name)
+        return digest
+
+    def _hash_and_size(self, name: str) -> tuple[str, int]:
+        return _hash_owned_regular_at(
+            self._directory_fd,
+            name,
+            max_bytes=MAX_SAMPLE_ARTIFACT_BYTES if name in BOUNDED_EVIDENCE_STREAMS else None,
+        )
 
     def _json_lines(self, name: str) -> list[Mapping[str, Any]]:
         if name in BOUNDED_EVIDENCE_STREAMS:
-            identity = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
-            if not stat.S_ISREG(identity.st_mode) or identity.st_size > MAX_SAMPLE_ARTIFACT_BYTES:
-                raise ValueError(f"{name} exceeds the reviewed byte bound")
+            return _json_lines_at(
+                self._directory_fd,
+                name,
+                max_bytes=MAX_SAMPLE_ARTIFACT_BYTES,
+                max_records=MAX_SAMPLE_RECORDS,
+            )
         rows: list[Mapping[str, Any]] = []
         for line in self._text(name).splitlines():
-            if name in BOUNDED_EVIDENCE_STREAMS and len(rows) >= MAX_SAMPLE_RECORDS:
-                raise ValueError(f"{name} exceeds the reviewed record bound")
             value = json.loads(line)
             if not isinstance(value, Mapping):
                 raise ValueError(f"{name} contains a non-object record")
@@ -2845,22 +3024,16 @@ class Evidence:
             elif name not in accepted_names:
                 errors.append(f"artifact tree contains an unregistered artifact: {name}")
         artifact_names = sorted(accepted_names)
-        artifact_payloads: dict[str, bytes] = {}
+        artifact_sizes: dict[str, int] = {}
+        artifact_digests: dict[str, str] = {}
         for name in artifact_names:
             try:
-                artifact_payloads[name], _identity = self._read(name)
+                artifact_digests[name], artifact_sizes[name] = self._hash_and_size(name)
             except (OSError, ValueError):
                 errors.append(f"registered artifact disappeared or changed before hashing: {name}")
         if errors:
             return None, errors
-        artifacts = tuple(
-            ArtifactRecord(
-                name,
-                len(artifact_payloads[name]),
-                "sha256:" + hashlib.sha256(artifact_payloads[name]).hexdigest(),
-            )
-            for name in artifact_names
-        )
+        artifacts = tuple(ArtifactRecord(name, artifact_sizes[name], artifact_digests[name]) for name in artifact_names)
         ledger = AcceptanceLedger(
             run=RunIdentity(
                 SCHEMA,

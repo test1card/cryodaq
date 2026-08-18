@@ -408,7 +408,9 @@ def test_clean_sha_collector_requires_order_same_sha_and_no_untracked_files(tmp_
 
 
 @pytest.mark.skipif(os.name != "posix", reason="runtime loader ownership is POSIX-only")
-def test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers() -> None:
+def test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     current_uid = os.getuid()
     current_gid = os.getgid()
 
@@ -420,6 +422,29 @@ def test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_w
     assert not runner._runtime_library_identity_is_safe(identity(uid=1, gid=1, mode=0o644))
     assert not runner._runtime_library_identity_is_safe(identity(uid=0, gid=0, mode=0o664))
     assert not runner._runtime_library_identity_is_safe(identity(uid=current_uid, gid=current_gid, mode=0o646))
+
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    library = library_root / "libproof.so"
+    library.write_bytes(b"proof")
+    library.chmod(0o644)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+
+    assert runner._controlled_runtime_library_path() == str(library_root.resolve())
+    assert runner._runtime_library_closure()["entry_count"] == 1
+
+    if os.geteuid() == 0:
+        os.chown(library, 0, 0)
+        library.chmod(0o644)
+        assert runner._runtime_library_closure()["entry_count"] == 1
+        library.chmod(0o664)
+        with pytest.raises(runner._RunnerActivationDisabled, match="file ownership is unsafe"):
+            runner._runtime_library_closure()
+
+    library.chmod(0o646)
+    with pytest.raises(runner._RunnerActivationDisabled, match="file ownership is unsafe"):
+        runner._runtime_library_closure()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
@@ -449,6 +474,30 @@ def test_clean_sha_collector_rejects_runtime_library_mutation(monkeypatch: pytes
     with pytest.raises(runner._RunnerFoundationError, match="native-library closure changed"):
         collector.observe(runner._ShaBoundary.BETWEEN_COLLECTION_AND_EXECUTION)
     assert manifest_closure["sha256"] != runner._runtime_library_closure()["sha256"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_runtime_library_closure_rejects_a_link_target_beneath_a_writable_ancestor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    writable = library_root / "writable-dir"
+    writable.mkdir(mode=0o755)
+    writable.chmod(0o777)
+    target = writable / "libevil.so"
+    target.write_bytes(b"evil")
+    target.chmod(0o644)
+    (library_root / "liblink.so").symlink_to(target)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+
+    with pytest.raises(runner._RunnerActivationDisabled, match="link ancestor ownership is unsafe"):
+        runner._runtime_library_closure()
+
+    writable.chmod(0o755)
+    closure = runner._runtime_library_closure()
+    assert closure["entry_count"] == 1
 
 
 @pytest.mark.skipif(os.name != "posix", reason="loaded native closure is Linux-only")

@@ -80,6 +80,10 @@ _FORBIDDEN_PYTEST_MARKERS: Final = (" skipped", " deselected", " xfailed", " xpa
 _MAX_STREAM_BYTES: Final = 8 * 1024 * 1024
 _MAX_SNAPSHOT_ARCHIVE_BYTES: Final = 32 * 1024 * 1024
 _EXACT_SIX_TIMEOUT_S: Final = 300.0
+_GIT_HEAD_TIMEOUT_S: Final = 10.0
+_SNAPSHOT_ARCHIVE_TIMEOUT_S: Final = 30.0
+_SNAPSHOT_IMPORT_TIMEOUT_S: Final = 20.0
+_DRIVER_PROBE_TIMEOUT_S: Final = 20.0
 _PROCESS_GROUP_GRACE_S: Final = 2.0
 _STATUS_STRUCT: Final = struct.Struct("!i")
 _SUPERVISOR_CODE: Final = """\
@@ -351,6 +355,11 @@ def _runtime_library_closure() -> dict[str, object]:
                 continue
             if not resolved.is_relative_to(root) or not resolved.is_file():
                 raise _RunnerActivationDisabled("runtime native-library link escapes its closure")
+            for ancestor in resolved.parents:
+                if not ancestor.is_relative_to(root):
+                    break
+                if not _runtime_library_identity_is_safe(ancestor.lstat()):
+                    raise _RunnerActivationDisabled("runtime native-library link ancestor ownership is unsafe")
             target_identity = resolved.stat()
             if not _runtime_library_identity_is_safe(target_identity):
                 raise _RunnerActivationDisabled("runtime native-library target ownership is unsafe")
@@ -580,7 +589,15 @@ async def probe() -> None:
         readings = await driver.read_channels()
     finally:
         await driver.disconnect()
-    print(json.dumps({"authority": items[0].spec.authority.value, "readings": len(readings)}))
+    print(
+        json.dumps(
+            {
+                "authority": items[0].spec.authority.value,
+                "readings": len(readings),
+                "channel_ids": sorted({str(reading.channel) for reading in readings}),
+            }
+        )
+    )
 
 
 asyncio.run(probe())
@@ -591,7 +608,7 @@ asyncio.run(probe())
             env=validation_environment,
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=_DRIVER_PROBE_TIMEOUT_S,
         )
         try:
             behavior = json.loads(validated.stdout)
@@ -601,13 +618,18 @@ asyncio.run(probe())
             validated.returncode != 0
             or validated.stderr.strip()
             or type(behavior) is not dict
-            or set(behavior) != {"authority", "readings"}
+            or set(behavior) != {"authority", "readings", "channel_ids"}
             or behavior["authority"] != "passive_measurement"
             or type(behavior["readings"]) is not int
             or behavior["readings"] <= 0
+            or type(behavior["channel_ids"]) is not list
+            or len(behavior["channel_ids"]) != behavior["readings"]
+            or any(type(item) is not str or not item for item in behavior["channel_ids"])
+            or len(set(behavior["channel_ids"])) != len(behavior["channel_ids"])
         ):
             raise _RunnerFoundationError("snapshot-bound passive instrument validation failed")
         readings_per_sample = behavior["readings"]
+        channel_ids = tuple(sorted(behavior["channel_ids"]))
 
     descriptors_raw = yaml.safe_load((source_dir / "channel_descriptors.yaml").read_text(encoding="utf-8"))
     if (
@@ -642,7 +664,9 @@ asyncio.run(probe())
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    return readings_per_sample
+    if readings_per_sample is None:
+        return None
+    return readings_per_sample, channel_ids
 
 
 def _materialize_complete_soak_config(
@@ -663,7 +687,7 @@ def _materialize_complete_soak_config(
         encoding="utf-8",
     )
     (config_dir / "experiment_templates").mkdir(mode=0o700)
-    readings_per_sample = _materialize_isolated_mock_config(
+    materialized = _materialize_isolated_mock_config(
         config_dir,
         source_root=source_snapshot.root,
         validation_interpreter=source_snapshot.interpreter,
@@ -672,9 +696,10 @@ def _materialize_complete_soak_config(
     for path in config_dir.iterdir():
         if path.is_file():
             path.chmod(0o600)
-    if readings_per_sample is None:
+    if materialized is None:
         raise _RunnerFoundationError("snapshot-bound fixture behavior was not measured")
-    return readings_per_sample
+    readings_per_sample, channel_ids = materialized
+    return readings_per_sample, channel_ids
 
 
 def _storage_evidence(data_dir: Path, *, elapsed_s: float, byte_limit: int) -> dict[str, object]:
@@ -831,7 +856,12 @@ class _SourceFixtureSeal:
     identities: tuple[tuple[object, ...], ...]
 
 
-def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int) -> _SourceFixtureSeal:
+def _source_fixture_seal(
+    config_dir: Path,
+    *,
+    expected_readings_per_sample: int,
+    channel_ids: tuple[str, ...],
+) -> _SourceFixtureSeal:
     """Describe the complete passive fixture with a canonical no-link tree seal."""
 
     expected_files = {
@@ -850,6 +880,14 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
     }
     if type(expected_readings_per_sample) is not int or expected_readings_per_sample <= 0:
         raise _RunnerFoundationError("passive source fixture behavior is invalid")
+    if (
+        type(channel_ids) is not tuple
+        or len(channel_ids) != expected_readings_per_sample
+        or any(type(item) is not str or not item for item in channel_ids)
+        or len(set(channel_ids)) != len(channel_ids)
+        or tuple(sorted(channel_ids)) != channel_ids
+    ):
+        raise _RunnerFoundationError("passive source fixture channel identities are invalid")
 
     def identity(info: os.stat_result) -> tuple[int, ...]:
         return (
@@ -960,6 +998,7 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
             "descriptor_count": 16,
             "binding_count": 16,
             "expected_readings_per_sample": expected_readings_per_sample,
+            "channel_ids": list(channel_ids),
             "poll_interval_s": float(
                 yaml.safe_load((config_dir / "instruments.yaml").read_text(encoding="utf-8"))["instruments"][0].get(
                     "poll_interval_s", 1.0
@@ -1291,7 +1330,7 @@ def _sealed_execution_snapshot(git_sha: str):
             env=_controlled_git_environment(),
             check=True,
             capture_output=True,
-            timeout=30,
+            timeout=_SNAPSHOT_ARCHIVE_TIMEOUT_S,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         raise _RunnerActivationDisabled("sealed exact-six snapshot is unavailable") from exc
@@ -1319,7 +1358,7 @@ def _sealed_execution_snapshot(git_sha: str):
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=_SNAPSHOT_IMPORT_TIMEOUT_S,
             )
             if imported.stderr.strip() or len(imported.stdout.splitlines()) != 1:
                 raise _RunnerFoundationError("sealed exact-six import proof output is invalid")
@@ -3823,12 +3862,12 @@ class _PosixSoakRunner:
             check=True,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_GIT_HEAD_TIMEOUT_S,
         ).stdout.strip()
         with _sealed_execution_snapshot(sha) as fixture_snapshot:
             with tempfile.TemporaryDirectory(prefix="cryodaq-fixture-seal-") as fixture_temporary:
                 fixture_config = Path(fixture_temporary) / "config"
-                fixture_readings_per_sample = _materialize_complete_soak_config(
+                fixture_readings_per_sample, fixture_channel_ids = _materialize_complete_soak_config(
                     fixture_config,
                     report_interval_s=report_interval_s,
                     source_snapshot=fixture_snapshot,
@@ -3836,6 +3875,7 @@ class _PosixSoakRunner:
                 source_fixture = _source_fixture_seal(
                     fixture_config,
                     expected_readings_per_sample=fixture_readings_per_sample,
+                    channel_ids=fixture_channel_ids,
                 ).payload
         evidence.write_manifest(
             {
@@ -3921,7 +3961,7 @@ class _PosixSoakRunner:
                 config_dir = root / "config"
                 data_dir = root / "data"
                 data_dir.mkdir(mode=0o700)
-                source_readings_per_sample = _materialize_complete_soak_config(
+                source_readings_per_sample, source_channel_ids = _materialize_complete_soak_config(
                     config_dir,
                     report_interval_s=report_interval_s,
                     source_snapshot=source_snapshot,
@@ -3931,6 +3971,7 @@ class _PosixSoakRunner:
                 source_runtime_seal = _source_fixture_seal(
                     config_dir,
                     expected_readings_per_sample=source_readings_per_sample,
+                    channel_ids=source_channel_ids,
                 )
                 if source_runtime_seal.payload != source_fixture:
                     raise _RunnerFoundationError("passive source fixture differs from its manifest seal")
@@ -4281,6 +4322,7 @@ class _PosixSoakRunner:
                         _source_fixture_seal(
                             config_dir,
                             expected_readings_per_sample=source_readings_per_sample,
+                            channel_ids=source_channel_ids,
                         )
                         != source_runtime_seal
                     ):

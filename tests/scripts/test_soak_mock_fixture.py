@@ -75,7 +75,7 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
 
 
 @_LINUX_PROCESS_AUTHORITY
-def _complete_fixture(tmp_path: Path) -> tuple[Path, int]:
+def _complete_fixture(tmp_path: Path) -> tuple[Path, int, tuple[str, ...]]:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join((str(runner._REPO_ROOT / "src"), str(runner._REPO_ROOT)))
     snapshot = runner._ExecutionSnapshot(
@@ -85,20 +85,21 @@ def _complete_fixture(tmp_path: Path) -> tuple[Path, int]:
         "sha256:" + "0" * 64,
     )
     config_dir = tmp_path / "config"
-    readings_per_sample = runner._materialize_complete_soak_config(
+    readings_per_sample, channel_ids = runner._materialize_complete_soak_config(
         config_dir,
         report_interval_s=600,
         source_snapshot=snapshot,
     )
-    return config_dir, readings_per_sample
+    return config_dir, readings_per_sample, channel_ids
 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_passive_fixture_seal_detects_content_and_link_drift(tmp_path) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     baseline = runner._source_fixture_seal(
         config_dir,
         expected_readings_per_sample=readings_per_sample,
+        channel_ids=channel_ids,
     )
     assert baseline.payload["authority"] == "passive_measurement"
     assert baseline.payload["descriptor_count"] == 16
@@ -109,7 +110,9 @@ def test_complete_passive_fixture_seal_detects_content_and_link_drift(tmp_path) 
     original = channels.read_bytes()
     channels.write_bytes(original + b"\n")
     assert (
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample).payload
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        ).payload
         != baseline.payload
     )
     channels.write_bytes(original)
@@ -117,15 +120,18 @@ def test_complete_passive_fixture_seal_detects_content_and_link_drift(tmp_path) 
     alias = tmp_path / "channels-alias.yaml"
     os.link(channels, alias)
     with pytest.raises(runner._RunnerFoundationError, match="identity is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_fixture_seal_detects_same_byte_inode_replacement(tmp_path) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     baseline = runner._source_fixture_seal(
         config_dir,
         expected_readings_per_sample=readings_per_sample,
+        channel_ids=channel_ids,
     )
     channels = config_dir / "channels.yaml"
     replacement = tmp_path / "replacement.yaml"
@@ -136,6 +142,7 @@ def test_complete_fixture_seal_detects_same_byte_inode_replacement(tmp_path) -> 
     replaced = runner._source_fixture_seal(
         config_dir,
         expected_readings_per_sample=readings_per_sample,
+        channel_ids=channel_ids,
     )
     assert replaced.payload == baseline.payload
     assert replaced != baseline
@@ -143,7 +150,7 @@ def test_complete_fixture_seal_detects_same_byte_inode_replacement(tmp_path) -> 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_fixture_seal_rejects_rebind_during_pinned_read(tmp_path, monkeypatch) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     channels = config_dir / "channels.yaml"
     original = channels.read_bytes()
     original_inode = channels.stat().st_ino
@@ -161,18 +168,22 @@ def test_complete_fixture_seal_rejects_rebind_during_pinned_read(tmp_path, monke
 
     monkeypatch.setattr(runner.os, "read", rebind_then_read)
     with pytest.raises(runner._RunnerFoundationError, match="changed during sealing"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     assert rebound is True
 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_path, monkeypatch) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     extra = config_dir / "unexpected.yaml"
     extra.write_text("{}\n", encoding="utf-8")
     extra.chmod(0o600)
     with pytest.raises(runner._RunnerFoundationError, match="topology is not exact"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     extra.unlink()
 
     channels = config_dir / "channels.yaml"
@@ -180,24 +191,32 @@ def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_p
     channels.replace(original)
     channels.symlink_to(original)
     with pytest.raises(runner._RunnerFoundationError, match="identity is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     channels.unlink()
     original.replace(channels)
 
     template = config_dir / "experiment_templates" / "unexpected.yaml"
     template.write_text("{}\n", encoding="utf-8")
     with pytest.raises(runner._RunnerFoundationError, match="template directory is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     template.unlink()
 
     channels.chmod(0o644)
     with pytest.raises(runner._RunnerFoundationError, match="identity is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     channels.chmod(0o600)
 
     monkeypatch.setattr(runner, "_MAX_SOURCE_FIXTURE_FILE_BYTES", 1)
     with pytest.raises(runner._RunnerFoundationError, match="exceeds the reviewed bound"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
 
 
 class _LogEvidence:
