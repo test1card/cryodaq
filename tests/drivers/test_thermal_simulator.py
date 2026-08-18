@@ -864,3 +864,26 @@ async def test_auxiliary_lakeshore_uses_internal_mock_transport(
     assert [driver.name for driver in lakeshores] == ["LS218_1", "LS218_2", "LS218_3"]
     assert [driver.name for driver in lakeshores if driver._mock_instrument_client is client] == ["LS218_1"]
     assert all(driver._mock_instrument_client is None for driver in lakeshores if driver.name != "LS218_1")
+
+
+@pytest.mark.parametrize(
+    "channels",
+    [
+        {1: "Т2 Криостат низ", 7: "Т7 Детектор"},
+        {1: "Т1 Криостат верх", 7: "Т6 Экран 4К"},
+        {1: "Т1 Криостат верх"},
+    ],
+)
+async def test_external_simulator_binding_requires_canonical_lakeshore_channels(channels: dict[int, str]) -> None:
+    client = _HeaterChannelTrackingClient()
+    remapped = validate_instrument_entry(
+        {
+            "type": "lakeshore_218s",
+            "name": "LS218_1",
+            "resource": "GPIB0::12::INSTR",
+            "poll_interval_s": 0.01,
+            "channels": channels,
+        }
+    )
+    with pytest.raises(DriverRegistryError, match="external thermal simulator requires channel"):
+        construct_driver(remapped, DriverConstructionContext(mock=True, mock_instrument_client=client))

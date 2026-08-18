@@ -54,6 +54,7 @@ from cryodaq.health.simulator import (
 DRIVER_REGISTRY_COMPAT_VERSION: Final = 1
 _EXTERNAL_MOCK_HEATER_INSTRUMENT: Final = "Keithley_1"
 _EXTERNAL_MOCK_LAKESHORE_INSTRUMENT: Final = "LS218_1"
+_EXTERNAL_MOCK_LAKESHORE_CHANNELS: Final = {1: "Т1 Криостат верх", 7: "Т7 Детектор"}
 logger = logging.getLogger(__name__)
 
 
@@ -344,12 +345,36 @@ def _multiline_normalizer(values: dict[str, object], path: str) -> dict[str, obj
     return values
 
 
+def _require_external_mock_lakeshore_channels(
+    config: ValidatedInstrumentConfig,
+    channels: Mapping[int, str],
+) -> None:
+    """Reject an external plant binding whose channel labels are not canonical.
+
+    The thermal simulator plant is positional: channel 1 is the hot sensor and
+    channel 7 is the cold detector. The shipped calculator consumes the fixed
+    labels in ``_EXTERNAL_MOCK_LAKESHORE_CHANNELS``; binding the plant to a
+    driver that remaps those labels would publish the plant's hot value under a
+    different identity and silently feed the calculator wrong sensors.
+    """
+
+    for channel_num, expected_label in _EXTERNAL_MOCK_LAKESHORE_CHANNELS.items():
+        actual_label = channels.get(channel_num, "")
+        if actual_label != expected_label:
+            raise DriverRegistryError(
+                f"{config.name}: external thermal simulator requires channel {channel_num} "
+                f"to be {expected_label!r}, got {actual_label!r}"
+            )
+
+
 def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConstructionContext) -> InstrumentDriver:
     from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
     values = config.values
     channels = values["channels"]
     assert isinstance(channels, Mapping)
+    if config.name == _EXTERNAL_MOCK_LAKESHORE_INSTRUMENT and context.mock_instrument_client is not None:
+        _require_external_mock_lakeshore_channels(config, channels)
     return LakeShore218S(
         config.name,
         str(values["resource"]),
