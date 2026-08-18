@@ -280,6 +280,88 @@ The irreducible hardware milestone then remains:
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
+### Measured position, 2026-08-18 — what the soak proves today
+
+Every statement here was measured on the day it is dated. Re-measure before you
+act on any of it; a number in a document is a record, not a result.
+
+**The owner travels to the laboratory this week to test on real hardware. Green
+software gates do not replace that test, and he has said so.** Read the
+irreducible hardware milestone above with that in mind: **Keithley A8-0 on real
+2604B firmware is the heater-control gate, and no soak substitutes for it.**
+
+**The laboratory computer is on an uninterruptible power supply** (owner,
+2026-08-18). The "host dies mid-profile" risk is therefore a schedule risk for
+that machine, not a data risk.
+
+#### The soak starts on Ubuntu 22.04, and its next barrier is named
+
+Measured at `fa52b35804` in a worktree cut from a native Linux clone:
+
+- the run reaches the runner phase and writes seven evidence files;
+- the exact-six integration gate **PASSES** (`exit_code 0`, `status PASS`);
+- it then fails at `_RunnerFoundationError: source stack did not reach the exact
+  four-role startup cut`.
+
+`log-launcher.txt` names the cause: the launcher cannot import, because
+`src/cryodaq/gui/theme.py` calls `resolve_theme()` at module import and
+`DEFAULT_THEME` (`_theme_loader.py:26`) is `warm_stone`, whose pack is absent
+from the copied tree. `scripts/soak_mock_stack_runner.py:153` copies only
+`_ISOLATED_TRACKED_CONFIG_FILES = ("channels.yaml",)` into the isolated config
+set, so `config/themes/` never arrives. The pack exists in the repository.
+
+`tests/scripts/` on the target at that head: **264 passed, 8 skipped, 0 failed.**
+
+#### The environment recipe that works today
+
+The qualification section of `docs/lab_verification_checklist.md` is right about
+the important thing — the run must happen in a clone on a native Linux
+filesystem, never under `/mnt/c` — and **its runtime recipe is stale**. It
+symlinks `.venv` at `/root/cryodaq-soak-py313`. Measured 2026-08-18 on the
+laboratory WSL image: that path is not readable, and the interpreter present is
+`cryodaq-lab`, Python 3.14.6.
+
+What was measured to work:
+
+```bash
+git -C <native-clone> worktree add --detach <probe> <sha>
+cd <probe> && <conda-env>/bin/python -m venv --system-site-packages .venv
+PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack --profile short --evidence-dir <dir>
+```
+
+Without `--system-site-packages` the runner stops at `ModuleNotFoundError: No
+module named 'yaml'`; a stock virtual environment has an empty `site-packages`.
+Write evidence outside `/tmp`: a WSL restart cleared it once on 2026-08-18 and
+took a launcher log with it.
+
+#### A measurement trap that produced four wrong answers in one evening
+
+A worktree created by Windows git holds a `.git` FILE whose gitdir is a Windows
+path. From WSL, git resolves nothing there, so **every test that shells out to
+git fails for a reason unrelated to the code**, while tests that never touch git
+pass normally. Two published claims had to be corrected. Measure the target in a
+worktree cut from a native Linux clone.
+
+#### The rungs to a laboratory-ready week
+
+Each rung is a stopping point: after it, the system is coherent even if work
+stops there.
+
+1. **Basic minimum** — acquisition, storage and export proven; heater-control
+   logic guarded; the instrument runs end to end once. Requires the conductivity
+   freshness bound, the exporter identity work, the analytics staleness work,
+   the theme-pack fix, and a sealed short-profile PASS.
+2. **Trust the evidence** — the suite that certifies the system is itself
+   trustworthy: no test leaves a production module mocked for the tests after
+   it, no unavailable source root passes as a compile check, no vacuous
+   assertion. Plus a 12-hour PASS.
+3. **Unattended week** — faults reach a human, configuration parsing has an
+   owner, the predictor baseline is honest. Plus a 72-hour PASS.
+4. **The week** — a 168-hour PASS on a frozen SHA.
+
+Sufficiency at every rung is the same object: a sealed soak PASS at increasing
+duration. That is why the soak is graded as an instrument rather than a feature.
+
 ---
 
 ## ASC scalability milestone — F35
