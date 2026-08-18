@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -288,7 +289,7 @@ def test_xlsx_preserves_same_channel_readings_with_distinct_descriptor_hashes(tm
     first = _descriptor(revision=1)
     second = _descriptor(revision=2)
     db_path = data_dir / f"data_{ts.date().isoformat()}.db"
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn:
         install_catalog(conn, ChannelCatalog([first]))
         install_catalog(conn, ChannelCatalog([second], historical=[first, second]))
         row_ids = [row[0] for row in conn.execute("SELECT id FROM readings ORDER BY id")]
