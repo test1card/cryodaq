@@ -3282,6 +3282,102 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: EXTERNAL-MOCK-THERMAL-POINT-IDENTITY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_process_reaches_published_thermal_calculator_result
+    ci_partition: remaining
+    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_independent_report_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_skip_second_power_and_queued_first_point_were_accepted_as_the_second_thermal_point
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-ENGINE-CLI-FORWARDING-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_engine_main_forwards_exact_external_simulator_client
+    ci_partition: remaining
+    red_evidence: exact_973837b23117492bd96291dbaa74baef99d50efc_independent_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_deleting_engine_main_external_client_forwarding_left_every_committed_simulator_test_green
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-RUN-ENGINE-FORWARDING-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_engine_registry_adoption.py::test_run_engine_passes_live_dependencies_and_exact_recorded_source
+    ci_partition: remaining
+    red_evidence: exact_973837b23117492bd96291dbaa74baef99d50efc_independent_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_deleting_run_engine_to_load_drivers_external_client_forwarding_left_every_committed_simulator_test_green
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-CONNECT-SETTLEMENT-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_scheduler_retries_after_initial_external_zero_connect_failure
+    ci_partition: remaining
+    red_evidence: exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_independent_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_initial_zero_failure_preceded_connect_cleanup_and_left_connect_in_progress_permanently_true_while_the_remaining_suite_stayed_green
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-ALREADY-LATCHED-OFF-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_failed_target_update_waits_for_already_latched_external_off
+    ci_partition: remaining
+    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898479_and_guard_red_the_failed_target_update_returned_before_the_concurrent_already_latched_external_OFF_side_effect_settled
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-ENDPOINT-CONSTRUCTION-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds
+    ci_partition: remaining
+    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898486_and_guard_red_direct_construction_accepted_a_remote_host_and_unbounded_ports_while_parser_only_guards_stayed_green_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_localhost_literal_was_accepted_without_peer_resolution_proof
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-HEATER-IDENTITY-FALSE-GREEN-007
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_smua_only_drives_mock_thermal_plant_channel
+    ci_partition: remaining
+    red_evidence: exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_and_guard_red_the_external_plant_received_0_5_W_from_smua_0_2_W_plus_smub_0_3_W_while_the_shipped_calculator_consumed_only_smua_power_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_and_guard_red_a_renamed_Keithley_aux_smua_received_the_external_client_and_applied_0_0_then_0_2_W_while_the_shipped_calculator_consumed_only_Keithley_1_smua
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-THERMOMETER-IDENTITY-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_simulator_binding_requires_canonical_lakeshore_channels
+    ci_partition: remaining
+    red_evidence: exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_and_guard_red_LS218_2_queried_the_external_LakeShore_endpoint_instead_of_its_internal_mock_transport_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_rebinding_to_a_future_auxiliary_LakeShore_left_the_closed_enumeration_guard_green_and_remapped_hot_cold_LS218_1_channel_labels_were_accepted_and_bound_the_plant_while_the_older_enumeration_guard_stayed_green
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-INCOMPLETE-ROSTER-FALSE-GREEN-009
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_load_drivers_rejects_incomplete_external_mock_roster
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_guards_always_constructed_a_complete_canonical_roster_so_a_roster_omitting_or_renaming_either_Keithley_1_or_LS218_1_could_accept_the_run_without_the_engine_drivers_ever_proving_the_external_client_could_bind_the_full_plant
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-CLIENT-TIMEOUT-FALSE-GREEN-010
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_mock_client_honors_per_call_timeout_ms
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_per_call_timeout_ms_was_ignored_so_a_quiet_loopback_endpoint_could_hang_past_the_deadline_while_the_registered_guards_only_exercised_the_client_default_timeout
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-LAKESHORE-TIMEOUT-FALSE-GREEN-011
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_lakeshore_external_query_forwards_per_call_timeout
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_lakeshore_external_query_dropped_the_per_call_timeout_ms_so_the_configured_read_timeout_was_not_honored_on_the_external_path_while_the_registered_guards_only_asserted_instrument_identity
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-READY-FILE-FALSE-GREEN-012
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_simulator_publishes_ready_file_atomically
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_ready_file_was_written_in_place_so_a_launcher_polling_by_existence_could_read_a_partially_written_document_while_no_registered_guard_asserted_atomic_publish
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6449,3 +6545,61 @@ records:
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
     green_evidence: pending
+  - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: External mock thermal endpoint construction and instrument selection, and the SafetyManager to Keithley connect, start, target-update, OFF, Scheduler, and ThermalCalculator path.
+    classification: late_side_effect
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A directly constructed remote or invalid endpoint can escape parser-only confinement; a failed or cancelled initial zero can wedge reviewed-source connect ownership; a delayed, failed, cancelled, or misrouted power command can leave the external plant nonzero or divergent from CryoDAQ truth, combine a non-heater source with the configured heater, replay one external thermometer stream under auxiliary instrument identities, return before an already-latched external OFF settles, return stale success after OFF authority, or let a queued earlier analytic certify the wrong automatic-sweep point.
+    invariant: Every external mock endpoint, including direct construction, uses the literal numeric loopback address 127.0.0.1 with an integer port in 1..65535; the exact CLI-selected client reaches only the canonical simulated instruments through engine and registry construction, and the production roster proves exactly one LakeShore owns that client; only Keithley_1/smua can drive the single external plant; only LS218_1 can read the external plant, while auxiliary LakeShore instruments keep independent internal mock transports; initial-zero failure or cancellation settles the Scheduler-owned connect attempt and permits a later safe retry; every uncertain start or target update settles a confirmed final zero before failure or cancellation escapes, including when a concurrent fault already owns the retained global-OFF operation; competing OFF authority cannot receive stale update success; and each published thermal point binds one new simulator command, a post-command Scheduler power reading, matching calculator metadata P, and reciprocal truth for that same point.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/drivers/test_thermal_simulator.py::test_failed_start_lost_ack_reconciles_external_zero
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_target_update_failure_forces_external_zero_and_latches_fault
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_cancelled_target_update_settles_external_zero_before_cancellation
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_target_update_cannot_report_success_after_emergency_off_authority
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_delayed_mock_start_cannot_reheat_external_plant_after_stop
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_delayed_mock_update_cannot_reheat_external_plant_after_stop
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_cancelled_stop_settles_zero_after_delayed_external_power
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_process_reaches_published_thermal_calculator_result
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_engine_main_forwards_exact_external_simulator_client
+        ci_partition: remaining
+      - node: tests/drivers/test_engine_registry_adoption.py::test_run_engine_passes_live_dependencies_and_exact_recorded_source
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_scheduler_retries_after_initial_external_zero_connect_failure
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_failed_target_update_waits_for_already_latched_external_off
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_smua_only_drives_mock_thermal_plant_channel
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_auxiliary_lakeshore_uses_internal_mock_transport
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_simulator_binding_requires_canonical_lakeshore_channels
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_load_drivers_rejects_incomplete_external_mock_roster
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_mock_client_honors_per_call_timeout_ms
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_lakeshore_external_query_forwards_per_call_timeout
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_simulator_publishes_ready_file_atomically
+        ci_partition: remaining
+    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
+    green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition

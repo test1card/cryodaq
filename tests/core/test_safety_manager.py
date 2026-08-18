@@ -1943,22 +1943,24 @@ async def test_fault_log_callback_runs_before_publish():
 async def test_update_target_updates_runtime_p_target_immediately():
     """HF1 — update_target() is a delayed-update, not a hardware no-op.
 
-    ``update_target()`` writes the new power target to ``runtime.p_target``
-    immediately (within the same call). The hardware voltage converges on the
-    *next* poll cycle because ``Keithley2604B.read_channels()`` computes
-    ``target_v = sqrt(p_target * R)`` and issues SCPI every cycle.
-
-    This design is intentional: slew-rate limiting and compliance checks live
-    in the regulation loop and must not be bypassed by a direct SCPI write
-    in the safety manager.
+    ``update_target()`` delegates to the driver's same-call target update. The
+    hardware voltage still converges on the next poll because
+    ``Keithley2604B.read_channels()`` applies slew-rate and compliance checks.
+    The driver call also synchronizes an external mock instrument when present.
     """
-    from unittest.mock import MagicMock
+    from unittest.mock import AsyncMock, MagicMock
 
     k = _mock_keithley()
     runtime = MagicMock()
     runtime.active = True
     runtime.p_target = 0.1
     k._channels = {"smua": runtime}
+
+    async def _update_source_target(channel: str, p_target: float) -> None:
+        assert channel == "smua"
+        runtime.p_target = p_target
+
+    k.update_source_target = AsyncMock(side_effect=_update_source_target)
 
     mgr, _ = await _make_manager(keithley=k, mock=True)
     mgr._keithley = k
@@ -1970,4 +1972,5 @@ async def test_update_target_updates_runtime_p_target_immediately():
     assert result["ok"] is True
     assert result["p_target"] == 0.5
     assert runtime.p_target == 0.5, "p_target must update immediately in runtime for next poll cycle"
+    k.update_source_target.assert_awaited_once_with("smua", 0.5)
     await mgr.stop()

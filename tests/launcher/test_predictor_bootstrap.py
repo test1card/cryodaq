@@ -36,6 +36,7 @@ def _make_fake_self(replay_source=None):
     """Minimal stand-in for LauncherWindow for _start_engine calls."""
     ns = types.SimpleNamespace(
         _mock=False,
+        _mock_thermal_simulator=None,
         _replay_source=replay_source,
         _replay_speed=5.0,
         _replay_phase="cooldown",
@@ -102,6 +103,7 @@ def test_start_engine_canonicalizes_mock_mode_in_child_environment(monkeypatch, 
         captured: dict[str, object] = {}
         fake = _make_fake_self(replay_source=None)
         fake._mock = mock
+        fake._mock_thermal_simulator = "127.0.0.1:43210" if mock else None
 
         def fake_popen(command, **kwargs):
             captured["command"] = command
@@ -126,6 +128,10 @@ def test_start_engine_canonicalizes_mock_mode_in_child_environment(monkeypatch, 
 
         assert captured["environment"]["CRYODAQ_MOCK"] == expected
         assert ("--mock" in captured["command"]) is mock
+        assert ("--mock-thermal-simulator" in captured["command"]) is mock
+        if mock:
+            option_index = captured["command"].index("--mock-thermal-simulator")
+            assert captured["command"][option_index + 1] == "127.0.0.1:43210"
 
 
 def test_start_engine_calls_hint_in_non_replay_path() -> None:
