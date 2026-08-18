@@ -2145,6 +2145,8 @@ class SafetyManager:
         """
         async with self._cmd_lock:
             smu_channel = normalize_smu_channel(channel)
+            update_abort_generation = self._abort_generation
+            update_full_abort_generation = self._full_abort_generation
 
             qualification_refusal = self._energizing_mutation_refusal()
             if qualification_refusal is not None:
@@ -2179,7 +2181,78 @@ class SafetyManager:
                 return {"ok": False, "error": f"Channel {smu_channel} not active on instrument"}
 
             old_p = runtime.p_target
-            runtime.p_target = p_target
+            update_task = asyncio.create_task(
+                self._keithley.update_source_target(smu_channel, p_target),
+                name=f"safety_update_source_target_{smu_channel}",
+            )
+            _update_result, update_error, caller_cancelled = await _settle_shielded_hardware_task(update_task)
+            if update_error is not None:
+                reason = f"Power-target update outcome is uncertain on {smu_channel}: {type(update_error).__name__}"
+                logger.critical("%s: %s", reason, update_error)
+                fault_was_already_latched = self._state is SafetyState.FAULT_LATCHED
+                await self._fault(reason, channel=smu_channel, source="safety_target_update")
+                if fault_was_already_latched:
+                    reconciliation_task = asyncio.create_task(
+                        self._ensure_output_off(
+                            owner_abort_generation=self._latched_fault_abort_generation,
+                        ),
+                        name=f"safety_target_update_existing_fault_off_{smu_channel}",
+                    )
+                    (
+                        reconciliation_result,
+                        reconciliation_error,
+                        reconciliation_cancelled,
+                    ) = await _settle_shielded_hardware_task(reconciliation_task)
+                    caller_cancelled = caller_cancelled or reconciliation_cancelled
+                    if reconciliation_error is None and reconciliation_result is True:
+                        self._active_sources.clear()
+                        self._refresh_operator_safety_snapshot()
+                    else:
+                        logger.critical(
+                            "Power-target update failure could not reconcile an already-latched "
+                            "fault to global OFF: %s",
+                            reconciliation_error,
+                        )
+                if caller_cancelled is not None:
+                    raise caller_cancelled
+                return {
+                    "ok": False,
+                    "channel": smu_channel,
+                    "p_target": runtime.p_target,
+                    "error": reason,
+                    "uncertain": ["p_target"],
+                }
+            if caller_cancelled is not None:
+                await self._fault(
+                    f"Power-target update completed after caller cancellation on {smu_channel}",
+                    channel=smu_channel,
+                    source="safety_target_update",
+                )
+                raise caller_cancelled
+            self._observe_terminal_safety_children()
+            if (
+                self._abort_generation != update_abort_generation
+                or self._state == SafetyState.FAULT_LATCHED
+                or not self._safety_children_authoritative()
+            ):
+                off_scope = None if self._full_abort_generation != update_full_abort_generation else smu_channel
+                off_task = asyncio.create_task(
+                    self._emergency_off_locked(off_scope),
+                    name=f"safety_target_update_authority_off_{smu_channel}",
+                )
+                off_result, off_error, off_cancelled = await _settle_shielded_hardware_task(off_task)
+                if off_cancelled is not None:
+                    raise off_cancelled
+                return {
+                    "ok": False,
+                    "channel": smu_channel,
+                    "p_target": runtime.p_target,
+                    "error": (
+                        "Safety authority was lost after a power-target update reached the source"
+                        if off_error is None and isinstance(off_result, dict) and off_result.get("ok") is True
+                        else "Safety authority was lost and target-update OFF reconciliation was not confirmed"
+                    ),
+                }
             logger.info("SAFETY: P_target update %s: %.4f → %.4f W", smu_channel, old_p, p_target)
 
             return {"ok": True, "channel": smu_channel, "p_target": p_target}
