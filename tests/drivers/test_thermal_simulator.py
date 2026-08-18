@@ -1025,3 +1025,64 @@ def test_simulator_publishes_ready_file_atomically(
         "protocol": "lake_shore_218_plus_mock_power_v1",
     }
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_simulator_removes_ready_file_on_shutdown(tmp_path: Path) -> None:
+    ready_path = tmp_path / "ready.json"
+    truth_path = tmp_path / "truth.json"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "tools/thermal_conductivity_simulator.py"),
+            "--ready-file",
+            str(ready_path),
+            "--truth-output",
+            str(truth_path),
+            "--time-constant-s",
+            "0.02",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 5.0
+    while not ready_path.is_file() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready_path.is_file(), "simulator did not become ready"
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    with socket.create_connection((ready["host"], ready["port"]), timeout=1.0) as connection:
+        connection.sendall(b"MOCK:SHUTDOWN\n")
+        assert connection.makefile("rb").readline() == b"OK\n"
+    process.wait(timeout=5.0)
+    assert process.returncode == 0, "simulator shutdown failed"
+    assert not ready_path.exists(), "shutdown must remove the ready file so a reused path cannot serve stale readiness"
+    assert truth_path.is_file()
+
+
+def test_simulator_clears_stale_ready_file_before_publishing(tmp_path: Path) -> None:
+    ready_path = tmp_path / "ready.json"
+    truth_path = tmp_path / "truth.json"
+    stale = {"host": "127.0.0.1", "port": 1, "protocol": "lake_shore_218_plus_mock_power_v1"}
+    ready_path.write_text(json.dumps(stale), encoding="utf-8")
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "tools/thermal_conductivity_simulator.py"),
+            "--ready-file",
+            str(ready_path),
+            "--truth-output",
+            str(truth_path),
+            "--bath-temperature-k",
+            "0",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    process.wait(timeout=5.0)
+    stdout, stderr = process.communicate()
+    assert process.returncode != 0, "the invalid bath temperature must refuse the run"
+    assert "bath temperature" in stderr
+    assert not ready_path.exists(), "startup must clear the stale ready document before it can be polled"

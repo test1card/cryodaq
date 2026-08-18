@@ -179,6 +179,14 @@ def main() -> int:
     parser.add_argument("--time-constant-s", type=float, default=0.25)
     args = parser.parse_args()
 
+    # A reused --ready-file path still holds the previous process's endpoint
+    # document because shutdown never removed it, so an existence-polling
+    # launcher could read the stale port before this run publishes its own.
+    # Clear the stale document before binding so readiness is generation-bound
+    # to this process.
+    if args.ready_file.is_file():
+        args.ready_file.unlink()
+
     plant = ThermalPlant(
         bath_temperature_k=args.bath_temperature_k,
         conductance_w_per_k=args.conductance_w_per_k,
@@ -199,6 +207,8 @@ def main() -> int:
     finally:
         server.server_close()
         _write_json(args.truth_output, plant.truth())
+        if args.ready_file.is_file():
+            args.ready_file.unlink()
     return 0
 
 
