@@ -3282,6 +3282,38 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: LONG-SOAK-MANIFEST-JOIN-FALSE-GREEN-055
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_mock_stack.py::test_runner_runtime_library_manifest_reaches_final_schema_validation
+    ci_partition: remaining
+    red_evidence: exact_477b0c3f63f3ae7d9c5964dd7e0d6353ab1ebff9_ubuntu_22_04_guard_failed_on_manifest_fields_are_not_exact_exit_1
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-NATIVE-GENERATION-FALSE-GREEN-056
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_loaded_native_closure_binds_fallback_system_objects
+    ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_hashed_only_sys_prefix_lib_and_had_no_loaded_system_object_guard_pending_immutable_mutation_capture
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-CHECKLIST-DRIFT-FALSE-GREEN-057
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/docs/test_docs_freshness.py::test_lab_checklist_names_short_and_duration_soak_gates
+    ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_checklist_blob_0d47fa2eb6474522d774260289cb908763febc5b_named_only_wsl_short_and_two_receipts_pending_immutable_guard_run
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-TERMINAL-MEMORY-FALSE-GREEN-058
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_mock_stack.py::test_sample_reader_rejects_records_above_the_reviewed_bound
+    ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_sample_reader_had_no_byte_or_record_bound_pending_immutable_mutation_capture
+    green_evidence: pending_final_candidate_and_hosted_remaining
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6449,3 +6481,33 @@ records:
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
     green_evidence: pending
+  - id: LONG-SOAK-QUALIFICATION-TRUST-055
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Ubuntu 22.04 short, 12-hour, 72-hour, and 168-hour whole-stack qualification evidence.
+    classification: evidence_false_acceptance
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A duration run can finish after hours or days but fail final acceptance, combine process generations that loaded different native bytes, follow a contradictory checklist, or exhaust memory during terminal validation.
+    invariant: The production manifest passes its exact final schema. Every process generation records the executable native objects it actually loaded, including fallback system objects, and one role keeps one closure across generations. The authoritative checklist separates short preflight from Ubuntu duration gates. Long profiles use a bounded cadence, and final sample input has explicit byte and record limits.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#integration-and-publication-discipline
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_soak_mock_stack.py::test_runner_runtime_library_manifest_reaches_final_schema_validation
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_loaded_native_closure_binds_fallback_system_objects
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_process_generation_native_closure_change_is_rejected
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_lab_checklist_names_short_and_duration_soak_gates
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_long_profile_contract.py::test_168h_sample_volume_has_an_explicit_terminal_validation_bound
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_sample_reader_rejects_records_above_the_reviewed_bound
+        ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_cold_breadth_report_sha256_0e5c671e1fb8b131c11039a485aad40b45d268f3121e30c51159d632002888bf_confirmed_three_P1_and_one_P2
+    green_evidence: pending_final_candidate_independent_review_and_hosted_remaining
