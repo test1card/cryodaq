@@ -139,6 +139,8 @@ _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 _MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
 _MAX_SOURCE_FIXTURE_FILE_BYTES: Final = 4 * 1024 * 1024
 _TRUNCATED_LAUNCHER_LOG_MARKER: Final = b"[launcher log truncated; bounded tail follows]\n"
+_ENGINE_STDERR_EVIDENCE_LOG_NAME: Final = "log-engine-stderr.txt"
+_ENGINE_STDERR_TRUNCATED_MARKER: Final = b"[engine stderr truncated; bounded tail follows]\n"
 _LOCKED_PSUTIL_VERSION: Final = "7.2.2"
 _SOURCE_ARGV: Final = (sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray")
 _SOURCE_GATE_CODE: Final = """\
@@ -1312,12 +1314,43 @@ def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_
     evidence.write_log("log-launcher.txt", payload.decode("utf-8"))
 
 
+def _publish_engine_stderr_log(evidence: Any, path: Path | None) -> None:
+    """Publish the launcher's captured engine-stderr log as a bounded evidence artifact.
+
+    The engine stderr file lives under the source launcher's own state root
+    (``<CRYODAQ_ROOT>/logs/engine.stderr.log``); the launcher forwards bounded
+    child-stderr lines there while the engine runs. Copying it into the evidence
+    bundle makes the reason a dead engine died survivable: without it, a bundle
+    records ``exception=RuntimeError`` and nothing that says why. A missing or
+    empty file simply publishes nothing.
+    """
+    from scripts.soak_mock_stack import redact_text
+
+    if path is None:
+        return
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return
+        raw = path.read_bytes()
+    except OSError:
+        return
+    encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
+    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_ENGINE_STDERR_TRUNCATED_MARKER)
+        tail = encoded[-tail_bytes:]
+        while tail and tail[0] & 0xC0 == 0x80:
+            tail = tail[1:]
+        encoded = _ENGINE_STDERR_TRUNCATED_MARKER + tail.decode("utf-8", errors="ignore").encode("utf-8")
+    evidence.write_log(_ENGINE_STDERR_EVIDENCE_LOG_NAME, encoded.decode("utf-8"))
+
+
 @contextmanager
 def _launcher_log_capture(
     evidence: Any,
     path: Path,
     *,
     settle_writer: Callable[[], None] | None = None,
+    engine_stderr_path: Path | None = None,
 ):
     """Capture stdout through a continuously drained, memory-bounded pipe."""
 
@@ -1338,6 +1371,7 @@ def _launcher_log_capture(
             if settled:
                 raw, total_bytes = drain.finish()
                 _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=True)
+                _publish_engine_stderr_log(evidence, engine_stderr_path)
             elif not drain.writer.closed:
                 drain.writer.close()
         except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
@@ -1346,6 +1380,7 @@ def _launcher_log_capture(
     else:
         raw, total_bytes = drain.finish()
         _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
+        _publish_engine_stderr_log(evidence, engine_stderr_path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -4135,7 +4170,12 @@ class _PosixSoakRunner:
                         )
                         launcher_settled = True
 
-                with _launcher_log_capture(evidence, log_path, settle_writer=settle_log_writer) as log:
+                with _launcher_log_capture(
+                    evidence,
+                    log_path,
+                    settle_writer=settle_log_writer,
+                    engine_stderr_path=root / "logs" / "engine.stderr.log",
+                ) as log:
                     process, launcher_identity = _spawn_gated_source(
                         environment=environment,
                         stdout=log,

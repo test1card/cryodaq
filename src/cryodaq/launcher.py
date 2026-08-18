@@ -1701,7 +1701,10 @@ def _pump_engine_stderr(
                 stderr_logger.error("engine stderr line exceeded the forwarding bound")
                 continue
             if raw_line.strip():
-                stderr_logger.error("engine child stderr record received; phase=runtime")
+                stderr_logger.error(
+                    "engine child stderr: %s",
+                    raw_line.decode("utf-8", errors="replace").rstrip("\r\n"),
+                )
     except BaseException as exc:
         owner.pump_failure = exc
     finally:
@@ -2418,10 +2421,11 @@ class LauncherWindow(QMainWindow):
             raise
         except BaseException as exc:
             self._construction_failure_phase = phase
+            message = str(exc)
             logger.critical(
                 "Launcher construction failed; phase=%s exception=%s",
                 phase,
-                type(exc).__name__,
+                f"{type(exc).__name__}: {message}" if message else type(exc).__name__,
             )
             if LauncherWindow._do_shutdown(self):
                 raise
@@ -5254,10 +5258,11 @@ class LauncherWindow(QMainWindow):
             retained_errors["shutdown_hold_alarm"] = exc
         self._shutdown_last_errors = retained_errors
         for label, error in retained_errors.items():
+            message = str(error)
             logger.error(
                 "Launcher shutdown owner remains unsettled: %s (%s)",
                 label,
-                type(error).__name__,
+                f"{type(error).__name__}: {message}" if message else type(error).__name__,
             )
         LauncherWindow._set_shutdown_tray_state(self, failed=True)
         LauncherWindow._schedule_shutdown_retry(self)

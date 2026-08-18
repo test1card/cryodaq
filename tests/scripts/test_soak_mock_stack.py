@@ -930,6 +930,30 @@ def test_final_acceptance_requires_persistence_and_storage_evidence(tmp_path: Pa
 
 
 @_POSIX_EVIDENCE
+def test_launcher_log_capture_registers_engine_stderr_in_log_index(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path / "evidence")
+    evidence.write_manifest(_manifest())
+    _write_prerequisites(evidence)
+    evidence.begin_run()
+    engine_stderr = tmp_path / "launcher-root" / "logs" / "engine.stderr.log"
+    engine_stderr.parent.mkdir(parents=True)
+    engine_stderr.write_bytes(b"RuntimeError: engine died on startup\n")
+
+    with runner._launcher_log_capture(
+        evidence,
+        tmp_path / "launcher.log",
+        engine_stderr_path=engine_stderr,
+    ) as stream:
+        stream.write(b"launcher diagnostic line\n")
+        stream.flush()
+
+    index = json.loads((evidence.directory / "log_capture.json").read_text())
+    assert index["artifacts"] == ["log-launcher.txt", "log-engine-stderr.txt"]
+    assert (evidence.directory / "log-launcher.txt").read_text() == "launcher diagnostic line\n"
+    assert (evidence.directory / "log-engine-stderr.txt").read_text() == "RuntimeError: engine died on startup\n"
+
+
+@_POSIX_EVIDENCE
 def test_persistence_validator_rejects_a_false_green_duplicate(tmp_path: Path) -> None:
     evidence = soak.Evidence(tmp_path)
     _populate_complete(evidence)

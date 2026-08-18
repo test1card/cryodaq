@@ -295,6 +295,97 @@ def test_launcher_log_capture_bounds_failure_and_rejects_truncated_pass(tmp_path
             stream.write(b"x" * 128)
 
 
+def test_publish_engine_stderr_log_copies_launcher_capture_into_evidence(tmp_path) -> None:
+    source = tmp_path / "logs" / "engine.stderr.log"
+    source.parent.mkdir()
+    source.write_bytes(b"Traceback (most recent call last):\nRuntimeError: engine died\n")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr_log(evidence, source)
+
+    assert evidence.logs == [
+        ("log-engine-stderr.txt", "Traceback (most recent call last):\nRuntimeError: engine died\n")
+    ]
+
+
+def test_publish_engine_stderr_log_skips_missing_and_empty(tmp_path) -> None:
+    evidence = _LogEvidence()
+    runner._publish_engine_stderr_log(evidence, None)
+    runner._publish_engine_stderr_log(evidence, tmp_path / "missing.log")
+    empty = tmp_path / "empty.log"
+    empty.write_bytes(b"")
+    runner._publish_engine_stderr_log(evidence, empty)
+    assert evidence.logs == []
+
+
+def test_publish_engine_stderr_log_bounds_oversized_capture_to_a_tail(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", 64)
+    source = tmp_path / "engine.stderr.log"
+    source.write_bytes(b"head-prefix " + b"x" * 256 + b" tail-payload\n")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr_log(evidence, source)
+
+    (name, text) = evidence.logs[0]
+    assert name == "log-engine-stderr.txt"
+    encoded = text.encode()
+    assert len(encoded) <= 64
+    assert encoded.startswith(runner._ENGINE_STDERR_TRUNCATED_MARKER)
+    assert b"tail-payload" in encoded
+    assert b"head-prefix" not in encoded
+
+
+def test_publish_engine_stderr_log_redacts_secrets(tmp_path) -> None:
+    source = tmp_path / "engine.stderr.log"
+    source.write_bytes(b"token leaked: 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij\n")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr_log(evidence, source)
+
+    (name, text) = evidence.logs[0]
+    assert name == "log-engine-stderr.txt"
+    assert "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij" not in text
+
+
+@pytest.mark.skipif(os.name != "posix", reason="launcher log capture is POSIX-only")
+def test_launcher_log_capture_publishes_engine_stderr_beside_launcher_log(tmp_path) -> None:
+    path = tmp_path / "launcher.log"
+    engine_stderr = tmp_path / "logs" / "engine.stderr.log"
+    engine_stderr.parent.mkdir()
+    engine_stderr.write_bytes(b"RuntimeError: engine died\n")
+    evidence = _LogEvidence()
+
+    with runner._launcher_log_capture(evidence, path, engine_stderr_path=engine_stderr) as stream:
+        stream.write(b"launcher line\n")
+        stream.flush()
+
+    assert evidence.logs == [
+        ("log-launcher.txt", "launcher line\n"),
+        ("log-engine-stderr.txt", "RuntimeError: engine died\n"),
+    ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="launcher log capture is POSIX-only")
+def test_launcher_log_capture_publishes_engine_stderr_on_failure(tmp_path) -> None:
+    engine_stderr = tmp_path / "logs" / "engine.stderr.log"
+    engine_stderr.parent.mkdir()
+    engine_stderr.write_bytes(b"Traceback:\nengine boom\n")
+    evidence = _LogEvidence()
+
+    with pytest.raises(ValueError, match="primary"):
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "launcher.log",
+            engine_stderr_path=engine_stderr,
+        ) as stream:
+            stream.write(b"launcher line\n")
+            stream.flush()
+            raise ValueError("primary")
+
+    assert ("log-launcher.txt", "launcher line\n") in evidence.logs
+    assert ("log-engine-stderr.txt", "Traceback:\nengine boom\n") in evidence.logs
+
+
 @_LINUX_PROCESS_AUTHORITY
 def test_source_gate_bind_failure_reaps_unreleased_session() -> None:
     observed_pid: list[int] = []
