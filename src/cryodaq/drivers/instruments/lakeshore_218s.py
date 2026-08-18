@@ -206,7 +206,9 @@ class LakeShore218S(InstrumentDriver):
 
     async def _query(self, command: str, timeout_ms: int | None = None) -> str:
         if self._mock_instrument_client is not None:
-            return await self._mock_instrument_client.query(command)
+            if timeout_ms is None:
+                timeout_ms = max(1, int(round(self._read_timeout_s * 1000)))
+            return await self._mock_instrument_client.query(command, timeout_ms=timeout_ms)
         return await self._transport.query(command, timeout_ms=timeout_ms)
 
     def failure_readings(self) -> list[Reading]:

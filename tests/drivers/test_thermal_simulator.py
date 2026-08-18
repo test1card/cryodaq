@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -887,3 +888,140 @@ async def test_external_simulator_binding_requires_canonical_lakeshore_channels(
     )
     with pytest.raises(DriverRegistryError, match="external thermal simulator requires channel"):
         construct_driver(remapped, DriverConstructionContext(mock=True, mock_instrument_client=client))
+
+
+def _write_roster_config(tmp_path: Path, instruments: list[dict[str, object]], *, name: str) -> Path:
+    path = tmp_path / name
+    path.write_text(yaml.safe_dump({"instruments": instruments}), encoding="utf-8")
+    return path
+
+
+def test_load_drivers_rejects_incomplete_external_mock_roster(tmp_path: Path) -> None:
+    client = _HeaterChannelTrackingClient()
+    canonical_lakeshore = {
+        "type": "lakeshore_218s",
+        "name": "LS218_1",
+        "resource": "GPIB0::12::INSTR",
+        "poll_interval_s": 0.01,
+        "channels": {1: "Т1 Криостат верх", 7: "Т7 Детектор"},
+    }
+    canonical_keithley = {
+        "type": "keithley_2604b",
+        "name": "Keithley_1",
+        "resource": "USB0::0x05E6::0x2604::MOCK00001::INSTR",
+        "poll_interval_s": 0.01,
+    }
+
+    renamed_keithley = dict(canonical_keithley, name="Keithley_aux")
+    renamed_lakeshore = dict(canonical_lakeshore, name="LS218_aux")
+    for index, instruments in enumerate(
+        (
+            [canonical_lakeshore],
+            [canonical_keithley],
+            [canonical_lakeshore, renamed_keithley],
+            [renamed_lakeshore, canonical_keithley],
+        )
+    ):
+        path = _write_roster_config(tmp_path, instruments, name=f"incomplete_{index}.yaml")
+        with pytest.raises(DriverRegistryError, match="complete canonical roster"):
+            engine_module._load_drivers(
+                path,
+                mock=True,
+                data_dir=tmp_path,
+                mock_instrument_client=client,
+            )
+
+    complete = _write_roster_config(tmp_path, [canonical_lakeshore, canonical_keithley], name="complete.yaml")
+    loaded = engine_module._load_drivers(
+        complete,
+        mock=True,
+        data_dir=tmp_path,
+        mock_instrument_client=client,
+    )
+    assert {config.driver.name for config in loaded.instrument_configs} == {"LS218_1", "Keithley_1"}
+
+
+async def _quiet_loopback_server() -> tuple[asyncio.Server, int]:
+    async def _never_respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while await reader.readline():
+                pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(_never_respond, host="127.0.0.1", port=0)
+    port = server.sockets[0].getsockname()[1]
+    return server, port
+
+
+async def test_external_mock_client_honors_per_call_timeout_ms() -> None:
+    server, port = await _quiet_loopback_server()
+    client = ExternalMockInstrumentClient(MockInstrumentEndpoint("127.0.0.1", port), timeout_s=2.0)
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await client.query("MOCK:TRUTH?", timeout_ms=50)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+class _TimeoutRecordingLakeShoreClient(ExternalMockInstrumentClient):
+    def __init__(self) -> None:
+        super().__init__(MockInstrumentEndpoint("127.0.0.1", 1))
+        self.observed: list[tuple[str, int | None]] = []
+
+    async def query(self, command: str, timeout_ms: int | None = None) -> str:
+        self.observed.append((command, timeout_ms))
+        return "LSCI,MODEL218S,0,1.0"
+
+
+async def test_lakeshore_external_query_forwards_per_call_timeout() -> None:
+    client = _TimeoutRecordingLakeShoreClient()
+    driver = LakeShore218S(
+        "LS218_1",
+        "GPIB0::12::INSTR",
+        mock=True,
+        read_timeout_s=0.4,
+        mock_instrument_client=client,
+    )
+    assert await driver._query("*IDN?", timeout_ms=123) == "LSCI,MODEL218S,0,1.0"
+    assert await driver._query("KRDG?") == "LSCI,MODEL218S,0,1.0"
+    assert client.observed == [("*IDN?", 123), ("KRDG?", 400)]
+
+
+def test_simulator_publishes_ready_file_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    replaced: list[tuple[Path, Path, str]] = []
+    real_replace = simulator_module.os.replace
+
+    def _observing_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        source_path = Path(source)
+        replaced.append((source_path, Path(target), source_path.read_text(encoding="utf-8")))
+        real_replace(source, target)
+
+    monkeypatch.setattr(simulator_module.os, "replace", _observing_replace)
+    ready_path = tmp_path / "ready.json"
+    simulator_module._write_json(
+        ready_path,
+        {"host": "127.0.0.1", "port": 43210, "protocol": "lake_shore_218_plus_mock_power_v1"},
+    )
+
+    assert len(replaced) == 1
+    source, target, source_text = replaced[0]
+    assert target == ready_path
+    assert source == ready_path.with_name(ready_path.name + ".tmp")
+    assert json.loads(source_text) == {
+        "host": "127.0.0.1",
+        "port": 43210,
+        "protocol": "lake_shore_218_plus_mock_power_v1",
+    }
+    assert json.loads(ready_path.read_text(encoding="utf-8")) == {
+        "host": "127.0.0.1",
+        "port": 43210,
+        "protocol": "lake_shore_218_plus_mock_power_v1",
+    }
+    assert list(tmp_path.glob("*.tmp")) == []

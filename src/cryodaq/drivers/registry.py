@@ -367,6 +367,36 @@ def _require_external_mock_lakeshore_channels(
             )
 
 
+def require_complete_external_mock_roster(
+    validated: tuple[ValidatedInstrumentConfig, ...],
+    *,
+    mock_instrument_client: ExternalMockInstrumentClient | None,
+) -> None:
+    """Fail closed when an external client cannot bind the full thermal plant.
+
+    The external thermal simulator is bound by canonical instrument name (see
+    ``_construct_keithley`` and ``_construct_lakeshore``): a local roster that
+    omits or renames either ``Keithley_1`` or ``LS218_1`` silently drops the
+    CLI-selected client for that half of the plant, yet the run can start while
+    only part — or none — of the external thermal path is active. Refuse the
+    incomplete roster whenever an external client is supplied instead.
+    """
+
+    if mock_instrument_client is None:
+        return
+    expected = {
+        _EXTERNAL_MOCK_HEATER_INSTRUMENT: "keithley_2604b",
+        _EXTERNAL_MOCK_LAKESHORE_INSTRUMENT: "lakeshore_218s",
+    }
+    roster = {config.name: config.spec.type_name for config in validated}
+    missing = [name for name, type_name in expected.items() if roster.get(name) != type_name]
+    if missing:
+        raise DriverRegistryError(
+            "external thermal simulator client requires the complete canonical roster; "
+            f"missing or mis-typed: {', '.join(sorted(missing))}"
+        )
+
+
 def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConstructionContext) -> InstrumentDriver:
     from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 

@@ -159,6 +159,7 @@ from cryodaq.drivers.registry import (
     ValidatedInstrumentConfig,
     construct_driver,
     is_reviewed_source_binding,
+    require_complete_external_mock_roster,
     validate_instrument_entries,
 )
 from cryodaq.drivers.transport.mock_instrument import (
@@ -2150,6 +2151,10 @@ def _load_drivers(
             mock_instrument_client=mock_instrument_client,
         )
         validated = validate_instrument_entries(raw.get("instruments", []))
+        require_complete_external_mock_roster(
+            validated,
+            mock_instrument_client=mock_instrument_client,
+        )
     except DriverRegistryError as exc:
         raise DriverRegistryError(f"{config_path}: {exc}") from exc
 

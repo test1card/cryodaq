@@ -49,11 +49,19 @@ class ExternalMockInstrumentClient:
         self.endpoint = endpoint
         self._timeout_s = float(timeout_s)
 
-    async def query(self, command: str) -> str:
-        """Send one ASCII command and return one newline-terminated reply."""
+    async def query(self, command: str, timeout_ms: int | None = None) -> str:
+        """Send one ASCII command and return one newline-terminated reply.
+
+        ``timeout_ms`` overrides the client default per call, mirroring the
+        transport ``query(..., timeout_ms=...)`` contract so external and
+        in-process paths keep the same configured timing.
+        """
 
         if not isinstance(command, str) or not command.strip() or "\n" in command or "\r" in command:
             raise ValueError("mock instrument command must be one non-empty line")
+        if timeout_ms is not None:
+            if isinstance(timeout_ms, bool) or not math.isfinite(float(timeout_ms)) or float(timeout_ms) <= 0:
+                raise ValueError("timeout_ms must be a finite positive number")
 
         async def _exchange() -> str:
             reader, writer = await asyncio.open_connection(self.endpoint.host, self.endpoint.port)
@@ -74,7 +82,8 @@ class ExternalMockInstrumentClient:
                 raise RuntimeError(response[6:] or "external mock instrument rejected the command")
             return response
 
-        return await asyncio.wait_for(_exchange(), timeout=self._timeout_s)
+        timeout_s = float(timeout_ms) / 1000.0 if timeout_ms is not None else self._timeout_s
+        return await asyncio.wait_for(_exchange(), timeout=timeout_s)
 
     async def set_power(self, power_w: float) -> None:
         """Tell the external plant which mock heater power CryoDAQ requested."""
