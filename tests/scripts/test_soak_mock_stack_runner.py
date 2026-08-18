@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 from contextlib import contextmanager, nullcontext
@@ -1205,3 +1206,60 @@ def test_tree_sha256_still_refuses_a_retargeted_link(tmp_path: Path) -> None:
     finally:
         runner.os.readlink = real_readlink  # type: ignore[assignment]
     assert calls, "the retargeting hook must have run"
+
+
+@_POSIX_EVIDENCE
+def test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    databases: list[Path] = []
+    for day, first, last in (("2026-08-18", 1000, 1450), ("2026-08-19", 1451, 1900)):
+        database = data_dir / f"data_{day}.db"
+        databases.append(database)
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TABLE readings (id INTEGER PRIMARY KEY, timestamp REAL, instrument_id TEXT, "
+                "channel TEXT, value REAL, unit TEXT, status TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO readings(timestamp,instrument_id,channel,value,unit,status) VALUES(?,?,?,?,?,?)",
+                [
+                    (float(timestamp), "LS218_1", f"ch{channel}", 4.0 + channel, "K", "OK")
+                    for timestamp in range(first, last + 1)
+                    for channel in range(8)
+                ],
+            )
+
+    selected = soak.profile("short")
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda _path: (_ for _ in ()).throw(AssertionError("database hashing must stream")),
+    )
+    persistence = runner._persistence_evidence(
+        data_dir,
+        selected=selected,
+        expected_channels=8,
+        poll_interval_s=1.0,
+    )
+    fixture = {"instrument_id": "LS218_1", "expected_readings_per_sample": 8, "poll_interval_s": 1.0}
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    assert len(persistence["channel_rows"]) == 8
+    assert {row["count"] for row in persistence["channel_rows"]} == {901}
+
+    storage = runner._storage_evidence(data_dir, elapsed_s=selected.duration_s, byte_limit=10**8)
+    assert storage["database_bytes"] == sum(database.stat().st_size for database in databases)
+    assert storage["total_bytes"] >= storage["database_bytes"] > 0
+    assert storage["wal_bytes"] == 0
+
+    linked_database = data_dir / "data_2026-08-20.db"
+    linked_database.symlink_to(databases[0])
+    with pytest.raises(runner._RunnerFoundationError, match="not a regular file"):
+        runner._persistence_evidence(
+            data_dir,
+            selected=selected,
+            expected_channels=8,
+            poll_interval_s=1.0,
+        )

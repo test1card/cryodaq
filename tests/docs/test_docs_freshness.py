@@ -2797,3 +2797,12 @@ def test_lab_checklist_names_short_and_duration_soak_gates() -> None:
     assert "Short preflight не закрывает duration gate" in checklist
     assert "manifest.periodic_schedule.expected_receipts" in checklist
     assert "Каждый duration gate остаётся OPEN" in checklist
+
+
+def test_mock_stack_runbook_names_each_profile_cadence() -> None:
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "mock_stack_soak.md").read_text(encoding="utf-8")
+
+    assert "short profile uses a 5-second sample interval and a 7.5-second maximum gap" in runbook
+    assert "long profiles use a 30-second sample interval and a 45-second maximum gap" in runbook
+    assert "72-hour five-second series" not in runbook
+    assert "time must be strictly monotonic, cadence gaps no larger than 7.5 seconds" not in runbook

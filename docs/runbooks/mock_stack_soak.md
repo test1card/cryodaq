@@ -34,8 +34,9 @@ PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
 
 ## Profiles
 
-The `short` profile samples the launcher and its descendants every 5 seconds.
-The long profiles sample them every 30 seconds. The final validator rejects a
+The short profile uses a 5-second sample interval and a 7.5-second maximum gap.
+The long profiles use a 30-second sample interval and a 45-second maximum gap.
+The final validator rejects a
 sample file above 64 MiB or 25,000 records. Identity is `(pid, OS start time)`,
 so PID reuse cannot select an unrelated process. Fault injection must re-check
 that identity immediately
@@ -63,7 +64,7 @@ graceful shutdown has a 20-second ceiling and zero recorded live descendants.
 Across 12/72/168-hour post-warm-up samples, robust fitted aggregate RSS growth must
 remain below 50 MiB. The slope estimator deterministically keeps at most 257
 evenly spaced points, including both endpoints, and computes at most 32,896
-pairwise slopes. A 72-hour five-second series therefore cannot trigger an
+pairwise slopes. A 72-hour 30-second series therefore cannot trigger an
 unbounded quadratic allocation. Process count must return to one launcher, one
 engine, one positively identified bridge, and one assistant after recovery.
 
@@ -72,8 +73,9 @@ fail qualification. Per-role descriptor, thread, and RSS envelopes are checked
 within every epoch and at the final boundary. Profile RSS and descriptor slopes
 are evaluated independently for every role and stable epoch, so one child's
 leak cannot be hidden by another child's decline. Elapsed times and counters must be finite
-and non-negative; time must be strictly monotonic, cadence gaps no larger than
-7.5 seconds, and the series must cover startup through the profile duration.
+and non-negative. Time must be strictly monotonic. The maximum cadence gap is
+7.5 seconds for `short` and 45 seconds for long profiles. The series must cover
+startup through the profile duration.
 
 ## Evidence contract
 

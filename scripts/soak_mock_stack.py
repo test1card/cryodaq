@@ -76,8 +76,8 @@ SUMMARY_RESERVED = frozenset({"schema", "status", "reason", "finished_at", "mani
 MANIFEST_RESERVED = frozenset({"schema"})
 LONG_REPORT_INTERVAL_MAX_S = 6 * 3600
 LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S = 5 * 60
-LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S = 15 * 60
-LONG_REPORT_EDGE_MARGIN_S = 5 * 60
+LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S = 16 * 60
+LONG_REPORT_EDGE_MARGIN_S = 11 * 60
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -881,6 +881,20 @@ def _validate_stream_record(name: str, payload: Any) -> None:
         expected = {"schema", "role", "epoch", "pid", "started_ns", "closure"}
         if set(payload) != expected:
             raise ValueError("runtime closure fields are not exact")
+    elif name == "storage-samples.jsonl":
+        expected = {
+            "schema",
+            "elapsed_s",
+            "total_bytes",
+            "database_bytes",
+            "wal_bytes",
+            "archive_bytes",
+            "file_count",
+            "free_bytes",
+            "byte_limit",
+        }
+        if set(payload) != expected:
+            raise ValueError("storage sample fields are not exact")
 
 
 def _flat_basename(name: str) -> str:
@@ -1287,6 +1301,209 @@ def _validate_periodic_delivery_payload(
     return errors, tuple(artifact_names)
 
 
+def _validate_periodic_cadence(
+    payload: object,
+    periodic_receipts: Sequence[Mapping[str, Any]],
+    selected: SoakProfile,
+) -> list[str]:
+    if type(payload) is not dict or set(payload) != {"schema", "interval_s", "boundary_offset_s", "receipts"}:
+        return ["periodic cadence schema is invalid"]
+    if payload.get("schema") != "cryodaq-soak-periodic-cadence/v1":
+        return ["periodic cadence schema is invalid"]
+    interval_s = payload.get("interval_s")
+    boundary_offset_s = payload.get("boundary_offset_s")
+    receipts = payload.get("receipts")
+    if type(interval_s) is not int or type(boundary_offset_s) is not int or not isinstance(receipts, list):
+        return ["periodic cadence values are invalid"]
+    if len(receipts) != len(periodic_receipts) or not receipts:
+        return ["periodic cadence receipt set differs from delivery evidence"]
+    errors: list[str] = []
+    last_elapsed = -1.0
+    for index, (timing, receipt) in enumerate(zip(receipts, periodic_receipts, strict=True)):
+        if type(timing) is not dict or set(timing) != {"receipt_id", "accepted_elapsed_s"}:
+            errors.append("periodic cadence receipt schema is invalid")
+            continue
+        elapsed = timing.get("accepted_elapsed_s")
+        if (
+            timing.get("receipt_id") != receipt.get("receipt_id")
+            or type(elapsed) not in {int, float}
+            or isinstance(elapsed, bool)
+            or not math.isfinite(float(elapsed))
+            or float(elapsed) <= last_elapsed
+        ):
+            errors.append("periodic cadence receipt identity or ordering is invalid")
+            continue
+        accepted = float(elapsed)
+        last_elapsed = accepted
+        if index == 0:
+            if accepted > 60.0:
+                errors.append("periodic immediate receipt was late")
+        else:
+            expected = float(boundary_offset_s + (index - 1) * interval_s)
+            if abs(accepted - expected) > 15.0:
+                errors.append(f"periodic receipt {index} missed its runtime slot")
+    if last_elapsed > selected.duration_s + 15.0:
+        errors.append("periodic cadence extends beyond the profile")
+    return errors
+
+
+def _validate_persistence_evidence(
+    payload: object,
+    selected: SoakProfile,
+    source_fixture: object,
+) -> list[str]:
+    expected = {
+        "schema",
+        "integrity",
+        "expected_channels",
+        "poll_interval_s",
+        "database_files",
+        "channel_rows",
+        "duplicate_rows",
+        "invalid_rows",
+        "interruptions",
+    }
+    if type(payload) is not dict or set(payload) != expected or type(source_fixture) is not dict:
+        return ["persistence evidence schema is invalid"]
+    errors: list[str] = []
+    expected_channels = source_fixture.get("expected_readings_per_sample")
+    poll_interval_s = source_fixture.get("poll_interval_s")
+    if (
+        payload.get("schema") != "cryodaq-soak-persistence/v1"
+        or payload.get("integrity") != "ok"
+        or payload.get("expected_channels") != expected_channels
+        or payload.get("poll_interval_s") != poll_interval_s
+        or payload.get("duplicate_rows") != 0
+        or payload.get("invalid_rows") != 0
+    ):
+        errors.append("persistence integrity or source binding is invalid")
+    databases = payload.get("database_files")
+    if not isinstance(databases, list) or not databases:
+        errors.append("persistence database inventory is empty")
+    else:
+        names: set[str] = set()
+        for item in databases:
+            if (
+                type(item) is not dict
+                or set(item) != {"name", "bytes", "sha256"}
+                or not isinstance(item.get("name"), str)
+                or re.fullmatch(r"data_\d{4}-\d{2}-\d{2}\.db", item["name"]) is None
+                or item["name"] in names
+                or type(item.get("bytes")) is not int
+                or item["bytes"] <= 0
+                or not isinstance(item.get("sha256"), str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) is None
+            ):
+                errors.append("persistence database inventory is invalid")
+                break
+            names.add(item["name"])
+    rows = payload.get("channel_rows")
+    if not isinstance(rows, list) or type(expected_channels) is not int or len(rows) != expected_channels:
+        errors.append("persistence channel coverage is incomplete")
+    else:
+        identities: set[tuple[str, str]] = set()
+        counts: set[int] = set()
+        for row in rows:
+            if type(row) is not dict or set(row) != {
+                "instrument_id",
+                "channel",
+                "count",
+                "first_timestamp",
+                "last_timestamp",
+            }:
+                errors.append("persistence channel row schema is invalid")
+                continue
+            identity = (row.get("instrument_id"), row.get("channel"))
+            count = row.get("count")
+            first = row.get("first_timestamp")
+            last = row.get("last_timestamp")
+            if (
+                identity in identities
+                or identity[0] != source_fixture.get("instrument_id")
+                or not isinstance(identity[1], str)
+                or type(count) is not int
+                or count <= 0
+                or type(first) not in {int, float}
+                or type(last) not in {int, float}
+                or float(last) - float(first) < selected.duration_s - RECOVERY_CEILING_S
+            ):
+                errors.append("persistence channel continuity is invalid")
+            identities.add(identity)
+            counts.add(int(count))
+        if len(counts) != 1:
+            errors.append("persistence channel row counts differ")
+    interruptions = payload.get("interruptions")
+    if not isinstance(interruptions, list):
+        errors.append("persistence interruption evidence is invalid")
+    else:
+        for item in interruptions:
+            if (
+                type(item) is not dict
+                or set(item) != {"instrument_id", "channel", "gap_s", "elapsed_s", "matched_engine_fault_s"}
+                or item.get("matched_engine_fault_s") is None
+                or type(item.get("gap_s")) not in {int, float}
+                or float(item["gap_s"]) > RECOVERY_CEILING_S + 1.5 * float(poll_interval_s)
+            ):
+                errors.append("persistence interruption is not bound to a reviewed engine fault")
+                break
+    return errors
+
+
+def _validate_storage_evidence(
+    samples: object,
+    final: object,
+    selected: SoakProfile,
+) -> list[str]:
+    fields = {
+        "schema",
+        "elapsed_s",
+        "total_bytes",
+        "database_bytes",
+        "wal_bytes",
+        "archive_bytes",
+        "file_count",
+        "free_bytes",
+        "byte_limit",
+    }
+    if not isinstance(samples, list) or not samples or type(final) is not dict or set(final) != fields:
+        return ["storage evidence schema is invalid"]
+    errors: list[str] = []
+    last_elapsed = -1.0
+    byte_limit: int | None = None
+    for item in [*samples, final]:
+        if type(item) is not dict or set(item) != fields or item.get("schema") != "cryodaq-soak-storage-sample/v1":
+            errors.append("storage sample schema is invalid")
+            continue
+        elapsed = item.get("elapsed_s")
+        integers = [item.get(name) for name in fields - {"schema", "elapsed_s"}]
+        if (
+            type(elapsed) not in {int, float}
+            or isinstance(elapsed, bool)
+            or not math.isfinite(float(elapsed))
+            or float(elapsed) < last_elapsed
+            or any(type(value) is not int or value < 0 for value in integers)
+        ):
+            errors.append("storage sample values are invalid")
+            continue
+        last_elapsed = float(elapsed)
+        current_limit = int(item["byte_limit"])
+        byte_limit = current_limit if byte_limit is None else byte_limit
+        if (
+            current_limit != byte_limit
+            or item["total_bytes"] > current_limit
+            or item["free_bytes"] < current_limit
+            or item["file_count"] > 128
+        ):
+            errors.append("storage growth or free-space bound is exceeded")
+    if (
+        final.get("wal_bytes") != 0
+        or final.get("database_bytes", 0) <= 0
+        or float(final.get("elapsed_s", -1)) < selected.duration_s
+    ):
+        errors.append("final storage is not settled or does not cover the profile")
+    return errors
+
+
 def _validate_source_fixture(payload: object) -> list[str]:
     expected_files = {
         "agent.yaml",
@@ -1310,6 +1527,7 @@ def _validate_source_fixture(payload: object) -> list[str]:
         "descriptor_count",
         "binding_count",
         "expected_readings_per_sample",
+        "poll_interval_s",
         "entries",
         "tree_sha256",
     }
@@ -1357,6 +1575,10 @@ def _validate_source_fixture(payload: object) -> list[str]:
         or type(payload.get("binding_count")) is not int
         or payload.get("expected_readings_per_sample") != 8
         or type(payload.get("expected_readings_per_sample")) is not int
+        or type(payload.get("poll_interval_s")) not in {int, float}
+        or isinstance(payload.get("poll_interval_s"), bool)
+        or not math.isfinite(float(payload["poll_interval_s"]))
+        or float(payload["poll_interval_s"]) <= 0
         or payload.get("tree_sha256") != expected_tree
     ):
         return ["source fixture semantics or tree seal is invalid"]
@@ -1941,14 +2163,15 @@ class Evidence:
         return "sha256:" + hashlib.sha256(payload).hexdigest()
 
     def _json_lines(self, name: str) -> list[Mapping[str, Any]]:
-        if name == "samples.jsonl":
+        bounded_streams = {"samples.jsonl", "storage-samples.jsonl"}
+        if name in bounded_streams:
             identity = os.stat(name, dir_fd=self._directory_fd, follow_symlinks=False)
             if not stat.S_ISREG(identity.st_mode) or identity.st_size > MAX_SAMPLE_ARTIFACT_BYTES:
-                raise ValueError("sample artifact exceeds the reviewed byte bound")
+                raise ValueError(f"{name} exceeds the reviewed byte bound")
         rows: list[Mapping[str, Any]] = []
         for line in self._text(name).splitlines():
-            if name == "samples.jsonl" and len(rows) >= MAX_SAMPLE_RECORDS:
-                raise ValueError("sample artifact exceeds the reviewed record bound")
+            if name in bounded_streams and len(rows) >= MAX_SAMPLE_RECORDS:
+                raise ValueError(f"{name} exceeds the reviewed record bound")
             value = json.loads(line)
             if not isinstance(value, Mapping):
                 raise ValueError(f"{name} contains a non-object record")
@@ -2211,7 +2434,7 @@ class Evidence:
     @_terminal_mutation("running")
     def append(self, name: str, payload: Mapping[str, Any]) -> None:
         self._require(RunState.RUNNING)
-        if name not in {"samples.jsonl", "runtime-closures.jsonl", "faults.jsonl"}:
+        if name not in {"samples.jsonl", "runtime-closures.jsonl", "faults.jsonl", "storage-samples.jsonl"}:
             self.finish_fail("invalid typed evidence stream", phase="running", error_type="ValidationError")
             raise ValueError("only registered typed evidence streams are accepted")
         _validate_stream_record(name, payload)
@@ -2244,6 +2467,19 @@ class Evidence:
         self._atomic_text(name, sanitized)
         index["artifacts"].append(name)
         self._atomic_json("log_capture.json", index)
+        self._assert_directory_path()
+
+    @_terminal_mutation("running")
+    def write_qualification_artifact(self, name: str, payload: Mapping[str, Any]) -> None:
+        self._require(RunState.RUNNING)
+        if name not in {"persistence.json", "storage-final.json", "periodic-cadence.json"}:
+            raise ValueError("qualification artifact name is not registered")
+        if self._exists(name):
+            raise RuntimeError("qualification artifact is write-once")
+        _validate_bounded_json(payload, path=name)
+        if _has_forbidden_capture_key(payload):
+            raise ValueError("environment capture is forbidden")
+        self._atomic_json(name, payload)
         self._assert_directory_path()
 
     @_terminal_mutation("shutdown")
@@ -2359,6 +2595,10 @@ class Evidence:
             "shutdown.json",
             "periodic-delivery-result.json",
             "periodic-receipts.jsonl",
+            "periodic-cadence.json",
+            "persistence.json",
+            "storage-samples.jsonl",
+            "storage-final.json",
         }
         missing: list[str] = []
         for name in sorted(required):
@@ -2379,6 +2619,10 @@ class Evidence:
             shutdown = json.loads(self._text("shutdown.json"))
             periodic_delivery = json.loads(self._text("periodic-delivery-result.json"))
             periodic_receipts = self._json_lines("periodic-receipts.jsonl")
+            periodic_cadence = json.loads(self._text("periodic-cadence.json"))
+            persistence = json.loads(self._text("persistence.json"))
+            storage_samples = self._json_lines("storage-samples.jsonl")
+            storage_final = json.loads(self._text("storage-final.json"))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return None, [f"artifact parse failed: {type(exc).__name__}"]
         if _has_forbidden_capture_key({"manifest": manifest, "prerequisites": prerequisites, "shutdown": shutdown}):
@@ -2499,6 +2743,9 @@ class Evidence:
                         errors.append(f"periodic-delivery {label} artifact hash differs")
                 except (OSError, ValueError):
                     errors.append(f"periodic-delivery {label} artifact is absent or unsafe")
+        errors += _validate_periodic_cadence(periodic_cadence, periodic_receipts, selected)
+        errors += _validate_persistence_evidence(persistence, selected, manifest.get("source_fixture"))
+        errors += _validate_storage_evidence(storage_samples, storage_final, selected)
         sample_errors = evaluate_resources(samples, selected)
         errors += [f"samples: {error}" for error in sample_errors]
         runtime_closure_errors = _validate_runtime_closures(runtime_closures, samples)

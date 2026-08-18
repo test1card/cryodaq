@@ -161,7 +161,17 @@ def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assis
     from scripts import soak_mock_stack_runner as runner
 
     selected = soak.PROFILES[profile_name]
-    interval_s, boundary_offset_s, expected_receipts = runner._select_soak_report_schedule(selected, now_epoch)
+    for wait_s in range(int(soak.LONG_REPORT_EDGE_MARGIN_S) + 1):
+        selected_epoch = now_epoch + wait_s
+        try:
+            interval_s, boundary_offset_s, expected_receipts = runner._select_soak_report_schedule(
+                selected, selected_epoch
+            )
+        except runner._RunnerFoundationError:
+            continue
+        break
+    else:
+        pytest.fail("no reviewed long-soak schedule became available inside the preflight margin")
     assert (
         soak.periodic_schedule_errors(
             selected,
@@ -172,7 +182,9 @@ def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assis
         == []
     )
     assert expected_receipts >= 3
-    runtime_offset_s = runner._validate_soak_runtime_schedule(selected, interval_s, expected_receipts, now_epoch + 300)
+    runtime_offset_s = runner._validate_soak_runtime_schedule(
+        selected, interval_s, expected_receipts, selected_epoch + 630
+    )
     first_fault_s = soak.first_assistant_fault_s(selected)
     assert first_fault_s + 300 <= runtime_offset_s <= first_fault_s + 900
     assert soak.periodic_schedule_errors(
@@ -186,16 +198,22 @@ def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assis
 def test_long_report_schedule_waits_through_a_temporarily_unavailable_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import soak_mock_stack_runner as runner
 
-    wall_epochs = iter((27_601.0, 27_602.0))
-    monotonic_epochs = iter((0.0, 0.0, 1.0))
+    wall_epochs = iter(27_601.0 + offset for offset in range(int(soak.LONG_REPORT_EDGE_MARGIN_S) + 2))
+    monotonic_epoch = [0.0]
     sleeps: list[float] = []
     monkeypatch.setattr(runner.time, "time", lambda: next(wall_epochs))
-    monkeypatch.setattr(runner.time, "monotonic", lambda: next(monotonic_epochs))
-    monkeypatch.setattr(runner.time, "sleep", sleeps.append)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: monotonic_epoch[0])
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        monotonic_epoch[0] += seconds
+
+    monkeypatch.setattr(runner.time, "sleep", sleep)
 
     interval_s, boundary_offset_s, expected_receipts = runner._wait_for_soak_report_schedule(soak.PROFILES["12h"])
 
-    assert sleeps == [1]
+    assert 1 <= len(sleeps) <= soak.LONG_REPORT_EDGE_MARGIN_S
+    assert set(sleeps) == {1}
     assert (
         soak.periodic_schedule_errors(
             soak.PROFILES["12h"],
@@ -439,6 +457,7 @@ def _source_fixture() -> dict[str, object]:
         "descriptor_count": 16,
         "binding_count": 16,
         "expected_readings_per_sample": 8,
+        "poll_interval_s": 1.0,
         "entries": entries,
         "tree_sha256": tree_sha,
     }
@@ -611,6 +630,18 @@ def _write_periodic_artifacts(evidence: soak.Evidence) -> None:
         encoding="ascii",
     )
     soak.atomic_json(evidence.directory / "periodic-delivery-result.json", result)
+    soak.atomic_json(
+        evidence.directory / "periodic-cadence.json",
+        {
+            "schema": "cryodaq-soak-periodic-cadence/v1",
+            "interval_s": 600,
+            "boundary_offset_s": 450,
+            "receipts": [
+                {"receipt_id": "g1:s1", "accepted_elapsed_s": 5.0},
+                {"receipt_id": "g2:s1", "accepted_elapsed_s": 450.0},
+            ],
+        },
+    )
 
 
 def _write_runtime_closures(evidence: soak.Evidence, samples: list[dict[str, object]]) -> None:
@@ -655,6 +686,61 @@ def _write_runtime_closures(evidence: soak.Evidence, samples: list[dict[str, obj
             )
 
 
+def _write_continuity_evidence(evidence: soak.Evidence) -> None:
+    for elapsed in (0.0, 900.0):
+        evidence.append(
+            "storage-samples.jsonl",
+            {
+                "schema": "cryodaq-soak-storage-sample/v1",
+                "elapsed_s": elapsed,
+                "total_bytes": 4096,
+                "database_bytes": 4096,
+                "wal_bytes": 0,
+                "archive_bytes": 0,
+                "file_count": 1,
+                "free_bytes": 10**9,
+                "byte_limit": 10**8,
+            },
+        )
+    evidence.write_qualification_artifact(
+        "storage-final.json",
+        {
+            "schema": "cryodaq-soak-storage-sample/v1",
+            "elapsed_s": 900.0,
+            "total_bytes": 4096,
+            "database_bytes": 4096,
+            "wal_bytes": 0,
+            "archive_bytes": 0,
+            "file_count": 1,
+            "free_bytes": 10**9,
+            "byte_limit": 10**8,
+        },
+    )
+    evidence.write_qualification_artifact(
+        "persistence.json",
+        {
+            "schema": "cryodaq-soak-persistence/v1",
+            "integrity": "ok",
+            "expected_channels": 8,
+            "poll_interval_s": 1.0,
+            "database_files": [{"name": "data_2026-01-01.db", "bytes": 4096, "sha256": "sha256:" + "1" * 64}],
+            "channel_rows": [
+                {
+                    "instrument_id": "LS218_1",
+                    "channel": f"ch{index}",
+                    "count": 900,
+                    "first_timestamp": 1000.0,
+                    "last_timestamp": 1900.0,
+                }
+                for index in range(8)
+            ],
+            "duplicate_rows": 0,
+            "invalid_rows": 0,
+            "interruptions": [],
+        },
+    )
+
+
 def _populate_complete(evidence: soak.Evidence) -> None:
     evidence.write_manifest(_manifest())
     _write_prerequisites(evidence)
@@ -663,6 +749,7 @@ def _populate_complete(evidence: soak.Evidence) -> None:
     for sample in samples:
         evidence.append("samples.jsonl", sample)
     _write_runtime_closures(evidence, samples)
+    _write_continuity_evidence(evidence)
     for fault in _faults():
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
@@ -678,6 +765,66 @@ def test_runner_runtime_library_manifest_reaches_final_schema_validation(tmp_pat
     _ledger, errors = evidence._build_ledger()
 
     assert "manifest fields are not exact" not in errors
+
+
+@_POSIX_EVIDENCE
+def test_final_acceptance_requires_persistence_and_storage_evidence(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    evidence.write_manifest(_manifest())
+    _write_prerequisites(evidence)
+    evidence.begin_run()
+    samples = _qualification_samples()
+    for sample in samples:
+        evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
+    for fault in _faults():
+        evidence.append("faults.jsonl", fault)
+    evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
+    _write_periodic_artifacts(evidence)
+    evidence.record_shutdown(_shutdown(samples))
+
+    _ledger, errors = evidence._build_ledger()
+
+    joined = "\n".join(errors)
+    assert "persistence.json" in joined
+    assert "storage-samples.jsonl" in joined
+    assert "storage-final.json" in joined
+
+
+def test_persistence_validator_rejects_a_false_green_duplicate(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = json.loads((tmp_path / "persistence.json").read_text())
+
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    persistence["duplicate_rows"] = 1
+    assert soak._validate_persistence_evidence(persistence, selected, fixture)
+
+
+def test_storage_validator_rejects_a_false_green_live_wal(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    samples = evidence._json_lines("storage-samples.jsonl")
+    final = json.loads((tmp_path / "storage-final.json").read_text())
+
+    assert soak._validate_storage_evidence(samples, final, selected) == []
+    final["wal_bytes"] = 1
+    assert soak._validate_storage_evidence(samples, final, selected)
+
+
+def test_periodic_cadence_validator_rejects_clustered_receipts(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    cadence = json.loads((tmp_path / "periodic-cadence.json").read_text())
+    receipts = evidence._json_lines("periodic-receipts.jsonl")
+
+    assert soak._validate_periodic_cadence(cadence, receipts, selected) == []
+    cadence["receipts"][1]["accepted_elapsed_s"] = 6.0
+    assert soak._validate_periodic_cadence(cadence, receipts, selected)
 
 
 @_POSIX_EVIDENCE
@@ -1109,6 +1256,7 @@ def test_exact_six_result_mutation_is_rejected(tmp_path: Path) -> None:
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(evidence)
+    _write_continuity_evidence(evidence)
     evidence.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="exact-six"):
         evidence.seal()
@@ -1130,6 +1278,7 @@ def test_arbitrary_source_command_and_missing_role_fail_terminally(tmp_path: Pat
         arbitrary.append("faults.jsonl", fault)
     arbitrary.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(arbitrary)
+    _write_continuity_evidence(arbitrary)
     arbitrary.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="canonical current-interpreter launcher"):
         arbitrary.seal()
@@ -1197,6 +1346,7 @@ def test_fault_and_shutdown_identities_require_exact_positive_integers(tmp_path:
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(evidence)
+    _write_continuity_evidence(evidence)
     evidence.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="positive integer"):
         evidence.seal()
@@ -1600,16 +1750,32 @@ def test_process_generation_native_closure_change_is_rejected(tmp_path: Path) ->
 
 
 @_POSIX_EVIDENCE
-def test_sample_reader_rejects_records_above_the_reviewed_bound(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("stream", ["samples.jsonl", "storage-samples.jsonl"])
+def test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound(
+    stream: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     evidence = soak.Evidence(tmp_path)
     evidence.write_manifest(_manifest())
     _write_prerequisites(evidence)
     evidence.begin_run()
-    evidence.append("samples.jsonl", _sample(0.0))
-    evidence.append("samples.jsonl", _sample(5.0))
+    if stream == "samples.jsonl":
+        evidence.append(stream, _sample(0.0))
+        evidence.append(stream, _sample(5.0))
+    else:
+        storage = {
+            "schema": "cryodaq-soak-storage-sample/v1",
+            "elapsed_s": 0.0,
+            "total_bytes": 4096,
+            "database_bytes": 4096,
+            "wal_bytes": 0,
+            "archive_bytes": 0,
+            "file_count": 1,
+            "free_bytes": 10**9,
+            "byte_limit": 10**8,
+        }
+        evidence.append(stream, storage)
+        evidence.append(stream, {**storage, "elapsed_s": 5.0})
     monkeypatch.setattr(soak, "MAX_SAMPLE_RECORDS", 1)
 
     with pytest.raises(ValueError, match="record bound"):
-        evidence._json_lines("samples.jsonl")
+        evidence._json_lines(stream)

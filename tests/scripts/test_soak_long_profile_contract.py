@@ -12,6 +12,7 @@ import math
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,6 +118,18 @@ def test_long_profile_contract_rejects_each_mutation(profile_name: str) -> None:
     excessive_recovery[0]["recovery_s"] = soak.RECOVERY_CEILING_S + profile.sample_interval_s
     assert any(
         "recovery exceeded ceiling" in error for error in soak._validate_faults(excessive_recovery, profile, samples)
+    )
+
+
+def test_long_schedule_reserves_the_complete_sequential_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import soak_mock_stack_runner as runner
+
+    monkeypatch.setattr(runner, "os", SimpleNamespace(name="posix"))
+    required_margin = 2 * runner._EXACT_SIX_TIMEOUT_S + runner._SOURCE_START_TIMEOUT_S
+
+    assert soak.LONG_REPORT_EDGE_MARGIN_S >= required_margin
+    assert soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S >= (
+        soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S + required_margin
     )
 
 

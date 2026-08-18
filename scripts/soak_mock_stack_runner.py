@@ -11,8 +11,10 @@ import os
 import re
 import secrets
 import selectors
+import shutil
 import signal
 import socket
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -670,6 +672,154 @@ def _materialize_complete_soak_config(
     return readings_per_sample
 
 
+def _storage_evidence(data_dir: Path, *, elapsed_s: float, byte_limit: int) -> dict[str, object]:
+    database_bytes = 0
+    wal_bytes = 0
+    archive_bytes = 0
+    total_bytes = 0
+    file_count = 0
+    for path in data_dir.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or (not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode)):
+            raise _RunnerFoundationError("storage tree contains an unsafe entry")
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        file_count += 1
+        total_bytes += info.st_size
+        if path.name.endswith(("-wal", "-shm")):
+            wal_bytes += info.st_size
+        elif path.suffix == ".db":
+            database_bytes += info.st_size
+        elif path.suffix == ".parquet":
+            archive_bytes += info.st_size
+    free_bytes = shutil.disk_usage(data_dir).free
+    return {
+        "schema": "cryodaq-soak-storage-sample/v1",
+        "elapsed_s": elapsed_s,
+        "total_bytes": total_bytes,
+        "database_bytes": database_bytes,
+        "wal_bytes": wal_bytes,
+        "archive_bytes": archive_bytes,
+        "file_count": file_count,
+        "free_bytes": free_bytes,
+        "byte_limit": byte_limit,
+    }
+
+
+def _persistence_evidence(
+    data_dir: Path,
+    *,
+    selected: Any,
+    expected_channels: int,
+    poll_interval_s: float,
+) -> dict[str, object]:
+    database_files: list[dict[str, object]] = []
+    aggregated: dict[tuple[str, str], dict[str, object]] = {}
+    raw_interruptions: list[tuple[str, str, float, float]] = []
+    duplicate_rows = 0
+    invalid_rows = 0
+    integrity = "ok"
+    for path in sorted(data_dir.glob("data_????-??-??.db")):
+        identity = path.lstat()
+        if not stat.S_ISREG(identity.st_mode):
+            raise _RunnerFoundationError("persistence database is not a regular file")
+        database_files.append(
+            {
+                "name": path.name,
+                "bytes": identity.st_size,
+                "sha256": _hash_regular_file(path),
+            }
+        )
+        uri = f"file:{path.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5.0) as connection:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if result != ("ok",):
+                integrity = "failed"
+            duplicate_rows += int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(n - 1), 0) FROM ("
+                    "SELECT COUNT(*) AS n FROM readings GROUP BY instrument_id, channel, timestamp HAVING n > 1)"
+                ).fetchone()[0]
+            )
+            invalid_rows += int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM readings WHERE timestamp IS NULL OR instrument_id IS NULL "
+                    "OR channel IS NULL OR value IS NULL OR unit IS NULL OR status IS NULL"
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                "SELECT instrument_id, channel, COUNT(*), MIN(timestamp), MAX(timestamp) "
+                "FROM readings GROUP BY instrument_id, channel ORDER BY instrument_id, channel"
+            ).fetchall()
+            for instrument_id, channel, count, first, last in rows:
+                key = (str(instrument_id), str(channel))
+                first_value = float(first)
+                last_value = float(last)
+                prior = aggregated.get(key)
+                if prior is None:
+                    aggregated[key] = {
+                        "instrument_id": key[0],
+                        "channel": key[1],
+                        "count": int(count),
+                        "first_timestamp": first_value,
+                        "last_timestamp": last_value,
+                    }
+                else:
+                    prior_last = float(prior["last_timestamp"])
+                    if first_value - prior_last > 1.5 * poll_interval_s:
+                        raw_interruptions.append((key[0], key[1], prior_last, first_value))
+                    prior["count"] = int(prior["count"]) + int(count)
+                    prior["first_timestamp"] = min(float(prior["first_timestamp"]), first_value)
+                    prior["last_timestamp"] = max(prior_last, last_value)
+                gaps = connection.execute(
+                    "SELECT previous_timestamp, timestamp FROM ("
+                    "SELECT timestamp, LAG(timestamp) OVER (ORDER BY timestamp) AS previous_timestamp "
+                    "FROM readings WHERE instrument_id = ? AND channel = ?) "
+                    "WHERE previous_timestamp IS NOT NULL AND timestamp - previous_timestamp > ?",
+                    (instrument_id, channel, 1.5 * poll_interval_s),
+                ).fetchall()
+                raw_interruptions.extend(
+                    (key[0], key[1], float(previous), float(current)) for previous, current in gaps
+                )
+    first_timestamp = min(
+        (float(row["first_timestamp"]) for row in aggregated.values()),
+        default=None,
+    )
+    engine_events = tuple(event.at_s for event in selected.events if event.target == "engine")
+    interruptions: list[dict[str, object]] = []
+    for instrument_id, channel, previous, current in raw_interruptions:
+        previous_elapsed = previous - float(first_timestamp or previous)
+        elapsed = current - float(first_timestamp or current)
+        matched = next(
+            (
+                event
+                for event in engine_events
+                if previous_elapsed - 2.0 * poll_interval_s <= event <= elapsed + 2.0 * poll_interval_s
+            ),
+            None,
+        )
+        interruptions.append(
+            {
+                "instrument_id": instrument_id,
+                "channel": channel,
+                "gap_s": current - previous,
+                "elapsed_s": elapsed,
+                "matched_engine_fault_s": matched,
+            }
+        )
+    return {
+        "schema": "cryodaq-soak-persistence/v1",
+        "integrity": integrity,
+        "expected_channels": expected_channels,
+        "poll_interval_s": poll_interval_s,
+        "database_files": database_files,
+        "channel_rows": [aggregated[key] for key in sorted(aggregated)],
+        "duplicate_rows": duplicate_rows,
+        "invalid_rows": invalid_rows,
+        "interruptions": interruptions,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class _SourceFixtureSeal:
     payload: dict[str, object]
@@ -805,6 +955,11 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
             "descriptor_count": 16,
             "binding_count": 16,
             "expected_readings_per_sample": expected_readings_per_sample,
+            "poll_interval_s": float(
+                yaml.safe_load((config_dir / "instruments.yaml").read_text(encoding="utf-8"))["instruments"][0].get(
+                    "poll_interval_s", 1.0
+                )
+            ),
             "entries": entries,
             "tree_sha256": tree_hash,
         },
@@ -3724,6 +3879,7 @@ class _PosixSoakRunner:
         observations: set[Any] = set()
         native_closures: dict[soak.ProcessIdentity, dict[str, object]] = {}
         role_native_closures: dict[str, str] = {}
+        receipt_acceptance_times: list[dict[str, object]] = []
         receipt_cut_type = tuple[
             dict[str, object],
             dict[str, object],
@@ -3773,6 +3929,13 @@ class _PosixSoakRunner:
                 )
                 if source_runtime_seal.payload != source_fixture:
                     raise _RunnerFoundationError("passive source fixture differs from its manifest seal")
+                source_poll_interval_s = float(source_fixture["poll_interval_s"])
+                expected_rows = math.ceil(selected.duration_s / source_poll_interval_s) * source_readings_per_sample
+                storage_byte_limit = 64 * 1024 * 1024 + expected_rows * 1024
+                evidence.append(
+                    "storage-samples.jsonl",
+                    _storage_evidence(data_dir, elapsed_s=0.0, byte_limit=storage_byte_limit),
+                )
                 log_path = root / "launcher.log"
                 environment = _source_environment(
                     root,
@@ -3858,7 +4021,9 @@ class _PosixSoakRunner:
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
                         raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
 
-                    _validate_soak_runtime_schedule(selected, report_interval_s, expected_receipts, time.time())
+                    runtime_boundary_offset_s = _validate_soak_runtime_schedule(
+                        selected, report_interval_s, expected_receipts, time.time()
+                    )
 
                     start = time.monotonic()
                     next_sample = 0.0
@@ -3918,6 +4083,10 @@ class _PosixSoakRunner:
                                     wall_time=datetime.now(UTC).isoformat(),
                                 ),
                             )
+                            evidence.append(
+                                "storage-samples.jsonl",
+                                _storage_evidence(data_dir, elapsed_s=elapsed, byte_limit=storage_byte_limit),
+                            )
                             next_sample = max(next_sample + selected.sample_interval_s, elapsed + 0.001)
 
                         state = self._periodic_cut(data_dir)
@@ -3940,6 +4109,9 @@ class _PosixSoakRunner:
                                 expected_artifact_sha256=artifact["sha256"],
                             )
                             ledger = evidence._json_lines("periodic-receipts.jsonl")[-1]
+                            receipt_acceptance_times.append(
+                                {"receipt_id": ledger["receipt_id"], "accepted_elapsed_s": time.monotonic() - start}
+                            )
                             photo, _metadata = evidence._read(ledger["filename"])
                             terminal_deadline = time.monotonic() + _ARTIFACT_IO_TIMEOUT_S
                             terminal_state = None
@@ -4108,6 +4280,32 @@ class _PosixSoakRunner:
                         != source_runtime_seal
                     ):
                         raise _RunnerFoundationError("passive source fixture changed during execution")
+                    evidence.write_qualification_artifact(
+                        "persistence.json",
+                        _persistence_evidence(
+                            data_dir,
+                            selected=selected,
+                            expected_channels=source_readings_per_sample,
+                            poll_interval_s=source_poll_interval_s,
+                        ),
+                    )
+                    evidence.write_qualification_artifact(
+                        "storage-final.json",
+                        _storage_evidence(
+                            data_dir,
+                            elapsed_s=time.monotonic() - start,
+                            byte_limit=storage_byte_limit,
+                        ),
+                    )
+                    evidence.write_qualification_artifact(
+                        "periodic-cadence.json",
+                        {
+                            "schema": "cryodaq-soak-periodic-cadence/v1",
+                            "interval_s": report_interval_s,
+                            "boundary_offset_s": runtime_boundary_offset_s,
+                            "receipts": receipt_acceptance_times,
+                        },
+                    )
         finally:
             with _block_termination_signals():
                 try:
