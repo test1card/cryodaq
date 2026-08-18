@@ -26,6 +26,7 @@ collision with the unrelated F3 ``CooldownHistoryWidget`` (duration plot).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.cooldown_compare import DEFAULT_THRESHOLDS, compare
 from cryodaq.analytics.cooldown_fingerprint import (
+    BASELINE_POINTER,
     CooldownFingerprint,
     get_baseline,
     list_fingerprints,
@@ -136,6 +138,23 @@ def _unreadable_message(count: int, prefix: str) -> str:
     else:
         noun, verb = "файлов", "не читается"
     return f"{prefix} ({count} {noun} {verb})."
+
+
+def _baseline_pointer_is_unreadable(history_dir: Path) -> bool:
+    """True when ``baseline.json`` itself is unreadable or structurally invalid.
+
+    Distinct from an unreadable baseline *target*: a corrupt pointer file is an
+    independent unavailable file that ``list_fingerprints`` does not count,
+    while a corrupt target fingerprint is already counted there. Used to report
+    the true unavailable-file count when both the history and the pointer are
+    independently unreadable.
+    """
+    pointer = Path(history_dir) / BASELINE_POINTER
+    try:
+        data = json.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, ValueError, AttributeError):
+        return True
+    return not isinstance(data, dict) or not data.get("fingerprint_id")
 
 
 def _badge_verdict(
@@ -335,6 +354,8 @@ class CooldownBaselineCard(QWidget):
         self._baseline_id = base.fingerprint_id if base else None
         if not self._entries:
             if unreadable_files:
+                if unreadable_baseline and _baseline_pointer_is_unreadable(self._history_dir):
+                    unreadable_files += 1
                 self._show_empty(_unreadable_message(unreadable_files, "История недоступна"))
             elif unreadable_baseline:
                 self._show_empty(_unreadable_message(unreadable_baseline, "Эталон недоступен"))
@@ -387,7 +408,7 @@ class CooldownBaselineCard(QWidget):
     ) -> None:
         if baseline is None:
             if unreadable_baseline:
-                text, color = "эталон недоступен", theme.STATUS_STALE
+                text, color = "эталон недоступен", theme.FOREGROUND
             else:
                 text, color = "нет эталона", theme.MUTED_FOREGROUND
         elif fp.fingerprint_id == baseline.fingerprint_id:

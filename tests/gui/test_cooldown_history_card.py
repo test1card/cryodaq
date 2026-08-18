@@ -13,6 +13,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.analytics.cooldown_fingerprint import (
@@ -22,6 +23,7 @@ from cryodaq.analytics.cooldown_fingerprint import (
     save_fingerprint,
     set_baseline,
 )
+from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.cooldown_baseline_card import (
     CooldownBaselineCard,
     CooldownVerdictBadge,
@@ -312,6 +314,9 @@ def test_card_marks_partial_history_and_unreadable_baseline(tmp_path: Path) -> N
     assert card._empty_label.isVisibleTo(card)
     assert card._empty_label.text() == "История неполна (1 файл не читается)."
     assert card._table.item(0, 4).text() == "эталон недоступен"
+    # DESIGN: RULE-A11Y-003 — STATUS_STALE text fails AA body contrast on the
+    # card surface; the unavailable verdict must render in readable FOREGROUND.
+    assert card._table.item(0, 4).foreground().color().name() == QColor(theme.FOREGROUND).name()
 
 
 def test_card_shows_unreadable_when_only_baseline_pointer_is_corrupt(tmp_path: Path) -> None:
@@ -333,3 +338,15 @@ def test_card_empty_state_counts_corrupt_baseline_file_once(tmp_path: Path) -> N
 
     # The corrupt file is the baseline's target too — it must be counted once.
     assert card._empty_label.text() == "История недоступна (1 файл не читается)."
+
+
+def test_card_empty_state_counts_independent_baseline_corruption(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "cd_1000.json").write_text("{", encoding="utf-8")
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+
+    # One corrupt fingerprint and a separately corrupt baseline pointer are two
+    # independent unreadable files — both must appear in the count.
+    assert card._empty_label.text() == "История недоступна (2 файла не читаются)."
