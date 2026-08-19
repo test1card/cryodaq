@@ -159,10 +159,6 @@ _ISOLATED_STATIC_CONFIGS: Final = (
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
-    (
-        "physical_alarms.yaml",
-        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n  escalate_to_safety: false\n",
-    ),
     ("plugins.yaml", "{}\n"),
     ("cooldown.yaml", "{}\n"),
 )
@@ -513,6 +509,23 @@ asyncio.run(probe())
         item["channel_id"]
         for item in descriptor_manifest["descriptors"]
         if item.get("safety_class") == "safety_critical_input" and item.get("role") != "source_readback"
+    )
+    # The physical-alarms document is taken from the tracked base and then DISARMED,
+    # rather than written as a short static string. The production loader requires exactly
+    # cooldown, vacuum and landmarks, complete key sets in the first two, and the two
+    # canonical landmark channels with non-empty alias lists in the third, so a curtailed
+    # document cannot satisfy it and the engine refused to start on it. Only the three
+    # arming flags are overridden, so the soak stays passive while the document stays the
+    # reviewed one.
+    physical_raw = yaml.safe_load((source_dir / "physical_alarms.yaml").read_text(encoding="utf-8"))
+    if type(physical_raw) is not dict or set(physical_raw) != {"cooldown", "vacuum", "landmarks"}:
+        raise _RunnerFoundationError("tracked physical alarms config is malformed")
+    physical_raw["cooldown"]["enabled"] = False
+    physical_raw["vacuum"]["enabled"] = False
+    physical_raw["vacuum"]["escalate_to_safety"] = False
+    (config_dir / "physical_alarms.yaml").write_text(
+        yaml.safe_dump(physical_raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
     )
     (config_dir / "safety.yaml").write_text(
         yaml.safe_dump(

@@ -44,6 +44,9 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         # Derived from the roster rather than written as a static string; see the test
         # below for why it cannot be one.
         "safety.yaml",
+        # Taken from the tracked base and disarmed: the production loader requires a
+        # complete document and rejected the short static one.
+        "physical_alarms.yaml",
     }
     assert {path.name for path in tmp_path.iterdir()} == expected
     assert all(".local." not in name for name in expected)
@@ -201,6 +204,28 @@ def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_p
     monkeypatch.setattr(runner, "_MAX_SOURCE_FIXTURE_FILE_BYTES", 1)
     with pytest.raises(runner._RunnerFoundationError, match="exceeds the reviewed bound"):
         runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+
+
+def test_the_fixture_physical_alarms_document_is_complete_and_disarmed(tmp_path) -> None:
+    """The production loader accepts nothing less than a complete document.
+
+    It requires exactly cooldown, vacuum and landmarks, complete key sets in the first
+    two, and the two canonical landmark channels with non-empty alias lists in the third.
+    The fixture used to write a four-line static string, and the engine refused to start
+    on it with ``physical alarms document must contain exactly cooldown, vacuum,
+    landmarks``. Taking the tracked document and disarming it keeps the soak passive
+    without inventing a document the loader has never reviewed.
+    """
+    from cryodaq.core.physical_alarms_config import load_production_physical_alarms_config
+
+    runner._materialize_isolated_mock_config(tmp_path)
+    path = tmp_path / "physical_alarms.yaml"
+
+    cooldown, vacuum, landmarks = load_production_physical_alarms_config(path)
+
+    assert cooldown["enabled"] is False, "the soak must not arm cooldown alarms"
+    assert vacuum["enabled"] is False, "the soak must not arm vacuum alarms"
+    assert set(landmarks) == {"\u0422\u0031\u0031", "\u0422\u0031\u0032"}
 
 
 def test_the_fixture_declares_critical_channels_that_actually_exist(tmp_path) -> None:
