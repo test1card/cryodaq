@@ -311,11 +311,29 @@ Measured at `fa52b35804` in a worktree cut from a native Linux clone:
   four-role startup cut`.
 
 `log-launcher.txt` names the cause: the launcher cannot import, because
-`src/cryodaq/gui/theme.py` calls `resolve_theme()` at module import and
-`DEFAULT_THEME` (`_theme_loader.py:26`) is `warm_stone`, whose pack is absent
-from the copied tree. `scripts/soak_mock_stack_runner.py:153` copies only
-`_ISOLATED_TRACKED_CONFIG_FILES = ("channels.yaml",)` into the isolated config
-set, so `config/themes/` never arrives. The pack exists in the repository.
+`src/cryodaq/gui/theme.py` calls `resolve_theme()` at module import and the
+default pack `warm_stone` (`_theme_loader.py:26`) is not found. **The pack is
+not missing from the tree.** It is tracked, and `git archive` carries it into
+the sealed snapshot. It is missing from where the child is told to look:
+`_source_environment` sets `CRYODAQ_ROOT` to the ISOLATED root,
+`get_config_dir()` is `get_project_root() / "config"`, and that isolated
+`config/` holds only the curated passive set (`_ISOLATED_TRACKED_CONFIG_FILES`
+plus `_ISOLATED_STATIC_CONFIGS`), with no `themes/` among them.
+
+Measured on Ubuntu 22.04.5 with `evidence/tools/rootprobe.sh` in the workspace:
+
+- **A.** `CRYODAQ_ROOT` pointed at a directory without `config/` reproduces the
+  recorded traceback exactly, exit 1;
+- **B.** `CRYODAQ_ROOT` at the application tree with `CRYODAQ_STATE_ROOT` at the
+  isolated directory imports cleanly, exit 0 -- read-only configuration from the
+  application tree, writable `data/` and `logs/` under the isolated root. That
+  is the split `src/cryodaq/paths.py` already documents.
+
+The refusal itself is not changed here. `resolve_theme()` stopping the program
+over a colour file is pinned by
+`tests/gui/test_theme_loader.py::test_missing_default_pack_raises`, and a tree
+with no `config/` has no safety configuration either. Whether it should stop is
+a behaviour decision, not a mechanism one.
 
 `tests/scripts/` on the target at that head: **264 passed, 8 skipped, 0 failed.**
 
