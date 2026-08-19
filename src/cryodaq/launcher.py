@@ -18,6 +18,7 @@ import json
 import logging
 import logging.handlers
 import math
+import multiprocessing
 import os
 import re
 import secrets
@@ -5998,6 +5999,35 @@ async def _tick_coro() -> None:
     await asyncio.sleep(0)
 
 
+def _select_launcher_multiprocessing_start_method() -> None:
+    """Make every launcher multiprocessing child a direct child of this process.
+
+    The ZMQ bridge is spawned with ``multiprocessing.Process``
+    (cryodaq/gui/zmq_client.py:_start_locked). Python 3.14 -- the pinned
+    interpreter in environment.yml -- changed the Linux default start method
+    to ``forkserver``, and a forkserver child is forked by the forkserver
+    process, not by its caller. The soak runner's ownership invariant refuses
+    a bridge whose parent is not the launcher
+    (scripts/soak_mock_stack_runner.py:_bind_positive_bridge_identity), and
+    that invariant is real: a process the launcher did not directly spawn
+    cannot be settled and killed by it, which is how a week-long run leaks a
+    process. ``spawn`` forks the child directly from this process on POSIX and
+    is the start method this launcher already used on Windows, so selecting it
+    here restores the reviewed production configuration. Must run before any
+    multiprocessing resource is created in this process (the first is the
+    bridge's ``mp.Queue`` inside LauncherWindow); nothing in the launcher's
+    import graph creates one at module scope. A process that already fixed its
+    default context is left alone -- that cannot be the real launcher, which
+    calls this first, but it does happen when tests invoke ``main()`` after
+    another test has used ``multiprocessing``.
+    """
+
+    if sys.platform == "win32":
+        return
+    if multiprocessing.get_start_method(allow_none=True) is None:
+        multiprocessing.set_start_method("spawn")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -6011,6 +6041,8 @@ def main() -> None:
         --tray   Только иконка в трее (без полного GUI). Полезно для автозагрузки
                  Windows, чтобы оператор видел статус engine без открытия GUI.
     """
+    _select_launcher_multiprocessing_start_method()
+
     import argparse
     # NOTE: multiprocessing.freeze_support() is called in
     # cryodaq._frozen_main.main_launcher() BEFORE importing this module.
