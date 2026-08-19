@@ -917,6 +917,19 @@ def test_closed_guard_source_blob_requires_explicit_reopen_when_weakened(tmp_pat
     sealed_integration.parent.mkdir(parents=True, exist_ok=True)
     sealed_integration.write_bytes((ROOT / integration_path).read_bytes())
     shutil.copytree(ROOT / "governance" / "red_reproductions", tmp_path / "governance" / "red_reproductions")
+    entries = [*payload["records"], *payload["false_green_pairs"]]
+    for entry in entries:
+        evidence = entry.get("red_evidence")
+        if not isinstance(evidence, dict) or not evidence.get("locator", "").startswith("red-reproduction:"):
+            continue
+        receipt_path = tmp_path / evidence["locator"].removeprefix("red-reproduction:")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        for guard_path in receipt["guard_blobs"]:
+            sealed_receipt_guard = tmp_path / guard_path
+            if sealed_receipt_guard.exists():
+                continue
+            sealed_receipt_guard.parent.mkdir(parents=True, exist_ok=True)
+            sealed_receipt_guard.write_bytes((ROOT / guard_path).read_bytes())
     validate_registry(payload, root=tmp_path)
 
     weakened = sealed_guard.read_text(encoding="utf-8").replace(
