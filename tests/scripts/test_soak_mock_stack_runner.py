@@ -224,7 +224,7 @@ def test_a_bounded_stream_says_how_many_characters_it_dropped() -> None:
     over = 137
     payload = ("q" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + over)).encode("utf-8")
     message = runner._child_failure_message(1, payload, b"")
-    assert "truncated %d character(s)" % over in message, "a bound that hides its size cannot be judged"
+    assert f"truncated {over} character(s)" in message, "a bound that hides its size cannot be judged"
 
 
 def test_a_stream_at_the_bound_is_not_marked_as_truncated() -> None:
