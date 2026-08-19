@@ -143,7 +143,17 @@ if os.read(gate_fd, 1) != b"G":
 os.close(gate_fd)
 os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 """
-_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
+# LS218_2 rather than LS218_1, and the difference is the whole point: the engine
+# REFUSES to start a SafetyManager with no critical channel, and refuses again when a
+# declared channel is not classified safety-critical by its own descriptor. Every one
+# of LS218_1's sixteen descriptors is observational, so no declaration could satisfy
+# both, and the fixture could not start the engine at all. LS218_2 is the SAME driver
+# (lakeshore_218s), the same passive measurement authority, and the same reviewed
+# cardinality of sixteen descriptors and sixteen bindings, and it carries TWO
+# safety_critical_input channels. Nothing reviewed is loosened and no classification is
+# fabricated; the fixture simply uses the tracked instrument that has what the startup
+# path requires.
+_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_2"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
 _ISOLATED_STATIC_CONFIGS: Final = (
     ("interlocks.yaml", "interlocks: []\n"),
