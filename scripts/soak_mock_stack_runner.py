@@ -1270,7 +1270,10 @@ class _LockedPsutilObserver:
             return None
         if candidate_parent != expected_launcher_pid:
             return None
-        if "multiprocessing.forkserver" not in candidate_argv and "forkserver" not in candidate_argv:
+        # The exact module the fork server runs, not a substring that any argument could
+        # carry. No reachable false positive exists in today's stack either way, but a
+        # heuristic in an identity check is a heuristic in an identity check.
+        if "multiprocessing.forkserver" not in candidate_argv:
             return None
         return pid
 
@@ -1304,7 +1307,9 @@ class _LockedPsutilObserver:
         belongs = parent_pid == expected_launcher_pid or (
             self._forkserver_of(parent_pid, expected_launcher_pid=expected_launcher_pid) is not None
         )
-        observation = _BridgeProcessObservation(identity, parent_pid, "zmq_bridge", True, belongs)
+        observation = _BridgeProcessObservation(
+            identity, parent_pid, "zmq_bridge", True, expected_launcher_pid if belongs else 0
+        )
         if not belongs:
             raise _RunnerFoundationError(
                 "reported bridge does not belong to this launcher: "
@@ -2319,12 +2324,17 @@ class _BridgeProcessObservation:
     parent_pid: int
     role: str
     alive: bool
-    # True only when the observer proved the bridge belongs to THIS launcher: either a
-    # direct child, or forked from a fork server that is itself a direct child. The
-    # binder cannot look at processes, so it reads this verdict rather than re-deriving
-    # it from the parent pid, which is no longer sufficient on Python 3.14 Linux.
-    # Defaults to False so a construction that forgets it REFUSES rather than passes.
-    parent_belongs_to_launcher: bool = False
+    # The launcher pid the observer PROVED this bridge belongs to: either as a direct
+    # child, or forked from a fork server that is itself a direct child. Zero means the
+    # observer proved nothing, which is the default, so a construction that forgets the
+    # field REFUSES rather than passes.
+    #
+    # It carries the PID and not a bare boolean on purpose. A boolean says only that some
+    # launcher was proved, and the binder could not tell WHICH -- so its own independent
+    # re-check against the recorded launcher was gone, and its error message named a pid
+    # that had taken no part in the decision. The two pids coincide at today's single call
+    # site; they would not have to at a second one.
+    verified_against_launcher_pid: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2365,12 +2375,17 @@ def _bind_positive_bridge_identity(
         raise _RunnerFoundationError("reported bridge process is not alive")
     if observation.identity.pid != record.bridge_pid:
         raise _RunnerFoundationError("observer bridge PID contradicts launcher record")
-    if type(observation.parent_pid) is not int or not observation.parent_belongs_to_launcher:
+    if (
+        type(observation.parent_pid) is not int
+        or type(observation.verified_against_launcher_pid) is not int
+        or observation.verified_against_launcher_pid != record.launcher_pid
+    ):
         raise _RunnerFoundationError(
             "reported bridge does not belong to this launcher: "
-            f"bridge pid {observation.identity.pid} reports parent {observation.parent_pid!r}, "
-            f"launcher is {record.launcher_pid}, and the observer did not prove that parent "
-            "is this launcher or its multiprocessing fork server"
+            f"bridge pid {observation.identity.pid} reports parent {observation.parent_pid!r}; "
+            f"the observer proved it belongs to launcher "
+            f"{observation.verified_against_launcher_pid!r}, and the record names "
+            f"{record.launcher_pid}"
         )
     if observation.role != "zmq_bridge":
         raise _RunnerFoundationError("reported PID is not the allowlisted bridge role")
