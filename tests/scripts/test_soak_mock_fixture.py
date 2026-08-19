@@ -258,10 +258,23 @@ def test_a_real_seal_payload_is_accepted_by_the_acceptance_validator(tmp_path) -
 
     config = tmp_path / "config"
     config.mkdir(mode=0o700)
-    # The materialiser returns a measured count only when it is given an interpreter to
-    # measure with; on the plain path it returns None, and the seal refuses a
-    # non-positive count. The fixture's declared value is what the acceptance validator
-    # checks, so that is what the seal is asked for here.
+    # The sealed topology spans BOTH materialisers: the complete one writes the two
+    # files below and the empty template directory, the isolated one writes the rest.
+    # The complete one cannot be called here because it also measures the reading count
+    # in a subprocess and refuses without one, so its two files and its directory are
+    # written the same way and the assertion afterwards proves the union is exactly what
+    # the seal expects -- if either materialiser grows a file, this test says so.
+    (config / "agent.yaml").write_text(
+        "agent:\n  enabled: false\nreporting:\n  automatic_enabled: true\n", encoding="utf-8"
+    )
+    (config / "notifications.yaml").write_text(
+        "telegram:\n  bot_token: 'x'\n  chat_id: -1\nperiodic_report:\n  enabled: true\n  report_interval_s: 60\n",
+        encoding="utf-8",
+    )
+    (config / "experiment_templates").mkdir(mode=0o700)
+    # The isolated materialiser returns a measured count only when given an interpreter
+    # to measure with; on this path it returns None and the seal refuses a non-positive
+    # count, so the seal is asked for the value the acceptance validator checks.
     runner._materialize_isolated_mock_config(config)
     for item in config.iterdir():
         if item.is_file():
