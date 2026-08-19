@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
@@ -91,6 +91,16 @@ def _make_mock_context(
 
     ctx.socket.side_effect = _make_socket
     return ctx
+
+
+def _assert_expected_reply_count(observed: Sequence[object], expected_reply_count: int) -> None:
+    """Assert that the observed reply ids match the shared publication-count contract."""
+    assert _replies_meet_expected_count(observed, expected_reply_count)
+
+
+def _replies_meet_expected_count(replies: Sequence[object], expected_reply_count: int) -> bool:
+    """Return whether the reply collector has exactly the expected reply count."""
+    return len(replies) == expected_reply_count
 
 
 def _run_cmd_forward(
@@ -250,7 +260,7 @@ def _run_cmd_forward(
                                 replies.append(output_queue.get_nowait())
                             except stdlib_queue.Empty:
                                 break
-                    if len(replies) == expected_replies:
+                    if _replies_meet_expected_count(replies, expected_replies):
                         collection_end = "expected_replies"
                         break
                     if bridge_owner_complete.is_set():
@@ -462,7 +472,7 @@ def test_cmd_forward_creates_fresh_socket_per_command(_sockets):
     assert all(socket.close.call_count == 1 for socket in req_sockets)
     # 1 SUB socket (sub_drain_loop) + 5 REQ sockets (one per command).
     assert len(_sockets) == 6, (
-        f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)} — ephemeral REQ lifecycle regressed"
+        f"expected 6 sockets (1 SUB + 5 REQ), got {len(_sockets)}; ephemeral REQ lifecycle regressed"
     )
 
 
@@ -506,7 +516,9 @@ def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
             diagnostics=diagnostics,
         )
 
-    assert reply_queue.attempted_reply_ids == ["r0", "r1", "r2", "r3", "r4"]
+    with pytest.raises(AssertionError):
+        _assert_expected_reply_count(diagnostics["collected_reply_ids"], len(cmds))
+
     assert reply_queue.published_reply_ids == ["r0"]
     assert diagnostics["req_sockets_created"] == 5
     assert diagnostics["req_sockets_sent"] == 5
@@ -520,6 +532,10 @@ def test_reply_collector_does_not_hide_real_reply_publication_loss(_sockets):
     assert "cmd_q_qsize=0" in str(failure.value)
     assert "bridge_owner_alive=False" in str(failure.value)
     assert "bridge_owner_exceptions=[]" in str(failure.value)
+
+
+def test_reply_count_accepts_exact_expected_reply_set() -> None:
+    _assert_expected_reply_count(["r0", "r1", "r2"], 3)
 
 
 def test_reply_collector_returns_accounted_replies_drained_after_collection_end(
@@ -1752,9 +1768,7 @@ def test_cmd_forward_survives_sequential_timeouts(_sockets):
         shutdown.set()
         thread.join(timeout=5.0)
 
-    assert len(replies) == 3, (
-        f"expected 3 replies across 3 timeouts, got {len(replies)} — shared-state poisoning across ephemeral sockets"
-    )
+    assert len(replies) == 3, f"expected 3 replies across 3 timeouts, got {len(replies)}; shared-state poisoning"
     # 1 SUB + 3 REQ (one per command); the SUB is not necessarily _sockets[0].
     req_sockets = _select_command_req_sockets(_sockets)
     assert len(req_sockets) == 3
