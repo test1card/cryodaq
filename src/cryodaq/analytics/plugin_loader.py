@@ -18,8 +18,7 @@ from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.analytics.base_plugin import AnalyticsPlugin, DerivedMetric
 from cryodaq.core.broker import DataBroker
 from cryodaq.core.shutdown_settlement import (
@@ -514,7 +513,7 @@ class PluginPipeline:
             if config_exists:
                 try:
                     with config_path.open("r", encoding="utf-8") as fh:
-                        loaded_config = yaml.safe_load(fh)
+                        loaded_config = owned_safe_load(fh)
                     if loaded_config is None:
                         config: dict[str, Any] = {}
                     elif type(loaded_config) is dict:

@@ -91,10 +91,9 @@ any disagreement):
    `config/physical_alarms.yaml` against the defect as it shipped: the
    `cold_channel`, `warm_channel` and `reference_temp_channel` identities that
    CooldownAlarm and VacuumGuard bind to were **silently substituted**, with the
-   document otherwise intact and no diagnostic. Four loaders now share
-   `src/cryodaq/_owned_yaml.py`; **50 bare call sites across 30 modules remain**,
-   including `core/safety_manager.py`, `core/interlock.py`,
-   `core/channel_manager.py` and `engine.py`, and the pre-import ordering is open
+   document otherwise intact and no diagnostic. All current PyYAML load-family
+   calls now use `src/cryodaq/_owned_yaml.py`; the owned-loader AST inventory
+   reports **zero bypasses in `src/cryodaq`**. The pre-import ordering remains open
    for all of them. Unlike OC-037 and OC-039 this one fails in the UNSAFE
    direction — it does not refuse, it proceeds on substituted values.
 

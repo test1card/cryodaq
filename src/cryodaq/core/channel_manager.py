@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.paths import get_config_dir as _get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -91,16 +92,13 @@ class ChannelManager:
 
         if not self._config_path.exists():
             raise ChannelConfigError(
-                f"channels.yaml not found at {self._config_path} — refusing "
-                f"to start without channel configuration"
+                f"channels.yaml not found at {self._config_path} — refusing to start without channel configuration"
             )
         try:
             with self._config_path.open(encoding="utf-8") as fh:
-                raw = yaml.safe_load(fh)
+                raw = owned_safe_load(fh)
         except yaml.YAMLError as exc:
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: YAML parse error — {exc}"
-            ) from exc
+            raise ChannelConfigError(f"channels.yaml at {self._config_path}: YAML parse error — {exc}") from exc
 
         if not isinstance(raw, dict):
             raise ChannelConfigError(
@@ -108,9 +106,7 @@ class ChannelManager:
             )
         channels = raw.get("channels")
         if not isinstance(channels, dict):
-            raise ChannelConfigError(
-                f"channels.yaml at {self._config_path}: missing or invalid 'channels' key"
-            )
+            raise ChannelConfigError(f"channels.yaml at {self._config_path}: missing or invalid 'channels' key")
         self._channels = channels
         logger.info("Загружена конфигурация каналов: %s", self._config_path)
 
@@ -351,14 +347,17 @@ class ChannelManager:
             high = float(candidate[1])
         except (TypeError, ValueError):
             logger.warning(
-                "ChannelManager: alarm_band for %s contains non-numeric "
-                "values (%r); ignoring", short_id, candidate,
+                "ChannelManager: alarm_band for %s contains non-numeric values (%r); ignoring",
+                short_id,
+                candidate,
             )
             return None
         if low > high:
             logger.warning(
-                "ChannelManager: alarm_band for %s is reversed [%s..%s]; "
-                "ignoring", short_id, low, high,
+                "ChannelManager: alarm_band for %s is reversed [%s..%s]; ignoring",
+                short_id,
+                low,
+                high,
             )
             return None
         return (low, high)
@@ -370,11 +369,7 @@ class ChannelManager:
         (e.g. "all warm-by-design channels"). Order matches YAML
         declaration order.
         """
-        return [
-            ch_id
-            for ch_id, info in self._channels.items()
-            if info.get("thermal_zone") == zone
-        ]
+        return [ch_id for ch_id, info in self._channels.items() if info.get("thermal_zone") == zone]
 
     def resolve_channel_reference(self, reference: str) -> str:
         """Resolve a channel reference to its canonical runtime label.
@@ -395,9 +390,7 @@ class ChannelManager:
         info = self._channels.get(short_id)
         if info is None:
             known = sorted(self._channels.keys())
-            raise ChannelConfigError(
-                f"unknown channel reference '{reference}' — known channels: {', '.join(known)}"
-            )
+            raise ChannelConfigError(f"unknown channel reference '{reference}' — known channels: {', '.join(known)}")
         name = info.get("name", "")
         return f"{short_id} {name}" if name else short_id
 

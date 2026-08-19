@@ -25,8 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from cryodaq._owned_yaml import owned_safe_load
 from cryodaq.paths import get_project_root, get_state_root
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.sentinel import decode
@@ -52,7 +51,7 @@ def _unavailable(provenance: dict[str, Any], *errors: str) -> dict[str, Any]:
 
 def _load_cooldown_config(path: Path) -> dict[str, Any]:
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = owned_safe_load(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise ValueError(f"cannot read physical alarms configuration: {exc}") from exc
     if not isinstance(raw, dict) or not isinstance(raw.get("cooldown"), dict):
@@ -121,7 +120,7 @@ def _build_legacy_thresholds(alarms_yaml: Path) -> dict[str, dict[str, float]]:
     """Extract per-channel threshold bounds from any alarms_v3.yaml section."""
     try:
         with alarms_yaml.open(encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = owned_safe_load(fh)
     except Exception as exc:
         raise ValueError(f"cannot read legacy alarms configuration: {exc}") from exc
     if not isinstance(raw, dict):

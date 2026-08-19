@@ -1,6 +1,6 @@
 """The engine's YAML loaders must own their parsing tables.
 
-Subclassing ``yaml.SafeLoader`` shares five mutable class attributes BY
+Subclassing ``yaml.SafeLoader`` shares its mutable class attributes BY
 REFERENCE.  Any library that calls ``yaml.SafeLoader.add_constructor(...)`` or
 ``add_implicit_resolver(...)`` -- documented public PyYAML APIs, ordinary use
 rather than an attack -- then decides what these loaders parse.  Three engine
@@ -344,7 +344,7 @@ def test_no_parsing_table_is_shared_with_yaml_safeloader(module_name: str, loade
     Deliberately NOT the primary evidence: on its own this is satisfiable by a
     defective loader, because ``add_constructor`` copies on write, so the
     identity differs while the CONTENT was copied from a poisoned table.  It
-    earns its place only as a check that all five attributes were covered
+    earns its place only as a check that the owned mutable tables were covered
     rather than the one that was noticed first.
     """
 
@@ -355,8 +355,36 @@ def test_no_parsing_table_is_shared_with_yaml_safeloader(module_name: str, loade
         "yaml_implicit_resolvers",
         "yaml_path_resolvers",
         "bool_values",
+        "ESCAPE_REPLACEMENTS",
+        "ESCAPE_CODES",
+        "DEFAULT_TAGS",
     ):
         assert getattr(loader, table) is not getattr(yaml.SafeLoader, table), table
+
+
+def test_post_import_poison_of_escape_and_inf_state_cannot_reach_the_owned_loader() -> None:
+    """The FULL parser state is owned, not just the five constructor tables.
+
+    ``OwnedSafeLoader`` copies the scanner's ``ESCAPE_REPLACEMENTS`` table and
+    the constructor's ``inf_value`` at import, exactly like the five table
+    copies.  A host mutating ``yaml.SafeLoader.ESCAPE_REPLACEMENTS`` or
+    rebinding ``yaml.SafeLoader.inf_value`` AFTER this module imports must not
+    change what ``owned_safe_load`` parses.  Before the fix, mutating the escape
+    table substituted ``a\\nb`` and rebinding ``inf_value`` made ``.inf`` parse
+    as the integer ``1`` -- both silent, both on the safety-bearing entry point
+    this module provides.
+    """
+
+    probe = (
+        "from cryodaq._owned_yaml import owned_safe_load\n"
+        "import yaml\n"
+        'yaml.SafeLoader.ESCAPE_REPLACEMENTS["n"] = "SUBSTITUTED"\n'
+        "yaml.SafeLoader.inf_value = 1\n"
+        "escape = owned_safe_load('value: \"a\\\\nb\"')\n"
+        "inf = owned_safe_load('v: .inf')\n"
+        'print("POISONED" if "SUBSTITUTED" in repr(escape) or inf["v"] == 1 else "CLEAN")\n'
+    )
+    assert _run(probe) == "CLEAN"
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.core.atomic_write import atomic_write_bytes, atomic_write_text
 
 FIRST_RUN_MARKER_NAME = ".first_run_done"
@@ -97,7 +98,7 @@ def _safe_load_yaml(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader)
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -108,7 +109,7 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise FirstRunConfigError(f"{path.name} not found")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader)
     except Exception as exc:
         # Parser text can quote the source line containing a Telegram token.
         raise FirstRunConfigError(f"{path.name} is invalid YAML") from exc
@@ -386,7 +387,7 @@ def read_safety_summary(config_dir: Path) -> dict[str, Any]:
         from cryodaq.core.safety_manager import SafetyManager
 
         SafetyManager(SafetyBroker()).load_config(safety_path)
-        loaded = yaml.safe_load(safety_path.read_text(encoding="utf-8"))
+        loaded = yaml.load(safety_path.read_text(encoding="utf-8"), Loader=OwnedSafeLoader)
     except Exception as exc:
         raise FirstRunConfigError(f"safety configuration invalid: {exc}") from exc
 
@@ -458,7 +459,7 @@ def _serialize_yaml(data: dict[str, Any], header: str) -> str:
     """Serialize and verify semantic round-trip before touching a target."""
     try:
         body = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
-        loaded = yaml.safe_load(body)
+        loaded = yaml.load(body, Loader=OwnedSafeLoader)
     except Exception as exc:
         raise FirstRunConfigError(f"cannot serialize setup YAML: {exc}") from exc
     if loaded != data:
