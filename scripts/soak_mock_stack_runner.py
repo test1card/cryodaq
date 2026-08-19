@@ -777,14 +777,62 @@ def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_
     evidence.write_log("log-launcher.txt", payload.decode("utf-8"))
 
 
+_ENGINE_STDERR_EVIDENCE_NAME: Final = "log-engine-stderr.txt"
+_ENGINE_STDERR_ABSENT_MARKER: Final = (
+    "<no engine stderr log was written under the isolated state root; the engine either "
+    "never started or never opened its stderr log>\n"
+)
+
+
+def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
+    """Publish the engine's own stderr, so a dead engine can say why it died.
+
+    Without this the run reports a CONDITION without its SUBJECT. The launcher forwards
+    engine stderr to a rotating log under the writable state root, which for this run is
+    the runner's own temporary directory and is deleted with it, so
+    ``Launcher construction failed; phase=engine exception=RuntimeError`` arrived with no
+    way to see the engine's traceback. Measured 2026-08-19 on Ubuntu 22.04.5: the evidence
+    bundle held six files and none of them was that log.
+
+    The artifact is ALWAYS written, and says so when the log is absent, because a missing
+    file is indistinguishable from a publisher that silently did nothing.
+    """
+
+    from scripts.soak_mock_stack import redact_text
+
+    path = Path(state_root) / "logs" / "engine.stderr.log"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
+        return
+
+    encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
+    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
+        # Keep the END: a traceback's cause is written last, and the bound exists to
+        # protect the bundle's size, not to choose which half of the failure survives.
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
+        tail = encoded[-tail_bytes:]
+        while tail and tail[0] & 0xC0 == 0x80:
+            tail = tail[1:]
+        encoded = _TRUNCATED_LAUNCHER_LOG_MARKER + tail
+    evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
+
+
 @contextmanager
 def _launcher_log_capture(
     evidence: Any,
     path: Path,
     *,
     settle_writer: Callable[[], None] | None = None,
+    state_root: Path | None = None,
 ):
-    """Capture stdout through a continuously drained, memory-bounded pipe."""
+    """Capture stdout through a continuously drained, memory-bounded pipe.
+
+    ``state_root`` names the writable root the child was given, so the engine's own
+    stderr log can be published beside the launcher log. It is optional so a caller
+    that has no such root is unchanged.
+    """
 
     if path.exists():
         raise FileExistsError(path)
@@ -807,10 +855,17 @@ def _launcher_log_capture(
                 drain.writer.close()
         except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
             primary.add_note(f"launcher diagnostic capture failed: {capture_error}")
+        if state_root is not None:
+            try:
+                _publish_engine_stderr(evidence, state_root)
+            except Exception as engine_error:  # noqa: BLE001 - preserve the primary failure
+                primary.add_note(f"engine stderr capture failed: {engine_error}")
         raise
     else:
         raw, total_bytes = drain.finish()
         _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
+        if state_root is not None:
+            _publish_engine_stderr(evidence, state_root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2467,14 +2522,35 @@ def _decode_complete_output(stdout: _StreamEvidence, payload: bytes) -> str:
 
 
 _DIAGNOSTIC_OUTPUT_LIMIT = 4096
+_DIAGNOSTIC_HEAD_SHARE = _DIAGNOSTIC_OUTPUT_LIMIT // 2
+_DIAGNOSTIC_TRUNCATION_MARKER = "\n...[truncated %d character(s); the tail of the stream follows]\n"
 
 
 def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
+    """Describe a failed child run, keeping the END of each stream as well as its start.
+
+    Keeping only the first characters is what a length bound does if nobody chooses,
+    and for a pytest child it discards exactly the part that says what went wrong:
+    the assertion, the traceback and the short test summary all sit at the END. A
+    real ubuntu-latest failure arrived here as four kilobytes of the child test's own
+    source text, then ``...[truncated]`` where the cause would have been, which is a
+    message that names a condition and withholds its subject.
+
+    The bound itself is unchanged: at most ``_DIAGNOSTIC_OUTPUT_LIMIT`` characters of
+    a stream reach the message. They are now taken from both ends instead of one.
+    """
+
     def bounded(payload: bytes) -> str:
         text = payload.decode("utf-8", errors="replace")
-        if len(text) > _DIAGNOSTIC_OUTPUT_LIMIT:
-            text = text[:_DIAGNOSTIC_OUTPUT_LIMIT] + "\n...[truncated]"
-        return text if text else "<empty>"
+        if not text:
+            return "<empty>"
+        if len(text) <= _DIAGNOSTIC_OUTPUT_LIMIT:
+            return text
+        tail_share = _DIAGNOSTIC_OUTPUT_LIMIT - _DIAGNOSTIC_HEAD_SHARE
+        dropped = len(text) - _DIAGNOSTIC_OUTPUT_LIMIT
+        return (
+            text[:_DIAGNOSTIC_HEAD_SHARE] + (_DIAGNOSTIC_TRUNCATION_MARKER % dropped) + text[len(text) - tail_share :]
+        )
 
     return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
         stderr
@@ -3554,7 +3630,7 @@ class _PosixSoakRunner:
                         )
                         launcher_settled = True
 
-                with _launcher_log_capture(evidence, log_path, settle_writer=settle_log_writer) as log:
+                with _launcher_log_capture(evidence, log_path, settle_writer=settle_log_writer, state_root=root) as log:
                     process, launcher_identity = _spawn_gated_source(
                         environment=environment,
                         stdout=log,
