@@ -104,9 +104,19 @@ jobs:
 
       - name: Install Qt offscreen system libraries (Linux)
         if: runner.os == 'Linux'
+        # Bounded, because this step HUNG for the job's full 50 minutes twice on
+        # 2026-08-19 and took two pull requests' evidence with it. The dpkg lock is held
+        # by the runner image's own unattended upgrades often enough to matter, and plain
+        # apt-get waits for it forever. A step timeout turns that into a fast, named
+        # failure a re-run can clear; the lock timeout usually avoids the failure at all;
+        # and the non-interactive frontend removes the other way apt can wait for nobody.
+        timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+          sudo apt-get -o DPkg::Lock::Timeout=180 update
+          sudo apt-get -o DPkg::Lock::Timeout=180 install -y \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3
 
       - name: Install immutable producer dependencies
         working-directory: judge
