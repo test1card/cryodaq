@@ -383,15 +383,23 @@ def classify_tree(
     if exact_process_role(bridge.argv) is not None:
         raise ValueError("positive bridge identity collides with an engine/assistant role")
     result = {"launcher": root, "bridge": bridge_identity}
+    unclassified: list[str] = []
     for identity, item in tree.items():
         if identity in {root, bridge_identity}:
             continue
         role = exact_process_role(item.argv)
         if role is None:
-            raise ValueError("unclassified descendant process")
+            parent = "none" if item.parent_pid is None else str(item.parent_pid)
+            unclassified.append(f"pid {identity.pid} started {identity.started_ns} parent {parent} argv {item.argv!r}")
+            continue
         if role in result:
             raise ValueError(f"duplicate live {role} process")
         result[role] = identity
+    if unclassified:
+        named = unclassified[:3]
+        detail = "; ".join(named)
+        total = f"{len(unclassified)} unclassified descendants in total"
+        raise ValueError(f"unclassified descendant process: {detail}; {total}")
     missing = set(ROLES) - result.keys()
     if missing:
         raise ValueError(f"missing required process roles: {sorted(missing)}")

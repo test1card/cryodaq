@@ -304,6 +304,51 @@ def test_classification_requires_positive_bridge_identity() -> None:
         soak.classify_tree(tree, root, bridge_identity=soak.ProcessIdentity(11, 110))
 
 
+def test_classify_tree_names_unclassified_descendant() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, ("python", "-m", "helper")),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"unclassified descendant process: pid 14 started 140 parent 10 "
+            r"argv \('python', '-m', 'helper'\); 1 unclassified descendants in total"
+        ),
+    ):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+def test_classify_tree_bounds_unclassified_descendant_report() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, ("python", "-m", "unknown-a")),
+        _snapshot(15, 150, 10, ("python", "-m", "unknown-b")),
+        _snapshot(16, 160, 10, ("python", "-m", "unknown-c")),
+        _snapshot(17, 170, 10, ("python", "-m", "unknown-d")),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(
+        ValueError,
+        match=r"pid 14 started 140 parent 10 argv \('python', '-m', 'unknown-a'\)",
+    ) as raised:
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+    message = str(raised.value)
+    assert "pid 17 started 170" not in message
+    assert "4 unclassified descendants in total" in message
+
+
 def test_recovery_requires_new_identity_readiness_and_health() -> None:
     old = soak.ProcessIdentity(42, 100)
     new = soak.ProcessIdentity(43, 200)
