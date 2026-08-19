@@ -1275,7 +1275,10 @@ class _LockedPsutilObserver:
             raise _RunnerFoundationError("positive bridge identity collides with another child role")
         observation = _BridgeProcessObservation(identity, parent_pid, "zmq_bridge", True)
         if parent_pid != expected_launcher_pid:
-            raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+            raise _RunnerFoundationError(
+                "reported bridge is not a direct launcher child: "
+                f"bridge pid {pid} reports parent {parent_pid}, launcher is {expected_launcher_pid}"
+            )
         return observation
 
     def signal_exact(self, identity: _ProcessIdentity, signum: int) -> None:
@@ -2304,7 +2307,11 @@ def _bind_positive_assistant_identity(
     if type(expected_launcher_pid) is not int or expected_launcher_pid <= 0:
         raise _RunnerFoundationError("launcher identity is invalid")
     if observation.parent_pid != expected_launcher_pid:
-        raise _RunnerFoundationError("reported assistant is not a direct launcher child")
+        raise _RunnerFoundationError(
+            "reported assistant is not a direct launcher child: "
+            f"assistant pid {observation.identity.pid} reports parent {observation.parent_pid}, "
+            f"launcher is {expected_launcher_pid}"
+        )
     if observation.role != "assistant":
         raise _RunnerFoundationError("reported PID is not the allowlisted assistant role")
     return observation.identity
@@ -2321,7 +2328,11 @@ def _bind_positive_bridge_identity(
     if observation.identity.pid != record.bridge_pid:
         raise _RunnerFoundationError("observer bridge PID contradicts launcher record")
     if type(observation.parent_pid) is not int or observation.parent_pid != record.launcher_pid:
-        raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+        raise _RunnerFoundationError(
+            "reported bridge is not a direct launcher child: "
+            f"bridge pid {observation.identity.pid} reports parent {observation.parent_pid!r}, "
+            f"launcher is {record.launcher_pid}"
+        )
     if observation.role != "zmq_bridge":
         raise _RunnerFoundationError("reported PID is not the allowlisted bridge role")
     return observation.identity
