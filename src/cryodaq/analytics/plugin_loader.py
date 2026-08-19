@@ -15,13 +15,18 @@ import inspect
 import logging
 import types
 from collections.abc import Coroutine
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from cryodaq.analytics.base_plugin import AnalyticsPlugin, DerivedMetric
-from cryodaq.core.broker import DataBroker
+from cryodaq.analytics.base_plugin import (
+    BROKER_INGRESS_MONOTONIC_METADATA_KEY,
+    AnalyticsPlugin,
+    DerivedMetric,
+)
+from cryodaq.core.broker import DataBroker, IngressReading
 from cryodaq.core.shutdown_settlement import (
     ShutdownOwnerSettledError,
     cancel_and_settle_tasks,
@@ -193,7 +198,7 @@ class PluginPipeline:
 
         try:
             subscribe_owner = _create_owned_task(
-                self._broker.subscribe(_SUBSCRIBE_NAME),
+                self._broker.subscribe(_SUBSCRIBE_NAME, wants_ingress_monotonic=True),
                 name="analytics-subscription-acquisition",
             )
             queue, subscribe_failure, cancellation = await _observe_owned_task(subscribe_owner)
@@ -668,7 +673,15 @@ class PluginPipeline:
                 if remaining <= 0:
                     break
                 try:
-                    reading = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                    queued = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                    if isinstance(queued, IngressReading):
+                        reading = replace(
+                            queued.reading,
+                            metadata=queued.reading.metadata
+                            | {BROKER_INGRESS_MONOTONIC_METADATA_KEY: queued.ingress_monotonic_s},
+                        )
+                    else:
+                        reading = queued
                     batch.append(reading)
                 except TimeoutError:
                     break
@@ -723,6 +736,7 @@ class PluginPipeline:
                             | {
                                 "source": "analytics",
                                 "plugin_id": plugin_id,
+                                "producer_interval_s": self._batch_interval_s,
                             },
                         )
                         await self._broker.publish(reading)

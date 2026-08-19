@@ -86,6 +86,7 @@ async def test_descriptor_scheduler_publishes_only_writer_receipt_owned_reading(
     assert delivered.raw == 101.0
     assert delivered.metadata == {
         "origin": "driver",
+        "producer_interval_s": 1.0,
         PERSISTENCE_AUTHORITATIVE_METADATA_KEY: True,
     }
 

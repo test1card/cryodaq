@@ -102,6 +102,130 @@ async def test_reading_transport_is_additive_and_internal_marker_is_stripped() -
     }
 
 
+async def test_source_age_follows_declared_producer_cadence_not_channel_spelling(monkeypatch) -> None:
+    publisher, socket = _prime_publisher()
+    declared = Reading(
+        timestamp=datetime(2026, 7, 10, tzinfo=UTC),
+        instrument_id="thermal_calculator",
+        channel="renamed-derived/thermal/R_thermal",
+        value=4.2,
+        unit="K/W",
+        metadata={"producer_interval_s": 1.0},
+    )
+    spelling_only = Reading(
+        timestamp=declared.timestamp,
+        instrument_id="unclassified_source",
+        channel="analytics/looks-derived-but-is-not-declared",
+        value=1.0,
+        unit="1",
+        metadata={},
+    )
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: declared.timestamp.timestamp() + 2.5)
+
+    await publisher._publish_reading(declared)
+    await publisher._publish_reading(spelling_only)
+
+    declared_payload = msgpack.unpackb(socket.frames[0][1], raw=False)
+    spelling_only_payload = msgpack.unpackb(socket.frames[1][1], raw=False)
+    assert declared_payload["meta"]["source_age_s"] == 2.5
+    assert "source_age_s" not in spelling_only_payload["meta"]
+
+
+async def test_raw_driver_reading_gets_cadence_and_transport_age_from_poll_mapping(monkeypatch) -> None:
+    """A raw forwarded driver feed carries the freshness basis before the GUI.
+
+    A VSP63D pressure reading is produced without ``producer_interval_s`` or
+    ``source_age_s``, so the phase widget would mark even its first healthy
+    sample stale. The publisher stamps the instrument's configured poll cadence
+    and derives the transport age so the GUI can judge freshness.
+    """
+    publisher = ZMQPublisher()
+    publisher.configure_instrument_poll_intervals_s({"VSP63D_1": 2.0})
+    fake = _Socket()
+    publisher._socket = fake  # type: ignore[assignment]
+    publisher._running = True
+    publisher._session_id = "a" * 32
+    publisher._sequence = 0
+    publisher._publish_failure_count = 0
+    publisher._send_lock = asyncio.Lock()
+    reading = Reading(
+        timestamp=datetime(2026, 7, 10, tzinfo=UTC),
+        instrument_id="VSP63D_1",
+        channel="VSP63D_1/pressure",
+        value=1.5e-6,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={"status_code": 0},
+    )
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: reading.timestamp.timestamp() + 1.5)
+
+    await publisher._publish_reading(reading)
+
+    payload = msgpack.unpackb(fake.frames[0][1], raw=False)
+    assert payload["meta"]["producer_interval_s"] == 2.0
+    assert payload["meta"]["source_age_s"] == 1.5
+
+
+async def test_raw_driver_reading_gets_code_owned_driver_type_from_poll_mapping(monkeypatch) -> None:
+    """A raw forwarded driver feed carries its code-owned driver type before the GUI.
+
+    The dashboard phase widget binds the pressure slot to the shipped physical
+    gauge by the CODE-OWNED driver type (``thyracont_vsp63d``), never by the
+    config-defined instrument name. The engine declares each instrument's
+    canonical registry type via ``configure_instrument_driver_types_s`` and the
+    publisher stamps ``driver_type`` onto the reading, so a renamed or second
+    gauge of the same driver keeps its feed instead of silently darkening.
+    """
+    publisher = ZMQPublisher()
+    publisher.configure_instrument_driver_types_s({"VSP63D_1": "thyracont_vsp63d"})
+    fake = _Socket()
+    publisher._socket = fake  # type: ignore[assignment]
+    publisher._running = True
+    publisher._session_id = "a" * 32
+    publisher._sequence = 0
+    publisher._publish_failure_count = 0
+    publisher._send_lock = asyncio.Lock()
+    reading = Reading(
+        timestamp=datetime(2026, 7, 10, tzinfo=UTC),
+        instrument_id="VSP63D_1",
+        channel="VSP63D_1/pressure",
+        value=1.5e-6,
+        unit="mbar",
+        status=ChannelStatus.OK,
+        metadata={},
+    )
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: reading.timestamp.timestamp() + 1.5)
+
+    await publisher._publish_reading(reading)
+
+    payload = msgpack.unpackb(fake.frames[0][1], raw=False)
+    assert payload["meta"]["driver_type"] == "thyracont_vsp63d"
+
+
+async def test_analytics_source_age_is_measured_after_waiting_for_the_send_lock(monkeypatch) -> None:
+    publisher, socket = _prime_publisher()
+    reading = Reading(
+        timestamp=datetime(2026, 7, 10, tzinfo=UTC),
+        instrument_id="thermal_calculator",
+        channel="renamed-derived/thermal/R_thermal",
+        value=4.2,
+        unit="K/W",
+        metadata={"producer_interval_s": 1.0},
+    )
+    now = {"value": reading.timestamp.timestamp() + 0.5}
+    monkeypatch.setattr("cryodaq.core.zmq_bridge.time.time", lambda: now["value"])
+
+    await publisher._send_lock.acquire()
+    publish = asyncio.create_task(publisher._publish_reading(reading))
+    await asyncio.sleep(0)
+    now["value"] = reading.timestamp.timestamp() + 4.5
+    publisher._send_lock.release()
+    await publish
+
+    payload = msgpack.unpackb(socket.frames[0][1], raw=False)
+    assert payload["meta"]["source_age_s"] == 4.5
+
+
 async def test_reading_event_and_barrier_share_one_sequence() -> None:
     publisher, socket = _prime_publisher()
     queue: asyncio.Queue[Reading] = asyncio.Queue()

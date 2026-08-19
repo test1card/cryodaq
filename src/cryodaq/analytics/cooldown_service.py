@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -48,6 +49,14 @@ from cryodaq.core.shutdown_settlement import (
 from cryodaq.drivers.base import Reading
 
 logger = logging.getLogger(__name__)
+
+# A bounded horizon for the FIRST learned cadence interval. Until a channel
+# has at least one normal interval, an early outage gap must not certify
+# future freshness: a single multi-minute gap recorded as "normal cadence"
+# would establish a horizon that keeps publishing ETA values from cached
+# inputs long after the sensor has failed again. Mirrors the thermal path's
+# bootstrap bound (plugins/thermal_calculator.py).
+_BOOTSTRAP_FRESHNESS_HORIZON_S = 30.0
 
 
 # ============================================================================
@@ -268,6 +277,29 @@ class CooldownService:
         # Latest T values for detector
         self._last_T_cold: float | None = None
         self._last_T_warm: float | None = None
+        # Source cadence remains keyed by Reading.timestamp for channel
+        # discovery. Freshness uses arrival cadence separately because replay
+        # deliberately decouples those clocks.
+        self._last_required_input_monotonic: dict[str, float | None] = {}
+        self._last_required_input_arrival_monotonic: dict[str, float] = {}
+        self._last_required_input_timestamp: dict[str, float] = {}
+        self._required_input_intervals: dict[str, deque[float]] = {
+            self._channel_cold: deque(maxlen=5),
+            self._channel_warm: deque(maxlen=5),
+        }
+        # The first source interval larger than the bootstrap horizon is not
+        # certified as cadence (a single outage gap must not certify
+        # freshness). It is held here instead; a second source interval
+        # consistent with it certifies a genuinely slow producer cadence that
+        # the bootstrap bound alone could never establish.
+        self._source_cadence_candidate: dict[str, float | None] = {
+            self._channel_cold: None,
+            self._channel_warm: None,
+        }
+        self._required_input_arrival_intervals: dict[str, deque[float]] = {
+            self._channel_cold: deque(maxlen=5),
+            self._channel_warm: deque(maxlen=5),
+        }
 
         # Task 8a: lazily-loaded cooldown_baseline config from plugins.yaml
         # (None = not loaded yet). The fingerprint tap is flag-guarded and
@@ -634,7 +666,104 @@ class CooldownService:
                 # NaN-доктрина: не годное показание (NaN/±inf или статус ошибки)
                 # не попадает в детектор/буфер — staleness всё равно обновлён.
                 if not reading.is_usable():
+                    if reading.channel in (self._channel_cold, self._channel_warm):
+                        self._last_required_input_monotonic[reading.channel] = None
                     continue
+
+                if reading.channel in (self._channel_cold, self._channel_warm):
+                    arrival_monotonic = time.monotonic()
+                    previous_timestamp = self._last_required_input_timestamp.get(reading.channel)
+                    previous_arrival = self._last_required_input_arrival_monotonic.get(reading.channel)
+                    source_interval = reading_ts - previous_timestamp if previous_timestamp is not None else None
+                    arrival_interval = arrival_monotonic - previous_arrival if previous_arrival is not None else None
+                    source_cadence = self._required_input_intervals[reading.channel]
+                    arrival_cadence = self._required_input_arrival_intervals[reading.channel]
+                    source_outage = (
+                        source_interval is not None
+                        and source_interval > 0.0
+                        and bool(source_cadence)
+                        and source_interval > 3.0 * float(np.median(source_cadence))
+                    )
+                    arrival_outage = (
+                        arrival_interval is not None
+                        and arrival_interval > 0.0
+                        and bool(arrival_cadence)
+                        and arrival_interval > 3.0 * float(np.median(arrival_cadence))
+                    )
+                    # A gap that is already an outage in either clock domain
+                    # is not evidence of normal cadence. Keep the resumed
+                    # sample as the new baseline, then accept the next normal
+                    # interval.
+                    #
+                    # With no cadence established yet, outage classification
+                    # has no median to compare against, so bound the first
+                    # learned interval by the bootstrap horizon as well: an
+                    # unclassified startup gap must not certify freshness.
+                    if not source_outage and not arrival_outage:
+                        if source_interval is not None and source_interval > 0.0:
+                            if source_cadence:
+                                if source_interval <= 3.0 * float(np.median(source_cadence)):
+                                    source_cadence.append(source_interval)
+                            elif source_interval <= _BOOTSTRAP_FRESHNESS_HORIZON_S:
+                                source_cadence.append(source_interval)
+                                self._source_cadence_candidate[reading.channel] = None
+                            else:
+                                # The first interval larger than the bootstrap
+                                # horizon could be an early outage gap OR the
+                                # start of a genuinely slow producer cadence
+                                # (e.g. a replayed curve sampled every 10
+                                # minutes). One observation cannot distinguish
+                                # them, so do not certify either; hold it as a
+                                # candidate. A SECOND source interval of the
+                                # same magnitude certifies the cadence: a real
+                                # slow producer repeats its interval, while a
+                                # one-off gap does not. Without this path a
+                                # slow-cadence source could never establish a
+                                # source cadence, collapsing the horizon to the
+                                # burst arrival cadence and withholding every
+                                # prediction from a healthy producer.
+                                candidate = self._source_cadence_candidate[reading.channel]
+                                if (
+                                    candidate is not None
+                                    and source_interval <= 3.0 * candidate
+                                    and candidate <= 3.0 * source_interval
+                                ):
+                                    source_cadence.append(candidate)
+                                    source_cadence.append(source_interval)
+                                    self._source_cadence_candidate[reading.channel] = None
+                                else:
+                                    self._source_cadence_candidate[reading.channel] = source_interval
+                        if arrival_interval is not None and arrival_interval > 0.0:
+                            allowed_arrival_interval = (
+                                3.0 * float(np.median(arrival_cadence))
+                                if arrival_cadence
+                                else _BOOTSTRAP_FRESHNESS_HORIZON_S
+                            )
+                            if arrival_interval <= allowed_arrival_interval:
+                                arrival_cadence.append(arrival_interval)
+                    self._last_required_input_timestamp[reading.channel] = reading_ts
+                    self._last_required_input_arrival_monotonic[reading.channel] = arrival_monotonic
+
+                    # Reading.timestamp is wall-clock/source time; convert its
+                    # observed age into the monotonic domain before storing the
+                    # anchor, so a drained backlog cannot present an old sample
+                    # as newly received.
+                    #
+                    # A source timestamp AHEAD of the wall clock is not evidence
+                    # of staleness. The replay engine re-bases a series onto
+                    # `now` and then plays it faster than real time, so its
+                    # timestamps legitimately run ahead -- measured here at
+                    # -1210s to -11495s on tests/replay_engine. Treating that as
+                    # "clocks incomparable" withheld every prediction for the
+                    # whole run. Clamp at zero: the sample is at least as fresh
+                    # as its arrival. Only a non-finite age is uncomparable, and
+                    # that still fails closed.
+                    source_age_s = time.time() - reading_ts
+                    if math.isfinite(source_age_s):
+                        observed_age_s = max(0.0, source_age_s)
+                        self._last_required_input_monotonic[reading.channel] = arrival_monotonic - observed_age_s
+                    else:
+                        self._last_required_input_monotonic[reading.channel] = None
 
                 if reading.channel == self._channel_cold:
                     self._last_T_cold = reading.value
@@ -675,6 +804,39 @@ class CooldownService:
         except asyncio.CancelledError:
             return
 
+    def _freshness_horizon_s(self, channel: str) -> float | None:
+        """How long a required input may go without a new sample.
+
+        Measured from BOTH clock domains, because replay decouples them in both
+        directions and either one alone is wrong at one end:
+
+        * arrival cadence alone breaks ACCELERATED replay. Measured on
+          ``tests/replay_engine``: a re-based series arrives in a burst, arrival
+          intervals are 0.0002-0.0004 s, the horizon becomes 0.0008 s, and every
+          prediction is withheld 18 ms later while the producer is healthy.
+        * source cadence alone breaks SLOW replay -- the reviewer's finding:
+          two-second source samples arriving every 20 wall seconds set a
+          six-second horizon and withhold from a healthy producer.
+
+        Taking the larger says an input is fresh when it is fresh in EITHER
+        domain. That does not let a stale sample through: the anchor carries the
+        sample's own source age, so a drained backlog is pushed back regardless
+        of how wide this horizon is. Outage gaps are already excluded from both
+        deques, so neither can be inflated by a silence.
+        """
+
+        candidates = [
+            float(np.median(intervals))
+            for intervals in (
+                self._required_input_arrival_intervals[channel],
+                self._required_input_intervals[channel],
+            )
+            if intervals
+        ]
+        if not candidates:
+            return None
+        return 3.0 * max(candidates)
+
     async def _do_predict(self) -> None:
         """Выполнить прогнозирование и опубликовать результат."""
         if self._model is None:
@@ -683,10 +845,31 @@ class CooldownService:
         phase = self._detector.phase
         cooldown_active = phase in (CooldownPhase.COOLING, CooldownPhase.STABILIZING)
 
-        T_cold = self._last_T_cold
-        T_warm = self._last_T_warm
-        if T_cold is None or T_warm is None:
+        required_channels = (self._channel_cold, self._channel_warm)
+        input_snapshot = {
+            self._channel_cold: (
+                self._last_T_cold,
+                self._last_required_input_monotonic.get(self._channel_cold),
+            ),
+            self._channel_warm: (
+                self._last_T_warm,
+                self._last_required_input_monotonic.get(self._channel_warm),
+            ),
+        }
+        freshness_horizons_s = {channel: self._freshness_horizon_s(channel) for channel in required_channels}
+        if any(
+            input_snapshot[channel][0] is None
+            or input_snapshot[channel][1] is None
+            or freshness_horizons_s[channel] is None
+            or time.monotonic() - input_snapshot[channel][1] > freshness_horizons_s[channel]
+            for channel in required_channels
+        ):
+            logger.warning("Cooldown prediction withheld because a required input is stale or its cadence is unknown")
             return
+
+        T_cold = input_snapshot[self._channel_cold][0]
+        T_warm = input_snapshot[self._channel_warm][0]
+        assert T_cold is not None and T_warm is not None
 
         # Compute elapsed time
         # F-ReplayPredictor (v0.56.3): use the most recent reading timestamp
@@ -737,6 +920,16 @@ class CooldownService:
         if not self._executor_admission_open:
             return
 
+        # The executor may outlive the pre-computation freshness horizon.
+        # Recheck the captured value/timestamp pairs before publishing;
+        # fresh readings arriving during compute cannot bless stale inputs.
+        if any(
+            time.monotonic() - input_snapshot[channel][1] > freshness_horizons_s[channel]
+            for channel in required_channels
+        ):
+            logger.warning("Cooldown prediction withheld because a required input is stale")
+            return
+
         # Build metadata
         metadata: dict[str, Any] = {
             "t_remaining_hours": pred.t_remaining_hours,
@@ -748,6 +941,7 @@ class CooldownService:
             "cooldown_start_ts": self._detector.cooldown_start_ts or 0,
             "T_cold": T_cold,
             "T_warm": T_warm,
+            "producer_interval_s": self._predict_interval_s,
         }
         self._last_prediction = metadata  # cache for F30 query agent
         # v0.55.3 — keep the raw dataclass so expected_value() can

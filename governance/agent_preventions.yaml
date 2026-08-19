@@ -6334,6 +6334,29 @@ records:
     red_evidence: legacy_write_batch_guard_stayed_green_while_mutated_write_live_batch_issued_one_transaction_per_reading_2026_08_01_pending_immutable_capture
     green_evidence: pending
 
+  - id: STALE-ANALYTICS-RENDERED-AS-CURRENT-344
+    status: open
+    scope: product_contract
+    authority_source: docs/OPEN_CELLS.md#oc-004
+    applies_to: Every operator-facing surface that renders a cached analytics value whose producer publishes on its own cadence.
+    classification: silent_stale_value
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: PhaseAwareWidget cached the cooldown ETA, R_thermal and pressure and revoked them ONLY when the experiment changed, so a producer that died inside a live experiment left its last number rendering as current for as long as the operator window stayed open. During a cooldown that is an operator reading an ETA or a thermal resistance that stopped being true hours earlier, with nothing on screen to say so. A stale number is indistinguishable from a fresh one, which is the same shape as the vanished readout behind revert 0bea0449 - the screen states something false rather than stating nothing.
+    invariant: 'A cached analytics value carries the monotonic time it arrived, and one that has gone unrefreshed past the staleness horizon is rendered MARKED rather than bare. WHAT THIS RECORD DOES NOT CLAIM: the value is MARKED, not WITHHELD, so an operator who reads a marked-stale ETA may still act on the number; withholding was considered and not chosen, and that choice is the one worth arguing in review. It also does not claim a bound between a producer dying and the mark appearing beyond the horizon itself, and the horizon is generous by design because analytics publish far more slowly than readings.'
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/gui/dashboard/test_phase_context_revocation.py::test_a_fresh_analytics_value_is_not_marked
+        ci_partition: gui
+      - node: tests/gui/dashboard/test_phase_context_revocation.py::test_a_value_whose_producer_died_is_marked_while_the_experiment_stays_active
+        ci_partition: gui
+      - node: tests/gui/dashboard/test_phase_context_revocation.py::test_the_mark_is_per_value_not_per_widget
+        ci_partition: gui
+    red_evidence: reverting_phase_aware_widget_to_the_origin_master_blob_read_as_raw_bytes_turns_2_of_the_3_nodes_red_the_dead_producer_node_and_the_per_value_node_and_both_fail_on_the_OPERATOR_VISIBLE_rendered_label_text_rather_than_on_a_private_cache_with_the_fresh_value_node_correctly_staying_green_because_a_fresh_value_is_unmarked_either_way_and_production_restored_byte_identical_and_verified_by_comparison_2026_08_09_pending_immutable_capture
+    green_evidence: pending
   - id: LAB-PROFILE-AUTHORITY-ESCAPE-001
     status: open
     scope: product_contract

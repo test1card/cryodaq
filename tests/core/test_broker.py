@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import pytest
 
+from cryodaq.analytics.base_plugin import BROKER_INGRESS_MONOTONIC_METADATA_KEY
 from cryodaq.core import broker as broker_module
 from cryodaq.core.broker import (
     PERSISTENCE_AUTHORITATIVE_METADATA_KEY,
     DataBroker,
+    IngressReading,
     OverflowPolicy,
     RequiredPublication,
 )
@@ -39,6 +42,31 @@ async def test_subscribe_creates_queue() -> None:
 # ---------------------------------------------------------------------------
 # 2. publish() delivers the reading to a subscriber's queue
 # ---------------------------------------------------------------------------
+
+
+async def test_publish_stamps_a_broker_ingress_monotonic_reading() -> None:
+    """The broker stamps ingress time, so a slow consumer cannot pass off queue age as freshness.
+
+    Without this stamp a consumer computes staleness from the moment it DEQUEUES, so a backlog
+    resets the freshness anchor and a dead feed keeps rendering as current.  Consumers fall back
+    to dequeue time when the key is absent, which is the pre-fix behaviour, so nothing downstream
+    fails if the broker stops stamping -- this test is the only thing that does.
+    """
+    broker = DataBroker()
+    q = await broker.subscribe("reader", maxsize=10, wants_ingress_monotonic=True)
+
+    before = time.monotonic()
+    r = _reading("T1", 4.2)
+    await broker.publish(r)
+    after = time.monotonic()
+
+    received = q.get_nowait()
+    assert isinstance(received, IngressReading)
+    stamped = received.ingress_monotonic_s
+    assert before <= stamped <= after
+
+    # the broker deep-copies, so stamping must not reach back into the publisher's own dict
+    assert BROKER_INGRESS_MONOTONIC_METADATA_KEY not in r.metadata
 
 
 async def test_publish_delivers_to_subscriber() -> None:

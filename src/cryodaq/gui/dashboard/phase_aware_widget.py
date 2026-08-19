@@ -9,6 +9,8 @@ MilestoneList) preserved in phase_content/ for B.10 Analytics overlay.
 from __future__ import annotations
 
 import logging
+import math
+import time
 from datetime import UTC, datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -30,9 +32,41 @@ from cryodaq.gui.dashboard.phase_stepper import PhaseStepper
 
 logger = logging.getLogger(__name__)
 
+_STALE_INTERVAL_MULTIPLIER = 3.0
+
+# Each context slot is bound to a DECLARED producer identity, never to
+# whichever producer happens to arrive first. The analytics slots name the
+# shipped producer's exact (instrument_id, channel). The pressure slot binds
+# the shipped physical gauge feed by a CODE-OWNED identity -- the driver type
+# ``thyracont_vsp63d`` stamped onto the reading by the engine publisher -- not
+# by a config-defined instrument name: a renamed or second gauge of the same
+# driver keeps its feed (dashboard_view routes the same way, by the ``/pressure``
+# channel suffix), while a foreign ``/pressure`` channel of a different driver is
+# refused. First-arrival selection is how a producer nobody chose ends up owning
+# a phase readout, which is the display layer's half of OC-004, so a slot with
+# no declared producer accepts nothing.
+_PRESSURE_DRIVER_TYPE = "thyracont_vsp63d"
+
+_SLOT_DECLARED_PRODUCER: dict[str, tuple[str, str] | None] = {
+    "eta": ("cooldown_predictor", "analytics/cooldown_predictor/cooldown_eta"),
+    "r_thermal": ("thermal_calculator", "analytics/thermal_calculator/R_thermal"),
+    "pressure": (_PRESSURE_DRIVER_TYPE, "*pressure"),
+}
+
 _MAX_HEIGHT_PX = 55
 _BUTTON_HEIGHT_PX = 28
 _DURATION_UPDATE_MS = 1000
+
+
+def _metadata_duration_s(reading, key: str, *, positive: bool = False) -> float | None:
+    metadata = getattr(reading, "metadata", None)
+    value = metadata.get(key) if type(metadata) is dict else None
+    if type(value) not in (int, float) or not math.isfinite(value):
+        return None
+    duration = float(value)
+    if duration < 0 or (positive and duration == 0):
+        return None
+    return duration
 
 
 class PhaseAwareWidget(QWidget):
@@ -61,6 +95,10 @@ class PhaseAwareWidget(QWidget):
         self._cached_r_thermal: float | None = None
         self._cached_pressure: float | None = None
         self._last_context_text: str = ""
+        self._cached_at: dict[str, float | None] = {}
+        self._stale_after_s: dict[str, float | None] = {}
+        self._cached_producer: dict[str, tuple[str, str]] = {}
+        self._reported_pressure_refusals: set[tuple[str, str]] = set()
 
         self._build_ui()
         self._apply_inactive_state()
@@ -68,6 +106,7 @@ class PhaseAwareWidget(QWidget):
         self._duration_timer = QTimer(self)
         self._duration_timer.setInterval(_DURATION_UPDATE_MS)
         self._duration_timer.timeout.connect(self._update_duration_display)
+        self._duration_timer.timeout.connect(self._refresh_context_label)
         self._duration_timer.start()
 
     # ------------------------------------------------------------------
@@ -223,15 +262,27 @@ class PhaseAwareWidget(QWidget):
 
             if self._current_phase == "cooldown":
                 if self._cached_eta_s is not None:
-                    parts.append(self._styled_metric("ETA", _format_duration_ru(self._cached_eta_s)))
+                    parts.append(
+                        self._styled_metric("ETA", self._mark_if_stale("eta", _format_duration_ru(self._cached_eta_s)))
+                    )
                 if self._cached_r_thermal is not None:
-                    parts.append(self._styled_metric("R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"))
+                    parts.append(
+                        self._styled_metric(
+                            "R", self._mark_if_stale("r_thermal", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442")
+                        )
+                    )
             elif self._current_phase == "vacuum":
                 if self._cached_pressure is not None:
-                    parts.append(self._styled_metric("P", f"{self._cached_pressure:.2e} mbar"))
+                    parts.append(
+                        self._styled_metric("P", self._mark_if_stale("pressure", f"{self._cached_pressure:.2e} mbar"))
+                    )
             elif self._current_phase == "measurement":
                 if self._cached_r_thermal is not None:
-                    parts.append(self._styled_metric("R", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442"))
+                    parts.append(
+                        self._styled_metric(
+                            "R", self._mark_if_stale("r_thermal", f"{self._cached_r_thermal:.2f} \u041a/\u0412\u0442")
+                        )
+                    )
             elif self._current_phase == "teardown":
                 if self._completed_phases_count > 0:
                     parts.append(
@@ -349,6 +400,10 @@ class PhaseAwareWidget(QWidget):
                 self._cached_eta_s = None
                 self._cached_r_thermal = None
                 self._cached_pressure = None
+                self._cached_at.clear()
+                self._stale_after_s.clear()
+                self._cached_producer.clear()
+                self._reported_pressure_refusals.clear()
             self._active_experiment_id = new_experiment_id
             self._current_phase = new_phase
             self._phase_started_at = new_started
@@ -363,30 +418,142 @@ class PhaseAwareWidget(QWidget):
             logger.warning("PhaseAwareWidget on_status_update failed", exc_info=True)
 
     def on_reading(self, reading) -> None:
-        """Route analytics readings to cached values for inline context."""
+        """Route analytics readings to cached values for inline context.
+
+        An unusable update is EVIDENCE THAT THE FEED IS BROKEN, not an absence of
+        news. This used to return early before the channel test, leaving the
+        previous freshness stamp intact, so the last value kept rendering as
+        CURRENT until the cadence horizon expired -- up to another 90 s for the
+        default ETA -- after the backend had already declared the feed unusable.
+
+        The channel tests now run FIRST and the usable test second, so an
+        unusable update reaches the metric it belongs to and invalidates it.
+        The last legible value is retained: marked, not hidden, which is the
+        rule the stale badge exists to enforce.
+        """
         channel = reading.channel
         value = reading.value
-        if not isinstance(value, (int, float)):
-            return
+        usable = reading.is_usable() and isinstance(value, (int, float)) and math.isfinite(value)
         if channel.endswith("/cooldown_eta"):
-            self._cached_eta_s = value * 3600 if value > 0 else None
-            self._refresh_context_label()
+            self._apply_context_reading("eta", reading, usable)
         elif channel.endswith("/R_thermal"):
-            self._cached_r_thermal = value
-            self._refresh_context_label()
+            self._apply_context_reading("r_thermal", reading, usable)
         elif channel.endswith("/pressure"):
+            self._apply_context_reading("pressure", reading, usable)
+
+    def _apply_context_reading(self, key: str, reading, usable: bool) -> None:
+        """Cache a usable value, or invalidate freshness when it is not."""
+        producer = (reading.instrument_id, reading.channel)
+        if not usable:
+            if self._cached_producer.get(key) == producer:
+                self._cached_at[key] = None
+                self._refresh_context_label()
+            return
+        # A slot binds to its DECLARED producer before any reading is accepted.
+        # First-arrival binding was a startup race: a site analytics plugin that
+        # published a usable matching suffix before the shipped producer took
+        # permanent ownership and made every later shipped value invisible.
+        bound = self._cached_producer.get(key)
+        if bound is not None and bound != producer:
+            self._report_slot_refusal(key, reading, producer)
+            return
+        if bound is None and not self._reading_matches_declared_producer(key, reading, producer):
+            self._report_slot_refusal(key, reading, producer)
+            return
+        value = reading.value
+        if key == "eta":
+            self._cached_eta_s = value * 3600 if value > 0 else None
+        elif key == "r_thermal":
+            self._cached_r_thermal = value
+        else:
             self._cached_pressure = value
-            self._refresh_context_label()
+        self._cached_producer[key] = producer
+        self._reported_pressure_refusals.discard(producer)
+        self._remember_freshness(key, reading)
+        self._refresh_context_label()
+
+    def _report_slot_refusal(self, key: str, reading, producer: tuple[str, str]) -> None:
+        """Say once, at operator level, when a slot refuses a matching-suffix feed.
+
+        A renamed or second gauge (or any foreign feed) that a slot refuses must
+        not drop silently: the raw reading is still buffered and persisted, but
+        the phase readout going dark with no log line is the failure the
+        laboratory cannot diagnose. Report each refusing producer once until the
+        slot accepts it, so a 2 Hz foreign feed does not flood the log.
+        """
+        if key != "pressure":
+            return
+        if producer in self._reported_pressure_refusals:
+            return
+        self._reported_pressure_refusals.add(producer)
+        logger.warning(
+            "Pressure slot refused %s/%s: not a %s gauge feed",
+            producer[0],
+            producer[1],
+            _PRESSURE_DRIVER_TYPE,
+        )
+
+    @staticmethod
+    def _reading_matches_declared_producer(key: str, reading, producer: tuple[str, str]) -> bool:
+        """Return whether an unbound slot may accept ``reading``.
+
+        Analytics slots accept only their declared shipped producer, named in
+        ``_SLOT_DECLARED_PRODUCER``. The pressure slot accepts the shipped
+        physical gauge feed by its CODE-OWNED driver type, stamped onto the
+        reading by the engine publisher (``driver_type`` metadata) and never by
+        a config-defined instrument name -- so a renamed or second VSP63D gauge
+        keeps its feed, and a foreign ``/pressure`` channel of a different
+        driver (or an analytics value) is refused. A slot with no declared
+        producer accepts nothing: first-arrival acceptance is precisely the
+        implicit producer pick this widget must not make.
+        """
+        if key == "pressure":
+            metadata = getattr(reading, "metadata", None)
+            return type(metadata) is dict and metadata.get("driver_type") == _PRESSURE_DRIVER_TYPE
+        declared = _SLOT_DECLARED_PRODUCER.get(key)
+        if declared is not None:
+            return producer == declared
+        return False
 
     # ------------------------------------------------------------------
     # State application
     # ------------------------------------------------------------------
+
+    def _remember_freshness(self, key: str, reading) -> None:
+        source_age_s = _metadata_duration_s(reading, "source_age_s")
+        interval_s = _metadata_duration_s(reading, "producer_interval_s", positive=True)
+        stale_after_s = None if interval_s is None else interval_s * _STALE_INTERVAL_MULTIPLIER
+        self._cached_at[key] = None if source_age_s is None else time.monotonic() - source_age_s
+        self._stale_after_s[key] = stale_after_s if stale_after_s is not None and math.isfinite(stale_after_s) else None
+
+    def _mark_if_stale(self, key: str, rendered: str) -> str:
+        """Mark a cached analytics value whose producer has gone quiet.
+
+        MARKED, NOT HIDDEN. A metric that silently disappears is no better than
+        one that silently lies -- a vanished readout is what caused revert
+        `0bea0449`, and this project's rule is that an unavailable reading
+        renders visibly unavailable.
+        """
+
+        stamped = self._cached_at.get(key)
+        stale_after_s = self._stale_after_s.get(key)
+        if stamped is not None and stale_after_s is not None and time.monotonic() - stamped <= stale_after_s:
+            return rendered
+        return (
+            f'<span style="border:1px solid {theme.STATUS_STALE}; '
+            f'border-radius:{theme.RADIUS_SM}px; padding:0 {theme.SPACE_1}px;">'
+            f"{rendered} \u00b7 ◇ \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u043e</span>"
+        )
 
     def _apply_inactive_state(self) -> None:
         self._has_active_experiment = False
         self._cached_eta_s = None
         self._cached_r_thermal = None
         self._cached_pressure = None
+        self._cached_at.clear()
+        self._stale_after_s.clear()
+        self._cached_producer.clear()
+        self._reported_pressure_refusals.clear()
         self._stepper.setVisible(False)
         self._duration_label.setText("")
         self._controls.setVisible(False)

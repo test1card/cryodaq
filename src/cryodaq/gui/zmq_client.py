@@ -53,6 +53,7 @@ from cryodaq.core.zmq_subprocess import (
     DEFAULT_CMD_ADDR,
     DEFAULT_PUB_ADDR,
     DEFAULT_SAFE_CMD_ADDR,
+    READING_RECEIVED_MONOTONIC_KEY,
     zmq_bridge_main,
 )
 from cryodaq.drivers.base import ChannelStatus, Reading
@@ -253,6 +254,33 @@ def _increment_shared_counter(counter: Any) -> int | None:
         lock.release()
 
 
+def _metadata_with_transport_age(d: dict[str, Any]) -> object:
+    metadata = d.get("metadata", {})
+    if type(metadata) is not dict or "producer_interval_s" not in metadata:
+        return metadata
+
+    public = dict(metadata)
+    source_age_s = public.get("source_age_s")
+    received_s = d.get(READING_RECEIVED_MONOTONIC_KEY)
+    if type(source_age_s) not in (int, float) or type(received_s) not in (int, float):
+        public.pop("source_age_s", None)
+        return public
+
+    queue_age_s = time.monotonic() - float(received_s)
+    total_age_s = float(source_age_s) + queue_age_s
+    if (
+        not math.isfinite(float(source_age_s))
+        or float(source_age_s) < 0
+        or not math.isfinite(total_age_s)
+        or total_age_s < 0
+        or (queue_age_s is not None and (not math.isfinite(queue_age_s) or queue_age_s < 0))
+    ):
+        public.pop("source_age_s", None)
+    else:
+        public["source_age_s"] = total_age_s
+    return public
+
+
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
     """Reconstruct a Reading and preserve trusted subprocess ingress age."""
 
@@ -268,7 +296,7 @@ def _reading_from_dict(d: dict[str, Any]) -> Reading:
         unit=d["unit"],
         status=ChannelStatus(d["status"]),
         raw=d.get("raw"),
-        metadata=metadata,
+        metadata=_metadata_with_transport_age({**d, "metadata": metadata}),
     )
 
 

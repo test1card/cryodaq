@@ -159,6 +159,75 @@ def _is_command_blocked(cmd: str) -> bool:
     return False
 
 
+def _configured_instrument_poll_intervals_s() -> dict[str, float]:
+    """Each configured instrument's poll cadence, for replay publishing.
+
+    The replay publisher stamps ``producer_interval_s`` on a raw driver feed
+    that does not already carry its own declaration, exactly as the live engine
+    does (engine.py configures ``configure_instrument_poll_intervals_s`` from
+    the same instruments config). Replay reads the local override first, then
+    the base file, and validates entries without constructing any driver. A
+    missing or invalid config yields an empty mapping rather than blocking
+    replay: the SQLite replay sources already declare cadence from the recorded
+    data, so this layer only covers feeds that carry no declaration of their
+    own.
+    """
+    from cryodaq.drivers.registry import validate_instrument_entries
+
+    config_dir = get_config_dir()
+    path = config_dir / "instruments.local.yaml"
+    if not path.exists():
+        path = config_dir / "instruments.yaml"
+    try:
+        with path.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+        entries = validate_instrument_entries(raw.get("instruments", []) if isinstance(raw, dict) else [])
+    except Exception as exc:
+        logger.warning(
+            "replay instrument poll intervals unavailable (%s); replay sources keep declaring recorded cadence",
+            type(exc).__name__,
+        )
+        return {}
+    intervals: dict[str, float] = {}
+    for config in entries:
+        try:
+            interval_s = float(config.values["poll_interval_s"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(interval_s) and interval_s > 0.0:
+            intervals[config.name] = interval_s
+    return intervals
+
+
+def _configured_instrument_driver_types_s() -> dict[str, str]:
+    """Each configured instrument's code-owned driver type, for replay publishing.
+
+    The replay publisher stamps ``driver_type`` on a raw driver feed exactly as
+    the live engine does (engine.py configures ``configure_instrument_driver_types_s``
+    from the same instruments config). Replay reads the local override first,
+    then the base file, and validates entries without constructing any driver. A
+    missing or invalid config yields an empty mapping rather than blocking
+    replay.
+    """
+    from cryodaq.drivers.registry import validate_instrument_entries
+
+    config_dir = get_config_dir()
+    path = config_dir / "instruments.local.yaml"
+    if not path.exists():
+        path = config_dir / "instruments.yaml"
+    try:
+        with path.open(encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+        entries = validate_instrument_entries(raw.get("instruments", []) if isinstance(raw, dict) else [])
+    except Exception as exc:
+        logger.warning(
+            "replay instrument driver types unavailable (%s); replay feeds carry no code-owned driver identity",
+            type(exc).__name__,
+        )
+        return {}
+    return {config.name: config.spec.type_name for config in entries}
+
+
 class ReplayEngine:
     """Minimal engine replacement: PUB readings, REP commands (read-only).
 
@@ -286,6 +355,8 @@ class ReplayEngine:
                 applied_cold_stage_channel=self._cold_channel,
             )
             self._pub = publisher
+            publisher.configure_instrument_poll_intervals_s(_configured_instrument_poll_intervals_s())
+            publisher.configure_instrument_driver_types_s(_configured_instrument_driver_types_s())
             await publisher.start(self._pub_queue)
             logger.info("Replay transport owner started; owner=publisher")
 

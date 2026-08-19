@@ -15,6 +15,14 @@ from typing import Any
 
 from cryodaq.drivers.base import Reading
 
+# Metadata key carrying the broker's monotonic ingress time for one reading.
+# The broker itself never writes it: the plugin pipeline stamps it onto the
+# copy it hands to plugins, so a plugin can tell the age of the DATA apart
+# from the moment it happened to be processed. Defined here because it is a
+# contract between the pipeline and every plugin, and plugins import only
+# this module and cryodaq.drivers.base — never cryodaq.core.
+BROKER_INGRESS_MONOTONIC_METADATA_KEY = "_broker_ingress_monotonic_s"
+
 
 @dataclass(frozen=True, slots=True)
 class DerivedMetric:
