@@ -493,10 +493,22 @@ asyncio.run(probe())
     #   consumer sees ... pattern='.*' source=safety.yaml critical_channels
     # Deriving the list from the roster keeps the original intent -- every channel is
     # critical -- and cannot drift from the descriptors the same call just wrote.
+    # A declared identity must ALSO be classified safety-critical by its own descriptor:
+    # the check requires `safety_class is SAFETY_CRITICAL_INPUT` and a role that is not
+    # SOURCE_READBACK. Every descriptor in this fixture is observational, so the honest
+    # declaration is the empty one, and it is DERIVED rather than assumed: if a
+    # safety-critical descriptor is ever added to the passive instrument, it is declared
+    # automatically and the fixture cannot quietly stop monitoring it.
+    critical_channels = sorted(
+        item["channel_id"]
+        for item in descriptor_manifest["descriptors"]
+        if item.get("safety_class") == "safety_critical_input"
+        and item.get("role") != "source_readback"
+    )
     (config_dir / "safety.yaml").write_text(
         yaml.safe_dump(
             {
-                "critical_channels": sorted(descriptor_ids),
+                "critical_channels": critical_channels,
                 "require_keithley_for_run": False,
                 "keithley_channels": [],
             },
