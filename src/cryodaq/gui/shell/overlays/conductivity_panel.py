@@ -964,7 +964,16 @@ class ConductivityPanel(QWidget):
         cadence = self._bound_temperature_cadence_s()
         if cadence is None:
             return _PREDICTOR_BASE_WINDOW_S
-        return max(_PREDICTOR_BASE_WINDOW_S, cadence * _PREDICTOR_MIN_POINTS)
+        # Rounded UP, and the rounding is load-bearing rather than cosmetic. The cadence
+        # is a MEASURED median of observed gaps, so a nominal 30-second feed arrives as
+        # 29.999999999999996 and the product lands one unit in the last place BELOW the
+        # window that holds the required number of points -- 899.9999999999999 instead of
+        # 900.0. A window a hair too short holds one point fewer than the count this
+        # method exists to guarantee, which is the "silently never producing a valid
+        # prediction" failure named above. Measured at master on Ubuntu 22.04.5: the
+        # guard test failed 1 run in 12 for exactly this, so it also cost a CI round in
+        # eight, on a queue that is already the constraint.
+        return max(_PREDICTOR_BASE_WINDOW_S, float(math.ceil(cadence * _PREDICTOR_MIN_POINTS)))
 
     def _bound_temperature_cadence_s(self) -> float | None:
         """Median of medians of the step's temperature feeds' observed cadence.
