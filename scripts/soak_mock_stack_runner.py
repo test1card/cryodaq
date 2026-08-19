@@ -383,11 +383,15 @@ def _materialize_isolated_mock_config(
         if not source.is_dir():
             raise _RunnerFoundationError(f"required tracked soak config directory is unavailable: {name}")
         target = config_dir / name
-        target.mkdir(parents=True, exist_ok=True)
+        target.mkdir(mode=0o700)
         copied = 0
         for item in sorted(source.iterdir()):
             if item.is_file():
-                (target / item.name).write_bytes(item.read_bytes())
+                copy = target / item.name
+                copy.write_bytes(item.read_bytes())
+                # The caller's chmod sweep only reaches the top level, and the seal
+                # demands 0o600 on every sealed file.
+                copy.chmod(0o600)
                 copied += 1
         if copied == 0:
             raise _RunnerFoundationError(f"tracked soak config directory is empty: {name}")
@@ -591,7 +595,7 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
             or stat.S_IMODE(directory_opened.st_mode) != 0o700
         ):
             raise _RunnerFoundationError("passive source fixture directory identity is unsafe")
-        expected_names = expected_files | {"experiment_templates"}
+        expected_names = expected_files | {"experiment_templates"} | set(_ISOLATED_TRACKED_CONFIG_DIRS)
         if set(os.listdir(directory_fd)) != expected_names:
             raise _RunnerFoundationError("passive source fixture topology is not exact")
 
@@ -614,10 +618,11 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
 
         entries: list[dict[str, object]] = [{"path": "experiment_templates", "kind": "directory"}]
         nofollow = getattr(os, "O_NOFOLLOW", 0)
-        for name in sorted(expected_files):
-            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+
+        def seal_file(name: str, parent_fd: int, label: str) -> None:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             try:
-                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent_fd)
             except OSError as exc:
                 raise _RunnerFoundationError("passive source fixture file identity is unsafe") from exc
             try:
@@ -641,18 +646,49 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
                     raise _RunnerFoundationError("passive source fixture changed during sealing")
             finally:
                 os.close(fd)
-            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if identity(after) != identity(opened):
                 raise _RunnerFoundationError("passive source fixture changed during sealing")
-            identities.append((name, *identity(opened)))
+            identities.append((label, *identity(opened)))
             entries.append(
                 {
-                    "path": name,
+                    "path": label,
                     "kind": "file",
                     "bytes": content_bytes,
                     "sha256": f"sha256:{content_sha256.hexdigest()}",
                 }
             )
+
+        for name in sorted(expected_files):
+            seal_file(name, directory_fd, name)
+
+        # The theme packs are a POPULATED tracked directory, unlike the empty template
+        # directory above. They are sealed exactly as the files are -- identity, no
+        # links, exact mode, content hashed -- because a directory the launcher must
+        # read at import is the last place an unsealed byte belongs.
+        for tracked in sorted(_ISOLATED_TRACKED_CONFIG_DIRS):
+            sub_before = os.stat(tracked, dir_fd=directory_fd, follow_symlinks=False)
+            sub_fd = os.open(tracked, flags, dir_fd=directory_fd)
+            try:
+                sub_opened = os.fstat(sub_fd)
+                if (
+                    not stat.S_ISDIR(sub_opened.st_mode)
+                    or not os.path.samestat(sub_before, sub_opened)
+                    or sub_opened.st_uid != os.getuid()
+                    or stat.S_IMODE(sub_opened.st_mode) != 0o700
+                ):
+                    raise _RunnerFoundationError("passive source fixture directory identity is unsafe")
+                identities.append((tracked, *identity(sub_opened)))
+                entries.append({"path": tracked, "kind": "directory"})
+                sub_names = sorted(os.listdir(sub_fd))
+                if not sub_names:
+                    raise _RunnerFoundationError("passive source fixture tracked directory is empty")
+                for sub_name in sub_names:
+                    seal_file(sub_name, sub_fd, f"{tracked}/{sub_name}")
+                if sorted(os.listdir(sub_fd)) != sub_names:
+                    raise _RunnerFoundationError("passive source fixture topology changed during sealing")
+            finally:
+                os.close(sub_fd)
         if set(os.listdir(directory_fd)) != expected_names:
             raise _RunnerFoundationError("passive source fixture topology changed during sealing")
         if identity(os.fstat(directory_fd)) != identity(directory_opened):
