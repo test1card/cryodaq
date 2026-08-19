@@ -417,6 +417,53 @@ class _LogEvidence:
         self.logs.append((name, text))
 
 
+def test_a_dead_engine_can_say_why_it_died(tmp_path) -> None:
+    """The run must publish the engine's own stderr, not only the launcher's log.
+
+    Measured 2026-08-19 on Ubuntu 22.04.5: the launcher reached engine construction and
+    reported ``Launcher construction failed; phase=engine exception=RuntimeError``, which
+    is raised when the engine child exits before its readiness receipt. Its traceback went
+    to a rotating log under the writable state root -- the runner's own temporary
+    directory -- and was deleted with it, so the six-file evidence bundle reported a
+    CONDITION without its SUBJECT.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "engine.stderr.log").write_text("ERROR engine refused to bind\n", encoding="utf-8")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr(evidence, tmp_path)
+
+    assert [name for name, _text in evidence.logs] == ["log-engine-stderr.txt"]
+    assert "engine refused to bind" in evidence.logs[0][1]
+
+
+def test_an_absent_engine_log_is_stated_rather_than_omitted(tmp_path) -> None:
+    """A missing artifact is indistinguishable from a publisher that did nothing."""
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr(evidence, tmp_path)
+
+    assert [name for name, _text in evidence.logs] == ["log-engine-stderr.txt"]
+    assert "no engine stderr log" in evidence.logs[0][1]
+
+
+def test_a_bounded_engine_log_keeps_its_END(tmp_path, monkeypatch) -> None:
+    """A traceback's cause is written LAST, so the bound must not choose the wrong half."""
+    monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", 256)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "engine.stderr.log").write_text("HEAD-MARKER" + ("m" * 4096) + "TAIL-MARKER\n", encoding="utf-8")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr(evidence, tmp_path)
+
+    text = evidence.logs[0][1]
+    assert "TAIL-MARKER" in text, "the end of the stream is where the cause is written"
+    assert "HEAD-MARKER" not in text
+    assert len(text.encode("utf-8")) <= 256
+
+
 @pytest.mark.skipif(os.name != "posix", reason="launcher log capture is POSIX-only")
 def test_launcher_log_capture_is_independent_of_path_rebind(tmp_path) -> None:
     path = tmp_path / "launcher.log"
