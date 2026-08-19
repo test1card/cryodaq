@@ -3716,7 +3716,23 @@ class _PosixSoakRunner:
                         if roles is None:
                             time.sleep(0.1)
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
-                        raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
+                        # Name WHICH of the four preconditions is missing. The bare
+                        # sentence sends the next turn to read the whole startup path,
+                        # and it has: the run gets further after every fix and stops here
+                        # again, each time for a different reason the message did not say.
+                        missing = ", ".join(
+                            name
+                            for name, value in (
+                                ("roles", roles),
+                                ("handshake", handshake),
+                                ("bridge", bridge),
+                                ("bridge_guard", bridge_guard),
+                            )
+                            if value is None
+                        )
+                        raise _RunnerFoundationError(
+                            f"source stack did not reach the exact four-role startup cut; still missing: {missing}"
+                        )
 
                     _validate_short_soak_runtime_schedule(report_interval_s, time.time())
 
