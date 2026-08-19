@@ -1078,13 +1078,18 @@ def _validate_periodic_delivery_payload(
 # because the launcher resolves a theme at import, so a fixture without the packs cannot
 # start the program at all; see the runner's own note beside its tracked-directory list.
 _EXPECTED_FIXTURE_DIRECTORIES = {"experiment_templates", "themes"}
+# Only ONE of those two may hold files. `experiment_templates` is sealed EMPTY by the
+# runner, so a member of it in an accepted manifest means the manifest and the seal
+# disagree. Treating both directories alike made the theme-presence check satisfiable by
+# a stray template member -- a guard that guards nothing.
+_POPULATED_FIXTURE_DIRECTORY = "themes"
 
 
 def _is_tracked_directory_member(path: str) -> bool:
-    """True for a file INSIDE one of the sealed tracked directories, one level deep."""
+    """True for a file one level inside the POPULATED sealed directory."""
 
     head, separator, tail = path.partition("/")
-    return bool(separator) and head in _EXPECTED_FIXTURE_DIRECTORIES and bool(tail) and "/" not in tail
+    return bool(separator) and head == _POPULATED_FIXTURE_DIRECTORY and bool(tail) and "/" not in tail
 
 
 def _validate_source_fixture(payload: object) -> list[str]:
@@ -1151,6 +1156,7 @@ def _validate_source_fixture(payload: object) -> list[str]:
     theme_members = {path for path in paths if _is_tracked_directory_member(path)}
     if (
         paths != sorted(paths)
+        or len(paths) != len(set(paths))
         or set(paths) != expected_files | _EXPECTED_FIXTURE_DIRECTORIES | theme_members
         or not theme_members
         or payload.get("schema") != "cryodaq-soak-source-fixture/v1"

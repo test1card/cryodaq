@@ -272,6 +272,103 @@ def test_a_real_seal_payload_is_accepted_by_the_acceptance_validator(tmp_path) -
     assert any(path.startswith("themes/") for path in paths), "and the packs inside it"
 
 
+def test_a_stray_template_member_cannot_stand_in_for_the_theme_packs() -> None:
+    """The theme-presence check must be satisfied by THEMES, not by any member at all.
+
+    The first version treated both sealed directories alike, so one
+    `experiment_templates/anything` entry satisfied it while the payload carried no
+    theme pack at all -- a guard that guarded nothing, and a test that passed only
+    because its hand-built payload happened to have no members of either kind. The
+    runner seals `experiment_templates` EMPTY, so a member of it in an accepted manifest
+    means the manifest and the seal disagree.
+    """
+    from scripts import soak_mock_stack as soak
+
+    payload = _fixture_payload_with(["experiment_templates", "experiment_templates/stray", "themes"])
+
+    assert soak._validate_source_fixture(payload) != []
+
+
+def test_duplicate_entries_are_refused() -> None:
+    """Dropping the exact-count check must not make a duplicated entry acceptable.
+
+    Adjacent duplicates satisfy the sortedness check, set equality collapses them, and
+    the tree digest is recomputed from the payload's own entries, so it stays
+    self-consistent. Only an explicit uniqueness check catches it.
+    """
+    from scripts import soak_mock_stack as soak
+
+    payload = _fixture_payload_with(
+        ["experiment_templates", "themes", "themes/default_cool.yaml", "themes/default_cool.yaml"]
+    )
+
+    assert soak._validate_source_fixture(payload) != []
+
+
+def _fixture_payload_with(extra_paths: list[str]) -> dict:
+    """A structurally complete payload whose entry PATHS are the ones under test."""
+    import hashlib
+    import json
+
+    files = sorted(
+        {
+            "agent.yaml",
+            "alarms_v3.yaml",
+            "channel_descriptors.yaml",
+            "channels.yaml",
+            "cooldown.yaml",
+            "housekeeping.yaml",
+            "instruments.yaml",
+            "interlocks.yaml",
+            "notifications.yaml",
+            "physical_alarms.yaml",
+            "plugins.yaml",
+            "safety.yaml",
+        }
+    )
+    entries: list[dict] = []
+    for path in sorted(files + extra_paths):
+        if path in {"experiment_templates", "themes"}:
+            entries.append({"path": path, "kind": "directory"})
+        else:
+            entries.append({"path": path, "kind": "file", "bytes": 1, "sha256": "sha256:" + "0" * 64})
+    canonical = sorted(entries, key=lambda item: item["path"])
+    tree = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return {
+        "schema": "cryodaq-soak-source-fixture/v1",
+        "instrument_id": "LS218_1",
+        "authority": "passive_measurement",
+        "mock": True,
+        "descriptor_count": 16,
+        "binding_count": 16,
+        "expected_readings_per_sample": 8,
+        "entries": entries,
+        "tree_sha256": tree,
+    }
+
+
+def test_a_non_file_in_the_tracked_directory_is_refused_by_name(tmp_path) -> None:
+    """A skipped entry makes the isolated root diverge from the tracked tree in silence.
+
+    The seal seals what the child sees and never compares back to the source, so a
+    dropped subdirectory would surface later as a launcher failure with no named cause.
+    """
+    source = tmp_path / "src"
+    (source / "config" / "themes" / "nested").mkdir(parents=True)
+    for name in runner._ISOLATED_TRACKED_CONFIG_FILES:
+        (source / "config" / name).write_text("channels: []\n", encoding="utf-8")
+
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(runner._RunnerFoundationError, match="non-file entry"):
+        runner._materialize_isolated_mock_config(out, source_root=source)
+
+
 def test_the_validator_still_refuses_a_fixture_with_no_theme_packs(tmp_path) -> None:
     """Teaching the validator a new shape must not teach it to accept a missing one.
 

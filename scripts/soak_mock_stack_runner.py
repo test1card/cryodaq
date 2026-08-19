@@ -386,13 +386,20 @@ def _materialize_isolated_mock_config(
         target.mkdir(mode=0o700)
         copied = 0
         for item in sorted(source.iterdir()):
-            if item.is_file():
-                copy = target / item.name
-                copy.write_bytes(item.read_bytes())
-                # The caller's chmod sweep only reaches the top level, and the seal
-                # demands 0o600 on every sealed file.
-                copy.chmod(0o600)
-                copied += 1
+            # Refused by NAME rather than skipped. A skipped entry makes the isolated
+            # root diverge from the tracked tree silently, and the seal seals what the
+            # child sees without ever comparing back to the source, so the divergence
+            # would surface later as a launcher failure with no named cause.
+            if not item.is_file():
+                raise _RunnerFoundationError(
+                    f"tracked soak config directory holds a non-file entry: {name}/{item.name}"
+                )
+            copy = target / item.name
+            copy.write_bytes(item.read_bytes())
+            # The caller's chmod sweep only reaches the top level, and the seal demands
+            # 0o600 on every sealed file.
+            copy.chmod(0o600)
+            copied += 1
         if copied == 0:
             raise _RunnerFoundationError(f"tracked soak config directory is empty: {name}")
     for name, content in _ISOLATED_STATIC_CONFIGS:
