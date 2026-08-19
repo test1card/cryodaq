@@ -3088,6 +3088,14 @@ false_green_pairs:
     ci_partition: core
     red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-REPLY-COUNT-FALSE-GREEN-249
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
+    ci_partition: core
+    red_evidence: an_always_false_reply_count_predicate_passed_only_the_negative_loss_test_while_the_positive_exact_count_control_was_unmapped_2026_08_15_pending_immutable_capture
+    green_evidence: pending
   - id: MONTANA-METRICS-SNAPSHOT-FALSE-GREEN-239
     status: open
     scope: repository
@@ -3881,6 +3889,36 @@ records:
       - node: tests/governance/test_agent_preventions.py::test_all_repository_python_sources_compile_before_pytest_evidence
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_checks_every_timeout_handler_exit
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_broad_timeout_handlers_as_timeout_handlers
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_asyncio_timeout_error_handlers_as_timeout_error_type
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_continue_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_logging_only_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_aliased_queue_getter_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_stored_queue_get_awaitable_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_transitively_aliased_stored_queue_get_awaitable_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_keyword_future_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_conditional_loop_jump_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_resolves_wait_for_import_aliases
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_accepts_positional_wait_for_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_allows_diagnostic_timeout_reraise
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_nested_timeout_handler_exit_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_os_error_handlers_as_timeout_handlers
         ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_active_guard_execution_rejects_skip_xfail_deselection_collect_only_and_warnings
         ci_partition: remaining
@@ -6033,6 +6071,8 @@ records:
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_run_cmd_forward_restores_both_reply_queue_put_attributes_after_success
         ci_partition: core
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_terminal_drain_accounts_reply_published_during_owner_settlement
+        ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
         ci_partition: core
     red_evidence: original_partial_return_error_path_queue_leak_permissive_identity_accounting_success_only_cleanup_safe_queue_cleanup_omission_prejoin_terminal_drain_and_exceptional_safe_queue_leak_mutants_failed_their_exact_behavioral_guards_2026_08_01_pending_immutable_capture
     green_evidence: pending
