@@ -403,11 +403,14 @@ def test_open_cells_table_and_owner_gates_remain_canonical() -> None:
         "OC-020",
         "OC-023",
         # OC-024 STAYS BLOCKING. The finalisation table now carries declared
-        # identity, but the four archive exporters reachable from the same
-        # operator-facing panel (csv_export, hdf5_export, parquet_archive,
-        # xlsx_export) still emit channel-spelling-only schemas and were not
-        # measured. Deregistering the row here would close the deployment gate
-        # for that path on the strength of a prose residual -- which is the
+        # identity, and the three archive exporters (csv_export, hdf5_export,
+        # xlsx_export) now append descriptor_hash (this slice, guarded);
+        # parquet_archive already carried it (PI-03). The row stays blocking
+        # because the XLSX information sheet reports the number of
+        # descriptor-qualified identities, so one instrument/channel with
+        # readings under two descriptor hashes is reported as two Каналов.
+        # Deregistering the row here would close the deployment gate for that
+        # path on the strength of a prose residual -- which is the
         # fix-one-instance-then-close-the-class error this registry exists to
         # catch, and which REGISTER-DOWNGRADE-ON-UNVERIFIED-SCOPE-301 records.
         "OC-024",
