@@ -3270,6 +3270,38 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: exact_9eeccabf_acknowledgement_suite_missed_an_early_stalled_200_body_that_held_send_photo_and_chart_shutdown_drain_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: ASSISTANT-ACKNOWLEDGEMENT-CHAT-BINDING-FALSE-GREEN-316
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_notifier_delivery_binding.py::test_a_well_formed_acknowledgement_for_the_wrong_chat_is_not_delivery
+    ci_partition: agents
+    red_evidence: notification_suite_passed_while_TelegramNotifier_send_message_accepted_an_acknowledgement_for_the_wrong_chat_until_the_public_send_message_path_guard_was_added_pending_immutable_capture
+    green_evidence: pending
+  - id: NOTIFIER-ACKNOWLEDGEMENT-DUPLICATE-AUTHORITY-FALSE-GREEN-340
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_notifier_delivery_binding.py::test_a_duplicate_authority_key_is_not_a_delivery_claim
+    ci_partition: agents
+    red_evidence: notification_suite_passed_while_TelegramNotifier_send_message_resolved_a_duplicate_ok_result_message_id_chat_or_chat_id_to_the_convenient_last_value_and_reported_a_delivery_claim_for_the_requested_chat_until_the_unique_key_decoder_was_added_reproduced_by_a_selective_chat_only_mutant_on_2026_08_14_pending_immutable_capture
+    green_evidence: pending
+  - id: NOTIFIER-ACKNOWLEDGEMENT-MEDIA-TYPE-REFUSAL-FALSE-GREEN-341
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_notifier_delivery_binding.py::test_a_non_json_media_type_is_not_a_delivery_claim
+    ci_partition: agents
+    red_evidence: duplicate_key_decoding_replaced_aiohttp_resp_json_and_silently_dropped_its_non_JSON_media_type_refusal_so_an_acknowledgement_shaped_HTTP_200_text_html_body_resolved_to_delivery_while_the_notification_suite_stayed_green_2026_08_15_pending_immutable_capture
+    green_evidence: pending
+  - id: NOTIFIER-ACKNOWLEDGEMENT-MEDIA-TYPE-ACCEPTANCE-FALSE-GREEN-342
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-EGRESS-AUTHORITY-001
+    guard: tests/notifications/test_notifier_delivery_binding.py::test_the_json_media_types_aiohttp_accepts_are_still_accepted_here
+    ci_partition: agents
+    red_evidence: the_non_JSON_media_type_refusal_guard_stayed_green_under_a_decoder_that_refused_every_acknowledgement_so_the_aiohttp_accepted_JSON_media_type_control_was_added_to_make_that_overbroad_refusal_red_2026_08_15_pending_immutable_capture
+    green_evidence: pending
 
   - id: EVIDENCE-PACKAGING-READINESS-FALSE-GREEN-242
     status: open
@@ -5088,7 +5120,7 @@ records:
     red_evidence: schema_constant_2_with_v1_module_error_and_codec_text_in_exact_97cff82c_pending_immutable_capture
     green_evidence: pending
   - id: ASSISTANT-EGRESS-AUTHORITY-001
-    status: open
+    status: reopened
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
     applies_to: Assistant audit, Telegram, GUI, chart, and other output delivery ownership.
@@ -5136,6 +5168,14 @@ records:
       - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_bound_the_entire_acknowledgement_operation
         ci_partition: agents
       - node: tests/notifications/test_delivery_acknowledgement.py::test_both_sender_paths_bound_a_dribbling_200_acknowledgement_body
+        ci_partition: agents
+      - node: tests/notifications/test_notifier_delivery_binding.py::test_a_well_formed_acknowledgement_for_the_wrong_chat_is_not_delivery
+        ci_partition: agents
+      - node: tests/notifications/test_notifier_delivery_binding.py::test_a_duplicate_authority_key_is_not_a_delivery_claim
+        ci_partition: agents
+      - node: tests/notifications/test_notifier_delivery_binding.py::test_a_non_json_media_type_is_not_a_delivery_claim
+        ci_partition: agents
+      - node: tests/notifications/test_notifier_delivery_binding.py::test_the_json_media_types_aiohttp_accepts_are_still_accepted_here
         ci_partition: agents
     red_evidence: http_500_egress_before_audit_unwired_shutdown_aggregate_sender_and_query_chart_before_audit_reproductions_pending_immutable_capture
     green_evidence: pending

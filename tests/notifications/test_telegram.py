@@ -584,8 +584,12 @@ async def test_cmd_log_without_identity_is_rejected() -> None:
 
 
 class _TelegramResponse:
-    def __init__(self, status: int, body: str) -> None:
+    def __init__(self, status: int, body: str, content_type: str = "application/json") -> None:
         self.status = status
+        # `send_message` gates the acknowledgement decode on the media type, as `resp.json()`
+        # does; aiohttp always exposes `content_type`, defaulting to `application/octet-stream`
+        # when the response carries no `Content-Type` header.
+        self.content_type = content_type
         self._body = body
 
     async def text(self) -> str:
@@ -618,7 +622,10 @@ class _TelegramSession:
     ("body", "recorded_outcome"),
     [
         ("", "transport_accepted"),
-        ('{"ok": true, "result": {"message_id": 42}}', "service_reported_delivered"),
+        # OC-026: the acknowledgement must name the requested chat. A message id alone
+        # says a message exists somewhere, not that this operator received it.
+        ('{"ok": true, "result": {"message_id": 42}}', "transport_accepted"),
+        ('{"ok": true, "result": {"message_id": 42, "chat": {"id": 111}}}', "service_reported_delivered"),
     ],
 )
 async def test_delayed_send_records_telegram_confirmation_tier(
@@ -648,7 +655,12 @@ async def test_delayed_send_records_telegram_confirmation_tier(
     [
         ("", "transport_accepted"),
         ('{"ok": true, "result": {}}', "transport_accepted"),
-        ('{"ok": true, "result": {"message_id": 42}}', "service_reported_delivered"),
+        # OC-026: a message id with no chat proves a message exists SOMEWHERE, not that it
+        # reached the requested destination. This case previously expected delivery; the
+        # sibling sender in assistant_main already refused it, and now so does this one.
+        ('{"ok": true, "result": {"message_id": 42}}', "transport_accepted"),
+        ('{"ok": true, "result": {"message_id": 42, "chat": {"id": 111}}}', "service_reported_delivered"),
+        ('{"ok": true, "result": {"message_id": 42, "chat": {"id": 222}}}', "transport_accepted"),
     ],
 )
 async def test_send_message_distinguishes_transport_and_service_confirmation(body: str, expected_outcome: str) -> None:

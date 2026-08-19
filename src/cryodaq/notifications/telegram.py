@@ -14,7 +14,9 @@ TelegramNotifier — транспорт для :class:`EscalationService`: ра�
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,79 @@ import yaml
 from cryodaq.notifications._secrets import SecretStr
 
 logger = logging.getLogger(__name__)
+
+# Telegram message ids are JSON integers; the live adapters accept 1..2**63-1.
+_MAX_JSON_INTEGER = 2**63 - 1
+
+# `await resp.json()` refuses a body whose media type is not JSON -- it raises
+# `aiohttp.ContentTypeError` and this sender then answers `transport_accepted`.  Decoding the
+# text ourselves is what the duplicate-key hook requires, and it drops that refusal unless the
+# check is made again here; otherwise an HTTP 200 carrying `text/html` or `text/plain` from
+# Telegram or an intervening proxy becomes delivery evidence.  This is `aiohttp.helpers.json_re`
+# verbatim, applied to `resp.content_type` (already lowercased, parameters stripped), so the
+# accepted set is the one this sender accepted before the hook was introduced.
+_JSON_ACKNOWLEDGEMENT_MEDIA_TYPE = re.compile(r"^application/(?:[\w.+-]+?\+)?json")
+
+
+def _reject_duplicate_acknowledgement_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Refuse an acknowledgement object that names any key twice.
+
+    `resp.json()` silently keeps the LAST value for a repeated key, so a body carrying
+    ``"chat": {"id": 222}, "chat": {"id": 111}`` decodes to the requested chat and passes the
+    destination check -- while the acknowledgement itself establishes nothing about where the
+    message went.  An ambiguous answer must not resolve to the convenient one.
+
+    Raising rather than returning a sentinel is deliberate: the caller already treats an
+    unparseable acknowledgement as `transport_accepted`, which is the honest tier for "the
+    transport took it and the service told us nothing we can rely on".
+
+    `cryodaq.agents.assistant_main._unique_telegram_acknowledgement_object` enforces the same
+    rule for the sibling sender.  FOLLOW-UP, not done here: there are now four near-copies of
+    this decoder across the notification surfaces, and they should be one.
+    """
+
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key in Telegram acknowledgement: {key!r}")
+        seen.add(key)
+    return dict(pairs)
+
+
+def _acknowledges_delivery(message: object, chat_id: int | str) -> bool:
+    """Return True only when the acknowledgement names OUR destination.
+
+    OC-026, second independent review. This sender previously accepted any 200
+    carrying ``ok: true`` and an integer ``result.message_id`` as
+    ``service_reported_delivered``. A message id proves that SOME message was
+    created, not that it reached the chat we asked for, so a body describing a
+    message posted to a different chat -- or naming no chat at all -- was reported
+    to the operator as delivered. For an alarm notifier that is the worst kind of
+    wrong answer: it says the operator was told when they were not.
+
+    THE RULES HERE ARE COPIED FROM THE ESTABLISHED CONTRACT, NOT INVENTED.
+    ``cryodaq.agents.assistant_main._acknowledged_message_id`` and the live
+    periodic adapter already bind the acknowledgement to the requested chat and
+    already accept ``1..2**63-1``. Its docstring states the reason plainly: two
+    senders disagreeing about what counts as an acknowledgement is itself a
+    defect. They disagreed until this change; now they do not.
+
+    ``type(...) is not int`` rather than ``isinstance`` because ``bool`` subclasses
+    ``int`` and ``True`` must not read as message 1.
+    """
+
+    if not isinstance(message, dict):
+        return False
+    message_id = message.get("message_id")
+    if type(message_id) is not int or not 1 <= message_id <= _MAX_JSON_INTEGER:
+        return False
+    chat = message.get("chat")
+    if not isinstance(chat, dict):
+        return False
+    if type(chat_id) is int:
+        return type(chat.get("id")) is int and chat.get("id") == chat_id
+    username = chat.get("username")
+    return type(username) is str and str(chat_id).startswith("@") and username.casefold() == str(chat_id)[1:].casefold()
 
 
 class TelegramNotifier:
@@ -145,7 +220,10 @@ class TelegramNotifier:
                     logger.error("Telegram API ответил %d: %s", resp.status, body[:200])
                     return "failed" if not 300 <= resp.status < 400 else "outcome_unknown"
                 try:
-                    result = await resp.json()
+                    body_text = await resp.text()
+                    if not _JSON_ACKNOWLEDGEMENT_MEDIA_TYPE.match(resp.content_type):
+                        raise ValueError(f"acknowledgement media type is not JSON: {resp.content_type!r}")
+                    result = json.loads(body_text, object_pairs_hook=_reject_duplicate_acknowledgement_keys)
                 except Exception:
                     logger.warning("Telegram API accepted sendMessage without a parseable service acknowledgement")
                     return "transport_accepted"
@@ -156,7 +234,7 @@ class TelegramNotifier:
                     logger.error("Telegram API rejected sendMessage: %s", result.get("description", "unknown error"))
                     return "failed"
                 message = result.get("result")
-                if result.get("ok") is True and isinstance(message, dict) and type(message.get("message_id")) is int:
+                if result.get("ok") is True and _acknowledges_delivery(message, chat_id):
                     return "service_reported_delivered"
                 logger.warning("Telegram API accepted sendMessage without a posted-message acknowledgement")
                 return "transport_accepted"
