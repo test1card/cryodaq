@@ -1536,8 +1536,8 @@ def test_dashboard_identity_banner_separates_historical_and_current_refusals(app
     assert "dashed" in banner.styleSheet()
 
 
-def test_dashboard_hiding_channel_prunes_transport_receipts(app) -> None:
-    """Visibility changes bound retained presentations and recovery receipts."""
+def test_dashboard_hiding_channel_retains_transport_receipts(app) -> None:
+    """Visibility changes keep accepted presentations and recovery receipts."""
     from cryodaq.drivers.base import ChannelStatus
     from cryodaq.gui.state.descriptor_store import IdentityStatus
 
@@ -1567,5 +1567,43 @@ def test_dashboard_hiding_channel_prunes_transport_receipts(app) -> None:
     assert "\u04221" in view._sensor_grid._last_presentations
     assert "\u04221" in view._sensor_grid._accepted_after_transport_loss
     assert "\u04222" not in view._sensor_grid._cells
-    assert "\u04222" not in view._sensor_grid._last_presentations
-    assert "\u04222" not in view._sensor_grid._accepted_after_transport_loss
+    assert "\u04222" in view._sensor_grid._last_presentations
+    assert "\u04222" in view._sensor_grid._accepted_after_transport_loss
+
+
+def test_dashboard_hidden_channel_recovery_recognized_on_unhide(app) -> None:
+    """A hidden channel that receives successor readings after a transport cut is
+    recognized as recovered when unhidden, so its rebuilt cell is not marked
+    disconnected."""
+    from cryodaq.drivers.base import ChannelStatus
+    from cryodaq.gui.state.descriptor_store import IdentityStatus
+
+    manager = ChannelManager()
+    view = DashboardView(manager)
+    view.set_connected(False)
+    view.set_connected(True)
+    manager.set_visible("\u04221", False)
+    manager._notify()
+    assert "\u04221" not in view._sensor_grid._cells
+
+    view.on_reading(
+        Reading.now(
+            channel="\u04221",
+            value=4.2,
+            unit="K",
+            instrument_id="lakeshore_218s",
+            status=ChannelStatus.OK,
+        ),
+        IdentityStatus.AUTHORITATIVE,
+    )
+    view._sensor_grid.refresh()
+
+    manager.set_visible("\u04221", True)
+    manager._notify()
+    view._sensor_grid.refresh()
+
+    cell = view._sensor_grid._cells["\u04221"]
+    assert "\u04221" in view._sensor_grid._accepted_after_transport_loss
+    assert cell._value_widget.text() == "4.20"
+    assert cell._status_hint_widget.text() == "Норма"
+    assert "dashed" not in cell.styleSheet()

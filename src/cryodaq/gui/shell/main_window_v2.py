@@ -655,6 +655,12 @@ class MainWindowV2(QMainWindow):
             logger.debug("retired or foreign bridge reading dropped")
             return
 
+        if not qualified.reading.channel.startswith(("system/", "analytics/", "support/")):
+            overview = getattr(self, "_overview_panel", None)
+            set_connected = getattr(overview, "set_connected", None)
+            if callable(set_connected):
+                set_connected(True)
+
         view: DescriptorView | None = None
         result: IngestResult | None = None
         dashboard_identity = IdentityStatus.REFUSED
@@ -750,11 +756,6 @@ class MainWindowV2(QMainWindow):
                 attempt(lambda: phase_widget.set_operation_state("unknown", unavailable_reason))
                 attempt(lambda: phase_widget.set_mutation_enabled(False))
 
-        experiment_overlay = getattr(self, "_experiment_overlay", None)
-        if experiment_overlay is not None:
-            attempt(lambda: experiment_overlay.set_templates([]))
-            attempt(lambda: experiment_overlay.set_experiment(None, []))
-
         operator_log_panel = getattr(self, "_operator_log_panel", None)
         if operator_log_panel is not None:
             attempt(lambda: operator_log_panel.set_current_experiment(None))
@@ -762,7 +763,6 @@ class MainWindowV2(QMainWindow):
         analytics_view = getattr(self, "_analytics_view", None)
         if analytics_view is not None:
             attempt(lambda: analytics_view.set_experiment_status(None))
-            attempt(lambda: analytics_view.set_phase(None))
 
         descriptor_store = getattr(self, "_descriptor_store", None)
         if descriptor_store is not None:

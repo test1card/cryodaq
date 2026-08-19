@@ -53,8 +53,9 @@ def test_main_window_v2_constructs_with_shell_components() -> None:
     assert w.windowTitle() == "CryoDAQ"
 
 
-def test_main_window_cold_start_quarantines_qualified_reading_before_status_tick() -> None:
-    """The composition root closes dashboard ingress before its first status tick."""
+def test_main_window_cold_start_qualified_reading_buffered_before_status_tick() -> None:
+    """Dashboard ingress opens when a current reading passes qualified ingress,
+    without waiting for the composition root's first status tick."""
     _app()
     window = MainWindowV2()
     _stop_timers(window)
@@ -72,12 +73,60 @@ def test_main_window_cold_start_quarantines_qualified_reading_before_status_tick
     )
     window._overview_panel._sensor_grid.refresh()
 
-    assert window._overview_panel._connection_generation == 1
-    assert window._overview_panel._buffer_store.get_last("Т1") is None
+    assert window._overview_panel._connection_generation == 2
+    assert window._overview_panel._connected is True
+    assert window._overview_panel._buffer_store.get_last("Т1") is not None
+    assert window._overview_panel._buffer_store.get_last("Т1")[1] == 8.8
     cell = window._overview_panel._sensor_grid._cells["Т1"]
-    assert cell._value_widget.text() == "—"
-    assert cell._status_hint_widget.text() == "Нет связи · данных нет"
-    assert "dashed" in cell.styleSheet()
+    assert cell._value_widget.text() == "8.80"
+    assert "dashed" not in cell.styleSheet()
+
+
+def test_successor_reading_opens_dashboard_ingress_before_status_tick() -> None:
+    """A current-incarnation reading is buffered immediately after a bridge cut,
+    while a retired bridge incarnation's reading is still rejected."""
+    _app()
+    window = MainWindowV2()
+    _stop_timers(window)
+
+    class _FakeBridge:
+        def __init__(self, instance_id: str) -> None:
+            self.bridge_instance_id = instance_id
+
+    old_id = "a" * 32
+    new_id = "b" * 32
+    window._bridge = _FakeBridge(old_id)
+
+    def bound(value: float, bridge_id: str) -> DescriptorQualifiedReading:
+        return DescriptorQualifiedReading(
+            reading=Reading.now(
+                channel="Т1",
+                value=value,
+                unit="K",
+                instrument_id="test_inst",
+                metadata={"bridge_instance_id": bridge_id},
+            ),
+            descriptor=None,
+        )
+
+    window.dispatch_qualified_reading(bound(1.0, old_id))
+    window._overview_panel._sensor_grid.refresh()
+    assert window._overview_panel._connected is True
+    assert window._overview_panel._buffer_store.get_last("Т1")[1] == 1.0
+
+    window.invalidate_descriptor_transport()
+    assert window._overview_panel._connected is False
+
+    window.dispatch_qualified_reading(bound(2.0, old_id))
+    window._overview_panel._sensor_grid.refresh()
+    assert window._overview_panel._connected is False
+    assert window._overview_panel._buffer_store.get_last("Т1")[1] == 1.0
+
+    window._bridge.bridge_instance_id = new_id
+    window.dispatch_qualified_reading(bound(3.0, new_id))
+    window._overview_panel._sensor_grid.refresh()
+    assert window._overview_panel._connected is True
+    assert window._overview_panel._buffer_store.get_last("Т1")[1] == 3.0
 
 
 def test_bridge_and_engine_retirement_reach_top_watch_live_authority_once() -> None:
@@ -251,8 +300,8 @@ def _populate_real_experiment_consumers(window: MainWindowV2) -> dict:
     return status
 
 
-def test_bridge_retirement_clears_experiment_truth_from_every_real_consumer(monkeypatch) -> None:
-    """Outgoing experiment status cannot survive bridge authority retirement."""
+def test_bridge_retirement_disconnects_every_experiment_consumer(monkeypatch) -> None:
+    """Bridge authority retirement keeps the overlay card as last-known and disconnects it."""
     _app()
     window = MainWindowV2()
     _stop_timers(window)
@@ -283,14 +332,14 @@ def test_bridge_retirement_clears_experiment_truth_from_every_real_consumer(monk
     assert not operation_label.isHidden()
     assert operation_label.text()
     assert operation_label.accessibleDescription()
-    assert window._experiment_overlay._experiment is None
-    assert window._experiment_overlay._phase_history == []
-    assert window._experiment_overlay._templates_by_id == {}
+    assert window._experiment_overlay._experiment is not None
+    assert window._experiment_overlay._phase_history
+    assert set(window._experiment_overlay._templates_by_id) == {"template-1"}
     assert window._experiment_overlay._connected is False
     assert window._operator_log_panel._current_experiment_id is None
     assert window._operator_log_panel._bind_experiment_check.isChecked() is False
     assert window._analytics_view._last_experiment_status is None
-    assert window._analytics_view.current_phase() is None
+    assert window._analytics_view.current_phase() == "preparation"
     assert window._typed_safety_ready is False
     assert window._accepted_safety_bridge_instance_id is None
     assert window._accepted_safety_experiment_id is None
@@ -321,11 +370,11 @@ def test_experiment_truth_retirement_attempts_siblings_after_renderer_failure(mo
     assert captured.value is failure
     assert window._latest_experiment_status is None
     assert window._typed_safety_ready is False
-    assert window._experiment_overlay._experiment is None
-    assert window._experiment_overlay._templates_by_id == {}
+    assert window._experiment_overlay._experiment is not None
+    assert set(window._experiment_overlay._templates_by_id) == {"template-1"}
     assert window._operator_log_panel._current_experiment_id is None
     assert window._analytics_view._last_experiment_status is None
-    assert window._analytics_view.current_phase() is None
+    assert window._analytics_view.current_phase() == "preparation"
     assert "set_experiment_status" not in window._analytics_snapshot
     assert window._top_bar._live_status_generation == top_generation + 1
 
@@ -372,8 +421,8 @@ def test_bridge_retirement_clears_outgoing_freshness_before_lazy_overlay(monkeyp
     assert window._operator_log_panel._connected is False
 
 
-def test_successor_experiment_status_restores_cleared_template_truth() -> None:
-    """A new accepted status repopulates every experiment overlay field."""
+def test_successor_experiment_status_refreshes_template_truth() -> None:
+    """A new accepted status updates every experiment overlay field."""
     _app()
     window = MainWindowV2()
     _stop_timers(window)
@@ -384,7 +433,7 @@ def test_successor_experiment_status_restores_cleared_template_truth() -> None:
     assert set(window._experiment_overlay._templates_by_id) == {"template-1"}
 
     window.invalidate_descriptor_transport()
-    assert window._experiment_overlay._templates_by_id == {}
+    assert set(window._experiment_overlay._templates_by_id) == {"template-1"}
 
     successor = _active_experiment_status_for_retirement()
     successor["active_experiment"]["experiment_id"] = "b" * 12
@@ -394,6 +443,65 @@ def test_successor_experiment_status_restores_cleared_template_truth() -> None:
 
     assert set(window._experiment_overlay._templates_by_id) == {"template-2"}
     assert window._experiment_overlay._experiment["experiment_id"] == "b" * 12
+
+
+def test_bridge_retirement_preserves_unsaved_experiment_card_edits(monkeypatch) -> None:
+    """A transport cut keeps the overlay card and its unsaved edits; only a
+    successor no-experiment status clears the card."""
+    _app()
+    window = MainWindowV2()
+    _stop_timers(window)
+    status = _active_experiment_status_for_retirement()
+    window._on_experiment_status_received(status)
+    window._ensure_overlay("experiment")
+    overlay = window._experiment_overlay
+    assert overlay is not None
+    monkeypatch.setattr(overlay, "_reload_timeline", lambda: None)
+    overlay.set_connected(True)
+    overlay._sample_edit.setText("unsaved local sample")
+    overlay._mark_card_dirty()
+    assert overlay._card_dirty is True
+    assert overlay._save_btn.isEnabled() is True
+
+    window.invalidate_descriptor_transport()
+
+    assert overlay._connected is False
+    assert overlay._experiment is not None
+    assert overlay._sample_edit.text() == "unsaved local sample"
+    assert overlay._card_dirty is True
+    assert overlay._save_btn.isEnabled() is False
+
+    window._on_experiment_status_received(status)
+    assert overlay._experiment is not None
+    assert overlay._sample_edit.text() == "unsaved local sample"
+
+    no_exp = dict(status)
+    no_exp["active_experiment"] = None
+    window._on_experiment_status_received(no_exp)
+    assert overlay._experiment is None
+
+
+def test_bridge_retirement_does_not_swap_analytics_layout() -> None:
+    """Connectivity loss must not change the analytics phase layout, so
+    phase-owned widgets (and their in-flight workers) are not deleted."""
+    from cryodaq.gui.shell.views import analytics_widgets
+
+    _app()
+    window = MainWindowV2()
+    _stop_timers(window)
+    window._ensure_overlay("analytics")
+    view = window._analytics_view
+    assert view is not None
+    window._on_experiment_status_received({"active_experiment": {}, "current_phase": "vacuum"})
+    assert view.current_phase() == "vacuum"
+    assert analytics_widgets.id_of(view._active["main"]) == "vacuum_prediction"
+    vacuum_widget = view._active["main"]
+
+    window.invalidate_descriptor_transport()
+
+    assert view.current_phase() == "vacuum"
+    assert analytics_widgets.id_of(view._active["main"]) == "vacuum_prediction"
+    assert view._active["main"] is vacuum_widget
 
 
 def test_bridge_retirement_synchronously_disconnects_every_instantiated_panel() -> None:

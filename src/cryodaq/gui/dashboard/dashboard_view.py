@@ -585,7 +585,12 @@ class DashboardView(QScrollArea):
         )
         self._phase_reconcile_worker = worker
         self._update_mutation_authority()
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError:
+            self._phase_reconcile_worker = None
+            self._update_mutation_authority()
+            logger.warning("phase reconciliation worker not admitted; skipped")
 
     def _on_phase_reconciliation_result(
         self,
@@ -847,7 +852,12 @@ class DashboardView(QScrollArea):
         )
         self._log_poll_context = context
         self._log_poll_worker = worker
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError:
+            self._log_poll_worker = None
+            self._log_poll_context = None
+            logger.warning("log poll worker not admitted; skipped until next poll")
 
     @staticmethod
     def _log_scope_receipt_matches(result: object, context: dict[str, Any]) -> bool:

@@ -170,13 +170,6 @@ class DynamicSensorGrid(QWidget):
             for ch in self._channel_mgr.get_all_visible()
             if ch.startswith("Т")  # cyrillic Т
         ]
-        visible_set = set(visible_ids)
-        self._last_presentations = {
-            channel: presentation
-            for channel, presentation in self._last_presentations.items()
-            if channel in visible_set
-        }
-        self._accepted_after_transport_loss.intersection_update(visible_set)
 
         for ch_id in visible_ids:
             cell = SensorCell(ch_id, self._channel_mgr, self._buffer, self)
@@ -311,9 +304,9 @@ class DynamicSensorGrid(QWidget):
     def dispatch_reading(self, reading: Reading, identity_status: IdentityStatus) -> None:
         """Cache only the latest presentation cut for the next <=2 Hz tick."""
         short_id = reading.channel.split(" ")[0]
+        if self._transport_invalidated:
+            self._accepted_after_transport_loss.add(short_id)
         if short_id in self._cells:
-            if self._transport_invalidated:
-                self._accepted_after_transport_loss.add(short_id)
             sample = _fail_closed_sample((reading, identity_status))
             pending = self._pending_readings.get(short_id)
             if pending is None:
@@ -325,6 +318,13 @@ class DynamicSensorGrid(QWidget):
                 )
             else:
                 pending.add(sample)
+        elif self._transport_invalidated:
+            sample = _fail_closed_sample((reading, identity_status))
+            self._last_presentations[short_id] = (
+                sample[0],
+                sample[1],
+                sample[0].status,
+            )
 
     def _refresh_identity_banner(self) -> None:
         historical_issues = {
