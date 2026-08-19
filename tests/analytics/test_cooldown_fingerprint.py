@@ -8,10 +8,12 @@ golden-baseline pointer.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from cryodaq.analytics.cooldown_fingerprint import (
+    BASELINE_POINTER,
     CooldownFingerprint,
     build_fingerprint,
     get_baseline,
@@ -61,9 +63,7 @@ def test_build_fingerprint_metrics() -> None:
 def test_build_fingerprint_ultimate_vacuum() -> None:
     t, T_cold, T_warm = _synthetic_cooldown()
     pressures = [1e-2, 5e-4, 3e-5, 1e-6, 8e-6]
-    fp = build_fingerprint(
-        t, T_cold, cooldown_start_ts=0.0, pressures=pressures
-    )
+    fp = build_fingerprint(t, T_cold, cooldown_start_ts=0.0, pressures=pressures)
     assert fp.ultimate_vacuum_mbar == pytest.approx(min(pressures))
 
 
@@ -103,8 +103,9 @@ def test_persist_roundtrip_and_listing(tmp_path) -> None:
     assert loaded.fingerprint_id == fp.fingerprint_id
     assert loaded.T_cold_final == pytest.approx(fp.T_cold_final)
 
-    listed = list_fingerprints(tmp_path)
+    listed, unreadable = list_fingerprints(tmp_path)
     assert len(listed) == 1
+    assert unreadable == 0
     assert listed[0].fingerprint_id == fp.fingerprint_id
 
 
@@ -115,16 +116,17 @@ def test_baseline_pointer(tmp_path) -> None:
     save_fingerprint(fp1, tmp_path)
     save_fingerprint(fp2, tmp_path)
 
-    assert get_baseline(tmp_path) is None  # none pinned yet
+    assert get_baseline(tmp_path)[0] is None  # none pinned yet
 
     set_baseline(fp2.fingerprint_id, tmp_path)
-    base = get_baseline(tmp_path)
+    base, _ = get_baseline(tmp_path)
     assert base is not None
     assert base.fingerprint_id == fp2.fingerprint_id
 
     # baseline.json is a pointer, not counted as a fingerprint in listing
-    listed = list_fingerprints(tmp_path)
+    listed, unreadable = list_fingerprints(tmp_path)
     assert len(listed) == 2
+    assert unreadable == 0
 
 
 def test_fingerprint_dict_roundtrip() -> None:
@@ -132,3 +134,101 @@ def test_fingerprint_dict_roundtrip() -> None:
     fp = build_fingerprint(t, T_cold, cooldown_start_ts=1.0)
     restored = CooldownFingerprint.from_dict(fp.to_dict())
     assert restored == fp
+
+
+def test_list_fingerprints_skips_corrupt_files_with_count(tmp_path: Path) -> None:
+    t, T_cold, _ = _synthetic_cooldown()
+    fp1 = build_fingerprint(t, T_cold, cooldown_start_ts=100.0, fingerprint_id="cd_1000")
+    fp2 = build_fingerprint(t, T_cold, cooldown_start_ts=200.0, fingerprint_id="cd_2000")
+    save_fingerprint(fp1, tmp_path)
+    save_fingerprint(fp2, tmp_path)
+    (tmp_path / "bad_1.json").write_text("{", encoding="utf-8")
+    (tmp_path / "bad_2.json").write_text("not-json", encoding="utf-8")
+
+    listed, unreadable = list_fingerprints(tmp_path)
+    assert len(listed) == 2
+    assert unreadable == 2
+
+
+def test_get_baseline_returns_unreadable_when_pointer_is_corrupt(tmp_path: Path) -> None:
+    (tmp_path / BASELINE_POINTER).write_text("{not-json", encoding="utf-8")
+    base, unreadable = get_baseline(tmp_path)
+    assert base is None
+    assert unreadable == 1
+
+
+@pytest.mark.parametrize("payload", [None, {"duration_h": []}])
+def test_structurally_invalid_fingerprint_is_unreadable(tmp_path: Path, payload) -> None:
+    (tmp_path / "bad.json").write_text(json.dumps(payload), encoding="utf-8")
+    listed, unreadable = list_fingerprints(tmp_path)
+    assert listed == []
+    assert unreadable == 1
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("fingerprint_id", []),
+        ("cooldown_start_ts", True),
+        ("duration_h", "12.5"),
+        ("time_to_base_h", False),
+        ("n_points", 1.5),
+    ],
+)
+def test_list_fingerprints_rejects_coercible_invalid_field_types(tmp_path: Path, field: str, value: object) -> None:
+    payload = CooldownFingerprint(
+        fingerprint_id="cd_valid",
+        cooldown_start_ts=1.0,
+        duration_h=2.0,
+        T_cold_final=3.0,
+        time_to_base_h=None,
+        time_to_50K_h=None,
+        ultimate_vacuum_mbar=None,
+        n_points=4,
+    ).to_dict()
+    payload[field] = value
+    (tmp_path / "bad.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    listed, unreadable = list_fingerprints(tmp_path)
+
+    assert listed == []
+    assert unreadable == 1
+
+
+def test_get_baseline_rejects_coercible_invalid_field_types(tmp_path: Path) -> None:
+    payload = CooldownFingerprint(
+        fingerprint_id="cd_bad",
+        cooldown_start_ts=1.0,
+        duration_h=2.0,
+        T_cold_final=3.0,
+        time_to_base_h=None,
+        time_to_50K_h=None,
+        ultimate_vacuum_mbar=None,
+        n_points=4,
+    ).to_dict()
+    payload["n_points"] = 1.5
+    (tmp_path / "cd_bad.json").write_text(json.dumps(payload), encoding="utf-8")
+    set_baseline("cd_bad", tmp_path)
+
+    baseline, unreadable = get_baseline(tmp_path)
+
+    assert baseline is None
+    assert unreadable == 1
+
+
+def test_get_baseline_returns_unreadable_when_pointer_access_is_denied(tmp_path: Path, monkeypatch) -> None:
+    pointer = tmp_path / BASELINE_POINTER
+    pointer.write_text("{}", encoding="utf-8")
+    original_exists = Path.exists
+
+    def denied_pointer_exists(path: Path) -> bool:
+        if path == pointer:
+            raise PermissionError("access denied")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", denied_pointer_exists)
+
+    baseline, unreadable = get_baseline(tmp_path)
+
+    assert baseline is None
+    assert unreadable == 1

@@ -20,7 +20,8 @@ Examples: `1.0.0`, `1.2.0`, `1.2.3`, `2.0.0`
 
 Pre-release suffixes allowed: `1.0.0-rc.1`, `2.0.0-alpha.3`. Build metadata as `+shorthash` optional.
 
-**Current version:** `4.0.3` — operator-state semantic correction: safety green
+**Current version:** `4.1.1` — cooldown history distinguishes unreadable baseline
+and partial-history states; operator-state semantic correction: safety green
 is reserved for demonstrated health, ordinary activity/progress uses accent or
 neutral information, and new presentation producers use the single caution
 rung (see `CHANGELOG.md`).

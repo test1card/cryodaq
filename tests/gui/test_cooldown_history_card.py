@@ -13,6 +13,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
 from cryodaq.analytics.cooldown_fingerprint import (
@@ -22,6 +23,7 @@ from cryodaq.analytics.cooldown_fingerprint import (
     save_fingerprint,
     set_baseline,
 )
+from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.cooldown_baseline_card import (
     CooldownBaselineCard,
     CooldownVerdictBadge,
@@ -110,7 +112,7 @@ def test_pin_selected_writes_baseline_pointer(tmp_path: Path) -> None:
     card.select_fingerprint("cd_1000")
     card._on_pin_clicked()
     assert (tmp_path / BASELINE_POINTER).exists()
-    base = get_baseline(tmp_path)
+    base, _ = get_baseline(tmp_path)
     assert base is not None and base.fingerprint_id == "cd_1000"
 
 
@@ -166,6 +168,33 @@ def test_badge_reflects_ok_verdict(tmp_path: Path) -> None:
     assert badge.verdict() == "ok"
 
 
+def test_badge_unknown_when_baseline_unreadable(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+    assert badge.verdict() == "unknown"
+    assert badge.text() == "Эталон: НЕТ ДАННЫХ"
+
+
+def test_badge_unknown_when_history_has_unreadable_record(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / "bad.json").write_text("{", encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+    assert badge.verdict() == "unknown"
+
+
+def test_badge_unknown_when_only_history_is_unreadable(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "cd_1000.json").write_text("{", encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+    assert badge.verdict() == "unknown"
+    assert badge.text() == "Эталон: НЕТ ДАННЫХ"
+
+
 # --------------------------------------------------------------------------
 # Fix A — strict-bool `enabled` parse (quoted YAML "false" must not enable)
 # --------------------------------------------------------------------------
@@ -173,9 +202,7 @@ def test_badge_reflects_ok_verdict(tmp_path: Path) -> None:
 
 def _write_cfg(tmp_path: Path, enabled_value: str) -> Path:
     cfg = tmp_path / "plugins.yaml"
-    cfg.write_text(
-        f"cooldown_baseline:\n  enabled: {enabled_value}\n", encoding="utf-8"
-    )
+    cfg.write_text(f"cooldown_baseline:\n  enabled: {enabled_value}\n", encoding="utf-8")
     return cfg
 
 
@@ -243,3 +270,83 @@ def test_badge_throttles_reads_within_window(tmp_path: Path, monkeypatch) -> Non
     assert first >= 1  # ctor reads
     badge.refresh()  # immediate second refresh is throttled
     assert calls["n"] == first
+
+
+def test_card_shows_unreadable_when_all_files_corrupt(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "bad_1.json").write_text("{", encoding="utf-8")
+    (tmp_path / "bad_2.json").write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    assert card._empty_label.isVisibleTo(card)
+    assert card._empty_label.text() == "История недоступна (2 файла не читаются)."
+    assert card._delta_label.text() == "—"
+
+
+def test_card_shows_baseline_unset_message(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    card.select_fingerprint("cd_2000")
+    assert card._delta_label.text() == "Эталонное охлаждение не задано."
+
+
+def test_card_shows_baseline_unreadable_message_when_pointer_corrupt(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    card.select_fingerprint("cd_2000")
+    assert card._delta_label.text() == "Эталонное охлаждение недоступно (1 файл не читается)."
+
+
+def test_card_marks_partial_history_and_unreadable_baseline(tmp_path: Path) -> None:
+    _app()
+    _seed(tmp_path)
+    (tmp_path / "bad.json").write_text("{", encoding="utf-8")
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+    assert card._table.isVisibleTo(card)
+    assert card._table.rowCount() == 2
+    assert card._empty_label.isVisibleTo(card)
+    assert card._empty_label.text() == "История неполна (1 файл не читается)."
+    assert card._table.item(0, 4).text() == "эталон недоступен"
+    # DESIGN: RULE-A11Y-003 — STATUS_STALE text fails AA body contrast on the
+    # card surface; the unavailable verdict must render in readable FOREGROUND.
+    assert card._table.item(0, 4).foreground().color().name() == QColor(theme.FOREGROUND).name()
+
+
+def test_card_shows_unreadable_when_only_baseline_pointer_is_corrupt(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+
+    assert card._empty_label.isVisibleTo(card)
+    assert "1" in card._empty_label.text()
+
+
+def test_card_empty_state_counts_corrupt_baseline_file_once(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "cd_1000.json").write_text("{", encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+
+    # The corrupt file is the baseline's target too — it must be counted once.
+    assert card._empty_label.text() == "История недоступна (1 файл не читается)."
+
+
+def test_card_empty_state_counts_independent_baseline_corruption(tmp_path: Path) -> None:
+    _app()
+    (tmp_path / "cd_1000.json").write_text("{", encoding="utf-8")
+    (tmp_path / BASELINE_POINTER).write_text("{", encoding="utf-8")
+    card = CooldownBaselineCard(history_dir=tmp_path, enabled=True)
+    _show(card)
+
+    # One corrupt fingerprint and a separately corrupt baseline pointer are two
+    # independent unreadable files — both must appear in the count.
+    assert card._empty_label.text() == "История недоступна (2 файла не читаются)."

@@ -3,18 +3,89 @@ title: CryoDAQ Design Language
 keywords: design-system, index, navigation, lookup, overview, cryodaq
 enforcement: strict
 priority: critical
-last_updated: 2026-07-20
+last_updated: 2026-08-16
 status: canonical
-version: 4.1.0
+version: 4.1.1
 ---
 
 # CryoDAQ Design Language
 
-**Current design-system version:** `4.1.0`
+**Current design-system version:** `4.1.1`
 
 Authoritative design specification for CryoDAQ GUI. Single source of truth for colors, typography, spacing, component anatomy, and interaction patterns. All widgets MUST conform.
 
 ## Operator-first observability
+
+### Unreadable cooldown baseline and partial history
+
+The cooldown history card treats an unreadable baseline as a distinct
+unavailable state: valid rows show `эталон недоступен`, while the selected-row
+detail explains the unavailable baseline. If some history files cannot be
+parsed, the valid table remains visible with a persistent partial-history cue.
+Counts use Russian 1 / 2–4 / 5+ forms. Tests cover corrupt, structurally
+invalid, and mixed-history fixtures.
+
+**Presentation examples** (state → operator-visible text → tokens):
+
+| State | Surface | Text / cue | Tokens |
+|---|---|---|---|
+| History empty | card empty label | `История охлаждений пуста.` | `MUTED_FOREGROUND` |
+| History unreadable, no rows | card empty label | `История недоступна (1 файл не читается).` / `(2 файла не читаются).` / `(5 файлов не читаются).` | `MUTED_FOREGROUND` |
+| Baseline unreadable, no rows | card empty label | `Эталон недоступен (1 файл не читается).` | `MUTED_FOREGROUND` |
+| Partial history | card persistent cue | `История неполна (1 файл не читается).` + valid table stays visible | `MUTED_FOREGROUND` |
+| Baseline unreadable | verdict cell | `эталон недоступен` | `FOREGROUND` |
+| No baseline | verdict cell | `нет эталона` | `MUTED_FOREGROUND` |
+| Baseline unreadable | selected-row detail | `Эталонное охлаждение недоступно (1 файл не читается).` | `MUTED_FOREGROUND` |
+| No baseline | selected-row detail | `Эталонное охлаждение не задано.` | `MUTED_FOREGROUND` |
+| Verdict ok / degraded / unknown | badge | `Эталон: НОРМА` / `Эталон: ДЕГРАДАЦИЯ` / `Эталон: НЕТ ДАННЫХ` | fill `STATUS_OK` / `STATUS_WARNING` / `STATUS_STALE`, text `ON_DESTRUCTIVE` |
+
+The verdict badge hides only when the feature is disabled, no baseline is
+pinned, or the history is empty. An unreadable baseline or unreadable history
+records resolve to the explicit `Эталон: НЕТ ДАННЫХ` chip: the badge never
+hides as if no baseline were configured, and never presents an optimistic
+verdict derived from an older readable record while the latest cooldown cannot
+be established.
+
+**Accessibility evidence** (measured 2026-08-18 against live `theme.py`):
+
+- Every state carries a Russian text label; color is never the sole channel
+  (RULE-A11Y-002 multi-channel redundancy): `эталон недоступен`,
+  `нет эталона`, `НЕТ ДАННЫХ`, and the full-sentence count messages.
+- Unreadable states resolve to the canonical stale/unavailable presentation:
+  the badge keeps the `STATUS_STALE` fill while the verdict-cell text renders
+  in readable `FOREGROUND` (`НЕТ ДАННЫХ` / `эталон недоступен`), never
+  optimistic green/ready (root `AGENTS.md` stale/unavailable rule;
+  RULE-COLOR-002 / RULE-COLOR-008).
+- Measured WCAG 2.x contrast (warm_stone pack, live `theme.py`): badge fill
+  `STATUS_STALE` + `ON_DESTRUCTIVE` text = 6.23:1 (AA body); `STATUS_OK` +
+  `ON_DESTRUCTIVE` = 3.92:1; `STATUS_WARNING` + `ON_DESTRUCTIVE` = 2.93:1;
+  verdict-cell `FOREGROUND` text on `SURFACE_CARD` = 11.51:1. The prior
+  verdict-cell `STATUS_STALE` text (2.26:1) failed AA body (RULE-A11Y-003) and
+  was replaced by the readable `FOREGROUND` pairing. The remaining filled-pill
+  classes are the documented AA gaps in `accessibility/contrast-matrix.md`; the
+  stale cue is therefore never the sole signal — the badge/cell label and the
+  card's sentence messages carry the meaning.
+
+**Performance evidence** (measured 2026-08-18):
+
+- The card defers its first directory glob+parse to the first `showEvent`,
+  keeping the read off the shell-construction path and off operators who never
+  open the Архив overlay.
+- The badge throttles re-reads to one glob+parse per 5 s window
+  (`_READ_THROTTLE_S = 5.0`), so phase-change-driven refreshes do not re-scan
+  the history directory on every call.
+- Reads are bounded local-disk JSON globs of a single history directory; no
+  engine round-trip.
+- The offscreen GUI module `tests/gui/test_cooldown_history_card.py` (23 tests,
+  including corrupt, structurally invalid, and mixed-history fixtures) runs in
+  0.77 s. Bound receipt: `QT_QPA_PLATFORM=offscreen` with
+  `PYTHONPATH='<worktree>\src'` (single-quoted),
+  `python -m pytest -q tests/gui/test_cooldown_history_card.py --durations=0`
+  → `23 passed in 0.77s`; Python 3.14.3 (MSC v.1944 AMD64), PySide6 6.11.0,
+  pytest 9.0.2, Windows 11. Measured against test-file blob
+  `e425baa04df417d999c7ec1be2a7695f843603d3` and card-module blob
+  `87dd114411b6fdfa7e4f661ea47428abaf0586e4`; any edit to either file
+  invalidates this receipt.
 
 The primary operating surface MUST preserve panoramic observability: current
 channel values, trends, experiment context, provenance, and explicit

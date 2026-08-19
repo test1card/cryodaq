@@ -14,6 +14,7 @@ service passes at cooldown end alike.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -43,25 +44,46 @@ class CooldownFingerprint:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CooldownFingerprint:
+        _validate_fingerprint_dict(d)
         return cls(
-            fingerprint_id=str(d["fingerprint_id"]),
+            fingerprint_id=d["fingerprint_id"],
             cooldown_start_ts=float(d["cooldown_start_ts"]),
             duration_h=float(d["duration_h"]),
             T_cold_final=float(d["T_cold_final"]),
             time_to_base_h=_opt_float(d.get("time_to_base_h")),
             time_to_50K_h=_opt_float(d.get("time_to_50K_h")),
             ultimate_vacuum_mbar=_opt_float(d.get("ultimate_vacuum_mbar")),
-            n_points=int(d["n_points"]),
+            n_points=d["n_points"],
         )
+
+
+def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
+    if not isinstance(d, dict) or not isinstance(d.get("fingerprint_id"), str):
+        raise ValueError("invalid fingerprint record")
+    numeric_fields = ("cooldown_start_ts", "duration_h", "T_cold_final")
+    optional_numeric_fields = ("time_to_base_h", "time_to_50K_h", "ultimate_vacuum_mbar")
+    if any(
+        not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool) or not math.isfinite(d[field])
+        for field in numeric_fields
+    ):
+        raise ValueError("invalid fingerprint record")
+    if any(
+        d.get(field) is not None
+        and (
+            not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool) or not math.isfinite(d[field])
+        )
+        for field in optional_numeric_fields
+    ):
+        raise ValueError("invalid fingerprint record")
+    if not isinstance(d.get("n_points"), int) or isinstance(d.get("n_points"), bool):
+        raise ValueError("invalid fingerprint record")
 
 
 def _opt_float(v: Any) -> float | None:
     return None if v is None else float(v)
 
 
-def _first_time_at_or_below(
-    t_hours: Sequence[float], T_cold: Sequence[float], threshold: float
-) -> float | None:
+def _first_time_at_or_below(t_hours: Sequence[float], T_cold: Sequence[float], threshold: float) -> float | None:
     """First t_hours where T_cold <= threshold, else None."""
     for ti, tc in zip(t_hours, T_cold):
         if float(tc) <= threshold:
@@ -131,21 +153,23 @@ def load_fingerprint(path: Path) -> CooldownFingerprint:
     return CooldownFingerprint.from_dict(data)
 
 
-def list_fingerprints(history_dir: Path) -> list[CooldownFingerprint]:
+def list_fingerprints(history_dir: Path) -> tuple[list[CooldownFingerprint], int]:
     """All fingerprints under ``history_dir`` (excludes the baseline pointer)."""
     history_dir = Path(history_dir)
     if not history_dir.exists():
-        return []
+        return [], 0
     out: list[CooldownFingerprint] = []
+    unreadable_files = 0
     for p in sorted(history_dir.glob("*.json")):
         if p.name == BASELINE_POINTER:
             continue
         try:
             out.append(load_fingerprint(p))
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
             # Skip corrupt / partial files — listing must never raise.
+            unreadable_files += 1
             continue
-    return out
+    return out, unreadable_files
 
 
 def set_baseline(fingerprint_id: str, history_dir: Path) -> None:
@@ -154,21 +178,26 @@ def set_baseline(fingerprint_id: str, history_dir: Path) -> None:
     atomic_write_text(path, json.dumps({"fingerprint_id": fingerprint_id}))
 
 
-def get_baseline(history_dir: Path) -> CooldownFingerprint | None:
-    """Return the pinned golden fingerprint, or None if unset/missing."""
+def get_baseline(history_dir: Path) -> tuple[CooldownFingerprint | None, int]:
+    """Return the pinned golden fingerprint and unreadable-file count.
+
+    The second tuple element is ``1`` when the baseline is present but unreadable,
+    ``0`` when unset or valid.
+    """
     pointer = Path(history_dir) / BASELINE_POINTER
-    if not pointer.exists():
-        return None
     try:
-        fid = json.loads(pointer.read_text(encoding="utf-8")).get("fingerprint_id")
-    except (OSError, ValueError):
-        return None
+        if not pointer.exists():
+            return None, 0
+        data = json.loads(pointer.read_text(encoding="utf-8"))
+        fid = data.get("fingerprint_id")
+    except (OSError, ValueError, AttributeError):
+        return None, 1
     if not fid:
-        return None
+        return None, 1
     fp_path = Path(history_dir) / f"{fid}.json"
     if not fp_path.exists():
-        return None
+        return None, 1
     try:
-        return load_fingerprint(fp_path)
-    except (OSError, ValueError, KeyError):
-        return None
+        return load_fingerprint(fp_path), 0
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, OverflowError):
+        return None, 1

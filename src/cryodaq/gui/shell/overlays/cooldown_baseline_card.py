@@ -26,6 +26,7 @@ collision with the unrelated F3 ``CooldownHistoryWidget`` (duration plot).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from cryodaq.analytics.cooldown_compare import DEFAULT_THRESHOLDS, compare
 from cryodaq.analytics.cooldown_fingerprint import (
+    BASELINE_POINTER,
     CooldownFingerprint,
     get_baseline,
     list_fingerprints,
@@ -126,6 +128,35 @@ def _fmt_signed(v: float | None, unit: str) -> str:
     return "—" if v is None else f"{v:+.1f} {unit}"
 
 
+def _unreadable_message(count: int, prefix: str) -> str:
+    if count % 100 in (11, 12, 13, 14):
+        noun, verb = "файлов", "не читается"
+    elif count % 10 == 1:
+        noun, verb = "файл", "не читается"
+    elif count % 10 in (2, 3, 4):
+        noun, verb = "файла", "не читаются"
+    else:
+        noun, verb = "файлов", "не читается"
+    return f"{prefix} ({count} {noun} {verb})."
+
+
+def _baseline_pointer_is_unreadable(history_dir: Path) -> bool:
+    """True when ``baseline.json`` itself is unreadable or structurally invalid.
+
+    Distinct from an unreadable baseline *target*: a corrupt pointer file is an
+    independent unavailable file that ``list_fingerprints`` does not count,
+    while a corrupt target fingerprint is already counted there. Used to report
+    the true unavailable-file count when both the history and the pointer are
+    independently unreadable.
+    """
+    pointer = Path(history_dir) / BASELINE_POINTER
+    try:
+        data = json.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, ValueError, AttributeError):
+        return True
+    return not isinstance(data, dict) or not data.get("fingerprint_id")
+
+
 def _badge_verdict(
     latest: CooldownFingerprint,
     baseline: CooldownFingerprint,
@@ -133,10 +164,7 @@ def _badge_verdict(
 ) -> str:
     """ok / degraded / unknown for the latest cooldown vs baseline."""
     cmp = compare(latest, baseline, thresholds=thresholds)
-    if (
-        cmp.time_to_base_verdict == "unknown"
-        and cmp.ultimate_vacuum_verdict == "unknown"
-    ):
+    if cmp.time_to_base_verdict == "unknown" and cmp.ultimate_vacuum_verdict == "unknown":
         return "unknown"
     return cmp.overall
 
@@ -207,9 +235,7 @@ class CooldownBaselineCard(QWidget):
         cfg = _load_baseline_cfg(config_path)
         # Strict-bool: a quoted YAML `enabled: "false"` must NOT enable the
         # card (mirrors the engine-side watchdog fix, commit b132fab).
-        self._enabled = (
-            cfg.get("enabled", False) is True if enabled is None else bool(enabled)
-        )
+        self._enabled = cfg.get("enabled", False) is True if enabled is None else bool(enabled)
         self._thresholds = {**DEFAULT_THRESHOLDS, **dict(cfg.get("thresholds") or {})}
         self._entries: list[CooldownFingerprint] = []
         self._baseline_id: str | None = None
@@ -249,10 +275,7 @@ class CooldownBaselineCard(QWidget):
 
         title = QLabel("ИСТОРИЯ ОХЛАЖДЕНИЙ")
         title.setFont(_title_font())
-        title.setStyleSheet(
-            f"color: {theme.FOREGROUND}; background: transparent; border: none;"
-            f" letter-spacing: 1px;"
-        )
+        title.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent; border: none; letter-spacing: 1px;")
         root.addWidget(title)
 
         self._empty_label = QLabel("")
@@ -260,8 +283,7 @@ class CooldownBaselineCard(QWidget):
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
         self._empty_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent;"
-            f" border: none; padding: {theme.SPACE_4}px;"
+            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none; padding: {theme.SPACE_4}px;"
         )
         root.addWidget(self._empty_label)
 
@@ -295,9 +317,7 @@ class CooldownBaselineCard(QWidget):
         self._delta_label = QLabel("—")
         self._delta_label.setFont(_label_font())
         self._delta_label.setWordWrap(True)
-        self._delta_label.setStyleSheet(
-            f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;"
-        )
+        self._delta_label.setStyleSheet(f"color: {theme.MUTED_FOREGROUND}; background: transparent; border: none;")
         root.addWidget(self._delta_label)
 
         actions = QHBoxLayout()
@@ -324,17 +344,28 @@ class CooldownBaselineCard(QWidget):
             self._baseline_id = None
             self._show_empty("Функция базового охлаждения отключена.")
             return
+        self._entries, unreadable_files = list_fingerprints(self._history_dir)
         self._entries = sorted(
-            list_fingerprints(self._history_dir),
+            self._entries,
             key=lambda fp: fp.cooldown_start_ts,
             reverse=True,
         )
-        base = get_baseline(self._history_dir)
+        base, unreadable_baseline = get_baseline(self._history_dir)
         self._baseline_id = base.fingerprint_id if base else None
         if not self._entries:
-            self._show_empty("История охлаждений пуста.")
+            if unreadable_files:
+                if unreadable_baseline and _baseline_pointer_is_unreadable(self._history_dir):
+                    unreadable_files += 1
+                self._show_empty(_unreadable_message(unreadable_files, "История недоступна"))
+            elif unreadable_baseline:
+                self._show_empty(_unreadable_message(unreadable_baseline, "Эталон недоступен"))
+            else:
+                self._show_empty("История охлаждений пуста.")
             return
         self._empty_label.setVisible(False)
+        if unreadable_files:
+            self._empty_label.setText(_unreadable_message(unreadable_files, "История неполна"))
+            self._empty_label.setVisible(True)
         self._table.setVisible(True)
         self._populate_table()
 
@@ -347,20 +378,18 @@ class CooldownBaselineCard(QWidget):
         self._pin_btn.setEnabled(False)
 
     def _populate_table(self) -> None:
-        baseline = get_baseline(self._history_dir)
+        baseline, unreadable_baseline = get_baseline(self._history_dir)
         self._table.setRowCount(len(self._entries))
         for row, fp in enumerate(self._entries):
             self._set_cell(row, 0, _fmt_ts(fp.cooldown_start_ts), fid=fp.fingerprint_id)
             self._set_cell(row, 1, _fmt_h(fp.duration_h), mono=True)
             self._set_cell(row, 2, _fmt_k(fp.T_cold_final), mono=True)
             self._set_cell(row, 3, _fmt_h(fp.time_to_base_h), mono=True)
-            self._set_verdict_cell(row, 4, fp, baseline)
+            self._set_verdict_cell(row, 4, fp, baseline, unreadable_baseline)
         if self._table.rowCount() > 0:
             self._table.selectRow(0)
 
-    def _set_cell(
-        self, row: int, col: int, text: str, *, mono: bool = False, fid: str | None = None
-    ) -> None:
+    def _set_cell(self, row: int, col: int, text: str, *, mono: bool = False, fid: str | None = None) -> None:
         item = QTableWidgetItem(text)
         if mono:
             item.setFont(_mono_font())
@@ -375,9 +404,13 @@ class CooldownBaselineCard(QWidget):
         col: int,
         fp: CooldownFingerprint,
         baseline: CooldownFingerprint | None,
+        unreadable_baseline: int = 0,
     ) -> None:
         if baseline is None:
-            text, color = "нет эталона", theme.MUTED_FOREGROUND
+            if unreadable_baseline:
+                text, color = "эталон недоступен", theme.FOREGROUND
+            else:
+                text, color = "нет эталона", theme.MUTED_FOREGROUND
         elif fp.fingerprint_id == baseline.fingerprint_id:
             text, color = "ЭТАЛОН", theme.ACCENT
         else:
@@ -419,9 +452,12 @@ class CooldownBaselineCard(QWidget):
         if entry is None:
             self._delta_label.setText("—")
             return
-        baseline = get_baseline(self._history_dir)
+        baseline, unreadable_baseline = get_baseline(self._history_dir)
         if baseline is None:
-            self._delta_label.setText("Эталонное охлаждение не задано.")
+            if unreadable_baseline:
+                self._delta_label.setText(_unreadable_message(unreadable_baseline, "Эталонное охлаждение недоступно"))
+            else:
+                self._delta_label.setText("Эталонное охлаждение не задано.")
             return
         if entry.fingerprint_id == baseline.fingerprint_id:
             self._delta_label.setText("Выбранное охлаждение — эталон.")
@@ -457,6 +493,8 @@ class CooldownVerdictBadge(QLabel):
     Compares the latest stored fingerprint against the golden baseline.
     Hidden when the feature is disabled, no baseline is pinned, or the
     history is empty — :meth:`verdict` returns ``None`` in that state.
+    An unreadable baseline or unreadable history records resolve to the
+    explicit ``unknown`` chip rather than hiding or an optimistic verdict.
     """
 
     def __init__(
@@ -471,9 +509,7 @@ class CooldownVerdictBadge(QLabel):
         self._history_dir = Path(history_dir) if history_dir else _default_history_dir()
         cfg = _load_baseline_cfg(config_path)
         # Strict-bool: quoted YAML `enabled: "false"` must NOT enable the badge.
-        self._enabled = (
-            cfg.get("enabled", False) is True if enabled is None else bool(enabled)
-        )
+        self._enabled = cfg.get("enabled", False) is True if enabled is None else bool(enabled)
         self._thresholds = {**DEFAULT_THRESHOLDS, **dict(cfg.get("thresholds") or {})}
         self._verdict: str | None = None
         self._last_read_ts: float | None = None
@@ -499,10 +535,7 @@ class CooldownVerdictBadge(QLabel):
 
     def refresh(self) -> None:
         now = time.monotonic()
-        if (
-            self._last_read_ts is not None
-            and now - self._last_read_ts < self._READ_THROTTLE_S
-        ):
+        if self._last_read_ts is not None and now - self._last_read_ts < self._READ_THROTTLE_S:
             return
         self._last_read_ts = now
         self._verdict = self._compute_verdict()
@@ -528,10 +561,14 @@ class CooldownVerdictBadge(QLabel):
     def _compute_verdict(self) -> str | None:
         if not self._enabled:
             return None
-        baseline = get_baseline(self._history_dir)
+        baseline, unreadable_baseline = get_baseline(self._history_dir)
         if baseline is None:
+            if unreadable_baseline:
+                return "unknown"
             return None
-        entries = list_fingerprints(self._history_dir)
+        entries, unreadable_files = list_fingerprints(self._history_dir)
+        if unreadable_files:
+            return "unknown"
         if not entries:
             return None
         latest = max(entries, key=lambda fp: fp.cooldown_start_ts)
