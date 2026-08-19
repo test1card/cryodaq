@@ -746,120 +746,6 @@ def test_baseline_metrics_ignore_replacement_refs(tmp_path: Path, monkeypatch: p
     assert generator.base_snapshot(refresh=True).read(entry.path) == original
 
 
-def test_claim_corrections_changed_python_count_matches_workflow_index() -> None:
-    workflow = _read(REPO_ROOT / ".github" / "workflows" / "main.yml")
-    corrections = _read(REPO_ROOT / "docs" / "CLAIM_CORRECTIONS.md")
-
-    def assert_current(candidate_workflow: str, candidate_corrections: str) -> None:
-        bases = re.findall(r"(?m)^\s*FORMAT_BASE=([0-9a-f]{40})\s*$", candidate_workflow)
-        assert len(bases) == 1
-        format_base = bases[0]
-        ancestry = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", format_base, "HEAD"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert ancestry.returncode == 0, ancestry.stderr
-        changed = subprocess.run(
-            [
-                "git",
-                "diff",
-                "--cached",
-                "--name-only",
-                "--diff-filter=ACMR",
-                format_base,
-                "--",
-                "*.py",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.splitlines()
-        assert changed == sorted(set(changed))
-        anchor = (
-            f"workflow-exact changed-file set in the current candidate index contains **{len(changed):,}** Python paths"
-        )
-        assert anchor in candidate_corrections
-
-    assert_current(workflow, corrections)
-
-    # The negative control has to mutate the LIVE candidate anchor that
-    # ``assert_current`` actually validates.  Matching the first
-    # ``contains **N** Python paths`` in the file is not equivalent: this branch
-    # also carries the frozen PR7 correction, whose count appears earlier and is
-    # deliberately pinned, so mutating it leaves the guard green and the control
-    # proves nothing.  The count itself stays un-hardcoded so the control keeps
-    # working as the candidate set moves.
-    current_anchor = re.search(r"current candidate index contains \*\*[\d,]+\*\* Python paths", corrections)
-    assert current_anchor is not None
-    stale_count = corrections.replace(
-        current_anchor.group(0), "current candidate index contains **669** Python paths", 1
-    )
-    assert stale_count != corrections
-    with pytest.raises(AssertionError):
-        assert_current(workflow, stale_count)
-
-    stale_base = workflow.replace(
-        "FORMAT_BASE=f5d6434d20dffae62c9f03fbc12f68b03f48351b",
-        "FORMAT_BASE=dc2f911b4da7e01325ef4627c21a3f6140d3bc67",
-        1,
-    )
-    assert stale_base != workflow
-    with pytest.raises(AssertionError):
-        assert_current(stale_base, corrections)
-
-    # Regression for the detached/exported-checkout topology defect: a
-    # FORMAT_BASE that is a valid commit but NOT an ancestor of HEAD must fail
-    # closed as an AssertionError from the ancestry guard. With the old
-    # ``check=True`` form this escaped as a CalledProcessError (which
-    # ``pytest.raises(AssertionError)`` cannot catch), so a non-ancestor base in
-    # a GitHub-shaped detached checkout turned the guard into an error instead
-    # of a clean failure. The dangling commit below is a real child of HEAD, so
-    # it is a valid commit that is provably not an ancestor of HEAD, and it
-    # touches no ref or working tree.
-    non_ancestor_env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "cryodaq-test",
-        "GIT_AUTHOR_EMAIL": "cryodaq-test@example.com",
-        "GIT_COMMITTER_NAME": "cryodaq-test",
-        "GIT_COMMITTER_EMAIL": "cryodaq-test@example.com",
-    }
-    head_tree = subprocess.run(
-        ["git", "rev-parse", "HEAD^{tree}"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    non_ancestor = subprocess.run(
-        ["git", "commit-tree", head_tree, "-p", "HEAD", "-m", "non-ancestor ancestry probe"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=non_ancestor_env,
-        check=True,
-    ).stdout.strip()
-    ancestry_check = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", non_ancestor, "HEAD"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert ancestry_check.returncode == 1, (non_ancestor, ancestry_check.stderr)
-    non_ancestor_workflow = workflow.replace(
-        "FORMAT_BASE=f5d6434d20dffae62c9f03fbc12f68b03f48351b",
-        f"FORMAT_BASE={non_ancestor}",
-        1,
-    )
-    assert non_ancestor_workflow != workflow
-    with pytest.raises(AssertionError):
-        assert_current(non_ancestor_workflow, corrections)
-
-
 def test_open_cell_qualification_replay_scope_matches_production_workflow(tmp_path: Path) -> None:
     from cryodaq.core.qualification import QualificationReceiptError, verify_qualification_receipt
     from tests.qualification_support import (
@@ -999,8 +885,15 @@ def test_open_cell_inventory_and_oc030_locator_match_live_tree() -> None:
         return len(governance_modules), inventory_size
 
     governance_module_count, inventory_size = assert_current(text, tracked, contents)
+    # DERIVED, not pinned.  This pair used to read `("All 6 tracked workflows", ...)`, so adding a
+    # seventh workflow made the mutation find nothing, `mutated == text`, and the control below
+    # failed -- reporting a broken register when what had actually broken was the control.  Every
+    # sibling pair in this tuple already derives its number; this one now does too.
+    workflow_count = len(
+        [path for path in tracked if path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))]
+    )
     for old, replacement in (
-        ("All 6 tracked workflows", "All 4 tracked workflows"),
+        (f"All {workflow_count} tracked workflows", f"All {workflow_count - 2} tracked workflows"),
         (
             f"all {governance_module_count} tracked governance-test modules",
             f"all {governance_module_count - 1} tracked governance-test modules",
@@ -2483,15 +2376,6 @@ def _svg_metadata(path: Path) -> dict[str, object]:
     return payload
 
 
-def _svg_nodes(path: Path) -> list[str]:
-    root = ET.parse(path).getroot()
-    return [
-        element.attrib["data-path"]
-        for element in root.iter()
-        if element.tag.endswith("g") and element.attrib.get("class") == "file-node"
-    ]
-
-
 @cache
 def _architecture_inventory() -> tuple[object, tuple[str, ...], dict[str, bytes]]:
     import tools.generate_montana_architecture_svgs as generator
@@ -2501,65 +2385,118 @@ def _architecture_inventory() -> tuple[object, tuple[str, ...], dict[str, bytes]
     return snapshot, paths, {path: snapshot.read(path) for path in paths}
 
 
-def test_checked_in_montana_architecture_svgs_match_frozen_index_snapshot(tmp_path: Path) -> None:
-    """Narrowed to the one surviving architecture graph (manifest SVG decision).
+def test_claim_corrections_changed_python_count_matches_workflow_index() -> None:
+    workflow = _read(REPO_ROOT / ".github" / "workflows" / "main.yml")
+    corrections = _read(REPO_ROOT / "docs" / "CLAIM_CORRECTIONS.md")
 
-    Previously checked both the exhaustive 1,085-file "all-files" map and the
-    legible "important" map. The manifest kept only the latter — the
-    all-files map is a provenance artifact, not a document a human or a weak
-    model can read, and the two before/after comparison maps are pure
-    campaign evidence. Only ``docs/architecture-montana-important.svg``
-    (moved out of the campaign-named ``docs/refactor/``) ships in PR-A, so
-    this is the only checked-in SVG this test can still verify.
-    """
-    import tools.generate_montana_architecture_svgs as generator
+    def assert_current(candidate_workflow: str, candidate_corrections: str) -> None:
+        bases = re.findall(r"(?m)^\s*FORMAT_BASE=([0-9a-f]{40})\s*$", candidate_workflow)
+        assert len(bases) == 1
+        format_base = bases[0]
+        ancestry = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", format_base, "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert ancestry.returncode == 0, ancestry.stderr
+        changed = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--cached",
+                "--name-only",
+                "--diff-filter=ACMR",
+                format_base,
+                "--",
+                "*.py",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        assert changed == sorted(set(changed))
+        anchor = (
+            f"workflow-exact changed-file set in the current candidate index contains **{len(changed):,}** Python paths"
+        )
+        assert anchor in candidate_corrections
 
-    snapshot, frozen_paths, contents = _architecture_inventory()
-    paths = list(frozen_paths)
-    reader = contents.__getitem__
-    assert paths
-    assert not any(generator._is_generated_output(path) for path in paths)
+    assert_current(workflow, corrections)
 
-    important_svg = REPO_ROOT / "docs/architecture-montana-important.svg"
-    important = list(generator.IMPORTANT_MONTANA)
-    assert _svg_metadata(important_svg) == generator.metadata_payload(
-        "montana-important",
-        important,
-        len(generator.EDGES_MONTANA),
-        reader,
-        snapshot,
+    # The negative control has to mutate the LIVE candidate anchor that
+    # ``assert_current`` actually validates.  Matching the first
+    # ``contains **N** Python paths`` in the file is not equivalent: this branch
+    # also carries the frozen PR7 correction, whose count appears earlier and is
+    # deliberately pinned, so mutating it leaves the guard green and the control
+    # proves nothing.  The count itself stays un-hardcoded so the control keeps
+    # working as the candidate set moves.
+    current_anchor = re.search(r"current candidate index contains \*\*[\d,]+\*\* Python paths", corrections)
+    assert current_anchor is not None
+    stale_count = corrections.replace(
+        current_anchor.group(0), "current candidate index contains **669** Python paths", 1
     )
-    assert _svg_nodes(important_svg) == important
-    generator.verify(important_svg, important, exhaustive=False)
-    rendered = tmp_path / important_svg.name
-    generator.important_svg("montana", paths, reader, rendered, snapshot)
-    generator.verify(rendered, important, exhaustive=False)
-    assert rendered.read_bytes() == generator._git_bytes("show", ":docs/architecture-montana-important.svg")
+    assert stale_count != corrections
+    with pytest.raises(AssertionError):
+        assert_current(workflow, stale_count)
 
-
-def test_shipped_architecture_artifact_does_not_claim_removed_companions() -> None:
-    # Enumerate every tracked architecture-SVG path, not only the ones this
-    # guard already knows about: a companion re-checked-in at any natural
-    # location (for example the historical root path
-    # `docs/architecture-montana-all-files.svg`) must fail this exact
-    # allowlist instead of passing unseen.
-    shipped_family = sorted(
-        path
-        for path in _tracked_files()
-        if path.endswith(".svg")
-        and (path.startswith("docs/architecture-") or path.startswith("docs/refactor/architecture-"))
+    stale_base = workflow.replace(
+        "FORMAT_BASE=f5d6434d20dffae62c9f03fbc12f68b03f48351b",
+        "FORMAT_BASE=dc2f911b4da7e01325ef4627c21a3f6140d3bc67",
+        1,
     )
-    assert shipped_family == ["docs/architecture-montana-important.svg"]
+    assert stale_base != workflow
+    with pytest.raises(AssertionError):
+        assert_current(stale_base, corrections)
 
-    expected_subtitle = "Selected load-bearing files in the sole shipped architecture map."
-    generator = _read(REPO_ROOT / "tools/generate_montana_architecture_svgs.py")
-    checked_in = _read(REPO_ROOT / shipped_family[0])
-    report = _read(REPO_ROOT / "docs/MONTANA_REFACTOR_REPORT.md")
-    assert expected_subtitle in generator
-    assert expected_subtitle in checked_in
-    for stale_claim in ("exhaustive companion map", "The all-file SVGs"):
-        assert stale_claim not in checked_in
-        assert stale_claim not in report
+    # Regression for the detached/exported-checkout topology defect: a
+    # FORMAT_BASE that is a valid commit but NOT an ancestor of HEAD must fail
+    # closed as an AssertionError from the ancestry guard. With the old
+    # ``check=True`` form this escaped as a CalledProcessError (which
+    # ``pytest.raises(AssertionError)`` cannot catch), so a non-ancestor base in
+    # a GitHub-shaped detached checkout turned the guard into an error instead
+    # of a clean failure. The dangling commit below is a real child of HEAD, so
+    # it is a valid commit that is provably not an ancestor of HEAD, and it
+    # touches no ref or working tree.
+    non_ancestor_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "cryodaq-test",
+        "GIT_AUTHOR_EMAIL": "cryodaq-test@example.com",
+        "GIT_COMMITTER_NAME": "cryodaq-test",
+        "GIT_COMMITTER_EMAIL": "cryodaq-test@example.com",
+    }
+    head_tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    non_ancestor = subprocess.run(
+        ["git", "commit-tree", head_tree, "-p", "HEAD", "-m", "non-ancestor ancestry probe"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        env=non_ancestor_env,
+        check=True,
+    ).stdout.strip()
+    ancestry_check = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", non_ancestor, "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ancestry_check.returncode == 1, (non_ancestor, ancestry_check.stderr)
+    non_ancestor_workflow = workflow.replace(
+        "FORMAT_BASE=f5d6434d20dffae62c9f03fbc12f68b03f48351b",
+        f"FORMAT_BASE={non_ancestor}",
+        1,
+    )
+    assert non_ancestor_workflow != workflow
+    with pytest.raises(AssertionError):
+        assert_current(non_ancestor_workflow, corrections)
 
 
 def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
@@ -2619,6 +2556,31 @@ def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
     for compact_form in ("130k lines", "1M lines"):
         compact_mutant = report + f"\nThe campaign interim count was {compact_form} of source text.\n"
         assert compact_aggregate_claim.search(compact_mutant)
+
+
+def test_shipped_architecture_artifact_does_not_claim_removed_companions() -> None:
+    # Enumerate every tracked architecture-SVG path, not only the ones this
+    # guard already knows about: a companion re-checked-in at any natural
+    # location (for example the historical root path
+    # `docs/architecture-montana-all-files.svg`) must fail this exact
+    # allowlist instead of passing unseen.
+    shipped_family = sorted(
+        path
+        for path in _tracked_files()
+        if path.endswith(".svg")
+        and (path.startswith("docs/architecture-") or path.startswith("docs/refactor/architecture-"))
+    )
+    assert shipped_family == ["docs/architecture-montana-important.svg"]
+
+    expected_subtitle = "Selected load-bearing files in the sole shipped architecture map."
+    generator = _read(REPO_ROOT / "tools/generate_montana_architecture_svgs.py")
+    checked_in = _read(REPO_ROOT / shipped_family[0])
+    report = _read(REPO_ROOT / "docs/MONTANA_REFACTOR_REPORT.md")
+    assert expected_subtitle in generator
+    assert expected_subtitle in checked_in
+    for stale_claim in ("exhaustive companion map", "The all-file SVGs"):
+        assert stale_claim not in checked_in
+        assert stale_claim not in report
 
 
 def test_architecture_svg_types_symlinks_and_gitlinks(tmp_path: Path, monkeypatch) -> None:
@@ -2791,3 +2753,213 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "no supported production health-node configuration" in section
     assert "::BUILTIN_DRIVER_SPECS" not in section
     assert "::get_driver_spec" not in section
+
+
+def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None:
+    """OB-006 stays fail-closed after moving whole-tree checks to release time."""
+    workflow_path = REPO_ROOT / ".github" / "workflows" / "release-gate.yml"
+    workflow = yaml.load(_read(workflow_path), Loader=yaml.BaseLoader)
+    assert isinstance(workflow, dict), f"release workflow must be a mapping: {workflow_path}"
+
+    triggers = workflow.get("on")
+    assert isinstance(triggers, dict), "release workflow has no trigger mapping"
+    push = triggers.get("push")
+    assert isinstance(push, dict), "release workflow must trigger on tag pushes"
+    tags = push.get("tags")
+    assert isinstance(tags, list) and "v*" in tags, "release workflow must trigger on v* tag pushes"
+
+    jobs = workflow.get("jobs")
+    assert isinstance(jobs, dict) and jobs, "release workflow has no jobs"
+    commands = [
+        step["run"]
+        for job in jobs.values()
+        if isinstance(job, dict)
+        for step in job.get("steps", [])
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+
+    # The registered whole-tree guards are back in the default-CI ``remaining`` partition,
+    # so release-gate.yml may not carry them again as tag-only obligations.  What remains in
+    # ``tests/release`` is the unregistered SVG check, which still runs through the strict
+    # active-guard runner (not plain pytest): the runner feeds the release selection files to
+    # the strict plugin as required files, so a skip/xfail marker cannot pass it unseen.
+    assert all("pytest" not in command.split() for command in commands), (
+        "release gate must not select release tests with plain pytest"
+    )
+    runners = [command for command in commands if "tools.ci_active_checkout_runner" in command]
+    assert len(runners) == 1, "release gate must invoke the strict active-guard runner exactly once"
+    runner = runners[0]
+    assert "--suite release" in runner
+    assert '--revision "${EVIDENCE_SHA:?}"' in runner
+    assert '--trusted-base "${TRUSTED_BASE_SHA:?}"' in runner
+
+    # The revision and trusted base are DERIVED by `candidate_identity`, never typed here.  That
+    # job's `bind` step is copied from `main.yml`, so silent byte drift between the two copies is
+    # the failure mode this comparison exists to catch.
+    ci = yaml.load(_read(REPO_ROOT / ".github" / "workflows" / "main.yml"), Loader=yaml.BaseLoader)
+
+    def _bind(document: dict) -> dict:
+        job = document["jobs"]["candidate_identity"]
+        return next(step for step in job["steps"] if step.get("id") == "bind")
+
+    # The two bind scripts are identical EXCEPT in the creation-push branch, and
+    # that one divergence is pinned here rather than excluded from comparison.
+    # Why they must differ: main.yml fires on `push: branches: ["**"]`, where a
+    # new branch's merge base with the default tip is a proper ancestor and the
+    # comparison is meaningful -- and a branch green carries no release
+    # authority. release-gate.yml fires on `tags: ['v*']`, where the tag usually
+    # points AT the default tip, so the merge base collapses to the candidate
+    # and compare_red_reproduction_bindings would compare a commit with itself.
+    # That is the one check the release gate exists to make independently, so it
+    # refuses instead and routes to workflow_dispatch with an explicit base.
+    #
+    # This assert is STRONGER than byte-identity, not weaker: every byte of both
+    # scripts is still covered, the divergence's content is dictated by this
+    # test, and drift anywhere in either file still fails.
+    ci_bind = _bind(ci)["run"]
+    creation_merge_base = (
+        '    test -n "${DEFAULT_BRANCH:?}"\n'
+        '    git fetch --no-tags origin "${DEFAULT_BRANCH}"\n'
+        '    default_tip="$(git rev-parse --verify "origin/${DEFAULT_BRANCH}^{commit}")"\n'
+        '    mapfile -t bases < <(git merge-base --all "$event_commit" "$default_tip")\n'
+        '    test "${#bases[@]}" = 1\n'
+        '    trusted_base_sha="$(require_commit \'creation-push merge base\' "${bases[0]}")"\n'
+    )
+    assert ci_bind.count(creation_merge_base) == 1, (
+        "main.yml's creation-push merge-base block moved; re-pin it here deliberately"
+    )
+    tag_creation_refusal = (
+        '    echo "new tag creation has no independently authenticated trusted base; '
+        'rerun through workflow_dispatch with trusted_base_sha" >&2\n'
+        "    exit 1\n"
+    )
+    # INDENTATION IS TAKEN FROM THE PARSED `run`, NOT RETYPED. This literal is
+    # compared against the block-scalar body after YAML has stripped the block
+    # indent, so it carries the script's own two-space nesting -- not the four
+    # spaces the surrounding Python suggests and not the raw file's deeper
+    # indent. A four-space version of this literal was never found in the
+    # workflow, so the substitution silently did nothing and the guard failed
+    # while both files were correct.
+    dispatch_tag_validation = (
+        '  if [[ "${GITHUB_REF_TYPE:?}" != "tag" ]] || [[ "${GITHUB_REF_NAME:?}" != v* ]]; then\n'
+        '    echo "workflow_dispatch release evidence must target a v* tag" >&2\n'
+        "    exit 1\n"
+        "  fi\n"
+    )
+    # Both anchors carry the indentation of the PARSED script, which for this
+    # `elif` is column zero. A two-space version matched nothing, so `.replace`
+    # returned the string unchanged and the comparison failed while both
+    # workflows were correct. `str.replace` reports no error when it substitutes
+    # nothing, so an anchor must be proven to occur before it is relied upon --
+    # which the assertion below now does.
+    dispatch_branch = 'elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then\n'
+    assert ci_bind.count(dispatch_branch) == 1, (
+        "main.yml's workflow_dispatch branch moved or changed indentation; re-pin it here"
+    )
+    expected_release_bind = ci_bind.replace(creation_merge_base, tag_creation_refusal).replace(
+        dispatch_branch, dispatch_branch + dispatch_tag_validation
+    )
+    assert _bind(workflow)["run"] == expected_release_bind, (
+        "release-gate bind drifted from main.yml outside its two pinned release divergences"
+    )
+    assert _bind(workflow)["env"] == _bind(ci)["env"], "release-gate bind environment drifted from main.yml"
+    assert workflow["jobs"]["candidate_identity"]["outputs"] == ci["jobs"]["candidate_identity"]["outputs"]
+    gate = jobs["whole-tree-artifact-freshness"]
+    assert gate["needs"] == "candidate_identity"
+    assert gate["env"]["EVIDENCE_SHA"] == "${{ needs.candidate_identity.outputs.evidence_sha }}"
+    assert gate["env"]["TRUSTED_BASE_SHA"] == "${{ needs.candidate_identity.outputs.trusted_base_sha }}"
+
+    # Reachability is now a property of the runner's own registry, not of workflow text: the
+    # runner executes exactly `checkout_execution_selection`, so a module absent from it is a
+    # module the release gate silently never runs.
+    from tools.ci_candidate_runner import _SELECTIONS
+    from tools.ci_guard_execution import (
+        GUARD_PLATFORMS,
+        active_guard_specs,
+        checkout_execution_selection,
+        suite_for_node,
+    )
+
+    release_modules = sorted(
+        path.relative_to(REPO_ROOT).as_posix() for path in (REPO_ROOT / "tests" / "release").rglob("test_*.py")
+    )
+    assert release_modules, "tests/release contains no test modules"
+    selected_files, _selected_nodes = checkout_execution_selection(REPO_ROOT, "release")
+    assert sorted(selected_files) == release_modules, (
+        f"release modules unreached by the release exact-checkout selection: "
+        f"{sorted(set(release_modules) - set(selected_files))}"
+    )
+
+    # The two whole-tree guards live in the ``remaining`` default-CI partition again, so the
+    # release suite must NOT be allowed to become their only home: a tag-only guard registration
+    # would reopen the prevention.  Assert they resolve to ``remaining`` and that the release
+    # suite itself carries no registered guards.
+    registered_whole_tree = (
+        "tests/docs/test_docs_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot",
+        "tests/docs/test_docs_freshness.py::test_claim_corrections_changed_python_count_matches_workflow_index",
+    )
+    for node in registered_whole_tree:
+        assert suite_for_node(node) == "remaining", f"whole-tree guard must stay in remaining default CI: {node}"
+    for platform in sorted(GUARD_PLATFORMS):
+        specs = active_guard_specs(REPO_ROOT, "release", platform=platform, execution_root="git-index")
+        assert not specs, f"release suite must not carry registered guards on {platform}"
+
+    remaining = _SELECTIONS["remaining"]
+    assert any("--ignore=tests/release" in selection for selection in remaining), (
+        "remaining candidate selection must ignore tests/release"
+    )
+
+
+def test_claim_corrections_cited_guard_nodes_resolve_and_name_their_real_cadence() -> None:
+    """A row naming a deleted node, or the wrong cadence for a live one, is a false claim.
+
+    The changed-Python-count guard lives in the default-CI ``remaining`` partition
+    (``tests/docs``) again, so its evidence row must name that live node and may not
+    describe the check as firing only at release.  Nothing caught either shape
+    before, because no check read the row's own citation.
+    """
+    from tools.ci_guard_execution import suite_for_node
+
+    corrections = _read(REPO_ROOT / "docs" / "CLAIM_CORRECTIONS.md")
+    node_reference = re.compile(r"tests/[\w/]+\.py::[\w.\-]+(?:\[[^\]\s]+\])?")
+
+    def assert_current(candidate: str) -> None:
+        references = sorted(set(node_reference.findall(candidate)))
+        assert references, "docs/CLAIM_CORRECTIONS.md cites no pytest node"
+        for reference in references:
+            path, _, name = reference.partition("::")
+            module = REPO_ROOT / path
+            assert module.is_file(), f"cited node's module does not exist: {reference}"
+            defined = {
+                node.name
+                for node in ast.walk(ast.parse(_read(module)))
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            assert name.split("[", 1)[0] in defined, f"cited node does not exist: {reference}"
+            if suite_for_node(reference) == "release":
+                continue
+            # A default-CI (remaining) node fires on every candidate head, so a row citing one
+            # may not describe the check as firing only when a release is cut.
+            rows = [line for line in candidate.splitlines() if reference in line]
+            assert rows, reference
+            for row in rows:
+                lowered = row.lower()
+                assert "at release" not in lowered, f"default-CI citation claims release-only cadence: {reference}"
+
+    assert_current(corrections)
+
+    live = "tests/docs/test_docs_freshness.py"
+    assert live in corrections
+    deleted_node = corrections.replace(live, "tests/release/test_whole_tree_artifact_freshness.py")
+    assert deleted_node != corrections
+    with pytest.raises(AssertionError, match="cited node does not exist"):
+        assert_current(deleted_node)
+
+    stale_cadence = corrections.replace(
+        "re-derives the count from the live index",
+        "re-derives the count from the live index only at release",
+        1,
+    )
+    assert stale_cadence != corrections
+    with pytest.raises(AssertionError, match="release-only cadence"):
+        assert_current(stale_cadence)

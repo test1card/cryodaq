@@ -43,7 +43,6 @@ default_ci_jobs:
   remaining:
     - test (ubuntu-latest, remaining)
     - test (windows-latest, remaining)
-
 false_green_pair_semantics:
   status: required_and_linked
   scope: inherited_from_runtime_prevention_id
