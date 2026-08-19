@@ -243,6 +243,58 @@ def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_p
         runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
 
 
+@_LINUX_PROCESS_AUTHORITY
+def test_a_real_seal_payload_is_accepted_by_the_acceptance_validator(tmp_path) -> None:
+    """The runner's seal and the ledger's validator must agree, and nothing tested that.
+
+    Every manifest test hand-builds the payload, so the two shapes were free to drift --
+    and they did: the seal grew a populated `themes` directory while the validator still
+    required the exact old topology, which would have destroyed every soak run at the
+    last gate, after the full duration had already been spent. A control that passes
+    while the real gate is broken is worse than no control, so this one feeds a payload
+    the runner ACTUALLY produced through the validator the ledger ACTUALLY calls.
+    """
+    from scripts import soak_mock_stack as soak
+
+    config = tmp_path / "config"
+    config.mkdir(mode=0o700)
+    readings = runner._materialize_isolated_mock_config(config)
+    for item in config.iterdir():
+        if item.is_file():
+            item.chmod(0o600)
+
+    seal = runner._source_fixture_seal(config, expected_readings_per_sample=readings)
+
+    assert soak._validate_source_fixture(seal.payload) == []
+
+    paths = [entry["path"] for entry in seal.payload["entries"]]
+    assert "themes" in paths, "the sealed topology must carry the theme directory"
+    assert any(path.startswith("themes/") for path in paths), "and the packs inside it"
+
+
+def test_the_validator_still_refuses_a_fixture_with_no_theme_packs(tmp_path) -> None:
+    """Teaching the validator a new shape must not teach it to accept a missing one.
+
+    The launcher resolves a theme at import, so a fixture without the packs cannot start
+    the program; a validator that shrugged at their absence would let that ship.
+    """
+    from scripts import soak_mock_stack as soak
+
+    payload = {
+        "schema": "cryodaq-soak-source-fixture/v1",
+        "instrument_id": "LS218_1",
+        "authority": "passive_measurement",
+        "mock": True,
+        "descriptor_count": 16,
+        "binding_count": 16,
+        "expected_readings_per_sample": 8,
+        "entries": [{"path": "experiment_templates", "kind": "directory"}],
+        "tree_sha256": "sha256:" + "0" * 64,
+    }
+
+    assert soak._validate_source_fixture(payload) != []
+
+
 class _LogEvidence:
     def __init__(self) -> None:
         self.logs: list[tuple[str, str]] = []

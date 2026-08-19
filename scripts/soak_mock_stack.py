@@ -1074,6 +1074,19 @@ def _validate_periodic_delivery_payload(
     return errors, tuple(artifact_names)
 
 
+# The empty template directory and the POPULATED theme directory. The second exists
+# because the launcher resolves a theme at import, so a fixture without the packs cannot
+# start the program at all; see the runner's own note beside its tracked-directory list.
+_EXPECTED_FIXTURE_DIRECTORIES = {"experiment_templates", "themes"}
+
+
+def _is_tracked_directory_member(path: str) -> bool:
+    """True for a file INSIDE one of the sealed tracked directories, one level deep."""
+
+    head, separator, tail = path.partition("/")
+    return bool(separator) and head in _EXPECTED_FIXTURE_DIRECTORIES and bool(tail) and "/" not in tail
+
+
 def _validate_source_fixture(payload: object) -> list[str]:
     expected_files = {
         "agent.yaml",
@@ -1103,19 +1116,23 @@ def _validate_source_fixture(payload: object) -> list[str]:
     if type(payload) is not dict or set(payload) != expected_top:
         return ["source fixture schema is invalid"]
     entries = payload.get("entries")
-    if not isinstance(entries, list) or len(entries) != len(expected_files) + 1:
+    if not isinstance(entries, list) or not entries:
         return ["source fixture entries are invalid"]
+    # The fixture carries a POPULATED tracked directory as well as the empty template one,
+    # so the topology is checked by SHAPE rather than by a fixed entry count: the count
+    # would otherwise have to know how many theme packs the tracked tree happens to hold,
+    # and the two numbers drifted apart the moment the packs were added.
     paths: list[str] = []
     for entry in entries:
         if type(entry) is not dict or not isinstance(entry.get("path"), str):
             return ["source fixture entry schema is invalid"]
         path = entry["path"]
         paths.append(path)
-        if path == "experiment_templates":
+        if path in _EXPECTED_FIXTURE_DIRECTORIES:
             if entry != {"path": path, "kind": "directory"}:
                 return ["source fixture directory entry is invalid"]
         elif (
-            path not in expected_files
+            (path not in expected_files and not _is_tracked_directory_member(path))
             or set(entry) != {"path", "kind", "bytes", "sha256"}
             or entry.get("kind") != "file"
             or type(entry.get("bytes")) is not int
@@ -1131,9 +1148,11 @@ def _validate_source_fixture(payload: object) -> list[str]:
             json.dumps(canonical_entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         ).hexdigest()
     )
+    theme_members = {path for path in paths if _is_tracked_directory_member(path)}
     if (
         paths != sorted(paths)
-        or set(paths) != expected_files | {"experiment_templates"}
+        or set(paths) != expected_files | _EXPECTED_FIXTURE_DIRECTORIES | theme_members
+        or not theme_members
         or payload.get("schema") != "cryodaq-soak-source-fixture/v1"
         or payload.get("instrument_id") != "LS218_1"
         or payload.get("authority") != "passive_measurement"
