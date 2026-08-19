@@ -3918,8 +3918,14 @@ class _PosixSoakRunner:
                                     break
                                 time.sleep(0.1)
                             if replacement_roles is None or replacement_tree is None:
+                                # Name WHICH child. The bare sentence leaves the reader to
+                                # guess between three roles with three different meanings:
+                                # a bridge that cannot recover is a defect, an engine that
+                                # does not is a deliberate permanent HOLD, and an assistant
+                                # is a third thing again. Guessing between them is exactly
+                                # what a refusal should make unnecessary.
                                 raise _RunnerFoundationError(
-                                    "faulted child did not recover within the reviewed ceiling"
+                                    f"faulted {event.target} did not recover within the reviewed ceiling"
                                 )
                             epochs[event.target] += 1
                             current = replacement_roles
