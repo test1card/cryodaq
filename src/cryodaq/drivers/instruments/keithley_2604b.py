@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -20,6 +21,7 @@ from typing import Any
 from cryodaq.core.smu_channel import SMU_CHANNELS, SmuChannel, normalize_smu_channel
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.drivers.contracts import CommandEvidence, CommandOutcome, SourceOffResult, SourceSetpoint
+from cryodaq.drivers.transport.mock_instrument import ExternalMockInstrumentClient
 from cryodaq.drivers.transport.usbtmc import USBTMCIncompleteCloseError, USBTMCTransport
 
 log = logging.getLogger(__name__)
@@ -76,6 +78,7 @@ _MOCK_T0 = 300.0
 _MOCK_ALPHA = 0.0033
 _MOCK_COOLING_RATE = 0.1
 _MOCK_SMUB_FACTOR = 0.7
+_EXTERNAL_THERMAL_HEATER_CHANNEL: SmuChannel = "smua"
 
 _IV_FIELDS = (
     ("voltage", "V"),
@@ -361,6 +364,7 @@ class Keithley2604B(InstrumentDriver):
         watchdog_mode: str | WatchdogMode | None = None,
         watchdog_enabled: bool | None = None,
         watchdog_timeout_s: float = 5.0,
+        mock_instrument_client: ExternalMockInstrumentClient | None = None,
     ) -> None:
         super().__init__(name, mock=mock)
         self._resource_str = resource_str
@@ -394,6 +398,10 @@ class Keithley2604B(InstrumentDriver):
         # Compliance tracking: consecutive cycles where SMU reports compliance.
         self._compliance_count: dict[SmuChannel, int] = {"smua": 0, "smub": 0}
         self._mock_temp = _MOCK_T0
+        if not mock and mock_instrument_client is not None:
+            raise ValueError("mock_instrument_client is available only in mock mode")
+        self._mock_instrument_client = mock_instrument_client
+        self._mock_power_sync_lock = asyncio.Lock()
         # Exact negative cache: True whenever either channel lacks current
         # readback-verified OFF evidence, including connect recovery, source
         # start, unmanaged output ON, or unusable output readback.
@@ -561,13 +569,17 @@ class Keithley2604B(InstrumentDriver):
             runtime.p_target = 0.0
             self._last_v[smu_channel] = 0.0
             self._compliance_count[smu_channel] = 0
-        self._revoke_off_evidence()
-        self._wdog_armed = False
-        self._wdog_autonomous = False
-
         family_authorized = False
         accepted_identity: str | None = None
         try:
+            # The external mock's initial zero belongs to this connect owner.
+            # Keep it inside the failed-connect cleanup boundary so any error
+            # or cancellation settles the lifecycle barrier before retry.
+            await self._sync_mock_thermal_power()
+            self._revoke_off_evidence()
+            self._wdog_armed = False
+            self._wdog_autonomous = False
+
             await self._transport.open(self._resource_str)
             idn_raw = await self._transport.query("*IDN?")
 
@@ -719,6 +731,9 @@ class Keithley2604B(InstrumentDriver):
                     f"{self.name}: disconnect refused without a readback-verified OFF for both outputs"
                 )
 
+            sync_cancel = await self._sync_mock_thermal_power_settled()
+            pending_cancel = pending_cancel or sync_cancel
+
             # Terminal current-generation OFF proof authorizes teardown.  Keep
             # the lifecycle barrier raised until disarm and close both settle.
             if not recovery_only:
@@ -785,9 +800,15 @@ class Keithley2604B(InstrumentDriver):
 
     async def read_channels(self) -> list[Reading]:
         self._require_operational_connection("read_channels")
+        acquisition_started_at = time.time()
+        acquisition_started_monotonic = time.monotonic()
 
         if self.mock:
-            return self._mock_readings()
+            readings = self._mock_readings()
+            for reading in readings:
+                reading.metadata["acquisition_started_at"] = acquisition_started_at
+                reading.metadata["acquisition_started_monotonic"] = acquisition_started_monotonic
+            return readings
 
         await self._wdog_pet()
 
@@ -964,6 +985,9 @@ class Keithley2604B(InstrumentDriver):
                         compliance_evidence=compliance_evidence,
                     )
                 )
+        for reading in readings:
+            reading.metadata["acquisition_started_at"] = acquisition_started_at
+            reading.metadata["acquisition_started_monotonic"] = acquisition_started_monotonic
         return readings
 
     async def start_source(
@@ -1006,6 +1030,8 @@ class Keithley2604B(InstrumentDriver):
             if self.mock:
                 runtime.active = True
                 self._source_regulation_epoch[smu_channel] = start_token
+                await self._sync_mock_thermal_power()
+                self._require_current_start(smu_channel, start_token)
                 return CommandOutcome(CommandEvidence.REQUESTED)
 
             # Every hazardous write is bracketed by an ownership check.  OFF
@@ -1058,6 +1084,20 @@ class Keithley2604B(InstrumentDriver):
                     smu_channel,
                     cleanup_error,
                 )
+
+            if cleanup_exact:
+                try:
+                    sync_pending = await self._sync_mock_thermal_power_settled()
+                    cleanup_pending = cleanup_pending or sync_pending
+                except BaseException as sync_error:
+                    cleanup_exact = False
+                    self._unsafe_output_state = True
+                    log.critical(
+                        "%s: SAFETY: failed-start external zero synchronization raised on %s: %s",
+                        self.name,
+                        smu_channel,
+                        sync_error,
+                    )
 
             if not cleanup_exact:
                 self._source_regulation_epoch[smu_channel] = None
@@ -1173,6 +1213,12 @@ class Keithley2604B(InstrumentDriver):
             command_epoch=update_epoch,
         )
         runtime.p_target = p_target
+        await self._sync_mock_thermal_power()
+        self._require_current_regulation(
+            smu_channel,
+            generation=update_generation,
+            command_epoch=update_epoch,
+        )
 
     async def update_source_limits(
         self,
@@ -1343,6 +1389,9 @@ class Keithley2604B(InstrumentDriver):
                     )
                 finally:
                     self._finish_off_operation([smu_channel])
+                sync_cancel = await self._sync_mock_thermal_power_settled()
+                if sync_cancel is not None:
+                    raise sync_cancel
                 return
             self._unsafe_output_state = True
             raise OutputStateUnverifiedError(
@@ -1354,13 +1403,17 @@ class Keithley2604B(InstrumentDriver):
             [smu_channel],
             context="stop_source",
         )
-        if pending_cancel is not None:
-            raise pending_cancel
         if not off_confirmed:
+            if pending_cancel is not None:
+                raise pending_cancel
             raise OutputStateUnverifiedError(
                 f"{self.name}: {smu_channel} output state UNVERIFIED after "
                 f"OUTPUT_OFF (readback did not confirm OFF) — output may still be ON"
             )
+        sync_cancel = await self._sync_mock_thermal_power_settled()
+        pending_cancel = pending_cancel or sync_cancel
+        if pending_cancel is not None:
+            raise pending_cancel
 
     async def read_buffer(self, start_idx: int = 1, count: int = 100) -> list[dict[str, float]]:
         self._require_operational_connection("read_buffer")
@@ -1401,12 +1454,18 @@ class Keithley2604B(InstrumentDriver):
                     )
             finally:
                 self._finish_off_operation(channels)
+            sync_cancel = await self._sync_mock_thermal_power_settled()
+            if sync_cancel is not None:
+                raise sync_cancel
             return SourceOffResult.DEVICE_REPORTED_OFF
 
         off_confirmed, pending_cancel = await self._attempt_owned_off(
             channels,
             context="emergency_off",
         )
+        if off_confirmed:
+            sync_cancel = await self._sync_mock_thermal_power_settled()
+            pending_cancel = pending_cancel or sync_cancel
         if pending_cancel is not None:
             raise pending_cancel
         return SourceOffResult.DEVICE_REPORTED_OFF if off_confirmed else SourceOffResult.PHYSICAL_STATE_UNKNOWN
@@ -2228,6 +2287,28 @@ class Keithley2604B(InstrumentDriver):
                 }
             )
         return results
+
+    async def _sync_mock_thermal_power(self) -> None:
+        if not self.mock or self._mock_instrument_client is None:
+            return
+        async with self._mock_power_sync_lock:
+            heater_runtime = self._channels[_EXTERNAL_THERMAL_HEATER_CHANNEL]
+            power_w = heater_runtime.p_target if heater_runtime.active else 0.0
+            await self._mock_instrument_client.set_power(power_w)
+
+    async def _sync_mock_thermal_power_settled(self) -> asyncio.CancelledError | None:
+        if not self.mock or self._mock_instrument_client is None:
+            return None
+
+        async def _sync() -> bool:
+            await self._sync_mock_thermal_power()
+            return True
+
+        task = asyncio.create_task(_sync(), name=f"{self.name}_mock_thermal_power_sync")
+        _result, error, caller_cancelled = await self._settle_owned_bool_task(task)
+        if error is not None:
+            raise error
+        return caller_cancelled
 
     def _mock_r_of_t(self) -> float:
         return max(_MOCK_R0 * (1.0 + _MOCK_ALPHA * (self._mock_temp - _MOCK_T0)), 1.0)

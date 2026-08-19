@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import time
+from datetime import UTC, datetime
 from typing import cast
 
-from cryodaq.drivers.base import Reading
+from cryodaq.drivers.base import InstrumentDriver, Reading
 from cryodaq.drivers.contracts import (
     BurstSensor,
     CalibratableSensor,
@@ -72,3 +75,60 @@ def test_existing_gpib_driver_is_not_falsely_declared_as_public_shared_bus() -> 
     lakeshore = LakeShore218S("LS", "GPIB0::1::INSTR", mock=True)
     assert not isinstance(lakeshore, SharedBusDevice)
     assert not isinstance(lakeshore, CalibratableSensor)
+
+
+class _EpochSilentDriver(InstrumentDriver):
+    """A driver that returns Т-prefixed temperature channels but stamps no
+    acquisition epoch of its own — the exact shape Finding B warns about: a
+    new-lab temperature channel from any InstrumentDriver other than the two
+    modified ones. The base polling boundary must supply the epoch."""
+
+    async def connect(self) -> None: ...
+
+    async def disconnect(self) -> None: ...
+
+    async def read_channels(self) -> list[Reading]:
+        return [
+            Reading(
+                timestamp=datetime.now(UTC),
+                instrument_id="NewLab",
+                channel="Т7",
+                value=4.2,
+                unit="K",
+                metadata={},
+            )
+        ]
+
+
+def test_safe_read_stamps_acquisition_epoch_for_driver_without_its_own() -> None:
+    driver = _EpochSilentDriver("NewLab", mock=True)
+    readings = asyncio.run(driver.safe_read())
+    assert len(readings) == 1
+    metadata = readings[0].metadata
+    assert "acquisition_started_monotonic" in metadata
+    assert "acquisition_started_at" in metadata
+    assert isinstance(metadata["acquisition_started_monotonic"], float)
+    assert isinstance(metadata["acquisition_started_at"], float)
+    # The epoch must be captured at the polling boundary, not after the read.
+    now = time.time()
+    assert metadata["acquisition_started_at"] <= now
+
+
+class _SelfStampingDriver(_EpochSilentDriver):
+    """A driver that already stamps its own epoch must keep it — the base
+    boundary must not overwrite a driver-supplied value."""
+
+    async def read_channels(self) -> list[Reading]:
+        reading = await super().read_channels()
+        reading[0].metadata["acquisition_started_monotonic"] = 123.0
+        reading[0].metadata["acquisition_started_at"] = 456.0
+        return reading
+
+
+def test_safe_read_preserves_driver_supplied_acquisition_epoch() -> None:
+    driver = _SelfStampingDriver("NewLab", mock=True)
+    readings = asyncio.run(driver.safe_read())
+    assert len(readings) == 1
+    metadata = readings[0].metadata
+    assert metadata["acquisition_started_monotonic"] == 123.0
+    assert metadata["acquisition_started_at"] == 456.0

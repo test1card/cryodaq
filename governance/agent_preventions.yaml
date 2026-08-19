@@ -43,7 +43,6 @@ default_ci_jobs:
   remaining:
     - test (ubuntu-latest, remaining)
     - test (windows-latest, remaining)
-
 false_green_pair_semantics:
   status: required_and_linked
   scope: inherited_from_runtime_prevention_id
@@ -223,6 +222,38 @@ false_green_pairs:
     guard: tests/agents/assistant/test_agent_narration_floor.py::test_the_escalation_clock_starts_when_the_operator_was_told
     ci_partition: agents
     red_evidence: three_separate_nodes_stepped_the_clock_forward_without_refiring_the_alarm_so_seen_went_stale_and_the_ordinary_quiet_for_a_full_window_branch_admitted_the_dispatch_while_the_escalation_and_retry_branches_under_test_were_never_reached_the_helper_flap_quietly_now_carries_the_refires_so_they_cannot_be_omitted_2026_08_06_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-LATE-DELIVERY-PRUNE-FALSE-GREEN-342
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_preserves_freshness_without_rearming_the_source_clock
+    ci_partition: agents
+    red_evidence: cross_alarm_pruning_used_only_source_activity_so_a_delivery_one_second_old_was_deleted_when_another_alarm_dispatched_and_the_next_refire_was_admitted_as_new_2026_08_15
+    green_evidence: pending
+  - id: NARRATION-GUARD-BACKPRESSURE-REARM-FALSE-GREEN-343
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap
+    ci_partition: agents
+    red_evidence: restoring the pre_68d2a284 late_delivery_rearm production logic made test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap fail its final admission assertion while the restored file compiled_2026_08_15_pending_immutable_capture
+    green_evidence: pending
+  - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_does_not_reset_source_activity_for_returning_alarm
+    ci_partition: agents
+    red_evidence: the_t_0_admission_t_10_suppression_t_35_late_delivery_t_41_return_control_stayed_FALSE_when_confirmed_delivery_refreshed_activity_and_the_returning_source_event_was_lost_2026_08_13
+    green_evidence: pending
+  - id: NARRATION-GUARD-QUIET-GAP-FALSE-GREEN-341
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
+    guard: tests/agents/assistant/test_agent_narration_floor.py::test_a_quiet_gap_clears_suppression_before_escalation_retirement
+    ci_partition: agents
+    red_evidence: the_quiet_gap_regression_was_green_with_the_suppression_defect_restored_so_the_suite_missed_that_a_quiet_gap_must_clear_suppression_before_escalation_retirement_2026_08_13
     green_evidence: pending
   - id: ARCHIVE-LOADER-PATH-FALSE-GREEN-328
     status: open
@@ -3057,6 +3088,14 @@ false_green_pairs:
     ci_partition: core
     red_evidence: safe_reply_queue_put_instrumentation_leaked_only_on_exceptional_exits_and_failed_absent_custom_owner_failure_and_timeout_guards_4_failed_2026_08_01_pending_immutable_capture
     green_evidence: pending
+  - id: ZMQ-REPLY-COLLECTION-REPLY-COUNT-FALSE-GREEN-249
+    status: open
+    scope: repository
+    runtime_prevention_id: ZMQ-REPLY-COLLECTION-SETTLEMENT-039
+    guard: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
+    ci_partition: core
+    red_evidence: an_always_false_reply_count_predicate_passed_only_the_negative_loss_test_while_the_positive_exact_count_control_was_unmapped_2026_08_15_pending_immutable_capture
+    green_evidence: pending
   - id: MONTANA-METRICS-SNAPSHOT-FALSE-GREEN-239
     status: open
     scope: repository
@@ -3282,6 +3321,152 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: CONDUCTIVITY-GUARD-ACQUISITION-CUT-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_auto_evidence_authority_081.json
+      sha256: sha256:5c86df35ead7fd1d341814b8e5426391cfb9301fea85d2cbb92145f1a2af2fd7
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-CHANNEL-IDENTITY-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_channel_identity_false_green_081.json
+      sha256: sha256:3aa74ab9b75463ed7f550387125ee7d1490568b51fd3145c85098d8180a892a8
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-UNUSABLE-FEED-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_unusable_feed_false_green_081.json
+      sha256: sha256:ce7d9e552bb0faddb528974c0831eb819ef890216016b619bef315413c2186cc
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-LAKESHORE-ACQUISITION-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_lakeshore_acquisition_false_green_081.json
+      sha256: sha256:5c4c2bf65344ad269e904131c397ba086924234abfb066a5a314ab3ab031cf3f
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_keithley_acquisition_false_green_081.json
+      sha256: sha256:5c8451e01643dc2a16f46016476450fc5ba786274f4b68ac1595ef345a77111c
+    green_evidence: pending
+  - id: EXTERNAL-MOCK-THERMAL-POINT-IDENTITY-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_process_reaches_published_thermal_calculator_result
+    ci_partition: remaining
+    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_independent_report_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_skip_second_power_and_queued_first_point_were_accepted_as_the_second_thermal_point
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-ENGINE-CLI-FORWARDING-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_engine_main_forwards_exact_external_simulator_client
+    ci_partition: remaining
+    red_evidence: exact_973837b23117492bd96291dbaa74baef99d50efc_independent_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_deleting_engine_main_external_client_forwarding_left_every_committed_simulator_test_green
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-RUN-ENGINE-FORWARDING-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_engine_registry_adoption.py::test_run_engine_passes_live_dependencies_and_exact_recorded_source
+    ci_partition: remaining
+    red_evidence: exact_973837b23117492bd96291dbaa74baef99d50efc_independent_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_deleting_run_engine_to_load_drivers_external_client_forwarding_left_every_committed_simulator_test_green
+    green_evidence: pending_final_registry_candidate_review
+  - id: EXTERNAL-MOCK-CONNECT-SETTLEMENT-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_scheduler_retries_after_initial_external_zero_connect_failure
+    ci_partition: remaining
+    red_evidence: exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_independent_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_initial_zero_failure_preceded_connect_cleanup_and_left_connect_in_progress_permanently_true_while_the_remaining_suite_stayed_green
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-ALREADY-LATCHED-OFF-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_failed_target_update_waits_for_already_latched_external_off
+    ci_partition: remaining
+    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898479_and_guard_red_the_failed_target_update_returned_before_the_concurrent_already_latched_external_OFF_side_effect_settled
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-ENDPOINT-CONSTRUCTION-FALSE-GREEN-006
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds
+    ci_partition: remaining
+    red_evidence: exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_finding_3797898486_and_guard_red_direct_construction_accepted_a_remote_host_and_unbounded_ports_while_parser_only_guards_stayed_green_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_localhost_literal_was_accepted_without_peer_resolution_proof
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-HEATER-IDENTITY-FALSE-GREEN-007
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_smua_only_drives_mock_thermal_plant_channel
+    ci_partition: remaining
+    red_evidence: exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_and_guard_red_the_external_plant_received_0_5_W_from_smua_0_2_W_plus_smub_0_3_W_while_the_shipped_calculator_consumed_only_smua_power_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_and_guard_red_a_renamed_Keithley_aux_smua_received_the_external_client_and_applied_0_0_then_0_2_W_while_the_shipped_calculator_consumed_only_Keithley_1_smua
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-THERMOMETER-IDENTITY-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_simulator_binding_requires_canonical_lakeshore_channels
+    ci_partition: remaining
+    red_evidence: exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_and_guard_red_LS218_2_queried_the_external_LakeShore_endpoint_instead_of_its_internal_mock_transport_and_exact_e4b08e8cc6e30ffb80f80f319a7bd413a2138429_cold_review_report_sha256_71cc2a3cb4b1f882324ed046776d382eaa39fbd9fa4bb4589de89ee29865c791_rebinding_to_a_future_auxiliary_LakeShore_left_the_closed_enumeration_guard_green_and_remapped_hot_cold_LS218_1_channel_labels_were_accepted_and_bound_the_plant_while_the_older_enumeration_guard_stayed_green
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-INCOMPLETE-ROSTER-FALSE-GREEN-009
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_load_drivers_rejects_incomplete_external_mock_roster
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_guards_always_constructed_a_complete_canonical_roster_so_a_roster_omitting_or_renaming_either_Keithley_1_or_LS218_1_could_accept_the_run_without_the_engine_drivers_ever_proving_the_external_client_could_bind_the_full_plant
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-CLIENT-TIMEOUT-FALSE-GREEN-010
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_external_mock_client_honors_per_call_timeout_ms
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_per_call_timeout_ms_was_ignored_so_a_quiet_loopback_endpoint_could_hang_past_the_deadline_while_the_registered_guards_only_exercised_the_client_default_timeout
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-LAKESHORE-TIMEOUT-FALSE-GREEN-011
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_lakeshore_external_query_forwards_per_call_timeout
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_lakeshore_external_query_dropped_the_per_call_timeout_ms_so_the_configured_read_timeout_was_not_honored_on_the_external_path_while_the_registered_guards_only_asserted_instrument_identity
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: EXTERNAL-MOCK-READY-FILE-FALSE-GREEN-012
+    status: open
+    scope: product_contract
+    runtime_prevention_id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    guard: tests/drivers/test_thermal_simulator.py::test_simulator_publishes_ready_file_atomically
+    ci_partition: remaining
+    red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_ready_file_was_written_in_place_so_a_launcher_polling_by_existence_could_read_a_partially_written_document_while_no_registered_guard_asserted_atomic_publish
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -3357,6 +3542,14 @@ records:
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_records_a_partial_delivery_as_seen
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_the_handler_keeps_a_delivery_cancelled_during_the_audit_write
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_quiet_gap_clears_suppression_before_escalation_retirement
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_does_not_reset_source_activity_for_returning_alarm
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_late_delivery_preserves_freshness_without_rearming_the_source_clock
+        ci_partition: agents
+      - node: tests/agents/assistant/test_agent_narration_floor.py::test_backpressure_suppression_rearms_after_a_late_delivery_and_quiet_gap
         ci_partition: agents
       - node: tests/agents/assistant/test_agent_narration_floor.py::test_a_duplicate_compatibility_delivery_does_not_move_the_clock
         ci_partition: agents
@@ -3778,6 +3971,36 @@ records:
       - node: tests/governance/test_agent_preventions.py::test_all_repository_python_sources_compile_before_pytest_evidence
         ci_partition: remaining
       - node: tests/governance/test_agent_preventions.py::test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_checks_every_timeout_handler_exit
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_broad_timeout_handlers_as_timeout_handlers
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_asyncio_timeout_error_handlers_as_timeout_error_type
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_continue_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_logging_only_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_aliased_queue_getter_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_stored_queue_get_awaitable_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_transitively_aliased_stored_queue_get_awaitable_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_tracks_keyword_future_in_discovery_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_conditional_loop_jump_timeout_handler_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_resolves_wait_for_import_aliases
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_accepts_positional_wait_for_timeout
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_allows_diagnostic_timeout_reraise
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_flags_nested_timeout_handler_exit_as_swallow
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_durable_ack_guard_treats_os_error_handlers_as_timeout_handlers
         ci_partition: remaining
       - node: tests/governance/test_active_guard_execution.py::test_active_guard_execution_rejects_skip_xfail_deselection_collect_only_and_warnings
         ci_partition: remaining
@@ -5939,6 +6162,8 @@ records:
         ci_partition: core
       - node: tests/core/test_zmq_subprocess_ephemeral.py::test_terminal_drain_accounts_reply_published_during_owner_settlement
         ci_partition: core
+      - node: tests/core/test_zmq_subprocess_ephemeral.py::test_reply_count_accepts_exact_expected_reply_set
+        ci_partition: core
     red_evidence: original_partial_return_error_path_queue_leak_permissive_identity_accounting_success_only_cleanup_safe_queue_cleanup_omission_prejoin_terminal_drain_and_exceptional_safe_queue_leak_mutants_failed_their_exact_behavioral_guards_2026_08_01_pending_immutable_capture
     green_evidence: pending
   - id: EXACT-SIX-PROTECTED-EXPORT-DESTINATION-ISOLATION-042
@@ -6449,3 +6674,95 @@ records:
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
     green_evidence: pending
+  - id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The automatic conductivity step from an acknowledged Keithley target through sample qualification, point recording, the next target, and Stop.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The automatic sweep can advance or record a conductivity point from a bridge backlog, from measurements acquired before the target acknowledgement after a wall-clock step, from temperature stability that spans a power-feed failure, or from controls rebuilt onto channels that differ from the commanded step.
+    invariant: Each automatic step binds one immutable Keithley channel and one immutable temperature chain. LakeShore and Keithley readings carry a monotonic acquisition start captured before I/O, and the bridge stamps monotonic ingress before its process queue. The panel accepts only usable samples acquired after the monotonic target acknowledgement and within a freshness bound at bridge ingress that has a fail-closed floor of ten seconds, widened to three times the largest per-channel median acquisition gap when the observed cadence of the bound channels is slower. An unusable or silent selected power feed clears both power and temperature evidence plus the stability predictor. Channel-manager rebuilds preserve the bound chain and re-disable every rebuilt selector until settlement; inactive controls then reconcile to current settings. The next target and Stop use the bound Keithley channel. The panel does not advance without current qualified power and temperature evidence.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_fresh_power_and_temperature_samples_after_target_ack
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_advances_when_stable_and_min_wait_elapsed
+        ci_partition: gui
+      - node: tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only
+        ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
+      sha256: sha256:305b9c74d3d4eeda82903c00cc927ce18e9931e2de75956c167120821900a869
+    green_evidence: pending
+  - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: External mock thermal endpoint construction and instrument selection, and the SafetyManager to Keithley connect, start, target-update, OFF, Scheduler, and ThermalCalculator path.
+    classification: late_side_effect
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A directly constructed remote or invalid endpoint can escape parser-only confinement; a failed or cancelled initial zero can wedge reviewed-source connect ownership; a delayed, failed, cancelled, or misrouted power command can leave the external plant nonzero or divergent from CryoDAQ truth, combine a non-heater source with the configured heater, replay one external thermometer stream under auxiliary instrument identities, return before an already-latched external OFF settles, return stale success after OFF authority, or let a queued earlier analytic certify the wrong automatic-sweep point.
+    invariant: Every external mock endpoint, including direct construction, uses the literal numeric loopback address 127.0.0.1 with an integer port in 1..65535; the exact CLI-selected client reaches only the canonical simulated instruments through engine and registry construction, and the production roster proves exactly one LakeShore owns that client; only Keithley_1/smua can drive the single external plant; only LS218_1 can read the external plant, while auxiliary LakeShore instruments keep independent internal mock transports; initial-zero failure or cancellation settles the Scheduler-owned connect attempt and permits a later safe retry; every uncertain start or target update settles a confirmed final zero before failure or cancellation escapes, including when a concurrent fault already owns the retained global-OFF operation; competing OFF authority cannot receive stale update success; and each published thermal point binds one new simulator command, a post-command Scheduler power reading, matching calculator metadata P, and reciprocal truth for that same point.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/drivers/test_thermal_simulator.py::test_failed_start_lost_ack_reconciles_external_zero
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_target_update_failure_forces_external_zero_and_latches_fault
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_cancelled_target_update_settles_external_zero_before_cancellation
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_target_update_cannot_report_success_after_emergency_off_authority
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_delayed_mock_start_cannot_reheat_external_plant_after_stop
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_delayed_mock_update_cannot_reheat_external_plant_after_stop
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_cancelled_stop_settles_zero_after_delayed_external_power
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_process_reaches_published_thermal_calculator_result
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_engine_main_forwards_exact_external_simulator_client
+        ci_partition: remaining
+      - node: tests/drivers/test_engine_registry_adoption.py::test_run_engine_passes_live_dependencies_and_exact_recorded_source
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_scheduler_retries_after_initial_external_zero_connect_failure
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_failed_target_update_waits_for_already_latched_external_off
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_direct_mock_endpoint_construction_enforces_loopback_and_port_bounds
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_smua_only_drives_mock_thermal_plant_channel
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_auxiliary_lakeshore_uses_internal_mock_transport
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_simulator_binding_requires_canonical_lakeshore_channels
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_load_drivers_rejects_incomplete_external_mock_roster
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_external_mock_client_honors_per_call_timeout_ms
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_lakeshore_external_query_forwards_per_call_timeout
+        ci_partition: remaining
+      - node: tests/drivers/test_thermal_simulator.py::test_simulator_publishes_ready_file_atomically
+        ci_partition: remaining
+    red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
+    green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition
