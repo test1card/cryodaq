@@ -2474,9 +2474,7 @@ def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
         tail_share = _DIAGNOSTIC_OUTPUT_LIMIT - _DIAGNOSTIC_HEAD_SHARE
         dropped = len(text) - _DIAGNOSTIC_OUTPUT_LIMIT
         return (
-            text[:_DIAGNOSTIC_HEAD_SHARE]
-            + (_DIAGNOSTIC_TRUNCATION_MARKER % dropped)
-            + text[len(text) - tail_share :]
+            text[:_DIAGNOSTIC_HEAD_SHARE] + (_DIAGNOSTIC_TRUNCATION_MARKER % dropped) + text[len(text) - tail_share :]
         )
 
     return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
