@@ -61,6 +61,8 @@ from cryodaq.operator_snapshot import OperatorSnapshot
 logger = logging.getLogger(__name__)
 
 _CMD_REPLY_TIMEOUT_S = 65.0  # H7: outermost command tier — server 55s < REQ 60s < GUI 65s
+_BRIDGE_INGRESS_MONOTONIC_KEY = "__bridge_ingress_monotonic"
+_BRIDGE_INGRESS_MONOTONIC_METADATA_KEY = "bridge_ingress_monotonic"
 
 # Mirror of core.zmq_bridge.PROTOCOL_VERSION. Duplicated (not imported) —
 # this module must not import zmq/core.zmq_bridge at module scope (the GUI
@@ -252,7 +254,12 @@ def _increment_shared_counter(counter: Any) -> int | None:
 
 
 def _reading_from_dict(d: dict[str, Any]) -> Reading:
-    """Reconstruct a Reading from a plain dict (received via mp.Queue)."""
+    """Reconstruct a Reading and preserve trusted subprocess ingress age."""
+
+    metadata = dict(d.get("metadata", {}))
+    ingress_monotonic = d.get(_BRIDGE_INGRESS_MONOTONIC_KEY)
+    if isinstance(ingress_monotonic, float) and math.isfinite(ingress_monotonic):
+        metadata[_BRIDGE_INGRESS_MONOTONIC_METADATA_KEY] = ingress_monotonic
     return Reading(
         timestamp=datetime.fromtimestamp(d["timestamp"], tz=UTC),
         instrument_id=d.get("instrument_id", ""),
@@ -261,7 +268,7 @@ def _reading_from_dict(d: dict[str, Any]) -> Reading:
         unit=d["unit"],
         status=ChannelStatus(d["status"]),
         raw=d.get("raw"),
-        metadata=d.get("metadata", {}),
+        metadata=metadata,
     )
 
 

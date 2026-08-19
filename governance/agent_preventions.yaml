@@ -3289,6 +3289,56 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: CONDUCTIVITY-GUARD-ACQUISITION-CUT-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_auto_evidence_authority_081.json
+      sha256: sha256:5c86df35ead7fd1d341814b8e5426391cfb9301fea85d2cbb92145f1a2af2fd7
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-CHANNEL-IDENTITY-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_channel_identity_false_green_081.json
+      sha256: sha256:3aa74ab9b75463ed7f550387125ee7d1490568b51fd3145c85098d8180a892a8
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-UNUSABLE-FEED-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds
+    ci_partition: gui
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_unusable_feed_false_green_081.json
+      sha256: sha256:ce7d9e552bb0faddb528974c0831eb819ef890216016b619bef315413c2186cc
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-LAKESHORE-ACQUISITION-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_lakeshore_acquisition_false_green_081.json
+      sha256: sha256:5c4c2bf65344ad269e904131c397ba086924234abfb066a5a314ab3ab031cf3f
+    green_evidence: pending
+  - id: CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081
+    status: open
+    scope: product_contract
+    runtime_prevention_id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    guard: tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only
+    ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_keithley_acquisition_false_green_081.json
+      sha256: sha256:5c8451e01643dc2a16f46016476450fc5ba786274f4b68ac1595ef345a77111c
+    green_evidence: pending
   - id: EXTERNAL-MOCK-THERMAL-POINT-IDENTITY-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -6583,6 +6633,40 @@ records:
       - node: tests/docs/test_evidence_packaging_readiness.py::test_procedure_parser_rejects_duplicate_opener_outside_bounded_block
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending
+  - id: CONDUCTIVITY-AUTO-EVIDENCE-AUTHORITY-081
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The automatic conductivity step from an acknowledged Keithley target through sample qualification, point recording, the next target, and Stop.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The automatic sweep can advance or record a conductivity point from a bridge backlog, from measurements acquired before the target acknowledgement after a wall-clock step, from temperature stability that spans a power-feed failure, or from controls rebuilt onto channels that differ from the commanded step.
+    invariant: Each automatic step binds one immutable Keithley channel and one immutable temperature chain. LakeShore and Keithley readings carry a monotonic acquisition start captured before I/O, and the bridge stamps monotonic ingress before its process queue. The panel accepts only usable samples acquired after the monotonic target acknowledgement and within a freshness bound at bridge ingress that has a fail-closed floor of ten seconds, widened to three times the largest per-channel median acquisition gap when the observed cadence of the bound channels is slower. An unusable or silent selected power feed clears both power and temperature evidence plus the stability predictor. Channel-manager rebuilds preserve the bound chain and re-disable every rebuilt selector until settlement; inactive controls then reconcile to current settings. The next target and Stop use the bound Keithley channel. The panel does not advance without current qualified power and temperature evidence.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_fresh_power_and_temperature_samples_after_target_ack
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_rejects_samples_without_post_ack_acquisition_proof
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_step_keeps_commanded_channels_when_controls_change
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_requires_current_usable_feeds
+        ci_partition: gui
+      - node: tests/gui/shell/overlays/test_conductivity_panel.py::test_auto_tick_advances_when_stable_and_min_wait_elapsed
+        ci_partition: gui
+      - node: tests/drivers/test_lakeshore_218s.py::test_mock_returns_8_channels
+        ci_partition: remaining
+      - node: tests/drivers/test_keithley_disconnect_verified_off.py::test_mock_connection_uses_simulator_local_proof_only
+        ci_partition: remaining
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
+      sha256: sha256:305b9c74d3d4eeda82903c00cc927ce18e9931e2de75956c167120821900a869
     green_evidence: pending
   - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
     status: open
