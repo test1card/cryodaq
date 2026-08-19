@@ -1268,11 +1268,22 @@ class _LockedPsutilObserver:
             candidate_argv = " ".join(candidate.cmdline())
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError):
             return None
+        # THE DIRECT-CHILD REQUIREMENT IS WHAT MAKES THE NEXT TEST SOUND, and it is not
+        # defence in depth -- it is load-bearing. Measured on the laboratory interpreter
+        # (Python 3.14.6, `evidence/tools/` probe): a process forked BY the fork server
+        # inherits the fork server's command line EXACTLY. The bridge's own argv therefore
+        # contains `multiprocessing.forkserver` too. So the module token alone identifies
+        # the fork server AND every one of its children, and only the parent tells them
+        # apart: the fork server's parent is the launcher, its children's parent is the
+        # fork server.
         if candidate_parent != expected_launcher_pid:
             return None
-        # The exact module the fork server runs, not a substring that any argument could
-        # carry. No reachable false positive exists in today's stack either way, but a
-        # heuristic in an identity check is a heuristic in an identity check.
+        # This is a SUBSTRING test and the comment used to claim it was an exact match on
+        # the module. It was not, and it cannot be: the token lives inside a `-c` code
+        # string, measured as
+        #   python -B -c "import sys; from multiprocessing.forkserver import main; main(...)"
+        # so there is no argument equal to the module name to compare against. The check
+        # is sound because of the parent test above, not because of this one.
         if "multiprocessing.forkserver" not in candidate_argv:
             return None
         return pid
@@ -2330,10 +2341,18 @@ class _BridgeProcessObservation:
     # field REFUSES rather than passes.
     #
     # It carries the PID and not a bare boolean on purpose. A boolean says only that some
-    # launcher was proved, and the binder could not tell WHICH -- so its own independent
-    # re-check against the recorded launcher was gone, and its error message named a pid
-    # that had taken no part in the decision. The two pids coincide at today's single call
-    # site; they would not have to at a second one.
+    # launcher was proved, and the binder could not tell WHICH, so its error message named
+    # a pid that had taken no part in the decision. The two pids coincide at today's single
+    # call site; they would not have to at a second one.
+    #
+    # BE CLEAR ABOUT WHAT THE BINDER'S COMPARISON IS AND IS NOT. It is a FAIL-CLOSED
+    # cross-check, not a second independent look at the process table -- the binder cannot
+    # look at processes at all. `observe_bridge` already RAISES when it proves nothing, so
+    # for any observation that function returns the comparison is satisfied by
+    # construction. Its value is against an observation built by hand, or by a future
+    # second call site, that never verified anything: the field defaults to zero and the
+    # binder refuses. Saying it restores an independent parentage check would be a claim
+    # the code does not support.
     verified_against_launcher_pid: int = 0
 
 

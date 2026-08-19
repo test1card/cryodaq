@@ -274,6 +274,21 @@ def classify_tree(
     # The property this function proves is unchanged -- every live descendant is accounted
     # for and belongs to this launcher. The fork server is accounted for BY NAME rather
     # than excused, so an unexpected descendant still refuses.
+    #
+    # THE NAME ALONE IS NOT ENOUGH, and this was measured rather than reasoned about. A
+    # process forked BY the fork server inherits the fork server's command line EXACTLY:
+    # on the laboratory interpreter the fork server and the child it forked print
+    # byte-identical argv. So `multiprocessing.forkserver` appears in the argv of the fork
+    # server AND of every child it makes, the bridge included. Matching on the token alone
+    # would excuse every multiprocessing child from role classification by name, and then
+    # "an unexpected descendant still refuses" would be false for exactly the descendants
+    # this check exists to catch.
+    #
+    # Only the PARENT separates them: the fork server and the resource tracker are direct
+    # children of the launcher, their children are not. Both sets below therefore require
+    # a direct child of the root, which is the same requirement the runner's
+    # `_forkserver_of` makes, so the two implementations prove the same property instead
+    # of one proving a weaker one.
     # multiprocessing starts TWO helper processes, not one: the fork server and the
     # resource tracker. Both are launched with `-c` and name their module inside that
     # code string, and both are descendants of this launcher with no role of their own.
@@ -285,6 +300,7 @@ def classify_tree(
         identity
         for identity, item in tree.items()
         if identity != root
+        and item.parent_pid == root.pid
         and any(
             module in argument
             for argument in item.argv
