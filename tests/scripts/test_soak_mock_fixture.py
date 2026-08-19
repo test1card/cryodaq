@@ -8,6 +8,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cryodaq.core.safety_broker import SafetyBroker
+from cryodaq.core.safety_manager import SafetyManager
+from cryodaq.core.safety_pattern_liveness import validate_safety_pattern_liveness
 from cryodaq.drivers.registry import (
     DriverAuthority,
     DriverConstructionContext,
@@ -41,9 +44,18 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         *(name for name, _content in runner._ISOLATED_STATIC_CONFIGS),
         "instruments.yaml",
         "channel_descriptors.yaml",
+        "physical_alarms.yaml",
+        "themes",
     }
     assert {path.name for path in tmp_path.iterdir()} == expected
     assert all(".local." not in name for name in expected)
+
+    themes_dir = tmp_path / "themes"
+    assert themes_dir.is_dir()
+    assert (themes_dir / "warm_stone.yaml").is_file()
+    assert (themes_dir / "warm_stone.yaml").read_bytes() == (
+        runner._REPO_ROOT / "config" / "themes" / "warm_stone.yaml"
+    ).read_bytes()
 
     config = yaml.safe_load((tmp_path / "instruments.yaml").read_text(encoding="utf-8"))
     validated = validate_instrument_entries(config["instruments"])
@@ -74,8 +86,104 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         await driver.disconnect()
 
 
+def test_isolated_config_theme_resolves_through_the_real_loader(tmp_path) -> None:
+    """The isolated config set must include the theme pack the GUI role's
+    module import needs. A fresh ``cryodaq.gui._theme_loader`` import with
+    ``CRYODAQ_ROOT`` pointed at the isolated root must resolve the default
+    pack; before the themes copy landed, this raised
+    ``Default theme pack invalid: theme pack 'warm_stone' is unavailable``."""
+    root = tmp_path / "soak-root"
+    config_dir = root / "config"
+    config_dir.mkdir(parents=True)
+    runner._materialize_isolated_mock_config(config_dir)
+
+    environment = dict(os.environ)
+    environment["CRYODAQ_ROOT"] = str(root)
+    environment["PYTHONPATH"] = os.pathsep.join((str(runner._REPO_ROOT / "src"), str(runner._REPO_ROOT)))
+    probe = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            "from cryodaq.gui import _theme_loader; print(_theme_loader.resolve_theme()[0])",
+        ),
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "warm_stone"
+
+
+def test_isolated_config_safety_declarations_resolve_through_the_real_liveness_check(tmp_path) -> None:
+    """The isolated config set's safety declarations must resolve to live
+    channels on the plane their consumer sees.
+
+    The engine runs the startup liveness check (src/cryodaq/core/
+    safety_pattern_liveness.py) over the ACTUALLY-SELECTED descriptor manifest
+    before acquisition boots, so a generated config set that fails it can never
+    produce a soak. Before the fix, the generated safety.yaml declared ``.*``
+    as a critical channel, which the check treats as a literal canonical
+    identity and rejects as dead (F-1 silent safety kill) — a safety reference
+    that resolves to nothing never fires. This guard runs the same check over
+    the materialized isolated config set and demands that every critical
+    declaration installs an exact live binding."""
+    runner._materialize_isolated_mock_config(tmp_path)
+
+    catalog = load_live_channel_descriptor_catalog(tmp_path / "channel_descriptors.yaml")
+    manager = SafetyManager(SafetyBroker())
+    manager.load_config(tmp_path / "safety.yaml")
+    manager._config.require_keithley_for_run = False
+
+    validate_safety_pattern_liveness(
+        descriptor_catalog=catalog,
+        interlocks_config_path=tmp_path / "interlocks.yaml",
+        safety_manager=manager,
+        adaptive_throttle_patterns=[],
+        alarms_config_path=tmp_path / "alarms_v3.yaml",
+    )
+
+    assert manager._critical_input_bindings, (
+        "generated safety.yaml critical_channels must install live critical-input bindings"
+    )
+
+
+def test_isolated_config_set_matches_engine_startup_requirements(tmp_path) -> None:
+    """The materialized isolated config set must satisfy the engine's startup cut.
+
+    Rounds 7 (missing theme pack), 9 (missing live safety declarations) and 10
+    (physical alarms document lacking cooldown/vacuum/landmarks) were each found
+    by the engine refusing at the next thing. This guard checks the SET against
+    the engine's startup requirements instead of against the last error: every
+    engine-required config document must be present, and every document the set
+    generates must be accepted by its own production loader.
+
+    Red: a set with a document removed, or a generated document its own loader
+    rejects. Green: the complete materialized set.
+    """
+    runner._materialize_isolated_mock_config(tmp_path)
+
+    assert runner._validate_isolated_config_set(tmp_path) == []
+
+    removed = tmp_path / "physical_alarms.yaml"
+    original = removed.read_bytes()
+    removed.unlink()
+    problems = runner._validate_isolated_config_set(tmp_path)
+    assert any("physical_alarms.yaml" in problem for problem in problems), problems
+    removed.write_bytes(original)
+
+    removed.write_text(
+        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    problems = runner._validate_isolated_config_set(tmp_path)
+    assert any("physical_alarms.yaml" in problem for problem in problems), problems
+    removed.write_bytes(original)
+
+    assert runner._validate_isolated_config_set(tmp_path) == []
+
+
 @_LINUX_PROCESS_AUTHORITY
-def _complete_fixture(tmp_path: Path) -> tuple[Path, int]:
+def _complete_fixture(tmp_path: Path) -> tuple[Path, int, tuple[str, ...]]:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join((str(runner._REPO_ROOT / "src"), str(runner._REPO_ROOT)))
     snapshot = runner._ExecutionSnapshot(
@@ -85,20 +193,21 @@ def _complete_fixture(tmp_path: Path) -> tuple[Path, int]:
         "sha256:" + "0" * 64,
     )
     config_dir = tmp_path / "config"
-    readings_per_sample = runner._materialize_complete_soak_config(
+    readings_per_sample, channel_ids = runner._materialize_complete_soak_config(
         config_dir,
         report_interval_s=600,
         source_snapshot=snapshot,
     )
-    return config_dir, readings_per_sample
+    return config_dir, readings_per_sample, channel_ids
 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_passive_fixture_seal_detects_content_and_link_drift(tmp_path) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     baseline = runner._source_fixture_seal(
         config_dir,
         expected_readings_per_sample=readings_per_sample,
+        channel_ids=channel_ids,
     )
     assert baseline.payload["authority"] == "passive_measurement"
     assert baseline.payload["descriptor_count"] == 16
@@ -109,7 +218,9 @@ def test_complete_passive_fixture_seal_detects_content_and_link_drift(tmp_path) 
     original = channels.read_bytes()
     channels.write_bytes(original + b"\n")
     assert (
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample).payload
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        ).payload
         != baseline.payload
     )
     channels.write_bytes(original)
@@ -117,15 +228,18 @@ def test_complete_passive_fixture_seal_detects_content_and_link_drift(tmp_path) 
     alias = tmp_path / "channels-alias.yaml"
     os.link(channels, alias)
     with pytest.raises(runner._RunnerFoundationError, match="identity is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_fixture_seal_detects_same_byte_inode_replacement(tmp_path) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     baseline = runner._source_fixture_seal(
         config_dir,
         expected_readings_per_sample=readings_per_sample,
+        channel_ids=channel_ids,
     )
     channels = config_dir / "channels.yaml"
     replacement = tmp_path / "replacement.yaml"
@@ -136,6 +250,7 @@ def test_complete_fixture_seal_detects_same_byte_inode_replacement(tmp_path) -> 
     replaced = runner._source_fixture_seal(
         config_dir,
         expected_readings_per_sample=readings_per_sample,
+        channel_ids=channel_ids,
     )
     assert replaced.payload == baseline.payload
     assert replaced != baseline
@@ -143,7 +258,7 @@ def test_complete_fixture_seal_detects_same_byte_inode_replacement(tmp_path) -> 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_fixture_seal_rejects_rebind_during_pinned_read(tmp_path, monkeypatch) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     channels = config_dir / "channels.yaml"
     original = channels.read_bytes()
     original_inode = channels.stat().st_ino
@@ -161,18 +276,22 @@ def test_complete_fixture_seal_rejects_rebind_during_pinned_read(tmp_path, monke
 
     monkeypatch.setattr(runner.os, "read", rebind_then_read)
     with pytest.raises(runner._RunnerFoundationError, match="changed during sealing"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     assert rebound is True
 
 
 @_LINUX_PROCESS_AUTHORITY
 def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_path, monkeypatch) -> None:
-    config_dir, readings_per_sample = _complete_fixture(tmp_path)
+    config_dir, readings_per_sample, channel_ids = _complete_fixture(tmp_path)
     extra = config_dir / "unexpected.yaml"
     extra.write_text("{}\n", encoding="utf-8")
     extra.chmod(0o600)
     with pytest.raises(runner._RunnerFoundationError, match="topology is not exact"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     extra.unlink()
 
     channels = config_dir / "channels.yaml"
@@ -180,24 +299,32 @@ def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_p
     channels.replace(original)
     channels.symlink_to(original)
     with pytest.raises(runner._RunnerFoundationError, match="identity is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     channels.unlink()
     original.replace(channels)
 
     template = config_dir / "experiment_templates" / "unexpected.yaml"
     template.write_text("{}\n", encoding="utf-8")
     with pytest.raises(runner._RunnerFoundationError, match="template directory is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     template.unlink()
 
     channels.chmod(0o644)
     with pytest.raises(runner._RunnerFoundationError, match="identity is unsafe"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
     channels.chmod(0o600)
 
     monkeypatch.setattr(runner, "_MAX_SOURCE_FIXTURE_FILE_BYTES", 1)
     with pytest.raises(runner._RunnerFoundationError, match="exceeds the reviewed bound"):
-        runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+        runner._source_fixture_seal(
+            config_dir, expected_readings_per_sample=readings_per_sample, channel_ids=channel_ids
+        )
 
 
 class _LogEvidence:
@@ -238,6 +365,97 @@ def test_launcher_log_capture_bounds_failure_and_rejects_truncated_pass(tmp_path
     with pytest.raises(runner._RunnerFoundationError, match="evidence ceiling"):
         with runner._launcher_log_capture(_LogEvidence(), tmp_path / "pass.log") as stream:
             stream.write(b"x" * 128)
+
+
+def test_publish_engine_stderr_log_copies_launcher_capture_into_evidence(tmp_path) -> None:
+    source = tmp_path / "logs" / "engine.stderr.log"
+    source.parent.mkdir()
+    source.write_bytes(b"Traceback (most recent call last):\nRuntimeError: engine died\n")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr_log(evidence, source)
+
+    assert evidence.logs == [
+        ("log-engine-stderr.txt", "Traceback (most recent call last):\nRuntimeError: engine died\n")
+    ]
+
+
+def test_publish_engine_stderr_log_skips_missing_and_empty(tmp_path) -> None:
+    evidence = _LogEvidence()
+    runner._publish_engine_stderr_log(evidence, None)
+    runner._publish_engine_stderr_log(evidence, tmp_path / "missing.log")
+    empty = tmp_path / "empty.log"
+    empty.write_bytes(b"")
+    runner._publish_engine_stderr_log(evidence, empty)
+    assert evidence.logs == []
+
+
+def test_publish_engine_stderr_log_bounds_oversized_capture_to_a_tail(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", 64)
+    source = tmp_path / "engine.stderr.log"
+    source.write_bytes(b"head-prefix " + b"x" * 256 + b" tail-payload\n")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr_log(evidence, source)
+
+    (name, text) = evidence.logs[0]
+    assert name == "log-engine-stderr.txt"
+    encoded = text.encode()
+    assert len(encoded) <= 64
+    assert encoded.startswith(runner._ENGINE_STDERR_TRUNCATED_MARKER)
+    assert b"tail-payload" in encoded
+    assert b"head-prefix" not in encoded
+
+
+def test_publish_engine_stderr_log_redacts_secrets(tmp_path) -> None:
+    source = tmp_path / "engine.stderr.log"
+    source.write_bytes(b"token leaked: 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij\n")
+    evidence = _LogEvidence()
+
+    runner._publish_engine_stderr_log(evidence, source)
+
+    (name, text) = evidence.logs[0]
+    assert name == "log-engine-stderr.txt"
+    assert "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij" not in text
+
+
+@pytest.mark.skipif(os.name != "posix", reason="launcher log capture is POSIX-only")
+def test_launcher_log_capture_publishes_engine_stderr_beside_launcher_log(tmp_path) -> None:
+    path = tmp_path / "launcher.log"
+    engine_stderr = tmp_path / "logs" / "engine.stderr.log"
+    engine_stderr.parent.mkdir()
+    engine_stderr.write_bytes(b"RuntimeError: engine died\n")
+    evidence = _LogEvidence()
+
+    with runner._launcher_log_capture(evidence, path, engine_stderr_path=engine_stderr) as stream:
+        stream.write(b"launcher line\n")
+        stream.flush()
+
+    assert evidence.logs == [
+        ("log-launcher.txt", "launcher line\n"),
+        ("log-engine-stderr.txt", "RuntimeError: engine died\n"),
+    ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="launcher log capture is POSIX-only")
+def test_launcher_log_capture_publishes_engine_stderr_on_failure(tmp_path) -> None:
+    engine_stderr = tmp_path / "logs" / "engine.stderr.log"
+    engine_stderr.parent.mkdir()
+    engine_stderr.write_bytes(b"Traceback:\nengine boom\n")
+    evidence = _LogEvidence()
+
+    with pytest.raises(ValueError, match="primary"):
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "launcher.log",
+            engine_stderr_path=engine_stderr,
+        ) as stream:
+            stream.write(b"launcher line\n")
+            stream.flush()
+            raise ValueError("primary")
+
+    assert ("log-launcher.txt", "launcher line\n") in evidence.logs
+    assert ("log-engine-stderr.txt", "Traceback:\nengine boom\n") in evidence.logs
 
 
 @_LINUX_PROCESS_AUTHORITY

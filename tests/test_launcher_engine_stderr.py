@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -118,6 +119,21 @@ def test_stderr_pump_handle_is_retained_until_thread_really_stops() -> None:
     assert host._engine_stderr_handler is None
     stderr_logger.removeHandler.assert_called_once_with(handler)
     handler.close.assert_called_once_with()
+
+
+def test_stderr_pump_forwards_actual_engine_stderr_content(tmp_path, monkeypatch) -> None:
+    _bind_logs_dir(monkeypatch, tmp_path)
+    stderr_logger, handler, path = launcher._create_engine_stderr_logger()
+    try:
+        owner = launcher._EngineStderrStreamOwner(io.BytesIO(b"RuntimeError: engine died on startup\n"))
+        launcher._pump_engine_stderr(owner, stderr_logger)
+    finally:
+        stderr_logger.removeHandler(handler)
+        handler.close()
+
+    text = path.read_text(encoding="utf-8")
+    assert "engine child stderr: RuntimeError: engine died on startup" in text
+    assert "engine child stderr record received" not in text
 
 
 def test_pre_spawn_logger_failure_cannot_publish_phantom_engine_authority(

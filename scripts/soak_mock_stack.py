@@ -1,10 +1,10 @@
 """Fail-closed source-mode CryoDAQ mock-stack qualification contracts.
 
-The reviewed Linux source path activates only the exact-clean-SHA ``short``
-profile with the locked observer, non-network artifact capability, bounded
-process ownership, and joined periodic-delivery receipts. Longer 12/72-hour
-profiles, Windows/frozen execution, production alarm topology, and physical
-hardware evidence remain separate open gates.
+The reviewed Linux source path activates exact-clean-SHA qualification profiles
+with the locked observer, non-network artifact capability, bounded process
+ownership, and joined periodic-delivery receipts. Windows/frozen execution,
+production alarm topology, and physical hardware evidence remain separate open
+gates.
 """
 
 from __future__ import annotations
@@ -42,6 +42,9 @@ SAMPLE_INTERVAL_S = 5.0
 MAX_CADENCE_GAP_S = 7.5
 MAX_SLOPE_POINTS = 257
 MAX_SLOPE_PAIRS = MAX_SLOPE_POINTS * (MAX_SLOPE_POINTS - 1) // 2
+MAX_SAMPLE_RECORDS = 25_000
+MAX_SAMPLE_ARTIFACT_BYTES = 64 * 1024 * 1024
+BOUNDED_EVIDENCE_STREAMS = frozenset({"samples.jsonl", "storage-samples.jsonl"})
 RECOVERY_CEILING_S = 60.0
 SHUTDOWN_CEILING_S = 20.0
 RSS_GROWTH_LIMIT_BYTES = 50 * 1024 * 1024
@@ -72,6 +75,10 @@ FAULT_SIGNAL = "SIGTERM"
 FAULT_INJECTION_METHOD = "observer.signal_exact_identity/v1"
 SUMMARY_RESERVED = frozenset({"schema", "status", "reason", "finished_at", "manifest_sha256"})
 MANIFEST_RESERVED = frozenset({"schema"})
+LONG_REPORT_INTERVAL_MAX_S = 6 * 3600
+LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S = 5 * 60
+LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S = 18 * 60
+LONG_REPORT_EDGE_MARGIN_S = 13 * 60
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -127,6 +134,8 @@ class SoakProfile:
     recovery_descriptor_delta_aggregate: int
     thread_delta_per_role: int = THREAD_DELTA_PER_ROLE
     rss_growth_limit_bytes_per_role: int = RSS_GROWTH_LIMIT_BYTES
+    sample_interval_s: float = SAMPLE_INTERVAL_S
+    max_cadence_gap_s: float = MAX_CADENCE_GAP_S
 
 
 PROFILES: Mapping[str, SoakProfile] = {
@@ -145,6 +154,8 @@ PROFILES: Mapping[str, SoakProfile] = {
     ),
     "12h": SoakProfile(
         name="12h",
+        sample_interval_s=30.0,
+        max_cadence_gap_s=45.0,
         duration_s=12 * 3600,
         warmup_s=10 * 60,
         events=tuple(
@@ -166,6 +177,8 @@ PROFILES: Mapping[str, SoakProfile] = {
     ),
     "72h": SoakProfile(
         name="72h",
+        sample_interval_s=30.0,
+        max_cadence_gap_s=45.0,
         duration_s=72 * 3600,
         warmup_s=10 * 60,
         events=tuple(
@@ -189,7 +202,110 @@ PROFILES: Mapping[str, SoakProfile] = {
         final_descriptor_delta_per_process=16,
         recovery_descriptor_delta_aggregate=64,
     ),
+    "168h": SoakProfile(
+        name="168h",
+        sample_interval_s=30.0,
+        max_cadence_gap_s=45.0,
+        duration_s=168 * 3600,
+        warmup_s=10 * 60,
+        events=tuple(
+            FaultEvent(target, hour * 3600)
+            for target, hour in (
+                ("engine", 1),
+                ("assistant", 2),
+                ("engine", 12),
+                ("assistant", 18),
+                ("engine", 24),
+                ("assistant", 36),
+                ("engine", 48),
+                ("assistant", 54),
+                ("engine", 60),
+                ("assistant", 66),
+                ("engine", 84),
+                ("assistant", 90),
+                ("engine", 108),
+                ("assistant", 114),
+                ("engine", 132),
+                ("assistant", 138),
+                ("engine", 156),
+                ("assistant", 162),
+            )
+        ),
+        rss_slope_limit_bytes_per_hour=1 * 1024 * 1024,
+        descriptor_slope_limit_per_hour=0.25,
+        recovery_descriptor_delta_per_process=16,
+        final_descriptor_delta_per_process=16,
+        recovery_descriptor_delta_aggregate=64,
+    ),
 }
+REVIEWED_PROFILES = tuple(PROFILES.values())
+
+
+def first_assistant_fault_s(selected: SoakProfile) -> float:
+    """Return the first scheduled assistant fault for a reviewed profile."""
+
+    try:
+        return next(event.at_s for event in selected.events if event.target == "assistant")
+    except StopIteration:
+        raise ValueError(f"profile {selected.name!r} has no assistant fault") from None
+
+
+def last_assistant_fault_s(selected: SoakProfile) -> float:
+    """Return the final scheduled assistant fault for a reviewed profile."""
+
+    assistant_events = [event.at_s for event in selected.events if event.target == "assistant"]
+    if not assistant_events:
+        raise ValueError(f"profile {selected.name!r} has no assistant fault")
+    return max(assistant_events)
+
+
+def expected_periodic_receipts(selected: SoakProfile, interval_s: int, boundary_offset_s: int) -> int:
+    """Return the exact count for one immediate report and all scheduled reports."""
+
+    if boundary_offset_s > selected.duration_s:
+        return 1
+    return 2 + int((selected.duration_s - boundary_offset_s) // interval_s)
+
+
+def periodic_schedule_errors(
+    selected: SoakProfile,
+    *,
+    interval_s: object,
+    boundary_offset_s: object,
+    expected_receipts: object,
+) -> list[str]:
+    """Validate one profile-bound periodic schedule."""
+
+    if type(interval_s) is not int or type(boundary_offset_s) is not int or type(expected_receipts) is not int:
+        return ["periodic schedule values must be integers"]
+    if interval_s <= 0 or boundary_offset_s <= 0:
+        return ["periodic schedule values must be positive"]
+    if selected.name == "short":
+        if (
+            not 600 <= interval_s <= 3600
+            or not 450 <= boundary_offset_s <= 600
+            or boundary_offset_s + interval_s < 1050
+            or expected_receipts != 2
+        ):
+            return ["periodic schedule is outside the reviewed short-run bounds"]
+        return []
+    first_fault = first_assistant_fault_s(selected)
+    last_fault = last_assistant_fault_s(selected)
+    calculated = expected_periodic_receipts(selected, interval_s, boundary_offset_s)
+    last_offset_s = boundary_offset_s + (expected_receipts - 2) * interval_s
+    if (
+        interval_s < first_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+        or interval_s > LONG_REPORT_INTERVAL_MAX_S
+        or boundary_offset_s < first_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+        or boundary_offset_s > first_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MAX_S
+        or expected_receipts < 3
+        or expected_receipts != calculated
+        or last_offset_s <= last_fault + LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+        or last_offset_s > selected.duration_s - LONG_REPORT_EDGE_MARGIN_S
+        or last_offset_s + interval_s <= selected.duration_s + LONG_REPORT_EDGE_MARGIN_S
+    ):
+        return ["periodic schedule is outside the reviewed long-run bounds"]
+    return []
 
 
 class ProcessObserver(Protocol):
@@ -245,6 +361,44 @@ def exact_process_role(argv: tuple[str, ...]) -> str | None:
     return None
 
 
+_RESOURCE_TRACKER_CODE = re.compile(r"from multiprocessing\.resource_tracker import main;main\(\d+\)")
+
+
+def _is_resource_tracker_argv(argv: tuple[str, ...]) -> bool:
+    """Recognize this interpreter's own multiprocessing resource tracker.
+
+    ``multiprocessing`` spawns it as
+    ``(interpreter, *flags, "-c", "from multiprocessing.resource_tracker
+    import main;main(<fd>)")`` where the fd is the tracker's read pipe.  The
+    match is exact, not a substring search: the interpreter path must resolve
+    to the same executable this process runs under (never the bare word
+    "python"), ``-c`` must be the penultimate token, the code string must be
+    the final token and match the module-main argv form, and every token in
+    between must be an interpreter flag.  A renamed binary, a generic "python"
+    command, an edited code string, or a trailing token is not recognized.
+    """
+
+    if not argv or len(argv) < 3 or argv[-2] != "-c":
+        return False
+    if os.path.realpath(argv[0]) != os.path.realpath(sys.executable):
+        return False
+    if _RESOURCE_TRACKER_CODE.fullmatch(argv[-1]) is None:
+        return False
+    index = 1
+    while index < len(argv) - 2:
+        token = argv[index]
+        if not token.startswith("-"):
+            return False
+        if token == "-X":
+            value = index + 1
+            if value >= len(argv) - 2 or argv[value].startswith("-"):
+                return False
+            index = value + 1
+        else:
+            index += 1
+    return True
+
+
 def classify_tree(
     tree: Mapping[ProcessIdentity, ProcessSnapshot],
     root: ProcessIdentity,
@@ -267,15 +421,40 @@ def classify_tree(
     if exact_process_role(bridge.argv) is not None:
         raise ValueError("positive bridge identity collides with an engine/assistant role")
     result = {"launcher": root, "bridge": bridge_identity}
+    unclassified: list[str] = []
+    resource_trackers: list[tuple[ProcessIdentity, ProcessSnapshot]] = []
     for identity, item in tree.items():
         if identity in {root, bridge_identity}:
             continue
+        if _is_resource_tracker_argv(item.argv):
+            resource_trackers.append((identity, item))
+            continue
         role = exact_process_role(item.argv)
         if role is None:
-            raise ValueError("unclassified descendant process")
+            parent = "none" if item.parent_pid is None else str(item.parent_pid)
+            unclassified.append(f"pid {identity.pid} started {identity.started_ns} parent {parent} argv {item.argv!r}")
+            continue
         if role in result:
             raise ValueError(f"duplicate live {role} process")
         result[role] = identity
+    if len(resource_trackers) > 1:
+        raise ValueError(
+            "more than one live multiprocessing resource tracker "
+            "(bound 1: one interpreter family owns exactly one tracker)"
+        )
+    if resource_trackers:
+        tracker_identity, tracker_item = resource_trackers[0]
+        if tracker_item.parent_pid not in {item.pid for item in result.values()}:
+            parent = "none" if tracker_item.parent_pid is None else str(tracker_item.parent_pid)
+            unclassified.append(
+                f"pid {tracker_identity.pid} started {tracker_identity.started_ns} "
+                f"parent {parent} argv {tracker_item.argv!r}"
+            )
+    if unclassified:
+        named = unclassified[:3]
+        detail = "; ".join(named)
+        total = f"{len(unclassified)} unclassified descendants in total"
+        raise ValueError(f"unclassified descendant process: {detail}; {total}")
     missing = set(ROLES) - result.keys()
     if missing:
         raise ValueError(f"missing required process roles: {sorted(missing)}")
@@ -397,10 +576,18 @@ def _exact_positive_int(value: Any) -> bool:
     return type(value) is int and value > 0
 
 
+def _max_profile_sample_records(soak_profile: SoakProfile) -> int:
+    periodic = math.ceil(soak_profile.duration_s / soak_profile.sample_interval_s) + 1
+    return periodic + 4 * len(soak_profile.events) + 16
+
+
 def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: SoakProfile) -> list[str]:
     errors: list[str] = []
+    if len(samples) > _max_profile_sample_records(soak_profile) or len(samples) > MAX_SAMPLE_RECORDS:
+        errors.append("sample record count exceeds the reviewed profile bound")
     if len(samples) < 2:
         return ["insufficient samples"]
+    fault_times = tuple(event.at_s for event in soak_profile.events)
     previous: float | None = None
     epoch_identities: dict[tuple[str, int], tuple[int, int]] = {}
     identity_epochs: dict[tuple[str, tuple[int, int]], set[int]] = {}
@@ -416,8 +603,15 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
         if previous is not None:
             if elapsed <= previous:
                 errors.append(f"sample {index} is not strictly monotonic")
-            elif elapsed - previous > MAX_CADENCE_GAP_S:
-                errors.append(f"sample {index} exceeds cadence gap")
+            elif elapsed - previous > soak_profile.max_cadence_gap_s:
+                recovery_gap = any(
+                    previous <= fault_time <= elapsed
+                    and elapsed - fault_time <= RECOVERY_CEILING_S
+                    and fault_time - previous <= soak_profile.max_cadence_gap_s
+                    for fault_time in fault_times
+                )
+                if not recovery_gap:
+                    errors.append(f"sample {index} exceeds cadence gap")
         previous = elapsed
         roles = sample.get("roles")
         if not isinstance(roles, Mapping) or set(roles) != set(ROLES):
@@ -458,13 +652,82 @@ def validate_sample_series(samples: Sequence[Mapping[str, Any]], soak_profile: S
             errors.append(f"sample {index} has invalid wall_time")
     first = samples[0].get("elapsed_s")
     last = samples[-1].get("elapsed_s")
-    if _finite_nonnegative(first) and float(first) > SAMPLE_INTERVAL_S:
+    if _finite_nonnegative(first) and float(first) > soak_profile.sample_interval_s:
         errors.append("series does not cover startup")
-    if _finite_nonnegative(last) and float(last) < soak_profile.duration_s - SAMPLE_INTERVAL_S:
+    if _finite_nonnegative(last) and float(last) < soak_profile.duration_s - soak_profile.sample_interval_s:
         errors.append("series does not cover profile duration")
     for (role, _identity), epochs in identity_epochs.items():
         if len(epochs) > 1:
             errors.append(f"{role} reused one identity across restart epochs")
+    return errors
+
+
+def _validate_runtime_closures(records: Sequence[Mapping[str, Any]], samples: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Require one reproducible native closure for every observed generation."""
+
+    errors: list[str] = []
+    expected: set[tuple[str, int, int, int]] = set()
+    for sample in samples:
+        roles = sample.get("roles")
+        if not isinstance(roles, Mapping):
+            continue
+        for role, value in roles.items():
+            if isinstance(value, Mapping) and all(key in value for key in ("epoch", "pid", "started_ns")):
+                expected.add((str(role), int(value["epoch"]), int(value["pid"]), int(value["started_ns"])))
+    actual: set[tuple[str, int, int, int]] = set()
+    role_digests: dict[str, str] = {}
+    for index, record in enumerate(records):
+        if set(record) != {"schema", "role", "epoch", "pid", "started_ns", "closure"}:
+            errors.append(f"runtime closure {index} fields are not exact")
+            continue
+        if record.get("schema") != "cryodaq-process-runtime-closure/v1":
+            errors.append(f"runtime closure {index} schema is invalid")
+        role = record.get("role")
+        if role not in ROLES:
+            errors.append(f"runtime closure {index} role is invalid")
+            continue
+        if not all(_exact_nonnegative_int(record.get(key)) for key in ("epoch", "pid", "started_ns")):
+            errors.append(f"runtime closure {index} identity is invalid")
+            continue
+        identity = (str(role), int(record["epoch"]), int(record["pid"]), int(record["started_ns"]))
+        if identity in actual:
+            errors.append(f"runtime closure {index} identity is duplicated")
+        actual.add(identity)
+        closure = record.get("closure")
+        if not isinstance(closure, Mapping) or set(closure) != {"schema", "entry_count", "entries", "sha256"}:
+            errors.append(f"runtime closure {index} payload is invalid")
+            continue
+        entries = closure.get("entries")
+        if closure.get("schema") != "cryodaq-loaded-native-closure/v1" or not isinstance(entries, list):
+            errors.append(f"runtime closure {index} payload schema is invalid")
+            continue
+        normalized: list[Mapping[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping) or set(entry) != {"path", "device", "inode", "size", "sha256"}:
+                errors.append(f"runtime closure {index} entry is invalid")
+                continue
+            if not isinstance(entry["path"], str) or not entry["path"].startswith("/"):
+                errors.append(f"runtime closure {index} entry path is invalid")
+            if not all(_exact_nonnegative_int(entry[key]) for key in ("device", "inode", "size")):
+                errors.append(f"runtime closure {index} entry identity is invalid")
+            if not isinstance(entry["sha256"], str) or re.fullmatch(r"sha256:[0-9a-f]{64}", entry["sha256"]) is None:
+                errors.append(f"runtime closure {index} entry digest is invalid")
+            normalized.append(entry)
+        if closure.get("entry_count") != len(normalized) or not normalized:
+            errors.append(f"runtime closure {index} entry count is invalid")
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            ).hexdigest()
+        )
+        if closure.get("sha256") != digest:
+            errors.append(f"runtime closure {index} digest is invalid")
+        prior = role_digests.setdefault(str(role), digest)
+        if digest != prior:
+            errors.append(f"{role} loaded native closure changed across process generations")
+    if actual != expected:
+        errors.append("runtime closures do not equal every observed process generation")
     return errors
 
 
@@ -697,6 +960,24 @@ def _validate_stream_record(name: str, payload: Any) -> None:
         }
         if set(payload) != expected:
             raise ValueError("fault fields are not exact")
+    elif name == "runtime-closures.jsonl":
+        expected = {"schema", "role", "epoch", "pid", "started_ns", "closure"}
+        if set(payload) != expected:
+            raise ValueError("runtime closure fields are not exact")
+    elif name == "storage-samples.jsonl":
+        expected = {
+            "schema",
+            "elapsed_s",
+            "total_bytes",
+            "database_bytes",
+            "wal_bytes",
+            "archive_bytes",
+            "file_count",
+            "free_bytes",
+            "byte_limit",
+        }
+        if set(payload) != expected:
+            raise ValueError("storage sample fields are not exact")
 
 
 def _flat_basename(name: str) -> str:
@@ -705,7 +986,12 @@ def _flat_basename(name: str) -> str:
     return name
 
 
-def _read_owned_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat_result]:
+def _read_owned_regular_at(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[bytes, os.stat_result]:
     """Read one flat artifact without following links or accepting replacement.
 
     The opened descriptor is the authority.  Device/inode, size and mtime must
@@ -719,6 +1005,8 @@ def _read_owned_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat
         before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("artifact is not a regular file")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ValueError("artifact exceeds the reviewed byte bound")
         file_fd = os.open(
             name,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
@@ -731,10 +1019,17 @@ def _read_owned_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat
         ):
             raise ValueError("artifact changed before no-follow open")
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
-            chunk = os.read(file_fd, 1024 * 1024)
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes - total_bytes + 1)
+            chunk = os.read(file_fd, read_size)
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise ValueError("artifact exceeds the reviewed byte bound")
             chunks.append(chunk)
         after = os.fstat(file_fd)
         current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -747,6 +1042,151 @@ def _read_owned_regular_at(directory_fd: int, name: str) -> tuple[bytes, os.stat
         ) != continuity:
             raise ValueError("artifact changed during no-follow read")
         return b"".join(chunks), opened
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+
+
+def _json_lines_at(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int | None = None,
+    max_records: int | None = None,
+) -> list[Mapping[str, Any]]:
+    """Parse one flat JSONL artifact record by record without buffering the stream.
+
+    The opened descriptor is the authority.  Device/inode, size and mtime must
+    remain continuous from the no-follow topology check through EOF and the
+    final pathname check.  Byte and record bounds are enforced as the stream is
+    consumed, so a week-long bounded stream is never materialised in full.
+    """
+
+    name = _flat_basename(name)
+    file_fd: int | None = None
+    rows: list[Mapping[str, Any]] = []
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("artifact is not a regular file")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ValueError("artifact exceeds the reviewed byte bound")
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise ValueError("artifact changed before no-follow open")
+        pending = b""
+        total_bytes = 0
+        while True:
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes - total_bytes + 1)
+            chunk = os.read(file_fd, read_size)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise ValueError("artifact exceeds the reviewed byte bound")
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                if max_records is not None and len(rows) >= max_records:
+                    raise ValueError(f"{name} exceeds the reviewed record bound")
+                if line.endswith(b"\r"):
+                    line = line[:-1]
+                value = json.loads(line.decode("utf-8"))
+                if not isinstance(value, Mapping):
+                    raise ValueError(f"{name} contains a non-object record")
+                rows.append(value)
+        if pending:
+            if max_records is not None and len(rows) >= max_records:
+                raise ValueError(f"{name} exceeds the reviewed record bound")
+            if pending.endswith(b"\r"):
+                pending = pending[:-1]
+            value = json.loads(pending.decode("utf-8"))
+            if not isinstance(value, Mapping):
+                raise ValueError(f"{name} contains a non-object record")
+            rows.append(value)
+        after = os.fstat(file_fd)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        continuity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != continuity or (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        ) != continuity:
+            raise ValueError("artifact changed during no-follow read")
+        return rows
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+
+
+def _hash_owned_regular_at(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[str, int]:
+    """Hash one flat artifact incrementally without buffering the stream.
+
+    The opened descriptor is the authority.  Device/inode, size and mtime must
+    remain continuous from the no-follow topology check through EOF and the
+    final pathname check.  The byte bound is enforced as the stream is consumed,
+    so a week-long bounded stream is hashed without materialising it in full.
+    """
+
+    name = _flat_basename(name)
+    file_fd: int | None = None
+    try:
+        before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("artifact is not a regular file")
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise ValueError("artifact exceeds the reviewed byte bound")
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            before.st_dev,
+            before.st_ino,
+        ):
+            raise ValueError("artifact changed before no-follow open")
+        digest = hashlib.sha256()
+        total_bytes = 0
+        while True:
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                read_size = min(read_size, max_bytes - total_bytes + 1)
+            chunk = os.read(file_fd, read_size)
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise ValueError("artifact exceeds the reviewed byte bound")
+            digest.update(chunk)
+        after = os.fstat(file_fd)
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        continuity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != continuity or (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        ) != continuity:
+            raise ValueError("artifact changed during no-follow read")
+        return "sha256:" + digest.hexdigest(), total_bytes
     finally:
         if file_fd is not None:
             os.close(file_fd)
@@ -965,7 +1405,7 @@ def _validate_periodic_delivery_payload(
     *,
     ledger_validator: Callable[[dict[str, object]], bool],
 ) -> tuple[list[str], tuple[str, ...]]:
-    """Revalidate the runner-issued result and its exact two ledger records."""
+    """Revalidate the runner-issued result and its complete receipt ledger."""
 
     errors: list[str] = []
     if (
@@ -973,7 +1413,7 @@ def _validate_periodic_delivery_payload(
         or set(payload) != {"schema", "status", "pre_fault", "post_fault"}
         or payload.get("schema") != "cryodaq-soak-periodic-delivery-result/v1"
         or payload.get("status") != "PASS"
-        or len(receipts) != 2
+        or len(receipts) < 2
     ):
         return ["periodic-delivery result schema is invalid"], ()
     result_records = (payload.get("pre_fault"), payload.get("post_fault"))
@@ -982,7 +1422,7 @@ def _validate_periodic_delivery_payload(
     destinations: list[str] = []
     state_times: list[float] = []
     health_times: list[float] = []
-    for index, (result, receipt) in enumerate(zip(result_records, receipts, strict=True), start=1):
+    for index, (result, receipt) in enumerate(zip(result_records, receipts[:2], strict=True), start=1):
         label = "pre_fault" if index == 1 else "post_fault"
         if type(result) is not dict or set(result) != _PERIODIC_DELIVERY_RECORD_FIELDS:
             errors.append(f"periodic-delivery {label} record schema is invalid")
@@ -1071,7 +1511,256 @@ def _validate_periodic_delivery_payload(
             errors.append("periodic-delivery destination changed")
         if state_times[1] <= state_times[0] or health_times[1] <= health_times[0]:
             errors.append("periodic-delivery post-fault cut is not newer")
+    valid_ledger = all(type(receipt) is dict and ledger_validator(receipt) for receipt in receipts)
+    if not valid_ledger:
+        errors.append("periodic-delivery ledger contains invalid records")
+    else:
+        receipt_ids = tuple(str(receipt["receipt_id"]) for receipt in receipts)
+        if len(set(receipt_ids)) != len(receipt_ids):
+            errors.append("periodic-delivery ledger contains duplicate receipt identities")
+        previous_generation = 0
+        previous_sequence = 0
+        for receipt in receipts:
+            generation = int(receipt["assistant_generation"])
+            sequence = int(receipt["sequence"])
+            if generation == previous_generation:
+                valid_progression = sequence == previous_sequence + 1
+            else:
+                valid_progression = generation == previous_generation + 1 and sequence == 1
+            if not valid_progression:
+                errors.append("periodic-delivery ledger generation sequence is incomplete")
+                break
+            previous_generation = generation
+            previous_sequence = sequence
+        for receipt in receipts[2:]:
+            artifact_name = str(receipt["filename"])
+            if _flat_basename(artifact_name) != artifact_name:
+                errors.append("periodic-delivery later artifact name is invalid")
+            else:
+                artifact_names.append(artifact_name)
+    if len(set(artifact_names)) != len(artifact_names):
+        errors.append("periodic-delivery artifacts are not distinct")
     return errors, tuple(artifact_names)
+
+
+def _validate_periodic_cadence(
+    payload: object,
+    periodic_receipts: Sequence[Mapping[str, Any]],
+    selected: SoakProfile,
+) -> list[str]:
+    if type(payload) is not dict or set(payload) != {"schema", "interval_s", "boundary_offset_s", "receipts"}:
+        return ["periodic cadence schema is invalid"]
+    if payload.get("schema") != "cryodaq-soak-periodic-cadence/v1":
+        return ["periodic cadence schema is invalid"]
+    interval_s = payload.get("interval_s")
+    boundary_offset_s = payload.get("boundary_offset_s")
+    receipts = payload.get("receipts")
+    if type(interval_s) is not int or type(boundary_offset_s) is not int or not isinstance(receipts, list):
+        return ["periodic cadence values are invalid"]
+    if len(receipts) != len(periodic_receipts) or not receipts:
+        return ["periodic cadence receipt set differs from delivery evidence"]
+    errors: list[str] = []
+    last_elapsed = -1.0
+    for index, (timing, receipt) in enumerate(zip(receipts, periodic_receipts, strict=True)):
+        if type(timing) is not dict or set(timing) != {"receipt_id", "accepted_elapsed_s"}:
+            errors.append("periodic cadence receipt schema is invalid")
+            continue
+        elapsed = timing.get("accepted_elapsed_s")
+        if (
+            timing.get("receipt_id") != receipt.get("receipt_id")
+            or type(elapsed) not in {int, float}
+            or isinstance(elapsed, bool)
+            or not math.isfinite(float(elapsed))
+            or float(elapsed) <= last_elapsed
+        ):
+            errors.append("periodic cadence receipt identity or ordering is invalid")
+            continue
+        accepted = float(elapsed)
+        if index == 0:
+            if accepted > 60.0:
+                errors.append("periodic immediate receipt was late")
+        else:
+            if index == 1:
+                expected = float(boundary_offset_s)
+            else:
+                expected = last_elapsed + float(interval_s)
+            if abs(accepted - expected) > 15.0:
+                errors.append(f"periodic receipt {index} missed its runtime slot")
+        last_elapsed = accepted
+    if last_elapsed > selected.duration_s + 15.0:
+        errors.append("periodic cadence extends beyond the profile")
+    return errors
+
+
+def _validate_persistence_evidence(
+    payload: object,
+    selected: SoakProfile,
+    source_fixture: object,
+) -> list[str]:
+    expected = {
+        "schema",
+        "integrity",
+        "expected_channels",
+        "poll_interval_s",
+        "database_files",
+        "channel_rows",
+        "duplicate_rows",
+        "invalid_rows",
+        "interruptions",
+    }
+    if type(payload) is not dict or set(payload) != expected or type(source_fixture) is not dict:
+        return ["persistence evidence schema is invalid"]
+    errors: list[str] = []
+    expected_channels = source_fixture.get("expected_readings_per_sample")
+    poll_interval_s = source_fixture.get("poll_interval_s")
+    if (
+        payload.get("schema") != "cryodaq-soak-persistence/v1"
+        or payload.get("integrity") != "ok"
+        or payload.get("expected_channels") != expected_channels
+        or payload.get("poll_interval_s") != poll_interval_s
+        or payload.get("duplicate_rows") != 0
+        or payload.get("invalid_rows") != 0
+    ):
+        errors.append("persistence integrity or source binding is invalid")
+    databases = payload.get("database_files")
+    if not isinstance(databases, list) or not databases:
+        errors.append("persistence database inventory is empty")
+    else:
+        names: set[str] = set()
+        for item in databases:
+            if (
+                type(item) is not dict
+                or set(item) != {"name", "bytes", "sha256"}
+                or not isinstance(item.get("name"), str)
+                or re.fullmatch(r"data_\d{4}-\d{2}-\d{2}\.db", item["name"]) is None
+                or item["name"] in names
+                or type(item.get("bytes")) is not int
+                or item["bytes"] <= 0
+                or not isinstance(item.get("sha256"), str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) is None
+            ):
+                errors.append("persistence database inventory is invalid")
+                break
+            names.add(item["name"])
+    rows = payload.get("channel_rows")
+    if not isinstance(rows, list) or type(expected_channels) is not int or len(rows) != expected_channels:
+        errors.append("persistence channel coverage is incomplete")
+    else:
+        engine_fault_count = sum(1 for event in selected.events if event.target == "engine")
+        recovery_budget_per_fault = math.ceil(
+            (RECOVERY_CEILING_S + 1.5 * float(poll_interval_s)) / float(poll_interval_s)
+        )
+        identities: set[tuple[str, str]] = set()
+        counts: set[int] = set()
+        for row in rows:
+            if type(row) is not dict or set(row) != {
+                "instrument_id",
+                "channel",
+                "count",
+                "first_timestamp",
+                "last_timestamp",
+            }:
+                errors.append("persistence channel row schema is invalid")
+                continue
+            identity = (row.get("instrument_id"), row.get("channel"))
+            count = row.get("count")
+            first = row.get("first_timestamp")
+            last = row.get("last_timestamp")
+            if (
+                identity in identities
+                or identity[0] != source_fixture.get("instrument_id")
+                or not isinstance(identity[1], str)
+                or type(count) is not int
+                or count <= 0
+                or type(first) not in {int, float}
+                or type(last) not in {int, float}
+                or not math.isfinite(float(first))
+                or not math.isfinite(float(last))
+                or float(last) - float(first) < selected.duration_s - RECOVERY_CEILING_S
+                or count
+                < math.ceil((float(last) - float(first)) / float(poll_interval_s))
+                - engine_fault_count * recovery_budget_per_fault
+                or count > math.ceil((float(last) - float(first)) / float(poll_interval_s)) + 1
+            ):
+                errors.append("persistence channel continuity is invalid")
+            identities.add(identity)
+            counts.add(int(count))
+        if {identity[1] for identity in identities if isinstance(identity[1], str)} != set(
+            source_fixture.get("channel_ids", [])
+        ):
+            errors.append("persistence channel identities differ from the sealed fixture")
+        if len(counts) != 1:
+            errors.append("persistence channel row counts differ")
+    interruptions = payload.get("interruptions")
+    if not isinstance(interruptions, list):
+        errors.append("persistence interruption evidence is invalid")
+    else:
+        for item in interruptions:
+            if (
+                type(item) is not dict
+                or set(item) != {"instrument_id", "channel", "gap_s", "elapsed_s", "matched_engine_fault_s"}
+                or item.get("matched_engine_fault_s") is None
+                or type(item.get("gap_s")) not in {int, float}
+                or float(item["gap_s"]) > RECOVERY_CEILING_S + 1.5 * float(poll_interval_s)
+            ):
+                errors.append("persistence interruption is not bound to a reviewed engine fault")
+                break
+    return errors
+
+
+def _validate_storage_evidence(
+    samples: object,
+    final: object,
+    selected: SoakProfile,
+) -> list[str]:
+    fields = {
+        "schema",
+        "elapsed_s",
+        "total_bytes",
+        "database_bytes",
+        "wal_bytes",
+        "archive_bytes",
+        "file_count",
+        "free_bytes",
+        "byte_limit",
+    }
+    if not isinstance(samples, list) or not samples or type(final) is not dict or set(final) != fields:
+        return ["storage evidence schema is invalid"]
+    errors: list[str] = []
+    last_elapsed = -1.0
+    byte_limit: int | None = None
+    for item in [*samples, final]:
+        if type(item) is not dict or set(item) != fields or item.get("schema") != "cryodaq-soak-storage-sample/v1":
+            errors.append("storage sample schema is invalid")
+            continue
+        elapsed = item.get("elapsed_s")
+        integers = [item.get(name) for name in fields - {"schema", "elapsed_s"}]
+        if (
+            type(elapsed) not in {int, float}
+            or isinstance(elapsed, bool)
+            or not math.isfinite(float(elapsed))
+            or float(elapsed) < last_elapsed
+            or any(type(value) is not int or value < 0 for value in integers)
+        ):
+            errors.append("storage sample values are invalid")
+            continue
+        last_elapsed = float(elapsed)
+        current_limit = int(item["byte_limit"])
+        byte_limit = current_limit if byte_limit is None else byte_limit
+        if (
+            current_limit != byte_limit
+            or item["total_bytes"] > current_limit
+            or item["free_bytes"] < current_limit
+            or item["file_count"] > 128
+        ):
+            errors.append("storage growth or free-space bound is exceeded")
+    if (
+        final.get("wal_bytes") != 0
+        or final.get("database_bytes", 0) <= 0
+        or float(final.get("elapsed_s", -1)) < selected.duration_s
+    ):
+        errors.append("final storage is not settled or does not cover the profile")
+    return errors
 
 
 def _validate_source_fixture(payload: object) -> list[str]:
@@ -1089,6 +1778,12 @@ def _validate_source_fixture(payload: object) -> list[str]:
         "plugins.yaml",
         "safety.yaml",
     }
+    from scripts import soak_mock_stack_runner as runner
+
+    expected_theme_packs = runner._ISOLATED_TRACKED_THEME_PACKS
+    expected_theme_paths = {f"themes/{name}" for name in expected_theme_packs}
+    expected_file_paths = expected_files | expected_theme_paths
+    expected_names = expected_file_paths | {"experiment_templates", "themes"}
     expected_top = {
         "schema",
         "instrument_id",
@@ -1097,13 +1792,15 @@ def _validate_source_fixture(payload: object) -> list[str]:
         "descriptor_count",
         "binding_count",
         "expected_readings_per_sample",
+        "channel_ids",
+        "poll_interval_s",
         "entries",
         "tree_sha256",
     }
     if type(payload) is not dict or set(payload) != expected_top:
         return ["source fixture schema is invalid"]
     entries = payload.get("entries")
-    if not isinstance(entries, list) or len(entries) != len(expected_files) + 1:
+    if not isinstance(entries, list) or len(entries) != len(expected_names):
         return ["source fixture entries are invalid"]
     paths: list[str] = []
     for entry in entries:
@@ -1111,11 +1808,11 @@ def _validate_source_fixture(payload: object) -> list[str]:
             return ["source fixture entry schema is invalid"]
         path = entry["path"]
         paths.append(path)
-        if path == "experiment_templates":
+        if path == "experiment_templates" or path == "themes":
             if entry != {"path": path, "kind": "directory"}:
                 return ["source fixture directory entry is invalid"]
         elif (
-            path not in expected_files
+            path not in expected_file_paths
             or set(entry) != {"path", "kind", "bytes", "sha256"}
             or entry.get("kind") != "file"
             or type(entry.get("bytes")) is not int
@@ -1133,7 +1830,7 @@ def _validate_source_fixture(payload: object) -> list[str]:
     )
     if (
         paths != sorted(paths)
-        or set(paths) != expected_files | {"experiment_templates"}
+        or set(paths) != expected_names
         or payload.get("schema") != "cryodaq-soak-source-fixture/v1"
         or payload.get("instrument_id") != "LS218_1"
         or payload.get("authority") != "passive_measurement"
@@ -1144,6 +1841,14 @@ def _validate_source_fixture(payload: object) -> list[str]:
         or type(payload.get("binding_count")) is not int
         or payload.get("expected_readings_per_sample") != 8
         or type(payload.get("expected_readings_per_sample")) is not int
+        or type(payload.get("channel_ids")) is not list
+        or len(payload["channel_ids"]) != payload.get("expected_readings_per_sample")
+        or any(type(item) is not str or not item for item in payload["channel_ids"])
+        or len(set(payload["channel_ids"])) != len(payload["channel_ids"])
+        or type(payload.get("poll_interval_s")) not in {int, float}
+        or isinstance(payload.get("poll_interval_s"), bool)
+        or not math.isfinite(float(payload["poll_interval_s"]))
+        or float(payload["poll_interval_s"]) <= 0
         or payload.get("tree_sha256") != expected_tree
     ):
         return ["source fixture semantics or tree seal is invalid"]
@@ -1390,7 +2095,7 @@ def _validate_faults(
                 errors.append(f"fault {index} scheduled time is invalid")
             if not math.isfinite(observed_s) or observed_s < 0:
                 errors.append(f"fault {index} observed time is invalid")
-            elif abs(observed_s - scheduled) > SAMPLE_INTERVAL_S:
+            elif abs(observed_s - scheduled) > selected.sample_interval_s:
                 errors.append(f"fault {index} exceeded schedule tolerance")
             for field in (
                 "pre_pid",
@@ -1718,16 +2423,32 @@ class Evidence:
         return True
 
     def _read(self, name: str) -> tuple[bytes, os.stat_result]:
-        return _read_owned_regular_at(self._directory_fd, name)
+        max_bytes = MAX_SAMPLE_ARTIFACT_BYTES if name in BOUNDED_EVIDENCE_STREAMS else None
+        return _read_owned_regular_at(self._directory_fd, name, max_bytes=max_bytes)
 
     def _text(self, name: str, *, errors: str = "strict") -> str:
-        return _read_owned_text_at(self._directory_fd, name, errors=errors)
+        payload, _identity = self._read(name)
+        return payload.decode("utf-8", errors=errors)
 
     def _sha256(self, name: str) -> str:
-        payload, _identity = self._read(name)
-        return "sha256:" + hashlib.sha256(payload).hexdigest()
+        digest, _size = self._hash_and_size(name)
+        return digest
+
+    def _hash_and_size(self, name: str) -> tuple[str, int]:
+        return _hash_owned_regular_at(
+            self._directory_fd,
+            name,
+            max_bytes=MAX_SAMPLE_ARTIFACT_BYTES if name in BOUNDED_EVIDENCE_STREAMS else None,
+        )
 
     def _json_lines(self, name: str) -> list[Mapping[str, Any]]:
+        if name in BOUNDED_EVIDENCE_STREAMS:
+            return _json_lines_at(
+                self._directory_fd,
+                name,
+                max_bytes=MAX_SAMPLE_ARTIFACT_BYTES,
+                max_records=MAX_SAMPLE_RECORDS,
+            )
         rows: list[Mapping[str, Any]] = []
         for line in self._text(name).splitlines():
             value = json.loads(line)
@@ -1903,7 +2624,8 @@ class Evidence:
         )
         if errors:
             raise ValueError("; ".join(errors))
-        for label, name, record in zip(("pre_fault", "post_fault"), artifact_names, receipts, strict=True):
+        for index, (name, record) in enumerate(zip(artifact_names, receipts, strict=True), start=1):
+            label = "pre_fault" if index == 1 else "post_fault" if index == 2 else f"receipt_{index}"
             artifact, _identity = self._read(name)
             if not artifact.startswith(b"\x89PNG\r\n\x1a\n") or self._sha256(name) != record["artifact_sha256"]:
                 raise ValueError(f"periodic-delivery {label} PNG evidence is invalid")
@@ -1991,9 +2713,9 @@ class Evidence:
     @_terminal_mutation("running")
     def append(self, name: str, payload: Mapping[str, Any]) -> None:
         self._require(RunState.RUNNING)
-        if name not in {"samples.jsonl", "faults.jsonl"}:
+        if name not in {"samples.jsonl", "runtime-closures.jsonl", "faults.jsonl", "storage-samples.jsonl"}:
             self.finish_fail("invalid typed evidence stream", phase="running", error_type="ValidationError")
-            raise ValueError("only typed samples/fault streams are accepted")
+            raise ValueError("only registered typed evidence streams are accepted")
         _validate_stream_record(name, payload)
         if _has_forbidden_capture_key(payload):
             self.finish_fail("evidence capture validation failed", phase="running", error_type="ValidationError")
@@ -2024,6 +2746,19 @@ class Evidence:
         self._atomic_text(name, sanitized)
         index["artifacts"].append(name)
         self._atomic_json("log_capture.json", index)
+        self._assert_directory_path()
+
+    @_terminal_mutation("running")
+    def write_qualification_artifact(self, name: str, payload: Mapping[str, Any]) -> None:
+        self._require(RunState.RUNNING)
+        if name not in {"persistence.json", "storage-final.json", "periodic-cadence.json"}:
+            raise ValueError("qualification artifact name is not registered")
+        if self._exists(name):
+            raise RuntimeError("qualification artifact is write-once")
+        _validate_bounded_json(payload, path=name)
+        if _has_forbidden_capture_key(payload):
+            raise ValueError("environment capture is forbidden")
+        self._atomic_json(name, payload)
         self._assert_directory_path()
 
     @_terminal_mutation("shutdown")
@@ -2133,11 +2868,16 @@ class Evidence:
             "prerequisites.json",
             "exact-six-result.json",
             "samples.jsonl",
+            "runtime-closures.jsonl",
             "faults.jsonl",
             "log_capture.json",
             "shutdown.json",
             "periodic-delivery-result.json",
             "periodic-receipts.jsonl",
+            "periodic-cadence.json",
+            "persistence.json",
+            "storage-samples.jsonl",
+            "storage-final.json",
         }
         missing: list[str] = []
         for name in sorted(required):
@@ -2152,11 +2892,16 @@ class Evidence:
             prerequisites = json.loads(self._text("prerequisites.json"))
             exact_six_result = json.loads(self._text("exact-six-result.json"))
             samples = self._json_lines("samples.jsonl")
+            runtime_closures = self._json_lines("runtime-closures.jsonl")
             faults = self._json_lines("faults.jsonl")
             log_index = json.loads(self._text("log_capture.json"))
             shutdown = json.loads(self._text("shutdown.json"))
             periodic_delivery = json.loads(self._text("periodic-delivery-result.json"))
             periodic_receipts = self._json_lines("periodic-receipts.jsonl")
+            periodic_cadence = json.loads(self._text("periodic-cadence.json"))
+            persistence = json.loads(self._text("persistence.json"))
+            storage_samples = self._json_lines("storage-samples.jsonl")
+            storage_final = json.loads(self._text("storage-final.json"))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return None, [f"artifact parse failed: {type(exc).__name__}"]
         if _has_forbidden_capture_key({"manifest": manifest, "prerequisites": prerequisites, "shutdown": shutdown}):
@@ -2168,6 +2913,7 @@ class Evidence:
             "dirty",
             "platform",
             "python",
+            "runtime_library",
             "source_command",
             "thresholds",
             "periodic_schedule",
@@ -2178,6 +2924,26 @@ class Evidence:
         errors += _exact_keys(manifest, expected_manifest, "manifest")
         if manifest.get("schema") != SCHEMA:
             errors.append("manifest schema is invalid")
+        runtime_library = manifest.get("runtime_library")
+        if not isinstance(runtime_library, Mapping):
+            errors.append("manifest runtime library closure is invalid")
+        else:
+            errors += _exact_keys(
+                runtime_library,
+                {"schema", "root", "entry_count", "sha256"},
+                "manifest runtime library closure",
+            )
+            if runtime_library.get("schema") != "cryodaq-runtime-library-closure/v1":
+                errors.append("manifest runtime library closure schema is invalid")
+            root = runtime_library.get("root")
+            if not isinstance(root, str) or not root.startswith("/"):
+                errors.append("manifest runtime library closure root is invalid")
+            entry_count = runtime_library.get("entry_count")
+            if isinstance(entry_count, bool) or not isinstance(entry_count, int) or entry_count <= 0:
+                errors.append("manifest runtime library closure entry count is invalid")
+            digest = runtime_library.get("sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                errors.append("manifest runtime library closure digest is invalid")
         selected = PROFILES.get(str(manifest.get("profile")))
         if selected is None:
             errors.append("manifest profile is invalid")
@@ -2198,18 +2964,12 @@ class Evidence:
                 {"interval_s", "selection_boundary_offset_s", "expected_receipts"},
                 "manifest periodic schedule",
             )
-            interval_s = periodic_schedule.get("interval_s")
-            boundary_offset_s = periodic_schedule.get("selection_boundary_offset_s")
-            if (
-                type(interval_s) is not int
-                or not 600 <= interval_s <= 3600
-                or type(boundary_offset_s) is not int
-                or not 450 <= boundary_offset_s <= 600
-                or boundary_offset_s + interval_s < 1050
-                or type(periodic_schedule.get("expected_receipts")) is not int
-                or periodic_schedule.get("expected_receipts") != 2
-            ):
-                errors.append("manifest periodic schedule is outside the reviewed short-run bounds")
+            errors += periodic_schedule_errors(
+                selected,
+                interval_s=periodic_schedule.get("interval_s"),
+                boundary_offset_s=periodic_schedule.get("selection_boundary_offset_s"),
+                expected_receipts=periodic_schedule.get("expected_receipts"),
+            )
         source_command = manifest.get("source_command")
         if (
             not isinstance(source_command, list)
@@ -2242,13 +3002,17 @@ class Evidence:
             ledger_validator=runner._ArtifactReceiptSink._valid_ledger_record,
         )
         errors += periodic_errors
+        if (
+            isinstance(periodic_schedule, Mapping)
+            and type(periodic_schedule.get("expected_receipts")) is int
+            and len(periodic_receipts) != periodic_schedule["expected_receipts"]
+        ):
+            errors.append("periodic-delivery receipt count differs from the manifest schedule")
         if not periodic_errors:
-            for label, artifact_name, ledger_record in zip(
-                ("pre_fault", "post_fault"),
-                periodic_artifact_names,
-                periodic_receipts,
-                strict=True,
+            for index, (artifact_name, ledger_record) in enumerate(
+                zip(periodic_artifact_names, periodic_receipts, strict=True), start=1
             ):
+                label = "pre_fault" if index == 1 else "post_fault" if index == 2 else f"receipt_{index}"
                 try:
                     artifact, _identity = self._read(artifact_name)
                     if (
@@ -2258,8 +3022,13 @@ class Evidence:
                         errors.append(f"periodic-delivery {label} artifact hash differs")
                 except (OSError, ValueError):
                     errors.append(f"periodic-delivery {label} artifact is absent or unsafe")
+        errors += _validate_periodic_cadence(periodic_cadence, periodic_receipts, selected)
+        errors += _validate_persistence_evidence(persistence, selected, manifest.get("source_fixture"))
+        errors += _validate_storage_evidence(storage_samples, storage_final, selected)
         sample_errors = evaluate_resources(samples, selected)
         errors += [f"samples: {error}" for error in sample_errors]
+        runtime_closure_errors = _validate_runtime_closures(runtime_closures, samples)
+        errors += [f"runtime closures: {error}" for error in runtime_closure_errors]
         fault_errors = _validate_faults(faults, selected, samples)
         errors += [f"faults: {error}" for error in fault_errors]
         expected_log_index = {"allowlist", "artifacts"}
@@ -2339,22 +3108,16 @@ class Evidence:
             elif name not in accepted_names:
                 errors.append(f"artifact tree contains an unregistered artifact: {name}")
         artifact_names = sorted(accepted_names)
-        artifact_payloads: dict[str, bytes] = {}
+        artifact_sizes: dict[str, int] = {}
+        artifact_digests: dict[str, str] = {}
         for name in artifact_names:
             try:
-                artifact_payloads[name], _identity = self._read(name)
+                artifact_digests[name], artifact_sizes[name] = self._hash_and_size(name)
             except (OSError, ValueError):
                 errors.append(f"registered artifact disappeared or changed before hashing: {name}")
         if errors:
             return None, errors
-        artifacts = tuple(
-            ArtifactRecord(
-                name,
-                len(artifact_payloads[name]),
-                "sha256:" + hashlib.sha256(artifact_payloads[name]).hexdigest(),
-            )
-            for name in artifact_names
-        )
+        artifacts = tuple(ArtifactRecord(name, artifact_sizes[name], artifact_digests[name]) for name in artifact_names)
         ledger = AcceptanceLedger(
             run=RunIdentity(
                 SCHEMA,
@@ -2599,8 +3362,8 @@ def _git_metadata() -> tuple[str | None, bool | None]:
 
 def effective_thresholds(selected: SoakProfile) -> dict[str, Any]:
     return {
-        "sample_interval_s": SAMPLE_INTERVAL_S,
-        "max_cadence_gap_s": MAX_CADENCE_GAP_S,
+        "sample_interval_s": selected.sample_interval_s,
+        "max_cadence_gap_s": selected.max_cadence_gap_s,
         "max_slope_points": MAX_SLOPE_POINTS,
         "max_slope_pairs": MAX_SLOPE_PAIRS,
         "recovery_ceiling_s": RECOVERY_CEILING_S,
@@ -2623,33 +3386,67 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _diagnose(message: str, *, stream: Any = None) -> None:
+    """Emit one refusal/completion diagnostic without changing the exit code.
+
+    The soak's refusals are fail-closed: the non-zero return and the sealed
+    terminal summary are the authority, and a diagnostic write failure must
+    never turn a refusal into something else, so a failed write is swallowed.
+    The stream is resolved at call time so an active capture (capsys) sees the
+    diagnostic rather than the interpreter's import-time stderr.
+    """
+
+    if stream is None:
+        stream = sys.stderr
+    try:
+        print(message, file=stream, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     selected = profile(args.profile)
-    if selected.name != "short":
-        print(
-            f"soak profile {selected.name!r} is defined but not activated: "
-            "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
-            "long-duration evidence remains open",
-            file=sys.stderr,
-        )
-        return 3
     from scripts import soak_mock_stack_runner as runner
 
     try:
         runner._PosixSoakRunner.require_platform()
-    except runner._RunnerActivationDisabled:
+    except runner._RunnerActivationDisabled as exc:
+        _diagnose(
+            "cryodaq mock-stack soak refused to start: "
+            + redact_text(str(exc))
+            + "; run it on the Ubuntu 22.04 laboratory qualification host with a "
+            "trusted interpreter (see docs/runbooks/mock_stack_soak.md)."
+        )
         return 2
     try:
         evidence = Evidence(args.evidence_dir or _default_evidence_dir(selected))
-    except (FileExistsError, EvidenceCapabilityError):
+    except FileExistsError as exc:
+        _diagnose(
+            "cryodaq mock-stack soak refused to start: "
+            + redact_text(str(exc))
+            + "; pass --evidence-dir an empty or freshly-created directory and re-run."
+        )
+        return 2
+    except EvidenceCapabilityError as exc:
+        _diagnose(
+            "cryodaq mock-stack soak refused to start: "
+            + redact_text(str(exc))
+            + "; the evidence capability is not available on this host/platform, so "
+            "run it on the Ubuntu 22.04 laboratory qualification host (see "
+            "docs/runbooks/mock_stack_soak.md)."
+        )
         return 2
     previous_handlers: dict[int, Any] = {}
     interrupt_handler = _first_signal_interrupt_handler()
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, interrupt_handler)
-        runner._PosixSoakRunner().run(evidence)
+        runner._PosixSoakRunner(selected).run(evidence)
+        _diagnose(
+            f"cryodaq mock-stack soak PASSED; sealed evidence at {evidence.directory}",
+            stream=sys.stdout,
+        )
         return 0
     except RunInterrupted as exc:
         evidence.finish_fail(
@@ -2657,12 +3454,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             phase="runner",
             interrupted=True,
         )
+        _diagnose(
+            f"cryodaq mock-stack soak interrupted by signal {exc.signum}; "
+            f"terminal FAIL summary at {evidence.directory / 'summary.json'}"
+        )
         return 128 + exc.signum
     except KeyboardInterrupt:
         evidence.finish_fail("interrupted by signal 2", phase="runner", interrupted=True)
+        _diagnose(
+            "cryodaq mock-stack soak interrupted by signal 2; "
+            f"terminal FAIL summary at {evidence.directory / 'summary.json'}"
+        )
         return 130
     except BaseException as exc:
         evidence.finish_fail(str(exc), phase="runner", error_type=type(exc).__name__)
+        _diagnose(
+            "cryodaq mock-stack soak refused: "
+            + redact_text(str(exc))
+            + f"; terminal FAIL summary at {evidence.directory / 'summary.json'} — "
+            "read that reason, correct the condition, then re-run from a clean start."
+        )
         return 1
     finally:
         for signum, previous in previous_handlers.items():

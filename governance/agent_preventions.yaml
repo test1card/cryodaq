@@ -3289,6 +3289,94 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: LONG-SOAK-MANIFEST-JOIN-FALSE-GREEN-055
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_mock_stack.py::test_runner_runtime_library_manifest_reaches_final_schema_validation
+    ci_partition: remaining
+    red_evidence: exact_477b0c3f63f3ae7d9c5964dd7e0d6353ab1ebff9_ubuntu_22_04_guard_failed_on_manifest_fields_are_not_exact_exit_1
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-NATIVE-GENERATION-FALSE-GREEN-056
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_loaded_native_closure_binds_fallback_system_objects
+    ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_hashed_only_sys_prefix_lib_and_had_no_loaded_system_object_guard_pending_immutable_mutation_capture
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-CHECKLIST-DRIFT-FALSE-GREEN-057
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/docs/test_docs_freshness.py::test_lab_checklist_names_short_and_duration_soak_gates
+    ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_checklist_blob_0d47fa2eb6474522d774260289cb908763febc5b_named_only_wsl_short_and_two_receipts_pending_immutable_guard_run
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-TERMINAL-MEMORY-FALSE-GREEN-058
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_long_profile_contract.py::test_168h_sample_volume_has_an_explicit_terminal_validation_bound
+    ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_sample_reader_had_no_byte_or_record_bound_pending_immutable_mutation_capture
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-RUNTIME-LIBRARY-OWNERSHIP-FALSE-GREEN-065
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-QUALIFICATION-TRUST-055
+    guard: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers
+    ci_partition: remaining
+    red_evidence: exact_2198fe461ac5d95ba58d3ebd1102a994b23315d1_ubuntu_22_04_guard_rejected_root_owned_mode_0644_runtime_library_identity_exit_1
+    green_evidence: pending_final_candidate_and_hosted_remaining
+  - id: LONG-SOAK-PERSISTENCE-CONTINUITY-FALSE-GREEN-059
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_persistence_validator_rejects_a_false_green_duplicate
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_duration_PASS_had_no_persisted_reading_continuity_or_no_loss_evidence
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-STORAGE-GROWTH-FALSE-GREEN-060
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_storage_validator_rejects_a_false_green_live_wal
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_duration_PASS_had_no_database_WAL_archive_or_disk_growth_bound
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-PERIODIC-CADENCE-FALSE-GREEN-061
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_periodic_cadence_validator_rejects_clustered_receipts
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_periodic_cadence_accepted_receipt_count_and_order_without_runtime_slot_timing
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-PREFLIGHT-BUDGET-FALSE-GREEN-062
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_long_profile_contract.py::test_long_schedule_reserves_the_complete_sequential_preflight
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_long_schedule_reserved_less_time_than_the_bounded_sequential_preflight
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-RUNBOOK-CADENCE-FALSE-GREEN-063
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/docs/test_docs_freshness.py::test_mock_stack_runbook_names_each_profile_cadence
+    ci_partition: remaining
+    red_evidence: exact_c3347ea1db532f16037f59d61d58b88650eb67aa_cold_breadth_report_sha256_85ef7810541f13bfc045116743d6597ab809721ce8a63d25a45bbb928fb05aef_confirmed_runbook_long_profile_cadence_contradicted_the_implemented_profile_values
+    green_evidence: pending_exact_final_review_and_hosted_remaining
+  - id: LONG-SOAK-BOUNDED-EVIDENCE-FALSE-GREEN-064
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LONG-SOAK-DATA-CONTINUITY-059
+    guard: tests/scripts/test_soak_mock_stack.py::test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound
+    ci_partition: remaining
+    red_evidence: exact_4e575caa205fa67d47af23e24d57d1c805021649_cold_breadth_report_sha256_ab768001c99b127d85d22ac70ca2e6333d6e30a1e9c3eea72097c66d05e3e1fb_P2_confirmed_direct_bounded_parser_guard_missed_production_seal_paths_disposition_requires_the_same_guard_node_to_drive_seal_and_prove_both_streams_apply_the_byte_ceiling_to_every_read_text_secrecy_required_artifact_hash_materialization_and_seal_read_with_growth_checked_during_streaming
+    green_evidence: pending_final_correction_review_and_hosted_remaining
   - id: EXTERNAL-MOCK-THERMAL-POINT-IDENTITY-FALSE-GREEN-001
     status: open
     scope: product_contract
@@ -5813,6 +5901,7 @@ records:
       repeat_threshold: 2
       covered_classifications:
         - coverage_escape
+        - evidence_false_acceptance
         - evidence_misbinding
         - instrument_authority_escape
         - late_side_effect
@@ -6584,6 +6673,91 @@ records:
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
     green_evidence: pending
+  - id: LONG-SOAK-QUALIFICATION-TRUST-055
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Ubuntu 22.04 short, 12-hour, 72-hour, and 168-hour whole-stack qualification evidence.
+    classification: evidence_false_acceptance
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A duration run can finish after hours or days but fail final acceptance, reject a safe immutable runtime, combine process generations that loaded different native bytes, follow a contradictory checklist, or exhaust memory during terminal validation.
+    invariant: The production manifest passes its exact final schema. A POSIX runtime library identity is accepted when it is current-user-owned under the private-group rule or root-owned without group or world write access; foreign non-root ownership and unsafe write access are refused. Every process generation records the executable native objects it actually loaded, including fallback system objects, and one role keeps one closure across generations. The authoritative checklist separates short preflight from Ubuntu duration gates. Long profiles use a bounded cadence, and final sample input has explicit byte and record limits.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#integration-and-publication-discipline
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_soak_mock_stack.py::test_runner_runtime_library_manifest_reaches_final_schema_validation
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner_process_authority.py::test_loaded_native_closure_binds_fallback_system_objects
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_process_generation_native_closure_change_is_rejected
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_lab_checklist_names_short_and_duration_soak_gates
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_long_profile_contract.py::test_168h_sample_volume_has_an_explicit_terminal_validation_bound
+        ci_partition: remaining
+    red_evidence: exact_d2cab49949129887ce25d246fb5ef5eb4806d9ee_cold_breadth_report_sha256_0e5c671e1fb8b131c11039a485aad40b45d268f3121e30c51159d632002888bf_confirmed_three_P1_and_one_P2
+    green_evidence: pending_final_candidate_independent_review_and_hosted_remaining
+  - id: LONG-SOAK-DATA-CONTINUITY-059
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: >-
+      Ubuntu 22.04 short, 12-hour, 72-hour, and 168-hour whole-stack qualification evidence.
+      This record covers persistence, storage growth, periodic delivery, startup timing, and documented cadence.
+    classification: evidence_false_acceptance
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: >-
+      A duration run can report PASS after it loses or duplicates readings.
+      It can leave WAL data unsettled, exceed storage limits, or miss periodic delivery slots.
+      A valid run can fail if its schedule does not reserve the complete preflight time.
+      Wrong runbook values can cause a reviewer to apply the wrong cadence limit.
+    invariant: >-
+      Final acceptance requires persistence, storage, and periodic-cadence evidence.
+      Persistence evidence covers every expected channel and detects lost or duplicate readings.
+      Only reviewed engine faults can explain allowed gaps.
+      The production helper hashes each persistence database as a bounded stream and refuses symlink databases.
+      Storage evidence measures database, WAL, archive, and total bytes.
+      It also measures file count, free space, and the reviewed byte limit.
+      Final WAL bytes are zero.
+      Every periodic receipt binds to its runtime slot and meets the reviewed lag limit.
+      A long schedule reserves the complete sequential preflight budget and its margin.
+      The runbook cadence values match the implemented profiles.
+      Both samples.jsonl and storage-samples.jsonl have byte and record bounds.
+      Their byte ceiling applies in every production _read, _text, secrecy scan,
+      required-artifact, hash, materialization, and seal path rather than only in a parser helper.
+      Each stream is rejected before allocation when its declared size exceeds the ceiling,
+      and accumulated growth is checked while streaming so a file cannot grow through the bound.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#integration-and-publication-discipline
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_soak_mock_stack.py::test_final_acceptance_requires_persistence_and_storage_evidence
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_persistence_validator_rejects_a_false_green_duplicate
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner.py::test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_storage_validator_rejects_a_false_green_live_wal
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_periodic_cadence_validator_rejects_clustered_receipts
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_long_profile_contract.py::test_long_schedule_reserves_the_complete_sequential_preflight
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mock_stack_runbook_names_each_profile_cadence
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack.py::test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound
+        ci_partition: remaining
+    red_evidence: exact_4e575caa205fa67d47af23e24d57d1c805021649_cold_breadth_report_sha256_ab768001c99b127d85d22ac70ca2e6333d6e30a1e9c3eea72097c66d05e3e1fb_P2_confirmed_both_bounded_streams_reached_unbounded_whole_file_read_text_secrecy_required_artifact_hash_materialization_and_seal_paths_before_the_direct_parser_limit
+    green_evidence: pending_final_correction_review_and_hosted_remaining
   - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
     status: open
     scope: product_contract

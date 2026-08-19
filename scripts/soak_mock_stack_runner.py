@@ -1,4 +1,4 @@
-"""POSIX source-mode short-soak runner and durable R3b receipt authority."""
+"""POSIX source-mode soak runner and durable R3b receipt authority."""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ import os
 import re
 import secrets
 import selectors
+import shutil
 import signal
 import socket
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -78,6 +80,10 @@ _FORBIDDEN_PYTEST_MARKERS: Final = (" skipped", " deselected", " xfailed", " xpa
 _MAX_STREAM_BYTES: Final = 8 * 1024 * 1024
 _MAX_SNAPSHOT_ARCHIVE_BYTES: Final = 32 * 1024 * 1024
 _EXACT_SIX_TIMEOUT_S: Final = 300.0
+_GIT_HEAD_TIMEOUT_S: Final = 10.0
+_SNAPSHOT_ARCHIVE_TIMEOUT_S: Final = 30.0
+_SNAPSHOT_IMPORT_TIMEOUT_S: Final = 20.0
+_DRIVER_PROBE_TIMEOUT_S: Final = 20.0
 _PROCESS_GROUP_GRACE_S: Final = 2.0
 _STATUS_STRUCT: Final = struct.Struct("!i")
 _SUPERVISOR_CODE: Final = """\
@@ -133,6 +139,8 @@ _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 _MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
 _MAX_SOURCE_FIXTURE_FILE_BYTES: Final = 4 * 1024 * 1024
 _TRUNCATED_LAUNCHER_LOG_MARKER: Final = b"[launcher log truncated; bounded tail follows]\n"
+_ENGINE_STDERR_EVIDENCE_LOG_NAME: Final = "log-engine-stderr.txt"
+_ENGINE_STDERR_TRUNCATED_MARKER: Final = b"[engine stderr truncated; bounded tail follows]\n"
 _LOCKED_PSUTIL_VERSION: Final = "7.2.2"
 _SOURCE_ARGV: Final = (sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray")
 _SOURCE_GATE_CODE: Final = """\
@@ -145,15 +153,38 @@ os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 """
 _ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
+_ISOLATED_TRACKED_THEME_PACKS: Final = (
+    "amber.yaml",
+    "anthropic_mono.yaml",
+    "braun.yaml",
+    "default_cool.yaml",
+    "gost.yaml",
+    "instrument.yaml",
+    "ochre_bloom.yaml",
+    "rose_dusk.yaml",
+    "signal.yaml",
+    "taupe_quiet.yaml",
+    "warm_stone.yaml",
+    "xcode.yaml",
+)
 _ISOLATED_STATIC_CONFIGS: Final = (
-    ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
+    (
+        "safety.yaml",
+        "critical_channels:\n"
+        "  - 'Т1'\n"
+        "  - 'Т2'\n"
+        "  - 'Т3'\n"
+        "  - 'Т4'\n"
+        "  - 'Т5'\n"
+        "  - 'Т6'\n"
+        "  - 'Т7'\n"
+        "  - 'Т8'\n"
+        "require_keithley_for_run: false\n"
+        "keithley_channels: []\n",
+    ),
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
-    (
-        "physical_alarms.yaml",
-        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n  escalate_to_safety: false\n",
-    ),
     ("plugins.yaml", "{}\n"),
     ("cooldown.yaml", "{}\n"),
 )
@@ -214,11 +245,17 @@ class _WorktreeImportProof:
         expected_interpreter = (root / ".venv/bin/python").resolve()
         expected_package = (root / "src/cryodaq").resolve()
         if interpreter != expected_interpreter:
-            raise _RunnerFoundationError("interpreter is not the exact worktree .venv Python")
+            raise _RunnerFoundationError(
+                f"interpreter is not the exact worktree .venv Python: interpreter={interpreter} "
+                f"expected={expected_interpreter}"
+            )
         if _SHA256_RE.fullmatch(self.interpreter_sha256) is None:
-            raise _RunnerFoundationError("interpreter hash must be canonical")
+            raise _RunnerFoundationError(f"interpreter hash must be canonical: hash={self.interpreter_sha256!r}")
         if not imported.is_relative_to(expected_package):
-            raise _RunnerFoundationError("cryodaq import does not resolve inside the exact worktree src")
+            raise _RunnerFoundationError(
+                f"cryodaq import does not resolve inside the exact worktree src: imported={imported} "
+                f"expected_root={expected_package}"
+            )
         object.__setattr__(self, "repo_root", root)
         object.__setattr__(self, "interpreter", interpreter)
         object.__setattr__(self, "cryodaq_import", imported)
@@ -231,7 +268,7 @@ def _file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
 def _hash_regular_file(path: Path) -> str:
     before = path.stat()
     if not stat.S_ISREG(before.st_mode):
-        raise _RunnerFoundationError("worktree interpreter is not a regular file")
+        raise _RunnerFoundationError(f"worktree interpreter is not a regular file: path={path}")
     digest = hashlib.sha256()
     try:
         with path.open("rb") as stream:
@@ -239,10 +276,10 @@ def _hash_regular_file(path: Path) -> str:
                 digest.update(chunk)
             opened = os.fstat(stream.fileno())
     except OSError as exc:
-        raise _RunnerFoundationError("worktree interpreter hash is unavailable") from exc
+        raise _RunnerFoundationError(f"worktree interpreter hash is unavailable: path={path}") from exc
     after = path.stat()
     if _file_identity(before) != _file_identity(opened) or _file_identity(before) != _file_identity(after):
-        raise _RunnerFoundationError("worktree interpreter changed while hashing")
+        raise _RunnerFoundationError(f"worktree interpreter changed while hashing: path={path}")
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -258,7 +295,9 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
         if not stat.S_ISREG(source_before.st_mode):
             raise _RunnerFoundationError("running interpreter is not a regular file")
         if Path(f"/proc/self/fd/{source_fd}").resolve(strict=True) != expected.resolve(strict=True):
-            raise _RunnerActivationDisabled("runner is not executing under the exact worktree .venv interpreter")
+            raise _RunnerActivationDisabled(
+                f"runner is not executing under the exact worktree .venv interpreter: expected={expected}"
+            )
         destination_fd = os.open(
             destination,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
@@ -270,23 +309,268 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
             while view:
                 written = os.write(destination_fd, view)
                 if written <= 0:
-                    raise _RunnerFoundationError("sealed interpreter copy made no progress")
+                    raise _RunnerFoundationError(
+                        f"sealed interpreter copy made no progress: source={expected} destination={destination}"
+                    )
                 view = view[written:]
         os.fsync(destination_fd)
         source_after = os.fstat(source_fd)
     except OSError as exc:
-        raise _RunnerActivationDisabled("running interpreter capture is unavailable") from exc
+        raise _RunnerActivationDisabled(f"running interpreter capture is unavailable: expected={expected}") from exc
     finally:
         if destination_fd is not None:
             os.close(destination_fd)
         if source_fd is not None:
             os.close(source_fd)
     if _file_identity(source_before) != _file_identity(source_after):
-        raise _RunnerFoundationError("running interpreter changed while being captured")
+        raise _RunnerFoundationError(f"running interpreter changed while being captured: expected={expected}")
     captured = f"sha256:{digest.hexdigest()}"
     if _hash_regular_file(destination) != captured:
-        raise _RunnerFoundationError("sealed interpreter copy contradicts its source")
+        raise _RunnerFoundationError(
+            f"sealed interpreter copy contradicts its source: source={expected} destination={destination}"
+        )
     return captured
+
+
+def _runtime_library_identity_unsafe_clause(identity: os.stat_result) -> str | None:
+    """Name the exact clause that rejects this identity, or ``None`` if it is safe.
+
+    ``_runtime_library_identity_is_safe`` is defined as this returning ``None``,
+    so a diagnostic can never drift from acceptance. Every ownership refusal
+    raised by ``_runtime_library_root`` and ``_runtime_library_closure`` names
+    the returned clause so an operator has the exact property to act on.
+    """
+    mode = stat.S_IMODE(identity.st_mode)
+    if os.name != "posix":
+        return "non-posix"
+    if mode & 0o002:
+        return "world-writable"
+    if identity.st_uid == 0:
+        if mode & 0o020:
+            return "root-owned-with-group-write"
+        return None
+    if identity.st_uid != os.getuid():
+        return "foreign-owned"
+    if not mode & 0o020:
+        return None
+    if identity.st_gid != os.getgid():
+        return "group-writable-foreign-group"
+    import grp
+    import pwd
+
+    current_name = pwd.getpwuid(os.getuid()).pw_name
+    primary_members = {entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == identity.st_gid}
+    supplemental_members = set(grp.getgrgid(identity.st_gid).gr_mem)
+    if primary_members | supplemental_members == {current_name}:
+        return None
+    return "group-writable-multi-member-group"
+
+
+def _runtime_library_identity_is_safe(identity: os.stat_result) -> bool:
+    """Accept native bytes writable only by a trusted owner."""
+
+    return _runtime_library_identity_unsafe_clause(identity) is None
+
+
+def _runtime_library_identity_refusal(path: Path, identity: os.stat_result) -> str:
+    """Serialize the path, numeric owner and group, octal mode, and rejecting clause.
+
+    ``identity`` must be one that ``_runtime_library_identity_unsafe_clause``
+    rejects; calling this on a safe identity is an internal contract error.
+    """
+
+    clause = _runtime_library_identity_unsafe_clause(identity)
+    if clause is None:
+        raise ValueError("identity is safe; there is no ownership refusal")
+    return (
+        f"path={path} uid={identity.st_uid} gid={identity.st_gid} "
+        f"mode={stat.S_IMODE(identity.st_mode):04o} clause={clause}"
+    )
+
+
+def _runtime_library_root() -> Path:
+    """Return the validated direct native-library search root."""
+
+    library_prefix = sys.base_prefix if sys.prefix != sys.base_prefix else sys.prefix
+    root = Path(library_prefix) / "lib"
+    try:
+        identity = root.lstat()
+        resolved = root.resolve(strict=True)
+    except OSError as exc:
+        raise _RunnerActivationDisabled(f"runtime native-library root is unavailable: path={root}") from exc
+    if not stat.S_ISDIR(identity.st_mode) or stat.S_ISLNK(identity.st_mode) or resolved != root.absolute():
+        raise _RunnerActivationDisabled(
+            "runtime native-library root is not a direct directory: "
+            f"path={root} uid={identity.st_uid} gid={identity.st_gid} "
+            f"mode={stat.S_IMODE(identity.st_mode):04o} resolved={resolved}"
+        )
+    if os.name == "posix" and not _runtime_library_identity_is_safe(identity):
+        raise _RunnerActivationDisabled(
+            "runtime native-library root ownership is unsafe: " + _runtime_library_identity_refusal(root, identity)
+        )
+    return resolved
+
+
+def _runtime_library_closure() -> dict[str, object]:
+    """Hash every direct file that LD_LIBRARY_PATH can select."""
+
+    if os.name != "posix":
+        raise _RunnerActivationDisabled("runtime native-library closure requires POSIX")
+    root = _runtime_library_root()
+    entries: list[dict[str, object]] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        raise _RunnerActivationDisabled(f"runtime native-library root cannot be enumerated: path={root}") from exc
+    for path in children:
+        identity = path.lstat()
+        if stat.S_ISDIR(identity.st_mode):
+            continue
+        if stat.S_ISLNK(identity.st_mode):
+            resolved = path.resolve(strict=True)
+            if resolved.is_dir():
+                continue
+            if not resolved.is_file():
+                raise _RunnerActivationDisabled(
+                    "runtime native-library link escapes its closure: "
+                    f"path={path} resolved={resolved} uid={identity.st_uid} gid={identity.st_gid} "
+                    f"mode={stat.S_IMODE(identity.st_mode):04o}"
+                )
+            for ancestor in resolved.parents:
+                if not ancestor.is_relative_to(root):
+                    break
+                ancestor_identity = ancestor.lstat()
+                if not _runtime_library_identity_is_safe(ancestor_identity):
+                    raise _RunnerActivationDisabled(
+                        "runtime native-library link ancestor ownership is unsafe: "
+                        + _runtime_library_identity_refusal(ancestor, ancestor_identity)
+                    )
+            if not resolved.is_relative_to(root):
+                # The resolved target of an escaping link is still bytes the
+                # loader can select, so the closure binds them: only the
+                # resolved target is ever executed, never the link's own name
+                # inside the root. Its external ancestors are as load-bearing
+                # as the in-root ones -- any of them writable by another party
+                # could swap the target the loader would follow. A stock
+                # Ubuntu /usr/lib contains such links (for example
+                # cpp -> /etc/alternatives/cpp), so refusing every escaping
+                # link refuses the reviewed target platform.
+                for ancestor in resolved.parents:
+                    if ancestor.is_relative_to(root):
+                        continue
+                    ancestor_identity = ancestor.lstat()
+                    if not _runtime_library_identity_is_safe(ancestor_identity):
+                        raise _RunnerActivationDisabled(
+                            "runtime native-library link ancestor ownership is unsafe: "
+                            + _runtime_library_identity_refusal(ancestor, ancestor_identity)
+                        )
+            target_identity = resolved.stat()
+            if not _runtime_library_identity_is_safe(target_identity):
+                raise _RunnerActivationDisabled(
+                    "runtime native-library target ownership is unsafe: "
+                    + _runtime_library_identity_refusal(resolved, target_identity)
+                )
+            target = resolved.relative_to(root).as_posix() if resolved.is_relative_to(root) else resolved.as_posix()
+            entries.append(
+                {
+                    "kind": "link",
+                    "path": path.name,
+                    "target": target,
+                    "target_sha256": _hash_regular_file(resolved),
+                }
+            )
+            continue
+        if not stat.S_ISREG(identity.st_mode):
+            raise _RunnerActivationDisabled(
+                "runtime native-library root contains a special entry: "
+                f"path={path} uid={identity.st_uid} gid={identity.st_gid} "
+                f"mode={stat.S_IMODE(identity.st_mode):04o}"
+            )
+        if not _runtime_library_identity_is_safe(identity):
+            raise _RunnerActivationDisabled(
+                "runtime native-library file ownership is unsafe: " + _runtime_library_identity_refusal(path, identity)
+            )
+        entries.append({"kind": "file", "path": path.name, "sha256": _hash_regular_file(path)})
+    if not entries:
+        raise _RunnerActivationDisabled(f"runtime native-library closure is empty: path={root}")
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return {
+        "schema": "cryodaq-runtime-library-closure/v1",
+        "root": str(root),
+        "entry_count": len(entries),
+        "sha256": digest,
+    }
+
+
+def _loaded_native_closure(pid: int) -> dict[str, object]:
+    """Bind every executable file mapping of one live Linux process."""
+
+    if sys.platform != "linux" or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise _RunnerActivationDisabled("loaded native closure requires one Linux process")
+    try:
+        lines = Path(f"/proc/{pid}/maps").read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise _RunnerFoundationError(f"loaded native map is unavailable: pid={pid}") from exc
+    entries: dict[tuple[int, int], dict[str, object]] = {}
+    for line in lines:
+        fields = line.split(maxsplit=5)
+        if len(fields) != 6 or "x" not in fields[1] or not fields[5].startswith("/"):
+            continue
+        raw_path = fields[5]
+        if raw_path.endswith(" (deleted)"):
+            raise _RunnerFoundationError(f"loaded native mapping was replaced or deleted: pid={pid} path={raw_path}")
+        try:
+            mapped_major, mapped_minor = (int(part, 16) for part in fields[3].split(":", 1))
+            mapped_inode = int(fields[4])
+            resolved = Path(raw_path).resolve(strict=True)
+            identity = resolved.stat()
+        except (OSError, ValueError) as exc:
+            raise _RunnerFoundationError(
+                f"loaded native mapping identity is unavailable: pid={pid} path={raw_path}"
+            ) from exc
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or os.major(identity.st_dev) != mapped_major
+            or os.minor(identity.st_dev) != mapped_minor
+            or identity.st_ino != mapped_inode
+        ):
+            raise _RunnerFoundationError(
+                f"loaded native mapping no longer matches its pathname: pid={pid} path={raw_path}"
+            )
+        key = (identity.st_dev, identity.st_ino)
+        entries[key] = {
+            "path": str(resolved),
+            "device": identity.st_dev,
+            "inode": identity.st_ino,
+            "size": identity.st_size,
+            "sha256": _hash_regular_file(resolved),
+        }
+    ordered = sorted(entries.values(), key=lambda item: (str(item["path"]), int(item["inode"])))
+    if not ordered:
+        raise _RunnerFoundationError(f"loaded native closure is empty: pid={pid}")
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(ordered, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return {
+        "schema": "cryodaq-loaded-native-closure/v1",
+        "entry_count": len(ordered),
+        "entries": ordered,
+        "sha256": digest,
+    }
+
+
+def _controlled_runtime_library_path() -> str:
+    """Return the validated native-library root of the active interpreter."""
+
+    return str(_runtime_library_root())
 
 
 def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[str, str]:
@@ -295,6 +579,7 @@ def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[s
         "HOME": "/nonexistent",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        "LD_LIBRARY_PATH": _controlled_runtime_library_path(),
         "PATH": "/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
@@ -323,11 +608,19 @@ def _source_environment(
     resolved = Path(root).resolve(strict=True)
     sealed_source = Path(source_root).resolve(strict=True)
     if not resolved.is_absolute() or resolved == _REPO_ROOT or resolved.is_relative_to(_REPO_ROOT):
-        raise _RunnerFoundationError("source root is not isolated from the repository")
+        raise _RunnerFoundationError(
+            f"source root is not isolated from the repository: source_root={resolved} repo_root={_REPO_ROOT}"
+        )
     if set(bridge_grant) != {_BRIDGE_FD_ENV, _BRIDGE_NONCE_ENV}:
-        raise _RunnerFoundationError("bridge capability grant fields are not exact")
+        raise _RunnerFoundationError(
+            f"bridge capability grant fields are not exact: observed={sorted(bridge_grant)} "
+            f"expected={sorted((_BRIDGE_FD_ENV, _BRIDGE_NONCE_ENV))}"
+        )
     if set(artifact_grant) != {_ARTIFACT_FD_ENV, _ARTIFACT_NONCE_ENV}:
-        raise _RunnerFoundationError("artifact capability grant fields are not exact")
+        raise _RunnerFoundationError(
+            f"artifact capability grant fields are not exact: observed={sorted(artifact_grant)} "
+            f"expected={sorted((_ARTIFACT_FD_ENV, _ARTIFACT_NONCE_ENV))}"
+        )
     home = resolved / "home"
     temporary = resolved / "tmp"
     cache = resolved / "cache"
@@ -339,6 +632,7 @@ def _source_environment(
         "HOME": str(home),
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
+        "LD_LIBRARY_PATH": _controlled_runtime_library_path(),
         "PATH": "/usr/bin:/bin",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
@@ -352,6 +646,180 @@ def _source_environment(
         **bridge_grant,
         **artifact_grant,
     }
+
+
+def _render_isolated_physical_alarms_document() -> str:
+    """Render the isolated ``physical_alarms.yaml`` from the module's own defaults.
+
+    The production loader ``load_production_physical_alarms_config`` demands a
+    document that carries exactly the ``cooldown``, ``vacuum`` and ``landmarks``
+    sections, with each section holding exactly the module default key set and
+    landmarks exactly Т11/Т12 with non-empty aliases
+    (src/cryodaq/core/physical_alarms_config.py:375-391). Rendering from the
+    module's own default tables keeps the fixture aligned to that contract
+    rather than to the last error text; production alarms stay deliberately
+    disabled (``enabled: false``), matching the passive-mock fixture boundary.
+    """
+    from cryodaq.core.physical_alarms_config import _COOLDOWN_DEFAULTS, _VACUUM_DEFAULTS
+
+    cooldown = dict(_COOLDOWN_DEFAULTS)
+    cooldown["enabled"] = False
+    vacuum = dict(_VACUUM_DEFAULTS)
+    vacuum["enabled"] = False
+    vacuum["escalate_to_safety"] = False
+    document = {
+        "cooldown": cooldown,
+        "vacuum": vacuum,
+        "landmarks": {
+            "Т11": {
+                "role": "warm_stage",
+                "physical": "1-я ступень GM-cooler, ~40K при работе",
+                "aliases": [
+                    "азотная плита",
+                    "плита",
+                    "плита 1-й ступени",
+                    "первая ступень",
+                    "первая ступень GM",
+                    "1-я ступень",
+                    "т warm",
+                    "t warm",
+                    "warm channel",
+                ],
+            },
+            "Т12": {
+                "role": "cold_stage",
+                "physical": "2-я ступень GM-cooler, ~2.9K при работе",
+                "aliases": [
+                    "вторая ступень",
+                    "вторая ступень GM",
+                    "2-я ступень",
+                    "холодная точка",
+                    "холодный палец",
+                    "т cold",
+                    "t cold",
+                    "cold channel",
+                ],
+            },
+        },
+    }
+    return yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
+
+
+# Engine config documents the engine fails closed on when missing. The engine
+# resolves its config directory at engine.py:6503-6507 (via
+# ``_engine_config_path``), then loads or validates each of these before it
+# reports readiness: instruments (engine.py:6524 ``_load_drivers``),
+# interlocks (engine.py:6596/6740), housekeeping (engine.py:6591),
+# safety (engine.py:6584), alarms_v3 (engine.py:6601/6796/6797),
+# physical_alarms (engine.py:6829/6830), channel_descriptors
+# (engine.py:2316/6589 ``_load_live_descriptor_authority``), and channels.yaml
+# (ChannelManager default, channel_manager.py:25/75). cooldown.yaml/plugins.yaml/
+# notifications.yaml are optional in the engine (only loaded if present), and
+# agent.yaml belongs to the assistant role; the isolated set generates them, so
+# the guard validates them too when present but never requires their presence.
+_ENGINE_REQUIRED_CONFIG_DOCUMENTS: Final = (
+    "instruments.yaml",
+    "interlocks.yaml",
+    "housekeeping.yaml",
+    "safety.yaml",
+    "alarms_v3.yaml",
+    "physical_alarms.yaml",
+    "channel_descriptors.yaml",
+    "channels.yaml",
+)
+
+_ISOLATED_GENERATED_CONFIG_DOCUMENTS: Final = _ENGINE_REQUIRED_CONFIG_DOCUMENTS + (
+    "cooldown.yaml",
+    "plugins.yaml",
+    "notifications.yaml",
+    "agent.yaml",
+)
+
+
+def _validate_single_config_document(config_dir: Path, name: str) -> str | None:
+    """Run one generated config document through the same loader the engine runs.
+
+    Returns a problem string when the document is rejected by its own loader,
+    or ``None`` when it is accepted. Presence is not checked here; the caller
+    decides which documents must exist.
+    """
+    path = config_dir / name
+    if not path.is_file():
+        return None
+    try:
+        if name == "instruments.yaml":
+            from cryodaq.drivers.registry import validate_instrument_entries
+
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if type(raw) is not dict or type(raw.get("instruments")) is not list:
+                return f"{name}: root config must be a mapping with an instruments list"
+            validated = validate_instrument_entries(raw["instruments"])
+            if len(validated) != 1 or validated[0].name != _ISOLATED_MOCK_INSTRUMENT_NAME:
+                return f"{name}: passive soak instrument is not unique"
+        elif name == "channel_descriptors.yaml":
+            from cryodaq.storage.channel_descriptors import load_live_channel_descriptor_catalog
+
+            catalog = load_live_channel_descriptor_catalog(path)
+            catalog.require_exact_instruments((_ISOLATED_MOCK_INSTRUMENT_NAME,))
+        elif name == "safety.yaml":
+            from cryodaq.core.safety_broker import SafetyBroker
+            from cryodaq.core.safety_manager import SafetyManager
+
+            SafetyManager(SafetyBroker()).load_config(path)
+        elif name == "interlocks.yaml":
+            from cryodaq.core.broker import DataBroker
+            from cryodaq.core.interlock import InterlockEngine
+
+            InterlockEngine(DataBroker(), actions={}).load_config(path)
+        elif name == "housekeeping.yaml":
+            from cryodaq.core.housekeeping import load_housekeeping_config
+
+            load_housekeeping_config(path)
+        elif name == "alarms_v3.yaml":
+            from cryodaq.core.alarm_config import load_alarm_config
+            from cryodaq.core.housekeeping import load_critical_channels_from_alarms_v3
+
+            load_alarm_config(path)
+            load_critical_channels_from_alarms_v3(path)
+        elif name == "physical_alarms.yaml":
+            from cryodaq.core.physical_alarms_config import load_production_physical_alarms_config
+
+            load_production_physical_alarms_config(path)
+        elif name == "channels.yaml":
+            from cryodaq.core.channel_manager import ChannelManager
+
+            ChannelManager(config_path=path)
+        elif name in ("cooldown.yaml", "plugins.yaml", "notifications.yaml", "agent.yaml"):
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw, dict):
+                return f"{name}: generated document must be a YAML mapping"
+        else:
+            return f"{name}: no registered generator validator"
+    except Exception as exc:  # noqa: BLE001 - every loader rejection is a guard finding
+        return f"{name}: rejected by its own loader: {type(exc).__name__}: {exc}"
+    return None
+
+
+def _validate_isolated_config_set(config_dir: Path) -> list[str]:
+    """Return every problem the materialized isolated config set has against the
+    engine's startup requirements, or an empty list when it is complete.
+
+    Mirrors the engine's startup consumption (engine.py:6503-6507 config path
+    selection, then each fail-closed loader). Every document the engine requires
+    before readiness must be present, and every document the set generates must
+    be accepted by the same loader the engine runs. A missing or loader-rejected
+    document is the defect class rounds 7/9/10 each patched one file at a time;
+    this guard checks the SET.
+    """
+    problems: list[str] = []
+    for name in _ENGINE_REQUIRED_CONFIG_DOCUMENTS:
+        if not (config_dir / name).is_file():
+            problems.append(f"engine-required config document is missing: {name}")
+    for name in _ISOLATED_GENERATED_CONFIG_DOCUMENTS:
+        problem = _validate_single_config_document(config_dir, name)
+        if problem is not None:
+            problems.append(problem)
+    return problems
 
 
 def _materialize_isolated_mock_config(
@@ -371,17 +839,34 @@ def _materialize_isolated_mock_config(
         (config_dir / name).write_bytes(source.read_bytes())
     for name, content in _ISOLATED_STATIC_CONFIGS:
         (config_dir / name).write_text(content, encoding="utf-8")
+    (config_dir / "physical_alarms.yaml").write_text(
+        _render_isolated_physical_alarms_document(),
+        encoding="utf-8",
+    )
+
+    themes_source = source_dir / "themes"
+    if not themes_source.is_dir():
+        raise _RunnerFoundationError(f"required tracked soak theme directory is unavailable: path={themes_source}")
+    themes_dest = config_dir / "themes"
+    themes_dest.mkdir(mode=0o700)
+    for name in _ISOLATED_TRACKED_THEME_PACKS:
+        source = themes_source / name
+        if not source.is_file():
+            raise _RunnerFoundationError(f"required tracked soak theme pack is unavailable: {name}")
+        dest = themes_dest / name
+        dest.write_bytes(source.read_bytes())
+        dest.chmod(0o600)
 
     instruments_raw = yaml.safe_load((source_dir / "instruments.yaml").read_text(encoding="utf-8"))
     if type(instruments_raw) is not dict or type(instruments_raw.get("instruments")) is not list:
-        raise _RunnerFoundationError("tracked instrument config is malformed")
+        raise _RunnerFoundationError(f"tracked instrument config is malformed: path={source_dir / 'instruments.yaml'}")
     selected = [
         item
         for item in instruments_raw["instruments"]
         if type(item) is dict and item.get("name") == _ISOLATED_MOCK_INSTRUMENT_NAME
     ]
     if len(selected) != 1:
-        raise _RunnerFoundationError("tracked passive soak instrument is not unique")
+        raise _RunnerFoundationError(f"tracked passive soak instrument is not unique: count={len(selected)} expected=1")
     instrument_path = config_dir / "instruments.yaml"
     instrument_path.write_text(
         yaml.safe_dump({"instruments": selected}, allow_unicode=True, sort_keys=False),
@@ -392,7 +877,10 @@ def _materialize_isolated_mock_config(
 
         validated = validate_instrument_entries(selected)
         if len(validated) != 1 or validated[0].spec.authority is not DriverAuthority.PASSIVE_MEASUREMENT:
-            raise _RunnerFoundationError("isolated soak instrument is not passive measurement authority")
+            raise _RunnerFoundationError(
+                f"isolated soak instrument is not passive measurement authority: "
+                f"name={validated[0].name if validated else 'none'}"
+            )
         readings_per_sample = None
     else:
         validation_code = """
@@ -421,7 +909,15 @@ async def probe() -> None:
         readings = await driver.read_channels()
     finally:
         await driver.disconnect()
-    print(json.dumps({"authority": items[0].spec.authority.value, "readings": len(readings)}))
+    print(
+        json.dumps(
+            {
+                "authority": items[0].spec.authority.value,
+                "readings": len(readings),
+                "channel_ids": sorted({str(reading.channel) for reading in readings}),
+            }
+        )
+    )
 
 
 asyncio.run(probe())
@@ -432,7 +928,7 @@ asyncio.run(probe())
             env=validation_environment,
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=_DRIVER_PROBE_TIMEOUT_S,
         )
         try:
             behavior = json.loads(validated.stdout)
@@ -442,13 +938,21 @@ asyncio.run(probe())
             validated.returncode != 0
             or validated.stderr.strip()
             or type(behavior) is not dict
-            or set(behavior) != {"authority", "readings"}
+            or set(behavior) != {"authority", "readings", "channel_ids"}
             or behavior["authority"] != "passive_measurement"
             or type(behavior["readings"]) is not int
             or behavior["readings"] <= 0
+            or type(behavior["channel_ids"]) is not list
+            or len(behavior["channel_ids"]) != behavior["readings"]
+            or any(type(item) is not str or not item for item in behavior["channel_ids"])
+            or len(set(behavior["channel_ids"])) != len(behavior["channel_ids"])
         ):
-            raise _RunnerFoundationError("snapshot-bound passive instrument validation failed")
+            raise _RunnerFoundationError(
+                "snapshot-bound passive instrument validation failed: "
+                f"returncode={validated.returncode} stderr={validated.stderr.strip()!r}"
+            )
         readings_per_sample = behavior["readings"]
+        channel_ids = tuple(sorted(behavior["channel_ids"]))
 
     descriptors_raw = yaml.safe_load((source_dir / "channel_descriptors.yaml").read_text(encoding="utf-8"))
     if (
@@ -457,7 +961,9 @@ asyncio.run(probe())
         or type(descriptors_raw.get("descriptors")) is not list
         or type(descriptors_raw.get("bindings")) is not list
     ):
-        raise _RunnerFoundationError("tracked descriptor config is malformed")
+        raise _RunnerFoundationError(
+            f"tracked descriptor config is malformed: path={source_dir / 'channel_descriptors.yaml'}"
+        )
     descriptor_manifest = {
         "schema_version": 1,
         "descriptors": [
@@ -472,18 +978,47 @@ asyncio.run(probe())
         ],
     }
     if not descriptor_manifest["descriptors"] or not descriptor_manifest["bindings"]:
-        raise _RunnerFoundationError("tracked passive soak descriptors are unavailable")
+        raise _RunnerFoundationError(
+            "tracked passive soak descriptors are unavailable: "
+            f"descriptors={len(descriptor_manifest['descriptors'])} bindings={len(descriptor_manifest['bindings'])}"
+        )
     descriptor_ids = {item["channel_id"] for item in descriptor_manifest["descriptors"]}
     binding_ids = {item["channel_id"] for item in descriptor_manifest["bindings"]}
     if len(descriptor_manifest["descriptors"]) != 16 or len(descriptor_manifest["bindings"]) != 16:
-        raise _RunnerFoundationError("tracked passive soak descriptor cardinality changed")
+        raise _RunnerFoundationError(
+            "tracked passive soak descriptor cardinality changed: "
+            f"descriptors={len(descriptor_manifest['descriptors'])} bindings={len(descriptor_manifest['bindings'])} "
+            "expected 16 each"
+        )
     if descriptor_ids != binding_ids:
-        raise _RunnerFoundationError("tracked passive soak descriptor bindings do not match")
+        raise _RunnerFoundationError(
+            "tracked passive soak descriptor bindings do not match: "
+            f"descriptors={len(descriptor_ids)} bindings={len(binding_ids)}"
+        )
+    # The isolated fixture's temperature channels are its safety-critical
+    # inputs. safety.yaml declares exactly these canonical ids as
+    # critical_channels, and the engine's startup liveness check refuses any
+    # critical declaration whose descriptor is not safety_critical_input
+    # (src/cryodaq/core/safety_pattern_liveness.py
+    # _resolve_critical_input_bindings). A declaration that resolves to nothing
+    # never fires (F-1 silent safety kill), so the fixture must genuinely
+    # classify the channels it protects; otherwise the soak config set cannot
+    # pass the engine's own startup cut. Raw-sensor channels stay observational.
+    for item in descriptor_manifest["descriptors"]:
+        if type(item) is dict and item.get("quantity") == "temperature":
+            item["safety_class"] = "safety_critical_input"
     (config_dir / "channel_descriptors.yaml").write_text(
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    return readings_per_sample
+    problems = _validate_isolated_config_set(config_dir)
+    if problems:
+        raise _RunnerFoundationError(
+            "materialized isolated config set fails the engine startup guard: " + "; ".join(problems)
+        )
+    if readings_per_sample is None:
+        return None
+    return readings_per_sample, channel_ids
 
 
 def _materialize_complete_soak_config(
@@ -504,7 +1039,7 @@ def _materialize_complete_soak_config(
         encoding="utf-8",
     )
     (config_dir / "experiment_templates").mkdir(mode=0o700)
-    readings_per_sample = _materialize_isolated_mock_config(
+    materialized = _materialize_isolated_mock_config(
         config_dir,
         source_root=source_snapshot.root,
         validation_interpreter=source_snapshot.interpreter,
@@ -513,9 +1048,157 @@ def _materialize_complete_soak_config(
     for path in config_dir.iterdir():
         if path.is_file():
             path.chmod(0o600)
-    if readings_per_sample is None:
-        raise _RunnerFoundationError("snapshot-bound fixture behavior was not measured")
-    return readings_per_sample
+    if materialized is None:
+        raise _RunnerFoundationError(
+            f"snapshot-bound fixture behavior was not measured: instrument={_ISOLATED_MOCK_INSTRUMENT_NAME}"
+        )
+    readings_per_sample, channel_ids = materialized
+    return readings_per_sample, channel_ids
+
+
+def _storage_evidence(data_dir: Path, *, elapsed_s: float, byte_limit: int) -> dict[str, object]:
+    database_bytes = 0
+    wal_bytes = 0
+    archive_bytes = 0
+    total_bytes = 0
+    file_count = 0
+    for path in data_dir.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or (not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode)):
+            raise _RunnerFoundationError(f"storage tree contains an unsafe entry: path={path}")
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        file_count += 1
+        total_bytes += info.st_size
+        if path.name.endswith(("-wal", "-shm")):
+            wal_bytes += info.st_size
+        elif path.suffix == ".db":
+            database_bytes += info.st_size
+        elif path.suffix == ".parquet":
+            archive_bytes += info.st_size
+    free_bytes = shutil.disk_usage(data_dir).free
+    return {
+        "schema": "cryodaq-soak-storage-sample/v1",
+        "elapsed_s": elapsed_s,
+        "total_bytes": total_bytes,
+        "database_bytes": database_bytes,
+        "wal_bytes": wal_bytes,
+        "archive_bytes": archive_bytes,
+        "file_count": file_count,
+        "free_bytes": free_bytes,
+        "byte_limit": byte_limit,
+    }
+
+
+def _persistence_evidence(
+    data_dir: Path,
+    *,
+    selected: Any,
+    expected_channels: int,
+    poll_interval_s: float,
+    start_wall_s: float,
+) -> dict[str, object]:
+    database_files: list[dict[str, object]] = []
+    aggregated: dict[tuple[str, str], dict[str, object]] = {}
+    raw_interruptions: list[tuple[str, str, float, float]] = []
+    duplicate_rows = 0
+    invalid_rows = 0
+    integrity = "ok"
+    for path in sorted(data_dir.glob("data_????-??-??.db")):
+        identity = path.lstat()
+        if not stat.S_ISREG(identity.st_mode):
+            raise _RunnerFoundationError(f"persistence database is not a regular file: path={path}")
+        database_files.append(
+            {
+                "name": path.name,
+                "bytes": identity.st_size,
+                "sha256": _hash_regular_file(path),
+            }
+        )
+        uri = f"file:{path.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5.0) as connection:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
+            if result != ("ok",):
+                integrity = "failed"
+            duplicate_rows += int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(n - 1), 0) FROM ("
+                    "SELECT COUNT(*) AS n FROM readings GROUP BY instrument_id, channel, timestamp HAVING n > 1)"
+                ).fetchone()[0]
+            )
+            invalid_rows += int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM readings WHERE timestamp IS NULL OR instrument_id IS NULL "
+                    "OR channel IS NULL OR value IS NULL OR unit IS NULL OR status IS NULL"
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                "SELECT instrument_id, channel, COUNT(*), MIN(timestamp), MAX(timestamp) "
+                "FROM readings GROUP BY instrument_id, channel ORDER BY instrument_id, channel"
+            ).fetchall()
+            for instrument_id, channel, count, first, last in rows:
+                key = (str(instrument_id), str(channel))
+                first_value = float(first)
+                last_value = float(last)
+                prior = aggregated.get(key)
+                if prior is None:
+                    aggregated[key] = {
+                        "instrument_id": key[0],
+                        "channel": key[1],
+                        "count": int(count),
+                        "first_timestamp": first_value,
+                        "last_timestamp": last_value,
+                    }
+                else:
+                    prior_last = float(prior["last_timestamp"])
+                    if first_value - prior_last > 1.5 * poll_interval_s:
+                        raw_interruptions.append((key[0], key[1], prior_last, first_value))
+                    prior["count"] = int(prior["count"]) + int(count)
+                    prior["first_timestamp"] = min(float(prior["first_timestamp"]), first_value)
+                    prior["last_timestamp"] = max(prior_last, last_value)
+                gaps = connection.execute(
+                    "SELECT previous_timestamp, timestamp FROM ("
+                    "SELECT timestamp, LAG(timestamp) OVER (ORDER BY timestamp) AS previous_timestamp "
+                    "FROM readings WHERE instrument_id = ? AND channel = ?) "
+                    "WHERE previous_timestamp IS NOT NULL AND timestamp - previous_timestamp > ?",
+                    (instrument_id, channel, 1.5 * poll_interval_s),
+                ).fetchall()
+                raw_interruptions.extend(
+                    (key[0], key[1], float(previous), float(current)) for previous, current in gaps
+                )
+    engine_events = tuple(event.at_s for event in selected.events if event.target == "engine")
+    interruptions: list[dict[str, object]] = []
+    for instrument_id, channel, previous, current in raw_interruptions:
+        previous_elapsed = previous - start_wall_s
+        elapsed = current - start_wall_s
+        matched = next(
+            (
+                event
+                for event in engine_events
+                if previous_elapsed - 2.0 * poll_interval_s <= event <= elapsed + 2.0 * poll_interval_s
+            ),
+            None,
+        )
+        interruptions.append(
+            {
+                "instrument_id": instrument_id,
+                "channel": channel,
+                "gap_s": current - previous,
+                "elapsed_s": elapsed,
+                "matched_engine_fault_s": matched,
+            }
+        )
+    return {
+        "schema": "cryodaq-soak-persistence/v1",
+        "integrity": integrity,
+        "expected_channels": expected_channels,
+        "poll_interval_s": poll_interval_s,
+        "database_files": database_files,
+        "channel_rows": [aggregated[key] for key in sorted(aggregated)],
+        "duplicate_rows": duplicate_rows,
+        "invalid_rows": invalid_rows,
+        "interruptions": interruptions,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -524,7 +1207,12 @@ class _SourceFixtureSeal:
     identities: tuple[tuple[object, ...], ...]
 
 
-def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int) -> _SourceFixtureSeal:
+def _source_fixture_seal(
+    config_dir: Path,
+    *,
+    expected_readings_per_sample: int,
+    channel_ids: tuple[str, ...],
+) -> _SourceFixtureSeal:
     """Describe the complete passive fixture with a canonical no-link tree seal."""
 
     expected_files = {
@@ -542,7 +1230,20 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
         "safety.yaml",
     }
     if type(expected_readings_per_sample) is not int or expected_readings_per_sample <= 0:
-        raise _RunnerFoundationError("passive source fixture behavior is invalid")
+        raise _RunnerFoundationError(
+            f"passive source fixture behavior is invalid: expected_readings_per_sample={expected_readings_per_sample!r}"
+        )
+    if (
+        type(channel_ids) is not tuple
+        or len(channel_ids) != expected_readings_per_sample
+        or any(type(item) is not str or not item for item in channel_ids)
+        or len(set(channel_ids)) != len(channel_ids)
+        or tuple(sorted(channel_ids)) != channel_ids
+    ):
+        raise _RunnerFoundationError(
+            "passive source fixture channel identities are invalid: "
+            f"count={len(channel_ids)} expected={expected_readings_per_sample}"
+        )
 
     def identity(info: os.stat_result) -> tuple[int, ...]:
         return (
@@ -568,10 +1269,13 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
             or directory_opened.st_uid != os.getuid()
             or stat.S_IMODE(directory_opened.st_mode) != 0o700
         ):
-            raise _RunnerFoundationError("passive source fixture directory identity is unsafe")
-        expected_names = expected_files | {"experiment_templates"}
+            raise _RunnerFoundationError(f"passive source fixture directory identity is unsafe: path={config_dir}")
+        expected_names = expected_files | {"experiment_templates", "themes"}
         if set(os.listdir(directory_fd)) != expected_names:
-            raise _RunnerFoundationError("passive source fixture topology is not exact")
+            raise _RunnerFoundationError(
+                "passive source fixture topology is not exact: "
+                f"path={config_dir} observed={sorted(os.listdir(directory_fd))} expected={sorted(expected_names)}"
+            )
 
         identities: list[tuple[object, ...]] = [(".", *identity(directory_opened))]
         template_info = os.stat("experiment_templates", dir_fd=directory_fd, follow_symlinks=False)
@@ -585,19 +1289,25 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
                 or stat.S_IMODE(template_opened.st_mode) != 0o700
                 or os.listdir(template_fd)
             ):
-                raise _RunnerFoundationError("passive source fixture template directory is unsafe")
+                raise _RunnerFoundationError(
+                    f"passive source fixture template directory is unsafe: path={config_dir / 'experiment_templates'}"
+                )
             identities.append(("experiment_templates", *identity(template_opened)))
         finally:
             os.close(template_fd)
 
-        entries: list[dict[str, object]] = [{"path": "experiment_templates", "kind": "directory"}]
+        entries: list[dict[str, object]] = [
+            {"path": "experiment_templates", "kind": "directory"},
+            {"path": "themes", "kind": "directory"},
+        ]
         nofollow = getattr(os, "O_NOFOLLOW", 0)
-        for name in sorted(expected_files):
-            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+
+        def seal_regular_file(path: str, name: str, parent_fd: int) -> None:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             try:
-                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent_fd)
             except OSError as exc:
-                raise _RunnerFoundationError("passive source fixture file identity is unsafe") from exc
+                raise _RunnerFoundationError(f"passive source fixture file identity is unsafe: path={path}") from exc
             try:
                 opened = os.fstat(fd)
                 if (
@@ -607,34 +1317,63 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
                     or opened.st_uid != os.getuid()
                     or stat.S_IMODE(opened.st_mode) != 0o600
                 ):
-                    raise _RunnerFoundationError("passive source fixture file identity is unsafe")
+                    raise _RunnerFoundationError(f"passive source fixture file identity is unsafe: path={path}")
                 content_bytes = 0
                 content_sha256 = hashlib.sha256()
                 while chunk := os.read(fd, 1024 * 1024):
                     content_bytes += len(chunk)
                     if content_bytes > _MAX_SOURCE_FIXTURE_FILE_BYTES:
-                        raise _RunnerFoundationError("passive source fixture file exceeds the reviewed bound")
+                        raise _RunnerFoundationError(
+                            "passive source fixture file exceeds the reviewed bound: "
+                            f"path={path} bytes={content_bytes} bound={_MAX_SOURCE_FIXTURE_FILE_BYTES}"
+                        )
                     content_sha256.update(chunk)
                 if identity(os.fstat(fd)) != identity(opened):
-                    raise _RunnerFoundationError("passive source fixture changed during sealing")
+                    raise _RunnerFoundationError(f"passive source fixture changed during sealing: path={path}")
             finally:
                 os.close(fd)
-            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if identity(after) != identity(opened):
-                raise _RunnerFoundationError("passive source fixture changed during sealing")
-            identities.append((name, *identity(opened)))
+                raise _RunnerFoundationError(f"passive source fixture changed during sealing: path={path}")
+            identities.append((path, *identity(opened)))
             entries.append(
                 {
-                    "path": name,
+                    "path": path,
                     "kind": "file",
                     "bytes": content_bytes,
                     "sha256": f"sha256:{content_sha256.hexdigest()}",
                 }
             )
+
+        for name in sorted(expected_files):
+            seal_regular_file(name, name, directory_fd)
+
+        themes_info = os.stat("themes", dir_fd=directory_fd, follow_symlinks=False)
+        themes_fd = os.open("themes", flags, dir_fd=directory_fd)
+        try:
+            themes_opened = os.fstat(themes_fd)
+            if (
+                not stat.S_ISDIR(themes_opened.st_mode)
+                or not os.path.samestat(themes_info, themes_opened)
+                or themes_opened.st_uid != os.getuid()
+                or stat.S_IMODE(themes_opened.st_mode) != 0o700
+                or set(os.listdir(themes_fd)) != set(_ISOLATED_TRACKED_THEME_PACKS)
+            ):
+                raise _RunnerFoundationError(
+                    f"passive source fixture theme directory is unsafe: path={config_dir / 'themes'}"
+                )
+            identities.append(("themes", *identity(themes_opened)))
+            for name in sorted(_ISOLATED_TRACKED_THEME_PACKS):
+                seal_regular_file(f"themes/{name}", name, themes_fd)
+        finally:
+            os.close(themes_fd)
         if set(os.listdir(directory_fd)) != expected_names:
-            raise _RunnerFoundationError("passive source fixture topology changed during sealing")
+            raise _RunnerFoundationError(
+                "passive source fixture topology changed during sealing: "
+                f"path={config_dir} observed={sorted(os.listdir(directory_fd))}"
+            )
         if identity(os.fstat(directory_fd)) != identity(directory_opened):
-            raise _RunnerFoundationError("passive source fixture directory changed during sealing")
+            raise _RunnerFoundationError(f"passive source fixture directory changed during sealing: path={config_dir}")
     finally:
         os.close(directory_fd)
     entries.sort(key=lambda item: str(item["path"]))
@@ -653,6 +1392,12 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
             "descriptor_count": 16,
             "binding_count": 16,
             "expected_readings_per_sample": expected_readings_per_sample,
+            "channel_ids": list(channel_ids),
+            "poll_interval_s": float(
+                yaml.safe_load((config_dir / "instruments.yaml").read_text(encoding="utf-8"))["instruments"][0].get(
+                    "poll_interval_s", 1.0
+                )
+            ),
             "entries": entries,
             "tree_sha256": tree_hash,
         },
@@ -664,7 +1409,7 @@ def _select_short_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
     """Choose exactly one post-fault aligned boundary inside the short run."""
 
     if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
-        raise _RunnerFoundationError("short-soak schedule epoch is invalid")
+        raise _RunnerFoundationError(f"short-soak schedule epoch is invalid: epoch={now_epoch!r}")
     now_second = int(now_epoch)
     for interval_s in range(600, 3601):
         next_offset_s = (-now_second) % interval_s or interval_s
@@ -673,20 +1418,108 @@ def _select_short_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
             and next_offset_s + interval_s >= _SHORT_SOAK_THIRD_REPORT_FLOOR_S
         ):
             return interval_s, next_offset_s
-    raise _RunnerFoundationError("unable to align the reviewed short-soak report cadence")
+    raise _RunnerFoundationError(f"unable to align the reviewed short-soak report cadence: epoch={now_epoch!r}")
 
 
 def _validate_short_soak_runtime_schedule(interval_s: int, now_epoch: float) -> int:
     """Fail closed if startup latency consumed the two-receipt reservation."""
 
     if type(interval_s) is not int or interval_s < 60 or interval_s > 86_400:
-        raise _RunnerFoundationError("short-soak report interval is invalid")
+        raise _RunnerFoundationError(f"short-soak report interval is invalid: interval_s={interval_s!r}")
     if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
-        raise _RunnerFoundationError("short-soak runtime epoch is invalid")
+        raise _RunnerFoundationError(f"short-soak runtime epoch is invalid: epoch={now_epoch!r}")
     next_offset_s = (-int(now_epoch)) % interval_s or interval_s
     if not (395 <= next_offset_s <= 700 and next_offset_s + interval_s > 900):
-        raise _RunnerFoundationError("short-soak startup consumed the exact two-receipt cadence reservation")
+        raise _RunnerFoundationError(
+            "short-soak startup consumed the exact two-receipt cadence reservation: "
+            f"next_offset_s={next_offset_s} interval_s={interval_s}"
+        )
     return next_offset_s
+
+
+def _select_soak_report_schedule(selected: Any, now_epoch: float) -> tuple[int, int, int]:
+    """Select a profile-bound cadence and its exact receipt count."""
+
+    from scripts import soak_mock_stack as soak
+
+    if selected.name == "short":
+        interval_s, boundary_offset_s = _select_short_soak_report_schedule(now_epoch)
+        return interval_s, boundary_offset_s, 2
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError(f"long-soak schedule epoch is invalid: epoch={now_epoch!r}")
+    first_fault_s = int(soak.first_assistant_fault_s(selected))
+    minimum_interval_s = first_fault_s + soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+    for interval_s in range(soak.LONG_REPORT_INTERVAL_MAX_S, minimum_interval_s - 1, -1):
+        boundary_offset_s = (-int(now_epoch)) % interval_s or interval_s
+        if boundary_offset_s < first_fault_s + 2 * soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S:
+            continue
+        expected_receipts = soak.expected_periodic_receipts(selected, interval_s, boundary_offset_s)
+        selected_errors = soak.periodic_schedule_errors(
+            selected,
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s,
+            expected_receipts=expected_receipts,
+        )
+        startup_floor_errors = soak.periodic_schedule_errors(
+            selected,
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s - soak.LONG_REPORT_EDGE_MARGIN_S,
+            expected_receipts=expected_receipts,
+        )
+        if not selected_errors and not startup_floor_errors:
+            return interval_s, boundary_offset_s, expected_receipts
+    raise _RunnerFoundationError(
+        f"unable to align the reviewed long-soak report cadence: profile={selected.name} epoch={now_epoch!r}"
+    )
+
+
+def _wait_for_soak_report_schedule(selected: Any) -> tuple[int, int, int]:
+    """Wait for a cadence that preserves the startup-time reservation."""
+
+    from scripts import soak_mock_stack as soak
+
+    deadline = time.monotonic() + soak.LONG_REPORT_EDGE_MARGIN_S + 2
+    while True:
+        try:
+            return _select_soak_report_schedule(selected, time.time())
+        except _RunnerFoundationError as exc:
+            if selected.name == "short" or not str(exc).startswith(
+                "unable to align the reviewed long-soak report cadence"
+            ):
+                raise
+            if time.monotonic() >= deadline:
+                raise _RunnerFoundationError(
+                    f"timed out while aligning the reviewed long-soak report cadence: profile={selected.name}"
+                ) from exc
+            time.sleep(1)
+
+
+def _validate_soak_runtime_schedule(
+    selected: Any,
+    interval_s: int,
+    expected_receipts: int,
+    now_epoch: float,
+) -> int:
+    """Fail closed when startup changes the selected schedule contract."""
+
+    from scripts import soak_mock_stack as soak
+
+    if selected.name == "short":
+        return _validate_short_soak_runtime_schedule(interval_s, now_epoch)
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError(f"long-soak runtime epoch is invalid: epoch={now_epoch!r}")
+    boundary_offset_s = (-int(now_epoch)) % interval_s or interval_s
+    if soak.periodic_schedule_errors(
+        selected,
+        interval_s=interval_s,
+        boundary_offset_s=boundary_offset_s,
+        expected_receipts=expected_receipts,
+    ):
+        raise _RunnerFoundationError(
+            "long-soak startup changed the reviewed receipt schedule: "
+            f"profile={selected.name} interval_s={interval_s} boundary_offset_s={boundary_offset_s}"
+        )
+    return boundary_offset_s
 
 
 class _BoundedLauncherLogDrain:
@@ -730,7 +1563,7 @@ class _BoundedLauncherLogDrain:
             self.writer.close()
         self._thread.join(timeout=_PROCESS_GROUP_GRACE_S)
         if self._thread.is_alive():
-            raise _RunnerFoundationError("launcher log writer did not settle")
+            raise _RunnerFoundationError("launcher log writer did not settle: drain thread still alive after join")
         if self._error is not None:
             raise _RunnerFoundationError("launcher log drain failed") from self._error
         return b"".join(self._chunks), self._total
@@ -742,12 +1575,17 @@ def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_
     from scripts.soak_mock_stack import redact_text
 
     if not isinstance(raw, bytes) or type(total_bytes) is not int or total_bytes < len(raw):
-        raise _RunnerFoundationError("launcher log drain evidence is invalid")
+        raise _RunnerFoundationError(
+            f"launcher log drain evidence is invalid: total_bytes={total_bytes!r} len(raw)={len(raw)!r}"
+        )
     truncated = total_bytes > _MAX_LAUNCHER_LOG_BYTES
     encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
     truncated = truncated or len(encoded) > _MAX_LAUNCHER_LOG_BYTES
     if truncated and not allow_truncated:
-        raise _RunnerFoundationError("launcher log exceeded the reviewed evidence ceiling")
+        raise _RunnerFoundationError(
+            f"launcher log exceeded the reviewed evidence ceiling: total_bytes={total_bytes} "
+            f"bound={_MAX_LAUNCHER_LOG_BYTES}"
+        )
     if truncated:
         tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
         tail = encoded[-tail_bytes:]
@@ -759,12 +1597,43 @@ def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_
     evidence.write_log("log-launcher.txt", payload.decode("utf-8"))
 
 
+def _publish_engine_stderr_log(evidence: Any, path: Path | None) -> None:
+    """Publish the launcher's captured engine-stderr log as a bounded evidence artifact.
+
+    The engine stderr file lives under the source launcher's own state root
+    (``<CRYODAQ_ROOT>/logs/engine.stderr.log``); the launcher forwards bounded
+    child-stderr lines there while the engine runs. Copying it into the evidence
+    bundle makes the reason a dead engine died survivable: without it, a bundle
+    records ``exception=RuntimeError`` and nothing that says why. A missing or
+    empty file simply publishes nothing.
+    """
+    from scripts.soak_mock_stack import redact_text
+
+    if path is None:
+        return
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return
+        raw = path.read_bytes()
+    except OSError:
+        return
+    encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
+    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_ENGINE_STDERR_TRUNCATED_MARKER)
+        tail = encoded[-tail_bytes:]
+        while tail and tail[0] & 0xC0 == 0x80:
+            tail = tail[1:]
+        encoded = _ENGINE_STDERR_TRUNCATED_MARKER + tail.decode("utf-8", errors="ignore").encode("utf-8")
+    evidence.write_log(_ENGINE_STDERR_EVIDENCE_LOG_NAME, encoded.decode("utf-8"))
+
+
 @contextmanager
 def _launcher_log_capture(
     evidence: Any,
     path: Path,
     *,
     settle_writer: Callable[[], None] | None = None,
+    engine_stderr_path: Path | None = None,
 ):
     """Capture stdout through a continuously drained, memory-bounded pipe."""
 
@@ -785,6 +1654,7 @@ def _launcher_log_capture(
             if settled:
                 raw, total_bytes = drain.finish()
                 _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=True)
+                _publish_engine_stderr_log(evidence, engine_stderr_path)
             elif not drain.writer.closed:
                 drain.writer.close()
         except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
@@ -793,6 +1663,7 @@ def _launcher_log_capture(
     else:
         raw, total_bytes = drain.finish()
         _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
+        _publish_engine_stderr_log(evidence, engine_stderr_path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -804,7 +1675,7 @@ class _ExecutionSnapshot:
 
     def assert_sealed(self) -> None:
         if _tree_sha256(self.root) != self.tree_sha256:
-            raise _RunnerFoundationError("sealed exact-six snapshot changed during execution")
+            raise _RunnerFoundationError(f"sealed exact-six snapshot changed during execution: root={self.root}")
 
 
 def _snapshot_fingerprint(entry: os.stat_result) -> bytes:
@@ -866,7 +1737,7 @@ def _tree_sha256(root: Path) -> str:
             # is strictly stronger than the previous check for the property that
             # actually matters: that the link still points where it did.
             if _snapshot_fingerprint(path.lstat()) != metadata or os.readlink(path).encode() != target:
-                raise _RunnerFoundationError("sealed snapshot link changed during hashing")
+                raise _RunnerFoundationError(f"sealed snapshot link changed during hashing: path={path}")
             digest.update(b"L\0" + relative + b"\0" + metadata + b"\0" + target + b"\0")
         elif stat.S_ISREG(info.st_mode):
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -874,18 +1745,18 @@ def _tree_sha256(root: Path) -> str:
             try:
                 opened = os.fstat(fd)
                 if not os.path.samestat(info, opened):
-                    raise _RunnerFoundationError("sealed snapshot file changed before hashing")
+                    raise _RunnerFoundationError(f"sealed snapshot file changed before hashing: path={path}")
                 digest.update(b"F\0" + relative + b"\0" + metadata + b"\0")
                 while chunk := os.read(fd, 1024 * 1024):
                     digest.update(chunk)
             finally:
                 os.close(fd)
             if not os.path.samestat(info, path.lstat()):
-                raise _RunnerFoundationError("sealed snapshot file changed during hashing")
+                raise _RunnerFoundationError(f"sealed snapshot file changed during hashing: path={path}")
         elif stat.S_ISDIR(info.st_mode):
             digest.update(b"D\0" + relative + b"\0" + metadata + b"\0")
         else:
-            raise _RunnerFoundationError("sealed snapshot contains a special file")
+            raise _RunnerFoundationError(f"sealed snapshot contains a special file: path={path}")
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -895,7 +1766,7 @@ def _sealed_execution_snapshot(git_sha: str):
     try:
         resolved = interpreter.resolve(strict=True)
     except OSError as exc:
-        raise _RunnerActivationDisabled("exact worktree .venv interpreter is unavailable") from exc
+        raise _RunnerActivationDisabled(f"exact worktree .venv interpreter is unavailable: path={interpreter}") from exc
     try:
         archive = subprocess.run(
             ("git", "archive", "--format=tar", git_sha),
@@ -903,17 +1774,20 @@ def _sealed_execution_snapshot(git_sha: str):
             env=_controlled_git_environment(),
             check=True,
             capture_output=True,
-            timeout=30,
+            timeout=_SNAPSHOT_ARCHIVE_TIMEOUT_S,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
-        raise _RunnerActivationDisabled("sealed exact-six snapshot is unavailable") from exc
+        raise _RunnerActivationDisabled(f"sealed exact-six snapshot is unavailable: git_sha={git_sha}") from exc
     if len(archive) > _MAX_SNAPSHOT_ARCHIVE_BYTES:
-        raise _RunnerActivationDisabled("sealed exact-six snapshot exceeds the reviewed bound")
+        raise _RunnerActivationDisabled(
+            f"sealed exact-six snapshot exceeds the reviewed bound: bytes={len(archive)} "
+            f"bound={_MAX_SNAPSHOT_ARCHIVE_BYTES}"
+        )
     site_packages = (
         Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
     ).resolve()
     if not site_packages.is_dir():
-        raise _RunnerActivationDisabled("exact worktree site-packages is unavailable")
+        raise _RunnerActivationDisabled(f"exact worktree site-packages is unavailable: path={site_packages}")
     with tempfile.TemporaryDirectory(prefix="cryodaq-exact-six-") as temporary:
         root = Path(temporary)
         try:
@@ -931,12 +1805,17 @@ def _sealed_execution_snapshot(git_sha: str):
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=_SNAPSHOT_IMPORT_TIMEOUT_S,
             )
             if imported.stderr.strip() or len(imported.stdout.splitlines()) != 1:
-                raise _RunnerFoundationError("sealed exact-six import proof output is invalid")
+                raise _RunnerFoundationError(
+                    "sealed exact-six import proof output is invalid: "
+                    f"stdout={imported.stdout.strip()!r} stderr={imported.stderr.strip()!r}"
+                )
             if not Path(imported.stdout.strip()).resolve().is_relative_to((root / "src/cryodaq").resolve()):
-                raise _RunnerFoundationError("sealed exact-six import escaped the snapshot")
+                raise _RunnerFoundationError(
+                    f"sealed exact-six import escaped the snapshot: imported={imported.stdout.strip()!r}"
+                )
             for path in root.rglob("*"):
                 if path.is_file() and path != snapshot_interpreter:
                     path.chmod(0o400)
@@ -974,12 +1853,16 @@ def _validate_clean_sha_chain(
     expected: tuple[_ShaBoundary, ...] = tuple(_ShaBoundary),
 ) -> str:
     if tuple(item.boundary for item in observations) != expected:
-        raise _RunnerFoundationError("clean SHA observations are incomplete or out of order")
+        raise _RunnerFoundationError(
+            "clean SHA observations are incomplete or out of order: "
+            f"observed={[item.boundary.value for item in observations]} expected={[b.value for b in expected]}"
+        )
     if any(not item.clean for item in observations):
-        raise _RunnerFoundationError("worktree drift is terminal")
+        dirty = [item.boundary.value for item in observations if not item.clean]
+        raise _RunnerFoundationError(f"worktree drift is terminal: dirty boundary={dirty}")
     shas = {item.git_sha for item in observations}
     if len(shas) != 1:
-        raise _RunnerFoundationError("clean SHA changed across runner boundaries")
+        raise _RunnerFoundationError(f"clean SHA changed across runner boundaries: observed={sorted(shas)}")
     return observations[0].git_sha
 
 
@@ -1051,19 +1934,23 @@ class _LockedPsutilObserver:
 
     def __init__(self, psutil_module: Any) -> None:
         if getattr(psutil_module, "__version__", None) != _LOCKED_PSUTIL_VERSION:
-            raise _RunnerActivationDisabled("locked psutil observer version is unavailable")
+            raise _RunnerActivationDisabled(
+                "locked psutil observer version is unavailable: "
+                f"observed={getattr(psutil_module, '__version__', None)!r} expected={_LOCKED_PSUTIL_VERSION!r}"
+            )
         required = ("Process", "NoSuchProcess", "AccessDenied", "TimeoutExpired", "STATUS_ZOMBIE")
         if any(not hasattr(psutil_module, name) for name in required):
-            raise _RunnerActivationDisabled("psutil observer API is incomplete")
+            missing = [name for name in required if not hasattr(psutil_module, name)]
+            raise _RunnerActivationDisabled(f"psutil observer API is incomplete: missing={missing}")
         self._psutil = psutil_module
 
     def _process(self, pid: int) -> Any:
         if type(pid) is not int or pid <= 0:
-            raise _RunnerFoundationError("observer PID is invalid")
+            raise _RunnerFoundationError(f"observer PID is invalid: pid={pid!r}")
         try:
             return self._psutil.Process(pid)
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied) as exc:
-            raise _RunnerFoundationError("process identity is unavailable") from exc
+            raise _RunnerFoundationError(f"process identity is unavailable: pid={pid}") from exc
 
     def _identity(self, process: Any, *, allow_zombie: bool = False) -> _ProcessIdentity:
         try:
@@ -1077,11 +1964,11 @@ class _LockedPsutilObserver:
             TypeError,
             ValueError,
         ) as exc:
-            raise _RunnerFoundationError("process start identity is unavailable") from exc
+            raise _RunnerFoundationError(f"process start identity is unavailable: pid={process.pid}") from exc
         if not math.isfinite(started) or started <= 0:
-            raise _RunnerFoundationError("process start identity is not live")
+            raise _RunnerFoundationError(f"process start identity is not live: pid={process.pid}")
         if status == self._psutil.STATUS_ZOMBIE and not allow_zombie:
-            raise _ObservedProcessGone("process start identity is not live")
+            raise _ObservedProcessGone(f"process start identity is not live: pid={process.pid}")
         started_ns = int(round(started * 1_000_000_000))
         return _ProcessIdentity(process.pid, f"psutil-{_LOCKED_PSUTIL_VERSION}:monotonic-ns={started_ns}")
 
@@ -1099,11 +1986,11 @@ class _LockedPsutilObserver:
     def group_members(self, process_group_id: int) -> tuple[_ProcessIdentity, ...]:
         members: list[_ProcessIdentity] = []
         if not hasattr(self._psutil, "process_iter"):
-            raise _RunnerFoundationError("process-group observer API is unavailable")
+            raise _RunnerFoundationError(f"process-group observer API is unavailable: pgid={process_group_id}")
         try:
             processes = tuple(self._psutil.process_iter())
         except (self._psutil.AccessDenied, OSError) as exc:
-            raise _RunnerFoundationError("process-group membership is unavailable") from exc
+            raise _RunnerFoundationError(f"process-group membership is unavailable: pgid={process_group_id}") from exc
         for process in processes:
             try:
                 if os.getpgid(process.pid) == process_group_id:
@@ -1117,7 +2004,9 @@ class _LockedPsutilObserver:
                     continue
                 raise
             except (PermissionError, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
-                raise _RunnerFoundationError("process-group membership cannot be proven") from exc
+                raise _RunnerFoundationError(
+                    f"process-group membership cannot be proven: pgid={process_group_id}"
+                ) from exc
         return tuple(sorted(members, key=lambda item: item.pid))
 
     def descendants(
@@ -1128,18 +2017,18 @@ class _LockedPsutilObserver:
     ) -> tuple[_ProcessIdentity, ...]:
         process = self._process(leader.pid)
         if self._identity(process, allow_zombie=True) != leader:
-            raise _RunnerFoundationError("PID/start identity changed; refusing descendant scan")
+            raise _RunnerFoundationError(f"PID/start identity changed; refusing descendant scan: pid={leader.pid}")
         try:
             processes = tuple(self._psutil.process_iter())
         except (self._psutil.AccessDenied, OSError) as exc:
-            raise _RunnerFoundationError("owned descendant scan is unavailable") from exc
+            raise _RunnerFoundationError(f"owned descendant scan is unavailable: pid={leader.pid}") from exc
         observed: list[tuple[_ProcessIdentity, int]] = []
         for candidate in processes:
             try:
                 identity = self._identity(candidate, allow_zombie=include_zombies)
                 parent_pid = int(candidate._proc.ppid())
                 if self._identity(self._process(identity.pid), allow_zombie=include_zombies) != identity:
-                    raise _RunnerFoundationError("process identity changed during descendant scan")
+                    raise _RunnerFoundationError(f"process identity changed during descendant scan: pid={identity.pid}")
             except _ObservedProcessGone:
                 continue
             except _RunnerFoundationError as exc:
@@ -1149,7 +2038,7 @@ class _LockedPsutilObserver:
             except self._psutil.NoSuchProcess:
                 continue
             except (self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
-                raise _RunnerFoundationError("owned descendant scan is unavailable") from exc
+                raise _RunnerFoundationError(f"owned descendant scan is unavailable: pid={leader.pid}") from exc
             observed.append((identity, parent_pid))
         service_pids = _interpreter_multiprocessing_service_pids()
         owned: set[_ProcessIdentity] = set()
@@ -1168,7 +2057,9 @@ class _LockedPsutilObserver:
                     owned.add(identity)
                 next_frontier.add(identity.pid)
             if len(owned) > 128:
-                raise _RunnerFoundationError("owned descendant count exceeds the reviewed bound")
+                raise _RunnerFoundationError(
+                    f"owned descendant count exceeds the reviewed bound: count={len(owned)} bound=128"
+                )
             frontier = next_frontier
         self.recheck_exact(leader)
         return tuple(sorted(owned, key=lambda item: item.pid))
@@ -1176,12 +2067,12 @@ class _LockedPsutilObserver:
     def signal_exact_for_cleanup(self, identity: _ProcessIdentity, signum: int) -> None:
         allowed = {signal.SIGTERM, getattr(signal, "SIGKILL", 9)}
         if isinstance(signum, bool) or not isinstance(signum, int) or signum not in allowed:
-            raise _RunnerFoundationError("cleanup signal is outside the reviewed allowlist")
+            raise _RunnerFoundationError(f"cleanup signal is outside the reviewed allowlist: signal={signum!r}")
         process = self._recheck(identity)
         try:
             process.send_signal(signum)
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError) as exc:
-            raise _RunnerFoundationError("exact-identity cleanup signal failed") from exc
+            raise _RunnerFoundationError(f"exact-identity cleanup signal failed: pid={identity.pid}") from exc
 
     def _recheck(self, expected: _ProcessIdentity) -> Any:
         if not isinstance(expected, _ProcessIdentity):
@@ -1198,7 +2089,7 @@ class _LockedPsutilObserver:
             parent_pid = int(process.ppid())
             argv = tuple(process.cmdline())
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
-            raise _RunnerFoundationError("assistant process observation is unavailable") from exc
+            raise _RunnerFoundationError(f"assistant process observation is unavailable: pid={pid}") from exc
         role = _exact_child_role(argv)
         observation = _AssistantProcessObservation(identity, parent_pid, role, True)
         _bind_positive_assistant_identity(observation, expected_launcher_pid=expected_launcher_pid)
@@ -1211,30 +2102,35 @@ class _LockedPsutilObserver:
             parent_pid = int(process.ppid())
             argv = tuple(process.cmdline())
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError) as exc:
-            raise _RunnerFoundationError("bridge process observation is unavailable") from exc
+            raise _RunnerFoundationError(f"bridge process observation is unavailable: pid={pid}") from exc
         try:
             _exact_child_role(argv)
         except _RunnerFoundationError:
             pass
         else:
-            raise _RunnerFoundationError("positive bridge identity collides with another child role")
+            raise _RunnerFoundationError(
+                f"positive bridge identity collides with another child role: pid={pid} argv={argv!r}"
+            )
         observation = _BridgeProcessObservation(identity, parent_pid, "zmq_bridge", True)
         if parent_pid != expected_launcher_pid:
-            raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+            raise _RunnerFoundationError(
+                f"reported bridge is not a direct launcher child: pid={pid} parent={parent_pid} "
+                f"launcher={expected_launcher_pid}"
+            )
         return observation
 
     def signal_exact(self, identity: _ProcessIdentity, signum: int) -> None:
         if isinstance(signum, bool) or not isinstance(signum, int) or signum != signal.SIGTERM:
-            raise _RunnerFoundationError("qualification permits only exact-identity SIGTERM")
+            raise _RunnerFoundationError(f"qualification permits only exact-identity SIGTERM: signal={signum!r}")
         process = self._recheck(identity)
         try:
             process.send_signal(signum)
         except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError) as exc:
-            raise _RunnerFoundationError("exact-identity signal failed") from exc
+            raise _RunnerFoundationError(f"exact-identity signal failed: pid={identity.pid}") from exc
 
     def wait_gone(self, identity: _ProcessIdentity, *, timeout_s: float) -> None:
         if type(timeout_s) not in {int, float} or not math.isfinite(float(timeout_s)) or not 0 < timeout_s <= 20:
-            raise _RunnerFoundationError("process wait timeout is outside the reviewed bound")
+            raise _RunnerFoundationError(f"process wait timeout is outside the reviewed bound: timeout_s={timeout_s!r}")
         if not isinstance(identity, _ProcessIdentity):
             raise TypeError("expected identity must be a _ProcessIdentity")
         try:
@@ -1242,23 +2138,25 @@ class _LockedPsutilObserver:
         except self._psutil.NoSuchProcess:
             return
         except self._psutil.AccessDenied as exc:
-            raise _RunnerFoundationError("process identity cannot be rechecked before wait") from exc
+            raise _RunnerFoundationError(
+                f"process identity cannot be rechecked before wait: pid={identity.pid}"
+            ) from exc
         if self._identity(process) != identity:
-            raise _RunnerFoundationError("PID/start identity changed; refusing process operation")
+            raise _RunnerFoundationError(f"PID/start identity changed; refusing process operation: pid={identity.pid}")
         try:
             process.wait(timeout=float(timeout_s))
         except self._psutil.NoSuchProcess:
             return
         except (self._psutil.AccessDenied, self._psutil.TimeoutExpired, OSError) as exc:
-            raise _RunnerFoundationError("exact process identity did not settle") from exc
+            raise _RunnerFoundationError(f"exact process identity did not settle: pid={identity.pid}") from exc
         try:
             current = self._psutil.Process(identity.pid)
         except self._psutil.NoSuchProcess:
             return
         except self._psutil.AccessDenied as exc:
-            raise _RunnerFoundationError("settled process identity cannot be rechecked") from exc
+            raise _RunnerFoundationError(f"settled process identity cannot be rechecked: pid={identity.pid}") from exc
         if self._identity(current) == identity:
-            raise _RunnerFoundationError("exact process identity remains live after wait")
+            raise _RunnerFoundationError(f"exact process identity remains live after wait: pid={identity.pid}")
 
 
 # Whole-argv suffixes (everything after argv[0], the interpreter) allowlisted
@@ -1277,32 +2175,37 @@ _ROLE_ARGV_SUFFIXES: Final = {
 
 def _exact_child_role(argv: tuple[str, ...]) -> str:
     if not argv or any(type(item) is not str for item in argv):
-        raise _RunnerFoundationError("child argv is unavailable")
+        raise _RunnerFoundationError(f"child argv is unavailable: argv={argv!r}")
     rest = argv[1:]
     for role, suffixes in _ROLE_ARGV_SUFFIXES.items():
         if rest in suffixes:
             return role
-    raise _RunnerFoundationError("child argv is not an exact allowlisted role")
+    raise _RunnerFoundationError(f"child argv is not an exact allowlisted role: argv={argv!r}")
 
 
 class _CleanShaCollector:
     """Collect ordered clean-SHA observations from fixed Git commands."""
 
-    __slots__ = ("_next", "_observations", "_repo_root", "_sha")
+    __slots__ = ("_next", "_observations", "_repo_root", "_runtime_library", "_sha")
 
     def __init__(self, repo_root: Path) -> None:
         root = Path(repo_root).resolve()
         if not (root / ".git").exists():
-            raise _RunnerFoundationError("runner root is not a Git worktree")
+            raise _RunnerFoundationError(f"runner root is not a Git worktree: path={root}")
         self._repo_root = root
         self._next = 0
         self._observations: list[_CleanShaObservation] = []
+        self._runtime_library = _runtime_library_closure() if os.name == "posix" else None
         self._sha: str | None = None
 
     def observe(self, boundary: _ShaBoundary) -> _CleanShaObservation:
         boundaries = tuple(_ShaBoundary)
         if self._next >= len(boundaries) or boundary is not boundaries[self._next]:
-            raise _RunnerFoundationError("clean SHA boundary is out of order")
+            raise _RunnerFoundationError(
+                f"clean SHA boundary is out of order: observed={boundary.value} expected={boundaries[self._next].value}"
+            )
+        if self._runtime_library is not None and _runtime_library_closure() != self._runtime_library:
+            raise _RunnerFoundationError("runtime native-library closure changed across runner boundaries")
         try:
             sha = subprocess.run(
                 ("git", "rev-parse", "HEAD"),
@@ -1323,14 +2226,16 @@ class _CleanShaCollector:
                 timeout=10,
             ).stdout
         except (OSError, subprocess.SubprocessError) as exc:
-            raise _RunnerFoundationError("clean SHA observation failed") from exc
+            raise _RunnerFoundationError(f"clean SHA observation failed: boundary={boundary.value}") from exc
         observation = _CleanShaObservation(boundary, sha, not bool(status))
         if not observation.clean:
-            raise _RunnerFoundationError("worktree drift is terminal")
+            raise _RunnerFoundationError(f"worktree drift is terminal: boundary={boundary.value}")
         if self._sha is None:
             self._sha = sha
         elif sha != self._sha:
-            raise _RunnerFoundationError("clean SHA changed across runner boundaries")
+            raise _RunnerFoundationError(
+                f"clean SHA changed across runner boundaries: observed={sha} previous={self._sha}"
+            )
         self._next += 1
         self._observations.append(observation)
         return observation
@@ -1338,6 +2243,12 @@ class _CleanShaCollector:
     @property
     def observations(self) -> tuple[_CleanShaObservation, ...]:
         return tuple(self._observations)
+
+    @property
+    def runtime_library_closure(self) -> dict[str, object]:
+        if self._runtime_library is None:
+            raise _RunnerActivationDisabled("runtime native-library closure requires POSIX")
+        return dict(self._runtime_library)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1462,9 +2373,9 @@ class _ArtifactReceiptSink:
         if os.name != "posix":
             raise _RunnerActivationDisabled("artifact receipt sink is POSIX-only")
         if re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
-            raise _RunnerFoundationError("artifact nonce is invalid")
+            raise _RunnerFoundationError(f"artifact nonce is invalid: nonce={nonce!r}")
         if endpoint.family != socket.AF_UNIX or endpoint.type & socket.SOCK_STREAM != socket.SOCK_STREAM:
-            raise _RunnerFoundationError("artifact endpoint is invalid")
+            raise _RunnerFoundationError(f"artifact endpoint is invalid: family={endpoint.family} type={endpoint.type}")
         endpoint.getpeername()
         metadata = evidence_dir.lstat()
         if (
@@ -1474,13 +2385,13 @@ class _ArtifactReceiptSink:
             or stat.S_IMODE(metadata.st_mode) != 0o700
             or metadata.st_uid != os.getuid()
         ):
-            raise _RunnerFoundationError("evidence directory is unsafe")
+            raise _RunnerFoundationError(f"evidence directory is unsafe: path={evidence_dir}")
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         self._dir_fd = os.open(evidence_dir, flags)
         opened = os.fstat(self._dir_fd)
         if not os.path.samestat(metadata, opened):
             os.close(self._dir_fd)
-            raise _RunnerFoundationError("evidence directory identity changed")
+            raise _RunnerFoundationError(f"evidence directory identity changed: path={evidence_dir}")
         self._socket = endpoint
         self._socket.set_inheritable(False)
         self._socket.settimeout(_ARTIFACT_IO_TIMEOUT_S)
@@ -1523,7 +2434,11 @@ class _ArtifactReceiptSink:
                 or type(expected_artifact_sha256) is not str
                 or _SHA256_RE.fullmatch(expected_artifact_sha256) is None
             ):
-                raise _RunnerFoundationError("expected artifact authority is invalid")
+                raise _RunnerFoundationError(
+                    "expected artifact authority is invalid: "
+                    f"generation={expected_assistant_generation!r} slot_id={expected_slot_id!r} "
+                    f"generation_id={expected_generation_id!r} owner_token={expected_owner_token!r}"
+                )
             assistant_identity = _bind_positive_assistant_identity(
                 assistant_observation,
                 expected_launcher_pid=expected_launcher_pid,
@@ -1531,7 +2446,7 @@ class _ArtifactReceiptSink:
             prefix = self._read_exact(_FRAME_PREFIX.size, deadline=deadline)
             (size,) = _FRAME_PREFIX.unpack(prefix)
             if not 1 <= size <= frame_body_limit():
-                raise _RunnerFoundationError("artifact frame size is invalid")
+                raise _RunnerFoundationError(f"artifact frame size is invalid: size={size} bound={frame_body_limit()}")
             frame = decode_frame_body(self._read_exact(size, deadline=deadline))
             metadata = frame.metadata
             generation = metadata["assistant_generation"]
@@ -1551,7 +2466,11 @@ class _ArtifactReceiptSink:
                 or (generation == self._last_generation and sequence != self._next_sequence)
                 or (generation == self._last_generation + 1 and sequence != 1)
             ):
-                raise _RunnerFoundationError("artifact identity/generation/sequence is invalid")
+                raise _RunnerFoundationError(
+                    "artifact identity/generation/sequence is invalid: "
+                    f"generation={generation!r} sequence={sequence!r} last_generation={self._last_generation} "
+                    f"next_sequence={self._next_sequence}"
+                )
             ack = build_ack(frame)
             ack_metadata = json.loads(ack[_FRAME_PREFIX.size :].decode("ascii"))
             self._persist(
@@ -1592,7 +2511,7 @@ class _ArtifactReceiptSink:
                 or stat.S_IMODE(staging_stat.st_mode) != 0o600
                 or staging_stat.st_nlink != 1
             ):
-                raise _RunnerFoundationError("artifact staging descriptor is unsafe")
+                raise _RunnerFoundationError(f"artifact staging descriptor is unsafe: name={staging}")
             self._write_fd(fd, frame.photo)
             os.fsync(fd)
         finally:
@@ -1611,7 +2530,7 @@ class _ArtifactReceiptSink:
                     or final_stat.st_nlink != 1
                     or final_stat.st_size != len(frame.photo)
                 ):
-                    raise _RunnerFoundationError("persisted artifact descriptor is unsafe")
+                    raise _RunnerFoundationError(f"persisted artifact descriptor is unsafe: name={final_name}")
                 raw = bytearray()
                 while len(raw) <= len(frame.photo):
                     chunk = os.read(verify_fd, min(64 * 1024, len(frame.photo) + 1 - len(raw)))
@@ -1619,7 +2538,7 @@ class _ArtifactReceiptSink:
                         break
                     raw.extend(chunk)
                 if bytes(raw) != frame.photo:
-                    raise _RunnerFoundationError("persisted artifact rehash mismatch")
+                    raise _RunnerFoundationError(f"persisted artifact rehash mismatch: name={final_name}")
             finally:
                 os.close(verify_fd)
             record = (
@@ -1638,11 +2557,16 @@ class _ArtifactReceiptSink:
                 + b"\n"
             )
             if len(record) > _MAX_RECEIPT_RECORD_BYTES:
-                raise _RunnerFoundationError("receipt ledger record is oversized")
+                raise _RunnerFoundationError(
+                    f"receipt ledger record is oversized: bytes={len(record)} bound={_MAX_RECEIPT_RECORD_BYTES}"
+                )
             ledger = self._open_validated_ledger()
             try:
                 if os.fstat(ledger).st_size + len(record) > _MAX_RECEIPT_LEDGER_BYTES:
-                    raise _RunnerFoundationError("receipt ledger capacity is exhausted")
+                    raise _RunnerFoundationError(
+                        "receipt ledger capacity is exhausted: "
+                        f"bytes={os.fstat(ledger).st_size + len(record)} bound={_MAX_RECEIPT_LEDGER_BYTES}"
+                    )
                 self._write_fd(ledger, record)
                 os.fsync(ledger)
             finally:
@@ -1678,12 +2602,15 @@ class _ArtifactReceiptSink:
                 or observed.st_nlink != 1
                 or not 1 <= observed.st_size <= _MAX_RECEIPT_LEDGER_BYTES
             ):
-                raise _RunnerFoundationError("existing receipt ledger is unsafe") from None
+                raise _RunnerFoundationError(
+                    f"existing receipt ledger is unsafe: name={name} size={observed.st_size} "
+                    f"bound={_MAX_RECEIPT_LEDGER_BYTES}"
+                ) from None
             fd = os.open(name, os.O_RDWR | os.O_APPEND | nofollow | nonblock, dir_fd=self._dir_fd)
             opened = os.fstat(fd)
             if not os.path.samestat(observed, opened):
                 os.close(fd)
-                raise _RunnerFoundationError("receipt ledger identity changed")
+                raise _RunnerFoundationError(f"receipt ledger identity changed: name={name}")
         metadata = os.fstat(fd)
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -1692,24 +2619,27 @@ class _ArtifactReceiptSink:
             or metadata.st_nlink != 1
         ):
             os.close(fd)
-            raise _RunnerFoundationError("receipt ledger descriptor is unsafe")
+            raise _RunnerFoundationError(f"receipt ledger descriptor is unsafe: name={name}")
         if not created:
             raw = os.pread(fd, metadata.st_size + 1, 0)
             if len(raw) != metadata.st_size or not raw.endswith(b"\n"):
                 os.close(fd)
-                raise _RunnerFoundationError("receipt ledger has a partial tail")
+                raise _RunnerFoundationError(f"receipt ledger has a partial tail: name={name} bytes={len(raw)}")
             seen_receipts: set[str] = set()
             ledger_generation = 0
             ledger_next_sequence = 1
             for line in raw.splitlines(keepends=True):
                 if len(line) > _MAX_RECEIPT_RECORD_BYTES or not line.endswith(b"\n"):
                     os.close(fd)
-                    raise _RunnerFoundationError("receipt ledger record is invalid")
+                    raise _RunnerFoundationError(
+                        f"receipt ledger record is invalid: name={name} bytes={len(line)} "
+                        f"bound={_MAX_RECEIPT_RECORD_BYTES}"
+                    )
                 try:
                     value = json.loads(line[:-1].decode("ascii"))
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     os.close(fd)
-                    raise _RunnerFoundationError("receipt ledger record is invalid") from None
+                    raise _RunnerFoundationError(f"receipt ledger record is invalid: name={name}") from None
                 canonical = (
                     json.dumps(
                         value,
@@ -1721,10 +2651,10 @@ class _ArtifactReceiptSink:
                 )
                 if type(value) is not dict or canonical != line:
                     os.close(fd)
-                    raise _RunnerFoundationError("receipt ledger record is not canonical")
+                    raise _RunnerFoundationError(f"receipt ledger record is not canonical: name={name}")
                 if not self._valid_ledger_record(value):
                     os.close(fd)
-                    raise _RunnerFoundationError("receipt ledger record is semantically invalid")
+                    raise _RunnerFoundationError(f"receipt ledger record is semantically invalid: name={name}")
                 receipt_id = value["receipt_id"]
                 generation = value["assistant_generation"]
                 sequence = value["sequence"]
@@ -1736,7 +2666,10 @@ class _ArtifactReceiptSink:
                     or (generation == ledger_generation + 1 and sequence != 1)
                 ):
                     os.close(fd)
-                    raise _RunnerFoundationError("receipt ledger ordering is invalid")
+                    raise _RunnerFoundationError(
+                        f"receipt ledger ordering is invalid: name={name} receipt_id={receipt_id!r} "
+                        f"generation={generation} sequence={sequence}"
+                    )
                 seen_receipts.add(receipt_id)
                 ledger_generation = generation
                 ledger_next_sequence = sequence + 1
@@ -1836,14 +2769,14 @@ class _ArtifactReceiptSink:
         while remaining:
             timeout = deadline - time.monotonic()
             if timeout <= 0:
-                raise _RunnerFoundationError("artifact stream deadline expired")
+                raise _RunnerFoundationError(f"artifact stream deadline expired: remaining={remaining}")
             self._socket.settimeout(timeout)
             try:
                 chunk = self._socket.recv(remaining)
             except TimeoutError as exc:
-                raise _RunnerFoundationError("artifact stream deadline expired") from exc
+                raise _RunnerFoundationError(f"artifact stream deadline expired: remaining={remaining}") from exc
             if not chunk:
-                raise _RunnerFoundationError("artifact stream ended mid-frame")
+                raise _RunnerFoundationError(f"artifact stream ended mid-frame: remaining={remaining}")
             chunks.append(chunk)
             remaining -= len(chunk)
         return b"".join(chunks)
@@ -1853,14 +2786,14 @@ class _ArtifactReceiptSink:
         while view:
             timeout = deadline - time.monotonic()
             if timeout <= 0:
-                raise _RunnerFoundationError("artifact ACK deadline expired")
+                raise _RunnerFoundationError(f"artifact ACK deadline expired: remaining={len(view)}")
             self._socket.settimeout(timeout)
             try:
                 sent = self._socket.send(view)
             except TimeoutError as exc:
-                raise _RunnerFoundationError("artifact ACK deadline expired") from exc
+                raise _RunnerFoundationError(f"artifact ACK deadline expired: remaining={len(view)}") from exc
             if sent <= 0:
-                raise _RunnerFoundationError("artifact ACK did not progress")
+                raise _RunnerFoundationError(f"artifact ACK did not progress: remaining={len(view)}")
             view = view[sent:]
 
     @staticmethod
@@ -1869,7 +2802,7 @@ class _ArtifactReceiptSink:
         while view:
             written = os.write(fd, view)
             if written <= 0:
-                raise _RunnerFoundationError("durable evidence write did not progress")
+                raise _RunnerFoundationError(f"durable evidence write did not progress: remaining={len(view)}")
             view = view[written:]
 
     def close(self) -> None:
@@ -2051,6 +2984,7 @@ class _OwnedRunResult:
     post_assistant_observation: _AssistantProcessObservation
     expected_launcher_pid: int
     report_interval_s: int
+    expected_receipts: int
     ledger_records: tuple[dict[str, object], ...]
     observations: tuple[Any, ...]
     survivors: tuple[Any, ...]
@@ -2086,6 +3020,7 @@ class _DeliveryEvidenceRegistry:
             post_assistant_observation=result.post_assistant_observation,
             expected_launcher_pid=result.expected_launcher_pid,
             expected_interval_s=result.report_interval_s,
+            expected_receipts=result.expected_receipts,
             ledger_records=result.ledger_records,
         )
 
@@ -2151,6 +3086,7 @@ def _validate_pre_post_receipts(
     post_assistant_observation: _AssistantProcessObservation,
     expected_launcher_pid: int,
     expected_interval_s: int,
+    expected_receipts: int,
     ledger_records: tuple[dict[str, object], ...],
 ) -> _PrePostReceiptEvidence:
     """Build both joins internally, then require exact assistant replacement."""
@@ -2187,25 +3123,62 @@ def _validate_pre_post_receipts(
         or post_active["slot_end"] - pre_active["slot_end"] != pre_active["interval_s"]
         or post_active["config_fingerprint"] != pre_active["config_fingerprint"]
     ):
-        raise _RunnerFoundationError("qualification receipts are not adjacent slots under one schedule")
-    if len(ledger_records) != 2:
-        raise _RunnerFoundationError("qualification requires exactly two receipt ledger records")
+        raise _RunnerFoundationError(
+            "qualification receipts are not adjacent slots under one schedule: "
+            f"pre_interval={pre_active.get('interval_s')!r} post_interval={post_active.get('interval_s')!r} "
+            f"expected_interval={expected_interval_s!r}"
+        )
+    if type(expected_receipts) is not int or expected_receipts < 2 or len(ledger_records) != expected_receipts:
+        raise _RunnerFoundationError(
+            "qualification receipt ledger count differs from its schedule: "
+            f"count={len(ledger_records)} expected={expected_receipts!r}"
+        )
     if any(type(item) is not dict or not _ArtifactReceiptSink._valid_ledger_record(item) for item in ledger_records):
-        raise _RunnerFoundationError("qualification ledger contains invalid records")
+        invalid = [
+            index for index, item in enumerate(ledger_records) if not _ArtifactReceiptSink._valid_ledger_record(item)
+        ]
+        raise _RunnerFoundationError(
+            f"qualification ledger contains invalid records: count={len(ledger_records)} invalid_indexes={invalid}"
+        )
+    receipt_ids = tuple(str(item["receipt_id"]) for item in ledger_records)
+    if len(set(receipt_ids)) != len(receipt_ids):
+        duplicates = sorted({item for item in receipt_ids if receipt_ids.count(item) > 1})
+        raise _RunnerFoundationError(
+            f"qualification ledger contains duplicate receipt identities: receipt_ids={duplicates}"
+        )
+    if any(item["nonce"] != pre_ledger_record["nonce"] for item in ledger_records):
+        raise _RunnerFoundationError("qualification ledger changed the retained local capability authority")
     expected_ids = (pre_fault.receipt_id, post_fault.receipt_id)
     observed_hashes = tuple(
         "sha256:"
         + hashlib.sha256(
             json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         ).hexdigest()
-        for item in ledger_records
+        for item in ledger_records[:2]
     )
     if (
-        tuple(item["receipt_id"] for item in ledger_records) != expected_ids
+        receipt_ids[:2] != expected_ids
         or observed_hashes != (pre_fault.ledger_record_sha256, post_fault.ledger_record_sha256)
         or len(set(expected_ids)) != 2
     ):
         raise _RunnerFoundationError("qualification ledger is duplicate, reordered, or incomplete")
+    previous_generation = 0
+    previous_sequence = 0
+    for record in ledger_records:
+        generation = int(record["assistant_generation"])
+        sequence = int(record["sequence"])
+        if generation == previous_generation:
+            valid_progression = sequence == previous_sequence + 1
+        else:
+            valid_progression = generation == previous_generation + 1 and sequence == 1
+        if not valid_progression:
+            raise _RunnerFoundationError(
+                "qualification ledger generation sequence is incomplete: "
+                f"generation={generation} sequence={sequence} previous_generation={previous_generation} "
+                f"previous_sequence={previous_sequence}"
+            )
+        previous_generation = generation
+        previous_sequence = sequence
     if (
         post_fault.assistant == pre_fault.assistant
         or pre_fault.sequence != 1
@@ -2245,13 +3218,19 @@ def _bind_positive_assistant_identity(
     expected_launcher_pid: int,
 ) -> _ProcessIdentity:
     if type(observation.alive) is not bool or not observation.alive:
-        raise _RunnerFoundationError("reported assistant process is not alive")
+        raise _RunnerFoundationError(f"reported assistant process is not alive: pid={observation.identity.pid}")
     if type(expected_launcher_pid) is not int or expected_launcher_pid <= 0:
-        raise _RunnerFoundationError("launcher identity is invalid")
+        raise _RunnerFoundationError(f"launcher identity is invalid: launcher_pid={expected_launcher_pid!r}")
     if observation.parent_pid != expected_launcher_pid:
-        raise _RunnerFoundationError("reported assistant is not a direct launcher child")
+        raise _RunnerFoundationError(
+            f"reported assistant is not a direct launcher child: pid={observation.identity.pid} "
+            f"parent={observation.parent_pid} launcher={expected_launcher_pid}"
+        )
     if observation.role != "assistant":
-        raise _RunnerFoundationError("reported PID is not the allowlisted assistant role")
+        raise _RunnerFoundationError(
+            "reported PID is not the allowlisted assistant role: "
+            f"pid={observation.identity.pid} role={observation.role!r}"
+        )
     return observation.identity
 
 
@@ -2262,13 +3241,21 @@ def _bind_positive_bridge_identity(
     """Bind reported PID to one positive direct-child observer identity."""
 
     if type(observation.alive) is not bool or not observation.alive:
-        raise _RunnerFoundationError("reported bridge process is not alive")
+        raise _RunnerFoundationError(f"reported bridge process is not alive: pid={observation.identity.pid}")
     if observation.identity.pid != record.bridge_pid:
-        raise _RunnerFoundationError("observer bridge PID contradicts launcher record")
+        raise _RunnerFoundationError(
+            f"observer bridge PID contradicts launcher record: observed={observation.identity.pid} "
+            f"recorded={record.bridge_pid}"
+        )
     if type(observation.parent_pid) is not int or observation.parent_pid != record.launcher_pid:
-        raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+        raise _RunnerFoundationError(
+            f"reported bridge is not a direct launcher child: pid={observation.identity.pid} "
+            f"parent={observation.parent_pid} launcher={record.launcher_pid}"
+        )
     if observation.role != "zmq_bridge":
-        raise _RunnerFoundationError("reported PID is not the allowlisted bridge role")
+        raise _RunnerFoundationError(
+            f"reported PID is not the allowlisted bridge role: pid={observation.identity.pid} role={observation.role!r}"
+        )
     return observation.identity
 
 
@@ -2279,7 +3266,9 @@ class _BridgeEpochGuard:
 
     def __init__(self, identity: _ProcessIdentity, restart_count: int) -> None:
         if type(restart_count) is not int or restart_count != 1:
-            raise _RunnerFoundationError("bridge epoch must begin at restart count one")
+            raise _RunnerFoundationError(
+                f"bridge epoch must begin at restart count one: restart_count={restart_count!r}"
+            )
         self._identity = identity
         self._restart_count = restart_count
         self._terminal = False
@@ -2289,7 +3278,10 @@ class _BridgeEpochGuard:
             raise _RunnerFoundationError("bridge epoch guard is terminal")
         if type(restart_count) is not int or identity != self._identity or restart_count != self._restart_count:
             self._terminal = True
-            raise _RunnerFoundationError("bridge PID/start identity changed or restarted")
+            raise _RunnerFoundationError(
+                f"bridge PID/start identity changed or restarted: pid={identity.pid} "
+                f"restart_count={restart_count!r} expected_restart_count={self._restart_count}"
+            )
 
 
 def _parse_bridge_handshake(
@@ -2304,7 +3296,10 @@ def _parse_bridge_handshake(
     if not received_before_deadline:
         raise _RunnerFoundationError("bridge handshake arrived after its deadline")
     if not payload or len(payload) > _MAX_BRIDGE_HANDSHAKE_BYTES or payload.count(b"\n") != 1:
-        raise _RunnerFoundationError("bridge handshake is missing, duplicate, or oversized")
+        raise _RunnerFoundationError(
+            f"bridge handshake is missing, duplicate, or oversized: bytes={len(payload)} "
+            f"bound={_MAX_BRIDGE_HANDSHAKE_BYTES}"
+        )
     if not payload.endswith(b"\n"):
         raise _RunnerFoundationError("bridge handshake record is incomplete")
     try:
@@ -2313,7 +3308,10 @@ def _parse_bridge_handshake(
         raise _RunnerFoundationError("bridge handshake is not canonical JSON") from exc
     expected_keys = {"schema", "version", "nonce", "launcher_pid", "bridge_pid", "restart_count"}
     if not isinstance(value, dict) or set(value) != expected_keys:
-        raise _RunnerFoundationError("bridge handshake keys are invalid")
+        raise _RunnerFoundationError(
+            f"bridge handshake keys are invalid: observed={sorted(value) if isinstance(value, dict) else type(value)} "
+            f"expected={sorted(expected_keys)}"
+        )
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
     if canonical != payload:
         raise _RunnerFoundationError("bridge handshake is not canonical")
@@ -2322,19 +3320,25 @@ def _parse_bridge_handshake(
         or type(value["version"]) is not int
         or value["version"] != _BRIDGE_HANDSHAKE_VERSION
     ):
-        raise _RunnerFoundationError("bridge handshake schema is invalid")
+        raise _RunnerFoundationError(
+            f"bridge handshake schema is invalid: schema={value['schema']!r} version={value['version']!r}"
+        )
     nonce = value["nonce"]
     launcher_pid = value["launcher_pid"]
     bridge_pid = value["bridge_pid"]
     restart_count = value["restart_count"]
     if not isinstance(nonce, str) or nonce != expected_nonce or re.fullmatch(r"[0-9a-f]{64}", nonce) is None:
-        raise _RunnerFoundationError("bridge handshake nonce mismatch")
+        raise _RunnerFoundationError(f"bridge handshake nonce mismatch: observed={nonce!r} expected={expected_nonce!r}")
     if launcher_pid != expected_launcher_pid or isinstance(launcher_pid, bool) or launcher_pid <= 0:
-        raise _RunnerFoundationError("bridge handshake launcher PID mismatch")
+        raise _RunnerFoundationError(
+            f"bridge handshake launcher PID mismatch: observed={launcher_pid!r} expected={expected_launcher_pid}"
+        )
     if isinstance(bridge_pid, bool) or not isinstance(bridge_pid, int) or bridge_pid <= 0 or bridge_pid == launcher_pid:
-        raise _RunnerFoundationError("bridge handshake bridge PID is invalid")
+        raise _RunnerFoundationError(f"bridge handshake bridge PID is invalid: bridge_pid={bridge_pid!r}")
     if type(restart_count) is not int or restart_count != 1:
-        raise _RunnerFoundationError("bridge restarted before positive identity acceptance")
+        raise _RunnerFoundationError(
+            f"bridge restarted before positive identity acceptance: restart_count={restart_count!r}"
+        )
     return _BridgeHandshakeRecord(nonce, launcher_pid, bridge_pid, restart_count)
 
 
@@ -2349,7 +3353,9 @@ def _parse_bridge_data(
     """Parse one bounded launcher-observed bridge-data fact."""
 
     if not payload or len(payload) > _MAX_BRIDGE_HANDSHAKE_BYTES or not payload.endswith(b"\n"):
-        raise _RunnerFoundationError("bridge data fact is incomplete or oversized")
+        raise _RunnerFoundationError(
+            f"bridge data fact is incomplete or oversized: bytes={len(payload)} bound={_MAX_BRIDGE_HANDSHAKE_BYTES}"
+        )
     try:
         value = json.loads(payload[:-1].decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2365,7 +3371,10 @@ def _parse_bridge_data(
     }
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
     if type(value) is not dict or set(value) != expected or canonical != payload:
-        raise _RunnerFoundationError("bridge data fact schema is invalid")
+        raise _RunnerFoundationError(
+            f"bridge data fact schema is invalid: observed={sorted(value) if isinstance(value, dict) else type(value)} "
+            f"expected={sorted(expected)}"
+        )
     sequence = value["sequence"]
     if (
         value["schema"] != _BRIDGE_DATA_SCHEMA
@@ -2379,7 +3388,9 @@ def _parse_bridge_data(
         or type(sequence) is not int
         or sequence <= after_sequence
     ):
-        raise _RunnerFoundationError("bridge data fact contradicts the accepted epoch")
+        raise _RunnerFoundationError(
+            f"bridge data fact contradicts the accepted epoch: sequence={sequence!r} after_sequence={after_sequence}"
+        )
     return _BridgeDataRecord(
         expected_nonce,
         expected_launcher_pid,
@@ -2403,7 +3414,9 @@ class _BoundedStreamDigest:
 
     def __init__(self, *, limit: int = _MAX_STREAM_BYTES) -> None:
         if isinstance(limit, bool) or limit <= 0 or limit > _MAX_STREAM_BYTES:
-            raise _RunnerFoundationError("stream limit is outside the reviewed bound")
+            raise _RunnerFoundationError(
+                f"stream limit is outside the reviewed bound: limit={limit!r} bound={_MAX_STREAM_BYTES}"
+            )
         self._limit = limit
         self._byte_count = 0
         self._hash = hashlib.sha256()
@@ -2420,7 +3433,9 @@ class _BoundedStreamDigest:
         next_count = self._byte_count + len(chunk)
         if next_count > self._limit:
             self._complete = False
-            raise _RunnerFoundationError("stream output exceeded the reviewed bound")
+            raise _RunnerFoundationError(
+                f"stream output exceeded the reviewed bound: bytes={next_count} bound={self._limit}"
+            )
         self._hash.update(chunk)
         self._byte_count = next_count
 
@@ -2456,9 +3471,7 @@ def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
             text = text[:_DIAGNOSTIC_OUTPUT_LIMIT] + "\n...[truncated]"
         return text if text else "<empty>"
 
-    return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
-        stderr
-    )
+    return f"exit code {exit_code}; captured stdout:\n{bounded(stdout)}; captured stderr:\n{bounded(stderr)}"
 
 
 def _parse_exact_collection(
@@ -2476,17 +3489,24 @@ def _parse_exact_collection(
     out = _decode_complete_output(stdout_evidence, stdout)
     err = _decode_complete_output(stderr_evidence, stderr)
     if err.strip():
-        raise _RunnerFoundationError("exact-six collection wrote stderr")
+        raise _RunnerFoundationError(
+            "exact-six collection wrote stderr: " + repr(err.strip()[:_DIAGNOSTIC_OUTPUT_LIMIT])
+        )
     lowered = out.casefold()
-    if any(marker in lowered for marker in _FORBIDDEN_PYTEST_MARKERS):
-        raise _RunnerFoundationError("exact-six collection contains a forbidden pytest outcome")
+    forbidden = [marker for marker in _FORBIDDEN_PYTEST_MARKERS if marker in lowered]
+    if forbidden:
+        raise _RunnerFoundationError(f"exact-six collection contains a forbidden pytest outcome: markers={forbidden}")
     lines = tuple(line.strip() for line in out.splitlines() if line.strip())
     nodes = tuple(line for line in lines if line.startswith(f"{_TEST_FILE}::"))
     summaries = tuple(line for line in lines if _COLLECTION_SUMMARY_RE.fullmatch(line))
     if nodes != _EXACT_NODE_IDS or len(summaries) != 1:
-        raise _RunnerFoundationError("collection is not the exact ordered six-node matrix")
+        raise _RunnerFoundationError(
+            f"collection is not the exact ordered six-node matrix: nodes={len(nodes)} expected={len(_EXACT_NODE_IDS)}"
+        )
     if len(lines) != len(nodes) + 1:
-        raise _RunnerFoundationError("collection output contains unexpected records")
+        raise _RunnerFoundationError(
+            f"collection output contains unexpected records: lines={len(lines)} nodes={len(nodes)}"
+        )
     return nodes
 
 
@@ -2503,13 +3523,16 @@ def _validate_exact_execution(
     out = _decode_complete_output(stdout_evidence, stdout)
     err = _decode_complete_output(stderr_evidence, stderr)
     if err.strip():
-        raise _RunnerFoundationError("exact-six execution wrote stderr")
+        raise _RunnerFoundationError(
+            "exact-six execution wrote stderr: " + repr(err.strip()[:_DIAGNOSTIC_OUTPUT_LIMIT])
+        )
     lowered = out.casefold()
-    if any(marker in lowered for marker in _FORBIDDEN_PYTEST_MARKERS):
-        raise _RunnerFoundationError("exact-six execution contains a forbidden pytest outcome")
+    forbidden = [marker for marker in _FORBIDDEN_PYTEST_MARKERS if marker in lowered]
+    if forbidden:
+        raise _RunnerFoundationError(f"exact-six execution contains a forbidden pytest outcome: markers={forbidden}")
     lines = tuple(line.strip() for line in out.splitlines() if line.strip())
     if len(lines) != 2 or _PROGRESS_RE.fullmatch(lines[0]) is None or _SUMMARY_RE.fullmatch(lines[1]) is None:
-        raise _RunnerFoundationError("execution output is not the exact six-pass result")
+        raise _RunnerFoundationError(f"execution output is not the exact six-pass result: lines={lines!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2590,7 +3613,7 @@ def _waitid_terminal_without_reap(pid: int, *, deadline: float) -> bool:
         except InterruptedError:
             continue
         except ChildProcessError as exc:
-            raise _RunnerFoundationError("owned launcher was reaped before settlement proof") from exc
+            raise _RunnerFoundationError(f"owned launcher was reaped before settlement proof: pid={pid}") from exc
         if result is not None:
             return True
         time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
@@ -2621,7 +3644,7 @@ def _settle_unbound_session(process: subprocess.Popen[bytes]) -> None:
         except ProcessLookupError:
             pass
         if not _waitid_terminal_without_reap(pid, deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S):
-            raise _RunnerFoundationError("unbound launcher did not settle")
+            raise _RunnerFoundationError(f"unbound launcher did not settle: pid={pid}")
     if owns_group:
         try:
             os.killpg(pid, getattr(signal, "SIGKILL", 9))
@@ -2630,7 +3653,7 @@ def _settle_unbound_session(process: subprocess.Popen[bytes]) -> None:
     try:
         process.wait(timeout=_PROCESS_GROUP_GRACE_S)
     except subprocess.TimeoutExpired as exc:
-        raise _RunnerFoundationError("unbound launcher could not be reaped") from exc
+        raise _RunnerFoundationError(f"unbound launcher could not be reaped: pid={pid}") from exc
 
 
 def _spawn_gated_source(
@@ -2665,10 +3688,10 @@ def _spawn_gated_source(
     try:
         identity = observer.identity_for_pid(process.pid)
         if os.getpgid(process.pid) != process.pid:
-            raise _RunnerFoundationError("source launcher does not own its process group")
+            raise _RunnerFoundationError(f"source launcher does not own its process group: pid={process.pid}")
         observer.recheck_exact(identity)
         if os.write(gate_write, b"G") != 1:
-            raise _RunnerFoundationError("source launcher gate release was incomplete")
+            raise _RunnerFoundationError(f"source launcher gate release was incomplete: pid={process.pid}")
     except BaseException:
         os.close(gate_write)
         _settle_unbound_session(process)
@@ -2712,7 +3735,10 @@ def _settle_adopted_owner_descendants(
         if empty_scans < 2:
             time.sleep(min(0.05, max(0.001, settlement_deadline - time.monotonic())))
     if empty_scans < 2:
-        raise _RunnerFoundationError("qualification owner did not reach a stable empty descendant cut")
+        raise _RunnerFoundationError(
+            f"qualification owner did not reach a stable empty descendant cut: empty_scans={empty_scans} "
+            f"observed={[item.pid for item in sorted(observed)]}"
+        )
     return tuple(sorted(observed, key=lambda item: item.pid))
 
 
@@ -2729,7 +3755,7 @@ def _reap_pinned_owned_session(
 
     observer.recheck_exact(expected)
     if os.getpgid(process.pid) != process.pid:
-        raise _RunnerFoundationError("source launcher lost process-group ownership before reap")
+        raise _RunnerFoundationError(f"source launcher lost process-group ownership before reap: pid={process.pid}")
     settlement_deadline = max(deadline, time.monotonic() + _PROCESS_GROUP_GRACE_S)
     empty_group = 0
     empty_descendants = 0
@@ -2766,7 +3792,10 @@ def _reap_pinned_owned_session(
         if empty_group < 2 or empty_descendants < 2:
             time.sleep(min(0.05, max(0.001, settlement_deadline - time.monotonic())))
     if empty_group < 2 or empty_descendants < 2:
-        raise _RunnerFoundationError("source launcher ownership did not reach a stable empty cut")
+        raise _RunnerFoundationError(
+            f"source launcher ownership did not reach a stable empty cut: pid={process.pid} "
+            f"empty_group_scans={empty_group} empty_descendant_scans={empty_descendants}"
+        )
     return_code = process.wait(timeout=_PROCESS_GROUP_GRACE_S)
     observed_survivors.update(
         _settle_adopted_owner_descendants(
@@ -2776,7 +3805,10 @@ def _reap_pinned_owned_session(
         )
     )
     if observed_survivors and reject_survivors:
-        raise _RunnerFoundationError("source launcher left process survivors at graceful exit")
+        raise _RunnerFoundationError(
+            f"source launcher left process survivors at graceful exit: "
+            f"survivors={[item.pid for item in sorted(observed_survivors)]}"
+        )
     return return_code
 
 
@@ -2792,7 +3824,9 @@ def _wait_and_reap_owned_session(
 
     deadline = time.monotonic() + timeout_s
     if not _waitid_terminal_without_reap(process.pid, deadline=deadline):
-        raise _RunnerFoundationError("source launcher exceeded graceful shutdown ceiling")
+        raise _RunnerFoundationError(
+            f"source launcher exceeded graceful shutdown ceiling: pid={process.pid} ceiling={timeout_s}"
+        )
     return _reap_pinned_owned_session(
         process,
         observer=observer,
@@ -2824,7 +3858,7 @@ def _force_settle_owned_session(
             pass
         deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
         if not _waitid_terminal_without_reap(process.pid, deadline=deadline):
-            raise _RunnerFoundationError("failed source launcher could not be pinned terminal")
+            raise _RunnerFoundationError(f"failed source launcher could not be pinned terminal: pid={process.pid}")
     _reap_pinned_owned_session(
         process,
         observer=observer,
@@ -2863,7 +3897,7 @@ def _settle_process_group(
 
     recheck()
     if os.getpgid(pid) != pid:
-        raise _RunnerFoundationError("exact-six child no longer owns its process group")
+        raise _RunnerFoundationError(f"exact-six child no longer owns its process group: pid={pid}")
     recheck()
     try:
         os.killpg(pid, signal.SIGTERM)
@@ -2881,7 +3915,7 @@ def _settle_process_group(
     try:
         process.wait(timeout=_PROCESS_GROUP_GRACE_S)
     except subprocess.TimeoutExpired as exc:
-        raise _RunnerFoundationError("exact-six process leader did not settle") from exc
+        raise _RunnerFoundationError(f"exact-six process leader did not settle: pid={pid}") from exc
 
 
 def _observe_stable_descendant_cut(
@@ -2936,7 +3970,10 @@ def _settle_owned_tree_once(
             signum=getattr(signal, "SIGKILL", 9),
         )
     if descendants or not stable:
-        raise _RunnerFoundationError("owned exact-six descendants did not settle")
+        raise _RunnerFoundationError(
+            f"owned exact-six descendants did not settle: pid={expected.pid} descendants="
+            f"{[item.pid for item in descendants]} stable={stable}"
+        )
     _settle_process_group(process, observer=observer, expected=expected)
 
 
@@ -2979,9 +4016,9 @@ def _execute_bounded_process(
 
     _require_posix_exact_six()
     if argv not in {_COLLECTION_ARGV, _EXECUTION_ARGV}:
-        raise _RunnerFoundationError("runner command is not fixed exact-six argv")
+        raise _RunnerFoundationError(f"runner command is not fixed exact-six argv: argv={argv!r}")
     if type(timeout_s) not in {int, float} or not math.isfinite(float(timeout_s)) or not 0 < timeout_s <= 300:
-        raise _RunnerFoundationError("exact-six timeout is outside the reviewed bound")
+        raise _RunnerFoundationError(f"exact-six timeout is outside the reviewed bound: timeout_s={timeout_s!r}")
     status_read, status_write = os.pipe()
     release_read, release_write = os.pipe()
     start_read, start_write = os.pipe()
@@ -3041,7 +4078,7 @@ def _execute_bounded_process(
         os.close(start_write)
     if process.stdout is None or process.stderr is None:
         _settle_owned_tree(process, observer=observer, expected=identity)
-        raise _RunnerFoundationError("exact-six pipes are unavailable")
+        raise _RunnerFoundationError(f"exact-six pipes are unavailable: pid={process.pid}")
     stdout_digest = _BoundedStreamDigest()
     stderr_digest = _BoundedStreamDigest()
     stdout = bytearray()
@@ -3051,16 +4088,16 @@ def _execute_bounded_process(
     deadline = time.monotonic() + float(timeout_s)
     try:
         if observer.identity_for_pid(process.pid) != identity:
-            raise _RunnerFoundationError("exact-six process identity changed before PGID probe")
+            raise _RunnerFoundationError(f"exact-six process identity changed before PGID probe: pid={process.pid}")
         if os.getpgid(process.pid) != process.pid:
-            raise _RunnerFoundationError("exact-six child does not own its process group")
+            raise _RunnerFoundationError(f"exact-six child does not own its process group: pid={process.pid}")
         selector.register(process.stdout, selectors.EVENT_READ, ("stream", stdout_digest, stdout))
         selector.register(process.stderr, selectors.EVENT_READ, ("stream", stderr_digest, stderr))
         selector.register(status_read, selectors.EVENT_READ, ("status", None, status))
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise _RunnerFoundationError("exact-six command timed out")
+                raise _RunnerFoundationError(f"exact-six command timed out: pid={process.pid} timeout_s={timeout_s}")
             for key, _events in selector.select(min(remaining, 0.25)):
                 chunk = os.read(key.fd, 64 * 1024)
                 if not chunk:
@@ -3068,12 +4105,17 @@ def _execute_bounded_process(
                     continue
                 kind, digest, retained = key.data
                 if kind == "status" and len(retained) + len(chunk) > _STATUS_STRUCT.size:
-                    raise _RunnerFoundationError("exact-six supervisor status is oversized")
+                    raise _RunnerFoundationError(
+                        f"exact-six supervisor status is oversized: bytes={len(retained) + len(chunk)} "
+                        f"bound={_STATUS_STRUCT.size}"
+                    )
                 if digest is not None:
                     digest.feed(chunk)
                 retained.extend(chunk)
         if len(status) != _STATUS_STRUCT.size:
-            raise _RunnerFoundationError("exact-six supervisor status is incomplete")
+            raise _RunnerFoundationError(
+                f"exact-six supervisor status is incomplete: bytes={len(status)} expected={_STATUS_STRUCT.size}"
+            )
         exit_code = _STATUS_STRUCT.unpack(status)[0]
         quiescence_deadline = time.monotonic() + _PROCESS_GROUP_GRACE_S
         descendants, stable = _observe_stable_descendant_cut(
@@ -3082,9 +4124,15 @@ def _execute_bounded_process(
             deadline=quiescence_deadline,
         )
         if descendants or not stable:
-            raise _RunnerFoundationError("exact-six child left owned descendants")
+            raise _RunnerFoundationError(
+                f"exact-six child left owned descendants: pid={process.pid} "
+                f"descendants={[item.pid for item in descendants]} stable={stable}"
+            )
         if observer.group_members(process.pid) != (identity,):
-            raise _RunnerFoundationError("exact-six child left process-group survivors")
+            raise _RunnerFoundationError(
+                f"exact-six child left process-group survivors: pid={process.pid} members="
+                f"{[item.pid for item in observer.group_members(process.pid)]}"
+            )
     except BaseException:
         _settle_owned_tree(process, observer=observer, expected=identity)
         raise
@@ -3288,11 +4336,18 @@ class _CancellationCleanupContract:
 
 
 class _PosixSoakRunner:
-    """Single-use owner of the real Linux source-mode short qualification."""
+    """Single-use owner of one reviewed Linux source-mode qualification."""
 
-    __slots__ = ("_prior_subreaper", "_subreaper_restored", "_used")
+    __slots__ = ("_prior_subreaper", "_selected", "_subreaper_restored", "_used")
 
-    def __init__(self) -> None:
+    def __init__(self, selected: Any | None = None) -> None:
+        from scripts import soak_mock_stack as soak
+
+        if selected is None:
+            selected = soak.profile("short")
+        if type(selected) is not soak.SoakProfile or not any(selected is item for item in soak.REVIEWED_PROFILES):
+            raise TypeError("selected profile must be an exact reviewed profile")
+        self._selected = selected
         self._used = False
         self._prior_subreaper: bool | None = None
         self._subreaper_restored = False
@@ -3319,7 +4374,10 @@ class _PosixSoakRunner:
                 break
             retained.extend(chunk)
             if len(retained) > 64 * _MAX_BRIDGE_HANDSHAKE_BYTES:
-                raise _RunnerFoundationError("bridge evidence stream is oversized")
+                raise _RunnerFoundationError(
+                    f"bridge evidence stream is oversized: bytes={len(retained)} "
+                    f"bound={64 * _MAX_BRIDGE_HANDSHAKE_BYTES}"
+                )
         records: list[bytes] = []
         while b"\n" in retained:
             index = retained.index(b"\n") + 1
@@ -3384,15 +4442,19 @@ class _PosixSoakRunner:
 
         from scripts import soak_mock_stack as soak
 
-        selected = soak.profile("short")
-        if selected.name != "short":
-            raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
+        selected = self._selected
+        if not any(selected is item for item in soak.REVIEWED_PROFILES):
+            raise _RunnerFoundationError("activation requires an exact reviewed profile")
         locked = _LockedPsutilObserver(psutil)
         owner_identity = locked.identity_for_pid(os.getpid())
         if locked.descendants(owner_identity, include_zombies=True):
-            raise _RunnerFoundationError("qualification owner has unexpected live descendants")
+            raise _RunnerFoundationError(
+                "qualification owner has unexpected live descendants: "
+                f"owner_pid={owner_identity.pid} descendants="
+                f"{[item.pid for item in locked.descendants(owner_identity, include_zombies=True)]}"
+            )
         collector = _CleanShaCollector(_REPO_ROOT)
-        report_interval_s, report_boundary_offset_s = _select_short_soak_report_schedule(time.time())
+        report_interval_s, report_boundary_offset_s, expected_receipts = _wait_for_soak_report_schedule(selected)
         sha = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=_REPO_ROOT,
@@ -3400,12 +4462,12 @@ class _PosixSoakRunner:
             check=True,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=_GIT_HEAD_TIMEOUT_S,
         ).stdout.strip()
         with _sealed_execution_snapshot(sha) as fixture_snapshot:
             with tempfile.TemporaryDirectory(prefix="cryodaq-fixture-seal-") as fixture_temporary:
                 fixture_config = Path(fixture_temporary) / "config"
-                fixture_readings_per_sample = _materialize_complete_soak_config(
+                fixture_readings_per_sample, fixture_channel_ids = _materialize_complete_soak_config(
                     fixture_config,
                     report_interval_s=report_interval_s,
                     source_snapshot=fixture_snapshot,
@@ -3413,20 +4475,22 @@ class _PosixSoakRunner:
                 source_fixture = _source_fixture_seal(
                     fixture_config,
                     expected_readings_per_sample=fixture_readings_per_sample,
+                    channel_ids=fixture_channel_ids,
                 ).payload
         evidence.write_manifest(
             {
-                "profile": "short",
+                "profile": selected.name,
                 "git_sha": sha,
                 "dirty": False,
                 "platform": platform.platform(),
                 "python": sys.version,
+                "runtime_library": collector.runtime_library_closure,
                 "source_command": list(_SOURCE_ARGV),
                 "thresholds": soak.effective_thresholds(selected),
                 "periodic_schedule": {
                     "interval_s": report_interval_s,
                     "selection_boundary_offset_s": report_boundary_offset_s,
-                    "expected_receipts": 2,
+                    "expected_receipts": expected_receipts,
                 },
                 "source_fixture": source_fixture,
                 "fatal_log_allowlist": [],
@@ -3458,6 +4522,9 @@ class _PosixSoakRunner:
         os.chmod(evidence.directory, 0o700)
         broad = soak.PsutilObserver(psutil)
         observations: set[Any] = set()
+        native_closures: dict[soak.ProcessIdentity, dict[str, object]] = {}
+        role_native_closures: dict[str, str] = {}
+        receipt_acceptance_times: list[dict[str, object]] = []
         receipt_cut_type = tuple[
             dict[str, object],
             dict[str, object],
@@ -3494,19 +4561,33 @@ class _PosixSoakRunner:
                 config_dir = root / "config"
                 data_dir = root / "data"
                 data_dir.mkdir(mode=0o700)
-                source_readings_per_sample = _materialize_complete_soak_config(
+                source_readings_per_sample, source_channel_ids = _materialize_complete_soak_config(
                     config_dir,
                     report_interval_s=report_interval_s,
                     source_snapshot=source_snapshot,
                 )
                 if source_readings_per_sample != fixture_readings_per_sample:
-                    raise _RunnerFoundationError("passive source fixture behavior differs from its manifest")
+                    raise _RunnerFoundationError(
+                        "passive source fixture behavior differs from its manifest: "
+                        f"observed={source_readings_per_sample} expected={fixture_readings_per_sample}"
+                    )
                 source_runtime_seal = _source_fixture_seal(
                     config_dir,
                     expected_readings_per_sample=source_readings_per_sample,
+                    channel_ids=source_channel_ids,
                 )
                 if source_runtime_seal.payload != source_fixture:
-                    raise _RunnerFoundationError("passive source fixture differs from its manifest seal")
+                    raise _RunnerFoundationError(
+                        "passive source fixture differs from its manifest seal: "
+                        f"runtime={source_runtime_seal.payload['tree_sha256']} manifest={source_fixture['tree_sha256']}"
+                    )
+                source_poll_interval_s = float(source_fixture["poll_interval_s"])
+                expected_rows = math.ceil(selected.duration_s / source_poll_interval_s) * source_readings_per_sample
+                storage_byte_limit = 64 * 1024 * 1024 + expected_rows * 1024
+                evidence.append(
+                    "storage-samples.jsonl",
+                    _storage_evidence(data_dir, elapsed_s=0.0, byte_limit=storage_byte_limit),
+                )
                 log_path = root / "launcher.log"
                 environment = _source_environment(
                     root,
@@ -3534,7 +4615,12 @@ class _PosixSoakRunner:
                         )
                         launcher_settled = True
 
-                with _launcher_log_capture(evidence, log_path, settle_writer=settle_log_writer) as log:
+                with _launcher_log_capture(
+                    evidence,
+                    log_path,
+                    settle_writer=settle_log_writer,
+                    engine_stderr_path=root / "logs" / "engine.stderr.log",
+                ) as log:
                     process, launcher_identity = _spawn_gated_source(
                         environment=environment,
                         stdout=log,
@@ -3554,6 +4640,7 @@ class _PosixSoakRunner:
                     bridge_guard: _BridgeEpochGuard | None = None
                     bridge_sequence = 0
                     roles: dict[str, Any] | None = None
+                    roles_error: BaseException | None = None
                     while time.monotonic() < deadline and roles is None:
                         for raw in self._pipe_records(bridge_pipe, bridge_buffer):
                             if handshake is None:
@@ -3585,16 +4672,35 @@ class _PosixSoakRunner:
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
-                            except ValueError:
+                            except ValueError as exc:
                                 roles = None
+                                roles_error = exc
                         if roles is None:
                             time.sleep(0.1)
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
-                        raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
+                        missing = [
+                            name
+                            for name, value in (
+                                ("roles", roles),
+                                ("handshake", handshake),
+                                ("bridge", bridge),
+                                ("bridge_guard", bridge_guard),
+                            )
+                            if value is None
+                        ]
+                        detail = ", ".join(missing)
+                        if roles is None and roles_error is not None:
+                            detail += f"; _load_roles refused: {type(roles_error).__name__}: {roles_error}"
+                        raise _RunnerFoundationError(
+                            f"source stack did not reach the exact four-role startup cut; missing: {detail}"
+                        )
 
-                    _validate_short_soak_runtime_schedule(report_interval_s, time.time())
+                    runtime_boundary_offset_s = _validate_soak_runtime_schedule(
+                        selected, report_interval_s, expected_receipts, time.time()
+                    )
 
                     start = time.monotonic()
+                    start_wall_s = time.time()
                     next_sample = 0.0
                     event_index = 0
                     epochs = {role: 0 for role in soak.ROLES}
@@ -3625,6 +4731,25 @@ class _PosixSoakRunner:
                             for role, identity in current.items():
                                 observations.add(identity)
                                 role_rows[role] = (epochs[role], tree[identity])
+                                if identity not in native_closures:
+                                    closure = _loaded_native_closure(identity.pid)
+                                    prior_digest = role_native_closures.setdefault(role, str(closure["sha256"]))
+                                    if closure["sha256"] != prior_digest:
+                                        raise _RunnerFoundationError(
+                                            f"{role} loaded native closure changed across process generations"
+                                        )
+                                    native_closures[identity] = closure
+                                    evidence.append(
+                                        "runtime-closures.jsonl",
+                                        {
+                                            "schema": "cryodaq-process-runtime-closure/v1",
+                                            "role": role,
+                                            "epoch": epochs[role],
+                                            "pid": identity.pid,
+                                            "started_ns": identity.started_ns,
+                                            "closure": closure,
+                                        },
+                                    )
                             evidence.append(
                                 "samples.jsonl",
                                 soak.stack_sample(
@@ -3633,7 +4758,11 @@ class _PosixSoakRunner:
                                     wall_time=datetime.now(UTC).isoformat(),
                                 ),
                             )
-                            next_sample = max(next_sample + soak.SAMPLE_INTERVAL_S, elapsed + 0.001)
+                            evidence.append(
+                                "storage-samples.jsonl",
+                                _storage_evidence(data_dir, elapsed_s=elapsed, byte_limit=storage_byte_limit),
+                            )
+                            next_sample = max(next_sample + selected.sample_interval_s, elapsed + 0.001)
 
                         state = self._periodic_cut(data_dir)
                         active = None if state is None else state["active"]
@@ -3655,6 +4784,9 @@ class _PosixSoakRunner:
                                 expected_artifact_sha256=artifact["sha256"],
                             )
                             ledger = evidence._json_lines("periodic-receipts.jsonl")[-1]
+                            receipt_acceptance_times.append(
+                                {"receipt_id": ledger["receipt_id"], "accepted_elapsed_s": time.monotonic() - start}
+                            )
                             photo, _metadata = evidence._read(ledger["filename"])
                             terminal_deadline = time.monotonic() + _ARTIFACT_IO_TIMEOUT_S
                             terminal_state = None
@@ -3675,7 +4807,11 @@ class _PosixSoakRunner:
                                     break
                                 time.sleep(0.05)
                             if terminal_state is None:
-                                raise _RunnerFoundationError("ACK did not reach durable successful periodic state")
+                                raise _RunnerFoundationError(
+                                    "ACK did not reach durable successful periodic state: "
+                                    f"slot_id={active['slot_id']} generation_id={active['generation_id']} "
+                                    f"receipt_id={ledger['receipt_id']}"
+                                )
 
                             health_deadline = time.monotonic() + _POST_ACK_HEALTH_TIMEOUT_S
                             last_state = None
@@ -3698,7 +4834,10 @@ class _PosixSoakRunner:
                                         break
                                 time.sleep(0.05)
                             if last_state is None:
-                                raise _RunnerFoundationError("durable terminal receipt did not reach ready health")
+                                raise _RunnerFoundationError(
+                                    "durable terminal receipt did not reach ready health: "
+                                    f"receipt_id={ledger['receipt_id']}"
+                                )
                             cut = (dict(ledger), delivery_state, last_state, photo, assistant_observation)
                             if not assistant_fault_injected:
                                 pre_assistant_fault_cut = cut
@@ -3710,7 +4849,10 @@ class _PosixSoakRunner:
                             event = selected.events[event_index]
                             if event.target == "assistant":
                                 if pre_assistant_fault_cut is None:
-                                    raise _RunnerFoundationError("assistant fault lacks a durable pre-fault receipt")
+                                    raise _RunnerFoundationError(
+                                        f"assistant fault lacks a durable pre-fault receipt: "
+                                        f"elapsed={elapsed:.1f}s scheduled={event.at_s:.1f}s"
+                                    )
                                 assistant_fault_injected = True
                             old = current[event.target]
                             expected = locked.identity_for_pid(old.pid)
@@ -3721,6 +4863,8 @@ class _PosixSoakRunner:
                             recovery_deadline = time.monotonic() + _RECOVERY_TIMEOUT_S
                             replacement_roles = None
                             replacement_tree = None
+                            saw_replacement_identity = False
+                            readiness_block = None
                             while time.monotonic() < recovery_deadline:
                                 for raw in self._pipe_records(bridge_pipe, bridge_buffer):
                                     data = _parse_bridge_data(
@@ -3737,7 +4881,11 @@ class _PosixSoakRunner:
                                     time.sleep(0.1)
                                     continue
                                 if candidate[event.target] != old:
+                                    saw_replacement_identity = True
                                     if event.target == "engine" and bridge_sequence <= prior_bridge_sequence:
+                                        readiness_block = (
+                                            "engine bridge data did not resume past its pre-fault sequence"
+                                        )
                                         time.sleep(0.1)
                                         continue
                                     if event.target == "assistant":
@@ -3747,14 +4895,37 @@ class _PosixSoakRunner:
                                             or health_state["health"]["status"] != "ready"
                                             or float(health_state["health"]["updated_at"]) <= prior_health
                                         ):
+                                            readiness_block = (
+                                                "assistant health did not reach a ready cut newer than "
+                                                "its pre-fault cut"
+                                            )
                                             time.sleep(0.1)
                                             continue
                                     replacement_roles, replacement_tree = candidate, candidate_tree
                                     break
                                 time.sleep(0.1)
                             if replacement_roles is None or replacement_tree is None:
+                                if saw_replacement_identity:
+                                    outcome = (
+                                        f"replacement identity appeared but readiness never opened ({readiness_block})"
+                                    )
+                                else:
+                                    try:
+                                        old_still_live = bool(
+                                            soak.surviving_recorded_identities(tuple(broad.snapshot()), {old})
+                                        )
+                                    except Exception:  # noqa: BLE001 - message-only diagnostic
+                                        old_still_live = None
+                                    if old_still_live:
+                                        outcome = "faulted process never exited"
+                                    elif old_still_live is False:
+                                        outcome = "faulted process exited and no replacement ever appeared"
+                                    else:
+                                        outcome = "final process liveness could not be determined"
                                 raise _RunnerFoundationError(
-                                    "faulted child did not recover within the reviewed ceiling"
+                                    f"{event.target} pid {old.pid} faulted at elapsed {recovery_start:.1f}s "
+                                    f"(scheduled {event.at_s:.1f}s) did not recover within the reviewed ceiling "
+                                    f"({_RECOVERY_TIMEOUT_S:.1f}s): {outcome}"
                                 )
                             epochs[event.target] += 1
                             current = replacement_roles
@@ -3802,7 +4973,11 @@ class _PosixSoakRunner:
                         time.sleep(min(0.1, max(0.001, next_sample - (time.monotonic() - start))))
 
                     if pre_assistant_fault_cut is None or post_assistant_fault_cut is None:
-                        raise _RunnerFoundationError("short qualification lacks exact pre/post fault receipts")
+                        raise _RunnerFoundationError(
+                            "qualification lacks exact pre/post fault receipts: "
+                            f"pre={'present' if pre_assistant_fault_cut is not None else 'missing'} "
+                            f"post={'present' if post_assistant_fault_cut is not None else 'missing'}"
+                        )
                     shutdown_start = time.monotonic()
                     locked.signal_exact(launcher_identity, signal.SIGTERM)
                     return_code = _wait_and_reap_owned_session(
@@ -3819,10 +4994,38 @@ class _PosixSoakRunner:
                         _source_fixture_seal(
                             config_dir,
                             expected_readings_per_sample=source_readings_per_sample,
+                            channel_ids=source_channel_ids,
                         )
                         != source_runtime_seal
                     ):
                         raise _RunnerFoundationError("passive source fixture changed during execution")
+                    evidence.write_qualification_artifact(
+                        "persistence.json",
+                        _persistence_evidence(
+                            data_dir,
+                            selected=selected,
+                            expected_channels=source_readings_per_sample,
+                            poll_interval_s=source_poll_interval_s,
+                            start_wall_s=start_wall_s,
+                        ),
+                    )
+                    evidence.write_qualification_artifact(
+                        "storage-final.json",
+                        _storage_evidence(
+                            data_dir,
+                            elapsed_s=time.monotonic() - start,
+                            byte_limit=storage_byte_limit,
+                        ),
+                    )
+                    evidence.write_qualification_artifact(
+                        "periodic-cadence.json",
+                        {
+                            "schema": "cryodaq-soak-periodic-cadence/v1",
+                            "interval_s": report_interval_s,
+                            "boundary_offset_s": runtime_boundary_offset_s,
+                            "receipts": receipt_acceptance_times,
+                        },
+                    )
         finally:
             with _block_termination_signals():
                 try:
@@ -3867,6 +5070,7 @@ class _PosixSoakRunner:
             post_assistant_observation=post_assistant_fault_cut[4],
             expected_launcher_pid=launcher_identity.pid,
             report_interval_s=report_interval_s,
+            expected_receipts=expected_receipts,
             ledger_records=all_ledger_records,
             observations=tuple(observations),
             survivors=tuple(survivors),

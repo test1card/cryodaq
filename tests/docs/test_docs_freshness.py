@@ -2755,6 +2755,24 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "::get_driver_spec" not in section
 
 
+def test_lab_checklist_names_short_and_duration_soak_gates() -> None:
+    checklist = (REPO_ROOT / "docs" / "lab_verification_checklist.md").read_text(encoding="utf-8")
+
+    assert "exact-SHA Ubuntu 22.04 soak" in checklist
+    assert "Short preflight не закрывает duration gate" in checklist
+    assert "manifest.periodic_schedule.expected_receipts" in checklist
+    assert "Каждый duration gate остаётся OPEN" in checklist
+
+
+def test_mock_stack_runbook_names_each_profile_cadence() -> None:
+    runbook = (REPO_ROOT / "docs" / "runbooks" / "mock_stack_soak.md").read_text(encoding="utf-8")
+
+    assert "short profile uses a 5-second sample interval and a 7.5-second maximum gap" in runbook
+    assert "long profiles use a 30-second sample interval and a 45-second maximum gap" in runbook
+    assert "72-hour five-second series" not in runbook
+    assert "time must be strictly monotonic, cadence gaps no larger than 7.5 seconds" not in runbook
+
+
 def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None:
     """OB-006 stays fail-closed after moving whole-tree checks to release time."""
     workflow_path = REPO_ROOT / ".github" / "workflows" / "release-gate.yml"

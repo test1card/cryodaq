@@ -6,9 +6,10 @@ import inspect
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -30,6 +31,11 @@ def _evidence(payload: bytes, *, complete: bool = True) -> runner._StreamEvidenc
 
 def _collection() -> bytes:
     return ("\n".join((*runner._EXACT_NODE_IDS, "7 tests collected in 0.12s")) + "\n").encode()
+
+
+def _runtime_library_root_expected() -> str:
+    library_prefix = sys.base_prefix if sys.prefix != sys.base_prefix else sys.prefix
+    return str((Path(library_prefix) / "lib").resolve())
 
 
 def _completed(payload: bytes, *, stderr: bytes = b"", exit_code: int = 0) -> runner._CompletedCommand:
@@ -735,6 +741,7 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
     monkeypatch.setenv("GIT_DIR", "attacker-git")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "alias.status")
     monkeypatch.setenv("LD_PRELOAD", "attacker.so")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "attacker-library-path")
     monkeypatch.setenv("PYTHONOPTIMIZE", "2")
     monkeypatch.setenv("QT_PLUGIN_PATH", "attacker-qt")
     monkeypatch.setenv("CRYODAQ_CONFIG", "attacker-config")
@@ -745,6 +752,7 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
         "HOME",
         "LANG",
         "LC_ALL",
+        "LD_LIBRARY_PATH",
         "PATH",
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONNOUSERSITE",
@@ -756,6 +764,8 @@ def test_exact_six_root_and_environment_are_not_caller_selected(monkeypatch: pyt
         "XDG_CONFIG_HOME",
     }
     assert environment["PYTHONPATH"] == os.pathsep.join((str(root / "src"), str(root), str(site_packages)))
+    assert environment["LD_LIBRARY_PATH"] == _runtime_library_root_expected()
+    assert environment["LD_LIBRARY_PATH"] != "attacker-library-path"
 
 
 def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypatch, tmp_path: Path) -> None:
@@ -763,6 +773,7 @@ def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypa
         "AWS_SECRET_ACCESS_KEY": "secret",
         "CRYODAQ_CONFIG_DIR": "hostile-config",
         "LD_PRELOAD": "hostile.so",
+        "LD_LIBRARY_PATH": "hostile-library-path",
         "PYTHONINSPECT": "1",
         "QT_PLUGIN_PATH": "hostile-plugins",
     }
@@ -791,17 +802,19 @@ def test_source_environment_drops_hostile_ambient_secrets_and_injection(monkeypa
         timeout=10,
     )
     observed = json.loads(probe.stdout)
-    assert not hostile.keys() & observed.keys()
+    assert not (hostile.keys() - {"LD_LIBRARY_PATH"}) & observed.keys()
     assert observed["CRYODAQ_ROOT"] == str(root.resolve())
     assert observed[runner._BRIDGE_NONCE_ENV] == "a" * 64
     assert observed[runner._ARTIFACT_NONCE_ENV] == "b" * 64
     assert observed["PYTHONPATH"] == os.pathsep.join((str(source_root.resolve() / "src"), str(source_root.resolve())))
+    assert observed["LD_LIBRARY_PATH"] == _runtime_library_root_expected()
     assert str(runner._REPO_ROOT) not in observed["PYTHONPATH"]
     assert set(environment) == {
         "CRYODAQ_ROOT",
         "HOME",
         "LANG",
         "LC_ALL",
+        "LD_LIBRARY_PATH",
         "PATH",
         "PYTHONDONTWRITEBYTECODE",
         "PYTHONNOUSERSITE",
@@ -1198,3 +1211,125 @@ def test_tree_sha256_still_refuses_a_retargeted_link(tmp_path: Path) -> None:
     finally:
         runner.os.readlink = real_readlink  # type: ignore[assignment]
     assert calls, "the retargeting hook must have run"
+
+
+@_POSIX_EVIDENCE
+def test_persistence_and_storage_helpers_measure_real_multiday_sqlite_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    databases: list[Path] = []
+    for day, first, last in (("2026-08-18", 1000, 1450), ("2026-08-19", 1451, 1900)):
+        database = data_dir / f"data_{day}.db"
+        databases.append(database)
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "CREATE TABLE readings (id INTEGER PRIMARY KEY, timestamp REAL, instrument_id TEXT, "
+                "channel TEXT, value REAL, unit TEXT, status TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO readings(timestamp,instrument_id,channel,value,unit,status) VALUES(?,?,?,?,?,?)",
+                [
+                    (float(timestamp), "LS218_1", f"ch{channel}", 4.0 + channel, "K", "OK")
+                    for timestamp in range(first, last + 1)
+                    for channel in range(8)
+                ],
+            )
+            connection.commit()
+
+    selected = soak.profile("short")
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda _path: (_ for _ in ()).throw(AssertionError("database hashing must stream")),
+    )
+    persistence = runner._persistence_evidence(
+        data_dir,
+        selected=selected,
+        expected_channels=8,
+        poll_interval_s=1.0,
+        start_wall_s=1000.0,
+    )
+    fixture = {
+        "instrument_id": "LS218_1",
+        "expected_readings_per_sample": 8,
+        "poll_interval_s": 1.0,
+        "channel_ids": [f"ch{channel}" for channel in range(8)],
+    }
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    assert len(persistence["channel_rows"]) == 8
+    assert {row["count"] for row in persistence["channel_rows"]} == {901}
+
+    storage = runner._storage_evidence(data_dir, elapsed_s=selected.duration_s, byte_limit=10**8)
+    assert storage["database_bytes"] == sum(database.stat().st_size for database in databases)
+    assert storage["total_bytes"] >= storage["database_bytes"] > 0
+    assert storage["wal_bytes"] == 0
+
+    linked_database = data_dir / "data_2026-08-20.db"
+    linked_database.symlink_to(databases[0])
+    with pytest.raises(runner._RunnerFoundationError, match="not a regular file"):
+        runner._persistence_evidence(
+            data_dir,
+            selected=selected,
+            expected_channels=8,
+            poll_interval_s=1.0,
+            start_wall_s=1000.0,
+        )
+
+
+@_POSIX_EVIDENCE
+def test_persistence_engine_fault_gap_matches_with_a_delayed_start(tmp_path: Path) -> None:
+    """A real engine-fault gap must still match its scheduled fault when the
+    first persisted row precedes the runner start by more than two poll
+    intervals. Interruption elapsed values are anchored to the runner start,
+    not to the first database timestamp, so stack startup latency cannot shift
+    a gap out of its scheduled-fault window."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    selected = soak.profile("short")
+    poll_interval_s = 1.0
+    start_wall_s = 10_000.0
+    first_row_s = start_wall_s - 30.0
+    engine_fault_s = 185.0
+    gap_s = 5.0
+    database = data_dir / "data_2026-08-18.db"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "CREATE TABLE readings (id INTEGER PRIMARY KEY, timestamp REAL, instrument_id TEXT, "
+            "channel TEXT, value REAL, unit TEXT, status TEXT)"
+        )
+        rows = []
+        last_before = start_wall_s + engine_fault_s - poll_interval_s
+        for timestamp in range(int(first_row_s), int(last_before) + 1):
+            for channel in range(8):
+                rows.append((float(timestamp), "LS218_1", f"ch{channel}", 4.0 + channel, "K", "OK"))
+        first_after = last_before + gap_s
+        for timestamp in range(int(first_after), int(first_row_s) + 900):
+            for channel in range(8):
+                rows.append((float(timestamp), "LS218_1", f"ch{channel}", 4.0 + channel, "K", "OK"))
+        connection.executemany(
+            "INSERT INTO readings(timestamp,instrument_id,channel,value,unit,status) VALUES(?,?,?,?,?,?)",
+            rows,
+        )
+        connection.commit()
+
+    persistence = runner._persistence_evidence(
+        data_dir,
+        selected=selected,
+        expected_channels=8,
+        poll_interval_s=poll_interval_s,
+        start_wall_s=start_wall_s,
+    )
+    fixture = {
+        "instrument_id": "LS218_1",
+        "expected_readings_per_sample": 8,
+        "poll_interval_s": poll_interval_s,
+        "channel_ids": [f"ch{channel}" for channel in range(8)],
+    }
+    interruptions = persistence["interruptions"]
+    assert len(interruptions) == 8
+    assert all(item["matched_engine_fault_s"] == engine_fault_s for item in interruptions)
+    assert all(item["gap_s"] == gap_s for item in interruptions)
+    assert all(item["elapsed_s"] == engine_fault_s + gap_s - poll_interval_s for item in interruptions)
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []

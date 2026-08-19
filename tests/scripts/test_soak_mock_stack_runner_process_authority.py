@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import mmap
+import os
+import select
 import signal
+import stat
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -399,3 +405,340 @@ def test_clean_sha_collector_requires_order_same_sha_and_no_untracked_files(tmp_
     (repo / "untracked.txt").write_text("drift\n", encoding="utf-8")
     with pytest.raises(runner._RunnerFoundationError, match="drift"):
         collector.observe(runner._ShaBoundary.AFTER_EXECUTION)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader ownership is POSIX-only")
+def test_runtime_library_identity_accepts_immutable_root_and_rejects_untrusted_writers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    current_uid = os.getuid()
+    current_gid = os.getgid()
+
+    def identity(*, uid: int, gid: int, mode: int) -> SimpleNamespace:
+        return SimpleNamespace(st_uid=uid, st_gid=gid, st_mode=stat.S_IFREG | mode)
+
+    assert runner._runtime_library_identity_is_safe(identity(uid=current_uid, gid=current_gid, mode=0o644))
+    assert runner._runtime_library_identity_is_safe(identity(uid=0, gid=0, mode=0o644))
+    assert not runner._runtime_library_identity_is_safe(identity(uid=1, gid=1, mode=0o644))
+    assert not runner._runtime_library_identity_is_safe(identity(uid=0, gid=0, mode=0o664))
+    assert not runner._runtime_library_identity_is_safe(identity(uid=current_uid, gid=current_gid, mode=0o646))
+
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    library = library_root / "libproof.so"
+    library.write_bytes(b"proof")
+    library.chmod(0o644)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    assert runner._controlled_runtime_library_path() == str(library_root.resolve())
+    assert runner._runtime_library_closure()["entry_count"] == 1
+
+    if os.geteuid() == 0:
+        os.chown(library, 0, 0)
+        library.chmod(0o644)
+        assert runner._runtime_library_closure()["entry_count"] == 1
+        library.chmod(0o664)
+        with pytest.raises(runner._RunnerActivationDisabled, match="file ownership is unsafe"):
+            runner._runtime_library_closure()
+
+    library.chmod(0o646)
+    with pytest.raises(runner._RunnerActivationDisabled, match="file ownership is unsafe"):
+        runner._runtime_library_closure()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_clean_sha_collector_rejects_runtime_library_mutation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    library = library_root / "libproof.so"
+    library.write_bytes(b"before")
+    library.chmod(0o644)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "soak@example.invalid")
+    _git(repo, "config", "user.name", "Soak Test")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-qm", "initial")
+
+    collector = runner._CleanShaCollector(repo)
+    manifest_closure = collector.runtime_library_closure
+    collector.observe(runner._ShaBoundary.BEFORE_COLLECTION)
+    library.write_bytes(b"after")
+    with pytest.raises(runner._RunnerFoundationError, match="native-library closure changed"):
+        collector.observe(runner._ShaBoundary.BETWEEN_COLLECTION_AND_EXECUTION)
+    assert manifest_closure["sha256"] != runner._runtime_library_closure()["sha256"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_runtime_library_closure_rejects_a_link_target_beneath_a_writable_ancestor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    writable = library_root / "writable-dir"
+    writable.mkdir(mode=0o755)
+    writable.chmod(0o777)
+    target = writable / "libevil.so"
+    target.write_bytes(b"evil")
+    target.chmod(0o644)
+    (library_root / "liblink.so").symlink_to(target)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    with pytest.raises(runner._RunnerActivationDisabled, match="link ancestor ownership is unsafe"):
+        runner._runtime_library_closure()
+
+    writable.chmod(0o755)
+    closure = runner._runtime_library_closure()
+    assert closure["entry_count"] == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader ownership is POSIX-only")
+def test_runtime_library_ownership_refusals_name_path_owner_group_mode_and_clause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every identity refusal must say what it refused, or the operator has no action.
+
+    This is the diagnostic counterpart of the acceptance rule: no refusal
+    becomes an acceptance, it simply reports the path, the numeric owner and
+    group, the octal mode, and the exact rejecting clause.
+    """
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    library = library_root / "libproof.so"
+    library.write_bytes(b"proof")
+    library.chmod(0o644)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    library.chmod(0o646)
+    with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+        runner._runtime_library_closure()
+    message = str(excinfo.value)
+    assert message.startswith("runtime native-library file ownership is unsafe: ")
+    assert f"path={library}" in message
+    assert "uid=" in message and "gid=" in message
+    assert "mode=0646" in message
+    assert "clause=world-writable" in message
+
+    library.chmod(0o644)
+    library_root.chmod(0o666)
+    with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+        runner._runtime_library_closure()
+    message = str(excinfo.value)
+    assert message.startswith("runtime native-library root ownership is unsafe: ")
+    assert f"path={library_root}" in message
+    assert "mode=0666" in message
+    assert "clause=world-writable" in message
+    library_root.chmod(0o755)
+
+    identity = SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFREG | 0o664)
+    refusal = runner._runtime_library_identity_refusal(library, identity)
+    assert "path=" in refusal and "uid=0" in refusal and "gid=0" in refusal
+    assert "mode=0664" in refusal and "clause=root-owned-with-group-write" in refusal
+
+    if os.geteuid() == 0:
+        os.chown(library, 0, 0)
+        library.chmod(0o664)
+        with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+            runner._runtime_library_closure()
+        assert "clause=root-owned-with-group-write" in str(excinfo.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_runtime_library_closure_binds_an_escaping_link_target(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A link whose target escapes the closure root must bind the resolved bytes.
+
+    A stock Ubuntu /usr/lib contains exactly such a link (cpp -> /etc/
+    alternatives/cpp -> /usr/bin/...), so refusing every escaping link refuses
+    the reviewed target platform. The resolved target is what the loader can
+    select, so its bytes and identity are the evidence, not the link's name.
+    """
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    candidates = (Path("/usr/bin/x86_64-linux-gnu-cpp-11"), Path("/bin/cat"), Path("/bin/ls"))
+    target = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if target is None:
+        pytest.skip("no system file under a root-owned ancestor tree is available")
+    (library_root / "libescape.so").symlink_to(target)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    closure = runner._runtime_library_closure()
+    assert closure["entry_count"] == 1
+
+    if os.geteuid() == 0:
+        safe_tree = Path("/") / f"cryodaq-escape-test-{os.getpid()}"
+        safe_tree.mkdir(mode=0o755)
+        try:
+            external = safe_tree / "external"
+            external.mkdir(mode=0o755)
+            writable_target = external / "libprobe.so"
+            writable_target.write_bytes(b"bound-v1")
+            writable_target.chmod(0o644)
+            (library_root / "libprobe.so").symlink_to(writable_target)
+            first = runner._runtime_library_closure()
+            assert first["entry_count"] == 2
+            writable_target.write_bytes(b"bound-v2")
+            second = runner._runtime_library_closure()
+            assert second["sha256"] != first["sha256"], "the escaping target's bytes must be bound"
+        finally:
+            import shutil
+
+            shutil.rmtree(safe_tree, ignore_errors=True)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="runtime loader closure is POSIX-only")
+def test_runtime_library_closure_refuses_an_escaping_link_target_beneath_an_unsafe_ancestor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Binding an escaping target does not relax the ownership rule for its tree."""
+    prefix = tmp_path / "prefix"
+    library_root = prefix / "lib"
+    library_root.mkdir(parents=True, mode=0o755)
+    writable = tmp_path / "writable"
+    writable.mkdir(mode=0o755)
+    writable.chmod(0o777)
+    target = writable / "libescape.so"
+    target.write_bytes(b"evil")
+    target.chmod(0o644)
+    (library_root / "liblink.so").symlink_to(target)
+    monkeypatch.setattr(runner.sys, "prefix", str(prefix))
+    monkeypatch.setattr(runner.sys, "base_prefix", str(prefix))
+
+    with pytest.raises(runner._RunnerActivationDisabled) as excinfo:
+        runner._runtime_library_closure()
+    message = str(excinfo.value)
+    assert message.startswith("runtime native-library link ancestor ownership is unsafe: ")
+    assert f"path={writable}" in message
+    assert "mode=0777" in message
+    assert "clause=world-writable" in message
+
+
+@pytest.mark.skipif(os.name != "posix", reason="stock-venv native-library activation is POSIX-only")
+def test_stock_venv_activation_selects_base_prefix_native_library(tmp_path: Path) -> None:
+    venv_dir = tmp_path / "venv"
+    created = subprocess.run(
+        (sys.executable, "-m", "venv", "--without-pip", str(venv_dir)),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if not (venv_dir / "bin/python").is_file():
+        raise AssertionError("real venv creation produced no interpreter; stderr: " + created.stderr.strip())
+    repo_root = Path(__file__).resolve().parents[2]
+    probe = (
+        f"import sys\n"
+        f"sys.path.insert(0, {str(repo_root)!r})\n"
+        f"from scripts import soak_mock_stack_runner as runner\n"
+        f"print('PREFIX', runner.sys.prefix)\n"
+        f"print('BASEPREFIX', runner.sys.base_prefix)\n"
+        f"print('ROOT', runner._runtime_library_root())\n"
+        f"try:\n"
+        f"    closure = runner._runtime_library_closure()\n"
+        f"    print('CLOSURE-OK', closure['root'], closure['entry_count'])\n"
+        f"except runner._RunnerActivationDisabled as exc:\n"
+        f"    print('CLOSURE-REFUSED', exc)\n"
+    )
+    yaml_dir = None
+    for entry in sys.path:
+        candidate = Path(entry)
+        if (candidate / "yaml").is_dir() or (candidate / "yaml.py").is_file():
+            yaml_dir = candidate
+            break
+    assert yaml_dir is not None
+    probe_env = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": os.pathsep.join((str(repo_root), str(yaml_dir))),
+    }
+    completed = subprocess.run(
+        (str(venv_dir / "bin/python"), "-c", probe),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=probe_env,
+    )
+    fields = dict(line.split(" ", 1) for line in completed.stdout.splitlines())
+    prefix = Path(fields["PREFIX"]).resolve()
+    base_prefix = Path(fields["BASEPREFIX"]).resolve()
+    root = Path(fields["ROOT"]).resolve()
+    assert prefix == venv_dir.resolve()
+    assert prefix != base_prefix
+    assert root == (base_prefix / "lib").resolve()
+    assert root != (prefix / "lib").resolve()
+    refused = fields.get("CLOSURE-REFUSED")
+    if refused is None:
+        closure_root, entry_count = fields["CLOSURE-OK"].split(" ", 1)
+        assert Path(closure_root).resolve() == root
+        assert int(entry_count) >= 1
+    else:
+        assert "closure is empty" not in refused
+
+
+@pytest.mark.skipif(os.name != "posix", reason="loaded native closure is Linux-only")
+def test_loaded_native_closure_binds_fallback_system_objects(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    mapped_path = tmp_path / "deleted-native-object.so"
+    mapped_path.write_bytes(b"\0" * 4096)
+    mapped_fd = os.open(mapped_path, os.O_RDONLY)
+    try:
+        deleted_mapping = mmap.mmap(mapped_fd, 4096, prot=mmap.PROT_READ | mmap.PROT_EXEC)
+    finally:
+        os.close(mapped_fd)
+    mapped_path.unlink()
+
+    process = subprocess.Popen(
+        (sys.executable, "-c", "import time; print('READY', flush=True); time.sleep(60)"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert process.stdout is not None
+        readable, _, _ = select.select((process.stdout,), (), (), 10)
+        assert readable
+        assert process.stdout.readline() == b"READY\n"
+        closure = runner._loaded_native_closure(process.pid)
+        runtime_root = (Path(sys.prefix) / "lib").resolve()
+        external = [
+            Path(entry["path"]) for entry in closure["entries"] if not Path(entry["path"]).is_relative_to(runtime_root)
+        ]
+        assert external
+
+        target = external[0].resolve()
+        original_hash = runner._hash_regular_file
+        monkeypatch.setattr(
+            runner,
+            "_hash_regular_file",
+            lambda path: "sha256:" + "0" * 64 if path.resolve() == target else original_hash(path),
+        )
+
+        changed = runner._loaded_native_closure(process.pid)
+
+        original_by_path = {entry["path"]: entry for entry in closure["entries"]}
+        changed_by_path = {entry["path"]: entry for entry in changed["entries"]}
+        assert changed_by_path.keys() == original_by_path.keys()
+        assert changed_by_path[str(target)]["sha256"] == "sha256:" + "0" * 64
+        assert {path: entry for path, entry in changed_by_path.items() if path != str(target)} == {
+            path: entry for path, entry in original_by_path.items() if path != str(target)
+        }
+        assert changed["sha256"] != closure["sha256"]
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+        if process.stdout is not None:
+            process.stdout.close()
+        deleted_mapping.close()

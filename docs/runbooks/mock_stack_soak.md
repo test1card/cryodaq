@@ -2,16 +2,34 @@
 
 ## Purpose
 
-This lane is the active Linux source-mode short qualification for the launcher,
-mock engine, GUI ZMQ bridge, assistant child, and H3 coordinator. It is
-separate from `scripts/soak_mock_engine.py`: the existing engine-only nightly
-lane remains useful and must not be reported as whole-stack evidence.
+This runner qualifies the Linux source stack. The stack contains the launcher,
+mock engine, GUI ZMQ bridge, assistant child, and H3 coordinator. The runner is
+separate from `scripts/soak_mock_engine.py`. The engine-only nightly lane does
+not supply whole-stack evidence.
 
-The integrated runner supports the Linux source-mode `short` profile only. It
-owns the locked `psutil` observer, positive launcher bridge handshake, inherited
-AF_UNIX periodic-artifact capability, exact-six execution, source process
-session, scheduled fault injection, joined receipts, and bounded cleanup. It
-rejects Windows and non-Linux POSIX hosts before creating an evidence bundle.
+The integrated runner supports the reviewed `short`, `12h`, `72h`, and `168h`
+profiles. It owns process observation, fault injection, periodic artifacts, and
+bounded cleanup. It rejects Windows and non-Linux POSIX hosts before it creates
+an evidence bundle.
+
+## Environment
+
+Build the interpreter the runner uses as a `--system-site-packages` virtual
+environment. The soak and its exact-six pytest command import `yaml`, `psutil`,
+the `pytest_asyncio`/`pytest_timeout` plugins, and the Qt/GFX stack from the
+base prefix, and a venv has no native-library `lib` of its own, so the venv must
+see the base interpreter's site packages. From the worktree root:
+
+```bash
+python -m venv --system-site-packages .venv
+.venv/bin/python -V
+.venv/bin/python -c "import yaml"
+```
+
+`python` above is the laboratory interpreter (for example the `cryodaq` conda
+environment, which provides the reviewed Python and the installed packages);
+the venv is a wrapper around it. Verify the native-library root precondition
+below once, then run the soak through `.venv/bin/python` exactly as shown.
 
 Run the qualification only from an exact clean SHA under the worktree's
 `.venv/bin/python`:
@@ -21,17 +39,69 @@ PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
   --profile short --evidence-dir artifacts/mock-stack-soak/preflight
 ```
 
-There is no acknowledgement or caller-supplied prerequisite/PASS option. The
-12-hour and 72-hour profiles remain validation contracts and open duration
-gates; the active runner refuses them until separately reviewed activation.
-The short-profile activation gate also remains open until this candidate is
-committed at a clean SHA and the real Linux run completes with a sealed PASS.
+There is no caller-supplied prerequisite or PASS option. A profile run must use
+an exact clean SHA. Each duration gate stays open until its real Ubuntu 22.04
+run completes with a sealed PASS.
+
+## Native-library root precondition
+
+The runner refuses to start when the active interpreter's native-library search
+root is writable by any party other than a trusted owner: the bytes the loader
+can select are the bytes that produce the evidence, so they must not be
+replaceable by someone who did not run the qualification. Check the root with
+one command from the worktree root before a run:
+
+```bash
+PYTHONPATH="$PWD/src" .venv/bin/python -c \
+  "from scripts.soak_mock_stack_runner import _runtime_library_root, _runtime_library_closure; print(_runtime_library_root()); print('native-library closure entries:', _runtime_library_closure()['entry_count'])"
+```
+
+The root is the interpreter's base-prefix `lib` directory — a venv or conda
+environment has no usable `lib` of its own, so the run validates the base
+prefix's. It must be owned by `root` with no group write, or by the running
+user with no group write, or by the running user with group write only when
+that group's entire membership is that one user. The system Python at `/usr/lib`
+satisfies this as installed (root-owned, mode 0755). An interpreter whose `lib`
+root is owned by another user, or is group- or world-writable by anyone else,
+must be re-installed or re-owned to a root-owned or current-user-owned layout
+before the run. A refusal names the path, the numeric owner and group, the
+octal mode, and the exact rejected clause, so the failing property is
+actionable rather than opaque.
+
+Run a long profile only on the laboratory qualification host. Use one of the
+reviewed names: `12h`, `72h`, or `168h`. For example:
+
+```bash
+PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack \
+  --profile 168h --evidence-dir artifacts/mock-stack-soak/168h
+```
 
 ## Profiles
 
-All profiles sample the launcher process and its ancestry-scoped descendants
-every 5 seconds. Identity is `(pid, OS start time)`, so PID reuse cannot select
-an unrelated process. Fault injection must re-check that identity immediately
+The short profile uses a 5-second sample interval and a 7.5-second maximum gap.
+The long profiles use a 30-second sample interval and a 45-second maximum gap.
+
+These are the ordinary inter-sample cadence bounds. Around each scheduled
+injected fault there is one deliberate exception, because an injected fault
+legitimately interrupts the observer: the allowlisted `SIGTERM` is followed by a
+role restart and recovery, so the single sampling gap that spans a scheduled
+fault may exceed the cadence. The validator exempts a gap only when a scheduled
+fault time lies inside it and both edges stay within their bounds —
+`max_cadence_gap_s` before the fault and `RECOVERY_CEILING_S` (60 seconds)
+after it. The widest exempted gap is therefore `max_cadence_gap_s + 60`
+seconds: 67.5 seconds for `short`, 105 seconds for `12h`, `72h`, and `168h`.
+Each scheduled fault earns at most one exempt gap, so the worst-case unvalidated
+observer time per profile, measured from the profile definitions in
+`scripts/soak_mock_stack.py`, is: `short` 2 faults x 67.5 s = 135 s
+(2.25 minutes); `12h` 6 faults x 105 s = 630 s (10.5 minutes); `72h` 10 faults
+x 105 s = 1050 s (17.5 minutes); `168h` 18 faults x 105 s = 1890 s (31.5
+minutes of the 168-hour run, 0.31%). Every gap that does not span a scheduled
+fault must still satisfy the stated cadence bound, and no other relaxation
+exists.
+The final validator rejects a
+sample file above 64 MiB or 25,000 records. Identity is `(pid, OS start time)`,
+so PID reuse cannot select an unrelated process. Fault injection must re-check
+that identity immediately
 before sending the allowlisted `SIGTERM` through
 `observer.signal_exact_identity/v1`; another signal, injection method,
 PID-only selector, or global process name is not qualification evidence.
@@ -46,16 +116,17 @@ silently become the baseline.
 | `short` | 15 min | 3 min | 3 min 5 s | 5 min | screen only | screen only |
 | `12h` | 12 h | 10 min | 1, 4, 8 h | 2, 6, 10 h | < 4 MiB/h | <= 1/h |
 | `72h` | 72 h | 10 min | 1, 12, 24, 48, 60 h | 2, 18, 36, 54, 66 h | < 1 MiB/h | <= 0.25/h |
+| `168h` | 168 h | 10 min | 1, 12, 24, 48, 60, 84, 108, 132, 156 h | 2, 18, 36, 54, 66, 90, 114, 138, 162 h | < 1 MiB/h | <= 0.25/h |
 
 Every process replacement must have a new PID/start identity. Engine recovery
 also requires bridge data readiness; assistant recovery requires a strictly
 newer H3 health heartbeat/owner. Each recovery has a 60-second ceiling. Final
 graceful shutdown has a 20-second ceiling and zero recorded live descendants.
 
-Across 12/72-hour post-warm-up samples, robust fitted aggregate RSS growth must
+Across 12/72/168-hour post-warm-up samples, robust fitted aggregate RSS growth must
 remain below 50 MiB. The slope estimator deterministically keeps at most 257
 evenly spaced points, including both endpoints, and computes at most 32,896
-pairwise slopes. A 72-hour five-second series therefore cannot trigger an
+pairwise slopes. A 72-hour 30-second series therefore cannot trigger an
 unbounded quadratic allocation. Process count must return to one launcher, one
 engine, one positively identified bridge, and one assistant after recovery.
 
@@ -64,8 +135,11 @@ fail qualification. Per-role descriptor, thread, and RSS envelopes are checked
 within every epoch and at the final boundary. Profile RSS and descriptor slopes
 are evaluated independently for every role and stable epoch, so one child's
 leak cannot be hidden by another child's decline. Elapsed times and counters must be finite
-and non-negative; time must be strictly monotonic, cadence gaps no larger than
-7.5 seconds, and the series must cover startup through the profile duration.
+and non-negative. Time must be strictly monotonic. The maximum cadence gap is
+7.5 seconds for `short` and 45 seconds for long profiles, except the single
+gap spanning a scheduled injected fault described in the recovery-window
+exemption above. The series must cover
+startup through the profile duration.
 
 ## Evidence contract
 

@@ -13,6 +13,9 @@ from pathlib import Path
 import pytest
 
 from scripts import soak_mock_stack as soak
+from scripts import soak_mock_stack_runner as runner
+from tests.scripts import test_soak_mock_stack_runner as exact_support
+from tests.scripts import test_soak_mock_stack_runner_joined_receipts as periodic_support
 
 _POSIX_EVIDENCE = pytest.mark.skipif(os.name != "posix", reason="evidence capability is POSIX-only")
 
@@ -32,12 +35,15 @@ def test_interrupt_handler_latches_first_signal(first: int, second: int) -> None
 
 
 @pytest.mark.skipif(os.name == "posix", reason="Windows fail-closed contract")
-def test_windows_rejects_evidence_without_creating_artifacts(tmp_path: Path) -> None:
+def test_windows_rejects_evidence_without_creating_artifacts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     evidence_dir = tmp_path / "evidence"
     with pytest.raises(soak.EvidenceCapabilityError, match="evidence capability is POSIX-only"):
         soak.Evidence(evidence_dir)
     assert not evidence_dir.exists()
     assert soak.main(["--evidence-dir", str(evidence_dir)]) == 2
+    assert "refused to start" in capsys.readouterr().err
     assert not evidence_dir.exists()
 
 
@@ -95,7 +101,9 @@ def _sample(
 
 
 def _full_series(selected: soak.SoakProfile) -> list[dict[str, object]]:
-    return [_sample(float(second)) for second in range(0, int(selected.duration_s) + 1, 5)]
+    return [
+        _sample(float(second)) for second in range(0, int(selected.duration_s) + 1, int(selected.sample_interval_s))
+    ]
 
 
 def test_profiles_have_exact_schedules_and_healthy_short_baseline() -> None:
@@ -123,11 +131,126 @@ def test_profiles_have_exact_schedules_and_healthy_short_baseline() -> None:
         60,
         66,
     ]
+    assert [event.at_s / 3600 for event in soak.profile("168h").events] == [
+        1,
+        2,
+        12,
+        18,
+        24,
+        36,
+        48,
+        54,
+        60,
+        66,
+        84,
+        90,
+        108,
+        114,
+        132,
+        138,
+        156,
+        162,
+    ]
 
 
 def test_unknown_profile_fails_closed() -> None:
     with pytest.raises(ValueError, match="unknown profile"):
         soak.profile("week")
+
+
+@pytest.mark.parametrize("profile_name", ["12h", "72h", "168h"])
+@pytest.mark.parametrize("now_epoch", [0.0, 1.0, 236_890.0, 1_700_000_000.0, 1_777_777_777.0])
+def test_long_report_schedule_keeps_the_first_periodic_cut_after_the_first_assistant_fault(
+    profile_name: str,
+    now_epoch: float,
+) -> None:
+    from scripts import soak_mock_stack_runner as runner
+
+    selected = soak.PROFILES[profile_name]
+    for wait_s in range(int(soak.LONG_REPORT_EDGE_MARGIN_S) + 1):
+        selected_epoch = now_epoch + wait_s
+        try:
+            interval_s, boundary_offset_s, expected_receipts = runner._select_soak_report_schedule(
+                selected, selected_epoch
+            )
+        except runner._RunnerFoundationError:
+            continue
+        break
+    else:
+        pytest.fail("no reviewed long-soak schedule became available inside the preflight margin")
+    assert (
+        soak.periodic_schedule_errors(
+            selected,
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s,
+            expected_receipts=expected_receipts,
+        )
+        == []
+    )
+    assert expected_receipts >= 3
+    runtime_offset_s = runner._validate_soak_runtime_schedule(
+        selected, interval_s, expected_receipts, selected_epoch + 630
+    )
+    first_fault_s = soak.first_assistant_fault_s(selected)
+    assert first_fault_s + 300 <= runtime_offset_s <= first_fault_s + 900
+    assert soak.periodic_schedule_errors(
+        selected,
+        interval_s=interval_s,
+        boundary_offset_s=boundary_offset_s,
+        expected_receipts=expected_receipts - 1,
+    )
+
+
+def test_long_report_schedule_requires_a_receipt_after_the_final_assistant_fault() -> None:
+    selected = soak.profile("12h")
+    final_fault = soak.last_assistant_fault_s(selected)
+    last_offset_s = 8_160 + 20_732
+    assert last_offset_s <= final_fault + soak.LONG_REPORT_BOUNDARY_AFTER_ASSISTANT_MIN_S
+    assert soak.periodic_schedule_errors(
+        selected,
+        interval_s=20_732,
+        boundary_offset_s=8_160,
+        expected_receipts=3,
+    )
+    assert (
+        soak.periodic_schedule_errors(
+            selected,
+            interval_s=11_000,
+            boundary_offset_s=8_160,
+            expected_receipts=5,
+        )
+        == []
+    )
+
+
+def test_long_report_schedule_waits_through_a_temporarily_unavailable_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import soak_mock_stack_runner as runner
+
+    wall_epochs = iter(237_177.0 + offset for offset in range(int(soak.LONG_REPORT_EDGE_MARGIN_S) + 2))
+    monotonic_epoch = [0.0]
+    sleeps: list[float] = []
+    monkeypatch.setattr(runner.time, "time", lambda: next(wall_epochs))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: monotonic_epoch[0])
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        monotonic_epoch[0] += seconds
+
+    monkeypatch.setattr(runner.time, "sleep", sleep)
+
+    interval_s, boundary_offset_s, expected_receipts = runner._wait_for_soak_report_schedule(soak.PROFILES["12h"])
+
+    assert 1 <= len(sleeps) <= soak.LONG_REPORT_EDGE_MARGIN_S
+    assert set(sleeps) == {1}
+    assert (
+        soak.periodic_schedule_errors(
+            soak.PROFILES["12h"],
+            interval_s=interval_s,
+            boundary_offset_s=boundary_offset_s,
+            expected_receipts=expected_receipts,
+        )
+        == []
+    )
 
 
 def test_descendants_and_shutdown_survivors_use_exact_identity_after_reparenting() -> None:
@@ -181,6 +304,148 @@ def test_classification_requires_positive_bridge_identity() -> None:
         soak.classify_tree(tree, root, bridge_identity=soak.ProcessIdentity(11, 110))
 
 
+def test_classify_tree_names_unclassified_descendant() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, ("python", "-m", "helper")),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"unclassified descendant process: pid 14 started 140 parent 10 "
+            r"argv \('python', '-m', 'helper'\); 1 unclassified descendants in total"
+        ),
+    ):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+def test_classify_tree_bounds_unclassified_descendant_report() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, ("python", "-m", "unknown-a")),
+        _snapshot(15, 150, 10, ("python", "-m", "unknown-b")),
+        _snapshot(16, 160, 10, ("python", "-m", "unknown-c")),
+        _snapshot(17, 170, 10, ("python", "-m", "unknown-d")),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(
+        ValueError,
+        match=r"pid 14 started 140 parent 10 argv \('python', '-m', 'unknown-a'\)",
+    ) as raised:
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+    message = str(raised.value)
+    assert "pid 17 started 170" not in message
+    assert "4 unclassified descendants in total" in message
+
+
+def _tracker_argv() -> tuple[str, ...]:
+    return (sys.executable, "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13)")
+
+
+def test_classify_tree_accepts_exact_resource_tracker() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    engine = soak.ProcessIdentity(11, 110)
+    assistant = soak.ProcessIdentity(13, 130)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, _tracker_argv()),
+    ]
+    tree = soak.descendants(rows, root)
+    roles = soak.classify_tree(tree, root, bridge_identity=bridge)
+    assert roles == {
+        "launcher": root,
+        "bridge": bridge,
+        "engine": engine,
+        "assistant": assistant,
+    }
+
+
+def test_classify_tree_rejects_resource_tracker_with_unknown_parent() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(15, 150, 10, ("helper",)),
+        _snapshot(14, 140, 15, _tracker_argv()),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(ValueError, match=r"pid 14 started 140 parent 15"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+def test_classify_tree_rejects_resource_tracker_persisting_after_owner_exit() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    tree = {
+        root: _snapshot(10, 100, 1, ("launcher",)),
+        bridge: _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        soak.ProcessIdentity(13, 130): _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        soak.ProcessIdentity(14, 140): _snapshot(14, 140, 11, _tracker_argv()),
+    }
+    with pytest.raises(ValueError, match=r"pid 14 started 140 parent 11"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("python", "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13)"),
+        (sys.executable, "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13);import os"),
+        (sys.executable, "-B", "-s", "from multiprocessing.resource_tracker import main;main(13)"),
+        (sys.executable, "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13)", "extra"),
+        (sys.executable, "module", "-c", "from multiprocessing.resource_tracker import main;main(13)"),
+        (sys.executable, "-B", "-s", "-c", "import multiprocessing.resource_tracker"),
+    ],
+)
+def test_classify_tree_rejects_resource_tracker_argv_near_misses(argv: tuple[str, ...]) -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, argv),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(ValueError, match=r"pid 14 started 140 parent 10"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+def test_classify_tree_rejects_duplicate_resource_trackers() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, _tracker_argv()),
+        _snapshot(16, 160, 10, _tracker_argv()),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(ValueError, match="more than one live multiprocessing resource tracker"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
 def test_recovery_requires_new_identity_readiness_and_health() -> None:
     old = soak.ProcessIdentity(42, 100)
     new = soak.ProcessIdentity(43, 200)
@@ -216,6 +481,37 @@ def test_resource_schema_rejects_nan_reverse_gap_short_duration_and_unknown_desc
     expected = ["invalid elapsed_s", "not strictly monotonic", "cadence gap", "profile duration", "invalid descriptors"]
     for samples, marker in zip(cases, expected, strict=True):
         assert any(marker in error for error in soak.evaluate_resources(samples, selected))
+
+
+def test_long_sample_series_accepts_a_bounded_recovery_gap_and_rejects_unbounded_ones() -> None:
+    selected = soak.profile("12h")
+    samples = _full_series(selected)
+    assert soak.validate_sample_series(samples, selected) == []
+    engine_fault = next(event.at_s for event in selected.events if event.target == "engine")
+
+    recovery = [sample for sample in samples if sample["elapsed_s"] <= engine_fault]
+    recovery.append(_sample(engine_fault + 50.0))
+    recovery.extend(sample for sample in samples if sample["elapsed_s"] > engine_fault + 50.0)
+    assert soak.validate_sample_series(recovery, selected) == []
+
+    excessive = [sample for sample in samples if sample["elapsed_s"] <= engine_fault]
+    excessive.append(_sample(engine_fault + soak.RECOVERY_CEILING_S + selected.sample_interval_s))
+    excessive.extend(
+        sample
+        for sample in samples
+        if sample["elapsed_s"] > engine_fault + soak.RECOVERY_CEILING_S + selected.sample_interval_s
+    )
+    assert any("exceeds cadence gap" in error for error in soak.validate_sample_series(excessive, selected))
+
+    unrelated = [sample for sample in samples if sample["elapsed_s"] <= 5000]
+    unrelated.append(_sample(5060.0))
+    unrelated.extend(sample for sample in samples if sample["elapsed_s"] > 5060.0)
+    assert any("exceeds cadence gap" in error for error in soak.validate_sample_series(unrelated, selected))
+
+    early_collapse = [sample for sample in samples if sample["elapsed_s"] <= engine_fault - 120.0]
+    early_collapse.append(_sample(engine_fault + soak.RECOVERY_CEILING_S))
+    early_collapse.extend(sample for sample in samples if sample["elapsed_s"] > engine_fault + soak.RECOVERY_CEILING_S)
+    assert any("exceeds cadence gap" in error for error in soak.validate_sample_series(early_collapse, selected))
 
 
 def test_resource_schema_rejects_identity_change_inside_epoch_and_bad_wall_time() -> None:
@@ -337,7 +633,10 @@ def _source_fixture() -> dict[str, object]:
         "plugins.yaml",
         "safety.yaml",
     )
-    entries = [{"path": "experiment_templates", "kind": "directory"}]
+    entries = [
+        {"path": "experiment_templates", "kind": "directory"},
+        {"path": "themes", "kind": "directory"},
+    ]
     entries.extend(
         {
             "path": name,
@@ -346,6 +645,15 @@ def _source_fixture() -> dict[str, object]:
             "sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
         }
         for name in files
+    )
+    entries.extend(
+        {
+            "path": f"themes/{name}",
+            "kind": "file",
+            "bytes": 0,
+            "sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
+        }
+        for name in runner._ISOLATED_TRACKED_THEME_PACKS
     )
     entries.sort(key=lambda item: item["path"])
     tree_sha = (
@@ -362,6 +670,8 @@ def _source_fixture() -> dict[str, object]:
         "descriptor_count": 16,
         "binding_count": 16,
         "expected_readings_per_sample": 8,
+        "channel_ids": [f"ch{index}" for index in range(8)],
+        "poll_interval_s": 1.0,
         "entries": entries,
         "tree_sha256": tree_sha,
     }
@@ -375,6 +685,12 @@ def _manifest(*, dirty: bool = False) -> dict[str, object]:
         "dirty": dirty,
         "platform": "test-platform",
         "python": "test-python",
+        "runtime_library": {
+            "schema": "cryodaq-runtime-library-closure/v1",
+            "root": "/test-prefix/lib",
+            "entry_count": 1,
+            "sha256": "sha256:" + "1" * 64,
+        },
         "source_command": [sys.executable, "-m", "cryodaq.launcher", "--mock", "--tray"],
         "thresholds": soak.effective_thresholds(selected),
         "periodic_schedule": {
@@ -528,6 +844,115 @@ def _write_periodic_artifacts(evidence: soak.Evidence) -> None:
         encoding="ascii",
     )
     soak.atomic_json(evidence.directory / "periodic-delivery-result.json", result)
+    soak.atomic_json(
+        evidence.directory / "periodic-cadence.json",
+        {
+            "schema": "cryodaq-soak-periodic-cadence/v1",
+            "interval_s": 600,
+            "boundary_offset_s": 450,
+            "receipts": [
+                {"receipt_id": "g1:s1", "accepted_elapsed_s": 5.0},
+                {"receipt_id": "g2:s1", "accepted_elapsed_s": 450.0},
+            ],
+        },
+    )
+
+
+def _write_runtime_closures(evidence: soak.Evidence, samples: list[dict[str, object]]) -> None:
+    seen: set[tuple[str, int, int, int]] = set()
+    for sample in samples:
+        for role, process in sample["roles"].items():
+            identity = (role, process["epoch"], process["pid"], process["started_ns"])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            ordinal = soak.ROLES.index(role) + 1
+            entries = [
+                {
+                    "path": f"/test-runtime/{role}.so",
+                    "device": 1,
+                    "inode": ordinal,
+                    "size": 1024,
+                    "sha256": "sha256:" + str(ordinal) * 64,
+                }
+            ]
+            digest = (
+                "sha256:"
+                + hashlib.sha256(
+                    json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+                ).hexdigest()
+            )
+            evidence.append(
+                "runtime-closures.jsonl",
+                {
+                    "schema": "cryodaq-process-runtime-closure/v1",
+                    "role": role,
+                    "epoch": process["epoch"],
+                    "pid": process["pid"],
+                    "started_ns": process["started_ns"],
+                    "closure": {
+                        "schema": "cryodaq-loaded-native-closure/v1",
+                        "entry_count": 1,
+                        "entries": entries,
+                        "sha256": digest,
+                    },
+                },
+            )
+
+
+def _write_continuity_evidence(evidence: soak.Evidence) -> None:
+    for elapsed in (0.0, 900.0):
+        evidence.append(
+            "storage-samples.jsonl",
+            {
+                "schema": "cryodaq-soak-storage-sample/v1",
+                "elapsed_s": elapsed,
+                "total_bytes": 4096,
+                "database_bytes": 4096,
+                "wal_bytes": 0,
+                "archive_bytes": 0,
+                "file_count": 1,
+                "free_bytes": 10**9,
+                "byte_limit": 10**8,
+            },
+        )
+    evidence.write_qualification_artifact(
+        "storage-final.json",
+        {
+            "schema": "cryodaq-soak-storage-sample/v1",
+            "elapsed_s": 900.0,
+            "total_bytes": 4096,
+            "database_bytes": 4096,
+            "wal_bytes": 0,
+            "archive_bytes": 0,
+            "file_count": 1,
+            "free_bytes": 10**9,
+            "byte_limit": 10**8,
+        },
+    )
+    evidence.write_qualification_artifact(
+        "persistence.json",
+        {
+            "schema": "cryodaq-soak-persistence/v1",
+            "integrity": "ok",
+            "expected_channels": 8,
+            "poll_interval_s": 1.0,
+            "database_files": [{"name": "data_2026-01-01.db", "bytes": 4096, "sha256": "sha256:" + "1" * 64}],
+            "channel_rows": [
+                {
+                    "instrument_id": "LS218_1",
+                    "channel": f"ch{index}",
+                    "count": 900,
+                    "first_timestamp": 1000.0,
+                    "last_timestamp": 1900.0,
+                }
+                for index in range(8)
+            ],
+            "duplicate_rows": 0,
+            "invalid_rows": 0,
+            "interruptions": [],
+        },
+    )
 
 
 def _populate_complete(evidence: soak.Evidence) -> None:
@@ -537,11 +962,267 @@ def _populate_complete(evidence: soak.Evidence) -> None:
     samples = _qualification_samples()
     for sample in samples:
         evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
+    _write_continuity_evidence(evidence)
     for fault in _faults():
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(evidence)
     evidence.record_shutdown(_shutdown(samples))
+
+
+def _populate_sealable_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    name: str,
+) -> soak.Evidence:
+    evidence = soak.Evidence(tmp_path / name)
+    evidence.write_manifest(_manifest())
+
+    class Collector:
+        def __init__(self, repo_root: Path) -> None:
+            assert repo_root == runner._REPO_ROOT
+
+        def observe(self, boundary: runner._ShaBoundary) -> runner._CleanShaObservation:
+            return runner._CleanShaObservation(boundary, "a" * 40, True)
+
+    def execute(
+        argv: tuple[str, ...],
+        *,
+        observer: object,
+        snapshot: object,
+    ) -> runner._CompletedCommand:
+        del observer, snapshot
+        payload = (
+            exact_support._collection() if argv == runner._COLLECTION_ARGV else b"....... [100%]\n7 passed in 1.20s\n"
+        )
+        return exact_support._completed(payload)
+
+    exact_support._install_execution_fakes(monkeypatch, Collector)
+    monkeypatch.setattr(runner, "_execute_bounded_process", execute)
+    runner._collect_and_execute_exact_six(evidence)
+    result_hash = soak._sha256(evidence.directory / "exact-six-result.json")
+    evidence.write_prerequisites(_prerequisites(result_sha256=result_hash))
+    evidence.begin_run()
+
+    samples = _qualification_samples()
+    for sample in samples:
+        evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
+    _write_continuity_evidence(evidence)
+    for fault in _faults():
+        evidence.append("faults.jsonl", fault)
+    evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
+
+    periodic_tmp = tmp_path / f"{name}-periodic"
+    periodic_tmp.mkdir()
+    evidence, receipts = periodic_support._accept_real_periodic_evidence(
+        monkeypatch,
+        periodic_tmp,
+        evidence=evidence,
+    )
+    soak.atomic_json(
+        evidence.directory / "periodic-cadence.json",
+        {
+            "schema": "cryodaq-soak-periodic-cadence/v1",
+            "interval_s": 600,
+            "boundary_offset_s": 450,
+            "receipts": [
+                {"receipt_id": receipts[0]["receipt_id"], "accepted_elapsed_s": 5.0},
+                {"receipt_id": receipts[1]["receipt_id"], "accepted_elapsed_s": 450.0},
+            ],
+        },
+    )
+    evidence.record_shutdown(_shutdown(samples))
+    return evidence
+
+
+@_POSIX_EVIDENCE
+def test_runner_runtime_library_manifest_reaches_final_schema_validation(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+
+    _ledger, errors = evidence._build_ledger()
+
+    assert "manifest fields are not exact" not in errors
+
+
+@_POSIX_EVIDENCE
+def test_final_acceptance_requires_persistence_and_storage_evidence(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    evidence.write_manifest(_manifest())
+    _write_prerequisites(evidence)
+    evidence.begin_run()
+    samples = _qualification_samples()
+    for sample in samples:
+        evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
+    for fault in _faults():
+        evidence.append("faults.jsonl", fault)
+    evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
+    _write_periodic_artifacts(evidence)
+    evidence.record_shutdown(_shutdown(samples))
+
+    _ledger, errors = evidence._build_ledger()
+
+    joined = "\n".join(errors)
+    assert "persistence.json" in joined
+    assert "storage-samples.jsonl" in joined
+    assert "storage-final.json" in joined
+
+
+@_POSIX_EVIDENCE
+def test_launcher_log_capture_registers_engine_stderr_in_log_index(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path / "evidence")
+    evidence.write_manifest(_manifest())
+    _write_prerequisites(evidence)
+    evidence.begin_run()
+    engine_stderr = tmp_path / "launcher-root" / "logs" / "engine.stderr.log"
+    engine_stderr.parent.mkdir(parents=True)
+    engine_stderr.write_bytes(b"RuntimeError: engine died on startup\n")
+
+    with runner._launcher_log_capture(
+        evidence,
+        tmp_path / "launcher.log",
+        engine_stderr_path=engine_stderr,
+    ) as stream:
+        stream.write(b"launcher diagnostic line\n")
+        stream.flush()
+
+    index = json.loads((evidence.directory / "log_capture.json").read_text())
+    assert index["artifacts"] == ["log-launcher.txt", "log-engine-stderr.txt"]
+    assert (evidence.directory / "log-launcher.txt").read_text() == "launcher diagnostic line\n"
+    assert (evidence.directory / "log-engine-stderr.txt").read_text() == "RuntimeError: engine died on startup\n"
+
+
+@_POSIX_EVIDENCE
+def test_persistence_validator_rejects_a_false_green_duplicate(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = json.loads((tmp_path / "persistence.json").read_text())
+
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    persistence["duplicate_rows"] = 1
+    assert soak._validate_persistence_evidence(persistence, selected, fixture)
+
+
+@_POSIX_EVIDENCE
+def test_persistence_validator_rejects_remapped_channel_identities(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = json.loads((tmp_path / "persistence.json").read_text())
+
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    persistence["channel_rows"] = [
+        {**row, "channel": f"wrong{index}"} for index, row in enumerate(persistence["channel_rows"])
+    ]
+    assert "persistence channel identities differ from the sealed fixture" in "\n".join(
+        soak._validate_persistence_evidence(persistence, selected, fixture)
+    )
+
+
+@_POSIX_EVIDENCE
+def test_persistence_validator_rejects_uniform_slow_cadence(tmp_path: Path) -> None:
+    """A uniformly slow poll (no individual gap above 1.5 * poll_interval) must
+    still fail: per-channel counts below the cadence-derived floor (after the
+    scheduled recovery budget) mean roughly a third of the expected readings
+    were never persisted."""
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = json.loads((tmp_path / "persistence.json").read_text())
+
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    for row in persistence["channel_rows"]:
+        row["count"] = int(selected.duration_s / 1.49)
+    errors = "\n".join(soak._validate_persistence_evidence(persistence, selected, fixture))
+    assert "persistence channel continuity is invalid" in errors
+
+
+def test_persistence_validator_rejects_inflated_duplicate_counts() -> None:
+    """A count above the cadence-derived ceiling (duplicate redelivery under a
+    fresh timestamp) must fail: the persistence check is a floor AND a ceiling."""
+    selected = soak.profile("short")
+    fixture = _source_fixture()
+    persistence = {
+        "schema": "cryodaq-soak-persistence/v1",
+        "integrity": "ok",
+        "expected_channels": 8,
+        "poll_interval_s": 1.0,
+        "database_files": [{"name": "data_2026-01-01.db", "bytes": 4096, "sha256": "sha256:" + "1" * 64}],
+        "channel_rows": [
+            {
+                "instrument_id": "LS218_1",
+                "channel": f"ch{index}",
+                "count": 900,
+                "first_timestamp": 1000.0,
+                "last_timestamp": 1900.0,
+            }
+            for index in range(8)
+        ],
+        "duplicate_rows": 0,
+        "invalid_rows": 0,
+        "interruptions": [],
+    }
+    assert soak._validate_persistence_evidence(persistence, selected, fixture) == []
+    for row in persistence["channel_rows"]:
+        row["count"] = 902
+    errors = "\n".join(soak._validate_persistence_evidence(persistence, selected, fixture))
+    assert "persistence channel continuity is invalid" in errors
+
+
+@_POSIX_EVIDENCE
+def test_storage_validator_rejects_a_false_green_live_wal(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    samples = evidence._json_lines("storage-samples.jsonl")
+    final = json.loads((tmp_path / "storage-final.json").read_text())
+
+    assert soak._validate_storage_evidence(samples, final, selected) == []
+    final["wal_bytes"] = 1
+    assert soak._validate_storage_evidence(samples, final, selected)
+
+
+@_POSIX_EVIDENCE
+def test_periodic_cadence_validator_rejects_clustered_receipts(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    _populate_complete(evidence)
+    selected = soak.profile("short")
+    cadence = json.loads((tmp_path / "periodic-cadence.json").read_text())
+    receipts = evidence._json_lines("periodic-receipts.jsonl")
+
+    assert soak._validate_periodic_cadence(cadence, receipts, selected) == []
+    cadence["receipts"][1]["accepted_elapsed_s"] = 6.0
+    assert soak._validate_periodic_cadence(cadence, receipts, selected)
+
+
+def test_periodic_cadence_slots_compare_a_single_clock_domain() -> None:
+    """Each later receipt is checked against the previous receipt in the same
+    (monotonic) domain, so a steady wall-clock drift below the per-interval
+    tolerance must not accumulate into a missed slot across many receipts."""
+    selected = soak.profile("12h")
+    interval_s = 600
+    boundary_offset_s = 450
+    receipt_ids = [f"r{index}" for index in range(5)]
+    accepted = [5.0]
+    accepted.extend(450.0 + (index - 1) * 610.0 for index in range(1, 5))
+    cadence = {
+        "schema": "cryodaq-soak-periodic-cadence/v1",
+        "interval_s": interval_s,
+        "boundary_offset_s": boundary_offset_s,
+        "receipts": [
+            {"receipt_id": receipt_id, "accepted_elapsed_s": elapsed}
+            for receipt_id, elapsed in zip(receipt_ids, accepted, strict=True)
+        ],
+    }
+    periodic_receipts = [{"receipt_id": receipt_id} for receipt_id in receipt_ids]
+    assert soak._validate_periodic_cadence(cadence, periodic_receipts, selected) == []
 
 
 @_POSIX_EVIDENCE
@@ -968,10 +1649,12 @@ def test_exact_six_result_mutation_is_rejected(tmp_path: Path) -> None:
     samples = _qualification_samples()
     for sample in samples:
         evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
     for fault in _faults():
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(evidence)
+    _write_continuity_evidence(evidence)
     evidence.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="exact-six"):
         evidence.seal()
@@ -988,10 +1671,12 @@ def test_arbitrary_source_command_and_missing_role_fail_terminally(tmp_path: Pat
     samples = _qualification_samples()
     for sample in samples:
         arbitrary.append("samples.jsonl", sample)
+    _write_runtime_closures(arbitrary, samples)
     for fault in _faults():
         arbitrary.append("faults.jsonl", fault)
     arbitrary.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(arbitrary)
+    _write_continuity_evidence(arbitrary)
     arbitrary.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="canonical current-interpreter launcher"):
         arbitrary.seal()
@@ -1052,12 +1737,14 @@ def test_fault_and_shutdown_identities_require_exact_positive_integers(tmp_path:
     samples = _qualification_samples()
     for sample in samples:
         evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
     faults = _faults()
     faults[0]["pre_pid"] = True
     for fault in faults:
         evidence.append("faults.jsonl", fault)
     evidence.write_log("log-launcher.txt", "INFO │ healthy\n")
     _write_periodic_artifacts(evidence)
+    _write_continuity_evidence(evidence)
     evidence.record_shutdown(_shutdown(samples))
     with pytest.raises(ValueError, match="positive integer"):
         evidence.seal()
@@ -1145,6 +1832,11 @@ def test_evidence_forbids_environment_capture_and_failure_has_typed_metadata(tmp
             "periodic schedule",
         ),
         (
+            "manifest.json",
+            lambda value: {**value, "runtime_library": {**value["runtime_library"], "entry_count": 0}},
+            "runtime library closure",
+        ),
+        (
             "log_capture.json",
             lambda value: {**value, "artifacts": ["../outside.txt"]},
             "log artifact list",
@@ -1228,6 +1920,9 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
         def require_platform() -> None:
             return None
 
+        def __init__(self, selected: soak.SoakProfile) -> None:
+            assert selected is soak.PROFILES["short"]
+
         def run(self, evidence: soak.Evidence) -> None:
             evidence.write_manifest(
                 {
@@ -1259,33 +1954,35 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
     assert summary["manifest_sha256"].startswith("sha256:")
 
 
-@pytest.mark.parametrize("profile_name", ["12h", "72h"])
-def test_cli_distinguishes_defined_but_unactivated_profiles(
+@pytest.mark.parametrize("profile_name", ["12h", "72h", "168h"])
+@_POSIX_EVIDENCE
+def test_cli_passes_each_reviewed_long_profile_to_the_runner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
     profile_name: str,
 ) -> None:
     from scripts import soak_mock_stack_runner as runner
 
-    class PlatformOnly:
+    selected_profiles: list[soak.SoakProfile] = []
+
+    class ProfileBoundRunner:
         @staticmethod
         def require_platform() -> None:
-            pytest.fail("an unactivated long profile must be refused before platform activation")
+            return None
 
-        def __init__(self) -> None:
-            pytest.fail("an unactivated long profile must not construct the short-profile runner")
+        def __init__(self, selected: soak.SoakProfile) -> None:
+            selected_profiles.append(selected)
 
-    monkeypatch.setattr(runner, "_PosixSoakRunner", PlatformOnly)
+        def run(self, evidence: soak.Evidence) -> None:
+            raise RuntimeError("deterministic runner stop")
+
+    monkeypatch.setattr(runner, "_PosixSoakRunner", ProfileBoundRunner)
     evidence_dir = tmp_path / profile_name
 
-    assert soak.main(["--profile", profile_name, "--evidence-dir", str(evidence_dir)]) == 3
-    assert capsys.readouterr().err == (
-        f"soak profile {profile_name!r} is defined but not activated: "
-        "the POSIX source-mode runner and evidence contract are validated only for the short profile; "
-        "long-duration evidence remains open\n"
-    )
-    assert not evidence_dir.exists()
+    assert soak.main(["--profile", profile_name, "--evidence-dir", str(evidence_dir)]) == 1
+    assert len(selected_profiles) == 1
+    assert selected_profiles[0] is soak.PROFILES[profile_name]
+    assert json.loads((evidence_dir / "summary.json").read_text())["status"] == "FAIL"
 
 
 @_POSIX_EVIDENCE
@@ -1301,6 +1998,10 @@ class FakeRunner:
     @staticmethod
     def require_platform():
         return None
+
+    def __init__(self, selected):
+        if selected.name != "short":
+            raise TypeError("unexpected profile")
 
     def run(self, evidence):
         from scripts import soak_mock_stack as soak
@@ -1417,3 +2118,172 @@ def test_initial_summary_is_incomplete_fail(tmp_path: Path) -> None:
     assert summary["status"] == "FAIL"
     assert summary["reason"] == "incomplete"
     assert not evidence.terminal
+
+
+@_POSIX_EVIDENCE
+def test_process_generation_native_closure_change_is_rejected(tmp_path: Path) -> None:
+    evidence = soak.Evidence(tmp_path)
+    evidence.write_manifest(_manifest())
+    _write_prerequisites(evidence)
+    evidence.begin_run()
+    samples = _qualification_samples()
+    for sample in samples:
+        evidence.append("samples.jsonl", sample)
+    _write_runtime_closures(evidence, samples)
+    records = evidence._json_lines("runtime-closures.jsonl")
+    changed = next(record for record in records if record["role"] == "engine" and record["epoch"] == 1)
+    changed["closure"]["entries"][0]["sha256"] = "sha256:" + "f" * 64
+    changed["closure"]["sha256"] = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(changed["closure"]["entries"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+                "ascii"
+            )
+        ).hexdigest()
+    )
+
+    errors = soak._validate_runtime_closures(records, samples)
+
+    assert "engine loaded native closure changed across process generations" in errors
+
+
+@_POSIX_EVIDENCE
+@pytest.mark.parametrize("stream", ["samples.jsonl", "storage-samples.jsonl"])
+def test_bounded_evidence_reader_rejects_records_above_the_reviewed_bound(
+    stream: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    valid = _populate_sealable_complete(monkeypatch, tmp_path, "valid")
+    real_reader = soak._read_owned_regular_at
+    real_json_lines_at = soak._json_lines_at
+    real_hash_owned_regular_at = soak._hash_owned_regular_at
+    observed_limits: list[int | None] = []
+    observed_record_limits: list[int | None] = []
+    reader_failures: list[str] = []
+    observed_stages: set[str] = set()
+    real_text = soak.Evidence._text
+    real_json_lines = soak.Evidence._json_lines
+    real_sha256 = soak.Evidence._sha256
+    real_secret_findings = soak.Evidence._secret_findings
+    real_build_ledger = soak.Evidence._build_ledger
+
+    def traced_text(evidence: soak.Evidence, name: str, *, errors: str = "strict") -> str:
+        if evidence is valid and name == stream:
+            observed_stages.add("text")
+        return real_text(evidence, name, errors=errors)
+
+    def traced_json_lines(evidence: soak.Evidence, name: str) -> list[dict[str, object]]:
+        if evidence is valid and name == stream:
+            observed_stages.add("json-lines")
+        return real_json_lines(evidence, name)
+
+    def traced_sha256(evidence: soak.Evidence, name: str) -> str:
+        if evidence is valid and name == stream:
+            observed_stages.add("sha256")
+        return real_sha256(evidence, name)
+
+    def traced_secret_findings(evidence: soak.Evidence) -> list[dict[str, object]]:
+        if evidence is valid:
+            observed_stages.add("secret-findings")
+        return real_secret_findings(evidence)
+
+    def traced_build_ledger(evidence: soak.Evidence):
+        if evidence is valid:
+            observed_stages.add("build-ledger")
+        return real_build_ledger(evidence)
+
+    monkeypatch.setattr(soak.Evidence, "_text", traced_text)
+    monkeypatch.setattr(soak.Evidence, "_json_lines", traced_json_lines)
+    monkeypatch.setattr(soak.Evidence, "_sha256", traced_sha256)
+    monkeypatch.setattr(soak.Evidence, "_secret_findings", traced_secret_findings)
+    monkeypatch.setattr(soak.Evidence, "_build_ledger", traced_build_ledger)
+
+    def observed_reader(
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[bytes, os.stat_result]:
+        if name == stream:
+            observed_limits.append(max_bytes)
+        try:
+            if max_bytes is None:
+                return real_reader(directory_fd, name)
+            return real_reader(directory_fd, name, max_bytes=max_bytes)
+        except ValueError as exc:
+            if name == stream:
+                reader_failures.append(str(exc))
+            raise
+
+    def observed_json_lines_at(
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int | None = None,
+        max_records: int | None = None,
+    ) -> list[dict[str, object]]:
+        if name == stream:
+            observed_limits.append(max_bytes)
+            observed_record_limits.append(max_records)
+        return real_json_lines_at(directory_fd, name, max_bytes=max_bytes, max_records=max_records)
+
+    def observed_hash_owned_regular_at(
+        directory_fd: int,
+        name: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[str, int]:
+        if name == stream:
+            observed_limits.append(max_bytes)
+        return real_hash_owned_regular_at(directory_fd, name, max_bytes=max_bytes)
+
+    monkeypatch.setattr(soak, "_read_owned_regular_at", observed_reader)
+    monkeypatch.setattr(soak, "_json_lines_at", observed_json_lines_at)
+    monkeypatch.setattr(soak, "_hash_owned_regular_at", observed_hash_owned_regular_at)
+    valid.seal()
+
+    assert valid.state == soak.RunState.EVIDENCE_SEALED
+    assert observed_record_limits == [soak.MAX_SAMPLE_RECORDS]
+    assert len(observed_limits) >= 6
+    assert all(limit == soak.MAX_SAMPLE_ARTIFACT_BYTES for limit in observed_limits)
+    assert {"text", "json-lines", "secret-findings", "build-ledger"} <= observed_stages
+    if stream == "samples.jsonl":
+        assert "sha256" in observed_stages
+    else:
+        assert "sha256" not in observed_stages
+
+    growth = _populate_sealable_complete(monkeypatch, tmp_path, "growth")
+    target = growth.directory / stream
+    target_identity = target.stat()
+    byte_limit = target_identity.st_size
+    real_os_read = soak.os.read
+    appended = False
+    target_read_calls = 0
+
+    def read_then_grow(file_fd: int, size: int) -> bytes:
+        nonlocal appended, target_read_calls
+        chunk = real_os_read(file_fd, size)
+        opened = soak.os.fstat(file_fd)
+        is_target = (opened.st_dev, opened.st_ino) == (target_identity.st_dev, target_identity.st_ino)
+        if is_target:
+            target_read_calls += 1
+        if not appended and chunk and is_target:
+            with target.open("ab") as stream_file:
+                stream_file.write(b"\n")
+                stream_file.flush()
+                soak.os.fsync(stream_file.fileno())
+            appended = True
+        return chunk
+
+    observed_limits.clear()
+    monkeypatch.setattr(soak, "MAX_SAMPLE_ARTIFACT_BYTES", byte_limit)
+    monkeypatch.setattr(soak.os, "read", read_then_grow)
+
+    with pytest.raises(ValueError, match="secret detection prevented sealing"):
+        growth.seal()
+
+    assert appended
+    assert observed_limits
+    assert target_read_calls >= 2
+    assert reader_failures[0] == "artifact exceeds the reviewed byte bound"
+    assert all(limit == byte_limit for limit in observed_limits)
+    assert growth.state == soak.RunState.FAIL

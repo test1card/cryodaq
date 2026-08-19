@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -190,6 +191,31 @@ def test_construction_failure_transfers_exact_owner_to_hold(phase: str) -> None:
     assert host._engine_shutdown_capability == capability
     settle.assert_called_once_with(host)
     host.show.assert_called_once_with()
+
+
+def test_construction_failure_logs_exception_message_not_only_type(caplog) -> None:
+    host = SimpleNamespace(
+        _construction_failure_phase=None,
+        _engine_proc=object(),
+        _engine_instance_id="a" * 32,
+        _engine_shutdown_capability="b" * 64,
+        setWindowTitle=MagicMock(),
+        show=MagicMock(),
+    )
+
+    with (
+        patch.object(LauncherWindow, "_do_shutdown", return_value=False),
+        pytest.raises(_LauncherConstructionHold),
+    ):
+        with caplog.at_level(logging.CRITICAL, logger="cryodaq.launcher"):
+            LauncherWindow._run_construction_step(
+                host,
+                "engine",
+                lambda: (_ for _ in ()).throw(RuntimeError("engine port 5555 is occupied")),
+            )
+
+    assert "exception=RuntimeError: engine port 5555 is occupied" in caplog.text
+    assert caplog.text.count("exception=RuntimeError: engine port 5555 is occupied") == 1
 
 
 def test_incomplete_owner_keeps_app_and_tray_live_then_retries_only_unsettled_owner() -> None:
