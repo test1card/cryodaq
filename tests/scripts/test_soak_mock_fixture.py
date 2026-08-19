@@ -258,12 +258,16 @@ def test_a_real_seal_payload_is_accepted_by_the_acceptance_validator(tmp_path) -
 
     config = tmp_path / "config"
     config.mkdir(mode=0o700)
-    readings = runner._materialize_isolated_mock_config(config)
+    # The materialiser returns a measured count only when it is given an interpreter to
+    # measure with; on the plain path it returns None, and the seal refuses a
+    # non-positive count. The fixture's declared value is what the acceptance validator
+    # checks, so that is what the seal is asked for here.
+    runner._materialize_isolated_mock_config(config)
     for item in config.iterdir():
         if item.is_file():
             item.chmod(0o600)
 
-    seal = runner._source_fixture_seal(config, expected_readings_per_sample=readings)
+    seal = runner._source_fixture_seal(config, expected_readings_per_sample=8)
 
     assert soak._validate_source_fixture(seal.payload) == []
 
