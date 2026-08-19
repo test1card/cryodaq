@@ -37,6 +37,7 @@ from cryodaq.drivers.contracts import (
     _bounded_identifier,
     _issue_registry_runtime_binding,
 )
+from cryodaq.drivers.transport.mock_instrument import ExternalMockInstrumentClient
 from cryodaq.health.contract import (
     HealthTelemetryError,
     HealthTelemetryReader,
@@ -51,6 +52,9 @@ from cryodaq.health.simulator import (
 )
 
 DRIVER_REGISTRY_COMPAT_VERSION: Final = 1
+_EXTERNAL_MOCK_HEATER_INSTRUMENT: Final = "Keithley_1"
+_EXTERNAL_MOCK_LAKESHORE_INSTRUMENT: Final = "LS218_1"
+_EXTERNAL_MOCK_LAKESHORE_CHANNELS: Final = {1: "Т1 Криостат верх", 7: "Т7 Детектор"}
 logger = logging.getLogger(__name__)
 
 
@@ -163,6 +167,7 @@ class DriverConstructionContext:
     calibration_store: object | None = None
     data_dir: Path = Path("data")
     keithley_watchdog: Mapping[str, object] = field(default_factory=dict)
+    mock_instrument_client: ExternalMockInstrumentClient | None = None
 
     def __post_init__(self) -> None:
         if type(self.mock) is not bool:
@@ -170,6 +175,11 @@ class DriverConstructionContext:
         object.__setattr__(self, "data_dir", Path(self.data_dir))
         normalized = _normalize_keithley_watchdog(self.keithley_watchdog, path="keithley.watchdog")
         object.__setattr__(self, "keithley_watchdog", MappingProxyType(normalized))
+        client = self.mock_instrument_client
+        if client is not None and not isinstance(client, ExternalMockInstrumentClient):
+            raise DriverRegistryError("mock_instrument_client must be an ExternalMockInstrumentClient")
+        if not self.mock and client is not None:
+            raise DriverRegistryError("mock_instrument_client is available only in mock mode")
 
     @classmethod
     def from_root_config(
@@ -179,6 +189,7 @@ class DriverConstructionContext:
         mock: bool,
         calibration_store: object | None = None,
         data_dir: Path = Path("data"),
+        mock_instrument_client: ExternalMockInstrumentClient | None = None,
     ) -> DriverConstructionContext:
         if not isinstance(root, Mapping):
             raise DriverRegistryError("root config must be a mapping")
@@ -198,6 +209,7 @@ class DriverConstructionContext:
             calibration_store=calibration_store,
             data_dir=data_dir,
             keithley_watchdog=watchdog,
+            mock_instrument_client=mock_instrument_client,
         )
 
 
@@ -333,12 +345,66 @@ def _multiline_normalizer(values: dict[str, object], path: str) -> dict[str, obj
     return values
 
 
+def _require_external_mock_lakeshore_channels(
+    config: ValidatedInstrumentConfig,
+    channels: Mapping[int, str],
+) -> None:
+    """Reject an external plant binding whose channel labels are not canonical.
+
+    The thermal simulator plant is positional: channel 1 is the hot sensor and
+    channel 7 is the cold detector. The shipped calculator consumes the fixed
+    labels in ``_EXTERNAL_MOCK_LAKESHORE_CHANNELS``; binding the plant to a
+    driver that remaps those labels would publish the plant's hot value under a
+    different identity and silently feed the calculator wrong sensors.
+    """
+
+    for channel_num, expected_label in _EXTERNAL_MOCK_LAKESHORE_CHANNELS.items():
+        actual_label = channels.get(channel_num, "")
+        if actual_label != expected_label:
+            raise DriverRegistryError(
+                f"{config.name}: external thermal simulator requires channel {channel_num} "
+                f"to be {expected_label!r}, got {actual_label!r}"
+            )
+
+
+def require_complete_external_mock_roster(
+    validated: tuple[ValidatedInstrumentConfig, ...],
+    *,
+    mock_instrument_client: ExternalMockInstrumentClient | None,
+) -> None:
+    """Fail closed when an external client cannot bind the full thermal plant.
+
+    The external thermal simulator is bound by canonical instrument name (see
+    ``_construct_keithley`` and ``_construct_lakeshore``): a local roster that
+    omits or renames either ``Keithley_1`` or ``LS218_1`` silently drops the
+    CLI-selected client for that half of the plant, yet the run can start while
+    only part — or none — of the external thermal path is active. Refuse the
+    incomplete roster whenever an external client is supplied instead.
+    """
+
+    if mock_instrument_client is None:
+        return
+    expected = {
+        _EXTERNAL_MOCK_HEATER_INSTRUMENT: "keithley_2604b",
+        _EXTERNAL_MOCK_LAKESHORE_INSTRUMENT: "lakeshore_218s",
+    }
+    roster = {config.name: config.spec.type_name for config in validated}
+    missing = [name for name, type_name in expected.items() if roster.get(name) != type_name]
+    if missing:
+        raise DriverRegistryError(
+            "external thermal simulator client requires the complete canonical roster; "
+            f"missing or mis-typed: {', '.join(sorted(missing))}"
+        )
+
+
 def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConstructionContext) -> InstrumentDriver:
     from cryodaq.drivers.instruments.lakeshore_218s import LakeShore218S
 
     values = config.values
     channels = values["channels"]
     assert isinstance(channels, Mapping)
+    if config.name == _EXTERNAL_MOCK_LAKESHORE_INSTRUMENT and context.mock_instrument_client is not None:
+        _require_external_mock_lakeshore_channels(config, channels)
     return LakeShore218S(
         config.name,
         str(values["resource"]),
@@ -347,6 +413,9 @@ def _construct_lakeshore(config: ValidatedInstrumentConfig, context: DriverConst
         calibration_store=context.calibration_store,  # type: ignore[arg-type]
         connect_timeout_s=float(values["connect_timeout_s"]),
         read_timeout_s=float(values["read_timeout_s"]),
+        mock_instrument_client=(
+            context.mock_instrument_client if config.name == _EXTERNAL_MOCK_LAKESHORE_INSTRUMENT else None
+        ),
     )
 
 
@@ -451,6 +520,9 @@ def _construct_keithley(config: ValidatedInstrumentConfig, context: DriverConstr
         watchdog_mode=str(mode) if mode is not None else None,
         watchdog_enabled=enabled,
         watchdog_timeout_s=float(watchdog.get("timeout_s", 5.0)),
+        mock_instrument_client=(
+            context.mock_instrument_client if config.name == _EXTERNAL_MOCK_HEATER_INSTRUMENT else None
+        ),
     )
     timeout_s = float(watchdog.get("timeout_s", 5.0))
     poll_interval_s = float(config.values["poll_interval_s"])
