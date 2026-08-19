@@ -349,6 +349,103 @@ def test_classify_tree_bounds_unclassified_descendant_report() -> None:
     assert "4 unclassified descendants in total" in message
 
 
+def _tracker_argv() -> tuple[str, ...]:
+    return (sys.executable, "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13)")
+
+
+def test_classify_tree_accepts_exact_resource_tracker() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    engine = soak.ProcessIdentity(11, 110)
+    assistant = soak.ProcessIdentity(13, 130)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, _tracker_argv()),
+    ]
+    tree = soak.descendants(rows, root)
+    roles = soak.classify_tree(tree, root, bridge_identity=bridge)
+    assert roles == {
+        "launcher": root,
+        "bridge": bridge,
+        "engine": engine,
+        "assistant": assistant,
+    }
+
+
+def test_classify_tree_rejects_resource_tracker_with_unknown_parent() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(15, 150, 10, ("helper",)),
+        _snapshot(14, 140, 15, _tracker_argv()),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(ValueError, match=r"pid 14 started 140 parent 15"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+def test_classify_tree_rejects_resource_tracker_persisting_after_owner_exit() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    tree = {
+        root: _snapshot(10, 100, 1, ("launcher",)),
+        bridge: _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        soak.ProcessIdentity(13, 130): _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        soak.ProcessIdentity(14, 140): _snapshot(14, 140, 11, _tracker_argv()),
+    }
+    with pytest.raises(ValueError, match=r"pid 14 started 140 parent 11"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("python", "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13)"),
+        (sys.executable, "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13);import os"),
+        (sys.executable, "-B", "-s", "from multiprocessing.resource_tracker import main;main(13)"),
+        (sys.executable, "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(13)", "extra"),
+        (sys.executable, "module", "-c", "from multiprocessing.resource_tracker import main;main(13)"),
+        (sys.executable, "-B", "-s", "-c", "import multiprocessing.resource_tracker"),
+    ],
+)
+def test_classify_tree_rejects_resource_tracker_argv_near_misses(argv: tuple[str, ...]) -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, argv),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(ValueError, match=r"pid 14 started 140 parent 10"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
+def test_classify_tree_rejects_duplicate_resource_trackers() -> None:
+    root = soak.ProcessIdentity(10, 100)
+    bridge = soak.ProcessIdentity(12, 120)
+    rows = [
+        _snapshot(10, 100, 1, ("launcher",)),
+        _snapshot(11, 110, 10, ("python", "-m", "cryodaq.engine")),
+        _snapshot(12, 120, 10, ("inherited-launcher-argv",)),
+        _snapshot(13, 130, 10, ("python", "-m", "cryodaq.agents.assistant_bootstrap")),
+        _snapshot(14, 140, 10, _tracker_argv()),
+        _snapshot(16, 160, 10, _tracker_argv()),
+    ]
+    tree = soak.descendants(rows, root)
+    with pytest.raises(ValueError, match="more than one live multiprocessing resource tracker"):
+        soak.classify_tree(tree, root, bridge_identity=bridge)
+
+
 def test_recovery_requires_new_identity_readiness_and_health() -> None:
     old = soak.ProcessIdentity(42, 100)
     new = soak.ProcessIdentity(43, 200)

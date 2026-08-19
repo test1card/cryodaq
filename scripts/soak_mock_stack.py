@@ -361,6 +361,44 @@ def exact_process_role(argv: tuple[str, ...]) -> str | None:
     return None
 
 
+_RESOURCE_TRACKER_CODE = re.compile(r"from multiprocessing\.resource_tracker import main;main\(\d+\)")
+
+
+def _is_resource_tracker_argv(argv: tuple[str, ...]) -> bool:
+    """Recognize this interpreter's own multiprocessing resource tracker.
+
+    ``multiprocessing`` spawns it as
+    ``(interpreter, *flags, "-c", "from multiprocessing.resource_tracker
+    import main;main(<fd>)")`` where the fd is the tracker's read pipe.  The
+    match is exact, not a substring search: the interpreter path must resolve
+    to the same executable this process runs under (never the bare word
+    "python"), ``-c`` must be the penultimate token, the code string must be
+    the final token and match the module-main argv form, and every token in
+    between must be an interpreter flag.  A renamed binary, a generic "python"
+    command, an edited code string, or a trailing token is not recognized.
+    """
+
+    if not argv or len(argv) < 3 or argv[-2] != "-c":
+        return False
+    if os.path.realpath(argv[0]) != os.path.realpath(sys.executable):
+        return False
+    if _RESOURCE_TRACKER_CODE.fullmatch(argv[-1]) is None:
+        return False
+    index = 1
+    while index < len(argv) - 2:
+        token = argv[index]
+        if not token.startswith("-"):
+            return False
+        if token == "-X":
+            value = index + 1
+            if value >= len(argv) - 2 or argv[value].startswith("-"):
+                return False
+            index = value + 1
+        else:
+            index += 1
+    return True
+
+
 def classify_tree(
     tree: Mapping[ProcessIdentity, ProcessSnapshot],
     root: ProcessIdentity,
@@ -384,8 +422,12 @@ def classify_tree(
         raise ValueError("positive bridge identity collides with an engine/assistant role")
     result = {"launcher": root, "bridge": bridge_identity}
     unclassified: list[str] = []
+    resource_trackers: list[tuple[ProcessIdentity, ProcessSnapshot]] = []
     for identity, item in tree.items():
         if identity in {root, bridge_identity}:
+            continue
+        if _is_resource_tracker_argv(item.argv):
+            resource_trackers.append((identity, item))
             continue
         role = exact_process_role(item.argv)
         if role is None:
@@ -395,6 +437,19 @@ def classify_tree(
         if role in result:
             raise ValueError(f"duplicate live {role} process")
         result[role] = identity
+    if len(resource_trackers) > 1:
+        raise ValueError(
+            "more than one live multiprocessing resource tracker "
+            "(bound 1: one interpreter family owns exactly one tracker)"
+        )
+    if resource_trackers:
+        tracker_identity, tracker_item = resource_trackers[0]
+        if tracker_item.parent_pid not in {item.pid for item in result.values()}:
+            parent = "none" if tracker_item.parent_pid is None else str(tracker_item.parent_pid)
+            unclassified.append(
+                f"pid {tracker_identity.pid} started {tracker_identity.started_ns} "
+                f"parent {parent} argv {tracker_item.argv!r}"
+            )
     if unclassified:
         named = unclassified[:3]
         detail = "; ".join(named)
