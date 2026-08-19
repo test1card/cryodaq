@@ -198,9 +198,40 @@ def test_nonzero_child_exit_reports_the_code_and_both_streams(parser: str, prefi
     assert message.startswith(prefix)
     assert "exit code 3" in message
     assert "stderr-marker" in message, "the stderr stream must survive into the diagnosis"
-    assert "...[truncated]" in message
-    assert "z" * runner._DIAGNOSTIC_OUTPUT_LIMIT in message
+    assert "...[truncated" in message
+    assert "z" * runner._DIAGNOSTIC_HEAD_SHARE in message
     assert "z" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + 1) not in message, "the 4096-character bound must hold"
+
+
+def test_a_bounded_stream_keeps_its_end_where_the_cause_is_written() -> None:
+    """The cause of a pytest child failure is written at the END of its output.
+
+    A head-only bound sent four kilobytes of the child test's own source text and
+    dropped the assertion, the traceback and the summary line. Both ends are kept
+    now, so this asserts the LAST characters survive, not only the first.
+    """
+
+    middle = "m" * (runner._DIAGNOSTIC_OUTPUT_LIMIT * 3)
+    payload = ("HEAD-MARKER" + middle + "TAIL-MARKER").encode("utf-8")
+    message = runner._child_failure_message(1, payload, b"")
+    assert "HEAD-MARKER" in message, "the start of the stream must survive"
+    assert "TAIL-MARKER" in message, "the END of the stream must survive; this is the whole fix"
+    assert "...[truncated" in message
+    assert middle not in message, "the bound must still drop the middle"
+
+
+def test_a_bounded_stream_says_how_many_characters_it_dropped() -> None:
+    over = 137
+    payload = ("q" * (runner._DIAGNOSTIC_OUTPUT_LIMIT + over)).encode("utf-8")
+    message = runner._child_failure_message(1, payload, b"")
+    assert f"truncated {over} character(s)" in message, "a bound that hides its size cannot be judged"
+
+
+def test_a_stream_at_the_bound_is_not_marked_as_truncated() -> None:
+    payload = ("e" * runner._DIAGNOSTIC_OUTPUT_LIMIT).encode("utf-8")
+    message = runner._child_failure_message(1, payload, b"")
+    assert "truncated" not in message, "nothing was dropped, so nothing may say it was"
+    assert "e" * runner._DIAGNOSTIC_OUTPUT_LIMIT in message
 
 
 def test_child_failure_message_names_an_empty_stream_instead_of_omitting_it() -> None:
