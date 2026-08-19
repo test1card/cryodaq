@@ -41,6 +41,9 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         *(name for name, _content in runner._ISOLATED_STATIC_CONFIGS),
         "instruments.yaml",
         "channel_descriptors.yaml",
+        # Derived from the roster rather than written as a static string; see the test
+        # below for why it cannot be one.
+        "safety.yaml",
     }
     assert {path.name for path in tmp_path.iterdir()} == expected
     assert all(".local." not in name for name in expected)
@@ -198,6 +201,36 @@ def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_p
     monkeypatch.setattr(runner, "_MAX_SOURCE_FIXTURE_FILE_BYTES", 1)
     with pytest.raises(runner._RunnerFoundationError, match="exceeds the reviewed bound"):
         runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+
+
+def test_the_fixture_declares_critical_channels_that_actually_exist(tmp_path) -> None:
+    """`critical_channels` entries are EXACT canonical identities, never patterns.
+
+    `_resolve_critical_bindings` does `if channel_id not in storage_catalog.by_channel_id`,
+    so the literal string ".*" is simply a channel nobody has. The fixture declared exactly
+    that, meaning "everything", and the engine therefore refused to start at its boot-time
+    safety liveness check -- the F-1 silent-safety-kill guard doing its job. Measured on
+    Ubuntu 22.04.5: the launcher started, the engine died before its readiness receipt, and
+    the reason was `Dead safety/alarm channel pattern(s): 1 match NO channel ... pattern='.*'`.
+    """
+    runner._materialize_isolated_mock_config(tmp_path)
+
+    safety = yaml.safe_load((tmp_path / "safety.yaml").read_text(encoding="utf-8"))
+    descriptors = yaml.safe_load((tmp_path / "channel_descriptors.yaml").read_text(encoding="utf-8"))
+    roster = {item["channel_id"] for item in descriptors["descriptors"]}
+
+    declared = safety["critical_channels"]
+    assert declared, "a fixture with no critical channel declares no safety at all"
+    assert set(declared) <= roster, (
+        f"every declared identity must exist on the roster; strays: {sorted(set(declared) - roster)}"
+    )
+    assert set(declared) == roster, "the fixture's intent is that every channel is critical"
+    # A dot is legitimate INSIDE an identity -- the roster carries names like "T1.raw" --
+    # so the check is for the wildcard that made the old declaration dead, not for every
+    # character a regular expression happens to use.
+    assert all("*" not in name for name in declared), (
+        "these are identities, not patterns; a wildcard here matches no channel at all"
+    )
 
 
 class _LogEvidence:

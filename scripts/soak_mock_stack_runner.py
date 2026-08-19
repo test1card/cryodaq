@@ -146,7 +146,6 @@ os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 _ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
 _ISOLATED_STATIC_CONFIGS: Final = (
-    ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
@@ -481,6 +480,29 @@ asyncio.run(probe())
         raise _RunnerFoundationError("tracked passive soak descriptor bindings do not match")
     (config_dir / "channel_descriptors.yaml").write_text(
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    # `critical_channels` entries are EXACT canonical identities, not patterns:
+    # `_resolve_critical_bindings` does `if channel_id not in storage_catalog.by_channel_id`.
+    # The fixture used to declare the literal string ".*", meaning "everything", and no
+    # channel has that identity, so the engine refused to start at its boot-time safety
+    # liveness check -- the F-1 silent-safety-kill guard doing exactly its job. Measured on
+    # Ubuntu 22.04.5: the launcher started, the engine died before its readiness receipt,
+    # and the reason was
+    #   Dead safety/alarm channel pattern(s): 1 match NO channel on the plane their
+    #   consumer sees ... pattern='.*' source=safety.yaml critical_channels
+    # Deriving the list from the roster keeps the original intent -- every channel is
+    # critical -- and cannot drift from the descriptors the same call just wrote.
+    (config_dir / "safety.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "critical_channels": sorted(descriptor_ids),
+                "require_keithley_for_run": False,
+                "keithley_channels": [],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     return readings_per_sample
