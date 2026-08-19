@@ -12,7 +12,8 @@ from scripts import soak_mock_engine as soak
 
 
 def _line(level: str, msg: str, name: str = "cryodaq.engine") -> str:
-    return f"2026-07-09 16:00:00 │ {level:<8} │ {name} │ {msg}"
+    delimiter = chr(0x2502)
+    return f"2026-07-09 16:00:00 {delimiter} {level:<8} {delimiter} {name} {delimiter} {msg}"
 
 
 def test_scan_log_flags_error_line():
@@ -94,3 +95,245 @@ def test_scan_log_traceback_continuation_lines_do_not_double_count():
 
 def test_scan_log_empty_text_returns_no_violations():
     assert soak.scan_log("") == []
+
+
+def test_scan_log_rejects_non_empty_unreadable_log():
+    text = "literal escape " + chr(92) + "u2502 ERROR " + chr(92) + "u2502 message"
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert str(exc) == "could not read log: no structured lines parsed from non-empty log"
+    else:
+        raise AssertionError("unreadable non-empty log was accepted")
+
+
+def test_scan_log_rejects_mixed_log_with_literal_escaped_error_record():
+    text = "\n".join(
+        [
+            _line("INFO", "engine started"),
+            "literal escape " + chr(92) + "u2502 ERROR " + chr(92) + "u2502 message",
+        ]
+    )
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        # The message must describe THIS cause. The mixed log did parse structured
+        # lines, so the all-unreadable message would state a property that was not
+        # measured, and a reader debugging a red soak would look for the wrong thing.
+        assert "malformed ERROR/CRITICAL record" in str(exc), str(exc)
+        assert "no structured lines parsed" not in str(exc), str(exc)
+    else:
+        raise AssertionError("mixed log with malformed ERROR record was accepted")
+
+
+def test_scan_log_clean_structured_log_is_readable():
+    assert soak.scan_log(_line("INFO", "engine started")) == []
+
+
+def test_scan_log_corrupt_line_with_one_delimiter_is_unreadable():
+    """A capture reduced to ``not-a-log │ arbitrary text`` retains one real
+    delimiter but carries no valid level and no name/message fields. It must
+    not count as a parsed record, or scan_log would return [] and certify a
+    corrupt capture as readable and clean."""
+    text = "not-a-log " + chr(0x2502) + " arbitrary text"
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert "no structured lines parsed from non-empty log" in str(exc), str(exc)
+    else:
+        raise AssertionError("corrupt single-delimiter log was accepted as readable")
+
+
+def test_scan_log_truncated_missing_fields_is_unreadable():
+    """A line with a recognized level but missing the name and message fields
+    is not a complete structured record; a log of only such lines must be
+    unreadable, not clean."""
+    delimiter = chr(0x2502)
+    text = f"2026-07-09 16:00:00 {delimiter} INFO     {delimiter} cryodaq.engine"
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert "no structured lines parsed from non-empty log" in str(exc), str(exc)
+    else:
+        raise AssertionError("truncated missing-field line was accepted as readable")
+
+
+def test_scan_log_mixed_log_with_truncated_error_record_is_unreadable():
+    """A truncated ERROR record beside a readable INFO line must fail the log
+    as unreadable rather than be silently skipped and certify the run clean.
+    This is the real-delimiter sibling of the escaped-``\\u2502`` case covered
+    by test_scan_log_rejects_mixed_log_with_literal_escaped_error_record."""
+    text = "\n".join(
+        [
+            _line("INFO", "engine started"),
+            "not-a-log " + chr(0x2502) + " ERROR",
+        ]
+    )
+    try:
+        soak.scan_log(text)
+    except soak.UnreadableLogError as exc:
+        assert "malformed ERROR/CRITICAL record" in str(exc), str(exc)
+        assert "no structured lines parsed" not in str(exc), str(exc)
+    else:
+        raise AssertionError("mixed log with truncated ERROR record was accepted")
+
+
+def test_run_soak_reports_the_specific_unreadable_reason(tmp_path):
+    """The retained reason must name the cause that actually occurred.
+
+    A mixed log DID parse structured lines, so reporting "no structured lines parsed"
+    is false and points an operator at the wrong thing. `scan_log` already
+    distinguishes the two causes; this pins that the distinction survives to
+    `SoakResult` instead of being discarded by `run_soak`.
+    """
+    bar = chr(0x2502)
+    # The child must emit a LITERAL backslash then u2502, not the character that
+    # escape produces. Writing chr(92) in THIS file evaluates here and hands the
+    # child a real escape, which Python turns back into the delimiter -- giving a
+    # readable line and a test that quietly measures the empty-log case instead.
+    # So the text "chr(92)" is passed through unevaluated and the CHILD evaluates it.
+    backslash = "chr(92)"
+    script = (
+        "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) + ' child ' "
+        "+ chr(0x2502) + ' started', flush=True);"
+        "print('2026 ' + " + backslash + " + 'u2502 ERROR ' + " + backslash + " + 'u2502 broke', flush=True)"
+    )
+    log_path = tmp_path / "mixed.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+
+    # The INFO line really did parse, so this is the mixed case, not the empty one.
+    assert f" {bar} INFO" in log_path.read_text(encoding="utf-8")
+    assert result.log_readable is False
+    assert result.ok is False
+    # getattr, not attribute access: reverting production removes the field, and an
+    # AttributeError proves only that a symbol is missing. This must fail as an
+    # ASSERTION about what the driver reports.
+    reason = getattr(result, "unreadable_reason", None)
+    assert reason is not None, "run_soak discarded the reason scan_log raised"
+    assert "malformed ERROR/CRITICAL record" in reason, reason
+    assert "no structured lines parsed" not in reason, reason
+
+
+def test_run_soak_keeps_parsed_violations_when_log_is_unreadable(tmp_path):
+    error = _line("ERROR", "definite failure")
+    script = (
+        "print(" + repr(error) + ", flush=True);"
+        "print('literal escape ' + chr(92) + 'u2502 ERROR ' + chr(92) + 'u2502 damaged', flush=True)"
+    )
+    result = soak.run_soak(
+        1.0,
+        log_path=tmp_path / "mixed-with-error.log",
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is False
+    assert result.violations == [error]
+
+
+def test_run_soak_keeps_no_reason_when_the_log_is_readable(tmp_path):
+    """A readable log carries no reason, so the field cannot go stale."""
+    script = "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) + ' child " + chr(0x2502) + " ok', flush=True)"
+    result = soak.run_soak(
+        1.0,
+        log_path=tmp_path / "clean.log",
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+
+    assert result.log_readable is True
+    assert getattr(result, "unreadable_reason", None) is None
+
+
+def test_run_soak_forces_child_utf8_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1251")
+    script = (
+        "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) + ' child ' + chr(0x2502) + ' Привет', flush=True)"
+    )
+    log_path = tmp_path / "child.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is True
+    assert "Привет" in log_path.read_text(encoding="utf-8")
+
+
+def test_run_soak_fails_when_child_writes_invalid_utf8_bytes(tmp_path):
+    """Native bytes bypassing the child's stream encoding must fail the soak.
+
+    A child that emits a valid INFO record then writes an invalid-UTF-8 byte
+    straight to fd 1 (os.write, not through the text layer
+    PYTHONIOENCODING/PYTHONUTF8 control) produces a captured log that is not
+    valid UTF-8. Decoding it with errors="replace" would silently hide the
+    corruption and certify a clean run; the strict decode must mark the log
+    unreadable instead.
+    """
+    script = (
+        "import os, signal, sys, time\n"
+        "def _h(*_: object) -> None: sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _h)\n"
+        "print('2026 ' + chr(0x2502) + ' INFO     ' + chr(0x2502) "
+        "+ ' child ' + chr(0x2502) + ' started', flush=True)\n"
+        "os.write(1, b'ERR\\xffOR\\n')\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n"
+    )
+    log_path = tmp_path / "undecodable.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is False
+    assert result.ok is False
+    reason = getattr(result, "unreadable_reason", None)
+    assert reason is not None, "run_soak must report the decode failure"
+    assert "not valid UTF-8" in reason, reason
+
+
+def test_run_soak_preserves_readable_violations_before_invalid_bytes(tmp_path):
+    """A strict whole-file decode must not hide violations that were readable.
+
+    When the captured log opens with a valid structured ERROR record and a
+    later line carries an invalid-UTF-8 byte (native code bypassing the child's
+    text stream), the log is correctly failed as unreadable — but the readable
+    ERROR line is a definite violation and must still be reported, not collapsed
+    into violations=0.
+    """
+    error = _line("ERROR", "definite failure")
+    script = (
+        "import os, signal, sys, time\n"
+        "def _h(*_: object) -> None: sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, _h)\n"
+        "print(" + repr(error) + ", flush=True)\n"
+        "os.write(1, b'bad\\xffbytes\\n')\n"
+        "while True:\n"
+        "    time.sleep(0.1)\n"
+    )
+    log_path = tmp_path / "undecodable-with-error.log"
+    result = soak.run_soak(
+        1.0,
+        log_path=log_path,
+        grace_s=5,
+        cmd=(soak.sys.executable, "-c", script),
+        poll_interval_s=0.001,
+    )
+    assert result.log_readable is False
+    assert result.ok is False
+    reason = getattr(result, "unreadable_reason", None)
+    assert reason is not None, "run_soak must report the decode failure"
+    assert "not valid UTF-8" in reason, reason
+    assert result.violations == [error]
