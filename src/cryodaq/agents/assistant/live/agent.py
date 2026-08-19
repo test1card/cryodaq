@@ -242,8 +242,10 @@ class _EventDedup:
         self._window_s = window_s
         self._escalate_after_s = escalate_after_s
         self._seen: dict[str, float] = {}
+        self._activity: dict[str, float] = {}
         self._last_allowed: dict[str, float] = {}
         self._undelivered: set[str] = set()
+        self._suppressed: set[str] = set()
         # An outcome belongs to the ATTEMPT that produced it, not to the alarm.
         # With `timeout_s: 120` and two concurrent inferences, attempt B can be
         # admitted and delivered while attempt A is still pending; A's late
@@ -313,9 +315,13 @@ class _EventDedup:
         """
 
         horizon = now - max(self._window_s, self._escalate_after_s)
-        self._seen = {key: stamp for key, stamp in self._seen.items() if stamp >= horizon}
-        self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in self._seen}
-        self._undelivered &= set(self._seen)
+        retained = {key for key, stamp in self._activity.items() if stamp >= horizon}
+        retained |= {key for key, stamp in self._last_told.items() if stamp >= horizon}
+        self._activity = {key: stamp for key, stamp in self._activity.items() if key in retained}
+        self._seen = {key: stamp for key, stamp in self._seen.items() if key in retained}
+        self._last_allowed = {key: stamp for key, stamp in self._last_allowed.items() if key in retained}
+        self._undelivered &= retained
+        self._suppressed &= retained
         # PRUNING DOES NOT ABANDON.  It is tempting -- the ids it leaves in
         # `_pending` are orphans -- but a pruned alarm's attempt may be SLOW
         # rather than dead: the alarm fired once, its narration is still queued,
@@ -324,15 +330,15 @@ class _EventDedup:
         # that alarm.  The orphan is instead cleared at the moment the same
         # alarm is admitted again, in `_allow`, where a replacement narration
         # provably exists.
-        self._attempt = {key: seq for key, seq in self._attempt.items() if key in self._seen}
-        self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in self._seen}
-        self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in self._seen}
+        self._attempt = {key: seq for key, seq in self._attempt.items() if key in retained}
+        self._admitted_at = {key: stamp for key, stamp in self._admitted_at.items() if key in retained}
+        self._last_told = {key: stamp for key, stamp in self._last_told.items() if key in retained}
         # The generation marker is pruned WITH its alarm.  Left behind, it still
         # names the retired occurrence's attempt, so a success from that
         # occurrence arriving BEFORE the alarm fires again compares equal and is
         # accepted -- recreating `_seen` and `_last_allowed` and suppressing the
         # new occurrence's first event.
-        self._generation = {key: seq for key, seq in self._generation.items() if key in self._seen}
+        self._generation = {key: seq for key, seq in self._generation.items() if key in retained}
         # `_settled_below` and `_settled_above` are pruned as they are written;
         # see `_mark_settled`.  Nothing to do here.
         return
@@ -367,6 +373,7 @@ class _EventDedup:
         applied to a single id at a moment `_prune` cannot see.
         """
 
+        self._activity.pop(event_id, None)
         self._seen.pop(event_id, None)
         self._last_allowed.pop(event_id, None)
         self._admitted_at.pop(event_id, None)
@@ -380,6 +387,7 @@ class _EventDedup:
         self._abandon(event_id)
         self._generation.pop(event_id, None)
         self._undelivered.discard(event_id)
+        self._suppressed.discard(event_id)
 
     def _allow(self, event_id: str, now: float) -> bool:
         fresh_occurrence = event_id not in self._attempt
@@ -398,6 +406,8 @@ class _EventDedup:
                 del self._pending_alarm[orphan]
                 self._abandoned.append(orphan)
         self._last_allowed[event_id] = now
+        self._seen[event_id] = now
+        self._activity[event_id] = now
         self._admitted_at[event_id] = now
         self._next_attempt += 1
         self._attempt[event_id] = self._next_attempt
@@ -423,22 +433,36 @@ class _EventDedup:
         # arriving while the fresh narration is still IN FLIGHT would start yet
         # another retry on the strength of a failure that has been answered.
         self._undelivered.discard(event_id)
+        self._suppressed.discard(event_id)
         return True
 
     def should_dispatch(self, event_id: str) -> bool:
         now = time.monotonic()
         last_seen = self._seen.get(event_id)
+        last_activity = self._activity.get(event_id)
         last_allowed = self._last_allowed.get(event_id)
+        source_quiet = last_activity is None or last_activity < now - self._window_s
+        quiet_gap_rearms = source_quiet and event_id in self._suppressed
 
         # RETIRE THIS ALARM'S OWN STALE STATE FIRST.  `_prune` runs after
-        # `_seen` is refreshed, so it can never retire the alarm currently
+        # `_activity` is refreshed, so it can never retire the alarm currently
         # firing -- and a lone CRITICAL, the only one qualifying, therefore kept
         # its `_attempt` and `_generation` across an arbitrarily long silence.
         # A success from that retired occurrence then passed the generation
         # check and cleared the CURRENT occurrence's failure marker.  Retiring
         # here uses the PRE-REFRESH timestamp, which is the only moment the
         # gap is visible.
-        if last_seen is not None and last_seen < now - max(self._window_s, self._escalate_after_s):
+        last_told = self._last_told.get(event_id)
+        retirement_horizon = now - max(self._window_s, self._escalate_after_s)
+        if (
+            last_activity is not None
+            and last_activity < retirement_horizon
+            and not (
+                last_told is not None
+                and last_told >= retirement_horizon
+                and last_activity <= self._admitted_at.get(event_id, last_activity)
+            )
+        ):
             self._retire(event_id)
             # CLEAR THE LOCAL FIRST-SIGHTING STATE TOO.  `_retire` drops the
             # stored state, but this local still held the old timestamp -- so
@@ -449,8 +473,12 @@ class _EventDedup:
             # must be treated as one everywhere.
             last_seen = None
             last_allowed = None
+        elif last_activity is not None and last_activity < now - self._window_s:
+            # A quiet gap ends the suppressed occurrence even when it is too
+            # short for full retirement.
+            self._suppressed.discard(event_id)
 
-        self._seen[event_id] = now
+        self._activity[event_id] = now
         self._prune(now)
 
         # SCOPED TO THE CURRENT OCCURRENCE.  Asking only "does this alarm own a
@@ -499,9 +527,13 @@ class _EventDedup:
             # so this does not silence the alarm. It declines to tell the
             # operator a 65th time by a system that has not managed to tell them
             # once.
+            if event_id not in self._undelivered and last_allowed is not None:
+                self._suppressed.add(event_id)
             return False
 
-        if last_seen is None or last_seen < now - self._window_s:
+        if (
+            quiet_gap_rearms or last_seen is None or last_seen < now - self._window_s
+        ) and event_id not in self._suppressed:
             # Genuinely quiet for a full window: the original semantics.
             return self._allow(event_id, now)
         if last_allowed is None:
@@ -549,6 +581,8 @@ class _EventDedup:
             # exists, so no received-to-received maximum can be stated here.  Enforcing one would need a deadline that
             # spans this whole path, which is a design change beyond OC-028.
             return self._allow(event_id, now)
+        if event_id not in self._undelivered and last_allowed is not None:
+            self._suppressed.add(event_id)
         return False
 
     def _has_settled(self, attempt: int) -> bool:

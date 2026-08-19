@@ -900,6 +900,61 @@ def test_candidate_runner_executes_each_active_parameter_once_and_deselects_it_f
     ]
 
 
+def test_release_selection_runs_strictly_and_refuses_skip_marker(tmp_path: Path) -> None:
+    """The release suite registers no guards, so its whole selection must be fed
+    to the strict active-guard runner as required files; a skip/xfail marker on
+    it must be a red strict receipt, never a silent green (PR #70 finding).
+    """
+    files, nodes = ci_guard_execution.checkout_execution_selection(ROOT, "release")
+    assert files, "release suite selects no files"
+    assert not nodes
+
+    basetemp = tmp_path / "release-strict-state"
+    basetemp.mkdir()
+    command = ci_candidate_runner._strict_guard_command(
+        "release",
+        active_nodes=(),
+        basetemp=basetemp,
+        execution_root="git-index",
+        pytest_command=ci_active_checkout_runner._PYTEST,
+        required_files=files,
+    )
+    assert command is not None, "release strict command must exist despite zero registered guards"
+    assert "tools.ci_guard_execution" in command
+    required_offset = command.index("--cryodaq-active-guard-required-files")
+    assert command[required_offset + 1] in files
+
+    fixture = "tests/release/test_required_fixture.py"
+    node = f"{fixture}::test_guard"
+    root = tmp_path / "release-fixture"
+    root.mkdir()
+    # A non-release registry guard proves the release suite itself stays guard-free
+    # while its selection is still enforced through required files.
+    _write_registry(root, "tests/core/test_guard.py::test_guard", partition="core")
+    _write_test(root, node, "def test_guard(): pass\n")
+    passed = _run_strict(
+        root,
+        suite="release",
+        selected=(fixture,),
+        extra=("--cryodaq-active-guard-required-files", fixture),
+    )
+    passed_payload = _receipt(passed)
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert passed_payload["result"] == "passed"
+
+    _write_test(root, node, "import pytest\n@pytest.mark.skip(reason='conditional')\ndef test_guard(): pass\n")
+    skipped = _run_strict(
+        root,
+        suite="release",
+        selected=(fixture,),
+        extra=("--cryodaq-active-guard-required-files", fixture),
+    )
+    skipped_payload = _receipt(skipped)
+    assert skipped.returncode != 0
+    assert skipped_payload["result"] == "failed"
+    assert any("forbidden conditional markers ['skip']" in value for value in skipped_payload["violations"])
+
+
 def test_candidate_runner_rejects_real_zero_exit_without_session_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

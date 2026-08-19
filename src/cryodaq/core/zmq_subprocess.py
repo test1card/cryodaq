@@ -67,6 +67,7 @@ DEFAULT_ASSISTANT_CMD_ADDR = "tcp://127.0.0.1:5557"
 # the engine's cmd_addr.
 _ASSISTANT_CMD_PREFIXES = ("assistant.", "rag.")
 _ASSISTANT_PROTOCOL_VERSION_CMD = "assistant.protocol_version"
+_BRIDGE_INGRESS_MONOTONIC_KEY = "__bridge_ingress_monotonic"
 _ASSISTANT_READ_ACTIONS = frozenset(
     {
         _ASSISTANT_PROTOCOL_VERSION_CMD,
@@ -370,6 +371,7 @@ def zmq_bridge_main(
                     except Exception:
                         reading_dict = None
                     if reading_dict is not None:
+                        reading_dict[_BRIDGE_INGRESS_MONOTONIC_KEY] = time.monotonic()
                         try:
                             data_queue.put_nowait(reading_dict)
                         except queue.Full:

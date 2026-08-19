@@ -68,8 +68,10 @@ def test_engine_exits_code_2_on_descriptor_config_error(monkeypatch, caplog: pyt
         shutdown_capability: str = "",
         engine_ready_nonce: str = "",
         engine_ready_channel_fd: int | None = None,
+        mock_instrument_client: object | None = None,
     ) -> None:
         assert mock is True
+        assert mock_instrument_client is None
         assert engine_instance_id == ""
         assert shutdown_capability == ""
         assert engine_ready_nonce == ""

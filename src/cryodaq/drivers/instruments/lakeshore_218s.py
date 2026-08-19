@@ -12,6 +12,7 @@ from typing import Any
 from cryodaq.analytics.calibration import CalibrationStore
 from cryodaq.drivers.base import ChannelStatus, InstrumentDriver, Reading
 from cryodaq.drivers.transport.gpib import GPIBTransport
+from cryodaq.drivers.transport.mock_instrument import ExternalMockInstrumentClient
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class LakeShore218S(InstrumentDriver):
         calibration_store: CalibrationStore | None = None,
         connect_timeout_s: float = 3.0,
         read_timeout_s: float = 3.0,
+        mock_instrument_client: ExternalMockInstrumentClient | None = None,
     ) -> None:
         super().__init__(name, mock=mock)
         for label, value in (
@@ -48,6 +50,9 @@ class LakeShore218S(InstrumentDriver):
         self._read_timeout_s = float(read_timeout_s)
         self._instrument_id: str = ""
         self._calibration_store = calibration_store
+        if not mock and mock_instrument_client is not None:
+            raise ValueError("mock_instrument_client is available only in mock mode")
+        self._mock_instrument_client = mock_instrument_client
         self._runtime_warning_cache: set[tuple[str, str]] = set()
         self._use_per_channel_krdg: bool = False
         self._use_per_channel_srdg: bool = False
@@ -75,7 +80,7 @@ class LakeShore218S(InstrumentDriver):
             timeout_ms=max(1, int(round(self._read_timeout_s * 1000))),
         )
 
-        if not self.mock:
+        if not self.mock or self._mock_instrument_client is not None:
             # Phase 2c F.1: validate IDN with retry-after-clear fallback.
             # The previous fallback (log a warning and proceed) allowed silent
             # mis-routing to a wrong GPIB address — KRDG? would still produce
@@ -86,7 +91,7 @@ class LakeShore218S(InstrumentDriver):
 
             for attempt in range(2):  # initial + one retry after device clear
                 try:
-                    idn_raw = (await self._transport.query("*IDN?", timeout_ms=idn_timeout_ms)).strip()
+                    idn_raw = (await self._query("*IDN?", timeout_ms=idn_timeout_ms)).strip()
                 except Exception as exc:
                     log.warning(
                         "%s: *IDN? query failed (attempt %d/2): %s",
@@ -155,6 +160,8 @@ class LakeShore218S(InstrumentDriver):
         if not self._connected:
             raise RuntimeError(f"{self.name}: instrument is not connected")
 
+        acquisition_started_at = _time.time()
+        acquisition_started_monotonic = _time.monotonic()
         runtime_policies = self._runtime_channel_policies()
         if not runtime_policies:
             readings = await self._read_krdg_channels()
@@ -166,7 +173,7 @@ class LakeShore218S(InstrumentDriver):
 
         # Periodic RDGST? status check (every 60s)
         now = _time.monotonic()
-        if not self.mock and now - self._last_status_check > 60.0:
+        if (not self.mock or self._mock_instrument_client is not None) and now - self._last_status_check > 60.0:
             self._last_status_check = now
             try:
                 self._last_status_result = await self.read_status()
@@ -197,7 +204,17 @@ class LakeShore218S(InstrumentDriver):
                     "reason": self._last_status_reason,
                 }
 
+        for reading in readings:
+            reading.metadata["acquisition_started_at"] = acquisition_started_at
+            reading.metadata["acquisition_started_monotonic"] = acquisition_started_monotonic
         return readings
+
+    async def _query(self, command: str, timeout_ms: int | None = None) -> str:
+        if self._mock_instrument_client is not None:
+            if timeout_ms is None:
+                timeout_ms = max(1, int(round(self._read_timeout_s * 1000)))
+            return await self._mock_instrument_client.query(command, timeout_ms=timeout_ms)
+        return await self._transport.query(command, timeout_ms=timeout_ms)
 
     def failure_readings(self) -> list[Reading]:
         """Represent a failed whole-instrument poll for every temperature channel.
@@ -230,13 +247,13 @@ class LakeShore218S(InstrumentDriver):
         ]
 
     async def _read_krdg_channels(self) -> list[Reading]:
-        if self.mock:
+        if self.mock and self._mock_instrument_client is None:
             return self._mock_readings()
 
         if self._use_per_channel_krdg:
             return await self._read_krdg_per_channel()
 
-        raw_response = await self._transport.query("KRDG?")
+        raw_response = await self._query("KRDG?")
         log.debug("%s: KRDG? -> %s", self.name, raw_response)
         readings = self._parse_response(raw_response, unit="K", reading_kind="temperature")
         if len(readings) < 8:
@@ -268,7 +285,7 @@ class LakeShore218S(InstrumentDriver):
         if now - self._krdg_last_batch_retry >= self._krdg_batch_retry_interval_s:
             self._krdg_last_batch_retry = now
             try:
-                raw = await self._transport.query("KRDG?")
+                raw = await self._query("KRDG?")
                 readings = self._parse_response(raw, unit="K", reading_kind="temperature")
                 if len(readings) >= 8:
                     log.info(
@@ -284,7 +301,7 @@ class LakeShore218S(InstrumentDriver):
         readings: list[Reading] = []
         for ch in range(1, 9):
             try:
-                raw = await self._transport.query(f"KRDG? {ch}")
+                raw = await self._query(f"KRDG? {ch}")
                 parsed = self._parse_response(raw, unit="K", reading_kind="temperature")
                 if parsed:
                     # Fix channel index — _parse_response starts at 1 for first token
@@ -320,13 +337,13 @@ class LakeShore218S(InstrumentDriver):
     async def read_srdg_channels(self) -> list[Reading]:
         if not self._connected:
             raise RuntimeError(f"{self.name}: instrument is not connected")
-        if self.mock:
+        if self.mock and self._mock_instrument_client is None:
             return self._mock_sensor_readings()
 
         if self._use_per_channel_srdg:
             return await self._read_srdg_per_channel()
 
-        raw_response = await self._transport.query("SRDG?")
+        raw_response = await self._query("SRDG?")
         log.debug("%s: SRDG? -> %s", self.name, raw_response)
         readings = self._parse_response(raw_response, unit="sensor_unit", reading_kind="raw_sensor")
         if len(readings) < 8:
@@ -358,7 +375,7 @@ class LakeShore218S(InstrumentDriver):
         if now - self._srdg_last_batch_retry >= self._srdg_batch_retry_interval_s:
             self._srdg_last_batch_retry = now
             try:
-                raw = await self._transport.query("SRDG?")
+                raw = await self._query("SRDG?")
                 readings = self._parse_response(raw, unit="sensor_unit", reading_kind="raw_sensor")
                 if len(readings) >= 8:
                     log.info(
@@ -374,7 +391,7 @@ class LakeShore218S(InstrumentDriver):
         readings: list[Reading] = []
         for ch in range(1, 9):
             try:
-                raw = await self._transport.query(f"SRDG? {ch}")
+                raw = await self._query(f"SRDG? {ch}")
                 parsed = self._parse_response(raw, unit="sensor_unit", reading_kind="raw_sensor")
                 if parsed:
                     reading = parsed[0]
@@ -412,14 +429,14 @@ class LakeShore218S(InstrumentDriver):
         Bitmap bits: 0=invalid, 4=T_under, 5=T_over, 6=sensor_overrange, 7=sensor_zero.
         Call periodically (every 30-60s), not every poll cycle.
         """
-        if self.mock:
+        if self.mock and self._mock_instrument_client is None:
             return {ch: 0 for ch in range(1, 9)}
         if not self._connected:
             raise RuntimeError(f"{self.name}: instrument is not connected")
         result: dict[int, int] = {}
         for ch in range(1, 9):
             try:
-                raw = await self._transport.query(f"RDGST? {ch}")
+                raw = await self._query(f"RDGST? {ch}")
                 result[ch] = int(raw.strip())
             except Exception as exc:
                 log.warning("%s: RDGST? %d failed: %s", self.name, ch, exc)

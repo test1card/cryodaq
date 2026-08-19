@@ -110,10 +110,23 @@ class XLSXExporter:
 
         # Read across hot SQLite + cold Parquet: rotated days live only in the
         # archive, so a plain SQLite scan would drop them silently.
-        rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, None)
+        reader = ArchiveReader(self._data_dir, self._archive_dir)
+        rows = reader.query_rows(start, end, channels, None)
+        # Fail closed before writing: a non-null descriptor_hash with no
+        # descriptor-catalog row is a dangling reference, not declared identity.
+        # The bounded reader refuses it as DESCRIPTOR_CATALOG_MISSING, and the
+        # exporter must not publish it as if a descriptor declared it.
+        reader.verify_descriptor_references({row[6] for row in rows if row[6] is not None})
         all_rows: list[dict[str, Any]] = [
-            {"timestamp": raw_ts, "channel": channel, "value": value, "status": status}
-            for raw_ts, _instrument_id, channel, value, _unit, status, *_ in rows
+            {
+                "timestamp": raw_ts,
+                "instrument_id": instrument_id,
+                "channel": channel,
+                "value": value,
+                "status": status,
+                "descriptor_hash": descriptor_hash,
+            }
+            for raw_ts, instrument_id, channel, value, _unit, status, descriptor_hash in rows
         ]
 
         if not all_rows:
@@ -121,25 +134,29 @@ class XLSXExporter:
             logger.info("XLSX экспорт: %s (0 записей, нет данных)", output_path)
             return 0
 
-        # Уникальные каналы в алфавитном порядке
-        unique_channels = sorted({r["channel"] for r in all_rows})
+        # Each data column represents one explicit instrument/channel/descriptor identity.
+        identities = sorted(
+            {(r["instrument_id"], r["channel"], r["descriptor_hash"]) for r in all_rows},
+            key=lambda identity: (identity[0], identity[1], identity[2] or ""),
+        )
 
-        # Заголовок
+        # Structural names are rows, never text derived from a channel label.
         bold = Font(bold=True)
-        headers = ["Время"] + unique_channels
-        for col, h in enumerate(headers, 1):
-            cell = ws_data.cell(row=1, column=col, value=h)
-            cell.font = bold
+        ws_data.cell(row=1, column=1, value="Время").font = bold
+        for column, (instrument_id, channel, descriptor_hash) in enumerate(identities, 2):
+            for row, value in enumerate((instrument_id, channel, descriptor_hash), 1):
+                ws_data.cell(row=row, column=column, value=value).font = bold
 
-        # Сводка по времени: ts_str → {channel: value}
+        # Сводка по времени: ts_str → {identity: value}
         # NaN-доктрина: decode at the read boundary — a sentinel / error / legacy
         # ±inf row surfaces as NaN and is left as an empty cell below, never as a
         # non-physical number in the operator's spreadsheet.
-        by_time: dict[str, dict[str, float]] = defaultdict(dict)
+        by_time: dict[object, dict[tuple[str, str, str | None], float]] = defaultdict(dict)
         for r in all_rows:
-            by_time[r["timestamp"]][r["channel"]] = decode(r["value"], r["status"])
+            identity = (r["instrument_id"], r["channel"], r["descriptor_hash"])
+            by_time[r["timestamp"]][identity] = decode(r["value"], r["status"])
 
-        row_num = 2
+        row_num = 4
         for ts_str in sorted(by_time.keys(), key=_ts_sort_key):
             if row_num >= _XLSX_MAX_ROWS:
                 logger.warning(
@@ -160,20 +177,20 @@ class XLSXExporter:
                 ts_cell.number_format = "YYYY-MM-DD HH:MM:SS"
 
             channel_values = by_time[ts_str]
-            for col, ch in enumerate(unique_channels, 2):
-                v = channel_values.get(ch)
-                if v is not None and math.isfinite(v):
+            for column, identity in enumerate(identities, 2):
+                value = channel_values.get(identity)
+                if value is not None and math.isfinite(value):
                     # Write the full float value (no pre-rounding): vacuum
                     # pressures span 1e-3..1e-9 mbar and were collapsed to 0.000
                     # by round(v, 3) + "0.000" format. "General" lets Excel pick
                     # a representation that preserves both small and wide-range
                     # magnitudes.
-                    cell = ws_data.cell(row=row_num, column=col, value=v)
+                    cell = ws_data.cell(row=row_num, column=column, value=value)
                     cell.number_format = "General"
 
             row_num += 1
 
-        data_row_count = row_num - 2
+        data_row_count = row_num - 4
 
         # ------------------------------------------------------------------
         # Лист 2: Информация
@@ -183,7 +200,7 @@ class XLSXExporter:
             ("Система", "CryoDAQ"),
             ("Дата экспорта", datetime.now().isoformat()),
             ("Записей", data_row_count),
-            ("Каналов", len(unique_channels)),
+            ("Идентичностей", len(identities)),
         ]
         if start is not None:
             info_rows.append(("Начало диапазона", start.isoformat()))
@@ -210,9 +227,9 @@ class XLSXExporter:
 
         wb.save(str(output_path))
         logger.info(
-            "XLSX экспорт: %s (%d записей, %d каналов)",
+            "XLSX экспорт: %s (%d записей, %d идентичностей)",
             output_path,
             data_row_count,
-            len(unique_channels),
+            len(identities),
         )
         return data_row_count
