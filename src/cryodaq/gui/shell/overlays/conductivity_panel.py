@@ -973,7 +973,21 @@ class ConductivityPanel(QWidget):
         # prediction" failure named above. Measured at master on Ubuntu 22.04.5: the
         # guard test failed 1 run in 12 for exactly this, so it also cost a CI round in
         # eight, on a queue that is already the constraint.
-        return max(_PREDICTOR_BASE_WINDOW_S, float(math.ceil(cadence * _PREDICTOR_MIN_POINTS)))
+        # ONE CADENCE OF HEADROOM, and the arithmetic is why. The predictor prunes at
+        # `now - window_s` and refuses below `min_points`. N points spaced by one cadence
+        # SPAN (N-1) cadences, so a window of exactly `cadence * points` fits the required
+        # points with a single cadence to spare -- and any delay longer than one cadence
+        # between the oldest sample and the update tick drops that sample, leaves N-1
+        # points, and the prediction goes invalid with tau, amplitude and settled all zero.
+        # A feed that is one cycle late therefore never accumulates its count, which is the
+        # "silently never producing a valid prediction" failure this method exists to
+        # prevent, arriving through the window instead of through the point count. Measured
+        # on a loaded hosted runner: exactly that shape, with the window assertion passing
+        # and the prediction invalid.
+        return max(
+            _PREDICTOR_BASE_WINDOW_S,
+            float(math.ceil(cadence * (_PREDICTOR_MIN_POINTS + 1))),
+        )
 
     def _bound_temperature_cadence_s(self) -> float | None:
         """Median of medians of the step's temperature feeds' observed cadence.

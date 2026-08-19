@@ -55,10 +55,17 @@ def test_the_predictor_window_never_lands_below_the_point_count_it_promises(app)
 
         window = panel._required_predictor_window_s()
 
-        assert window >= nominal * points, (
-            f"a {nominal}s feed needs {nominal * points}s to hold {points} points; got {window!r}"
+        # N points spaced by one cadence SPAN (N-1) cadences, so the window must exceed
+        # that span by more than a single cadence: with exactly one cadence to spare, a
+        # feed one cycle late loses its oldest point, drops to N-1, and the predictor
+        # returns tau, amplitude and settled all zero with valid False. Measured on a
+        # loaded hosted runner: exactly that, with the floor assertion passing.
+        span = (points - 1) * nominal
+        assert window >= span + 2 * nominal, (
+            f"a {nominal}s feed spans {span}s for {points} points and needs more than one "
+            f"cadence of slack beyond it; got {window!r}"
         )
-        assert window == float(math.ceil(measured * points)), window
+        assert window == float(math.ceil(measured * (points + 1))), window
 
 
 def test_an_unobserved_cadence_leaves_the_base_window_alone(app) -> None:
