@@ -77,31 +77,46 @@ jobs:
       - name: Install Qt offscreen system libraries (Linux)
         if: runner.os == 'Linux'
         # Bounded, because this step HUNG for the job's full 50 minutes twice on
-        # 2026-08-19 and took two pull requests' evidence with it. The dpkg lock is held
-        # by the runner image's own unattended upgrades often enough to matter, and plain
-        # apt-get waits for it forever. A step timeout turns that into a fast, named
-        # failure a re-run can clear; the lock timeout usually avoids the failure at all;
-        # and the non-interactive frontend removes the other way apt can wait for nobody.
+        # 2026-08-19 and took two pull requests' evidence with it. The bound is what
+        # turned that silent cancellation into a named failure, and the named failure's
+        # log then gave the real cause: an unreachable Ubuntu mirror, not the dpkg lock
+        # the first fix was aimed at. Keep the bound -- it is how the next stall of a
+        # different kind will name itself instead of vanishing.
         timeout-minutes: 8
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # Ask what is MISSING before touching the network. The runner image already
-          # carries these libraries, so the common case needs no package index update at
-          # all -- and the index update is where the time went: the log shows a 2m14s
-          # stall against the Ubuntu archive inside a step that then hit its bound. A
-          # step that does nothing when there is nothing to do cannot hang.
+          # Ask what is MISSING before touching the network. Runner images differ: in run
+          # 32303335407 one job reported "missing: libegl1" and another reported nothing
+          # at all, so both paths are real and both have to be bounded.
           missing=""
           for package in libegl1 libgl1 libxkbcommon0 libdbus-1-3; do
             dpkg -s "$package" >/dev/null 2>&1 || missing="$missing $package"
           done
           if [ -z "$missing" ]; then
-            echo "Qt offscreen libraries already present; no package index update needed"
+            echo "Qt offscreen libraries already present; nothing to fetch"
             exit 0
           fi
           echo "missing:$missing"
-          sudo apt-get -o DPkg::Lock::Timeout=180 update
-          sudo apt-get -o DPkg::Lock::Timeout=180 install -y $missing
+          # EVERY apt-get call below carries the same network bounds, because every one of
+          # them goes to the same mirror list. Measured in that run: apt-get spent 2 min
+          # 13 s trying azure.archive.ubuntu.com before ignoring it, then a further 6
+          # minutes on package indexes from archive.ubuntu.com and hit the step bound.
+          # Downloading the .deb itself can stall the same way, so bounding only the index
+          # update would let the first install eat the whole budget.
+          apt_options="-o DPkg::Lock::Timeout=180"
+          apt_options="$apt_options -o Acquire::http::Timeout=15"
+          apt_options="$apt_options -o Acquire::https::Timeout=15"
+          apt_options="$apt_options -o Acquire::Retries=2"
+          # Try the package index that is already on the image first. A mirror that is
+          # unreachable cannot delay an install that never refreshes the index.
+          if sudo apt-get $apt_options install -y $missing; then
+            echo "installed from the package index already on the image"
+            exit 0
+          fi
+          echo "the index on the image did not satisfy$missing; refreshing it"
+          sudo apt-get $apt_options update
+          sudo apt-get $apt_options install -y $missing
 
       - name: Install dependencies
         run: |
