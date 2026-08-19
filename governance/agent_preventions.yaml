@@ -55,6 +55,54 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: MOJIBAKE-DERIVATION-ESCAPE-FALSE-GREEN-341
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_derivation_matches_its_pinned_mapping
+    ci_partition: remaining
+    red_evidence: local_executed_on_commit_65c9654ae0d91192b19776f40d32878edacba292_tree_8925458a417a8924fd9190419cc4e5e9caafa497_guard_blob_8600a9155953a507690227e0daa23ecff168cd8e_python_3_14_3_with_MOJIBAKE_SIGNATURES_diverged_from_cp1251_mojibake_for_the_single_source_U_00A7_exact_node_selected_1_failed_exit_1_pinned_mapping_mismatch_where_before_this_control_hashed_the_helper_and_all_five_nodes_stayed_green_while_the_real_corruption_produced_zero_hits_stdout_stderr_sha256_3b7cd59b3dfb4bf132f0fe81cadbeffa899fd637d7e82c0d558f198dc6fe4688
+    green_evidence: local_executed_on_commit_65c9654ae0d91192b19776f40d32878edacba292_tree_8925458a417a8924fd9190419cc4e5e9caafa497_guard_blob_8600a9155953a507690227e0daa23ecff168cd8e_python_3_14_3_exact_node_selected_1_passed_exit_0_digest_taken_over_the_consumed_signature_tuple_stdout_stderr_sha256_5b19689a97d618d5cdfce632de67285a8efa3c57100a80350a5bb7ca9e05ae34_pending_sealed_hosted_remaining_artifact
+  - id: MOJIBAKE-DETECTOR-CONTROL-FALSE-GREEN-340
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_its_pinned_digest
+    ci_partition: remaining
+    red_evidence: local_executed_on_commit_6cbcd307a02617bcbb3edebd81db0ea57cec2601_tree_3e8b7ea27315c3daaae95d2ceae285f863a218b9_guard_blob_515338803489c6e11b2baa9678e9206856ca50a5_python_3_14_3_with_the_single_source_U_00A7_removed_from_MOJIBAKE_AT_RISK_SOURCES_exact_node_selected_1_failed_exit_1_pinned_digest_mismatch_while_the_repository_sweep_alone_still_exits_0_which_is_the_escape_this_pair_records_stdout_stderr_sha256_58ed3743168500e3f7a74959346235f106436e557d5c06840ef0b3c0bd430f7f
+    green_evidence: local_executed_on_commit_6cbcd307a02617bcbb3edebd81db0ea57cec2601_tree_3e8b7ea27315c3daaae95d2ceae285f863a218b9_guard_blob_515338803489c6e11b2baa9678e9206856ca50a5_python_3_14_3_all_four_exact_nodes_selected_4_passed_exit_0_152_unique_signatures_stdout_stderr_sha256_00313f812180a456ffe7937fb2b03b4b821aaf1ef4e4604dbf9ca8f66d21b731_pending_sealed_hosted_remaining_artifact
+  - id: MOJIBAKE-SWEEP-ENUMERATION-FALSE-GREEN-342
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file
+    ci_partition: remaining
+    red_evidence: local_mutation_of_tracked_sweep_enumeration_to_empty_slice_left_all_existing_mojibake_guards_green_while_a_damaged_file_was_not_read_pending_immutable_capture
+    green_evidence: pending_local_execution_after_addition
+  - id: MOJIBAKE-LIVE-INVENTORY-FALSE-GREEN-343
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_live_tracked_inventory
+    ci_partition: remaining
+    red_evidence: a_cp1251_mojibake_source_whose_image_begins_with_Cyrillic_was_excluded_from_the_live_inventory_and_left_the_sweep_green_pending_immutable_capture
+    green_evidence: pending_local_execution_after_independent_source_anchor
+  - id: MOJIBAKE-NONUTF-STARTUP-FALSE-GREEN-344
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_tracked_files_preserves_non_ascii_paths_without_utf8_mode
+    ci_partition: remaining
+    red_evidence: the_parent_process_only_set_PYTHONUTF8_after_startup_so_the_guard_passed_without_proving_sys_flags_utf8_mode_0_pending_immutable_capture
+    green_evidence: pending_local_execution_in_a_child_interpreter_with_PYTHONUTF8_0
+  - id: MOJIBAKE-READ-ERROR-FALSE-GREEN-345
+    status: open
+    scope: repository
+    runtime_prevention_id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    guard: tests/docs/test_docs_freshness.py::test_mojibake_inventory_fails_when_a_tracked_file_cannot_be_read
+    ci_partition: remaining
+    red_evidence: both_inventory_readers_swallowed_a_simulated_PermissionError_and_returned_clean_evidence_pending_immutable_capture
+    green_evidence: pending_local_execution_after_fail_closed_read_guard
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -6726,3 +6774,65 @@ records:
         ci_partition: remaining
     red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
     green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition
+  - id: MOJIBAKE-TRACKED-TEXT-CORRUPTION-340
+    status: open
+    scope: repository
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every tracked text file, swept for the sequences produced when UTF-8 bytes are read as cp1251.
+    classification: runtime_invariant
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: >-
+      A cp1251/UTF-8 round-trip silently rewrites every em dash, ellipsis, curly quote and middle dot in a
+      tracked file. It has done so twice. The first instance replaced 26 sequences inside docs/OBLIGATIONS.md,
+      within the row that holds an owner direction VERBATIM, and a gate on row count, row IDs and
+      byte-identical status cells passed all three, because structure cannot see bytes. The second landed in
+      tests/test_ci_candidate_evidence.py from a PowerShell Out-File round-trip. Without this sweep the damage
+      reaches review as ordinary-looking text.
+    invariant: >-
+      No tracked text file contains a cp1251/UTF-8 mojibake sequence. The signature set is DERIVED from every
+      non-ASCII character present in tracked text, restricted to non-Cyrillic sources because a Cyrillic
+      source produces a Cyrillic-initial image that genuine Russian also produces; U+00BB is excluded on the
+      same measured ground, its image being Cyrillic Ve before a closing guillemet, which occurs genuinely
+      including in the volts symbol. On top of that live inventory, the complete class of printable-Latin
+      sources whose cp1251 image is entirely Cyrillic is DERIVED, minus the images that are ordinary Russian
+      digraphs, so a corrupted accented-Latin letter can never hide as Cyrillic text. Tracked paths are read
+      NUL-delimited, because core.quotePath is on by default and would return a non-ASCII path as an
+      octal-escaped literal that the sweep would silently skip.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/docs/test_docs_freshness.py::test_tracked_text_carries_no_known_mojibake
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_its_pinned_digest
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_source_set_matches_live_tracked_inventory
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_derivation_matches_its_pinned_mapping
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_every_derived_signature_is_exercised
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_detector_fires_on_independently_specified_damage
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_tracked_files_preserves_non_ascii_paths_without_utf8_mode
+        ci_partition: remaining
+      - node: tests/docs/test_docs_freshness.py::test_mojibake_inventory_fails_when_a_tracked_file_cannot_be_read
+        ci_partition: remaining
+    automation_limit: >-
+      Local red and green executions are bound below to an immutable commit, tree and guard blob, but no
+      sealed hosted remaining artifact can be produced without network access, so this record stays open.
+      Stated coverage limits: the cp1251 round-trip only. Not a different codepage pair, not ASCII-only
+      corruption, not replacement characters, not damage inside binary files, and not a corrupted U+00BB,
+      which is excluded by measurement. A new variant outside the derived Latin blocks needs its source
+      character added to the derivation that builds the at-risk set.
+      The NUL-delimited path fix is verified behaviour-preserving here rather than merely asserted: at the
+      evidence commit 6cbcd307a02617bcbb3edebd81db0ea57cec2601, 0 non-ASCII tracked paths existed and both
+      forms returned the identical set of 1219 paths. That count is historical, bound to that commit, not a
+      claim about this head; re-measured at head 8952a3b9427b2867ead02fa2f5e52b375bd456c0, git ls-files -z
+      returns 1222 paths, still 0 non-ASCII.
+    red_evidence: local_executed_on_commit_6cbcd307a02617bcbb3edebd81db0ea57cec2601_tree_3e8b7ea27315c3daaae95d2ceae285f863a218b9_guard_blob_515338803489c6e11b2baa9678e9206856ca50a5_python_3_14_3_with_one_em_dash_in_docs_OBLIGATIONS_md_replaced_by_its_cp1251_mojibake_image_exact_node_selected_1_failed_exit_1_sweep_names_the_damaged_path_and_hit_count_stdout_stderr_sha256_5887732263826bc266201f686e3a1b4bca7a666f0e3dd8ed61135464ade4fd44
+    green_evidence: local_executed_on_commit_6cbcd307a02617bcbb3edebd81db0ea57cec2601_tree_3e8b7ea27315c3daaae95d2ceae285f863a218b9_guard_blob_515338803489c6e11b2baa9678e9206856ca50a5_python_3_14_3_all_four_exact_nodes_selected_4_passed_exit_0_152_unique_signatures_stdout_stderr_sha256_00313f812180a456ffe7937fb2b03b4b821aaf1ef4e4604dbf9ca8f66d21b731_pending_sealed_hosted_remaining_artifact

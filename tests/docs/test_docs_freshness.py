@@ -31,15 +31,28 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _tracked_files() -> list[str]:
-    """Return Git-tracked repo-relative paths; missing Git evidence is fatal."""
-    out = subprocess.run(
-        ["git", "ls-files"],
+    """Return Git-tracked repo-relative paths; missing Git evidence is fatal.
+
+    Uses ``-z`` because the line-oriented form applies ``core.quotePath``, which is
+    on by default: a tracked path containing a non-ASCII byte comes back as an
+    octal-escaped quoted literal such as ``"caf\303\251.md"``.  A caller then opens
+    a path that does not exist and, if it swallows the error, skips the file
+    silently.  NUL-delimited output is the raw name.
+
+    ``text=True`` would undo the point of ``-z``.  It decodes with the LOCALE codec.
+    The repository's Windows CI gate enables ``PYTHONUTF8=1``; this remains a
+    failure mode for local/default environments that do not enable UTF-8 mode.
+    Capture BYTES and decode with the filesystem encoding, with ``surrogateescape`` so an
+    undecodable byte round-trips to ``open()`` instead of raising.
+    """
+    raw = subprocess.run(
+        ["git", "ls-files", "-z"],
         cwd=REPO_ROOT,
         capture_output=True,
-        text=True,
         check=True,
     ).stdout
-    return [line for line in out.splitlines() if line]
+    out = raw.decode(sys.getfilesystemencoding(), errors="surrogateescape")
+    return [name for name in out.split("\0") if name]
 
 
 def _pyproject() -> dict:
@@ -2753,6 +2766,567 @@ def test_new_lab_adaptation_uses_instrument_partition_without_health_wiring_clai
     assert "no supported production health-node configuration" in section
     assert "::BUILTIN_DRIVER_SPECS" not in section
     assert "::get_driver_spec" not in section
+
+
+# Mojibake produced by reading UTF-8 bytes as cp1251.  DERIVED, not enumerated: every
+# non-ASCII character present in tracked text is at risk, and the image of a NON-Cyrillic
+# source is a sequence that genuine Russian does not produce.  Cyrillic sources are
+# excluded because their images begin with a Cyrillic letter that Russian text produces
+# normally.  U+00BB is excluded for the same reason -- its image is Cyrillic Ve followed
+# by a closing guillemet, which occurs genuinely here, including "V = <<B>>" where B is
+# the Russian symbol for volts.  Measured: 26 of 26 sequences on the damaged register,
+# and zero hits across every tracked file on a clean tree.
+def _cp1251_mojibake(source: str) -> str:
+    """Return the sequence a character becomes when its UTF-8 bytes are read as cp1251."""
+    return source.encode("utf-8").decode("cp1251")
+
+
+# A source whose cp1251 image is entirely Cyrillic looks like ordinary Russian, so the
+# live-inventory predicate below (which skips Cyrillic) can never see it, and that class
+# must be DERIVED here instead of grown one code point per review round.  Scope: the
+# printable Latin blocks that transliterated text plausibly carries -- Latin-1 Supplement
+# and Latin Extended-A (U+00A1..U+017F).  Sources whose image is a pair of genuine
+# Russian letters are excluded: their image is ordinary text and would flag every clean
+# document.  U+00B8 -> "Вё" (вёл, вёсла) and U+0128 -> "ДЁ", which tracked text carries
+# today in "ПЕРЕВЕДЁН" and "ПОДТВЕРЖДЁННЫХ", are the measured instances of that ground.
+def _cyrillic_only_mojibake_sources() -> tuple[str, ...]:
+    russian = frozenset(
+        {chr(codepoint) for codepoint in range(0x0410, 0x0430)}
+        | {chr(codepoint) for codepoint in range(0x0430, 0x0450)}
+        | {chr(0x0401), chr(0x0451)}
+    )
+    sources = []
+    for codepoint in range(0x00A1, 0x0180):
+        source = chr(codepoint)
+        try:
+            image = _cp1251_mojibake(source)
+        except UnicodeDecodeError:
+            continue
+        if not image or not all(0x0400 <= ord(char) <= 0x052F for char in image):
+            continue
+        if all(char in russian for char in image):
+            continue
+        sources.append(source)
+    return tuple(sources)
+
+
+_CYRILLIC_ONLY_MOJIBAKE_SOURCES = _cyrillic_only_mojibake_sources()
+
+_MOJIBAKE_BASE_SOURCES = (
+    "\u00a7",
+    "\u00ab",
+    "\u00ad",
+    "\u00b0",
+    "\u00b1",
+    "\u00b2",
+    "\u00b3",
+    "\u00b5",
+    "\u00b7",
+    "\u00b9",
+    "\u00bc",
+    "\u00bd",
+    "\u00d7",
+    "\u00e9",
+    "\u00f3",
+    "\u0301",
+    "\u0304",
+    "\u0308",
+    "\u0394",
+    "\u03a3",
+    "\u03a9",
+    "\u03b1",
+    "\u03b2",
+    "\u03b5",
+    "\u03bc",
+    "\u03c3",
+    "\u03c4",
+    "\u0660",
+    "\u0667",
+    "\u06f0",
+    "\u0966",
+    "\u200b",
+    "\u2013",
+    "\u2014",
+    "\u2019",
+    "\u201c",
+    "\u201d",
+    "\u2022",
+    "\u2026",
+    "\u202e",
+    "\u203a",
+    "\u2076",
+    "\u2079",
+    "\u207b",
+    "\u2080",
+    "\u2081",
+    "\u2082",
+    "\u2099",
+    "\u2116",
+    "\u2139",
+    "\u2190",
+    "\u2191",
+    "\u2192",
+    "\u2193",
+    "\u2194",
+    "\u2195",
+    "\u21b5",
+    "\u21d2",
+    "\u21d4",
+    "\u2208",
+    "\u2212",
+    "\u2213",
+    "\u221a",
+    "\u221e",
+    "\u222a",
+    "\u2248",
+    "\u2260",
+    "\u2264",
+    "\u2265",
+    "\u226a",
+    "\u226b",
+    "\u2273",
+    "\u22ef",
+    "\u2500",
+    "\u2502",
+    "\u250c",
+    "\u2510",
+    "\u2514",
+    "\u251c",
+    "\u2524",
+    "\u252c",
+    "\u2534",
+    "\u253c",
+    "\u2550",
+    "\u2551",
+    "\u2554",
+    "\u2557",
+    "\u255a",
+    "\u255d",
+    "\u2571",
+    "\u2572",
+    "\u2588",
+    "\u2591",
+    "\u2592",
+    "\u2593",
+    "\u25a0",
+    "\u25a1",
+    "\u25a3",
+    "\u25aa",
+    "\u25ac",
+    "\u25b2",
+    "\u25b6",
+    "\u25ba",
+    "\u25bc",
+    "\u25c0",
+    "\u25c6",
+    "\u25c7",
+    "\u25cb",
+    "\u25cf",
+    "\u2699",
+    "\u26a0",
+    "\u26a1",
+    "\u2705",
+    "\u2713",
+    "\u2715",
+    "\u2717",
+    "\u2726",
+    "\u2744",
+    "\u274c",
+    "\u27e6",
+    "\u27e7",
+    "\u27f2",
+    "\u27fa",
+    "\u2b0d",
+    "\u2b1c",
+    "\u2b24",
+    "\ufe0f",
+    "\uff0b",
+    "\uff0d",
+    "\uff0e",
+    "\uff10",
+    "\uff11",
+    "\uff21",
+    "\ufffd",
+    "\U0001f3db",
+    "\U0001f3e0",
+    "\U0001f4ca",
+    "\U0001f4cb",
+    "\U0001f4d3",
+    "\U0001f4d6",
+    "\U0001f4da",
+    "\U0001f4f8",
+    "\U0001f514",
+    "\U0001f527",
+    "\U0001f52c",
+    "\U0001f534",
+    "\U0001f535",
+    "\U0001f6a8",
+    "\U0001f7ac",
+    "\U0001f7e1",
+    "\U0001f916",
+    "\U0001f989",
+)
+_MOJIBAKE_AT_RISK_SOURCES = tuple(sorted(set(_MOJIBAKE_BASE_SOURCES) | set(_CYRILLIC_ONLY_MOJIBAKE_SOURCES), key=ord))
+
+_MOJIBAKE_SIGNATURES = tuple(_cp1251_mojibake(source) for source in _MOJIBAKE_AT_RISK_SOURCES)
+
+
+_TRACKED_TEXT_EXTENSIONS = frozenset(
+    {
+        ".bat",
+        ".example",
+        ".html",
+        ".json",
+        ".lua",
+        ".md",
+        ".ps1",
+        ".py",
+        ".sh",
+        ".spec",
+        ".svg",
+        ".toml",
+        ".txt",
+        ".typed",
+        ".yaml",
+        ".yml",
+    }
+)
+
+_TRACKED_TEXT_BASENAMES = frozenset({".gitattributes", ".gitignore", "LICENSE", "Makefile", "VERSION", ".gitkeep"})
+
+
+def _is_tracked_text_path(relative: str) -> bool:
+    """Known-text classification for one tracked path.
+
+    Only these paths fail closed on invalid UTF-8; every other tracked path is
+    treated as a binary and skipped.  The set is the tracked tree's own text
+    suffixes plus its extensionless text basenames.
+    """
+    name = relative.rsplit("/", 1)[-1]
+    if name in _TRACKED_TEXT_BASENAMES:
+        return True
+    return Path(relative).suffix.lower() in _TRACKED_TEXT_EXTENSIONS
+
+
+def _tracked_index_blobs() -> dict[str, bytes]:
+    """Return every tracked path's content from the INDEX, not the working tree.
+
+    Enumeration and content both read the index: ``git ls-files -s -z`` supplies
+    each blob SHA in the same snapshot the sweep enumerates, and ``git cat-file
+    --batch`` streams the blobs in one process.  A staged-but-overwritten working
+    tree can therefore never make the sweep certify the index clean.
+    """
+    raw = subprocess.run(
+        ["git", "ls-files", "-s", "-z"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    pairs: list[tuple[str, str]] = []
+    for entry in raw.decode(sys.getfilesystemencoding(), errors="surrogateescape").split("\0"):
+        if not entry:
+            continue
+        metadata, _, name = entry.partition("\t")
+        _mode, blob_sha, _stage = metadata.split(" ")
+        pairs.append((name, blob_sha))
+    cat = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=REPO_ROOT,
+        input="".join(blob_sha + "\n" for _, blob_sha in pairs).encode("utf-8"),
+        capture_output=True,
+        check=True,
+    ).stdout
+    blobs: dict[str, bytes] = {}
+    position = 0
+    for name, blob_sha in pairs:
+        newline = cat.index(b"\n", position)
+        _got_sha, _kind, size_text = cat[position:newline].decode("ascii").split(" ")
+        size = int(size_text)
+        blobs[name] = cat[newline + 1 : newline + 1 + size]
+        position = newline + 1 + size + 1
+    return blobs
+
+
+def _tracked_text_content(relative: str, raw: bytes) -> str | None:
+    """Decode one tracked path's index content as UTF-8.
+
+    Known text paths fail closed on invalid UTF-8: a corrupted text file must never
+    be skipped as if it were a binary, or a sweep could certify a tree clean while a
+    damaged text file sits in it.  Every other path is treated as a binary and
+    returns None, staying out of the sweep.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        if _is_tracked_text_path(relative):
+            raise ValueError(f"tracked text file {relative!r} is not valid UTF-8") from exc
+        return None
+
+
+def _tracked_mojibake_hits() -> dict[str, int]:
+    damaged: dict[str, int] = {}
+    for relative, raw in _tracked_index_blobs().items():
+        text = _tracked_text_content(relative, raw)
+        if text is None:
+            continue  # binary
+        hits = _mojibake_hits(text)
+        if hits:
+            damaged[relative] = hits
+    return damaged
+
+
+def _mojibake_hits(text: str) -> int:
+    """Count known mojibake sequences in one decoded document."""
+    return sum(text.count(signature) for signature in _MOJIBAKE_SIGNATURES)
+
+
+# Hand-pinned digest over the whole at-risk source set.  The samples in the control
+# below exercise only a handful of signatures, so without this a single deleted source
+# would leave every test green -- the vacuous-pass condition, one entry at a time.  Any
+# removal, addition or substitution changes this digest.
+_MOJIBAKE_SOURCE_DIGEST = "sha256:d70ab9ad233af2e199bc7f200f95724f55ed00f37179cc6eed7f9688b934144b"
+
+
+def test_mojibake_source_set_matches_live_tracked_inventory() -> None:
+    """The pinned source set must cover every eligible character in tracked text.
+
+    The Cyrillic-only half of ``expected`` is derived INLINE here, never read from
+    ``_CYRILLIC_ONLY_MOJIBAKE_SOURCES``.  When the oracle reused that tuple, deleting a
+    source from it shrank the expected value with it and this guard could not fail;
+    recomputing the class independently makes this node an independent control for it
+    (pair 343).
+    """
+    eligible: set[str] = set()
+    for relative, raw in _tracked_index_blobs().items():
+        text = _tracked_text_content(relative, raw)
+        if text is None:
+            continue
+        for character in text:
+            if ord(character) <= 0x7F or 0x0400 <= ord(character) <= 0x052F or character in {"\u00b8", "\u00bb"}:
+                continue
+            try:
+                _cp1251_mojibake(character)
+            except UnicodeDecodeError:
+                continue
+            eligible.add(character)
+
+    russian = frozenset(
+        {chr(codepoint) for codepoint in range(0x0410, 0x0430)}
+        | {chr(codepoint) for codepoint in range(0x0430, 0x0450)}
+        | {chr(0x0401), chr(0x0451)}
+    )
+
+    def cyrillic_only_image(source: str) -> str | None:
+        try:
+            image = _cp1251_mojibake(source)
+        except UnicodeDecodeError:
+            return None
+        if (
+            image
+            and all(0x0400 <= ord(char) <= 0x052F for char in image)
+            and not all(char in russian for char in image)
+        ):
+            return image
+        return None
+
+    cyrillic_only = {chr(cp) for cp in range(0x00A1, 0x0180) if cyrillic_only_image(chr(cp)) is not None}
+    expected = tuple(sorted(eligible | cyrillic_only, key=ord))
+    assert _MOJIBAKE_AT_RISK_SOURCES == expected, (
+        "the mojibake source tuple is stale; re-derive it from tracked UTF-8 text"
+    )
+
+
+def test_mojibake_source_set_matches_its_pinned_digest() -> None:
+    """The at-risk source set may not change without changing this literal.
+
+    Independent by construction: the expected value is written by hand, so weakening
+    the production tuple fails here rather than silently shrinking the oracle.
+    """
+    observed = hashlib.sha256("".join(_MOJIBAKE_AT_RISK_SOURCES).encode("utf-8")).hexdigest()
+    assert f"sha256:{observed}" == _MOJIBAKE_SOURCE_DIGEST, (
+        "the mojibake at-risk source set changed. If that is intended, re-derive it and "
+        "update _MOJIBAKE_SOURCE_DIGEST in the same commit, stating why in the message."
+    )
+
+
+# Hand-pinned digest over the derived MAPPING: every source paired with the exact
+# sequence it becomes.  The source digest above cannot see a DERIVATION error -- the
+# sources stay identical while the image changes -- and the exercise test below builds
+# its samples from `_cp1251_mojibake`, so it would verify a broken value against itself.
+# Measured before this anchor existed: returning a dynamically assembled bogus signature
+# for a single source left all four guard nodes green, and the real corruption for that
+# character escaped the repository sweep.
+_MOJIBAKE_MAPPING_DIGEST = "sha256:61d5e6fb6cd0303070db4df97aa0ed4ac8f58ff2f3c5816e532697bdbc1c53d9"
+
+
+def test_mojibake_derivation_matches_its_pinned_mapping() -> None:
+    """The source-to-signature mapping may not change without changing this literal.
+
+    Hashes ``_MOJIBAKE_SIGNATURES`` -- the tuple ``_mojibake_hits`` actually consumes --
+    rather than recomputing the images from ``_cp1251_mojibake``.  Measured reason: with
+    the digest bound to the helper, diverging one tuple entry from it left all five
+    mojibake nodes green while the real corruption for that character produced ZERO hits.
+    A control that recomputes a parallel value cannot see the data path it is guarding.
+    """
+    assert len(_MOJIBAKE_SIGNATURES) == len(_MOJIBAKE_AT_RISK_SOURCES)
+    observed = hashlib.sha256(
+        "\x1f".join(
+            f"{source}\x1e{signature}"
+            for source, signature in zip(_MOJIBAKE_AT_RISK_SOURCES, _MOJIBAKE_SIGNATURES, strict=True)
+        ).encode("utf-8")
+    ).hexdigest()
+    assert f"sha256:{observed}" == _MOJIBAKE_MAPPING_DIGEST, (
+        "the cp1251 source-to-signature mapping changed. If that is intended, re-derive it "
+        "and update _MOJIBAKE_MAPPING_DIGEST in the same commit, stating why in the message."
+    )
+
+
+def test_every_derived_signature_is_exercised() -> None:
+    """Every signature must actually detect, not merely be declared.
+
+    The digest above proves the set is intact; this proves each member works.
+    """
+    assert len(_MOJIBAKE_SIGNATURES) == len(_MOJIBAKE_AT_RISK_SOURCES)
+    assert len(set(_MOJIBAKE_SIGNATURES)) == len(_MOJIBAKE_SIGNATURES), "duplicate signature"
+    for source, signature in zip(_MOJIBAKE_AT_RISK_SOURCES, _MOJIBAKE_SIGNATURES, strict=True):
+        assert _mojibake_hits(f"before {signature} after") == 1, (
+            f"signature derived from U+{ord(source):04X} does not detect its own damage"
+        )
+
+
+def test_mojibake_detector_fires_on_independently_specified_damage() -> None:
+    """Positive control bound to LITERALS, never to the production signature set.
+
+    An earlier version of this control looped over ``_MOJIBAKE_SIGNATURES`` and asserted
+    ``len(_MOJIBAKE_SIGNATURES)``.  Emptying that tuple therefore satisfied the control
+    while the repository sweep below matched nothing -- the oracle shrank with the thing
+    it was meant to test.  Every sample and count here is written out by hand so that
+    weakening the production set fails this test.
+    """
+    samples = (
+        ("register row \u0432\u0402\u201d end", 1),
+        ("print RED \u0432\u0402\u201d tail", 1),
+        ("it\u0432\u0402\u2122s", 1),
+        ("bullet \u0412\u00b7 item", 1),
+        ("ellipsis \u0432\u0402\u00a6 tail", 1),
+        ("two \u0432\u0402\u201d and \u0412\u00b7", 2),
+        ("non-Latin-1 \u0414\u0403", 1),
+        ("Latin-Extended-A \u0414\u0453", 1),
+    )
+    for text, expected in samples:
+        assert _mojibake_hits(text) == expected, text
+
+    # Genuine Russian must stay silent.  The third case is the measured reason U+00BB is
+    # excluded: a word ending in Ve before a closing guillemet is ordinary text.
+    assert _mojibake_hits("\u043a\u0430\u043d\u0430\u043b \u00ab\u04221\u00bb") == 0
+    assert _mojibake_hits("plain ASCII \u2014 with real punctuation \u201d\u2026") == 0
+    assert _mojibake_hits("V = \u00ab\u0412\u00bb, I = \u00ab\u0410\u00bb") == 0
+    assert _mojibake_hits("\u00ab\u0410\u0420\u0425\u0418\u0412 \u041e\u0412\u00bb title") == 0
+    assert (
+        _mojibake_hits(
+            "\u0412\u0451\u0440\u0441\u0442\u043a\u0430 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430"
+        )
+        == 0
+    )
+
+
+def test_tracked_text_carries_no_known_mojibake() -> None:
+    """No tracked text file may contain a cp1251/UTF-8 mojibake sequence.
+
+    Limits, stated because a guard whose limits are unstated invites the belief that it
+    covers more: this catches the cp1251 round-trip only.  It does not catch mojibake
+    from a different codepage pair, ASCII-only corruption, replacement characters, damage
+    inside binary files, or a corrupted U+00BB, which is excluded above by measurement.
+    """
+    damaged = _tracked_mojibake_hits()
+
+    assert not damaged, (
+        "tracked files carry cp1251/UTF-8 mojibake: "
+        f"{sorted(damaged.items())}. Repair with "
+        "a targeted replacement of each reported mojibake signature, preserving "
+        "unaffected Unicode, and verify no ASCII skeleton changed."
+    )
+
+
+def test_mojibake_sweep_reads_and_reports_a_damaged_tracked_file(tmp_path, monkeypatch) -> None:
+    damaged = tmp_path / "damaged.md"
+    damaged.write_text(_cp1251_mojibake("\u2014"), encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", damaged.name], cwd=tmp_path, check=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert _tracked_mojibake_hits() == {"damaged.md": 1}
+
+
+def test_mojibake_sweep_fails_closed_on_invalid_utf8_in_known_text_path(tmp_path, monkeypatch) -> None:
+    damaged = tmp_path / "damaged.md"
+    damaged.write_bytes(_cp1251_mojibake("\u2014").encode("utf-8") + b"\xff")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", damaged.name], cwd=tmp_path, check=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    with pytest.raises(ValueError, match="damaged.md"):
+        _tracked_mojibake_hits()
+    with pytest.raises(ValueError, match="damaged.md"):
+        test_mojibake_source_set_matches_live_tracked_inventory()
+
+
+def test_mojibake_sweep_still_skips_binary_paths_with_invalid_utf8(tmp_path, monkeypatch) -> None:
+    binary = tmp_path / "image.png"
+    binary.write_bytes(b"\x89PNG\r\n\x1a\n\xff")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", binary.name], cwd=tmp_path, check=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert _tracked_mojibake_hits() == {}
+
+
+def test_mojibake_sweep_reads_index_not_working_tree_when_they_diverge(tmp_path, monkeypatch) -> None:
+    candidate = tmp_path / "candidate.md"
+    candidate.write_text(_cp1251_mojibake("\u2014"), encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", candidate.name], cwd=tmp_path, check=True)
+    candidate.write_text("clean ASCII", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert _tracked_mojibake_hits() == {"candidate.md": 1}
+
+
+def test_mojibake_inventory_fails_when_a_tracked_file_cannot_be_read(monkeypatch) -> None:
+    def locked_snapshot():
+        raise PermissionError("unable to read tracked file 'locked.md'")
+
+    monkeypatch.setattr(sys.modules[__name__], "_tracked_index_blobs", locked_snapshot)
+    with pytest.raises(OSError, match="locked.md"):
+        _tracked_mojibake_hits()
+    with pytest.raises(OSError, match="locked.md"):
+        test_mojibake_source_set_matches_live_tracked_inventory()
+
+
+def test_tracked_files_preserves_non_ascii_paths_without_utf8_mode(tmp_path, monkeypatch) -> None:
+    tracked = tmp_path / "café.md"
+    tracked.write_text("plain", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "--", tracked.name], cwd=tmp_path, check=True)
+    child = (
+        "import sys; from pathlib import Path; "
+        "import test_docs_freshness as freshness; "
+        "assert sys.flags.utf8_mode == 0; "
+        "freshness.REPO_ROOT = Path.cwd(); "
+        "assert 'café.md' in freshness._tracked_files()"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "0"
+    environment["PYTHONPATH"] = str(Path(__file__).parent)
+    subprocess.run(
+        [sys.executable, "-c", child],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+    )
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+    assert "café.md" in _tracked_files()
 
 
 def test_release_whole_tree_artifact_gate_is_reachable_and_pr_excluded() -> None:
