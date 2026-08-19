@@ -79,16 +79,22 @@ class CSVExporter:
         # Read across hot SQLite + cold Parquet: rotated days live only in the
         # archive, so a plain SQLite scan would silently drop them. query_rows
         # already decodes the NaN-доктрина sentinel and keeps end exclusive.
-        rows = ArchiveReader(self._data_dir, self._archive_dir).query_rows(start, end, channels, instrument_ids)
+        reader = ArchiveReader(self._data_dir, self._archive_dir)
+        rows = reader.query_rows(start, end, channels, instrument_ids)
+        # Fail closed before writing: a non-null descriptor_hash with no
+        # descriptor-catalog row is a dangling reference, not declared identity.
+        # The bounded reader refuses it as DESCRIPTOR_CATALOG_MISSING, and the
+        # exporter must not publish it as if a descriptor declared it.
+        reader.verify_descriptor_references({row[6] for row in rows if row[6] is not None})
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         total = 0
 
         with output_path.open("w", newline="", encoding="utf-8-sig") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["timestamp", "instrument_id", "channel", "value", "unit", "status"])
+            writer.writerow(["timestamp", "instrument_id", "channel", "value", "unit", "status", "descriptor_hash"])
 
-            for raw_ts, instrument_id, channel, value, unit, status, *_ in rows:
+            for raw_ts, instrument_id, channel, value, unit, status, descriptor_hash, *_ in rows:
                 ts = _parse_timestamp(raw_ts)
                 # The value is already decoded; a non-finite (masked) reading is
                 # left blank — the status column carries the discriminator.
@@ -100,6 +106,7 @@ class CSVExporter:
                         value if math.isfinite(value) else "",
                         unit,
                         status,
+                        descriptor_hash,
                     ]
                 )
                 total += 1

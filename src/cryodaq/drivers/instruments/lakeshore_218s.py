@@ -160,6 +160,8 @@ class LakeShore218S(InstrumentDriver):
         if not self._connected:
             raise RuntimeError(f"{self.name}: instrument is not connected")
 
+        acquisition_started_at = _time.time()
+        acquisition_started_monotonic = _time.monotonic()
         runtime_policies = self._runtime_channel_policies()
         if not runtime_policies:
             readings = await self._read_krdg_channels()
@@ -202,6 +204,9 @@ class LakeShore218S(InstrumentDriver):
                     "reason": self._last_status_reason,
                 }
 
+        for reading in readings:
+            reading.metadata["acquisition_started_at"] = acquisition_started_at
+            reading.metadata["acquisition_started_monotonic"] = acquisition_started_monotonic
         return readings
 
     async def _query(self, command: str, timeout_ms: int | None = None) -> str:
