@@ -2512,14 +2512,35 @@ def _decode_complete_output(stdout: _StreamEvidence, payload: bytes) -> str:
 
 
 _DIAGNOSTIC_OUTPUT_LIMIT = 4096
+_DIAGNOSTIC_HEAD_SHARE = _DIAGNOSTIC_OUTPUT_LIMIT // 2
+_DIAGNOSTIC_TRUNCATION_MARKER = "\n...[truncated %d character(s); the tail of the stream follows]\n"
 
 
 def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
+    """Describe a failed child run, keeping the END of each stream as well as its start.
+
+    Keeping only the first characters is what a length bound does if nobody chooses,
+    and for a pytest child it discards exactly the part that says what went wrong:
+    the assertion, the traceback and the short test summary all sit at the END. A
+    real ubuntu-latest failure arrived here as four kilobytes of the child test's own
+    source text, then ``...[truncated]`` where the cause would have been, which is a
+    message that names a condition and withholds its subject.
+
+    The bound itself is unchanged: at most ``_DIAGNOSTIC_OUTPUT_LIMIT`` characters of
+    a stream reach the message. They are now taken from both ends instead of one.
+    """
+
     def bounded(payload: bytes) -> str:
         text = payload.decode("utf-8", errors="replace")
-        if len(text) > _DIAGNOSTIC_OUTPUT_LIMIT:
-            text = text[:_DIAGNOSTIC_OUTPUT_LIMIT] + "\n...[truncated]"
-        return text if text else "<empty>"
+        if not text:
+            return "<empty>"
+        if len(text) <= _DIAGNOSTIC_OUTPUT_LIMIT:
+            return text
+        tail_share = _DIAGNOSTIC_OUTPUT_LIMIT - _DIAGNOSTIC_HEAD_SHARE
+        dropped = len(text) - _DIAGNOSTIC_OUTPUT_LIMIT
+        return (
+            text[:_DIAGNOSTIC_HEAD_SHARE] + (_DIAGNOSTIC_TRUNCATION_MARKER % dropped) + text[len(text) - tail_share :]
+        )
 
     return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
         stderr
