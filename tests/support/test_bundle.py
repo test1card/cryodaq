@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta, tzinfo
 
 import pytest
 
+from cryodaq.support import SCHEMA_VERSION, UnavailableSource
+from cryodaq.support import bundle as bundle_module
 from cryodaq.support.bundle import (
     BundleArtifact,
     BundleCapture,
@@ -24,9 +26,27 @@ from cryodaq.support.bundle import (
 
 NOW = datetime(2026, 7, 12, 7, 8, 9, 123456, tzinfo=UTC)
 HASH = "a" * 64
+OBSERVED_AT = "2026-07-12T07:08:08.123456Z"
+
+
+def _snapshot_fields(*, role: str = "summary") -> dict[str, object]:
+    return {
+        "observed_at": "2026-07-12T07:08:08.123456Z",
+        "received_at": "2026-07-12T07:08:09.123456Z",
+        "record_role": role,
+        "revision": 1,
+        "snapshot_mode": "live",
+        "snapshot_producer_id": "engine-v1",
+        "snapshot_source_id": "engine-v1",
+        "source_age_us": 0,
+        "transport_age_us": 0,
+        **({"parent_source_id": "plant-health-summary"} if role == "child" else {}),
+    }
 
 
 def _capture(*, records: tuple[EvidenceRecord, ...] = (), unavailable: tuple[str, ...] = ()) -> BundleCapture:
+    record_kinds = {record.kind for record in records}
+    unavailable = tuple(sorted(set(unavailable) | ({"attention", "health", "integrity"} - record_kinds)))
     return BundleCapture(
         bundle_id="support-0001",
         created_at=NOW,
@@ -37,6 +57,7 @@ def _capture(*, records: tuple[EvidenceRecord, ...] = (), unavailable: tuple[str
         ),
         records=records,
         unavailable_fields=unavailable,
+        unavailable_sources=tuple(UnavailableSource(source, "source_not_provided") for source in unavailable),
     )
 
 
@@ -50,10 +71,22 @@ def test_identical_detached_inputs_are_byte_stable_and_sorted() -> None:
         _capture(
             records=(
                 EvidenceRecord.from_payload(
-                    "log", {"event_id": "log-2", "event_code": "worker.stopped", "level": "INFO"}
+                    "log",
+                    {
+                        "event_id": "log-2",
+                        "event_code": "worker.stopped",
+                        "level": "info",
+                        "observed_at": OBSERVED_AT,
+                    },
                 ),
                 EvidenceRecord.from_payload(
-                    "audit", {"event_id": "audit-1", "event_code": "bundle.requested", "outcome": "accepted"}
+                    "audit",
+                    {
+                        "event_id": "audit-1",
+                        "event_code": "bundle.requested",
+                        "outcome": "accepted",
+                        "observed_at": OBSERVED_AT,
+                    },
                 ),
             )
         )
@@ -62,10 +95,22 @@ def test_identical_detached_inputs_are_byte_stable_and_sorted() -> None:
         _capture(
             records=(
                 EvidenceRecord.from_payload(
-                    "audit", {"outcome": "accepted", "event_code": "bundle.requested", "event_id": "audit-1"}
+                    "audit",
+                    {
+                        "observed_at": OBSERVED_AT,
+                        "outcome": "accepted",
+                        "event_code": "bundle.requested",
+                        "event_id": "audit-1",
+                    },
                 ),
                 EvidenceRecord.from_payload(
-                    "log", {"level": "INFO", "event_code": "worker.stopped", "event_id": "log-2"}
+                    "log",
+                    {
+                        "observed_at": OBSERVED_AT,
+                        "level": "info",
+                        "event_code": "worker.stopped",
+                        "event_id": "log-2",
+                    },
                 ),
             )
         )
@@ -154,13 +199,61 @@ def test_hostile_unicode_controls_and_formula_prefixes_are_neutralized() -> None
     assert SoftwareVersion("component", "ё").version == "ё"
 
 
+def test_pending_record_pseudonyms_are_idempotent_and_remain_distinct() -> None:
+    pending = "redacted-pending-" + "a" * 24
+    assert bundle_module._identifier(pending, field="event_id") == pending
+
+    records = tuple(
+        EvidenceRecord.from_payload(
+            "log",
+            {
+                "event_id": event_id,
+                "event_code": "worker.started",
+                "level": "info",
+                "observed_at": OBSERVED_AT,
+            },
+        )
+        for event_id in ("compressorx", "pumpx")
+    )
+
+    identities = tuple(json.loads(record.payload_json)["event_id"] for record in records)
+    assert identities[0].startswith("redacted-pending-")
+    assert identities[0] != identities[1]
+    assert _capture(records=records).records == records
+
+
+@pytest.mark.parametrize("version", ["al\u200bice", "1.0+al\u200bice"])
+def test_version_person_screening_uses_control_stripped_text(version: str) -> None:
+    assert SoftwareVersion("driver-pack", version).version == "<redacted:private>"
+
+
+def test_snapshot_records_reject_non_protocol_unavailable_state() -> None:
+    with pytest.raises(ValueError, match="state is not an allowed public value"):
+        EvidenceRecord.from_payload(
+            "integrity",
+            {
+                "source_id": "data-integrity",
+                "state": "unavailable",
+                "storage": "unavailable",
+                "reason_code": "database_locked",
+                **_snapshot_fields(),
+            },
+        )
+
+
 def test_degraded_capture_retains_explicit_unavailable_fields() -> None:
     bundle = build_support_bundle(
         _capture(
             records=(
                 EvidenceRecord.from_payload(
                     "integrity",
-                    {"source_id": "database", "state": "unavailable", "reason_code": "database_locked"},
+                    {
+                        "source_id": "data-integrity",
+                        "state": "fault",
+                        "storage": "unavailable",
+                        "reason_code": "database_locked",
+                        **_snapshot_fields(),
+                    },
                 ),
             ),
             unavailable=("attention", "health"),
@@ -169,6 +262,10 @@ def test_degraded_capture_retains_explicit_unavailable_fields() -> None:
 
     evidence = _evidence(bundle)
     assert evidence["unavailable_fields"] == ["attention", "health"]
+    assert evidence["unavailable_sources"] == [
+        {"reason_code": "source_not_provided", "source": "attention"},
+        {"reason_code": "source_not_provided", "source": "health"},
+    ]
     assert evidence["records"][0]["payload"]["reason_code"] == "database_locked"
 
 
@@ -223,10 +320,10 @@ def test_inputs_are_immutable_and_reject_subclasses_callables_and_mutation() -> 
         pass
 
     with pytest.raises(TypeError):
-        EvidenceRecord.from_payload("log", DictSubclass(event_id="x", event_code="x", level="INFO"))
+        EvidenceRecord.from_payload("log", DictSubclass(event_id="x", event_code="x", level="info"))
     with pytest.raises(TypeError):
         EvidenceRecord.from_payload(
-            "log", {"event_id": "x", "event_code": "x", "level": "INFO", "callback": lambda: None}
+            "log", {"event_id": "x", "event_code": "x", "level": "info", "callback": lambda: None}
         )
     with pytest.raises(TypeError):
         BundleCapture("x", NOW, [], (), ())  # type: ignore[arg-type]
@@ -235,17 +332,45 @@ def test_inputs_are_immutable_and_reject_subclasses_callables_and_mutation() -> 
     with pytest.raises(FrozenInstanceError):
         version.version = "2"  # type: ignore[misc]
 
-    source = {"event_id": "before", "event_code": "worker.started", "level": "INFO"}
+    source = {
+        "event_id": "log-1",
+        "event_code": "log.engine.entry",
+        "level": "info",
+        "observed_at": OBSERVED_AT,
+    }
     record = EvidenceRecord.from_payload("log", source)
-    source["event_id"] = "after"
-    assert b"before" in record.payload_json
-    assert b"after" not in record.payload_json
+    source["event_id"] = "log-2"
+    assert b"log-1" in record.payload_json
+    assert b"log-2" not in record.payload_json
 
 
 @pytest.mark.parametrize("kind", ["command", "control", "setpoint", "raw_experiment_data"])
 def test_control_and_unbounded_data_kinds_are_not_in_the_contract(kind: str) -> None:
     with pytest.raises(ValueError):
         EvidenceRecord.from_payload(kind, {"value": 1})
+
+
+@pytest.mark.parametrize(
+    ("kind", "payload"),
+    [
+        ("audit", {"event_id": "audit-1", "event_code": "bundle.requested", "outcome": "accepted"}),
+        ("log", {"event_id": "log-1", "event_code": "worker.started", "level": "info"}),
+    ],
+)
+def test_audit_and_log_evidence_without_a_timestamp_is_refused(kind: str, payload: dict[str, object]) -> None:
+    """A detached audit or log record must carry its observation time, or it cannot be dated.
+
+    Such a record states only that an event happened, never when, so it can neither substantiate
+    that the evidence is recent nor be placed on a diagnostic timeline beside the snapshot records.
+    The production collector always supplies ``observed_at``; only a detached or deserialized
+    payload can omit it, which is why the schema and not the collector is the place to refuse it.
+    Without this case the requirement can be deleted from ``_RECORD_SCHEMAS`` and every other test
+    in this module still passes, because they all supply the field.
+    """
+    with pytest.raises(ValueError, match="observed_at"):
+        EvidenceRecord.from_payload(kind, payload)
+
+    EvidenceRecord.from_payload(kind, {**payload, "observed_at": OBSERVED_AT})
 
 
 def test_nonfinite_values_depth_and_count_are_bounded() -> None:
@@ -259,7 +384,7 @@ def test_nonfinite_values_depth_and_count_are_bounded() -> None:
     with pytest.raises(ValueError, match="too large"):
         EvidenceRecord.from_payload(
             "log",
-            {"event_id": "x", "event_code": "x", "level": "INFO"} | {str(index): index for index in range(129)},
+            {"event_id": "x", "event_code": "x", "level": "info"} | {str(index): index for index in range(129)},
         )
 
 
@@ -274,8 +399,10 @@ def test_schema_is_strict_and_does_not_crawl_live_sources() -> None:
         "records",
         "schema_version",
         "unavailable_fields",
+        "unavailable_sources",
         "versions",
     }
+    assert evidence["schema_version"] == SCHEMA_VERSION == 2
     assert not any(name in evidence for name in ("filesystem", "environment", "network", "credentials", "raw_data"))
 
 
@@ -300,19 +427,33 @@ def test_capture_rejects_mutable_timezone_without_invoking_it() -> None:
 
 
 def test_unavailable_fields_cannot_contradict_present_evidence() -> None:
-    health = EvidenceRecord.from_payload("health", {"source_id": "engine", "state": "unavailable"})
+    health = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "engine", "state": "fault", **_snapshot_fields(role="child")},
+    )
     with pytest.raises(ValueError, match="cannot also contain"):
-        BundleCapture("bundle", NOW, (), (), (health,), ("health",))
+        BundleCapture(
+            "bundle", NOW, (), (), (health,), ("health",), (UnavailableSource("health", "source_not_provided"),)
+        )
     with pytest.raises(ValueError, match="unavailable versions"):
-        BundleCapture("bundle", NOW, (SoftwareVersion("cryodaq", "1"),), (), (), ("versions",))
+        BundleCapture(
+            "bundle",
+            NOW,
+            (SoftwareVersion("cryodaq", "1"),),
+            (),
+            (),
+            ("versions",),
+            (UnavailableSource("versions", "source_not_provided"),),
+        )
     with pytest.raises(ValueError, match="unavailable config"):
         BundleCapture(
             "bundle",
             NOW,
-            (),
+            (SoftwareVersion("cryodaq", "1"),),
             (ConfigFingerprint("alarms", "alarms.public.v1", "redacted_public_projection", HASH),),
             (),
             ("config_fingerprints",),
+            (UnavailableSource("config_fingerprints", "source_not_provided"),),
         )
 
 
@@ -402,11 +543,25 @@ def test_fingerprint_requires_explicit_redacted_public_projection_provenance() -
     ],
 )
 def test_dedicated_digest_field_and_canonical_uuid_id_are_not_guessed_as_secrets(source_id: str) -> None:
-    record = EvidenceRecord.from_payload(
+    integrity = EvidenceRecord.from_payload(
         "integrity",
-        {"source_id": source_id, "state": "ok", "digest_sha256": HASH},
+        {
+            "source_id": "data-integrity",
+            "state": "ok",
+            "storage": "available",
+            "digest_sha256": HASH,
+            "dropped_records": 0,
+            "pending_records": 0,
+            "persisted_revision": 1,
+            **_snapshot_fields(),
+        },
     )
-    assert json.loads(record.payload_json)["digest_sha256"] == HASH
+    child = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": source_id, "state": "ok", **_snapshot_fields(role="child")},
+    )
+    assert json.loads(integrity.payload_json)["digest_sha256"] == HASH
+    assert json.loads(child.payload_json)["source_id"] == source_id
     with pytest.raises(ValueError, match="opaque"):
         SoftwareVersion("component", "550e8400-e29b-41d4-a716-446655440000")
 
@@ -439,9 +594,12 @@ def test_bundle_is_stable_across_hash_seeds() -> None:
     script = """
 from datetime import UTC, datetime
 from cryodaq.support.bundle import *
-r = EvidenceRecord.from_payload('log', {'level':'INFO','event_code':'worker.started','event_id':'log-1'})
+r = EvidenceRecord.from_payload('log', {'level':'info','event_code':'worker.started','event_id':'log-1',
+    'observed_at':'2026-07-12T07:08:08.123456Z'})
+u = ('attention', 'health', 'integrity')
+s = tuple(UnavailableSource(name, 'source_not_provided') for name in u)
 c = BundleCapture('bundle-1', datetime(2026,1,1,tzinfo=UTC), (SoftwareVersion('cryodaq','1'),),
-    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','a'*64),), (r,))
+    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','a'*64),), (r,), u, s)
 print(build_support_bundle(c).manifest_sha256)
 """
     outputs = []

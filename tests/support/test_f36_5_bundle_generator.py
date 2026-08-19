@@ -13,16 +13,23 @@ Tests are grouped by acceptance criterion:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import inspect
 import json
 import os
+import re
 import subprocess
 import sys
+from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
 import cryodaq.support.collector as collector_module
+from cryodaq.core.operator_log import OperatorLogEntry
 from cryodaq.operator_snapshot import (
     AttentionItem,
     AttentionQueue,
@@ -53,6 +60,7 @@ from cryodaq.support.bundle import (
     ConfigFingerprint,
     EvidenceRecord,
     SoftwareVersion,
+    UnavailableSource,
     build_support_bundle,
 )
 from cryodaq.support.collector import collect_bundle_capture
@@ -151,6 +159,24 @@ def _snapshot(
     )
 
 
+def _with_unchecked_health(snapshot: OperatorSnapshot, subsystems: object) -> OperatorSnapshot:
+    summary = PlantHealthSummary.__new__(PlantHealthSummary)
+    object.__setattr__(summary, "cut", snapshot.cut)
+    object.__setattr__(summary, "status", snapshot.plant_health.status)
+    object.__setattr__(summary, "subsystems", subsystems)
+    object.__setattr__(snapshot, "plant_health", summary)
+    return snapshot
+
+
+def _with_unchecked_attention(snapshot: OperatorSnapshot, items: object) -> OperatorSnapshot:
+    summary = AttentionQueue.__new__(AttentionQueue)
+    object.__setattr__(summary, "cut", snapshot.cut)
+    object.__setattr__(summary, "status", snapshot.attention.status)
+    object.__setattr__(summary, "items", items)
+    object.__setattr__(snapshot, "attention", summary)
+    return snapshot
+
+
 def _minimal_capture(**overrides: object) -> BundleCapture:
     """Return the smallest valid BundleCapture for parametrized tests."""
     defaults: dict[str, object] = dict(
@@ -162,12 +188,43 @@ def _minimal_capture(**overrides: object) -> BundleCapture:
         unavailable_fields=(),
     )
     defaults.update(overrides)
+    if "unavailable_fields" not in overrides:
+        records = defaults["records"]
+        assert type(records) is tuple
+        record_kinds = {record.kind for record in records}
+        unavailable = tuple(sorted({"attention", "health", "integrity"} - record_kinds))
+        defaults["unavailable_fields"] = unavailable
+        defaults["unavailable_sources"] = tuple(
+            UnavailableSource(source, "source_not_provided") for source in unavailable
+        )
     return BundleCapture(**defaults)  # type: ignore[arg-type]
 
 
 def _evidence(bundle) -> dict[str, object]:
     artifact = next(a for a in bundle.artifacts if a.logical_path == "evidence.json")
     return json.loads(artifact.content)
+
+
+def _snapshot_record_fields(
+    *,
+    role: str = "summary",
+    parent_source_id: str | None = None,
+    mode: str = "live",
+    source_id: str = "engine-v1",
+    producer_id: str = "engine-v1",
+) -> dict[str, object]:
+    return {
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+        "received_at": "2026-07-14T11:59:01.000000Z",
+        "record_role": role,
+        "revision": 1,
+        "snapshot_mode": mode,
+        "snapshot_producer_id": producer_id,
+        "snapshot_source_id": source_id,
+        "source_age_us": 0,
+        "transport_age_us": 0,
+        **({"parent_source_id": parent_source_id} if parent_source_id is not None else {}),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -187,14 +244,16 @@ def test_schema_conformance_evidence_has_all_required_fields() -> None:
         "records",
         "schema_version",
         "unavailable_fields",
+        "unavailable_sources",
         "versions",
     }
-    assert ev["schema_version"] == 1
+    assert ev["schema_version"] == 2
     assert ev["bundle_id"] == _BUNDLE_ID
     assert isinstance(ev["versions"], list)
     assert isinstance(ev["config_fingerprints"], list)
     assert isinstance(ev["records"], list)
     assert isinstance(ev["unavailable_fields"], list)
+    assert isinstance(ev["unavailable_sources"], list)
 
 
 def test_schema_conformance_manifest_has_required_fields() -> None:
@@ -204,10 +263,33 @@ def test_schema_conformance_manifest_has_required_fields() -> None:
 
     assert set(manifest) == {"artifacts", "bundle_id", "created_at", "schema_version"}
     assert manifest["bundle_id"] == _BUNDLE_ID
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert isinstance(manifest["artifacts"], list)
     assert len(manifest["artifacts"]) == 1
     assert manifest["artifacts"][0]["logical_path"] == "evidence.json"
+
+
+def test_schema_v2_unavailable_fields_require_one_sorted_reason_each() -> None:
+    with pytest.raises(ValueError, match="exactly one reason-coded"):
+        _minimal_capture(unavailable_fields=("health",), unavailable_sources=())
+    with pytest.raises(ValueError, match="exactly one reason-coded"):
+        _minimal_capture(
+            unavailable_fields=(),
+            unavailable_sources=(UnavailableSource("health", "source_not_provided"),),
+        )
+    with pytest.raises(ValueError, match="sorted and unique"):
+        _minimal_capture(
+            unavailable_fields=("attention", "health"),
+            unavailable_sources=(
+                UnavailableSource("health", "source_not_provided"),
+                UnavailableSource("attention", "source_not_provided"),
+            ),
+        )
+
+
+def test_schema_v2_rejects_unknown_unavailable_reason_code() -> None:
+    with pytest.raises(ValueError, match="reason_code"):
+        UnavailableSource("health", "exception-OSError-C-users-alice")
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +381,7 @@ def test_redaction_category_hostile_strings_neutralized() -> None:
         # Formula injection prefix
         ('  =HYPERLINK("x")', '  <formula>HYPERLINK("x")'),
         # Zero-width space (invisible separator)
-        ("nor​mal", "nor<U+200B>mal"),
+        ("nor​mal", "<redacted:private>"),
     ]
     for raw, expected in cases:
         sv = SoftwareVersion("component", raw)
@@ -310,6 +392,287 @@ def test_redaction_category_hostile_strings_neutralized() -> None:
                 assert char not in (sv.version or ""), f"hostile char {char!r} leaked"
 
 
+def test_redaction_category_private_scalar_email_is_rejected() -> None:
+    """Category: operator/private data — scalar email values fail closed too."""
+    with pytest.raises(ValueError, match="private"):
+        SoftwareVersion("driver-pack", "alice.operator@example.invalid")
+
+
+@pytest.mark.parametrize("value", ("alice@lab", "+1 555 867 5309"))
+def test_redaction_category_private_scalar_identity_is_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="private"):
+        SoftwareVersion("driver-pack", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "Alice Smith",
+        "alice smith",
+        "\u0410\u043b\u0438\u0441\u0430 \u0418\u0432\u0430\u043d\u043e\u0432\u0430",
+        "Microsoft Windows",
+    ),
+)
+def test_name_like_private_scalar_is_redacted_without_erasing_version(value: str) -> None:
+    assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
+
+
+@pytest.mark.parametrize("value", ("alice", "1.0+alice"))
+def test_lowercase_person_shaped_version_text_is_redacted(value: str) -> None:
+    assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "driver build by alice smith",
+        "driver build by \u0410\u043b\u0438\u0441\u0430 \u0418\u0432\u0430\u043d\u043e\u0432\u0430",
+        "555.867.5309",
+    ),
+)
+def test_embedded_name_and_dotted_phone_are_redacted(value: str) -> None:
+    assert SoftwareVersion("driver-pack", value).version == "<redacted:private>"
+
+
+@pytest.mark.parametrize(
+    "value", ("\u0430\u043b\u0438\u0441\u0430@\u043f\u0440\u0438\u043c\u0435\u0440.\u0440\u0444", "contact=alice")
+)
+def test_unicode_email_and_private_contact_assignment_are_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="private|secret"):
+        SoftwareVersion("driver-pack", value)
+
+
+@pytest.mark.parametrize("value", ("10.0.26100", "2026.08.10"))
+def test_numeric_versions_are_not_misclassified_as_private_phone_data(value: str) -> None:
+    assert SoftwareVersion("driver-pack", value).version == value
+
+
+def test_collector_keeps_safe_versions_when_name_like_value_is_redacted() -> None:
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=None,
+        extra_versions={
+            "kernel": "10.0.26100",
+            "calendar": "2026.08.10",
+            "platform": "Microsoft Windows",
+        },
+    )
+    evidence = _evidence(build_support_bundle(capture))
+    versions = {item["component"]: item["version"] for item in evidence["versions"]}
+
+    assert "versions" not in evidence["unavailable_fields"]
+    assert versions["kernel"] == "10.0.26100"
+    assert versions["calendar"] == "2026.08.10"
+    assert versions["platform"] == "<redacted:private>"
+
+
+@pytest.mark.parametrize("value", ("alice.operator", "alice.smith"))
+def test_identifier_valued_private_role_is_rejected(value: str) -> None:
+    record = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": value,
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
+    )
+
+    assert json.loads(record.payload_json)["source_id"] == "redacted-private"
+
+
+def test_private_identifiers_are_redacted_across_bundle_schema_surfaces() -> None:
+    capture = _minimal_capture(
+        bundle_id="alice.operator",
+        versions=(SoftwareVersion("alice.operator", "1.0"),),
+        config_fingerprints=(
+            ConfigFingerprint("alice.operator", "alarms.public.v1", "redacted_public_projection", _HASH),
+        ),
+    )
+    bundle = build_support_bundle(capture)
+    evidence = _evidence(bundle)
+
+    assert bundle.bundle_id == "redacted-private"
+    assert evidence["bundle_id"] == "redacted-private"
+    assert evidence["versions"][0]["component"] == "redacted-private"
+    assert evidence["config_fingerprints"][0]["config_id"] == "redacted-private"
+    assert "alice" not in b"".join(artifact.content for artifact in bundle.artifacts).decode().casefold()
+
+
+def test_unknown_identifier_pseudonyms_cannot_be_recovered_from_sha256() -> None:
+    """Unknown identifiers use opaque pseudonyms, not reversible digest prefixes."""
+    capture = _minimal_capture(
+        bundle_id="bundle-v1",
+        versions=(SoftwareVersion("alice", "1.0"), SoftwareVersion("bob", "2.0")),
+    )
+    by_version = {item["version"]: item["component"] for item in _evidence(build_support_bundle(capture))["versions"]}
+    alice_pseudonym = by_version["1.0"]
+    bob_pseudonym = by_version["2.0"]
+    other_bundle = _minimal_capture(
+        bundle_id="bundle-v2",
+        versions=(SoftwareVersion("charlie", "1.0"),),
+    )
+    charlie_pseudonym = _evidence(build_support_bundle(other_bundle))["versions"][0]["component"]
+
+    assert alice_pseudonym != bob_pseudonym
+    assert alice_pseudonym != charlie_pseudonym
+    assert re.fullmatch(r"redacted-id-[0-9a-f]{24}", alice_pseudonym) is not None
+    assert re.fullmatch(r"redacted-id-[0-9a-f]{24}", bob_pseudonym) is not None
+    assert alice_pseudonym != f"redacted-id-{hashlib.sha256(b'alice').hexdigest()[:24]}"
+    assert bob_pseudonym != f"redacted-id-{hashlib.sha256(b'bob').hexdigest()[:24]}"
+
+
+def test_unknown_identifier_pseudonyms_are_independent_of_input_order() -> None:
+    first = _minimal_capture(
+        versions=(SoftwareVersion("alice", "1.0"), SoftwareVersion("bob", "2.0")),
+    )
+    reversed_order = _minimal_capture(
+        versions=(SoftwareVersion("bob", "2.0"), SoftwareVersion("alice", "1.0")),
+    )
+
+    first_bundle = build_support_bundle(first)
+    reversed_bundle = build_support_bundle(reversed_order)
+
+    assert first_bundle.manifest_sha256 == reversed_bundle.manifest_sha256
+    assert first_bundle.artifacts[1].content == reversed_bundle.artifacts[1].content
+
+
+@pytest.mark.parametrize("bundle_id", ("alice", "bob"))
+def test_unrepresentable_private_bundle_ids_are_rejected(bundle_id: str) -> None:
+    with pytest.raises(ValueError, match="unrepresentable private identifier"):
+        _minimal_capture(bundle_id=bundle_id)
+
+
+def test_raw_pseudonym_cannot_collide_with_generated_identifier() -> None:
+    scope = json.dumps(
+        {"bundle_id": "bundle-v1", "created_at": "2026-07-14T12:00:00.000000Z"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    reserved = f"redacted-id-{hashlib.sha256(scope + (0).to_bytes(4, 'big')).hexdigest()[:24]}"
+    capture = _minimal_capture(
+        bundle_id="bundle-v1",
+        versions=(SoftwareVersion("alice", "1.0"), SoftwareVersion(reserved, "2.0")),
+    )
+
+    evidence = _evidence(build_support_bundle(capture))
+
+    assert len({item["component"] for item in evidence["versions"]}) == 2
+    assert reserved in {item["component"] for item in evidence["versions"]}
+
+
+def test_redaction_category_embedded_absolute_user_path_is_removed() -> None:
+    """Category: paths — an absolute user path stays redacted when glued to hostile text."""
+    private_path = "/home/alice/private/run.log"
+    version = SoftwareVersion("driver-pack", f"hostile-prefix{private_path}").version
+
+    assert version is not None
+    assert private_path not in version
+    assert "alice" not in version
+    assert "<redacted:path>" in version
+
+
+@pytest.mark.parametrize(
+    ("value", "private_fragment"),
+    [
+        ("x/home/alice/a", "/home/alice/a"),
+        (r"xC:\Users\alice\a", r"C:\Users\alice\a"),
+        (r"x\\server\share\alice\a", r"\\server\share\alice\a"),
+    ],
+)
+def test_redaction_category_glued_absolute_user_paths_are_removed(
+    value: str,
+    private_fragment: str,
+) -> None:
+    version = SoftwareVersion("driver-pack", value).version
+
+    assert version is not None
+    assert private_fragment not in version
+    assert "alice" not in version
+    assert "<redacted:path>" in version
+
+
+@pytest.mark.parametrize("value", ("../private/run.log", r"..\private\run.log", "prefix/../secret"))
+def test_redaction_category_path_traversal_is_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="traversal"):
+        SoftwareVersion("driver-pack", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        '{"password":"hunter2"}',
+        '{"profile":{"email":"alice.operator@example.invalid"}}',
+        '{"token":"FAKE_TOKEN_abcdefghijklmnopqrstuvwxyz0123"}',
+        '{"contact":"unrecognized-private-value"}',
+    ),
+)
+def test_redaction_category_serialized_blobs_are_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="secret|private|serialized"):
+        SoftwareVersion("driver-pack", value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "x/home/Alice Smith/private/run.log",
+        r"xC:\Users\Alice Smith\private\run.log",
+        r"x\\server\share\Alice Smith\private\run.log",
+    ),
+)
+def test_redaction_category_glued_spaced_user_paths_leave_no_suffix(value: str) -> None:
+    version = SoftwareVersion("driver-pack", value).version
+
+    assert version is not None
+    for private_fragment in ("Alice", "Smith", "private", "run.log"):
+        assert private_fragment not in version
+    assert "<redacted:path>" in version
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "prefix/opt/cryodaq/alice/run.log",
+        "prefix\uff0fhome\uff0falice\uff0fprivate.txt",
+        "prefixD\uff1a\uff3cUsers\uff3calice\uff3cprivate.txt",
+        "prefix\u2215home\u2215alice\u2215private.txt",
+        "prefix\u2044home\u2044alice\u2044private.txt",
+        "prefix/ho\u200bme/alice/private.txt",
+    ),
+)
+def test_redaction_category_hostile_generic_and_confusable_paths_are_removed(value: str) -> None:
+    version = SoftwareVersion("driver-pack", value).version
+
+    assert version is not None
+    assert "alice" not in version.casefold()
+    assert "<redacted:path>" in version
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "prefixBearer abcdefghijklmnop",
+        "prefixAKIAIOSFODNN7EXAMPLE",
+        'prefix {"contact":"unrecognized-private-value"}',
+    ),
+)
+def test_redaction_category_wrapped_credential_or_serialized_blob_is_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="secret|serialized"):
+        SoftwareVersion("driver-pack", value)
+
+
+def test_redaction_category_nested_credentials_are_rejected() -> None:
+    with pytest.raises(ValueError, match="secret-bearing"):
+        EvidenceRecord.from_payload(
+            "health",
+            {
+                "source_id": "engine",
+                "state": "ok",
+                "metadata": {"nested": {"credential": "hunter2"}},
+            },
+        )
+
+
 # ---------------------------------------------------------------------------
 # Manifest stability
 # ---------------------------------------------------------------------------
@@ -317,21 +680,17 @@ def test_redaction_category_hostile_strings_neutralized() -> None:
 
 def test_manifest_stability_identical_inputs_produce_byte_identical_manifest() -> None:
     """Identical BundleCapture instances must produce byte-identical manifests."""
-    record = EvidenceRecord.from_payload("log", {"event_id": "log-1", "event_code": "worker.started", "level": "INFO"})
-    capture_a = BundleCapture(
-        bundle_id=_BUNDLE_ID,
-        created_at=_NOW,
-        versions=(SoftwareVersion("cryodaq", "0.64.1"),),
-        config_fingerprints=(ConfigFingerprint("alarms", "alarms.public.v1", "redacted_public_projection", _HASH),),
-        records=(record,),
+    record = EvidenceRecord.from_payload(
+        "log",
+        {
+            "event_id": "log-1",
+            "event_code": "worker.started",
+            "level": "info",
+            "observed_at": "2026-07-14T11:59:00.000000Z",
+        },
     )
-    capture_b = BundleCapture(
-        bundle_id=_BUNDLE_ID,
-        created_at=_NOW,
-        versions=(SoftwareVersion("cryodaq", "0.64.1"),),
-        config_fingerprints=(ConfigFingerprint("alarms", "alarms.public.v1", "redacted_public_projection", _HASH),),
-        records=(record,),
-    )
+    capture_a = _minimal_capture(records=(record,))
+    capture_b = _minimal_capture(records=(record,))
 
     bundle_a = build_support_bundle(capture_a)
     bundle_b = build_support_bundle(capture_b)
@@ -346,10 +705,14 @@ def test_manifest_stability_across_hash_seeds_via_subprocess() -> None:
     script = (
         "from datetime import UTC, datetime\n"
         "from cryodaq.support.bundle import *\n"
-        "r = EvidenceRecord.from_payload('log', {'level':'INFO','event_code':'engine.started','event_id':'log-1'})\n"
+        "r = EvidenceRecord.from_payload("
+        "'log', {'level':'info','event_code':'engine.started','event_id':'log-1',"
+        "'observed_at':'2026-07-14T11:59:00.000000Z'})\n"
+        "u = ('attention', 'health', 'integrity')\n"
+        "s = tuple(UnavailableSource(name, 'source_not_provided') for name in u)\n"
         "c = BundleCapture('f36-5-seed-test', datetime(2026,7,14,tzinfo=UTC),\n"
-        "    (SoftwareVersion('cryodaq','0.64.1'),),\n"
-        "    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','b'*64),), (r,))\n"
+        "    (SoftwareVersion('alice','1.0'), SoftwareVersion('bob','2.0')),\n"
+        "    (ConfigFingerprint('alarms','alarms.public.v1','redacted_public_projection','b'*64),), (r,), u, s)\n"
         "print(build_support_bundle(c).manifest_sha256)"
     )
     outputs = []
@@ -386,14 +749,296 @@ def test_degraded_engine_none_snapshot_produces_valid_bundle_with_unavailable_se
     assert "integrity" in unavailable, "integrity must be unavailable when engine is absent"
     assert "audit" in unavailable, "audit must be unavailable when engine is absent"
     assert "log" in unavailable, "log must be unavailable when engine is absent"
+    assert "config_fingerprints" in unavailable, "missing config evidence must be explicit"
+    assert "unavailable_sources" in ev, "degraded capture omitted reason-bearing source status"
+    reasons = {item["source"]: item["reason_code"] for item in ev["unavailable_sources"]}
+    assert reasons == {
+        "attention": "engine_unavailable",
+        "audit": "source_not_provided",
+        "config_fingerprints": "source_not_provided",
+        "health": "engine_unavailable",
+        "integrity": "engine_unavailable",
+        "log": "source_not_provided",
+    }
 
     # No live records should appear.
     assert ev["records"] == []
 
 
+def test_collector_captures_independent_recent_audit_and_log_sources() -> None:
+    """Real OperatorLogEntry inputs are projected without their private fields."""
+    parameters = inspect.signature(collect_bundle_capture).parameters
+    assert {"recent_audit_entries", "recent_log_entries"} <= set(parameters), (
+        "collect_bundle_capture has no production audit/log source inputs"
+    )
+
+    audit_entry = OperatorLogEntry(
+        7,
+        _OBS,
+        "private-experiment",
+        "alice.operator@example.invalid",
+        "safety",
+        "password=hunter2 C:\\Users\\alice\\private.txt",
+        ("alarm",),
+    )
+    log_entry = OperatorLogEntry(
+        8,
+        _OBS,
+        "private-experiment",
+        "alice.operator@example.invalid",
+        "engine",
+        "Bearer FAKE_TOKEN_abcdefghijklmnopqrstuvwxyz0123",
+        (),
+    )
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=None,
+        recent_audit_entries=(audit_entry,),
+        recent_log_entries=(log_entry,),
+    )
+    bundle = build_support_bundle(capture)
+    evidence = _evidence(bundle)
+
+    assert {record["kind"] for record in evidence["records"]} == {"audit", "log"}
+    public_records = {record["kind"]: record["payload"] for record in evidence["records"]}
+    assert public_records["audit"] == {
+        "event_code": "audit.safety.alarm",
+        "event_id": "audit-7-20260714T115900000000Z",
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+        "outcome": "recorded",
+        "revision": 7,
+        "source_id": "record-store",
+    }
+    assert public_records["log"] == {
+        "event_code": "log.engine.entry",
+        "event_id": "log-8-20260714T115900000000Z",
+        "level": "info",
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+        "revision": 8,
+        "source_id": "record-store",
+    }
+    assert not {"audit", "log"}.intersection(evidence["unavailable_fields"])
+    serialized = b"".join(artifact.content for artifact in bundle.artifacts)
+    for private in (b"alice", b"private-experiment", b"hunter2", b"FAKE_TOKEN"):
+        assert private not in serialized
+
+
+def test_unreadable_audit_source_is_explicit_without_aborting_log_capture() -> None:
+    """One dead evidence source gets a stable reason while its sibling still captures."""
+    parameters = inspect.signature(collect_bundle_capture).parameters
+    assert {"recent_audit_entries", "recent_log_entries"} <= set(parameters), (
+        "collect_bundle_capture has no production audit/log source inputs"
+    )
+
+    def unreadable_audit():
+        raise OSError("C:\\Users\\alice\\audit.db password=hunter2")
+        yield  # pragma: no cover - makes this an iterable source
+
+    log_entry = OperatorLogEntry(8, _OBS, None, "system", "engine", "started", ())
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=None,
+        recent_audit_entries=unreadable_audit(),
+        recent_log_entries=(log_entry,),
+    )
+    evidence = _evidence(build_support_bundle(capture))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
+
+    assert reasons["audit"] == "source_read_failed"
+    assert "log" not in reasons
+    assert any(record["kind"] == "log" for record in evidence["records"])
+
+
+def test_unreadable_config_source_is_explicit_without_aborting_capture() -> None:
+    def unreadable_fingerprints():
+        raise OSError("C:\\Users\\alice\\config.yaml password=hunter2")
+        yield
+
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=None,
+        extra_fingerprints=unreadable_fingerprints(),  # type: ignore[arg-type]
+    )
+    evidence = _evidence(build_support_bundle(capture))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
+
+    assert reasons["config_fingerprints"] == "source_read_failed"
+
+
+def test_non_authoritative_empty_attention_is_unavailable_not_empty_success() -> None:
+    """An unavailable canonical attention summary cannot masquerade as an empty queue."""
+    snapshot = _snapshot()
+    attention = AttentionQueue(
+        snapshot.cut,
+        SummaryStatus(
+            OperatorPresentationState.CAUTION,
+            1,
+            0.25,
+            ("attention_authority_unavailable",),
+            "Источник внимания недоступен",
+        ),
+        (),
+    )
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=replace(snapshot, attention=attention))
+
+    assert "attention" in capture.unavailable_fields
+    evidence = _evidence(build_support_bundle(capture))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
+    assert reasons["attention"] == "snapshot_unavailable"
+    assert not any(record["kind"] == "attention" for record in evidence["records"])
+
+
+def test_collector_reuses_infrastructure_health_from_the_coherent_snapshot() -> None:
+    """Passive infrastructure and plant health share the one F36.1 snapshot cut."""
+    snapshot = _snapshot()
+    infrastructure = InfrastructureNodeHealth(
+        snapshot.cut,
+        _status(OperatorPresentationState.FAULT),
+        (InfrastructureNode("ups-main", "ИБП", OperatorPresentationState.FAULT, ("on_battery",)),),
+    )
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=replace(snapshot, infrastructure=infrastructure),
+    )
+    evidence = _evidence(build_support_bundle(capture))
+    health_ids = {record["payload"]["source_id"] for record in evidence["records"] if record["kind"] == "health"}
+
+    assert health_ids == {"infrastructure-summary", "plant", "plant-health-summary", "ups-main"}
+
+
+def test_collector_preserves_bounded_integrity_results_from_snapshot() -> None:
+    """Integrity evidence retains the canonical persistence/archive counters and cut."""
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=_snapshot())))
+    payload = next(record["payload"] for record in evidence["records"] if record["kind"] == "integrity")
+
+    assert payload == {
+        "archive_revision": 41,
+        "dropped_records": 0,
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+        "pending_records": 0,
+        "persisted_revision": 42,
+        "reason_code": "authoritative",
+        "received_at": "2026-07-14T11:59:01.000000Z",
+        "record_role": "summary",
+        "revision": 1,
+        "snapshot_mode": "live",
+        "snapshot_producer_id": "engine-v1",
+        "snapshot_source_id": "engine-v1",
+        "source_age_us": 1_000_000,
+        "source_id": "data-integrity",
+        "state": "ok",
+        "storage": "available",
+        "transport_age_us": 250_000,
+    }
+
+
+def test_collector_preserves_canonical_integrity_fault_state() -> None:
+    snapshot = _snapshot()
+    integrity = DataIntegritySummary(
+        snapshot.cut,
+        SummaryStatus(
+            OperatorPresentationState.FAULT,
+            1,
+            0.25,
+            ("data_loss",),
+            "Integrity loss",
+        ),
+        42,
+        41,
+        0,
+        1,
+        AvailabilityTruth.AVAILABLE,
+    )
+    experiment = replace(
+        snapshot.experiment,
+        recording=RecordingTruth.NOT_RECORDING,
+        recording_session_id=None,
+    )
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=replace(snapshot, data_integrity=integrity, experiment=experiment),
+    )
+    evidence = _evidence(build_support_bundle(capture))
+    payload = next(record["payload"] for record in evidence["records"] if record["kind"] == "integrity")
+
+    assert payload["state"] == "fault"
+    assert payload["dropped_records"] == 1
+
+
+def test_collector_preserves_authoritative_summary_severity() -> None:
+    health_item = PlantHealthItem("plant", "Plant", OperatorPresentationState.CAUTION, ())
+    attention_item = AttentionItem(
+        "alarm-vacuum",
+        OperatorPresentationState.CAUTION,
+        "Vacuum caution",
+        "Inspect vacuum system",
+        _OBS,
+        (),
+    )
+    snapshot = _snapshot(attention_items=(attention_item,), health_items=(health_item,))
+    fault_status = _status(OperatorPresentationState.FAULT)
+    snapshot = replace(
+        snapshot,
+        plant_health=PlantHealthSummary(snapshot.cut, fault_status, snapshot.plant_health.subsystems),
+        attention=AttentionQueue(snapshot.cut, fault_status, snapshot.attention.items),
+    )
+
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    health = {
+        record["payload"]["source_id"]: record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == "health"
+    }
+    attention = {
+        record["payload"]["attention_id"]: record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == "attention"
+    }
+
+    assert health["plant"]["state"] == "caution"
+    assert health["plant-health-summary"]["state"] == "fault"
+    assert attention["alarm-vacuum"]["state"] == "caution"
+    assert attention["alarm-vacuum"]["severity"] == "caution"
+    assert attention["attention-summary"]["state"] == "fault"
+    assert attention["attention-summary"]["severity"] == "fault"
+
+
+def test_collector_does_not_copy_aggregate_fault_to_healthy_items() -> None:
+    health_items = (
+        PlantHealthItem("healthy", "Healthy", OperatorPresentationState.OK, ()),
+        PlantHealthItem("faulted", "Faulted", OperatorPresentationState.FAULT, ("sensor_fault",)),
+    )
+    attention_items = (
+        AttentionItem("caution-item", OperatorPresentationState.CAUTION, "Caution", "Inspect", _OBS, ()),
+        AttentionItem("fault-item", OperatorPresentationState.FAULT, "Fault", "Respond", _OBS, ()),
+    )
+    snapshot = _snapshot(attention_items=attention_items, health_items=health_items)
+
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    health_children = [
+        record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == "health" and record["payload"].get("record_role") == "child"
+    ]
+    attention = {
+        record["payload"]["attention_id"]: record["payload"]["state"]
+        for record in evidence["records"]
+        if record["kind"] == "attention" and record["payload"].get("record_role") == "child"
+    }
+
+    assert next(item for item in health_children if item["source_id"] == "healthy")["state"] == "ok"
+    assert sum(item["state"] == "fault" for item in health_children) == 1
+    assert attention["caution-item"] == "caution"
+    assert attention["fault-item"] == "fault"
+
+
 def test_degraded_engine_partial_snapshot_failure_marks_section_unavailable() -> None:
-    """If one live section raises, that section becomes unavailable and others succeed."""
-    # Build a mock snapshot where attention raises but plant_health works.
+    """A noncanonical snapshot-shaped source fails closed for every derived section."""
     mock_snap = MagicMock()
     mock_snap.plant_health.subsystems = []
     type(mock_snap.attention).items = property(lambda self: (_ for _ in ()).throw(RuntimeError("engine down")))
@@ -404,13 +1049,15 @@ def test_degraded_engine_partial_snapshot_failure_marks_section_unavailable() ->
         _NOW,
         snapshot=mock_snap,
     )
-    bundle = build_support_bundle(capture)
-    ev = _evidence(bundle)
+    evidence = _evidence(build_support_bundle(capture))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
 
-    assert "attention" in ev["unavailable_fields"]
-    # health and integrity should NOT be in unavailable (they succeeded).
-    assert "health" not in ev["unavailable_fields"]
-    assert "integrity" not in ev["unavailable_fields"]
+    assert {section: reasons[section] for section in ("health", "attention", "integrity")} == {
+        "health": "source_invalid",
+        "attention": "source_invalid",
+        "integrity": "source_invalid",
+    }
+    assert not {"health", "attention", "integrity"}.intersection(record["kind"] for record in evidence["records"])
 
 
 def test_collector_attention_real_item_emits_evidence_record() -> None:
@@ -433,7 +1080,11 @@ def test_collector_attention_real_item_emits_evidence_record() -> None:
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
-    attention_records = [r for r in ev["records"] if r["kind"] == "attention"]
+    attention_records = [
+        record
+        for record in ev["records"]
+        if record["kind"] == "attention" and record["payload"].get("record_role") == "child"
+    ]
     assert len(attention_records) == 1, (
         "Expected exactly one attention EvidenceRecord; got "
         f"{len(attention_records)}.  If zero, the collector is reading a "
@@ -476,23 +1127,29 @@ def test_collector_attention_severity_derivation_covers_all_five_non_ok_states()
         capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snap)
         bundle = build_support_bundle(capture)
         ev = _evidence(bundle)
-        records = [r for r in ev["records"] if r["kind"] == "attention"]
-        assert len(records) == 1, f"no attention record for state={state}"
+        records = [
+            record
+            for record in ev["records"]
+            if record["kind"] == "attention" and record["payload"].get("record_role") == "child"
+        ]
+        assert len(records) == 1, f"no attention child record for state={state}"
         payload = records[0]["payload"]
         assert payload["severity"] == expected_severity, f"wrong severity for state={state}"
         # The true state must be preserved verbatim — severity derivation must not overwrite it.
         assert payload["state"] == state.value, f"state field lost for state={state}"
 
 
-def test_collector_attention_empty_queue_emits_no_records_and_no_unavailable() -> None:
-    """An empty attention queue produces zero records and does NOT mark attention unavailable."""
+def test_collector_attention_empty_queue_emits_only_authoritative_summary() -> None:
+    """An empty authoritative queue still records its explicit OK summary."""
     snap = _snapshot(attention_items=())
     capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snap)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
-    attention_records = [r for r in ev["records"] if r["kind"] == "attention"]
-    assert len(attention_records) == 0
+    attention_records = [record["payload"] for record in ev["records"] if record["kind"] == "attention"]
+    assert len(attention_records) == 1
+    assert attention_records[0]["attention_id"] == "attention-summary"
+    assert attention_records[0]["state"] == "ok"
     assert "attention" not in ev["unavailable_fields"]
 
 
@@ -526,79 +1183,61 @@ def test_collector_secret_inputs_and_exception_are_absent_from_bundle_and_logs(
 
 
 def test_collector_rolls_back_partial_health_iteration_and_preserves_other_sections() -> None:
-    """A mid-iteration health failure degrades only health and keeps integrity.
-
-    Uses a real OperatorSnapshot for the non-failing sections.  The health
-    subsystems list is replaced with a generator that raises mid-iteration so
-    we exercise the rollback path; the snapshot object itself is real.
-    """
-    # Build a real snapshot first, then override plant_health with a broken generator.
-    real_snap = _snapshot(integrity_storage=AvailabilityTruth.AVAILABLE)
-
-    first = PlantHealthItem("first", "Первый", OperatorPresentationState.OK, ())
+    """A mid-iteration exact-summary failure degrades health while integrity survives."""
+    snapshot = _snapshot(integrity_storage=AvailabilityTruth.AVAILABLE)
+    first = PlantHealthItem("first", "First", OperatorPresentationState.OK, ())
 
     def broken_subsystems():
         yield first
         raise RuntimeError("collector iteration failed")
 
-    # Monkeypatch plant_health.subsystems on the real snapshot.
-    # OperatorSnapshot is a frozen dataclass so we use MagicMock only for the
-    # plant_health attribute; attention and data_integrity come from the real object.
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = broken_subsystems()
-    mock_snap.attention.items = real_snap.attention.items
-    mock_snap.data_integrity.storage.value = real_snap.data_integrity.storage.value
+    broken_health = PlantHealthSummary.__new__(PlantHealthSummary)
+    object.__setattr__(broken_health, "cut", snapshot.cut)
+    object.__setattr__(broken_health, "status", snapshot.plant_health.status)
+    object.__setattr__(broken_health, "subsystems", broken_subsystems())
+    object.__setattr__(snapshot, "plant_health", broken_health)
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
-    bundle = build_support_bundle(capture)
-    ev = _evidence(bundle)
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
 
-    assert "health" in ev["unavailable_fields"]
-    assert not any(record["kind"] == "health" for record in ev["records"])
-    assert any(record["kind"] == "integrity" for record in ev["records"])
+    assert reasons["health"] == "source_read_failed"
+    assert not any(record["kind"] == "health" for record in evidence["records"])
+    assert any(record["kind"] == "integrity" for record in evidence["records"])
 
 
 def test_collector_all_health_items_fail_marks_health_unavailable() -> None:
-    """If every health item raises, health is marked unavailable (not silently zero records)."""
+    """An invalid item on an exact health summary makes the whole section unavailable."""
+    bad_item = PlantHealthItem.__new__(PlantHealthItem)
+    object.__setattr__(bad_item, "subsystem_id", None)
+    object.__setattr__(bad_item, "display_name", "bad")
+    object.__setattr__(bad_item, "state", OperatorPresentationState.OK)
+    object.__setattr__(bad_item, "reason_codes", ())
+    object.__setattr__(bad_item, "transport_reason_codes", ())
+    snapshot = _with_unchecked_health(_snapshot(), (bad_item,))
 
-    # Use a MagicMock with items that each raise.
-    def bad_subsystems():
-        yield MagicMock(subsystem_id=None)  # _safe_identifier(None) will raise
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = bad_subsystems()
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
-
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
-    bundle = build_support_bundle(capture)
-    ev = _evidence(bundle)
-
-    assert "health" in ev["unavailable_fields"], (
-        "health must be marked unavailable when all items are dropped — not silently zero records"
-    )
-    assert not any(r["kind"] == "health" for r in ev["records"])
+    assert reasons["health"] == "source_invalid"
+    assert not any(record["kind"] == "health" for record in evidence["records"])
 
 
 def test_collector_all_attention_items_fail_marks_attention_unavailable() -> None:
-    """If every attention item raises, attention is marked unavailable (not silently zero records)."""
+    """An invalid item on an exact attention summary makes the whole section unavailable."""
+    bad_item = AttentionItem.__new__(AttentionItem)
+    object.__setattr__(bad_item, "attention_id", None)
+    object.__setattr__(bad_item, "state", OperatorPresentationState.OK)
+    object.__setattr__(bad_item, "title", "bad")
+    object.__setattr__(bad_item, "detail", "bad")
+    object.__setattr__(bad_item, "observed_at", _OBS)
+    object.__setattr__(bad_item, "transport_reason_codes", ())
+    snapshot = _with_unchecked_attention(_snapshot(), (bad_item,))
 
-    def bad_items():
-        yield MagicMock(attention_id=None)  # _safe_identifier(None) will raise
+    evidence = _evidence(build_support_bundle(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)))
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = []
-    mock_snap.attention.items = bad_items()
-    mock_snap.data_integrity.storage.value = "available"
-
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
-    bundle = build_support_bundle(capture)
-    ev = _evidence(bundle)
-
-    assert "attention" in ev["unavailable_fields"], (
-        "attention must be marked unavailable when all items are dropped — not silently zero records"
-    )
-    assert not any(r["kind"] == "attention" for r in ev["records"])
+    assert reasons["attention"] == "source_invalid"
+    assert not any(record["kind"] == "attention" for record in evidence["records"])
 
 
 # ---------------------------------------------------------------------------
@@ -743,15 +1382,25 @@ def test_failclosed_live_section_overflow_consumes_only_cap_plus_one(section: st
             consumed += 1
             yield MagicMock()
 
-    snapshot = MagicMock()
-    snapshot.plant_health.subsystems = oversized() if section == "health" else ()
-    snapshot.attention.items = oversized() if section == "attention" else ()
-    snapshot.data_integrity.storage.value = "available"
+    snapshot = _snapshot()
+    if section == "health":
+        broken_summary = PlantHealthSummary.__new__(PlantHealthSummary)
+        object.__setattr__(broken_summary, "cut", snapshot.cut)
+        object.__setattr__(broken_summary, "status", snapshot.plant_health.status)
+        object.__setattr__(broken_summary, "subsystems", oversized())
+        object.__setattr__(snapshot, "plant_health", broken_summary)
+    else:
+        broken_summary = AttentionQueue.__new__(AttentionQueue)
+        object.__setattr__(broken_summary, "cut", snapshot.cut)
+        object.__setattr__(broken_summary, "status", snapshot.attention.status)
+        object.__setattr__(broken_summary, "items", oversized())
+        object.__setattr__(snapshot, "attention", broken_summary)
 
     capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
+    reasons = {item.source: item.reason_code for item in capture.unavailable_sources}
 
     assert consumed == cap + 1
-    assert section in capture.unavailable_fields
+    assert reasons[section] == "source_invalid"
     assert not any(record.kind == section for record in capture.records)
 
 
@@ -772,12 +1421,9 @@ def test_failclosed_item_serialization_failure_after_valid_items_whole_section_u
     object.__setattr__(bad_item, "reason_codes", ())
     object.__setattr__(bad_item, "transport_reason_codes", ())
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = [valid_item, bad_item]
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
+    snapshot = _with_unchecked_health(_snapshot(), (valid_item, bad_item))
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
@@ -805,12 +1451,9 @@ def test_failclosed_unicode_non_ascii_identifier_section_unavailable() -> None:
     object.__setattr__(bad_item, "reason_codes", ())
     object.__setattr__(bad_item, "transport_reason_codes", ())
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = [bad_item]
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
+    snapshot = _with_unchecked_health(_snapshot(), (bad_item,))
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
@@ -874,12 +1517,9 @@ def test_failclosed_section_is_either_complete_or_unavailable_never_partial() ->
     object.__setattr__(bad_item, "reason_codes", ())
     object.__setattr__(bad_item, "transport_reason_codes", ())
 
-    mock_snap = MagicMock()
-    mock_snap.plant_health.subsystems = [valid_item, bad_item]
-    mock_snap.attention.items = ()
-    mock_snap.data_integrity.storage.value = "available"
+    snapshot = _with_unchecked_health(_snapshot(), (valid_item, bad_item))
 
-    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=mock_snap)
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot)
     bundle = build_support_bundle(capture)
     ev = _evidence(bundle)
 
@@ -982,3 +1622,1189 @@ def test_failclosed_no_control_remediation_surface() -> None:
                 assert not any(verb in name.lower() for verb in control_verbs), (
                     f"unexpected control/remediation surface: {type(obj).__name__}.{name}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Independent-review regression guards
+# ---------------------------------------------------------------------------
+
+
+def _sealed_evidence(**capture_inputs: object) -> tuple[dict[str, object], bytes]:
+    capture = collect_bundle_capture(_BUNDLE_ID, _NOW, **capture_inputs)  # type: ignore[arg-type]
+    bundle = build_support_bundle(capture)
+    return _evidence(bundle), b"".join(artifact.content for artifact in bundle.artifacts)
+
+
+@pytest.mark.parametrize("private_identifier", ("alice-smith", "alice_smith"))
+def test_private_delimited_component_identifiers_never_reach_sealed_evidence(private_identifier: str) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={private_identifier: "1.0"})
+
+    assert private_identifier.encode() not in sealed
+    assert {"component": "redacted-private", "version": "1.0"} in evidence["versions"]
+
+
+def test_private_reason_code_never_reaches_sealed_health_evidence() -> None:
+    private_reason = "alice.smith"
+    snapshot = _snapshot(
+        health_items=(PlantHealthItem("plant", "Plant", OperatorPresentationState.CAUTION, (private_reason,)),)
+    )
+    evidence, sealed = _sealed_evidence(snapshot=snapshot)
+    plant = next(
+        record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == "health" and record["payload"]["source_id"] == "plant"
+    )
+
+    assert private_reason.encode() not in sealed
+    assert plant["reason_code"] == "redacted-private"
+
+
+@pytest.mark.parametrize(
+    "hostile_version",
+    (
+        "1.555.867.5309",
+        "prefix\u2216home\u2216alice\u2216private.txt",
+        "prefix\u29f5home\u29f5alice\u29f5private.txt",
+        "pa\u0455\u0455word=hunter2",
+    ),
+)
+def test_review_hostile_versions_never_reach_sealed_evidence(hostile_version: str) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"probe": hostile_version})
+
+    assert hostile_version.encode() not in sealed
+    if "versions" not in evidence["unavailable_fields"]:
+        version = next(item["version"] for item in evidence["versions"] if item["component"] == "probe")
+        assert version in {"<redacted:path>", "<redacted:private>"}
+
+
+@pytest.mark.parametrize("layers", [1, 2])
+def test_private_version_text_is_screened_at_every_encoding_layer(layers: int) -> None:
+    """One decode is not enough: a doubly-encoded name used to pass through verbatim.
+
+    ``QWxpY2UgU21pdGg=`` decodes to a personal name and was redacted, but
+    ``UVd4cFkyVWdVMjFwZEdnPQ==`` decodes to *that* string and was sealed unchanged, because the
+    screen stopped after the first successful decode.  Both depths must reach the same screening,
+    or nesting buys an attacker a weaker check rather than a deeper one.  Parametrised so the
+    single-layer case stays covered too -- it is the one that was already working, and a fix here
+    must not trade one depth for another.
+    """
+    encoded = b"Alice Smith"
+    for _ in range(layers):
+        encoded = base64.b64encode(encoded)
+    probe = encoded.decode("ascii")
+
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"probe": probe})
+
+    assert b"Alice Smith" not in sealed
+    assert probe.encode() not in sealed, "the encoded form was sealed verbatim, so it was never screened"
+    if "versions" not in evidence["unavailable_fields"]:
+        version = next(item["version"] for item in evidence["versions"] if item["component"] == "probe")
+        assert version == "<redacted:private>"
+
+
+def test_distinct_public_dotted_components_remain_distinct() -> None:
+    evidence, _ = _sealed_evidence(
+        snapshot=None,
+        extra_versions={"driver.pack": "1.2.3", "plugin.core": "4.5.6"},
+    )
+
+    assert "versions" not in evidence["unavailable_fields"]
+    assert {(item["component"], item["version"]) for item in evidence["versions"]} >= {
+        ("driver.pack", "1.2.3"),
+        ("plugin.core", "4.5.6"),
+    }
+
+
+def test_equal_version_mappings_with_private_id_collision_fail_closed_deterministically() -> None:
+    left = {"alice.smith": "1.0", "bob.jones": "2.0"}
+    right = {"bob.jones": "2.0", "alice.smith": "1.0"}
+    assert left == right
+
+    left_evidence, _ = _sealed_evidence(snapshot=None, extra_versions=left)
+    right_evidence, _ = _sealed_evidence(snapshot=None, extra_versions=right)
+
+    assert left_evidence == right_evidence
+    assert "versions" in left_evidence["unavailable_fields"]
+    assert left_evidence["versions"] == []
+    assert {item["source"]: item["reason_code"] for item in left_evidence["unavailable_sources"]}[
+        "versions"
+    ] == "source_invalid"
+
+
+def test_private_config_id_collision_fails_closed_without_order_dependence() -> None:
+    left = (
+        ("alice.smith", "alarms.public.v1", "a" * 64),
+        ("bob.jones", "channels.public.v1", "b" * 64),
+    )
+    right = tuple(reversed(left))
+
+    left_evidence, _ = _sealed_evidence(snapshot=None, extra_fingerprints=left)
+    right_evidence, _ = _sealed_evidence(snapshot=None, extra_fingerprints=right)
+
+    assert left_evidence == right_evidence
+    assert "config_fingerprints" in left_evidence["unavailable_fields"]
+    assert left_evidence["config_fingerprints"] == []
+
+
+def _assert_evidence_section_unavailable(capture: BundleCapture, section: str) -> None:
+    evidence = _evidence(build_support_bundle(capture))
+    assert section in evidence["unavailable_fields"]
+    assert not any(record["kind"] == section for record in evidence["records"])
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
+    assert reasons[section] == "source_invalid"
+
+
+def test_plant_summary_id_collision_fails_health_closed() -> None:
+    snapshot = _snapshot(
+        health_items=(
+            PlantHealthItem(
+                "plant-health-summary",
+                "Reserved-looking child",
+                OperatorPresentationState.CAUTION,
+                (),
+            ),
+        )
+    )
+    snapshot = replace(
+        snapshot,
+        plant_health=replace(snapshot.plant_health, status=_status(OperatorPresentationState.FAULT)),
+    )
+
+    _assert_evidence_section_unavailable(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot), "health")
+
+
+def test_infrastructure_summary_id_collision_fails_health_closed() -> None:
+    snapshot = _snapshot()
+    infrastructure = InfrastructureNodeHealth(
+        snapshot.cut,
+        _status(OperatorPresentationState.FAULT),
+        (
+            InfrastructureNode(
+                "infrastructure-summary",
+                "Reserved-looking child",
+                OperatorPresentationState.CAUTION,
+                (),
+            ),
+        ),
+    )
+    snapshot = replace(snapshot, infrastructure=infrastructure)
+
+    _assert_evidence_section_unavailable(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot), "health")
+
+
+def test_attention_summary_id_collision_fails_attention_closed() -> None:
+    item = AttentionItem(
+        "attention-summary",
+        OperatorPresentationState.CAUTION,
+        "Reserved-looking child",
+        "Synthetic detail",
+        _OBS,
+    )
+    snapshot = _snapshot(attention_items=(item,))
+    snapshot = replace(
+        snapshot,
+        attention=replace(snapshot.attention, status=_status(OperatorPresentationState.FAULT)),
+    )
+
+    _assert_evidence_section_unavailable(collect_bundle_capture(_BUNDLE_ID, _NOW, snapshot=snapshot), "attention")
+
+
+def test_bundle_capture_rejects_duplicate_record_identities() -> None:
+    first = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "plant",
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
+    )
+    second = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "plant",
+            "state": "fault",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="record identities"):
+        _minimal_capture(records=(first, second))
+
+
+def test_health_child_source_age_must_match_its_parent_summary() -> None:
+    """A child and its owning summary come from ONE snapshot-fields call, so they cannot disagree.
+
+    A child claiming a different `source_age_us` from the summary it names presents two conflicting
+    freshness stories for the same claimed snapshot, and the production collectors cannot emit that
+    combination.  The pairing is per-parent on purpose: two DIFFERENT summaries may legitimately
+    carry different ages, so this must not collapse into one age across the whole record set.
+    """
+    # BOTH canonical health summaries are required, and an `ok` summary must own at least one
+    # child, so a thinner fixture fails for an unrelated reason and the control below would pass
+    # without testing anything. Each summary therefore gets its own agreeing child.
+    summaries = tuple(
+        EvidenceRecord.from_payload(
+            "health",
+            {"source_id": identity, "state": "ok", **_snapshot_record_fields()},
+        )
+        for identity in ("infrastructure-summary", "plant-health-summary")
+    )
+    infra_child = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "infra-node",
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="infrastructure-summary"),
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "plant",
+            "state": "ok",
+            **{
+                **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+                "source_age_us": 99,
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="source_age_us"):
+        _minimal_capture(records=(*summaries, infra_child, child))
+
+    agreeing = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "plant",
+            "state": "ok",
+            **_snapshot_record_fields(role="child", parent_source_id="plant-health-summary"),
+        },
+    )
+    _minimal_capture(records=(*summaries, infra_child, agreeing))
+
+
+def _recut_snapshot(snapshot: OperatorSnapshot, cut: SnapshotCut) -> OperatorSnapshot:
+    return OperatorSnapshot(cut, *(replace(summary, cut=cut) for summary in snapshot.summaries()))
+
+
+def _record_payload(evidence: dict[str, object], kind: str, identity: str) -> dict[str, object]:
+    identity_field = "attention_id" if kind == "attention" else "source_id"
+    return next(
+        record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == kind and record["payload"].get(identity_field) == identity
+    )
+
+
+def test_canonical_snapshot_cut_provenance_changes_sealed_evidence() -> None:
+    first = _snapshot()
+    second_cut = replace(
+        first.cut,
+        received_at=first.cut.received_at + timedelta(seconds=1),
+        source="engine-v2",
+        producer_id="engine-producer-2",
+    )
+    second = _recut_snapshot(first, second_cut)
+
+    first_evidence, _ = _sealed_evidence(snapshot=first)
+    second_evidence, _ = _sealed_evidence(snapshot=second)
+    first_integrity = _record_payload(first_evidence, "integrity", "data-integrity")
+    second_integrity = _record_payload(second_evidence, "integrity", "data-integrity")
+
+    assert first_evidence != second_evidence
+    assert first_integrity.get("snapshot_mode") == "live"
+    assert first_integrity.get("snapshot_source_id") == "engine-v1"
+    assert first_integrity.get("snapshot_producer_id") == "engine-v1"
+    assert first_integrity.get("received_at") == "2026-07-14T11:59:01.000000Z"
+    assert second_integrity.get("snapshot_source_id") == "engine-v2"
+    assert second_integrity.get("snapshot_producer_id") == "engine-producer-2"
+
+
+def test_integrity_storage_truth_changes_sealed_evidence() -> None:
+    snapshot = _snapshot()
+    available = replace(
+        snapshot,
+        data_integrity=DataIntegritySummary(
+            snapshot.cut,
+            _status(OperatorPresentationState.CAUTION),
+            42,
+            41,
+            0,
+            0,
+            AvailabilityTruth.AVAILABLE,
+        ),
+    )
+    unknown = replace(
+        snapshot,
+        experiment=replace(
+            snapshot.experiment,
+            recording=RecordingTruth.NOT_RECORDING,
+            recording_session_id=None,
+        ),
+        data_integrity=DataIntegritySummary(
+            snapshot.cut,
+            _status(OperatorPresentationState.CAUTION),
+            42,
+            41,
+            0,
+            0,
+            AvailabilityTruth.UNKNOWN,
+        ),
+    )
+
+    available_evidence, _ = _sealed_evidence(snapshot=available)
+    unknown_evidence, _ = _sealed_evidence(snapshot=unknown)
+    available_integrity = _record_payload(available_evidence, "integrity", "data-integrity")
+    unknown_integrity = _record_payload(unknown_evidence, "integrity", "data-integrity")
+
+    assert available_evidence != unknown_evidence
+    assert available_integrity.get("storage") == "available"
+    assert unknown_integrity.get("storage") == "unknown"
+
+
+def test_real_disconnected_snapshot_preserves_transport_reason_separately() -> None:
+    from cryodaq.gui.state.operator_view_models import _degrade_snapshot
+
+    degraded = _degrade_snapshot(_snapshot(), connected=False, age_s=9.0)
+    evidence, _ = _sealed_evidence(snapshot=degraded)
+    integrity = _record_payload(evidence, "integrity", "data-integrity")
+
+    assert integrity.get("state") == "disconnected"
+    assert integrity.get("reason_code") == "authoritative"
+    assert integrity.get("transport_reason_code") == "transport_disconnected"
+    assert integrity.get("storage") == "unknown"
+    assert integrity.get("transport_age_us") == 9_000_000
+
+
+@pytest.mark.parametrize(
+    ("input_name", "kind"),
+    (("recent_audit_entries", "audit"), ("recent_log_entries", "log")),
+)
+def test_materially_distinct_recent_events_remain_distinguishable(input_name: str, kind: str) -> None:
+    safety = OperatorLogEntry(7, _OBS, None, "private-author", "safety", "FAULT LATCHED", ("alarm",))
+    experiment = OperatorLogEntry(7, _OBS, None, "private-author", "experiment", "RUN STARTED", ("run",))
+
+    first_evidence, first_sealed = _sealed_evidence(snapshot=None, **{input_name: (safety,)})
+    second_evidence, second_sealed = _sealed_evidence(snapshot=None, **{input_name: (experiment,)})
+    first_record = next(record["payload"] for record in first_evidence["records"] if record["kind"] == kind)
+    second_record = next(record["payload"] for record in second_evidence["records"] if record["kind"] == kind)
+
+    assert first_evidence != second_evidence
+    assert first_record["event_code"] != second_record["event_code"]
+    assert first_record["source_id"] == second_record["source_id"] == "record-store"
+    for private in (b"private-author", b"FAULT LATCHED", b"RUN STARTED"):
+        assert private not in first_sealed + second_sealed
+
+
+@pytest.mark.parametrize(
+    "source_id",
+    (
+        "engine/operator-snapshot-v1/0123456789abcdef0123456789abcdef",
+        "replay/operator-v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/0000000000000001",
+    ),
+)
+def test_production_snapshot_identifiers_survive_the_bundle_schema(source_id: str) -> None:
+    mode = "replay" if source_id.startswith("replay/") else "live"
+    record = EvidenceRecord.from_payload(
+        "integrity",
+        {
+            "source_id": "data-integrity",
+            "state": ("fault" if mode == "replay" else "ok"),
+            "storage": ("unknown" if mode == "replay" else "available"),
+            "dropped_records": 0,
+            "pending_records": 0,
+            "persisted_revision": 42,
+            **_snapshot_record_fields(mode=mode, source_id=source_id, producer_id=source_id),
+        },
+    )
+
+    payload = json.loads(record.payload_json)
+    assert payload["snapshot_source_id"] == source_id
+    assert payload["snapshot_producer_id"] == source_id
+
+
+def test_production_alarm_identifier_survives_the_bundle_schema() -> None:
+    alarm_id = "alarm:" + "a" * 32
+    record = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": alarm_id,
+            "state": "fault",
+            "severity": "fault",
+            **_snapshot_record_fields(role="child"),
+        },
+    )
+
+    assert json.loads(record.payload_json)["attention_id"] == alarm_id
+
+
+def test_private_recent_entry_metadata_fails_only_that_section_closed() -> None:
+    private_entry = OperatorLogEntry(
+        7,
+        _OBS,
+        None,
+        "alice.operator@example.invalid",
+        "alice-source",
+        "FAULT LATCHED",
+        ("private-tag",),
+    )
+    safe_entry = OperatorLogEntry(8, _OBS, None, "system", "engine", "STARTED", ())
+
+    evidence, sealed = _sealed_evidence(
+        snapshot=None,
+        recent_audit_entries=(private_entry,),
+        recent_log_entries=(safe_entry,),
+    )
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
+
+    assert reasons["audit"] == "source_invalid"
+    assert "log" not in reasons
+    assert {record["kind"] for record in evidence["records"]} == {"log"}
+    assert b"alice" not in sealed
+    assert b"private-tag" not in sealed
+
+
+@pytest.mark.parametrize(
+    ("kind", "required_field"),
+    (("audit", "outcome"), ("log", "level")),
+)
+def test_recent_evidence_requires_kind_specific_semantics(kind: str, required_field: str) -> None:
+    with pytest.raises(ValueError, match=required_field):
+        EvidenceRecord.from_payload(kind, {"event_id": f"{kind}-1", "event_code": f"{kind}.entry"})
+
+
+@pytest.mark.parametrize("kind", ("audit", "log"))
+def test_recent_evidence_requires_observation_timestamp(kind: str) -> None:
+    payload = {
+        "event_id": f"{kind}-1",
+        "event_code": f"{kind}.entry",
+        "outcome" if kind == "audit" else "level": "accepted" if kind == "audit" else "info",
+    }
+
+    with pytest.raises(ValueError, match="observed_at"):
+        EvidenceRecord.from_payload(kind, payload)
+
+
+def test_schema_v1_is_explicitly_rejected_as_unreleased_and_pre_redaction() -> None:
+    import hashlib
+
+    from cryodaq.support.bundle import BundleArtifact, SupportBundle
+
+    base = build_support_bundle(_minimal_capture())
+    evidence = json.loads(base.artifacts[1].content)
+    evidence["schema_version"] = 1
+    evidence_json = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    evidence_artifact = BundleArtifact(
+        "evidence.json",
+        evidence_json,
+        hashlib.sha256(evidence_json).hexdigest(),
+    )
+    manifest = json.loads(base.manifest_json)
+    manifest["schema_version"] = 1
+    manifest["artifacts"] = [
+        {
+            "logical_path": "evidence.json",
+            "sha256": evidence_artifact.sha256,
+            "size_bytes": len(evidence_json),
+        }
+    ]
+    manifest_json = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    manifest_artifact = BundleArtifact(
+        "manifest.json",
+        manifest_json,
+        hashlib.sha256(manifest_json).hexdigest(),
+    )
+
+    with pytest.raises(ValueError, match="schema 1.*unreleased.*redaction"):
+        SupportBundle(
+            base.bundle_id,
+            (manifest_artifact, evidence_artifact),
+            manifest_json,
+            manifest_artifact.sha256,
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "field", "other_field", "other_value"),
+    (
+        ("audit", "outcome", None, None),
+        ("log", "level", None, None),
+    ),
+)
+def test_recent_evidence_semantics_use_closed_public_vocabularies(
+    kind: str,
+    field: str,
+    other_field: str | None,
+    other_value: str | None,
+) -> None:
+    payload = {
+        "event_id": f"{kind}-1",
+        "event_code": f"{kind}.entry",
+        field: "alice.operator",
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+    }
+    if other_field is not None:
+        payload[other_field] = other_value
+
+    with pytest.raises(ValueError, match="allowed"):
+        EvidenceRecord.from_payload(kind, payload)
+
+
+@pytest.mark.parametrize(
+    "private_identifier",
+    ("alice-engine", "engine-alice", "alice-token", "plugin-alice"),
+)
+def test_private_identifier_cannot_borrow_a_public_technical_segment(private_identifier: str) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={private_identifier: "1.0"})
+
+    assert private_identifier.encode() not in sealed
+    assert {"component": "redacted-private", "version": "1.0"} in evidence["versions"]
+
+
+@pytest.mark.parametrize(
+    "hostile_version",
+    (
+        "Pwd=hunter2",
+        "user=alice",
+        "password%3Dhunter2",
+        r"C%3A%5CUsers%5CAlice%5Csecret",
+    ),
+)
+def test_credential_alias_and_percent_encoded_private_versions_never_reach_bundle(
+    hostile_version: str,
+) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": hostile_version})
+
+    assert hostile_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"]
+
+
+def test_production_safety_health_identifiers_remain_distinct() -> None:
+    source_ids = ("safety_fsm", "safety_monitor", "reviewed_source", "critical_inputs", "persistence")
+    snapshot = _snapshot(
+        health_items=tuple(
+            PlantHealthItem(source_id, "Public subsystem", OperatorPresentationState.OK, ()) for source_id in source_ids
+        )
+    )
+
+    evidence, _ = _sealed_evidence(snapshot=snapshot)
+    emitted_ids = {record["payload"]["source_id"] for record in evidence["records"] if record["kind"] == "health"}
+
+    assert "health" not in evidence["unavailable_fields"]
+    assert set(source_ids) <= emitted_ids
+
+
+@pytest.mark.parametrize(
+    ("source", "tags"),
+    (
+        ("rest", ()),
+        ("machine", ("safety_fault",)),
+        ("auto", ("auto", "phase_transition")),
+    ),
+)
+def test_production_operator_log_sources_and_tags_are_projected(
+    source: str,
+    tags: tuple[str, ...],
+) -> None:
+    entry = OperatorLogEntry(7, _OBS, None, "system", source, "STARTED", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+
+
+def test_snapshot_record_schema_rejects_provenance_stripped_health_record() -> None:
+    with pytest.raises(ValueError, match="snapshot provenance"):
+        EvidenceRecord.from_payload(
+            "health",
+            {"source_id": "plant-health-summary", "state": "ok"},
+        )
+
+
+@pytest.mark.parametrize(
+    "private_identifier",
+    ("ada12345",),
+)
+def test_unprefixed_hex_like_private_identifier_is_redacted(private_identifier: str) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={private_identifier: "1.0"})
+
+    assert private_identifier.encode() not in sealed
+    assert {"component": "redacted-private", "version": "1.0"} in evidence["versions"]
+
+
+@pytest.mark.parametrize(
+    "hostile_version",
+    (
+        "password" + "." * 70 + "=hunter2",
+        "build-alice-smith",
+    ),
+)
+def test_delimiter_obscured_credentials_and_private_names_never_reach_bundle(
+    hostile_version: str,
+) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": hostile_version})
+
+    assert hostile_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"]
+
+
+@pytest.mark.parametrize(
+    ("source", "tags"),
+    (
+        ("operator", ("safety_audio_ack", "safety_fault")),
+        ("auto", ("auto", "event_type")),
+        ("auto", ("auto", "experiment")),
+        ("auto", ("auto", "phase")),
+        ("auto", ("auto", "keithley")),
+        ("auto", ("auto", "leak_rate")),
+        ("command", ()),
+    ),
+)
+def test_additional_production_operator_log_vocabularies_are_projected(
+    source: str,
+    tags: tuple[str, ...],
+) -> None:
+    entry = OperatorLogEntry(8, _OBS, None, "system", source, "RECORDED", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+    assert records[0]["payload"]["event_code"] != "redacted-private"
+
+
+@pytest.mark.parametrize(
+    ("kind", "tags"),
+    (
+        ("audit", ("accepted", "denied")),
+        ("log", ("error", "warning")),
+    ),
+)
+def test_conflicting_recent_event_semantics_fail_the_section_closed(
+    kind: str,
+    tags: tuple[str, ...],
+) -> None:
+    entry = OperatorLogEntry(9, _OBS, None, "system", "engine", "RECORDED", tags)
+    argument = "recent_audit_entries" if kind == "audit" else "recent_log_entries"
+
+    evidence, _ = _sealed_evidence(snapshot=None, **{argument: (entry,)})
+
+    assert kind in evidence["unavailable_fields"]
+    assert not any(record["kind"] == kind for record in evidence["records"])
+
+
+def _complete_integrity_provenance() -> dict[str, object]:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    return {
+        "source_id": "data-integrity",
+        "state": "caution",
+        "storage": "available",
+        "record_role": "summary",
+        "snapshot_mode": "live",
+        "snapshot_source_id": live_id,
+        "snapshot_producer_id": live_id,
+        "observed_at": "2026-07-14T11:59:00.000000Z",
+        "received_at": "2026-07-14T11:59:01.000000Z",
+        "revision": 1,
+        "source_age_us": 0,
+        "transport_age_us": 0,
+        "dropped_records": 0,
+        "pending_records": 0,
+        "persisted_revision": 42,
+    }
+
+
+def test_integrity_schema_rejects_ok_state_with_unavailable_storage() -> None:
+    payload = _complete_integrity_provenance()
+    payload.update(state="ok", storage="unavailable")
+
+    with pytest.raises(ValueError, match="storage"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+@pytest.mark.parametrize("omitted", ["pending_records", "persisted_revision"])
+def test_available_integrity_evidence_requires_persistence_counters(omitted: str) -> None:
+    """Integrity evidence cannot present as available without stating what is durable.
+
+    ``persisted_revision`` and ``pending_records`` are non-optional on the authoritative
+    ``DataIntegritySummary``, unlike ``archive_revision``.  Omitting either lets a record seal as
+    available while establishing neither its durable position nor whether a backlog exists, so an
+    operator reads the section as healthy storage on evidence that never says so.  The production
+    collector always supplies both, so only a detached or deserialized payload can omit them.
+    """
+    payload = _complete_integrity_provenance()
+    del payload[omitted]
+
+    with pytest.raises(ValueError, match=omitted):
+        EvidenceRecord.from_payload("integrity", payload)
+
+    EvidenceRecord.from_payload("integrity", _complete_integrity_provenance())
+
+
+def test_snapshot_schema_rejects_mode_and_structured_source_mismatch() -> None:
+    payload = _complete_integrity_provenance()
+    payload["snapshot_source_id"] = "replay/operator-v1/" + "a" * 32 + "/" + "b" * 32 + "/0000000000000001"
+
+    with pytest.raises(ValueError, match="snapshot.*mode|mode.*snapshot"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_dishonest_version_mapping_is_bounded_and_fails_only_versions_closed() -> None:
+    class DishonestVersions(dict[str, str]):
+        consumed = 0
+
+        def __len__(self) -> int:
+            return 0
+
+        def items(self) -> Iterator[tuple[str, str]]:
+            for index in range(1000):
+                self.consumed += 1
+                yield (f"plugin-{index}", "1.0")
+
+    versions = DishonestVersions()
+    safe_log = OperatorLogEntry(10, _OBS, None, "system", "engine", "RECORDED", ())
+
+    evidence, _ = _sealed_evidence(
+        snapshot=None,
+        extra_versions=versions,
+        recent_log_entries=(safe_log,),
+    )
+    reasons = {item["source"]: item["reason_code"] for item in evidence["unavailable_sources"]}
+
+    assert versions.consumed == collector_module.MAX_VERSIONS + 1
+    assert reasons["versions"] == "source_invalid"
+    assert any(record["kind"] == "log" for record in evidence["records"])
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "record_role",
+        "snapshot_mode",
+        "snapshot_source_id",
+        "snapshot_producer_id",
+        "observed_at",
+        "received_at",
+        "revision",
+        "source_age_us",
+        "transport_age_us",
+        "storage",
+    ),
+)
+def test_integrity_schema_requires_every_snapshot_truth_field(missing_field: str) -> None:
+    payload = _complete_integrity_provenance()
+    del payload[missing_field]
+
+    with pytest.raises(ValueError, match=missing_field):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_bundle_capture_rejects_snapshot_records_from_mixed_cuts() -> None:
+    integrity_payload = _complete_integrity_provenance()
+    excluded_integrity_fields = {"storage", "dropped_records", "pending_records", "persisted_revision"}
+    health_payload = {key: value for key, value in integrity_payload.items() if key not in excluded_integrity_fields}
+    health_payload.update(source_id="plant-health-summary", state="caution")
+    health_payload.update(
+        revision=2,
+        observed_at="2026-07-14T11:58:00.000000Z",
+        received_at="2026-07-14T11:58:01.000000Z",
+    )
+    health = EvidenceRecord.from_payload("health", health_payload)
+    integrity = EvidenceRecord.from_payload("integrity", integrity_payload)
+
+    with pytest.raises(ValueError, match="coherent snapshot cut"):
+        _minimal_capture(records=(health, integrity))
+
+
+@pytest.mark.parametrize(
+    "hostile_version",
+    (
+        "password%25253Dhunter2",
+        "password.old=hunter2",
+        "api_key.value=hunter2",
+        r"C%25253A%25255CUsers%25255CAlice%25255Csecret.txt",
+        "Alice-Smith",
+        "Alice_Smith",
+        "Alice.Smith",
+    ),
+)
+def test_nested_encoding_and_simple_private_names_never_reach_sealed_versions(
+    hostile_version: str,
+) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": hostile_version})
+
+    assert hostile_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"]
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected_event_code"),
+    (
+        (("safety_fault",), "log.machine.safety_fault"),
+        (("safety_fault", "smua"), "log.machine.safety_fault.smua"),
+        (("safety_fault", "smub"), "log.machine.safety_fault.smub"),
+    ),
+)
+def test_real_safety_fault_log_preserves_public_fault_semantics(
+    tags: tuple[str, ...],
+    expected_event_code: str,
+) -> None:
+    entry = OperatorLogEntry(7, _OBS, None, "safety_manager", "machine", "FAULT", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+    assert records[0]["payload"]["event_code"] == expected_event_code
+    assert records[0]["payload"]["level"] == "fault"
+
+
+@pytest.mark.parametrize("mixed_mode", (False, True))
+def test_bundle_capture_rejects_child_record_from_a_different_snapshot_cut(mixed_mode: bool) -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary_fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **summary_fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "ok", **summary_fields},
+    )
+    child_fields = _snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id)
+    child_fields.update(
+        revision=2,
+        observed_at="2026-07-14T11:58:00.000000Z",
+        received_at="2026-07-14T11:58:01.000000Z",
+    )
+    if mixed_mode:
+        replay_id = "replay/operator-v1/" + "a" * 32 + "/" + "b" * 32 + "/0000000000000001"
+        child_fields.update(
+            snapshot_mode="replay",
+            snapshot_source_id=replay_id,
+            snapshot_producer_id=replay_id,
+        )
+    child = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "safety_fsm", "state": "fault", **child_fields},
+    )
+
+    with pytest.raises(ValueError, match="coherent snapshot cut"):
+        _minimal_capture(records=(plant, infrastructure, child))
+
+
+@pytest.mark.parametrize(
+    "channel_tag",
+    (
+        "Keithley_1/smua/power",
+        "Keithley_1/smub/power",
+    ),
+)
+def test_real_safety_fault_channel_tag_is_projected_without_leaking_identifier(channel_tag: str) -> None:
+    entry = OperatorLogEntry(8, _OBS, None, "safety_manager", "machine", "FAULT", ("safety_fault", channel_tag))
+
+    evidence, sealed = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+    records = [record for record in evidence["records"] if record["kind"] == "log"]
+
+    assert "log" not in evidence["unavailable_fields"]
+    assert len(records) == 1
+    assert records[0]["payload"]["event_code"] == "log.machine.channel.safety_fault"
+    assert records[0]["payload"]["level"] == "fault"
+    assert channel_tag.encode() not in sealed
+
+
+def test_attention_record_rejects_severity_that_contradicts_state() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+
+    with pytest.raises(ValueError, match="severity"):
+        EvidenceRecord.from_payload(
+            "attention",
+            {
+                "attention_id": "alarm:" + "c" * 32,
+                "state": "fault",
+                "severity": "caution",
+                **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+            },
+        )
+
+
+def test_attention_summary_cannot_understate_a_child() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "attention-summary",
+            "state": "ok",
+            "severity": "warning",
+            **_snapshot_record_fields(source_id=live_id, producer_id=live_id),
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "alarm:" + "c" * 32,
+            "state": "fault",
+            "severity": "fault",
+            **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+        },
+    )
+
+    with pytest.raises(ValueError, match="attention summary"):
+        _minimal_capture(records=(summary, child))
+
+
+def test_health_summaries_cannot_collectively_understate_a_child() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "ok", **fields},
+    )
+    child = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "sensor-1",
+            "state": "fault",
+            **_snapshot_record_fields(
+                role="child",
+                parent_source_id="plant-health-summary",
+                source_id=live_id,
+                producer_id=live_id,
+            ),
+        },
+    )
+
+    with pytest.raises(ValueError, match="health summaries"):
+        _minimal_capture(records=(plant, infrastructure, child))
+
+
+def test_valid_older_attention_item_preserves_capture_and_event_time() -> None:
+    item = AttentionItem(
+        "alarm:" + "a" * 32,
+        OperatorPresentationState.FAULT,
+        "Fault",
+        "Detail",
+        _OBS - timedelta(seconds=30),
+    )
+    snapshot = _snapshot(attention_items=(item,))
+
+    capture = collect_bundle_capture(
+        _BUNDLE_ID,
+        _NOW,
+        snapshot=snapshot,
+        extra_fingerprints=(("alarms", "alarms.public.v1", "b" * 64),),
+    )
+    evidence = _evidence(build_support_bundle(capture))
+    child = next(
+        record["payload"]
+        for record in evidence["records"]
+        if record["kind"] == "attention" and record["payload"]["record_role"] == "child"
+    )
+
+    assert "attention" not in evidence["unavailable_fields"]
+    assert child["observed_at"] == "2026-07-14T11:58:30.000000Z"
+
+
+@pytest.mark.parametrize(
+    "private_version",
+    (
+        "Smith,Alice",
+        "Alice",
+        "Alice, Jr.",
+        "Alice S.",
+        "Alice O'Neil",
+        "cGFzc3dvcmQ9aHVudGVyMg==",
+        "QWxpY2UgU21pdGg",
+        "QWxpY2UgU21pdGg%3D",
+        "password&#x3d;hunter2",
+        "Alice;Smith",
+        "Alice:Smith",
+        "Alice+Smith",
+        "password hunter2",
+        "pwd hunter2",
+        "token->abc123",
+    ),
+)
+def test_common_delimited_private_and_credential_versions_never_reach_bundle(private_version: str) -> None:
+    evidence, sealed = _sealed_evidence(snapshot=None, extra_versions={"driver-pack": private_version})
+
+    assert private_version.encode() not in sealed
+    assert "versions" in evidence["unavailable_fields"] or all(
+        item["version"] != private_version for item in evidence["versions"]
+    )
+
+
+def test_integrity_ok_cannot_claim_dropped_records() -> None:
+    payload = _complete_integrity_provenance()
+    payload.update(state="ok", storage="available", dropped_records=1)
+
+    with pytest.raises(ValueError, match="dropped"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_replay_integrity_requires_unknown_storage_even_when_not_ok() -> None:
+    payload = _complete_integrity_provenance()
+    replay_id = "replay/operator-v1/" + "a" * 32 + "/" + "b" * 32 + "/0000000000000001"
+    payload.update(snapshot_mode="replay", snapshot_source_id=replay_id, snapshot_producer_id=replay_id)
+
+    with pytest.raises(ValueError, match="replay integrity.*unknown storage"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_snapshot_summaries_require_one_coherent_observation_time() -> None:
+    fields = _snapshot_record_fields(source_id="engine-v1", producer_id="engine-v1")
+    first = EvidenceRecord.from_payload("health", {"source_id": "plant-health-summary", "state": "caution", **fields})
+    second = EvidenceRecord.from_payload(
+        "health",
+        {
+            "source_id": "infrastructure-summary",
+            "state": "caution",
+            **dict(fields, observed_at="2026-07-14T11:58:00.000000Z"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="coherent observation time"):
+        _minimal_capture(records=(first, second))
+
+
+@pytest.mark.parametrize("field", ("revision", "record_count", "persisted_revision"))
+def test_record_counters_reject_values_above_protocol_range(field: str) -> None:
+    payload = _complete_integrity_provenance()
+    payload[field] = 2**63
+
+    with pytest.raises(ValueError, match="protocol-range"):
+        EvidenceRecord.from_payload("integrity", payload)
+
+
+def test_attention_child_cannot_claim_ok() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+
+    with pytest.raises(ValueError, match="attention child"):
+        EvidenceRecord.from_payload(
+            "attention",
+            {
+                "attention_id": "alarm:" + "c" * 32,
+                "state": "ok",
+                "severity": "warning",
+                **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+            },
+        )
+
+
+def test_empty_health_evidence_cannot_claim_ok_summaries() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "ok", **fields},
+    )
+
+    with pytest.raises(ValueError, match="health summaries.*children"):
+        _minimal_capture(records=(plant, infrastructure))
+
+
+def test_one_log_entry_has_a_bounded_tag_cardinality() -> None:
+    max_event_tags = 16
+    tags = ("info",) * (max_event_tags + 1)
+    entry = OperatorLogEntry(9, _OBS, None, "system", "system", "INFO", tags)
+
+    evidence, _ = _sealed_evidence(snapshot=None, recent_log_entries=(entry,))
+
+    assert len(tags) == max_event_tags + 1
+    assert "log" in evidence["unavailable_fields"]
+    assert not any(record["kind"] == "log" for record in evidence["records"])
+    assert any(item["component"] == "cryodaq" for item in evidence["versions"])
+
+
+def test_health_child_is_bound_to_the_summary_that_must_cover_it() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    plant = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "plant-health-summary", "state": "ok", **fields},
+    )
+    infrastructure = EvidenceRecord.from_payload(
+        "health",
+        {"source_id": "infrastructure-summary", "state": "fault", **fields},
+    )
+
+    with pytest.raises(ValueError, match="health summary.*understate|parent"):
+        child = EvidenceRecord.from_payload(
+            "health",
+            {
+                "source_id": "sensor-1",
+                "parent_source_id": "plant-health-summary",
+                "state": "fault",
+                **_snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id),
+            },
+        )
+        _minimal_capture(records=(plant, infrastructure, child))
+
+
+def test_snapshot_records_require_one_coherent_transport_age() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary_fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    child_fields = _snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id)
+    child_fields["transport_age_us"] = 999_999
+    summary = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "attention-summary",
+            "state": "fault",
+            "severity": "fault",
+            **summary_fields,
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "alarm:" + "d" * 32,
+            "state": "fault",
+            "severity": "fault",
+            **child_fields,
+        },
+    )
+
+    with pytest.raises(ValueError, match="coherent snapshot cut|coherent transport age"):
+        _minimal_capture(records=(summary, child))
+
+
+def test_snapshot_records_require_one_coherent_transport_condition() -> None:
+    live_id = "engine/operator-snapshot-v1/" + "0" * 32
+    summary_fields = _snapshot_record_fields(source_id=live_id, producer_id=live_id)
+    summary_fields["transport_reason_code"] = "snapshot_stale"
+    child_fields = _snapshot_record_fields(role="child", source_id=live_id, producer_id=live_id)
+    child_fields["transport_reason_code"] = "transport_disconnected"
+    summary = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "attention-summary",
+            "state": "fault",
+            "severity": "fault",
+            **summary_fields,
+        },
+    )
+    child = EvidenceRecord.from_payload(
+        "attention",
+        {
+            "attention_id": "alarm:" + "e" * 32,
+            "state": "warning",
+            "severity": "warning",
+            **child_fields,
+        },
+    )
+
+    with pytest.raises(ValueError, match="coherent transport condition"):
+        _minimal_capture(records=(summary, child))
