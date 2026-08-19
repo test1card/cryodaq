@@ -220,17 +220,28 @@ def test_the_fixture_declares_critical_channels_that_actually_exist(tmp_path) ->
     roster = {item["channel_id"] for item in descriptors["descriptors"]}
 
     declared = safety["critical_channels"]
-    assert declared, "a fixture with no critical channel declares no safety at all"
     assert set(declared) <= roster, (
         f"every declared identity must exist on the roster; strays: {sorted(set(declared) - roster)}"
     )
-    assert set(declared) == roster, "the fixture's intent is that every channel is critical"
     # A dot is legitimate INSIDE an identity -- the roster carries names like "T1.raw" --
     # so the check is for the wildcard that made the old declaration dead, not for every
     # character a regular expression happens to use.
     assert all("*" not in name for name in declared), (
         "these are identities, not patterns; a wildcard here matches no channel at all"
     )
+
+    # And the declaration must match the DESCRIPTORS, not the roster: the liveness check
+    # also requires safety_class SAFETY_CRITICAL_INPUT and a role that is not
+    # SOURCE_READBACK, so declaring the whole roster only moves the refusal to the next
+    # plane. Every descriptor in this fixture is observational, so the honest declaration
+    # here is empty -- and it is DERIVED, so adding a safety-critical descriptor later
+    # declares it automatically.
+    expected = sorted(
+        item["channel_id"]
+        for item in descriptors["descriptors"]
+        if item.get("safety_class") == "safety_critical_input" and item.get("role") != "source_readback"
+    )
+    assert sorted(declared) == expected
 
 
 class _LogEvidence:

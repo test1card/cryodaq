@@ -502,8 +502,7 @@ asyncio.run(probe())
     critical_channels = sorted(
         item["channel_id"]
         for item in descriptor_manifest["descriptors"]
-        if item.get("safety_class") == "safety_critical_input"
-        and item.get("role") != "source_readback"
+        if item.get("safety_class") == "safety_critical_input" and item.get("role") != "source_readback"
     )
     (config_dir / "safety.yaml").write_text(
         yaml.safe_dump(
