@@ -145,6 +145,15 @@ os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 """
 _ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
+# The launcher resolves a theme at IMPORT time, so a config root without the theme
+# packs kills the source stack before any of it runs. Measured on Ubuntu 22.04.5:
+# the short soak reached the runner phase, wrote its evidence files, passed the
+# exact-six gate, and then failed with "source stack did not reach the exact
+# four-role startup cut" -- because the child is told to read config from the
+# ISOLATED root, and this set is everything that root gets. Theme packs carry no
+# hardware authority, so copying them does not weaken the isolation the curated
+# set exists to provide; they are colours.
+_ISOLATED_TRACKED_CONFIG_DIRS: Final = ("themes",)
 _ISOLATED_STATIC_CONFIGS: Final = (
     ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
     ("interlocks.yaml", "interlocks: []\n"),
@@ -369,6 +378,19 @@ def _materialize_isolated_mock_config(
         if not source.is_file():
             raise _RunnerFoundationError(f"required tracked soak config is unavailable: {name}")
         (config_dir / name).write_bytes(source.read_bytes())
+    for name in _ISOLATED_TRACKED_CONFIG_DIRS:
+        source = source_dir / name
+        if not source.is_dir():
+            raise _RunnerFoundationError(f"required tracked soak config directory is unavailable: {name}")
+        target = config_dir / name
+        target.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for item in sorted(source.iterdir()):
+            if item.is_file():
+                (target / item.name).write_bytes(item.read_bytes())
+                copied += 1
+        if copied == 0:
+            raise _RunnerFoundationError(f"tracked soak config directory is empty: {name}")
     for name, content in _ISOLATED_STATIC_CONFIGS:
         (config_dir / name).write_text(content, encoding="utf-8")
 

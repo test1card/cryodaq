@@ -32,12 +32,55 @@ def linux_subreaper():
         runner._set_runner_subreaper(prior)
 
 
+def test_the_isolated_config_carries_the_theme_pack_the_launcher_resolves_at_import(tmp_path) -> None:
+    """The launcher cannot start without the default theme pack, so the set must hold it.
+
+    This is not a preference about appearance. ``cryodaq.gui.theme`` resolves a theme at
+    module import, and the child is told to read configuration from the ISOLATED root, so
+    a root without the packs stops the source stack before any of it runs. Measured on
+    Ubuntu 22.04.5 before the fix: the short soak reached the runner phase, wrote seven
+    evidence files, passed the exact-six integration gate, and then failed with "source
+    stack did not reach the exact four-role startup cut", with the launcher log naming the
+    missing default pack.
+    """
+    from cryodaq.gui._theme_loader import DEFAULT_THEME
+
+    runner._materialize_isolated_mock_config(tmp_path)
+
+    themes = tmp_path / "themes"
+    assert themes.is_dir(), "the isolated config root must carry the theme directory"
+    names = {path.stem for path in themes.iterdir() if path.is_file()}
+    assert DEFAULT_THEME in names, (
+        f"the default pack {DEFAULT_THEME!r} decides whether the launcher imports at all; "
+        f"the isolated root holds {sorted(names)}"
+    )
+
+
+def test_a_missing_theme_directory_is_refused_by_name_rather_than_left_to_the_launcher(tmp_path) -> None:
+    """A source tree without the packs must fail HERE, where the cause is still readable.
+
+    Left to the launcher the same condition arrives as "source stack did not reach the
+    exact four-role startup cut", which names the symptom and not the subject, and that
+    cost a full measurement round to trace back.
+    """
+    hollow = tmp_path / "hollow"
+    (hollow / "config").mkdir(parents=True)
+    for name in runner._ISOLATED_TRACKED_CONFIG_FILES:
+        (hollow / "config" / name).write_text("channels: []\n", encoding="utf-8")
+
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(runner._RunnerFoundationError, match="config directory is unavailable: themes"):
+        runner._materialize_isolated_mock_config(out, source_root=hollow)
+
+
 @pytest.mark.asyncio
 async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> None:
     runner._materialize_isolated_mock_config(tmp_path)
 
     expected = {
         *runner._ISOLATED_TRACKED_CONFIG_FILES,
+        *runner._ISOLATED_TRACKED_CONFIG_DIRS,
         *(name for name, _content in runner._ISOLATED_STATIC_CONFIGS),
         "instruments.yaml",
         "channel_descriptors.yaml",
