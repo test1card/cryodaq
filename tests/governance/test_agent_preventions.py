@@ -1363,6 +1363,21 @@ def test_durable_ack_regressions_own_tasks_and_writer_across_failure_paths() -> 
             )
 
 
+@pytest.mark.parametrize("missing", ("src", "tests", "tools"))
+def test_compile_check_fails_closed_when_required_source_directory_is_unavailable(tmp_path: Path, missing: str) -> None:
+    for directory_name in {"src", "tests", "tools"} - {missing}:
+        directory = tmp_path / directory_name
+        directory.mkdir()
+        (directory / "valid.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    try:
+        compile_python_tree(tmp_path)
+    except ValueError as exc:
+        assert str(exc) == f"required Python source directories are unavailable: {missing}"
+    else:
+        pytest.fail(f"compile check rendered missing required source directory as PASS: {missing}")
+
+
 def _first_function(tree: ast.AST, name: str) -> ast.AsyncFunctionDef | ast.FunctionDef:
     for node in ast.walk(tree):
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:

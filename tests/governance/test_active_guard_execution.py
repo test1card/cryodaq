@@ -860,6 +860,8 @@ def test_candidate_runner_executes_each_active_parameter_once_and_deselects_it_f
 ) -> None:
     root = tmp_path / "candidate"
     root.mkdir()
+    for directory_name in ("src", "tools"):
+        (root / directory_name).mkdir()
     node = "tests/test_guard_cases.py::test_guard"
     _write_registry(root, node)
     _write_test(
@@ -960,6 +962,8 @@ def test_candidate_runner_rejects_real_zero_exit_without_session_receipt(
     node = "tests/test_guard_cases.py::test_guard"
     _write_registry(tmp_path, node)
     _write_test(tmp_path, node, "import os\ndef test_guard(): os._exit(0)\n")
+    for directory_name in ("src", "tools"):
+        (tmp_path / directory_name).mkdir()
     monkeypatch.setattr(ci_candidate_runner, "_suite_commands", lambda *_args, **_kwargs: ())
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     prior = os.environ.get("PYTHONPATH")
@@ -985,6 +989,8 @@ def test_candidate_runner_rejects_failed_receipt_even_when_later_hook_resets_exi
         node,
         "import pytest\n@pytest.mark.skip(reason='conditional')\ndef test_guard(): pass\n",
     )
+    for directory_name in ("src", "tools"):
+        (tmp_path / directory_name).mkdir()
     (tmp_path / "conftest.py").write_text(
         "import pytest\n\n"
         "@pytest.hookimpl(hookwrapper=True, tryfirst=True)\n"
