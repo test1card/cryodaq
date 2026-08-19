@@ -289,9 +289,11 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
     return captured
 
 
-def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[str, str]:
+def _controlled_test_environment(
+    repo_root: Path, site_packages: Path, *, runtime_library_dir: Path | None = None
+) -> dict[str, str]:
     root = Path(repo_root).resolve()
-    return {
+    environment = {
         "HOME": "/nonexistent",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -305,6 +307,22 @@ def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[s
         "XDG_CACHE_HOME": "/nonexistent",
         "XDG_CONFIG_HOME": "/nonexistent",
     }
+    # This stage COPIES the interpreter into the snapshot, and a relocated interpreter
+    # cannot use the run-paths that were relative to where it used to live. The first
+    # extension module that needs the C++ runtime then loads the SYSTEM one, and every
+    # library loaded afterwards is stuck with it. Measured on Ubuntu 22.04.5 with a
+    # conda interpreter: `import zmq` then `import sqlite3` raises
+    #   ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version `CXXABI_1.3.15'
+    #   not found (required by <prefix>/lib/libicui18n.so.78)
+    # and collection of the exact-six module fails with it, while either import alone
+    # succeeds. Naming the interpreter's OWN library directory removes the ambiguity;
+    # the value is derived from the interpreter, never inherited from the caller, so
+    # the environment stays closed.
+    if runtime_library_dir is not None:
+        resolved_library_dir = Path(runtime_library_dir).resolve()
+        if resolved_library_dir.is_dir():
+            environment["LD_LIBRARY_PATH"] = str(resolved_library_dir)
+    return environment
 
 
 def _controlled_git_environment() -> dict[str, str]:
@@ -922,7 +940,9 @@ def _sealed_execution_snapshot(git_sha: str):
             snapshot_interpreter = root / ".venv/bin/python"
             snapshot_interpreter.parent.mkdir(parents=True)
             _copy_running_executable(resolved, snapshot_interpreter)
-            environment = _controlled_test_environment(root, site_packages)
+            environment = _controlled_test_environment(
+                root, site_packages, runtime_library_dir=Path(sys.base_prefix) / "lib"
+            )
             code = "from pathlib import Path; import cryodaq; print(Path(cryodaq.__file__).resolve())"
             imported = subprocess.run(
                 (str(snapshot_interpreter), "-c", code),
