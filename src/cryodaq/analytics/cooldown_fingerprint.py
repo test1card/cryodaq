@@ -63,18 +63,14 @@ def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
     numeric_fields = ("cooldown_start_ts", "duration_h", "T_cold_final")
     optional_numeric_fields = ("time_to_base_h", "time_to_50K_h", "ultimate_vacuum_mbar")
     if any(
-        not isinstance(d.get(field), (int, float))
-        or isinstance(d.get(field), bool)
-        or not math.isfinite(d[field])
+        not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool) or not math.isfinite(d[field])
         for field in numeric_fields
     ):
         raise ValueError("invalid fingerprint record")
     if any(
         d.get(field) is not None
         and (
-            not isinstance(d.get(field), (int, float))
-            or isinstance(d.get(field), bool)
-            or not math.isfinite(d[field])
+            not isinstance(d.get(field), (int, float)) or isinstance(d.get(field), bool) or not math.isfinite(d[field])
         )
         for field in optional_numeric_fields
     ):
