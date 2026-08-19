@@ -3726,10 +3726,16 @@ class _PosixSoakRunner:
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
-                            except ValueError:
+                            except ValueError as exc:
+                                # Kept, not swallowed. The refusal below used to say only
+                                # that roles were missing, so the classifier's own reason --
+                                # which names the process and the topology it rejected --
+                                # was discarded at the one place it could have been read.
                                 roles = None
+                                roles_refusal = str(exc)
                         if roles is None:
                             time.sleep(0.1)
+                    roles_refusal = locals().get("roles_refusal", "")
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
                         # Name WHICH of the four preconditions is missing. The bare
                         # sentence sends the next turn to read the whole startup path,
@@ -3745,8 +3751,10 @@ class _PosixSoakRunner:
                             )
                             if value is None
                         )
+                        detail = f"; last classifier refusal: {roles_refusal}" if roles_refusal else ""
                         raise _RunnerFoundationError(
-                            f"source stack did not reach the exact four-role startup cut; still missing: {missing}"
+                            "source stack did not reach the exact four-role startup cut; "
+                            f"still missing: {missing}{detail}"
                         )
 
                     _validate_short_soak_runtime_schedule(report_interval_s, time.time())

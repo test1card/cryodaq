@@ -262,17 +262,40 @@ def classify_tree(
     if bridge_identity is None:
         raise ValueError("positive bridge identity is unavailable")
     bridge = tree.get(bridge_identity)
-    if bridge is None or bridge.parent_pid != root.pid:
-        raise ValueError("positive bridge identity is not a direct launcher child")
+    if bridge is None:
+        raise ValueError("positive bridge identity is absent from observed tree")
+
+    # Python 3.14 makes `forkserver` the Linux default, and the laboratory target is
+    # 3.14.6, so a multiprocessing child is forked from a fork-server process that is
+    # itself a direct child of the launcher. Two consequences here, and BOTH refused the
+    # whole run: the bridge is not a direct child any more, and the fork server itself is
+    # a descendant whose argv matches no role, so it read as an unclassified process.
+    #
+    # The property this function proves is unchanged -- every live descendant is accounted
+    # for and belongs to this launcher. The fork server is accounted for BY NAME rather
+    # than excused, so an unexpected descendant still refuses.
+    forkservers = {
+        identity
+        for identity, item in tree.items()
+        if identity != root
+        and item.parent_pid == root.pid
+        and any("multiprocessing.forkserver" in argument for argument in item.argv)
+    }
+    if bridge.parent_pid != root.pid and not any(bridge.parent_pid == identity.pid for identity in forkservers):
+        raise ValueError(
+            "positive bridge identity is neither a launcher child nor a fork-server child: "
+            f"bridge parent {bridge.parent_pid}, launcher {root.pid}, "
+            f"fork servers {sorted(identity.pid for identity in forkservers)}"
+        )
     if exact_process_role(bridge.argv) is not None:
         raise ValueError("positive bridge identity collides with an engine/assistant role")
     result = {"launcher": root, "bridge": bridge_identity}
     for identity, item in tree.items():
-        if identity in {root, bridge_identity}:
+        if identity in {root, bridge_identity} or identity in forkservers:
             continue
         role = exact_process_role(item.argv)
         if role is None:
-            raise ValueError("unclassified descendant process")
+            raise ValueError(f"unclassified descendant process: pid {identity.pid} argv {list(item.argv)[:4]}")
         if role in result:
             raise ValueError(f"duplicate live {role} process")
         result[role] = identity
