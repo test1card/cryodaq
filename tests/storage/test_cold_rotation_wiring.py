@@ -252,9 +252,13 @@ def test_xlsx_export_spans_rotated_day(tmp_path: Path) -> None:
     XLSXExporter(data_dir, archive_dir=archive_dir).export(out, start=old_day, end=TODAY)
 
     ws = openpyxl.load_workbook(out)["Данные"]
-    header = [c.value for c in ws[1]]
-    assert "Т1" in header, "rotated-day channel missing from XLSX"
-    assert "Т2" in header, "hot-day channel missing from XLSX"
+    # Row 1 is instrument_id, row 2 is channel, row 3 is descriptor_hash:
+    # every data column is keyed by the full identity, so a channel name is
+    # never a derived header. Reading row 1 for a channel finds the
+    # instrument instead, which is what this assertion used to do.
+    channels = [c.value for c in ws[2]]
+    assert "Т1" in channels, "rotated-day channel missing from XLSX"
+    assert "Т2" in channels, "hot-day channel missing from XLSX"
 
 
 def test_disabled_flag_hot_only(tmp_path: Path) -> None:
