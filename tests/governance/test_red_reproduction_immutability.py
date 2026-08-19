@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,10 @@ from tools.ci_active_checkout_runner import (
     RedReproductionComparisonError,
     compare_red_reproduction_bindings,
 )
+from tools.governance_contract import _RED_REPRODUCTION_PROVENANCE
+
+GUARD_FILE = "tests/governance/guard_demo.py"
+RECEIPT_PATH = "governance/red_reproductions/seed.json"
 
 
 def _git(root: Path, *args: str) -> str:
@@ -47,6 +52,54 @@ def _write_registry(
         encoding="utf-8",
         newline="\n",
     )
+
+
+def _guard_blob(root: Path, raw: bytes) -> str:
+    (root / GUARD_FILE).parent.mkdir(parents=True, exist_ok=True)
+    (root / GUARD_FILE).write_bytes(raw)
+    return _git(root, "hash-object", "-w", GUARD_FILE)
+
+
+def _write_red_receipt(root: Path, *, guard_blob: str, stdout: str) -> str:
+    receipt = {
+        "command": ["python", "-m", "pytest", f"{GUARD_FILE}::test_guard", "-q"],
+        "defective_commit": "0" * 40,
+        "defective_source_blobs": {},
+        "defective_tree": "0" * 40,
+        "environment": {"PYTHONPATH": "src"},
+        "exit_code": 1,
+        "failed_nodes": [f"{GUARD_FILE}::test_guard"],
+        "failure_signatures": {f"{GUARD_FILE}::test_guard": [f"FAILED {GUARD_FILE}::test_guard"]},
+        "guard_blobs": {GUARD_FILE: guard_blob},
+        "guard_nodes": [f"{GUARD_FILE}::test_guard"],
+        "provenance": _RED_REPRODUCTION_PROVENANCE,
+        "python_version": "Python 3.14.3",
+        "record_ids": ["RED-001"],
+        "schema_version": 1,
+        "stderr_bytes_base64": "",
+        "stderr_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes_base64": __import__("base64").b64encode(stdout.encode("utf-8")).decode("ascii"),
+        "stdout_sha256": "sha256:" + hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+    }
+    raw = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    target = root / RECEIPT_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _seed_red(
+    tmp_path: Path, *, guard_v1: bytes, stdout: str = "FAILED tests/governance/guard_demo.py::test_guard\n"
+) -> tuple[Path, str]:
+    root = tmp_path / "repository"
+    root.mkdir(parents=True)
+    _git(root, "init", "-q")
+    _git(root, "branch", "-M", "master")
+    blob_v1 = _guard_blob(root, guard_v1)
+    digest = _write_red_receipt(root, guard_blob=blob_v1, stdout=stdout)
+    _write_registry(root, locator=RECEIPT_PATH, digest=digest)
+    base = _commit(root, "seed trusted evidence")
+    return root, base
 
 
 def _seed(tmp_path: Path) -> tuple[Path, str, str]:
@@ -156,3 +209,41 @@ def test_rejects_same_blob_mode_or_type_change(tmp_path: Path, mode: str) -> Non
 def test_rejects_missing_malformed_zero_or_unresolvable_base(tmp_path: Path, base: str) -> None:
     root, _trusted, _path = _seed(tmp_path)
     _assert_rejected(root, base, "trusted base")
+
+
+def test_accepts_forced_rerun_after_guard_change(tmp_path: Path) -> None:
+    """A guard-file change forces a receipt re-run; the re-run's move is accepted."""
+    guard_v1 = b"def test_guard():\n    assert False\n"
+    root, base = _seed_red(tmp_path, guard_v1=guard_v1)
+    guard_v2 = b"def test_guard():\n    assert False  # changed\n"
+    blob_v2 = _guard_blob(root, guard_v2)
+    digest = _write_red_receipt(root, guard_blob=blob_v2, stdout="FAILED tests/governance/guard_demo.py::test_guard\n")
+    _write_registry(root, locator=RECEIPT_PATH, digest=digest)
+    _commit(root, "re-run receipt against changed guard")
+    result = compare_red_reproduction_bindings(root, candidate=_git(root, "rev-parse", "HEAD"), trusted_base=base)
+    assert result["outcome"] == "passed"
+
+
+def test_still_refuses_repoint_with_unchanged_guard_files(tmp_path: Path) -> None:
+    """A receipt rewrite while its guard files are unchanged is a re-point, refused."""
+    guard_v1 = b"def test_guard():\n    assert False\n"
+    root, base = _seed_red(tmp_path, guard_v1=guard_v1)
+    blob_v1 = _git(root, "rev-parse", f"HEAD:{GUARD_FILE}")
+    digest = _write_red_receipt(
+        root,
+        guard_blob=blob_v1,
+        stdout="FAILED tests/governance/guard_demo.py::test_guard\nreplacement evidence\n",
+    )
+    _write_registry(root, locator=RECEIPT_PATH, digest=digest)
+    _commit(root, "re-point receipt while guard files are unchanged")
+    _assert_rejected(root, base, "guard files are unchanged")
+
+
+def test_refuses_forced_looking_move_to_dishonest_receipt(tmp_path: Path) -> None:
+    """A forced-shaped move whose receipt names a non-matching guard blob is refused."""
+    guard_v1 = b"def test_guard():\n    assert False\n"
+    root, base = _seed_red(tmp_path, guard_v1=guard_v1)
+    digest = _write_red_receipt(root, guard_blob="0" * 40, stdout="FAILED tests/governance/guard_demo.py::test_guard\n")
+    _write_registry(root, locator=RECEIPT_PATH, digest=digest)
+    _commit(root, "forced-looking move to a dishonest receipt")
+    _assert_rejected(root, base, "guard blob does not match its committed guard file")

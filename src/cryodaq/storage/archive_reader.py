@@ -2309,6 +2309,72 @@ class ArchiveReader:
         self._assert_index_snapshot(index_snapshot.token)
         return out
 
+    def verify_descriptor_references(self, referenced: set[str]) -> None:
+        """Fail closed when an exported non-null descriptor_hash has no catalog row.
+
+        The exporter read path (:meth:`query_rows`) returns raw
+        ``descriptor_hash`` values without resolving them, so a restored,
+        legacy, or damaged hot database can hand the exporters a non-null hash
+        with no matching descriptor-catalog row. The bounded reader refuses that
+        condition as ``DESCRIPTOR_CATALOG_MISSING`` / ``DESCRIPTOR_HASH_MISSING``;
+        the operator-facing exporters must not publish the dangling reference as
+        declared identity either. This raises before the exporter writes.
+        """
+        if not referenced:
+            return
+        missing = referenced - self.declared_descriptor_hashes()
+        if missing:
+            raise ArchiveUnavailableError(
+                BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING,
+                "export descriptor reference",
+            )
+
+    def declared_descriptor_hashes(self) -> set[str]:
+        """Union of descriptor hashes declared by every reachable catalog row.
+
+        Hot daily SQLite catalogs (``channel_descriptors`` tables) and cold
+        descriptor sidecars are both authoritative; a hash declared in either
+        one is a real declared identity. A non-null hash that resolves nowhere
+        is the dangling-reference condition the exporters must refuse.
+        """
+        declared: set[str] = set()
+        if self._data_dir.exists():
+            for db_path in sorted(self._data_dir.glob("data_????-??-??.db")):
+                try:
+                    conn = sqlite3.connect(str(db_path), timeout=5)
+                    try:
+                        if (
+                            conn.execute(
+                                "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='channel_descriptors'"
+                            ).fetchone()
+                            is None
+                        ):
+                            continue
+                        declared.update(
+                            row[0] for row in conn.execute("SELECT descriptor_hash FROM main.channel_descriptors")
+                        )
+                    finally:
+                        conn.close()
+                except sqlite3.Error:
+                    continue
+        snapshot = self._load_index_snapshot()
+        for entry in snapshot.document.get("files", []):
+            sidecar_rel = entry.get("channel_descriptors_path")
+            if type(sidecar_rel) is not str:
+                continue
+            try:
+                sidecar = self._contained_regular(self._archive_dir, sidecar_rel)
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+            try:
+                import pyarrow.parquet as pq
+
+                table = pq.ParquetFile(str(sidecar)).read(columns=["descriptor_hash"])
+            except Exception:
+                continue
+            declared.update(value for value in table.column("descriptor_hash").to_pylist() if value is not None)
+        return declared
+
     def query_operator_log(
         self,
         start: datetime | None,
