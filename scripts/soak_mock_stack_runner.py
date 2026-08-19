@@ -501,10 +501,12 @@ asyncio.run(probe())
     # critical -- and cannot drift from the descriptors the same call just wrote.
     # A declared identity must ALSO be classified safety-critical by its own descriptor:
     # the check requires `safety_class is SAFETY_CRITICAL_INPUT` and a role that is not
-    # SOURCE_READBACK. Every descriptor in this fixture is observational, so the honest
-    # declaration is the empty one, and it is DERIVED rather than assumed: if a
-    # safety-critical descriptor is ever added to the passive instrument, it is declared
-    # automatically and the fixture cannot quietly stop monitoring it.
+    # SOURCE_READBACK. For this fixture that is the two channels LS218_2 carries as
+    # safety-critical inputs; it was the EMPTY set while the fixture used LS218_1, whose
+    # sixteen descriptors are all observational, and an empty list is refused outright by
+    # the engine. Derived rather than assumed either way: a safety-critical descriptor
+    # added later is declared automatically, and one removed stops being declared, so the
+    # fixture cannot quietly monitor something that is gone or miss something that is new.
     critical_channels = sorted(
         item["channel_id"]
         for item in descriptor_manifest["descriptors"]

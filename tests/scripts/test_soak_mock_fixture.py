@@ -258,9 +258,10 @@ def test_the_fixture_declares_critical_channels_that_actually_exist(tmp_path) ->
     # And the declaration must match the DESCRIPTORS, not the roster: the liveness check
     # also requires safety_class SAFETY_CRITICAL_INPUT and a role that is not
     # SOURCE_READBACK, so declaring the whole roster only moves the refusal to the next
-    # plane. Every descriptor in this fixture is observational, so the honest declaration
-    # here is empty -- and it is DERIVED, so adding a safety-critical descriptor later
-    # declares it automatically.
+    # plane. For this fixture that leaves the two channels LS218_2 carries as
+    # safety-critical inputs. The assertion below derives the expectation from the
+    # descriptors rather than naming those two, so the test follows a descriptor added or
+    # removed later instead of blocking it.
     expected = sorted(
         item["channel_id"]
         for item in descriptors["descriptors"]
