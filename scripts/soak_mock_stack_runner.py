@@ -4399,6 +4399,7 @@ class _PosixSoakRunner:
                     bridge_guard: _BridgeEpochGuard | None = None
                     bridge_sequence = 0
                     roles: dict[str, Any] | None = None
+                    roles_error: BaseException | None = None
                     while time.monotonic() < deadline and roles is None:
                         for raw in self._pipe_records(bridge_pipe, bridge_buffer):
                             if handshake is None:
@@ -4430,12 +4431,28 @@ class _PosixSoakRunner:
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
-                            except ValueError:
+                            except ValueError as exc:
                                 roles = None
+                                roles_error = exc
                         if roles is None:
                             time.sleep(0.1)
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
-                        raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
+                        missing = [
+                            name
+                            for name, value in (
+                                ("roles", roles),
+                                ("handshake", handshake),
+                                ("bridge", bridge),
+                                ("bridge_guard", bridge_guard),
+                            )
+                            if value is None
+                        ]
+                        detail = ", ".join(missing)
+                        if roles is None and roles_error is not None:
+                            detail += f"; _load_roles refused: {type(roles_error).__name__}: {roles_error}"
+                        raise _RunnerFoundationError(
+                            f"source stack did not reach the exact four-role startup cut; missing: {detail}"
+                        )
 
                     runtime_boundary_offset_s = _validate_soak_runtime_schedule(
                         selected, report_interval_s, expected_receipts, time.time()
