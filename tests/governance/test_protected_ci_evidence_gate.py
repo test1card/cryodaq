@@ -37,6 +37,26 @@ _APPROVED_CANCEL_EXPRESSIONS = frozenset(
         "${{ github.ref != 'refs/heads/master' }}",
     }
 )
+# Every concurrency group reviewed as giving each pull request its OWN group. Membership,
+# never a substring search: `${{ startsWith(github.ref, 'refs/pull/') }}` mentions
+# `github.ref` and evaluates to the SAME group for every pull request, so activity on one
+# would cancel the jobs of the pull request that is about to merge.
+_APPROVED_CONCURRENCY_GROUPS = frozenset(
+    {
+        "${{ github.workflow }}-${{ github.ref }}",
+        "docs-gate-${{ github.ref }}",
+    }
+)
+# Every job condition reviewed as running the job on a ready pull request and NOT on a
+# draft. Membership again: `... || true` contains the whole draft comparison and runs
+# every expensive job on every draft.
+_APPROVED_DRAFT_CONDITIONS = frozenset(
+    {
+        "${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}",
+        "${{ !cancelled() && always() && (github.event_name != 'pull_request'"
+        " || github.event.pull_request.draft == false) }}",
+    }
+)
 
 
 def _workflow_trigger(payload: dict) -> dict:
@@ -404,7 +424,13 @@ def test_every_pull_request_workflow_keeps_ready_to_draft_gating(workflow_name: 
     )
 
     concurrency = payload["concurrency"]
-    assert "github.ref" in concurrency["group"], f"{workflow_name}: concurrency group is not ref-scoped"
+    group = concurrency["group"]
+    assert group in _APPROVED_CONCURRENCY_GROUPS, (
+        f"{workflow_name}: concurrency group is {group!r}, which is not one of the reviewed "
+        f"groups {sorted(_APPROVED_CONCURRENCY_GROUPS)}. Asking only whether the expression "
+        "MENTIONS `github.ref` accepts a group that is the same for every pull request, and "
+        "then activity on any one of them cancels the jobs of the one about to merge."
+    )
     # AN APPROVED EXPRESSION, not a mention of the word. Asking whether the string
     # CONTAINS "pull_request" accepts `${{ github.event_name != 'pull_request' }}`, which
     # disables cancellation for exactly the runs this is meant to cancel -- so the
@@ -418,6 +444,10 @@ def test_every_pull_request_workflow_keeps_ready_to_draft_gating(workflow_name: 
     )
 
     for job_name, job in payload["jobs"].items():
-        assert PULL_REQUEST_DRAFT_GATE in job.get("if", ""), (
-            f"{workflow_name}: job {job_name!r} is not gated against draft pull requests"
+        condition = job.get("if", "")
+        assert condition in _APPROVED_DRAFT_CONDITIONS, (
+            f"{workflow_name}: job {job_name!r} has condition {condition!r}, which is not one of "
+            f"the reviewed conditions {sorted(_APPROVED_DRAFT_CONDITIONS)}. Asking only whether "
+            "the condition CONTAINS the draft comparison accepts `... || true`, which runs every "
+            "expensive job on every draft while this guard stays green."
         )
