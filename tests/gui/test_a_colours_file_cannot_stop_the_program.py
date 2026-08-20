@@ -210,6 +210,71 @@ def test_the_deferred_list_cannot_grow_without_bound() -> None:
     logging_setup._deferred_records.clear()
 
 
+def test_the_theme_menu_survives_a_directory_it_cannot_read(themes_dir, monkeypatch) -> None:
+    """Surviving the import is not surviving startup.
+
+    ``resolve_theme`` coming back with the built-in pack only gets the program as far as
+    its window. ``LauncherWindow.__init__`` then builds the settings menu, which calls
+    ``available_themes``, and the same ``OSError`` aborted window construction one step
+    later -- so the colours file still stopped the program, just further along.
+    """
+
+    real_exists = pathlib.Path.exists
+
+    def _refuses(self):
+        if self.name == "themes":
+            raise PermissionError(13, "Permission denied")
+        return real_exists(self)
+
+    monkeypatch.setattr(pathlib.Path, "exists", _refuses)
+    assert _theme_loader.available_themes() == [], "an unreadable directory means no choices, not a crash"
+
+
+def test_a_directory_that_cannot_be_listed_also_survives(themes_dir, monkeypatch) -> None:
+    """exists() can answer while the listing still refuses."""
+
+    def _refuses(self, _pattern):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(pathlib.Path, "glob", _refuses)
+    assert _theme_loader.available_themes() == []
+
+
+def test_an_ignored_theme_choice_says_why(themes_dir, tmp_path, monkeypatch, root_logging_restored) -> None:
+    """The one place that can explain it, because the fallback is never reached.
+
+    When the settings file cannot be read but the default pack CAN, resolve_theme returns
+    the default and ``_default_pack_or_last_resort`` never runs -- so without a record here
+    the operator's configured theme is dropped and nothing anywhere says so.
+    """
+
+    _write(themes_dir, _theme_loader.DEFAULT_THEME, _good_pack())
+    real_exists = pathlib.Path.exists
+
+    def _refuses(self):
+        if self.name == "settings.local.yaml":
+            raise OSError(5, "Input/output error")
+        return real_exists(self)
+
+    monkeypatch.setattr(pathlib.Path, "exists", _refuses)
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    name, _pack = _theme_loader.resolve_theme()
+    assert name == _theme_loader.DEFAULT_THEME
+    assert logging_setup._deferred_records, "the reason must be held for the log that does not exist yet"
+
+    monkeypatch.undo()  # restore Path.exists before logging touches the filesystem
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+    logging_setup.setup_logging("theme-settings-probe", console=False, file=True)
+    logging.shutdown()
+
+    written = (log_dir / "theme-settings-probe.log").read_text(encoding="utf-8")
+    assert "cannot read" in written, written
+
+
 # ------------------------------------------------------------- a working pack still wins
 
 

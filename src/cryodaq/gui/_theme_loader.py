@@ -177,9 +177,21 @@ def _validate_theme_id(name: object) -> str:
 def _selected_theme_name() -> str:
     try:
         settings_present = SETTINGS_FILE.exists()
-    except OSError:
+    except OSError as exc:
         # Same class as the pack stat below: an unsearchable directory raises here rather
         # than answering False, and a settings file must never decide whether we start.
+        #
+        # It must also not disappear quietly. If the default pack is readable the fallback
+        # below is never entered, so this is the ONLY place that can say why the operator's
+        # chosen theme was ignored. Deferred as well, because this runs before logging.
+        logger.error("theme: cannot read %s (%s); using %s", SETTINGS_FILE, exc, DEFAULT_THEME)
+        defer_record(
+            logging.ERROR,
+            "theme: cannot read %s (%s); using %s",
+            str(SETTINGS_FILE),
+            str(exc),
+            DEFAULT_THEME,
+        )
         return DEFAULT_THEME
     if not settings_present:
         return DEFAULT_THEME
@@ -323,11 +335,42 @@ def write_theme_selection(name: str) -> None:
 
 
 def available_themes() -> list[dict[str, str]]:
-    """Scan THEMES_DIR for bundled packs; return sorted metadata list."""
-    if not THEMES_DIR.exists():
+    """Scan THEMES_DIR for bundled packs; return sorted metadata list.
+
+    The FALLBACK IS NOT ENOUGH ON ITS OWN. resolve_theme surviving an unreadable directory
+    only gets the program to its window; LauncherWindow.__init__ then builds the settings
+    menu, which calls this, and the same OSError aborted window construction one step
+    later. A themes directory that cannot be read means an empty menu, not a dead program.
+    """
+
+    try:
+        present = THEMES_DIR.exists()
+    except OSError as exc:
+        logger.error("theme: cannot scan %s (%s); offering no theme choices", THEMES_DIR, exc)
+        defer_record(
+            logging.ERROR,
+            "theme: cannot scan %s (%s); offering no theme choices",
+            str(THEMES_DIR),
+            str(exc),
+        )
+        return []
+    if not present:
         return []
     results: list[dict[str, str]] = []
-    for pack_file in sorted(THEMES_DIR.glob("*.yaml")):
+    try:
+        pack_files = sorted(THEMES_DIR.glob("*.yaml"))
+    except OSError as exc:
+        # exists() can answer while the listing still refuses, on a directory that is
+        # readable but not searchable and on a filesystem that fails mid-scan.
+        logger.error("theme: cannot list %s (%s); offering no theme choices", THEMES_DIR, exc)
+        defer_record(
+            logging.ERROR,
+            "theme: cannot list %s (%s); offering no theme choices",
+            str(THEMES_DIR),
+            str(exc),
+        )
+        return []
+    for pack_file in pack_files:
         try:
             pack = validate_theme_pack(pack_file.stem)
         except ThemePackError as exc:
