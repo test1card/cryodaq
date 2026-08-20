@@ -3259,6 +3259,33 @@ false_green_pairs:
     red_evidence: pending
     green_evidence: pending
 
+  - id: ONEDIR-SMOKE-SUBPROCESS-DIAGNOSTIC-VISIBILITY-FALSE-GREEN-002
+    status: open
+    scope: repository
+    runtime_prevention_id: ONEDIR-SMOKE-CELL-DIAGNOSTIC-VISIBILITY-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_nonzero_frozen_subprocess_diagnostic_reaches_the_ordinary_log
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+
+  - id: ONEDIR-SMOKE-BOUNDED-TAIL-DIAGNOSTIC-VISIBILITY-FALSE-GREEN-003
+    status: open
+    scope: repository
+    runtime_prevention_id: ONEDIR-SMOKE-CELL-DIAGNOSTIC-VISIBILITY-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_frozen_driver_import_cell_emits_bounded_tail_diagnostic_on_nonzero_exit
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+
+  - id: ONEDIR-CHECK-WARNINGS-REASON-VISIBILITY-FALSE-GREEN-001
+    status: open
+    scope: repository
+    runtime_prevention_id: ONEDIR-CHECK-WARNINGS-REASON-VISIBILITY-001
+    guard: tests/test_windows_onedir_smoke_contract.py::test_check_warnings_prints_its_reason_not_only_the_json
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
+
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6435,6 +6462,12 @@ records:
       - AGENTS.md#integration-and-publication-discipline
     guards:
       - node: tests/test_windows_onedir_smoke_contract.py::test_run_smoke_reports_raised_gui_cell_identity
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_frozen_driver_import_cell_emits_bounded_tail_diagnostic_on_nonzero_exit
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_nonzero_frozen_subprocess_diagnostic_reaches_the_ordinary_log
+        ci_partition: remaining
+      - node: tests/test_windows_onedir_smoke_contract.py::test_early_gui_exit_diagnostic_reaches_the_ordinary_log
         ci_partition: remaining
       - node: tests/test_windows_onedir_smoke_contract.py::test_run_smoke_binds_every_cell_through_the_shared_helper
         ci_partition: remaining

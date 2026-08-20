@@ -515,6 +515,31 @@ def _subprocess_failure(name: str, completed: subprocess.CompletedProcess[bytes]
     return RuntimeError(f"{name} returned {completed.returncode}: {diagnostic!r}")
 
 
+def _bounded_reason(exc: BaseException) -> str:
+    """Render a smoke failure once, retaining the causal diagnostic suffix."""
+
+    reason = f"{type(exc).__name__}:{exc}"
+    if len(reason) <= _SMOKE_DIAGNOSTIC_BYTES:
+        return reason
+    prefix_bytes = _SMOKE_DIAGNOSTIC_BYTES // 2
+    suffix_bytes = _SMOKE_DIAGNOSTIC_BYTES - prefix_bytes - 3
+    return f"{reason[:prefix_bytes]}...{reason[-suffix_bytes:]}"
+
+
+def _early_startup_failure(
+    name: str,
+    command: list[str],
+    evidence_dir: Path,
+    process: subprocess.Popen[bytes],
+) -> RuntimeError:
+    """Capture an EXE's early-exit output before reporting readiness failure."""
+
+    stdout, stderr = process.communicate(timeout=5)
+    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    _write_log(evidence_dir, name, completed)
+    return _subprocess_failure(name, completed)
+
+
 def _run_frozen_driver_import_cell(
     executable: Path,
     root: Path,
@@ -617,7 +642,7 @@ def _run_gui_startup_cell(executable: Path, root: Path, evidence_dir: Path) -> d
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                raise RuntimeError(f"gui_startup_offscreen exited before readiness observation ({process.returncode})")
+                raise _early_startup_failure("gui_startup_offscreen", command, evidence_dir, process)
             time.sleep(0.1)
         process.send_signal(signal.CTRL_BREAK_EVENT)
         stdout, stderr = process.communicate(timeout=20)
@@ -830,7 +855,7 @@ def _run_assistant_cell(
         stable_until = time.monotonic() + (15 if expect_periodic_state else 5)
         while time.monotonic() < stable_until:
             if process.poll() is not None:
-                raise RuntimeError(f"{name} exited before readiness observation")
+                raise _early_startup_failure(name, command, evidence_dir, process)
             if expect_periodic_state and state_path.is_file():
                 try:
                     state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -981,7 +1006,7 @@ def _run_smoke_cell(
             {
                 "name": cell_name,
                 "status": "FAIL",
-                "reason": f"{type(exc).__name__}:{str(exc)[:512]}",
+                "reason": _bounded_reason(exc),
             }
         )
         raise
@@ -1129,7 +1154,7 @@ def run_smoke(dist_dir: Path, evidence_dir: Path) -> int:
         _atomic_json(evidence_dir / "artifact-hashes.json", inventory)
         status, reason = smoke_summary(cells)
     except BaseException as exc:
-        reason = f"{type(exc).__name__}:{str(exc)[:512]}"
+        reason = cells[-1]["reason"] if cells else _bounded_reason(exc)
     finally:
         runtime_parent = evidence_dir.parent / "windows smoke runtime path with spaces"
         if runtime_parent.exists():

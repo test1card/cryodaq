@@ -744,8 +744,8 @@ def test_nonzero_frozen_subprocess_diagnostic_reaches_the_ordinary_log(
     def failing_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(
             returncode=7,
-            stdout=b"stdout-line\n",
-            stderr=b"CRYODAQ-DIAGNOSTIC-MARKER: driver import exploded\n",
+            stdout=b"x" * 2048,
+            stderr=b"y" * 2048 + b"CRYODAQ-DIAGNOSTIC-MARKER: driver import exploded\n",
         )
 
     monkeypatch.setattr(smoke.os, "name", "nt")
@@ -761,3 +761,39 @@ def test_nonzero_frozen_subprocess_diagnostic_reaches_the_ordinary_log(
     err = capsys.readouterr().err
     assert "CRYODAQ-DIAGNOSTIC-MARKER" in err
     assert "cell frozen_driver_imports: FAIL" in err
+
+
+def test_early_gui_exit_diagnostic_reaches_the_ordinary_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An early GUI exit carries its captured subprocess output into smoke evidence."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "CryoDAQ.exe").write_bytes(b"frozen-executable")
+    evidence = tmp_path / "evidence"
+
+    def frozen(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {"name": "frozen_driver_imports", "status": "PASS"}
+
+    process = SimpleNamespace(
+        returncode=9,
+        pid=1,
+        poll=lambda: 9,
+        communicate=lambda *args, **kwargs: (b"", b"GUI-STARTUP-CAUSAL-MARKER\n"),
+        terminate=lambda: None,
+        wait=lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke, "_run_frozen_driver_import_cell", frozen)
+    monkeypatch.setattr(smoke.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    assert smoke.run_smoke(dist, evidence) == 1
+    payload = json.loads((evidence / "smoke-result.json").read_text(encoding="utf-8"))
+    failed = payload["cells"][-1]
+    assert failed["name"] == "gui_startup_offscreen"
+    assert "GUI-STARTUP-CAUSAL-MARKER" in failed["reason"]
+    assert "GUI-STARTUP-CAUSAL-MARKER" in capsys.readouterr().err
+    assert b"GUI-STARTUP-CAUSAL-MARKER" in (evidence / "gui_startup_offscreen.stderr.log").read_bytes()
