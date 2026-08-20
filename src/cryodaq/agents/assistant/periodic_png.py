@@ -33,6 +33,7 @@ from cryodaq.agents.assistant.periodic_projection import (
     ProjectionSnapshot,
 )
 from cryodaq.instance_lock import release_lock, try_acquire_lock
+from cryodaq.logging_setup import _redact
 from cryodaq.periodic_config import (
     PeriodicPngConfig,
     PeriodicPngConfigLoad,
@@ -103,12 +104,22 @@ _log = logging.getLogger(__name__)
 
 _RUNTIME_FAILED_TEXT = "periodic runtime is unavailable"
 _RUNTIME_REASON_MAX_CHARS = 160
+# One line per distinct reason, then at most one per minute while it persists. The monitor
+# retries about once a second, and a week of that is a log file nobody can read and a disk
+# nobody budgeted for -- the exact failure mode a week-long run is supposed to survive.
+_RUNTIME_FAILED_LOG_INTERVAL_S = 60.0
 
 
 def _bounded_reason(cause: BaseException) -> str:
-    """One line of the exception's own words, bounded, never a traceback."""
+    """One line of the exception's own words, bounded, redacted, never a traceback.
 
-    detail = " ".join(str(cause).split())
+    An exception can carry a credential -- an HTTP client error embedding a Telegram bot
+    URL is the obvious one -- and this text goes into the health record, which is what a
+    support bundle carries OFF this machine. That is the export boundary, so the same
+    redaction the logging setup applies is applied here.
+    """
+
+    detail = " ".join(_redact(str(cause)).split())
     if len(detail) > _RUNTIME_REASON_MAX_CHARS:
         detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
     return detail
@@ -1738,6 +1749,8 @@ class PeriodicPngSupervisor:
         self._coordinator: PeriodicPngCoordinator | None = None
         self._run_task: asyncio.Task[None] | None = None
         self._published_health_record: PeriodicStateDocument | None = None
+        # (reason signature, monotonic time) of the last runtime-failure line written.
+        self._last_runtime_failure_log: tuple[tuple[str, str], float] | None = None
 
     async def run(self) -> None:
         if self._run_task is not None and self._run_task is not asyncio.current_task():
@@ -1819,12 +1832,14 @@ class PeriodicPngSupervisor:
                     self._release_leader()
                     return
                 if outcome == "failed":
-                    # The monitor already wrote a health code of its own before returning
-                    # here -- "periodic live source stopped unexpectedly" is the one seen on
-                    # the laboratory target -- and this used to overwrite it with a sentence
-                    # that named nothing. Say which branch this is, so the two can be told
-                    # apart in a run that repeats once a second.
-                    await self._stop_then_mark_runtime_failed(because="the monitor reported a failure")
+                    # The monitor writes a health code of its OWN before returning here --
+                    # "periodic live source stopped unexpectedly" is the one seen on the
+                    # laboratory target -- and it is strictly more specific than anything
+                    # this branch knows. Naming the branch was not enough: the specific code
+                    # was still destroyed by the general one a fraction of a second later.
+                    # So this stops the coordinator and KEEPS whatever the monitor said,
+                    # writing its own only when the monitor left nothing.
+                    await self._stop_then_keep_monitor_health()
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
@@ -1979,6 +1994,35 @@ class PeriodicPngSupervisor:
         if cleanup_error is not None:
             raise cleanup_error
 
+    async def _stop_then_keep_monitor_health(self) -> None:
+        """Stop the coordinator without overwriting a more specific reason.
+
+        The monitor persists its own health before it reports failure. Replacing that with
+        the general "runtime is unavailable" throws away the only sentence that says WHAT
+        went wrong, which is the whole complaint this change exists to answer.
+        """
+
+        cleanup_error: BaseException | None = None
+        try:
+            await self._stop_coordinator()
+        except BaseException as exc:
+            cleanup_error = exc
+        if not await self._monitor_left_a_reason():
+            await self._write_runtime_failed_health(because="the monitor reported a failure")
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    async def _monitor_left_a_reason(self) -> bool:
+        """True when the persisted health already names something more specific than ours."""
+
+        try:
+            state = await self._run_blocking(load_periodic_state, self._data_dir)
+            health = state.payload["health"]
+            code = health.get("error_code")
+        except Exception:
+            return False
+        return bool(code) and code != "periodic_runtime_failed"
+
     async def _stop_then_mark_runtime_failed(
         self,
         cause: BaseException | None = None,
@@ -2106,12 +2150,17 @@ class PeriodicPngSupervisor:
         # whole run, no slot was ever allocated, no receipt was ever sealed, and the reason
         # existed only inside a swallowed exception.
         if cause is not None or because:
-            _log.error(
-                "periodic runtime is unavailable; because=%s type=%s detail=%s",
-                because or "unstated",
-                "none" if cause is None else type(cause).__name__,
-                "" if cause is None else _bounded_reason(cause),
-            )
+            signature = (because, "none" if cause is None else type(cause).__name__)
+            now_monotonic = self._clock.monotonic()
+            last = self._last_runtime_failure_log
+            if last is None or last[0] != signature or now_monotonic - last[1] >= _RUNTIME_FAILED_LOG_INTERVAL_S:
+                self._last_runtime_failure_log = (signature, now_monotonic)
+                _log.error(
+                    "periodic runtime is unavailable; because=%s type=%s detail=%s",
+                    because or "unstated",
+                    signature[1],
+                    "" if cause is None else _bounded_reason(cause),
+                )
         try:
             state = await self._run_blocking(load_periodic_state, self._data_dir)
             previous = float(state.payload["updated_at"])
