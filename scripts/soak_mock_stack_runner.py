@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 import hashlib
 import io
 import json
@@ -125,7 +126,6 @@ _ARTIFACT_NONCE_ENV: Final = "CRYODAQ_SOAK_ARTIFACT_NONCE"
 _FRAME_PREFIX: Final = struct.Struct("!I")
 _ARTIFACT_IO_TIMEOUT_S: Final = 10.0
 _POST_ACK_HEALTH_TIMEOUT_S: Final = 40.0
-_LONG_SOAK_REPORT_INTERVAL_S: Final = 3600
 _SHORT_SOAK_NEXT_REPORT_MIN_S: Final = 450
 _SHORT_SOAK_NEXT_REPORT_MAX_S: Final = 600
 _SHORT_SOAK_THIRD_REPORT_FLOOR_S: Final = 1050
@@ -837,64 +837,6 @@ def _select_short_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
         ):
             return interval_s, next_offset_s
     raise _RunnerFoundationError("unable to align the reviewed short-soak report cadence")
-
-
-def _expected_report_receipts(selected: Any, interval_s: int, boundary_offset_s: int) -> int:
-    """How many periodic-report boundaries the run is expected to cross.
-
-    Two is the SHORT profile's own reservation, and it is returned as a literal so that
-    profile's manifest cannot move: its chooser places one boundary inside the 900-second
-    run and the next one past the end, and the second receipt is the settling one.
-
-    Any other profile crosses as many boundaries as its duration allows, so the number is
-    COUNTED. It used to be the literal 2 for every profile, beside a `"profile": "short"`
-    that was also a literal, so a manifest could have described a run that did not happen.
-    Nothing can reach that state while the entry point refuses every profile but the short
-    one -- which is why it has to be right BEFORE that refusal is lifted, not after.
-    """
-
-    if selected.name == "short":
-        return 2
-    if interval_s <= 0:
-        raise _RunnerFoundationError("report interval must be positive to count receipts")
-    return 1 + max(0, int((selected.duration_s - boundary_offset_s) // interval_s))
-
-
-def _select_long_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
-    """Choose the report cadence for a profile that is NOT the short one.
-
-    A SIBLING, not an edit to the short-soak chooser, and the reason is that the two want
-    opposite things. The short chooser solves a puzzle: find an interval whose FIRST
-    boundary lands 450-600 s into a 900-second run and whose SECOND lands at 1050 s or
-    later -- that is, exactly ONE report inside the run and the next one safely outside
-    it. A twelve-hour run wants no such reservation; it crosses many boundaries by itself
-    and the cadence only has to be sane.
-
-    Leaving the short chooser untouched is what makes the short profile behave IDENTICALLY
-    after this change, by construction rather than by testing.
-    """
-
-    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
-        raise _RunnerFoundationError("long-soak schedule epoch is invalid")
-    interval_s = _LONG_SOAK_REPORT_INTERVAL_S
-    next_offset_s = (-int(now_epoch)) % interval_s or interval_s
-    return interval_s, next_offset_s
-
-
-def _validate_long_soak_runtime_schedule(interval_s: int, now_epoch: float) -> int:
-    """Re-check the long cadence after startup, without the short run's reservation.
-
-    The short validator refuses unless the first boundary is still 395-700 s in and the
-    second still falls past 900 s, because startup latency can eat a 15-minute run's only
-    report. Nothing of that applies to a run measured in hours, so this checks the shape of
-    the numbers and nothing else -- it must not invent a refusal the run cannot deserve.
-    """
-
-    if type(interval_s) is not int or interval_s < 60 or interval_s > 86_400:
-        raise _RunnerFoundationError("long-soak report interval is invalid")
-    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
-        raise _RunnerFoundationError("long-soak runtime epoch is invalid")
-    return (-int(now_epoch)) % interval_s or interval_s
 
 
 def _validate_short_soak_runtime_schedule(interval_s: int, now_epoch: float) -> int:
@@ -2396,10 +2338,10 @@ class _DeliveryEvidenceRegistry:
     def __init__(self) -> None:
         self._records: dict[int, tuple[_DeliveryEvidenceAuthority, Any, dict[str, object]]] = {}
 
-    def run(self, runner: Any, evidence: Any) -> None:
+    def run(self, runner: Any, evidence: Any, selected: Any) -> None:
         if type(runner) is not _PosixSoakRunner or runner._used is not True:
             raise _RunnerFoundationError("delivery run is not owned by the active runner")
-        result = _PosixSoakRunner._run_owned(runner, evidence)
+        result = _PosixSoakRunner._run_owned(runner, evidence, selected)
         if type(result) is not _OwnedRunResult:
             raise _RunnerFoundationError("owned runner returned an invalid private result")
         proof = _validate_pre_post_receipts(
@@ -3730,6 +3672,10 @@ class _PosixSoakRunner:
 
     def run(self, evidence: Any, selected: Any = None) -> None:
         self.require_platform()
+        from scripts import soak_mock_stack as _soak_for_default
+
+        if selected is None:
+            selected = _soak_for_default.profile("short")
         if self._used:
             raise _RunnerFoundationError("POSIX soak runner is single-use")
         from scripts import soak_mock_stack as soak
@@ -3743,7 +3689,7 @@ class _PosixSoakRunner:
             # rolls back to the observed prior state.
             self._prior_subreaper = _runner_subreaper_state()
             _apply_runner_subreaper(True)
-            _DELIVERY_EVIDENCE.run(self, evidence)
+            _DELIVERY_EVIDENCE.run(self, evidence, selected)
         finally:
             if self._prior_subreaper is not None and not self._subreaper_restored:
                 self._restore_subreaper()
@@ -3757,7 +3703,7 @@ class _PosixSoakRunner:
             _apply_runner_subreaper(self._prior_subreaper)
             self._subreaper_restored = True
 
-    def _run_owned(self, evidence: Any) -> _OwnedRunResult:
+    def _run_owned(self, evidence: Any, selected: Any) -> _OwnedRunResult:
         """Run, validate, seal, and publish one short-soak terminal result."""
 
         import platform
@@ -3769,27 +3715,45 @@ class _PosixSoakRunner:
 
         # THE PROFILE NOW ARRIVES FROM THE CALLER, and until this change it did not arrive
         # at all: `main()` computed one, used it to name the evidence directory, and then
-        # called a runner that chose its own. Defaulting to the short profile keeps every
-        # existing caller -- including two tests that call `run(evidence)` -- behaving
-        # exactly as before.
+        # called a runner that chose its own.
         #
-        # The check that replaces the old one is STRICTER, not looser. It used to compare a
-        # name against the literal it had just asked for, which cannot fail unless
-        # `soak.profile` is replaced. This asks whether the object IS the registered
-        # profile, so a hand-built look-alike is refused as well.
-        if selected is None:
-            selected = soak.profile("short")
-        if selected is not soak.PROFILES.get(getattr(selected, "name", None)):
+        # THE REFUSAL STAYS, and its reason is now TRUE instead of tautological. The old
+        # line compared a name against the literal it had just asked for, which cannot
+        # fail. This one names the contract that actually forbids a long profile today:
+        # `Evidence` rejects a manifest whose `expected_receipts` is not 2
+        # (`soak_mock_stack.py`), and the qualification refuses a ledger whose length is
+        # not 2 (`_validate_pre_post_receipts`). A long profile could therefore start,
+        # fault processes for hours, and never seal. Admitting one before that contract
+        # changes would spend a night of machine time to produce nothing.
+        #
+        # IT COMPARES FIELDS, AND IT HAS TO BE CLASS-AGNOSTIC. Two stricter-looking checks
+        # were tried and both would have refused EVERY REAL RUN; a test that drives this
+        # boundary caught them before they shipped.
+        #
+        # The soak starts as `python -m scripts.soak_mock_stack`, so the entry module is
+        # `__main__` while this runner does `from scripts import soak_mock_stack`. Those are
+        # TWO module instances. `selected is soak.PROFILES[name]` is therefore false for
+        # every real run -- and so is `==`, because dataclass equality requires the same
+        # class and the two instances define two `SoakProfile` classes.
+        #
+        # Comparing the FIELDS answers the question that actually matters: does this profile
+        # carry what the reviewed profile of that name carries. A look-alike whose fields
+        # differ is refused; one identical in every field is the reviewed profile in all but
+        # object identity, and behaves as such.
+        registered = soak.PROFILES.get(getattr(selected, "name", None))
+        if registered is None or dataclasses.asdict(registered) != dataclasses.asdict(selected):
             raise _RunnerFoundationError("soak profile is not one of the reviewed profiles")
+        if selected.name != "short":
+            raise _RunnerFoundationError(
+                "the evidence contract seals exactly two receipts, so only the short "
+                f"profile can qualify; {selected.name!r} would run and never seal"
+            )
         locked = _LockedPsutilObserver(psutil)
         owner_identity = locked.identity_for_pid(os.getpid())
         if locked.descendants(owner_identity, include_zombies=True):
             raise _RunnerFoundationError("qualification owner has unexpected live descendants")
         collector = _CleanShaCollector(_REPO_ROOT)
-        if selected.name == "short":
-            report_interval_s, report_boundary_offset_s = _select_short_soak_report_schedule(time.time())
-        else:
-            report_interval_s, report_boundary_offset_s = _select_long_soak_report_schedule(time.time())
+        report_interval_s, report_boundary_offset_s = _select_short_soak_report_schedule(time.time())
         sha = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=_REPO_ROOT,
@@ -3828,9 +3792,10 @@ class _PosixSoakRunner:
                 "periodic_schedule": {
                     "interval_s": report_interval_s,
                     "selection_boundary_offset_s": report_boundary_offset_s,
-                    "expected_receipts": _expected_report_receipts(
-                        selected, report_interval_s, report_boundary_offset_s
-                    ),
+                    # Two, and NOT derived. `Evidence` rejects a manifest whose count is
+                    # not 2 and the qualification refuses a ledger that is not two records
+                    # long, so a derived count would only describe a run that cannot seal.
+                    "expected_receipts": 2,
                 },
                 "source_fixture": source_fixture,
                 "fatal_log_allowlist": [],
@@ -4020,10 +3985,7 @@ class _PosixSoakRunner:
                             f"still missing: {missing}{detail}"
                         )
 
-                    if selected.name == "short":
-                        _validate_short_soak_runtime_schedule(report_interval_s, time.time())
-                    else:
-                        _validate_long_soak_runtime_schedule(report_interval_s, time.time())
+                    _validate_short_soak_runtime_schedule(report_interval_s, time.time())
 
                     start = time.monotonic()
                     next_sample = 0.0

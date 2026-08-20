@@ -1,9 +1,9 @@
-"""The profile the entry point selects must be the profile the runner runs.
+"""The profile the entry point selects must reach the runner, and be refused there honestly.
 
-WHY THIS MODULE EXISTS. Until this change the profile was never passed. `main()` computed
-one, used it to name the evidence directory and to decide the activation refusal, and then
-called `runner._PosixSoakRunner().run(evidence)` — a runner that selected `short` for
-itself.
+WHY THIS MODULE EXISTS. The profile was never passed. `main()` computed one, used it to
+name the evidence directory and to decide the activation refusal, and then called
+`runner._PosixSoakRunner().run(evidence)` — a runner that selected `short` for itself and
+asserted that the name it had just asked for was the name it got, which cannot fail.
 
 HOW THAT WAS SEEN, stated exactly, because it cannot be reproduced through this entry
 point: the activation refusal was lifted on a THROWAWAY commit that was never pushed, and
@@ -11,8 +11,16 @@ a run asked for the `12h` profile then stopped at elapsed 185.0 s on the SHORT p
 fault schedule, under the long profile's name. Through the entry point as it stands, a
 non-short profile returns 3 and never reaches the runner at all.
 
-Nothing here lifts the activation refusal. These tests are about one thing only: the
-profile reaches the runner, and asking for the short one still behaves exactly as before.
+WHAT THIS DOES NOT DO. It does not admit a long profile. The evidence contract seals
+exactly two receipts -- `Evidence` rejects a manifest whose `expected_receipts` is not 2,
+and the qualification refuses a ledger that is not two records long -- so a long profile
+could start, fault processes for hours and never seal. The runner therefore still refuses
+one, now for that reason instead of a tautology.
+
+A NOTE ON WHAT THESE TESTS MUST DO. An earlier version of this module asserted how an
+impostor profile was CONSTRUCTED and never handed it to anything, so it would have passed
+with the refusal deleted. That is the failure this file exists to prevent, so every
+refusal below is driven rather than described.
 """
 
 from __future__ import annotations
@@ -33,77 +41,116 @@ _SPEC.loader.exec_module(soak)
 
 from scripts import soak_mock_stack_runner as runner  # noqa: E402
 
-# The evidence directory needs POSIX capabilities, so the one test that builds a real
-# Evidence is skipped elsewhere. Windows skipping it is exactly why the fix has to be
-# run on the laboratory machine before it is pushed.
+# The evidence directory needs POSIX capabilities, so the test that builds a real Evidence
+# is skipped elsewhere. Windows skipping it is exactly why this file has to be run on the
+# laboratory machine before it is pushed.
 _POSIX_EVIDENCE = pytest.mark.skipif(os.name != "posix", reason="evidence capability is POSIX-only")
 
 
-def test_the_runner_still_defaults_to_the_short_profile() -> None:
-    """Every existing caller passes no profile, and must keep working unchanged.
+def _runner_at_the_selection_boundary(monkeypatch):
+    """A real `_PosixSoakRunner`, called at the boundary the profile check lives on.
 
-    Two tests in the neighbouring module call `run(evidence)` with one argument. The
-    default is what keeps them, and the entry point's own behaviour, identical.
+    The check is inside `_run_owned`, past the platform guard. That guard is replaced so
+    the test reaches the boundary and nothing else, and `_run_owned` is then called with
+    the profile directly -- the same argument the production chain now forwards.
+    """
+
+    monkeypatch.setattr(runner._PosixSoakRunner, "require_platform", staticmethod(lambda: None))
+    instance = runner._PosixSoakRunner()
+    instance._used = True
+    return instance
+
+
+def test_the_whole_chain_forwards_the_profile_and_no_link_drops_it() -> None:
+    """The crash this test was written after: a parameter added at one end only.
+
+    `run()` took the profile, handed `_DELIVERY_EVIDENCE.run(self, evidence)` two
+    arguments, and that called `_run_owned(runner, evidence)`. `_run_owned` then read an
+    unbound `selected` and raised `UnboundLocalError` on EVERY real invocation. No test
+    caught it, because they all replace the runner or inspect helpers instead of walking
+    this chain. So the chain itself is walked here.
     """
 
     import inspect
 
-    signature = inspect.signature(runner._PosixSoakRunner.run)
-    assert list(signature.parameters) == ["self", "evidence", "selected"]
-    assert signature.parameters["selected"].default is None
+    run_params = list(inspect.signature(runner._PosixSoakRunner.run).parameters)
+    assert run_params == ["self", "evidence", "selected"]
+    assert inspect.signature(runner._PosixSoakRunner.run).parameters["selected"].default is None
+
+    registry_run = type(runner._DELIVERY_EVIDENCE).run
+    assert list(inspect.signature(registry_run).parameters) == [
+        "self",
+        "runner",
+        "evidence",
+        "selected",
+    ], "the delivery registry must forward the profile, or the runner reads an unbound name"
+
+    assert list(inspect.signature(runner._PosixSoakRunner._run_owned).parameters) == [
+        "self",
+        "evidence",
+        "selected",
+    ]
+
+    source = inspect.getsource(runner._PosixSoakRunner.run)
+    assert "_DELIVERY_EVIDENCE.run(self, evidence, selected)" in source, (
+        "the call must pass the profile, not only the signature"
+    )
 
 
-def test_a_profile_that_is_not_the_registered_object_is_refused() -> None:
-    """The check is stricter than the one it replaced, not looser.
+def test_a_look_alike_profile_is_refused_by_the_runner_itself(monkeypatch) -> None:
+    """A profile that answers to a registered NAME but differs in a field must be refused.
 
-    The old line compared `selected.name` against the literal it had just asked for, which
-    cannot fail. This asks whether the object IS the registered profile, so a look-alike
-    built by hand is refused too.
+    The old check compared `selected.name` against the literal it had just asked for, which
+    cannot fail. The refusal is DRIVEN here rather than described: an earlier version of
+    this test only asserted how the look-alike was built and would have passed with the
+    check deleted.
+
+    The check compares by value on purpose. Identity looks stricter and is wrong: the soak
+    starts as `python -m scripts.soak_mock_stack`, so the entry module is `__main__` while
+    the runner imports `scripts.soak_mock_stack` -- two instances, two sets of profile
+    objects, and an identity check would refuse every real run. This test found that.
     """
 
     from dataclasses import replace
 
     genuine = soak.profile("short")
-    impostor = replace(genuine, duration_s=genuine.duration_s)
+    impostor = replace(genuine, duration_s=genuine.duration_s * 4)
+    assert impostor.name == genuine.name, "it must pass for the short profile by NAME"
+    assert impostor != genuine, "and differ in a field, which is what makes it worth refusing"
 
-    assert impostor == genuine, "the look-alike must be EQUAL, or the test proves nothing"
-    assert impostor is not genuine
-    assert soak.PROFILES.get(impostor.name) is genuine
-    assert soak.PROFILES.get(impostor.name) is not impostor
+    instance = _runner_at_the_selection_boundary(monkeypatch)
+    with pytest.raises(runner._RunnerFoundationError, match="not one of the reviewed profiles"):
+        instance._run_owned(object(), impostor)
 
 
-def test_the_long_cadence_is_a_sibling_and_the_short_one_is_untouched() -> None:
-    """The short chooser must be the SAME function it was, so short behaviour cannot move.
+def test_a_long_profile_is_refused_by_the_runner_for_the_contract_reason(monkeypatch) -> None:
+    """A long profile must not start, and the message must say WHY.
 
-    The short chooser solves a reservation puzzle for a 15-minute run: one report boundary
-    450-600 s in, and the next one at 1050 s or later. A long run needs none of that, so it
-    gets its own chooser rather than an edit to this one.
+    The evidence contract seals exactly two receipts. A long profile admitted here would
+    run for hours and fail at the seal, spending a night of machine time to produce
+    nothing. The refusal names that instead of asserting a tautology.
     """
 
-    interval_s, offset_s = runner._select_short_soak_report_schedule(1_700_000_000.0)
-    assert 450 <= offset_s <= 600
-    assert offset_s + interval_s >= 1050
-
-    long_interval_s, long_offset_s = runner._select_long_soak_report_schedule(1_700_000_000.0)
-    assert long_interval_s == runner._LONG_SOAK_REPORT_INTERVAL_S == 3600
-    assert 0 < long_offset_s <= long_interval_s
+    instance = _runner_at_the_selection_boundary(monkeypatch)
+    for name in ("12h", "72h"):
+        with pytest.raises(runner._RunnerFoundationError, match="never seal"):
+            instance._run_owned(object(), soak.profile(name))
 
 
-def test_the_long_validator_refuses_a_malformed_interval_but_invents_no_reservation() -> None:
-    """It must check the shape of the numbers and nothing else.
+def test_the_short_profile_passes_the_selection_boundary(monkeypatch) -> None:
+    """The refusals must not swallow the profile that IS allowed.
 
-    The short validator refuses when startup latency ate a 15-minute run's only report.
-    A run measured in hours cannot deserve that refusal, so this one must not make it.
+    A file that only proves refusals would pass with a runner that refuses everything. The
+    short profile therefore has to get PAST this boundary; it fails later, on the evidence
+    object this test deliberately does not build.
     """
 
-    with pytest.raises(runner._RunnerFoundationError, match="long-soak report interval is invalid"):
-        runner._validate_long_soak_runtime_schedule(30, 1_700_000_000.0)
-    with pytest.raises(runner._RunnerFoundationError, match="long-soak runtime epoch is invalid"):
-        runner._validate_long_soak_runtime_schedule(3600, float("nan"))
-
-    # Every ordinary moment is accepted; the short validator would refuse most of them.
-    for now in (1_700_000_000.0, 1_700_000_123.0, 1_700_003_599.0):
-        assert 0 < runner._validate_long_soak_runtime_schedule(3600, now) <= 3600
+    instance = _runner_at_the_selection_boundary(monkeypatch)
+    with pytest.raises(Exception) as caught:
+        instance._run_owned(object(), soak.profile("short"))
+    message = str(caught.value)
+    assert "not one of the reviewed profiles" not in message
+    assert "never seal" not in message
 
 
 @_POSIX_EVIDENCE
@@ -127,37 +174,3 @@ def test_main_hands_the_runner_the_profile_it_selected(tmp_path, monkeypatch) ->
     assert received[0] is soak.profile("short"), (
         "the runner must receive the profile the entry point selected, not choose its own"
     )
-
-
-def test_the_manifest_reports_the_profile_that_ran_and_counts_its_receipts() -> None:
-    """The manifest used to name the short profile and claim two receipts, as literals.
-
-    The thresholds beside those lines already read the selected profile, so a manifest could
-    have described a run that did not happen. Nothing reaches that state while the entry
-    point refuses every profile but the short one, which is exactly why it has to be right
-    BEFORE the refusal is lifted rather than after.
-
-    The short profile's own answer is pinned to 2 so its manifest cannot move: its chooser
-    places one boundary inside the 900-second run and the next past the end.
-    """
-
-    short = soak.profile("short")
-    assert runner._expected_report_receipts(short, 600, 500) == 2
-    assert runner._expected_report_receipts(short, 3600, 1) == 2, (
-        "the short answer must not depend on the interval, or its manifest could move"
-    )
-
-    twelve_hour = soak.profile("12h")
-    assert twelve_hour.duration_s == 12 * 3600
-
-    # Twelve hours at an hourly cadence crosses twelve boundaries, and the offset inside
-    # the first hour does not change that. I first wrote 13 for the second line; the test
-    # caught my arithmetic, which is what it is for.
-    assert runner._expected_report_receipts(twelve_hour, 3600, 3600) == 12
-    assert runner._expected_report_receipts(twelve_hour, 3600, 1) == 12
-
-    # A case that actually distinguishes: halve the cadence and the count halves.
-    assert runner._expected_report_receipts(twelve_hour, 7200, 7200) == 6
-
-    with pytest.raises(runner._RunnerFoundationError, match="report interval must be positive"):
-        runner._expected_report_receipts(twelve_hour, 0, 0)
