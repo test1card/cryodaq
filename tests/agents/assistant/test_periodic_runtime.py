@@ -1334,3 +1334,96 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
         assert cache.get_summary() is None
     finally:
         await cache.stop()
+
+
+async def test_a_reading_carrying_a_descriptor_envelope_is_accepted() -> None:
+    """`zmq_bridge` attaches `desc` whenever it has a channel-descriptor envelope.
+
+    The contract used to compare the key set with `!=`, so an ordinary reading with a
+    descriptor was refused exactly as hard as one missing a required field -- and the
+    refusal invalidates the whole generation. Measured on Ubuntu 22.04 on 2026-08-20,
+    after the topic fix, this became the most frequent reason the periodic source lost
+    authority.
+    """
+
+    import msgpack
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    payload = {
+        "ts": 1_700_000_000.0,
+        "iid": "ls",
+        "ch": "T2",
+        "v": 2.0,
+        "u": "K",
+        "st": "ok",
+        "raw": None,
+        "meta": {},
+        "transport": {
+            "schema": "cryodaq.periodic.stream/v1",
+            "session_id": "1" * 32,
+            "sequence": 1,
+            "persistence_authoritative": True,
+        },
+        "desc": b"an opaque descriptor envelope",
+    }
+    transport, reading = SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
+
+    assert reading.channel == "T2"
+    assert transport.sequence == 1
+
+
+async def test_a_reading_missing_a_required_field_is_still_refused() -> None:
+    """Accepting a documented optional field must not relax the contract."""
+
+    import msgpack
+    import pytest as _pytest
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    payload = {
+        "ts": 1_700_000_000.0,
+        "iid": "ls",
+        "ch": "T2",
+        "v": 2.0,
+        "u": "K",
+        "st": "ok",
+        "raw": None,
+        "meta": {},
+        # `transport` deliberately absent
+    }
+    with _pytest.raises(ValueError, match="missing="):
+        SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
+
+
+async def test_an_unknown_field_is_refused_and_not_echoed() -> None:
+    """Fail-closed on a key nobody documented -- and the message must not carry the wire."""
+
+    import msgpack
+    import pytest as _pytest
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    payload = {
+        "ts": 1_700_000_000.0,
+        "iid": "ls",
+        "ch": "T2",
+        "v": 2.0,
+        "u": "K",
+        "st": "ok",
+        "raw": None,
+        "meta": {},
+        "transport": {
+            "schema": "cryodaq.periodic.stream/v1",
+            "session_id": "1" * 32,
+            "sequence": 1,
+            "persistence_authoritative": True,
+        },
+        "smuggled_secret_name": 1,
+    }
+    with _pytest.raises(ValueError) as raised:
+        SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
+
+    said = str(raised.value)
+    assert "unexpected_key_count=1" in said
+    assert "smuggled_secret_name" not in said, "an unknown key name reached the message"

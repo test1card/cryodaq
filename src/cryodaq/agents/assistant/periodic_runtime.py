@@ -93,6 +93,21 @@ _MONITOR_FAILURE_EVENTS = frozenset(
 # topic in one and not the other is either a silent drop or a fatal refusal.
 _PARTICIPATING_TOPICS: tuple[bytes, ...] = (DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC)
 
+# THE READING CONTRACT, SPLIT INTO WHAT MUST BE THERE AND WHAT MAY BE.
+#
+# This used to be one set compared with `!=`, which refuses a reading that carries an
+# extra field just as hard as one that is missing a required field. `zmq_bridge._pack_reading`
+# attaches `desc`, the channel-descriptor envelope, whenever it has one -- so an ordinary
+# reading with a descriptor was refused, and the refusal INVALIDATES THE WHOLE GENERATION.
+# Measured on Ubuntu 22.04 on 2026-08-20, after the topic fix removed the previous
+# dominant cause, `a reading had an unexpected shape` became the most frequent reason the
+# periodic source lost authority.
+#
+# The check stays fail-closed on an unknown key. What changed is that a field the
+# publisher documents as optional is no longer treated as an unknown one.
+_READING_REQUIRED_KEYS: frozenset[str] = frozenset({"ts", "iid", "ch", "v", "u", "st", "raw", "meta", "transport"})
+_READING_OPTIONAL_KEYS: frozenset[str] = frozenset({"desc"})
+
 
 class PeriodicLiveDiscontinuity(PeriodicSourceUnavailable):
     """Fixed failure raised after the private live generation loses authority."""
@@ -648,9 +663,16 @@ class SequencedPeriodicLiveSources:
             max_array_len=1024,
             max_map_len=1024,
         )
-        expected = {"ts", "iid", "ch", "v", "u", "st", "raw", "meta", "transport"}
-        if not isinstance(data, dict) or set(data) != expected:
-            raise ValueError("invalid reading shape")
+        if not isinstance(data, dict):
+            raise ValueError("invalid reading shape: the reading is not a mapping")
+        keys = set(data)
+        missing = sorted(_READING_REQUIRED_KEYS - keys)
+        unexpected = sorted(keys - _READING_REQUIRED_KEYS - _READING_OPTIONAL_KEYS)
+        if missing or unexpected:
+            # The KEY NAMES, never a value. The required set is a fixed vocabulary, and an
+            # unexpected key is reported by COUNT rather than by name, because an unknown
+            # name is not a fixed vocabulary and could carry content from the wire.
+            raise ValueError(f"invalid reading shape: missing={missing} unexpected_key_count={len(unexpected)}")
         transport = cls._transport(data["transport"])
         timestamp = _finite_number(data["ts"])
         instrument = _text(data["iid"], maximum=256)
