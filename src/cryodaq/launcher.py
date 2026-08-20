@@ -5505,13 +5505,35 @@ class LauncherWindow(QMainWindow):
 
     @Slot()
     def _handle_engine_exit(self) -> None:
-        """Latch an owned unexpected exit, or back off only unowned/replay starts.
+        """Restart after an observed exit; HOLD only when the handle is lost.
 
-        A launcher-owned acquisition process that dies without its exact
-        shutdown receipt has no software-only proof of safe output settlement,
-        regardless of exit code. Its process handle and identity therefore
-        remain owned in HOLD. Replay or genuinely unowned failures may still
-        use the bounded backoff.
+        Two different things were treated as one. An engine that EXITED, whose
+        handle we still hold and whose exit code we have just read, is provably
+        gone: nothing of that incarnation can still be writing. An engine whose
+        handle is LOST, with shutdown authority published, is not provably gone
+        at all -- a second engine started beside it would write the same
+        database, which is the data loss this whole path exists to prevent.
+
+        Only the second case holds. The first settles its readers and takes the
+        reviewed crash path below: the code is logged, and the restart backs off
+        and retries forever, exactly as it already does for replay and unowned
+        children.
+
+        This matters for the safe state of the hardware as well as for uptime.
+        The launcher cannot command the source off; only an engine can. A HOLD
+        therefore leaves a possibly live heater with no authority able to reach
+        it, while a restart re-establishes one: the SMU driver commands OFF on
+        every channel inside connect() before anything else (see
+        ``drivers/instruments/keithley_2604b.py``, ``_attempt_owned_off(...,
+        context="connect")``).
+
+        Owner direction, 2026-08-20, on what a week-long unattended run must do
+        when the engine falls over: "программа ВЕРНЕТСЯ и просто сохранит в
+        логе что упала и почему".
+
+        A configuration-error exit still refuses to restart -- retrying into the
+        identical failure is a busy loop, not a recovery -- and still records
+        the reason and tells the operator which files to fix.
         """
         if not LauncherWindow._runtime_callback_is_current(self):
             return
@@ -5543,11 +5565,9 @@ class LauncherWindow(QMainWindow):
         )
 
         # Latch ownership before invalidation can raise and before any restart
-        # can be scheduled. A lost handle is not settlement evidence.
-        if owned_acquisition and (
-            (process is None and any(value is not None for value in authority_evidence))
-            or (process is not None and returncode is not None)
-        ):
+        # can be scheduled. A lost handle is not settlement evidence; an
+        # observed exit code, read from a handle we still hold, is.
+        if owned_acquisition and process is None and any(value is not None for value in authority_evidence):
             instance_id = authority_evidence[0]
             preserved_id = instance_id if type(instance_id) is str else "<unknown>"
             self._engine_unsettled_incarnation = (preserved_id, returncode)
@@ -5651,8 +5671,16 @@ class LauncherWindow(QMainWindow):
         # Retry forever: backoff caps at the last slot (120s), no give-up.
         backoff_idx = min(self._restart_attempts, len(self._restart_backoff_s) - 1)
         delay_s = self._restart_backoff_s[backoff_idx]
+        # Name the incarnation that fell. Without it a week of log lines cannot
+        # be told apart, and "which run died" is the first question asked.
+        crashed_id = (
+            getattr(self, "_replay_session_id", None)
+            if getattr(self, "_replay_source", None) is not None
+            else getattr(self, "_engine_instance_id", None)
+        )
         logger.warning(
-            "Engine crashed (code=%s). Restart attempt %d in %ds (retrying forever).",
+            "Engine crashed (incarnation=%s, code=%s). Restart attempt %d in %ds (retrying forever).",
+            crashed_id if type(crashed_id) is str else "<unknown>",
             returncode,
             self._restart_attempts + 1,
             delay_s,
