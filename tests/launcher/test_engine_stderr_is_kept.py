@@ -30,12 +30,13 @@ whole, and one undecodable byte must not kill the pump and lose every line after
 
 from __future__ import annotations
 
-import inspect
+import contextlib
 import io
-import logging
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from cryodaq import launcher, logging_setup
 
@@ -107,27 +108,92 @@ def test_the_pump_adds_and_removes_nothing_even_for_a_real_token_shape(tmp_path,
     assert any(_REAL_TOKEN_SHAPE in m for m in messages), f"the pump must forward the line unchanged; got {messages}"
 
 
-def test_the_engine_end_still_replaces_a_telegram_token_before_it_is_written() -> None:
-    """The other end, stated truthfully rather than overclaimed.
+# A child that logs the way the engine logs: through the production setup_logging, whose
+# handler is bound to ITS stderr, which is the stream the launcher's pump reads.
+_ENGINE_LIKE_CHILD = """
+import logging
+from cryodaq.logging_setup import setup_logging
+setup_logging("stderr-contract-probe", console=True, file=False)
+logging.getLogger("cryodaq.probe").error("telegram call failed for %s", {url!r})
+logging.getLogger("cryodaq.probe").error({said!r})
+logging.shutdown()
+"""
 
-    Telegram has no header authentication, so the token rides in the URL and any logged
-    URL would carry a live credential into a file that leaves this machine. That single
-    replacement happens in the engine's own logging setup, before the pump ever sees the
-    line, and it is the export boundary rather than an operational scrub.
+
+def _run_engine_like_child(program: str, env: dict[str, str]) -> bytes:
+    child = subprocess.run([sys.executable, "-c", program], capture_output=True, env=env)
+    assert child.returncode == 0, child.stderr.decode("utf-8", "replace")
+    return child.stderr
+
+
+def test_the_engine_end_replaces_a_token_through_its_real_logging_setup(tmp_path, monkeypatch) -> None:
+    """Run production's setup_logging, in a child, and read what actually reached stderr.
+
+    Constructing a _TokenRedactFilter by hand would prove only that the class works. What
+    has to hold is that PRODUCTION attaches it to the stream the pump reads: if
+    setup_logging ever stops adding it to the console handler, or adds it only to the file
+    handler, a live credential reaches a file that leaves this machine, and a hand-built
+    filter would go on passing.
+
+    Telegram has no header authentication, so the token rides in the URL. That single
+    replacement is the export boundary doing its job, not an operational scrub, which is
+    why it stays while the pump itself keeps everything.
     """
 
-    record = logging.LogRecord(
-        name="cryodaq.test.engine",
-        level=logging.ERROR,
-        pathname=__file__,
-        lineno=1,
-        msg="telegram call failed for %s",
-        args=(f"https://api.telegram.org/{_REAL_TOKEN_SHAPE}/getMe",),
-        exc_info=None,
+    said = "Движок остановлен: датчик Т7 Детектор не отвечает"
+    program = _ENGINE_LIKE_CHILD.format(
+        url=f"https://api.telegram.org/{_REAL_TOKEN_SHAPE}/getMe",
+        said=said,
     )
-    assert logging_setup._TokenRedactFilter().filter(record) is True
-    assert _REAL_TOKEN_SHAPE not in record.getMessage()
-    assert "bot***" in record.getMessage()
+    env = launcher._engine_child_environment(os.environ)
+    messages = _pump(_run_engine_like_child(program, env), tmp_path, monkeypatch)
+
+    joined = "\n".join(messages)
+    assert _REAL_TOKEN_SHAPE not in joined, "the engine's own logging setup must replace the token"
+    assert "bot***" in joined, f"and it must replace it with the documented marker; got {messages}"
+    assert said in joined, "everything that is not that one credential shape must survive intact"
+
+
+def test_the_spawn_hands_the_operating_system_the_environment_under_test(monkeypatch) -> None:
+    """Prove _start_engine PASSES that environment, not merely that it builds one.
+
+    A helper that production calls and then overwrites, or hands to something other than
+    the spawn, would leave the original failure able to recur while every test stayed
+    green. So this intercepts the real Popen call inside the real _start_engine and reads
+    the env that was actually on its way to the operating system.
+    """
+
+    captured: dict[str, dict[str, str]] = {}
+
+    class _Stop(RuntimeError):
+        pass
+
+    def _capture(*_args, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        raise _Stop("spawn intercepted after the environment was fixed")
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", _capture)
+
+    # The two extras are simply what _start_engine touches on the way to the spawn; they
+    # were found by letting it say so, not chosen. Raising from inside Popen lets the
+    # method's own descriptor cleanup run on the way out.
+    window = SimpleNamespace(
+        _engine_proc=None,
+        _engine_external=False,
+        _replay_source=None,
+        _engine_unsettled_incarnation=None,
+        _check_predictor_bootstrap_hint=MagicMock(),
+        _mock=True,
+    )
+    with contextlib.suppress(BaseException):
+        launcher.LauncherWindow._start_engine(window)
+
+    assert "env" in captured, "the spawn was never reached; this test would prove nothing"
+    assert captured["env"].get("PYTHONIOENCODING") == "utf-8", (
+        f"the environment on its way to the operating system must fix the encoding; "
+        f"got {captured['env'].get('PYTHONIOENCODING')!r}"
+    )
+    assert captured["env"].get("PYTHONUNBUFFERED") == "1"
 
 
 def test_a_russian_diagnostic_survives_the_real_subprocess_boundary(tmp_path, monkeypatch) -> None:
@@ -156,15 +222,6 @@ def test_a_russian_diagnostic_survives_the_real_subprocess_boundary(tmp_path, mo
     child = subprocess.run([sys.executable, "-c", program], capture_output=True, env=fixed)
     messages = _pump(child.stderr, tmp_path, monkeypatch)
     assert any(said in m for m in messages), f"the Russian diagnostic must arrive intact; got {messages}"
-
-
-def test_the_spawn_uses_that_same_environment_builder() -> None:
-    """A helper nothing calls would fix nothing."""
-
-    source = inspect.getsource(launcher.LauncherWindow._start_engine)
-    assert "_engine_child_environment(os.environ)" in source, (
-        "the engine spawn must build its child environment through the helper under test"
-    )
 
 
 def test_an_undecodable_byte_does_not_kill_the_pump(tmp_path, monkeypatch) -> None:
