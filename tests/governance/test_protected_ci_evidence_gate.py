@@ -15,7 +15,28 @@ CHECKOUT_PIN = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 UPLOAD_PIN = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 PULL_REQUEST_WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 PULL_REQUEST_READY_TO_DRAFT_EVENTS = ("ready_for_review", "converted_to_draft")
+# THE COMPLETE ACTIVITY SET, not only the two draft transitions. Naming `types`
+# explicitly REPLACES GitHub's default set, so a workflow that lists the draft
+# transitions and drops `synchronize` stops rerunning on new commits -- a ready pull
+# request would then keep a green check set that describes an older tree. Asserting only
+# the two transitions left that mutation green.
+PULL_REQUEST_REQUIRED_EVENTS = (
+    "opened",
+    "synchronize",
+    "reopened",
+    "ready_for_review",
+    "converted_to_draft",
+)
 PULL_REQUEST_DRAFT_GATE = "github.event.pull_request.draft == false"
+# Every expression reviewed as CANCELLING a pull-request run. Membership, never a
+# substring search: `${{ github.event_name != 'pull_request' }}` contains the word and
+# means the opposite.
+_APPROVED_CANCEL_EXPRESSIONS = frozenset(
+    {
+        "${{ github.event_name == 'pull_request' }}",
+        "${{ github.ref != 'refs/heads/master' }}",
+    }
+)
 
 
 def _workflow_trigger(payload: dict) -> dict:
@@ -44,9 +65,18 @@ def _expected_immutable_paths() -> tuple[str, ...]:
 
 
 def _pull_request_workflows() -> tuple[tuple[str, dict], ...]:
-    """Every workflow under `.github/workflows` that reacts to pull_request events."""
+    """Every workflow under `.github/workflows` that reacts to pull_request events.
+
+    BOTH EXTENSIONS. GitHub runs `.yaml` as readily as `.yml`, so a scan for one of
+    them lets a real workflow run in production while this parametrization omits it --
+    and an omitted workflow is an ungated draft job under a green suite. That is the
+    exact shape this guard exists to refuse, arriving through the guard's own reader.
+    """
+
     workflows = []
-    for path in sorted(PULL_REQUEST_WORKFLOWS_DIR.glob("*.yml")):
+    for path in sorted(
+        {candidate for pattern in ("*.yml", "*.yaml") for candidate in PULL_REQUEST_WORKFLOWS_DIR.glob(pattern)}
+    ):
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         if "pull_request" in _workflow_trigger(payload):
             workflows.append((path.name, payload))
@@ -365,14 +395,27 @@ def test_every_pull_request_workflow_keeps_ready_to_draft_gating(workflow_name: 
     trigger = _workflow_trigger(payload)
     pr_trigger = trigger["pull_request"]
     assert pr_trigger is not None, f"{workflow_name}: pull_request trigger has no types"
-    assert set(PULL_REQUEST_READY_TO_DRAFT_EVENTS) <= set(pr_trigger["types"])
+    declared = set(pr_trigger["types"])
+    missing = sorted(set(PULL_REQUEST_REQUIRED_EVENTS) - declared)
+    assert not missing, (
+        f"{workflow_name}: pull_request types omit {missing}. Declaring `types` replaces "
+        "GitHub's default set, so a missing `synchronize` stops the workflow rerunning on "
+        "new commits and leaves a green check set describing an older tree."
+    )
 
     concurrency = payload["concurrency"]
     assert "github.ref" in concurrency["group"], f"{workflow_name}: concurrency group is not ref-scoped"
+    # AN APPROVED EXPRESSION, not a mention of the word. Asking whether the string
+    # CONTAINS "pull_request" accepts `${{ github.event_name != 'pull_request' }}`, which
+    # disables cancellation for exactly the runs this is meant to cancel -- so the
+    # ready-to-draft cancellation defect could be restored without reddening anything.
     cancel = concurrency["cancel-in-progress"]
-    assert cancel is True or (
-        isinstance(cancel, str) and ("pull_request" in cancel or "ref != 'refs/heads/master'" in cancel)
-    ), f"{workflow_name}: cancel-in-progress does not cancel pull_request runs"
+    assert cancel is True or cancel in _APPROVED_CANCEL_EXPRESSIONS, (
+        f"{workflow_name}: cancel-in-progress is {cancel!r}, which is neither `true` nor one "
+        f"of the reviewed expressions {sorted(_APPROVED_CANCEL_EXPRESSIONS)}. A new expression "
+        "must be added here deliberately, after someone works out what it does on a "
+        "pull_request event."
+    )
 
     for job_name, job in payload["jobs"].items():
         assert PULL_REQUEST_DRAFT_GATE in job.get("if", ""), (
