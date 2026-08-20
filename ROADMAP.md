@@ -287,9 +287,11 @@ act on any of it; a number in a document is a record, not a result.
 
 **Physical testing on real hardware is a REQUIREMENT, not a formality, and no
 green software gate replaces it.** Read the irreducible hardware milestone above
-with that in mind: **Keithley A8-0 on real 2604B firmware is the heater-control
-gate, and no soak substitutes for it.** When that testing happens is scheduling,
-which belongs in the coordination channel and not in a public product plan.
+with that in mind: **A8-0 verifies nonce-bound OFF reply grammar with the source
+already confirmed OFF and no power applied.** Heater-control evidence requires the
+powered A8b and A8d procedures, and no soak substitutes for them. When that testing
+happens is scheduling, which belongs in the coordination channel and not in a public
+product plan.
 
 **The laboratory computer is on an uninterruptible power supply** (owner,
 2026-08-18). That removes ONE cause of host death — mains power loss — and only
@@ -386,13 +388,17 @@ Measured on Ubuntu 22.04.5 with `evidence/tools/rootprobe.sh` in the workspace:
   application tree, writable `data/` and `logs/` under the isolated root. That
   is the split `src/cryodaq/paths.py` already documents.
 
-The refusal itself was not changed at that commit. `resolve_theme()` stopping
-the program over a colour file was pinned by
-`tests/gui/test_theme_loader.py::test_missing_default_pack_raises`, and a tree
-with no `config/` has no safety configuration either. Whether it should stop was
-a behaviour decision, not a mechanism one — **and the owner has since decided
-it** (2026-08-20: *"файл цветов не должен останавливать"*), so that test now
-states the opposite and the loader falls back to a built-in copy.
+The refusal itself was not changed at that commit, and it is not changed in this
+candidate either. Verified here: `src/cryodaq/gui/_theme_loader.py` still raises
+`RuntimeError` on a missing or invalid default pack, and
+`tests/gui/test_theme_loader.py::test_missing_default_pack_raises` still requires
+that exception. **So a missing colour file still stops startup today.**
+
+**The owner has DECIDED it should not** (2026-08-20: *"файл цветов не должен
+останавливать"*), and the built-in fallback that carries out that decision is on
+an open branch, not in this candidate. Both halves matter: the decision is made,
+and the behaviour has not changed yet. Reading only the first half would send an
+investigation of a startup failure down the wrong path.
 
 `tests/scripts/` on the target at that head: **264 passed, 8 skipped, 0 failed.**
 
@@ -405,13 +411,6 @@ dangling symlink. Its qualification section no longer links `.venv` at the
 unreadable path; it measures the interpreter on the machine and links only the
 interpreter. **The recipe below is the same one and is kept as the record of what
 was measured**, not as a competing procedure.
-
-The qualification section of `docs/lab_verification_checklist.md` is right about
-the important thing — the run must happen in a clone on a native Linux
-filesystem, never under `/mnt/c` — and **its runtime recipe is stale**. It
-symlinks `.venv` at `/root/cryodaq-soak-py313`. Measured 2026-08-18 on the
-laboratory WSL image: that path is not readable, and the interpreter present is
-`cryodaq-lab`, Python 3.14.6.
 
 What was measured to work:
 
