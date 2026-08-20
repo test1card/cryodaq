@@ -964,6 +964,49 @@ def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
     evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
 
 
+_ASSISTANT_LOG_EVIDENCE_NAME: Final = "log-assistant.txt"
+_ASSISTANT_LOG_ABSENT_MARKER: Final = (
+    "<no assistant log was written under the isolated state root; the assistant either "
+    "never started or never opened its log>\n"
+)
+
+
+def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
+    """Publish the assistant's own log, so a periodic reporter can say why it stopped.
+
+    Without this the reporter's diagnosis exists and is unreachable. The launcher sends
+    the assistant child's stderr to the null device, and `setup_logging("assistant")`
+    writes `logs/assistant.log` under the writable state root -- which for this run is
+    the runner's temporary directory and is deleted with it. So the line naming WHICH
+    condition took the live source lived only inside a directory the run removes, and
+    the bundle a week-long run leaves behind never held it.
+
+    The artifact is ALWAYS written, and says so when the log is absent, because a
+    missing file is indistinguishable from a publisher that silently did nothing. This
+    is the same shape as the engine stderr publisher above, for the same reason.
+    """
+
+    from scripts.soak_mock_stack import redact_text
+
+    path = Path(state_root) / "logs" / "assistant.log"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_ABSENT_MARKER)
+        return
+
+    encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
+    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
+        # Keep the END, for the reason the engine publisher keeps it: the bound protects
+        # the bundle's size and must not choose which half of the failure survives.
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
+        tail = encoded[-tail_bytes:]
+        while tail and tail[0] & 0xC0 == 0x80:
+            tail = tail[1:]
+        encoded = _TRUNCATED_LAUNCHER_LOG_MARKER + tail
+    evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
+
+
 @contextmanager
 def _launcher_log_capture(
     evidence: Any,
@@ -1005,12 +1048,17 @@ def _launcher_log_capture(
                 _publish_engine_stderr(evidence, state_root)
             except Exception as engine_error:  # noqa: BLE001 - preserve the primary failure
                 primary.add_note(f"engine stderr capture failed: {engine_error}")
+            try:
+                _publish_assistant_log(evidence, state_root)
+            except Exception as assistant_error:  # noqa: BLE001 - preserve the primary failure
+                primary.add_note(f"assistant log capture failed: {assistant_error}")
         raise
     else:
         raw, total_bytes = drain.finish()
         _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
         if state_root is not None:
             _publish_engine_stderr(evidence, state_root)
+            _publish_assistant_log(evidence, state_root)
 
 
 @dataclass(frozen=True, slots=True)

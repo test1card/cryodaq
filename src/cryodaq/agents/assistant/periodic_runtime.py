@@ -13,9 +13,11 @@ import inspect
 import ipaddress
 import itertools
 import json
+import logging
 import math
 import re
 import secrets
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -88,11 +90,67 @@ _MONITOR_FAILURE_EVENTS = frozenset(
 )
 
 
-class PeriodicLiveDiscontinuity(PeriodicSourceUnavailable):
-    """Fixed failure raised after the private live generation loses authority."""
+_log = logging.getLogger(__name__)
 
-    def __init__(self) -> None:
-        super().__init__("periodic live stream discontinuity")
+# One line per distinct reason per minute. A run that flaps once a second for a week
+# must leave a diagnosis, not a log nobody can open; and the FIRST occurrence of each
+# reason is always written, because that is the one that says what happened.
+_DISCONTINUITY_LOG_INTERVAL_S = 60.0
+_last_discontinuity_log: dict[str, float] = {}
+
+
+# A CLOSED VOCABULARY, not the exception text. The receive loop catches whatever the
+# frame handler raised, and putting that message into the reason would put frame content
+# -- values, identifiers, addresses -- into a log line and into a durable health record.
+# The category says which CLASS of thing went wrong, which is what a diagnosis needs.
+_INVALIDATION_CATEGORIES: dict[type[BaseException], str] = {
+    ValueError: "a frame was rejected as malformed, out of sequence, or counter-inconsistent",
+    TypeError: "a frame carried a value of the wrong type",
+    KeyError: "a frame was missing a required field",
+    OSError: "the subscriber transport failed",
+}
+
+
+def _invalidation_category(error: BaseException | None) -> str:
+    """Name the class of failure that took authority, never its text."""
+
+    if error is None:
+        return "the live generation was invalidated"
+    for kind, category in _INVALIDATION_CATEGORIES.items():
+        if isinstance(error, kind):
+            return category
+    return f"the receive path failed with {type(error).__name__}"
+
+
+def _say_discontinuity(reason: str) -> None:
+    """Write the reason at most once a minute, per reason."""
+
+    now = time.monotonic()
+    previous = _last_discontinuity_log.get(reason)
+    if previous is not None and now - previous < _DISCONTINUITY_LOG_INTERVAL_S:
+        return
+    _last_discontinuity_log[reason] = now
+    _log.warning("Periodic live source lost authority: because=%s", reason)
+
+
+class PeriodicLiveDiscontinuity(PeriodicSourceUnavailable):
+    """Fixed failure raised after the private live generation loses authority.
+
+    WHY IT CARRIES A REASON. Sixteen places construct this, and every one of them
+    produced the same sentence. The supervisor turns it into the health code
+    `periodic_engine_unavailable` and stops there, so a run that never allocates a
+    periodic slot -- and therefore never seals a receipt, and therefore refuses the
+    assistant fault -- leaves no evidence of WHICH condition fired. That is the
+    difference between a week-long run that can be diagnosed and one that cannot.
+
+    The reason is recorded on construction rather than at each raise site, so a new
+    site cannot be added silently: the default reads `unstated`, and a test refuses it.
+    """
+
+    def __init__(self, reason: str = "unstated") -> None:
+        super().__init__(f"periodic live stream discontinuity (because={reason})")
+        self.reason = reason
+        _say_discontinuity(reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,6 +636,9 @@ class SequencedPeriodicLiveSources:
         self._running = False
         self._stopping = False
         self._invalid = False
+        # Set the moment authority is lost, and read by `wait()`. A default that says
+        # nothing would let a reader mistake "no reason recorded" for "no reason".
+        self._invalidation_reason = "the live generation was invalidated"
         self._closed = False
         self._generation = next(_GENERATION_COUNTER)
         self._session_id: str | None = None
@@ -589,10 +650,13 @@ class SequencedPeriodicLiveSources:
         self._provisional: list[_ProvisionalFrame] = []
         self._provisional_bytes = 0
 
-    def _invalidate(self) -> None:
+    def _invalidate(self, reason: str = "the live generation was invalidated") -> None:
+        """Take the generation down and REMEMBER WHY, so a later reader is not guessing."""
+
         if self._invalid or self._stopping:
             return
         self._invalid = True
+        self._invalidation_reason = reason
         self._running = False
         self._provisional.clear()
         self._provisional_bytes = 0
@@ -600,7 +664,7 @@ class SequencedPeriodicLiveSources:
         for task in (self._receive_task, self._monitor_task):
             if task is not None and task is not current and not task.done():
                 task.cancel()
-        discontinuity = PeriodicLiveDiscontinuity()
+        discontinuity = PeriodicLiveDiscontinuity(reason)
         marker = self._ready_marker
         if marker is not None and not marker.done():
             marker.set_exception(discontinuity)
@@ -769,7 +833,7 @@ class SequencedPeriodicLiveSources:
             raise ValueError("invalid multipart frame")
         async with self._state_lock:
             if self._invalid or not self._running:
-                raise PeriodicLiveDiscontinuity()
+                raise PeriodicLiveDiscontinuity("a frame arrived after the source stopped")
             if parts[0] == PERIODIC_BARRIER_TOPIC:
                 await self._handle_barrier(parts[1])
                 return
@@ -799,11 +863,11 @@ class SequencedPeriodicLiveSources:
                 await self._handle_frame(parts)
         except asyncio.CancelledError:
             raise
-        except BaseException:
-            self._invalidate()
+        except BaseException as error:
+            self._invalidate(f"the receive loop stopped: {_invalidation_category(error)}")
         else:
             if not self._stopping:
-                self._invalidate()
+                self._invalidate("the receive loop ended while the source was still running")
 
     async def _monitor_loop(self) -> None:
         try:
@@ -825,18 +889,18 @@ class SequencedPeriodicLiveSources:
                         # expected until the first connection; after that,
                         # DISCONNECTED remains terminal authority loss.
                         continue
-                    self._invalidate()
+                    self._invalidate("the subscriber retried its connection after it had connected once")
                     return
                 if event in _MONITOR_FAILURE_EVENTS:
-                    self._invalidate()
+                    self._invalidate(f"the subscriber socket reported event {event!r}")
                     return
         except asyncio.CancelledError:
             raise
-        except BaseException:
-            self._invalidate()
+        except BaseException as error:
+            self._invalidate(f"the socket monitor stopped: {_invalidation_category(error)}")
         else:
             if not self._stopping:
-                self._invalidate()
+                self._invalidate("the socket monitor ended while the source was still running")
 
     async def start(
         self,
@@ -927,7 +991,7 @@ class SequencedPeriodicLiveSources:
 
     async def ready(self) -> LiveSourceCut:
         if not self._running or self._invalid or self._stopping:
-            raise PeriodicLiveDiscontinuity()
+            raise PeriodicLiveDiscontinuity("ready was asked of a source that is not running")
         if self._ready_active:
             raise RuntimeError("periodic barrier is already in flight")
         self._ready_active = True
@@ -936,11 +1000,11 @@ class SequencedPeriodicLiveSources:
             marker_cut: LiveSourceCut | None = None
             connected = self._connected
             if connected is None:
-                raise PeriodicLiveDiscontinuity()
+                raise PeriodicLiveDiscontinuity("there is no connection event to wait on")
             for attempt in range(_READY_MAX_ATTEMPTS):
                 nonce = secrets.token_hex(16)
                 if nonce in self._retired_ready_nonces:
-                    raise PeriodicLiveDiscontinuity()
+                    raise PeriodicLiveDiscontinuity("the generated barrier nonce was already retired")
                 marker = asyncio.get_running_loop().create_future()
                 marker.add_done_callback(_consume_future_exception)
                 self._ready_nonce = nonce
@@ -951,7 +1015,7 @@ class SequencedPeriodicLiveSources:
                         if attempt == 0:
                             await connected.wait()
                         if self._invalid or not self._running:
-                            raise PeriodicLiveDiscontinuity()
+                            raise PeriodicLiveDiscontinuity("the source stopped while waiting to connect")
                         query_result = await self._query.barrier(nonce)
                         if not query_result.ok:
                             if (
@@ -960,9 +1024,13 @@ class SequencedPeriodicLiveSources:
                                 and await self._retire_startup_attempt(nonce, marker, require_no_evidence=True)
                             ):
                                 continue
-                            raise PeriodicLiveDiscontinuity()
+                            raise PeriodicLiveDiscontinuity(
+                                f"the engine barrier query failed with {query_result.error_code!r}"
+                            )
                         if query_result.nonce != nonce or query_result.cut is None:
-                            raise PeriodicLiveDiscontinuity()
+                            raise PeriodicLiveDiscontinuity(
+                                "the barrier answer named a different nonce or carried no cut"
+                            )
                         marker_cut = await marker
                 except TimeoutError:
                     can_retry = (
@@ -978,24 +1046,30 @@ class SequencedPeriodicLiveSources:
                     if not can_retry or not await self._retire_startup_attempt(
                         nonce, marker, require_no_evidence=False
                     ):
-                        raise PeriodicLiveDiscontinuity() from None
+                        raise PeriodicLiveDiscontinuity(
+                            "the engine barrier timed out and could not be retried"
+                        ) from None
                     continue
                 if not self._same_evidence(query_result.cut, marker_cut):
-                    raise PeriodicLiveDiscontinuity()
+                    raise PeriodicLiveDiscontinuity(
+                        "the barrier answer and the published marker describe different evidence"
+                    )
                 break
             if marker_cut is None:
-                raise PeriodicLiveDiscontinuity()
+                raise PeriodicLiveDiscontinuity("the barrier produced no cut")
             async with self._state_lock:
                 if self._session_id is None:
                     if self._provisional_cut != marker_cut:
-                        raise PeriodicLiveDiscontinuity()
+                        raise PeriodicLiveDiscontinuity(
+                            "the provisional cut does not match the cut the barrier established"
+                        )
                     self._session_id = marker_cut.session_id
                     self._drop_baseline = marker_cut.reading_drop_count
                     self._failure_baseline = marker_cut.publish_failure_count
                     self._last_sequence = marker_cut.sequence
                     for frame in self._provisional:
                         if frame.sequence != self._last_sequence + 1:
-                            raise PeriodicLiveDiscontinuity()
+                            raise PeriodicLiveDiscontinuity("a held frame is out of sequence")
                         self._dispatch(frame)
                         self._last_sequence = frame.sequence
                     self._provisional.clear()
@@ -1004,13 +1078,13 @@ class SequencedPeriodicLiveSources:
                     self._provisional_last = None
             return marker_cut
         except asyncio.CancelledError:
-            self._invalidate()
+            self._invalidate("the barrier was cancelled")
             raise
         except BaseException as exc:
-            self._invalidate()
+            self._invalidate(f"the barrier failed with {type(exc).__name__}")
             if isinstance(exc, PeriodicLiveDiscontinuity):
                 raise
-            raise PeriodicLiveDiscontinuity() from None
+            raise PeriodicLiveDiscontinuity(f"the barrier failed with {type(exc).__name__}") from None
         finally:
             self._ready_active = False
             self._ready_task = None
@@ -1037,7 +1111,9 @@ class SequencedPeriodicLiveSources:
             raise RuntimeError("periodic live source is not started")
         await asyncio.shield(failure)
         if self._invalid:
-            raise PeriodicLiveDiscontinuity()
+            # The reason the generation went down, not the fact that it is down. The
+            # second is what a caller already knows.
+            raise PeriodicLiveDiscontinuity(self._invalidation_reason)
 
     async def _stop_impl(self) -> None:
         self._stopping = True
@@ -1082,7 +1158,7 @@ class SequencedPeriodicLiveSources:
             self._context = None
         marker = self._ready_marker
         if marker is not None and not marker.done():
-            marker.set_exception(PeriodicLiveDiscontinuity())
+            marker.set_exception(PeriodicLiveDiscontinuity("the source stopped while a barrier was in flight"))
         failure = self._failure
         if failure is not None and not failure.done():
             failure.set_result(None)
