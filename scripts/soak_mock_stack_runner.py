@@ -2696,6 +2696,12 @@ class _BridgeEpoch:
     restart_count: int
     sequence: int
     identity: _ProcessIdentity
+    # The last DATA record's sequence, tracked apart from the shared stream sequence.
+    # A turnover advances the shared one, so using it to decide "data resumed" would count
+    # the announcement of a new bridge as a reading FROM it: a replacement that is merely
+    # alive and never delivers another sample would be recorded as recovered. For a run
+    # whose whole purpose is that no reading is lost, that is the wrong thing to believe.
+    data_sequence: int
 
 
 def _role_identity_of(identity: _ProcessIdentity) -> Any:
@@ -2740,10 +2746,22 @@ def _consume_bridge_stream_record(
                 restart_count=record.restart_count,
                 retired_restart_count=record.retired_restart_count,
             )
-        return _BridgeEpoch(record.bridge_pid, record.restart_count, record.sequence, identity)
+        return _BridgeEpoch(
+            record.bridge_pid,
+            record.restart_count,
+            record.sequence,
+            identity,
+            epoch.data_sequence,
+        )
     if guard is not None:
         guard.observe(locked.identity_for_pid(record.bridge_pid), restart_count=record.restart_count)
-    return _BridgeEpoch(epoch.bridge_pid, epoch.restart_count, record.sequence, epoch.identity)
+    return _BridgeEpoch(
+        epoch.bridge_pid,
+        epoch.restart_count,
+        record.sequence,
+        epoch.identity,
+        record.sequence,
+    )
 
 
 def _parse_bridge_stream_record(
@@ -2822,6 +2840,8 @@ def _parse_bridge_turnover(
         or value["version"] != _BRIDGE_HANDSHAKE_VERSION
         or value["nonce"] != expected_nonce
         or value["launcher_pid"] != expected_launcher_pid
+        or isinstance(value["retired_bridge_pid"], bool)
+        or type(value["retired_bridge_pid"]) is not int
         or value["retired_bridge_pid"] != expected_bridge_pid
         or type(value["retired_restart_count"]) is not int
         or value["retired_restart_count"] != expected_restart_count
@@ -4142,6 +4162,7 @@ class _PosixSoakRunner:
                                     handshake.restart_count,
                                     0,
                                     bridge_identity,
+                                    0,
                                 )
                                 bridge = _role_identity_of(bridge_identity)
                             else:
@@ -4153,7 +4174,9 @@ class _PosixSoakRunner:
                                     locked=locked,
                                     guard=None,
                                 )
-                                bridge_sequence = bridge_epoch.sequence
+                                # One meaning per name: bridge_sequence is the last DATA
+                                # record everywhere, so the handshake drain uses it too.
+                                bridge_sequence = bridge_epoch.data_sequence
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
@@ -4201,6 +4224,7 @@ class _PosixSoakRunner:
                         now = time.monotonic()
                         elapsed = now - start
                         for raw in self._pipe_records(bridge_pipe, bridge_buffer):
+                            _prior_bridge_pid = bridge_epoch.bridge_pid
                             bridge_epoch = _consume_bridge_stream_record(
                                 raw,
                                 nonce=handshake.nonce,
@@ -4209,7 +4233,14 @@ class _PosixSoakRunner:
                                 locked=locked,
                                 guard=bridge_guard,
                             )
-                            bridge_sequence = bridge_epoch.sequence
+                            bridge_sequence = bridge_epoch.data_sequence
+                            if bridge_epoch.bridge_pid != _prior_bridge_pid:
+                                # A sample row carries (epoch, identity) per role, and
+                                # validate_sample_series refuses a new identity inside the
+                                # same epoch. Without this every soak carrying an engine
+                                # fault failed its FINAL evidence validation, long after
+                                # this loop had happily carried on.
+                                epochs["bridge"] += 1
                             bridge = _role_identity_of(bridge_epoch.identity)
                         if elapsed >= next_sample or (
                             event_index < len(selected.events) and elapsed >= selected.events[event_index].at_s
@@ -4322,6 +4353,7 @@ class _PosixSoakRunner:
                                     # bridge on its way. Without the turnover this drain
                                     # quarantined the stream and the sequence could never
                                     # advance again -- so the engine "never recovered".
+                                    _prior_bridge_pid = bridge_epoch.bridge_pid
                                     bridge_epoch = _consume_bridge_stream_record(
                                         raw,
                                         nonce=handshake.nonce,
@@ -4330,7 +4362,10 @@ class _PosixSoakRunner:
                                         locked=locked,
                                         guard=bridge_guard,
                                     )
-                                    bridge_sequence = bridge_epoch.sequence
+                                    # Only a real reading counts as resumed data flow.
+                                    bridge_sequence = bridge_epoch.data_sequence
+                                    if bridge_epoch.bridge_pid != _prior_bridge_pid:
+                                        epochs["bridge"] += 1
                                     # The classifier below is handed this identity; a
                                     # replaced bridge must be the one it looks for.
                                     bridge = _role_identity_of(bridge_epoch.identity)

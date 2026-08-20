@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -232,6 +233,86 @@ def test_after_a_turnover_the_old_bridge_can_no_longer_speak() -> None:
         after=accepted.sequence,
     )
     assert survivor.sequence == 3
+
+
+def test_a_turnover_is_not_a_reading(monkeypatch) -> None:
+    """A new bridge announcing itself is not the same as that bridge delivering data.
+
+    The two record kinds share one sequence so their ordering is total. Using that shared
+    sequence to decide "data resumed" would count the ANNOUNCEMENT of a replacement as a
+    reading from it, so a replacement that is merely alive and never delivers another
+    sample would be recorded as recovered. In a run whose entire purpose is that no
+    reading is lost, that is the wrong thing to believe.
+    """
+
+    class _Locked:
+        def observe_bridge(self, pid, *, expected_launcher_pid):
+            return runner._BridgeProcessObservation(
+                runner._ProcessIdentity(pid, "linux:start=2.0"), expected_launcher_pid, "zmq_bridge", True, 100
+            )
+
+        def identity_for_pid(self, pid):
+            return runner._ProcessIdentity(pid, "linux:start=1.0")
+
+    start = runner._BridgeEpoch(101, 1, 0, runner._ProcessIdentity(101, "linux:start=1.0"), 0)
+
+    after_data = runner._consume_bridge_stream_record(
+        _encode(_data_record(sequence=1)),
+        nonce="a" * 64,
+        launcher_pid=100,
+        epoch=start,
+        locked=_Locked(),
+        guard=None,
+    )
+    assert after_data.data_sequence == 1, "a reading advances the data sequence"
+
+    after_turnover = runner._consume_bridge_stream_record(
+        _encode(_turnover_record(sequence=2)),
+        nonce="a" * 64,
+        launcher_pid=100,
+        epoch=after_data,
+        locked=_Locked(),
+        guard=None,
+    )
+    assert after_turnover.sequence == 2, "the shared stream sequence advances"
+    assert after_turnover.data_sequence == 1, "but no reading has arrived from the new bridge yet"
+    assert after_turnover.bridge_pid == 202
+
+    after_next = runner._consume_bridge_stream_record(
+        _encode(_data_record(bridge_pid=202, restart_count=2, sequence=3)),
+        nonce="a" * 64,
+        launcher_pid=100,
+        epoch=after_turnover,
+        locked=_Locked(),
+        guard=None,
+    )
+    assert after_next.data_sequence == 3, "and the first real reading from it does advance it"
+
+
+def test_the_recovery_check_and_its_evidence_field_read_the_data_sequence() -> None:
+    """Both places that decide "the engine recovered" must read the same, right thing.
+
+    This is a source assertion on purpose: the surrounding loop needs a live launcher, a
+    live bridge and a real fault schedule, so the two lines cannot be reached in isolation.
+    It is a backstop for the behavioural test above, not a substitute for it.
+    """
+
+    source = Path(runner.__file__).read_text(encoding="utf-8")
+    assert "bridge_sequence = bridge_epoch.sequence" not in source, (
+        "no drain may track the shared stream sequence as if it were the data sequence"
+    )
+    assert source.count("bridge_sequence = bridge_epoch.data_sequence") == 3, (
+        "all three drains must track the last DATA record"
+    )
+
+
+def test_a_turnover_must_carry_an_exact_integer_retired_identity() -> None:
+    """A float that compares equal is not the same value, and the contract says exact."""
+
+    with pytest.raises(runner._RunnerFoundationError):
+        _read(_encode(_turnover_record(retired_bridge_pid=101.0)))
+    with pytest.raises(runner._RunnerFoundationError):
+        _read(_encode(_turnover_record(retired_bridge_pid=True)))
 
 
 def test_the_epoch_guard_advances_by_one_and_refuses_anything_else() -> None:
