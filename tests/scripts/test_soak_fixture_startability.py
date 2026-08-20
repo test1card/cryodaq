@@ -80,8 +80,7 @@ def test_the_fixture_declares_critical_channels_that_actually_exist(tmp_path) ->
     expected = sorted(
         item["channel_id"]
         for item in descriptors["descriptors"]
-        if item.get("quantity") == "temperature"
-        and item.get("safety_class") == "safety_critical_input"
+        if item.get("quantity") == "temperature" and item.get("safety_class") == "safety_critical_input"
     )
     assert sorted(declared) == expected
     assert declared, "an empty critical_channels list is refused by the engine outright"

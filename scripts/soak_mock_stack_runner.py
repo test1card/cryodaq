@@ -383,8 +383,7 @@ def _engine_critical_channel_ids(descriptors: list[dict]) -> list[str]:
     return sorted(
         item["channel_id"]
         for item in descriptors
-        if item.get("quantity") == "temperature"
-        and item.get("safety_class") == "safety_critical_input"
+        if item.get("quantity") == "temperature" and item.get("safety_class") == "safety_critical_input"
     )
 
 
