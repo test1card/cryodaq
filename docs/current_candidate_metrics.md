@@ -6,22 +6,22 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | Measure | Value |
 |---|---:|
 | Baseline commit | `f5d6434d20dffae62c9f03fbc12f68b03f48351b` |
-| Source snapshot tree | `9b735547e989c9e64959bd305a70d76c8dcf35de` |
-| Source snapshot object manifest SHA-256 | `683cce8eb3222daf01a56758f7628238e226b7fd52b501940a817db4fe383f48` |
+| Source snapshot tree | `787053467976ae1473752c65704c143f8287fbaa` |
+| Source snapshot object manifest SHA-256 | `82fc57aebcebed1ea851520b49a72043d2ef323c41b5f7a23c483df17d179a5b` |
 | Changed source-inventory paths | 883 |
-| Source-inventory Git churn | 321,565 insertions / 21,272 deletions / 300,293 net |
+| Source-inventory Git churn | 321,848 insertions / 21,277 deletions / 300,571 net |
 | Delivered-tree changed paths | 885 |
-| Delivered-tree Git churn | 321,686 insertions / 21,272 deletions / 300,414 net |
+| Delivered-tree Git churn | 321,969 insertions / 21,277 deletions / 300,692 net |
 | Changed binary paths, source / delivered | 9 / 9 |
 | Baseline repository text | 188,539 lines |
-| Candidate source-inventory text | 488,832 lines |
-| Delivered-tree text | 488,953 lines |
+| Candidate source-inventory text | 489,110 lines |
+| Delivered-tree text | 489,231 lines |
 | Baseline production Python | 68,857 lines |
-| Candidate production Python | 158,511 lines |
-| Production-Python inventory growth | 89,654 lines |
+| Candidate production Python | 158,580 lines |
+| Production-Python inventory growth | 89,723 lines |
 | Baseline test Python | 80,529 lines |
-| Candidate test Python | 241,188 lines |
-| Test-Python inventory growth | 160,659 lines |
+| Candidate test Python | 241,393 lines |
+| Test-Python inventory growth | 160,864 lines |
 | Baseline files | 779 |
 | Candidate source-manifest files | 1,238 |
 | Delivered-tree files | 1,240 |

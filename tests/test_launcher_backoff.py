@@ -20,9 +20,11 @@ def _make_launcher_mock(
     w = MagicMock()
     w._restart_pending = False
     w._shutdown_requested = False
-    # Backoff is exercised through a launcher-owned replay process. A real
-    # acquisition process has shutdown authority and must remain in HOLD for
-    # every unexpected exit code.
+    # Backoff is exercised through a launcher-owned replay process. A live
+    # acquisition process now takes the same path whenever its exit was
+    # OBSERVED -- handle still held, code already read -- and holds only when
+    # the handle itself is lost. See the sibling assertions in
+    # tests/gui/shell/test_d7_1b_repair.py.
     w._engine_external = False
     w._engine_unsettled_incarnation = None
     w._replay_source = Path("replay.db")
@@ -78,30 +80,19 @@ def _make_assistant_launcher_mock() -> MagicMock:
     return w
 
 
-def test_owned_config_error_exit_remains_hold_without_exact_shutdown_settlement():
-    """Exit code 2 cannot settle an owned acquisition incarnation.
+def test_owned_config_error_exit_refuses_restart_without_latching_an_unsettled_incarnation():
+    """Exit code 2 still refuses to restart, and no longer blocks launcher exit.
 
-    ``_engine_proc`` is a process *handle*, not HOLD evidence — the
-    persistent unsettled-incarnation evidence is ``_engine_unsettled_incarnation``
-    (asserted below and confirmed to survive). Once the owned-acquisition
-    branch of ``_handle_engine_exit`` latches that incarnation, it calls
-    ``_reap_unsettled_engine_process``, whose docstring is exact: "Terminally
-    reap a HOLD child without upgrading its safety evidence." It only clears
-    ``_engine_proc`` after confirming (via ``poll()``, and by actively
-    terminating/killing if still running) that the OS process is genuinely
-    gone — never optimistically. Retaining a handle to an already-reaped
-    process would be a stale reference an unwary reader could mistake for
-    liveness; clearing it is the deliberate choice.
+    Retrying a configuration error would re-enter the identical failure, so the
+    reviewed config-error path keeps its refusal, records the reason, and tells
+    the operator which files to fix. What it must NOT do any more is latch
+    ``_engine_unsettled_incarnation``: that latch is also read by
+    ``_stop_engine``, so latching it here trapped the operator inside a
+    launcher that would not quit, over an engine that had provably exited.
 
-    Traced every reader of ``self._engine_proc`` in ``launcher.py`` to
-    confirm this isn't just a plausible-sounding docstring: ``_start_engine``,
-    ``_restart_engine``, ``_stop_engine`` (the launcher-exit settlement path),
-    and the tray/status "is the engine alive" computation all gate
-    exclusively on ``_engine_unsettled_incarnation`` (and ``_restart_giving_up``
-    for the tray case, whose own comment reads "Process liveness cannot
-    discharge an ownership or transport HOLD"). None of them treat
-    ``_engine_proc``'s presence as safety evidence, so clearing it here loses
-    nothing that actually gates restart, launcher exit, or operator display.
+    ``_engine_proc`` is a process *handle*, not HOLD evidence. Its clearing
+    here follows the reviewed crash path, which settles the crashed child's
+    readers first and refuses to advance if that settlement fails.
     """
     from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
     from cryodaq.launcher import LauncherWindow
@@ -114,14 +105,46 @@ def test_owned_config_error_exit_remains_hold_without_exact_shutdown_settlement(
     with patch("cryodaq.launcher.QTimer") as mock_qtimer:
         LauncherWindow._handle_engine_exit(w)
 
-    assert w._engine_unsettled_incarnation == ("a" * 32, ENGINE_CONFIG_ERROR_EXIT_CODE)
+    assert w._engine_unsettled_incarnation is None
     assert w._engine_proc is None
-    assert w._engine_instance_id == "a" * 32
-    assert w._engine_shutdown_capability == "b" * 64
+    # The incarnation is retired here too. No restart is SCHEDULED after a configuration
+    # error, but the modal tells the operator to fix config/*.yaml and press the restart
+    # button, and that button reaches the same spawn preflight -- which refuses while the
+    # dead incarnation's identity is still published.
+    assert w._engine_instance_id is None
+    assert w._engine_shutdown_capability is None
     assert w._restart_giving_up is True
-    w._show_engine_down_banner.assert_called_once()
+    assert w._config_error_modal_shown is True
     mock_qtimer.singleShot.assert_not_called()
     assert w._restart_attempts == 0
+
+
+def test_owned_observed_exit_retries_forever_like_every_other_child():
+    """The live acquisition child gets the never-give-up backoff it was denied.
+
+    ``test_handle_engine_exit_retries_forever_never_gives_up`` below has always
+    said what this project wants -- "a silently dead overnight acquisition is
+    the hazard being designed out" -- but it proved it against a REPLAY child.
+    The live child was held instead, so the retry-forever path was unreachable
+    for the one process a week-long run depends on.
+    """
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=1, restart_attempts=50)
+    w._replay_source = None
+    w._engine_instance_id = "a" * 32
+    w._engine_shutdown_capability = "b" * 64
+
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+        with patch("cryodaq.launcher.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            LauncherWindow._handle_engine_exit(w)
+
+    assert w._engine_unsettled_incarnation is None
+    assert w._restart_giving_up is False
+    assert w._restart_pending is True
+    mock_qtimer.singleShot.assert_called_once()
+    assert mock_qtimer.singleShot.call_args[0][0] == 120 * 1000
 
 
 def test_missing_owned_process_handle_latches_hold_before_invalidation() -> None:

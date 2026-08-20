@@ -216,16 +216,13 @@ def test_soak_handshake_failure_cleanup_keeps_bridge_live_until_engine_settles()
     assert shutdown.index('attempt("bridge_shutdown"') < shutdown.index('attempt("bridge_terminal"')
 
 
-@pytest.mark.parametrize("returncode", [ENGINE_CONFIG_ERROR_EXIT_CODE, 9])
-def test_detected_owned_engine_exit_reaps_handle_preserves_hold_and_blocks_restart_and_quit(
-    returncode: int,
-) -> None:
-    calls: list[str] = []
-    process = SimpleNamespace(poll=lambda: calls.append("poll") or returncode)
-    launcher = SimpleNamespace(
+def _exited_owned_launcher(calls: list[str], returncode: int) -> SimpleNamespace:
+    """A launcher-owned engine that HAS exited, with its handle still held."""
+
+    return SimpleNamespace(
         _restart_pending=False,
         _shutdown_requested=False,
-        _engine_proc=process,
+        _engine_proc=SimpleNamespace(poll=lambda: calls.append("poll") or returncode),
         _engine_external=False,
         _replay_source=None,
         _engine_instance_id="a" * 32,
@@ -240,25 +237,210 @@ def test_detected_owned_engine_exit_reaps_handle_preserves_hold_and_blocks_resta
         _restart_attempts=0,
         _restart_backoff_s=[3],
         _last_restart_time=0.0,
+        _restart_generation=0,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=1,
         _tray=SimpleNamespace(isVisible=lambda: False),
         _invalidate_descriptor_transport=lambda: calls.append("invalidate"),
         _close_engine_stderr_stream=lambda: calls.append("close_stream"),
         _show_engine_down_banner=lambda _text: calls.append("banner"),
         _start_engine=lambda **_kwargs: calls.append("start_engine"),
     )
+
+
+def test_observed_owned_engine_exit_settles_readers_and_restarts_forever() -> None:
+    """An engine we WATCHED exit is provably gone, so the launcher comes back.
+
+    The handle is still held and ``poll()`` has just returned the exit code:
+    nothing of that incarnation can still be writing, which is the only thing
+    the HOLD was ever protecting. Holding here also left the heater with no
+    authority able to command it off -- only an engine can do that, and its SMU
+    driver commands OFF on every channel inside connect().
+
+    Owner direction, 2026-08-20: "программа ВЕРНЕТСЯ и просто сохранит в логе
+    что упала и почему."
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+
     with (
         patch("cryodaq.launcher.time.monotonic", return_value=10.0),
         patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
     ):
         LauncherWindow._handle_engine_exit(launcher)
-    # Poll establishes the exact exit observation; HOLD is latched before the
-    # subsequent invalidation can fail or schedule any backoff.
+
+    # The exit observation still comes first, and authority is still invalidated
+    # before anything is scheduled -- only the verdict after it has changed.
     assert calls[:2] == ["poll", "invalidate"]
+    assert launcher._engine_unsettled_incarnation is None
+    assert launcher._restart_giving_up is False
+    assert launcher._restart_pending is True
+    assert launcher._restart_attempts == 1
     assert launcher._engine_proc is None
-    assert launcher._engine_unsettled_incarnation == ("a" * 32, returncode)
+    assert calls.count("close_stream") == 1
+    single_shot.assert_called_once()
+    assert single_shot.call_args[0][0] == 3 * 1000
+
+    # The unsettled latch being clear is exactly what unblocks the operator:
+    # both refusals -- manual restart and launcher exit -- test that one
+    # attribute, and the lost-handle test below proves they still fire when it
+    # is set.
+
+
+def test_observed_owned_engine_exit_names_the_incarnation_and_code_in_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The "why" the owner asked for has to reach the log, not just the banner."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+
+    with (
+        caplog.at_level("WARNING", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot"),
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    recorded = "\n".join(record.getMessage() for record in caplog.records)
+    assert "a" * 32 in recorded, recorded
+    assert "code=9" in recorded, recorded
+
+
+def _authority_of(launcher: SimpleNamespace) -> dict[str, object]:
+    """Every field the real _start_engine preflight reads as published identity."""
+
+    return {
+        name: getattr(launcher, name, None)
+        for name in (
+            "_engine_instance_id",
+            "_engine_shutdown_capability",
+            "_engine_shutdown_request_id",
+            "_engine_shutdown_transport_identity",
+            "_engine_shutdown_receipt",
+            "_engine_ready_nonce",
+        )
+    }
+
+
+def test_the_scheduled_restart_actually_reaches_the_spawn() -> None:
+    """Clearing the handle is not enough, and the preflight is where that showed.
+
+    _start_engine refuses to spawn while ANY of the previous incarnation's identity is
+    still published, and that refusal is right -- two engines on one identity is two
+    writers on one database. But the crash path used to clear only the process handle,
+    so the scheduled restart hit "prior launcher-owned engine authority remains live",
+    recovery called _stop_engine with no handle and retained authority, and the crash
+    turned back into the lost-handle HOLD this change exists to avoid.
+
+    This drives the REAL preflight rather than asserting on the fields, because the
+    fields are only interesting insofar as that code reads them.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    assert any(value is not None for value in _authority_of(launcher).values()), (
+        "the fixture must start with published authority, or this proves nothing"
+    )
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+    single_shot.assert_called_once()
+
+    assert all(value is None for value in _authority_of(launcher).values()), (
+        f"the observed incarnation must be retired; still published: {_authority_of(launcher)}"
+    )
+
+    # Now run the production preflight itself. It will fail later, on something this
+    # stand-in launcher does not have, and WHICH failure is the whole point: it must not
+    # be either refusal, because both of those block the restart the owner asked for.
+    try:
+        LauncherWindow._start_engine(launcher)
+    except BaseException as exc:
+        message = str(exc)
+    else:
+        message = ""
+    assert "prior launcher-owned engine authority remains live" not in message, message
+    assert "restart remains in HOLD" not in message, message
+
+
+def test_a_lost_handle_keeps_its_authority_published() -> None:
+    """Retiring identity is for an exit we WATCHED, never for one we did not.
+
+    With no handle and no exit code the old incarnation may still be running, and its
+    identity is what stops a second one being spawned beside it.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = None
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot"),
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._engine_instance_id == "a" * 32
+    assert launcher._engine_shutdown_capability == "b" * 64
+
+
+def test_owned_config_error_exit_records_the_reason_and_refuses_to_retry() -> None:
+    """A configuration error must not become a restart loop into the same failure.
+
+    Retrying it would be a busy loop, not a recovery, so this one exit code
+    still refuses -- but it refuses by the reviewed config-error path, which
+    logs the reason and names the files to fix. It no longer latches an
+    unsettled incarnation, which would also have blocked the operator's quit.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, ENGINE_CONFIG_ERROR_EXIT_CODE)
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert calls[:2] == ["poll", "invalidate"]
     assert launcher._restart_giving_up is True
     assert launcher._restart_pending is False
-    assert calls.count("close_stream") == 1
+    assert launcher._restart_attempts == 0
+    assert launcher._engine_proc is None
+    assert launcher._engine_unsettled_incarnation is None
+    assert launcher._config_error_modal_shown is True
+    single_shot.assert_not_called()
+
+
+def test_lost_owned_engine_handle_preserves_hold_and_blocks_restart_and_quit() -> None:
+    """No handle and no exit code is the case that must still HOLD.
+
+    This is the original invariant, kept exactly. With shutdown authority
+    published and the handle gone, the old incarnation cannot be proven dead.
+    Starting a second engine beside a live one would put two writers on one
+    database, which is the data loss this path exists to prevent, so restart
+    and launcher exit both stay blocked until recovery proves otherwise.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = None
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert calls[:1] == ["invalidate"]
+    assert launcher._engine_unsettled_incarnation == ("a" * 32, None)
+    assert launcher._restart_giving_up is True
+    assert launcher._restart_pending is False
     single_shot.assert_not_called()
 
     with pytest.raises(RuntimeError, match="manual restart remains in HOLD"):
@@ -267,7 +449,7 @@ def test_detected_owned_engine_exit_reaps_handle_preserves_hold_and_blocks_resta
         LauncherWindow._stop_engine(launcher)
 
     assert launcher._engine_proc is None
-    assert launcher._engine_unsettled_incarnation == ("a" * 32, returncode)
+    assert launcher._engine_unsettled_incarnation == ("a" * 32, None)
     launcher._bridge.shutdown.assert_not_called()
 
 

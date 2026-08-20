@@ -4216,7 +4216,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: Windows terminate or kill can bypass engine cleanup while process death is reported as successful shutdown.
-    invariant: Launcher success requires engine-incarnation-bound global OFF, teardown, and exit receipts; a late reply remains bound to its exact request ID and transport generation until reconciled before bridge identity release. Forced death remains HOLD and permanently blocks restart or clean-exit claims, but the HOLD evidence latch must never block bounded terminate, kill, wait, stderr-reader settlement, or release of a terminal OS process handle.
+    invariant: Launcher success requires engine-incarnation-bound global OFF, teardown, and exit receipts; a late reply remains bound to its exact request ID and transport generation until reconciled before bridge identity release. Forced death remains HOLD and permanently blocks restart or clean-exit claims, but the HOLD evidence latch must never block bounded terminate, kill, wait, stderr-reader settlement, or release of a terminal OS process handle. An unexpected exit the launcher OBSERVED, with the process handle still held and the exit code already read, is not forced death and is not held; it settles its crashed-child readers, records the incarnation and the exit code, and takes the reviewed crash path, which retries forever except after a configuration error, whose reviewed refusal stands. An unexpected exit with the process handle LOST while shutdown authority is published remains HOLD, because an engine that cannot be proven dead may still be writing, and a second engine beside it would put two writers on one database.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4229,7 +4229,11 @@ records:
         ci_partition: remaining
       - node: tests/integration/test_launcher_shutdown_ownership.py::test_timed_out_engine_is_force_reaped_while_exact_settlement_remains_hold
         ci_partition: remaining
-      - node: tests/gui/shell/test_d7_1b_repair.py::test_detected_owned_engine_exit_reaps_handle_preserves_hold_and_blocks_restart_and_quit
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_lost_owned_engine_handle_preserves_hold_and_blocks_restart_and_quit
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_observed_owned_engine_exit_settles_readers_and_restarts_forever
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_owned_config_error_exit_records_the_reason_and_refuses_to_retry
         ci_partition: gui
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending
