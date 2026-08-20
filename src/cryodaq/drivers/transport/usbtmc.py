@@ -8,7 +8,10 @@ import binascii
 import json
 import logging
 import multiprocessing
+import os
 import re
+import signal
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -428,8 +431,59 @@ def _blocking_close_handles(resource: Any, manager: Any) -> _HandleCloseOutcome:
     return _HandleCloseOutcome(resource_error=resource_error, manager_error=manager_error)
 
 
+# THE CHILD THAT HOLDS THE SOURCE MUST DIE WITH ITS ENGINE.
+#
+# This process owns the native VISA session for the Keithley -- the instrument that drives
+# the heater. `daemon=True` is not enough: multiprocessing terminates a daemonic child from
+# an atexit handler, which runs only when the parent exits NORMALLY. An engine that is
+# killed, or that crashes, never runs it, and the child survives its parent.
+#
+# That survivor is not merely untidy. It can still be inside, or about to finish, a write to
+# the source. The launcher restarts a dead engine, the replacement connects and commands OFF
+# on every channel -- and the orphan's write can land AFTER that, leaving the instrument
+# sourcing while the software believes it is off. Two owners of one source is the exact
+# hazard the whole ownership design exists to prevent.
+#
+# On Linux the kernel will do this for us: PR_SET_PDEATHSIG asks for a signal when the
+# parent dies, whatever the cause. It carries one classic race -- the parent can die between
+# the fork and this call, so the signal is requested against a parent that is already gone
+# -- which is why the parent identity is re-read afterwards and a mismatch exits at once.
+_PR_SET_PDEATHSIG = 1
+
+
+def _bind_lifetime_to_parent() -> None:
+    """Ask the kernel to kill this process when its parent dies. Linux only."""
+
+    if not sys.platform.startswith("linux"):
+        # Elsewhere the daemonic flag remains the only mechanism, and an abruptly dead
+        # parent can still leave this process behind. The laboratory target is Ubuntu.
+        return
+    expected_parent = os.getppid()
+    if expected_parent <= 1:
+        # Already reparented: the parent died before we got here. Nothing can be bound.
+        os._exit(0)
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+    except Exception:
+        # A source-owning child that cannot be bound to its parent must not run at all.
+        # Refusing here costs one failed open, which the transport reports; continuing
+        # would risk the orphan this exists to prevent.
+        os._exit(0)
+    if os.getppid() != expected_parent:
+        # The race: the parent died between the fork and the prctl above, so the signal we
+        # just asked for will never arrive. Leave now, by ourselves.
+        os._exit(0)
+
+
 def _visa_process_main(connection: Any) -> None:
     """Own native VISA handles behind a bounded, non-pickle protocol."""
+
+    # Before anything else, and before any VISA handle exists.
+    _bind_lifetime_to_parent()
 
     resource = None
     manager = None
