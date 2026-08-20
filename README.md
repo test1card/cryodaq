@@ -120,8 +120,8 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
 
 ## The laboratory-readiness refactor: what changed
 
-The qualification refactor (merged 2026-07-31; campaign records in
-`docs/campaigns/`) moved CryoDAQ toward narrower ownership, explicit
+The qualification refactor (merged 2026-07-31; campaign records are archived
+outside this repository) moved CryoDAQ toward narrower ownership, explicit
 evidence, and visible failure boundaries while preserving the information-dense
 operator workflow. Several boundaries remain open below, so this is a design
 direction with open acceptance gates, not a finished system property.
@@ -178,8 +178,7 @@ The refactor merged into `master` on 2026-07-31 after independent review. The
 merge is a software checkpoint, not acceptance: it establishes no release
 readiness, physical-OFF proof, real-instrument, packaged-Windows, or
 laboratory-acceptance claim. `PROJECT_STATUS.md` defines the live boundary;
-`docs/OPEN_CELLS.md` is the live software-defect disclosure; deferred
-directions with trigger conditions are registered in `docs/OBLIGATIONS.md`.
+`docs/OPEN_CELLS.md` is the live software-defect disclosure.
 
 Historical checkpoint note: commit
 `503c8bf8d884654256ede4f08a9e44ab7b382242` is associated with reported

@@ -2,7 +2,7 @@
 
 > **Living document.** `CHANGELOG.md` is the authoritative shipped-history
 > record; this file is only the forward feature map. The active campaign, if
-> any, is recorded at `docs/campaigns/`.
+> any, is recorded outside this repository.
 >
 > **Current frontier:** v0.64.1 is shipped as the immutable `v0.64.1` tag, and the
 > release train v0.58.0 -> v0.64.0 closed the v0.60 Known Limitations backlog.
@@ -142,10 +142,36 @@ retention/rotation lifecycle bug is fixed.
 ## Montana PR-readiness plan (2026-07-29) — closed; archived
 
 The owner-ratified P0-P9 plan that stood here is campaign history. It moved
-verbatim, with provenance, to `docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md`
-(section "Owner-ratified P0-P9 plan, extracted from ROADMAP.md").
-`docs/OPEN_CELLS.md` is the live disclosure register; it wins on any
+verbatim, with provenance, into the campaign record kept outside this
+repository. `docs/OPEN_CELLS.md` is the live disclosure register; it wins on any
 disagreement with this file.
+
+**The one rule from that plan that this file still USES is restated here in
+full**, because the outcome derived below decides which work may start, and a
+reader of this repository must be able to check that derivation without reaching
+for anything else:
+
+> The cycle starts when P2 begins and permits exactly one integration object and
+> one P5 frozen SHA. It terminates immediately with one of three outcomes.
+> **PR_READY:** P0-P8 pass for one unchanged P5 SHA. **NOT_PR_READY:** any
+> prerequisite check is red, cancelled, missing, stale, or bound to another SHA;
+> either mandatory reviewer withholds approval; a covered byte or mode changes
+> after P5; or the integration topology differs from P2. **MERGED_P9_OPEN:**
+> `master` has already been fast-forwarded at P9, but a post-fast-forward check
+> or settings verification fails.
+>
+> There is no correction, retry-until-green, refreeze, or "one more review"
+> sub-loop. A diagnostic rerun earns no acceptance credit. After a terminal
+> failure, further authoring requires a new owner-authorized bounded cycle.
+> Deferred disclosure rows do not extend the cycle and do not become merge
+> prerequisites merely because work on them remains possible.
+
+**And the boundary that closes the residual**, without which the outcome below
+can be read but not resolved: `MERGED_P9_OPEN` becomes `MERGED_CHECKPOINT` only
+when all three of these hold — the build host is migrated, the workflow is bound
+natively, and a post-fast-forward protected run passes on `master` at the merged
+SHA. Until all three hold, the residual is open, and the items below that depend
+on it do not start.
 
 Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 (not copied from any document):
@@ -171,8 +197,9 @@ Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 
 By the archived plan's own P9 definition those facts derive the outcome
 `MERGED_P9_OPEN`: merged on P7's exact-SHA evidence, with host migration and
-native workflow binding still open — registered as OB-007 in
-`docs/OBLIGATIONS.md`, which is the single live home of that residual. The
+native workflow binding still open. That residual is carried as a deferred
+direction, recorded outside this repository, whose subject is exactly those two
+things: moving the build host, and binding the workflow natively. The
 campaign threat-model ruling lives on in the OC-035 and OC-036 rows of the
 register. Several register rows still carry pre-merge Cycle-2 wording; a
 separate register-truth pass owns correcting that, and their pending language
@@ -573,9 +600,9 @@ safety boundaries.
 
 The owner requires all project documentation to use Simplified Technical
 English (ASD-STE100), via the skill installed at `docs/skills/asd-ste100/`.
-The obligation and its scope decision are OB-012 in `docs/OBLIGATIONS.md`;
-this entry is the plan for the retrofit of the EXISTING corpus, and the two
-documents reference each other so neither drifts alone.
+The direction requiring it, and the decision on what it covers, are recorded
+outside this repository; this entry is the plan for the retrofit of the EXISTING
+corpus.
 
 Sequencing: this is a parallel documentation track. It must not displace the
 software-side pre-lab phases (H3/H4, F35, F36) above, which set the lab date.
@@ -602,7 +629,7 @@ files so the same document is not rewritten twice:
    purge and STE pass complete here). ROADMAP.md itself is deliberately NOT a
    purge target: its remaining campaign-name occurrences are the archived-plan
    stub heading, section names, and generator/file identifiers — historical
-   identifiers the amendment explicitly permits (see OB-001's disposition
+   identifiers the client-facing language amendment explicitly permits (see its disposition
    list).
 
 Honest costs, stated so this entry cannot decay into a checkbox: STE
@@ -626,8 +653,8 @@ archived campaign records are never rewritten.
 > and handoff gates are closed. The software, review and CI gates closed with
 > the 2026-07-31 merge; the publication/handoff residual is still open — the
 > terminal outcome derived in the stub above is `MERGED_P9_OPEN`, with host
-> migration and native workflow binding tracked as OB-007 in
-> `docs/OBLIGATIONS.md`. Items below that do not depend on that residual may
+> migration and native workflow binding still open as a deferred direction.
+> Items below that do not depend on that residual may
 > start; nothing here claims the P9 gates are complete. They are not retroactive Montana acceptance
 > criteria and must not delay the current branch merely to pursue an abstract
 > quality score. If future exploration exposes a violation of an existing
@@ -835,9 +862,15 @@ and gating on nothing but the owner's time at the stand.**
   the prevention record's `green_evidence`); the OC-039 disposition.
   Proves the PR-review-merge workflow end to end at small scale.
 <!-- phase-1-status=IN_PROGRESS : when every Phase 1 item below is merged, change
-     this token to phase-1-status=DONE. OB-002 in docs/OBLIGATIONS.md keys its
-     trigger to that exact token; do not reword it, translate it, or let an
-     STE rewrite touch it. -->
+     this token to phase-1-status=DONE. **A deferred direction keys its trigger to
+     that exact token**, and what it defers is stated here in full so that flipping
+     the token cannot silently strand it: build the in-repository adaptation skill - a concise
+     procedural skill folder linked from AGENTS.md, detailed material in a
+     references subfolder, deterministic generation and validation in scripts,
+     built on the existing sources of truth; done when a cold mid-tier model
+     passes a forward test on a deliberately different example laboratory, graded
+     by a context that did not write the contract. Do not reword this token,
+     translate it, or let an STE rewrite touch it. -->
 - **Phase 1 — the descriptor spine.** The engine-loader ownership fix; then
   OC-031's registry re-key; then the OC-008/OC-030 site migrations in bounded
   batches carrying rendering evidence for every touched surface; OC-023 rides
@@ -1192,6 +1225,3 @@ and independent laboratory acceptance remain unchanged.
   plugin safety approval decision.
 - `docs/adr/003-governance-as-enforcement.md` — current mistake-to-rule-to-guard
   governance decision.
-- `docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md` — historical record of the
-  completed/superseded campaign coordination material split out of this file
-  and `PROJECT_STATUS.md`; not current policy.

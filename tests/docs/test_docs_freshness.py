@@ -1708,6 +1708,15 @@ _PATH_PREFIXES = ("docs/", "config/", "src/", "tests/", "tools/", "scripts/", "b
 _EXEMPT_SOURCE_PREFIXES: tuple[str, ...] = ()
 _LINE_REF_RE = re.compile(r":\d+(-\d+)?$")
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
+# A byte-faithful record may name a path that has since been removed, and it must NOT be
+# edited to make that reference resolve -- an append-only log whose entries are rewritten
+# to satisfy a check stops being a record. So text between these fences is excluded from
+# the dead-path scan, and from nothing else. The fence is the same one the documentation
+# skill already uses to mark text that must not be rewritten.
+_VERBATIM_BLOCK_RE = re.compile(
+    r"<!--\s*verbatim:begin\s*-->.*?<!--\s*verbatim:end\s*-->",
+    re.DOTALL,
+)
 
 
 def _is_path_candidate(span: str) -> bool:
@@ -1731,7 +1740,7 @@ def test_no_dead_repo_paths_referenced_in_docs():
             continue
         if p.startswith(_EXEMPT_SOURCE_PREFIXES):
             continue
-        text = _read(REPO_ROOT / p)
+        text = _VERBATIM_BLOCK_RE.sub("", _read(REPO_ROOT / p))
         for span in _BACKTICK_RE.findall(text):
             if not _is_path_candidate(span):
                 continue

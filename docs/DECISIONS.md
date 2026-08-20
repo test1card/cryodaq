@@ -386,6 +386,11 @@ fast-forward once the gates are verified in the merging turn on the exact
 head: green CI **and** a positive Codex verdict bound to that same SHA, plus a
 clean fast-forward check. Anything outside this repository remains owner-only.
 
+<!-- verbatim:begin -->
+<!-- Kept byte-faithful. This entry is SUPERSEDED by the two decisions below, and
+     the path it names no longer exists in this repository. It is not edited to
+     make that reference resolve: an append-only log whose entries are rewritten
+     to satisfy a check is no longer a record of anything. -->
 ## [Owner] 2026-08-09 — The agent working layer moves out of temp; obligations are registered in-tree
 
 The out-of-tree agent working layer (state, plans, evidence, campaign history)
@@ -399,3 +404,51 @@ directions and repository search must be able to find them.
 were invisible to repository search; one had its trigger fire and sat
 undischarged for nine days. Preservation, classification, and the migration
 were verified against byte-exact snapshots before anything was deleted.
+<!-- verbatim:end -->
+
+## [Owner] 2026-08-20 — This repository publishes the instrument, and deletion does not undo history
+
+The working relationship, the plans, and the development directives are private.
+New material of that kind is not written here. This repository is an instrument
+utility: the software, its tests, its guards, and the disclosure a user of the
+instrument needs.
+
+This SUPERSEDES the 2026-08-09 decision above, which is kept intact because this
+log is append-only and an edited entry claims to be the original. That earlier
+decision solved a real failure — a direction recorded outside the repository was
+invisible and sat undischarged for nine days — and the fix it chose traded that
+failure for a worse one: a private direction published in a public repository.
+The invisibility problem is answered by keeping the register in ONE place with a
+guard over it, not by choosing which repository that place is.
+
+**WHAT THIS DECISION DOES NOT ACHIEVE, stated because the opposite is easy to
+assume.** Removing a file from the current tree does not remove it from the
+repository. The register and the campaign archive removed alongside this entry
+stay readable through ordinary Git history, and so does anything else ever
+committed here. Entries above this one also still publish owner directions
+verbatim, and they are not being rewritten. **So this is a decision about what is
+WRITTEN here from now on. It is not a claim that what was written is
+unpublished.** Closing that would take either a history rewrite — which breaks
+every existing clone and every open pull request, and still leaves the objects on
+the hosting service — or a change of repository visibility. Both are outward acts
+and belong to the owner.
+
+## [Owner] 2026-08-20 — No internal identifiers; name the thing
+
+Documentation in this repository uses explicit, understandable names. An internal
+identifier of the form `OB-` or `OC-` names nothing to a reader who cannot open
+the register it belongs to, and it LOOKS like a name, so the reader stops there
+instead of asking what the thing is.
+
+This SUPERSEDES the sentence in the decision above that said obligation
+identifiers stay wherever a reader needs to know a deferred direction exists.
+What stays is the DIRECTION, stated plainly and completely enough to act on. The
+number goes.
+
+**The retrofit is not complete and its size is measured.** The `OC-` row keys of
+`docs/OPEN_CELLS.md` are 224 occurrences across 26 files, and the documentation
+freshness guards match those literal row prefixes; the campaign codename is in
+eight tracked paths, every one of which is read by tests, tools or continuous
+integration. Until those land, a reader still meets identifiers in the register,
+in `tests/release/`, and in several `tools/ci_*` comments. They are work in
+progress, not a contradiction of this decision.
