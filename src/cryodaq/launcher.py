@@ -1701,7 +1701,23 @@ def _pump_engine_stderr(
                 stderr_logger.error("engine stderr line exceeded the forwarding bound")
                 continue
             if raw_line.strip():
-                stderr_logger.error("engine child stderr record received; phase=runtime")
+                # KEEP WHAT THE ENGINE SAID. This logged a fixed string and threw the line
+                # away, so a soak run produced 104 identical records and the one moment the
+                # engine explains itself said nothing. Owner, 2026-08-20: "конечно
+                # сохранять, ничего не чистить. секреты хранятся на том компе, их нужно
+                # чистить только если происходит вынос с компа, а не внутри работы
+                # программы" -- redaction belongs to EXPORT off the machine, not to running
+                # on it.
+                #
+                # The bound above still holds: a line longer than the forwarding limit is
+                # drained and reported as over-long, so this decode can never see more than
+                # _MAX_ENGINE_STDERR_LINE_BYTES. Decoding replaces undecodable bytes rather
+                # than raising, because a pump that dies on one bad byte loses every line
+                # after it.
+                stderr_logger.error(
+                    "engine child stderr; phase=runtime: %s",
+                    raw_line.decode("utf-8", "replace").rstrip("\r\n"),
+                )
     except BaseException as exc:
         owner.pump_failure = exc
     finally:
