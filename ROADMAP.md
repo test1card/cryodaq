@@ -190,9 +190,9 @@ Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 
 By the archived plan's own P9 definition those facts derive the outcome
 `MERGED_P9_OPEN`: merged on P7's exact-SHA evidence, with host migration and
-native workflow binding still open — carried as OB-007 in the obligations
-register, which is the single live home of that residual and is kept outside
-this repository. The
+native workflow binding still open. That residual is carried as a deferred
+direction, recorded outside this repository, whose subject is exactly those two
+things: moving the build host, and binding the workflow natively. The
 campaign threat-model ruling lives on in the OC-035 and OC-036 rows of the
 register. Several register rows still carry pre-merge Cycle-2 wording; a
 separate register-truth pass owns correcting that, and their pending language
@@ -593,9 +593,9 @@ safety boundaries.
 
 The owner requires all project documentation to use Simplified Technical
 English (ASD-STE100), via the skill installed at `docs/skills/asd-ste100/`.
-The obligation and its scope decision are OB-012 in the obligations register,
-which is kept outside this repository; this entry is the plan for the retrofit
-of the EXISTING corpus.
+The direction requiring it, and the decision on what it covers, are recorded
+outside this repository; this entry is the plan for the retrofit of the EXISTING
+corpus.
 
 Sequencing: this is a parallel documentation track. It must not displace the
 software-side pre-lab phases (H3/H4, F35, F36) above, which set the lab date.
@@ -622,7 +622,7 @@ files so the same document is not rewritten twice:
    purge and STE pass complete here). ROADMAP.md itself is deliberately NOT a
    purge target: its remaining campaign-name occurrences are the archived-plan
    stub heading, section names, and generator/file identifiers — historical
-   identifiers the amendment explicitly permits (see OB-001's disposition
+   identifiers the client-facing language amendment explicitly permits (see its disposition
    list).
 
 Honest costs, stated so this entry cannot decay into a checkbox: STE
@@ -646,8 +646,8 @@ archived campaign records are never rewritten.
 > and handoff gates are closed. The software, review and CI gates closed with
 > the 2026-07-31 merge; the publication/handoff residual is still open — the
 > terminal outcome derived in the stub above is `MERGED_P9_OPEN`, with host
-> migration and native workflow binding tracked as OB-007 in the obligations
-> register. Items below that do not depend on that residual may
+> migration and native workflow binding still open as a deferred direction.
+> Items below that do not depend on that residual may
 > start; nothing here claims the P9 gates are complete. They are not retroactive Montana acceptance
 > criteria and must not delay the current branch merely to pursue an abstract
 > quality score. If future exploration exposes a violation of an existing
@@ -855,9 +855,9 @@ and gating on nothing but the owner's time at the stand.**
   the prevention record's `green_evidence`); the OC-039 disposition.
   Proves the PR-review-merge workflow end to end at small scale.
 <!-- phase-1-status=IN_PROGRESS : when every Phase 1 item below is merged, change
-     this token to phase-1-status=DONE. **OB-002 keys its trigger to that exact
-     token**, and what it defers is stated here so that flipping the token cannot
-     silently strand it: build the in-repository adaptation skill - a concise
+     this token to phase-1-status=DONE. **A deferred direction keys its trigger to
+     that exact token**, and what it defers is stated here in full so that flipping
+     the token cannot silently strand it: build the in-repository adaptation skill - a concise
      procedural skill folder linked from AGENTS.md, detailed material in a
      references subfolder, deterministic generation and validation in scripts,
      built on the existing sources of truth; done when a cold mid-tier model

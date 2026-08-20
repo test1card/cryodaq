@@ -2,8 +2,7 @@
 
 > **Repository note (CryoDAQ, 2026-08-10).** The checked-in copy at
 > `docs/skills/asd-ste100/` is the reviewed, binding version for this
-> repository's documentation work (registered as OB-012 in the obligations
-> register, which is kept outside this repository): its
+> repository's documentation work, which a standing owner direction requires: its
 > `SKILL.md` carries the repository's archive/verbatim-quote exemption, which
 > the upstream does not. The installation command later in this file is the
 > upstream project's own instruction — do NOT follow it for work in this
