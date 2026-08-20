@@ -1745,8 +1745,8 @@ class PeriodicPngSupervisor:
             while not self._stop_requested:
                 try:
                     load = await self._run_blocking(self._loader, self._config_dir)
-                except Exception:
-                    backoff_index = await self._handle_config_loader_failure(backoff_index)
+                except Exception as exc:
+                    backoff_index = await self._handle_config_loader_failure(backoff_index, exc)
                     continue
                 if not load.requested:
                     if self._leader_fd is not None:
@@ -1770,8 +1770,8 @@ class PeriodicPngSupervisor:
 
                 try:
                     load = await self._run_blocking(self._loader, self._config_dir)
-                except Exception:
-                    backoff_index = await self._handle_config_loader_failure(backoff_index)
+                except Exception as exc:
+                    backoff_index = await self._handle_config_loader_failure(backoff_index, exc)
                     continue
                 if not load.requested:
                     await self._stop_then_write_orderly(disabled=True)
@@ -1821,8 +1821,8 @@ class PeriodicPngSupervisor:
 
                 try:
                     refreshed = await self._run_blocking(self._loader, self._config_dir)
-                except Exception:
-                    backoff_index = await self._handle_config_loader_failure(backoff_index)
+                except Exception as exc:
+                    backoff_index = await self._handle_config_loader_failure(backoff_index, exc)
                     continue
                 if not refreshed.requested:
                     await self._stop_then_write_orderly(disabled=True)
@@ -1923,9 +1923,18 @@ class PeriodicPngSupervisor:
         finally:
             self._release_leader()
 
-    async def _handle_config_loader_failure(self, backoff_index: int) -> int:
+    async def _handle_config_loader_failure(self, backoff_index: int, cause: BaseException | None = None) -> int:
+        # The configuration loader is the OTHER way to reach "runtime unavailable", and it
+        # discarded its exception as well. All three call sites feed this one handler.
+        if cause is not None:
+            _log.error(
+                "periodic configuration could not be loaded from %s; type=%s detail=%s",
+                self._config_dir,
+                type(cause).__name__,
+                _bounded_reason(cause),
+            )
         if self._leader_fd is not None:
-            await self._stop_then_mark_runtime_failed()
+            await self._stop_then_mark_runtime_failed(cause)
             self._release_leader()
         await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
         return min(backoff_index + 1, 5)
