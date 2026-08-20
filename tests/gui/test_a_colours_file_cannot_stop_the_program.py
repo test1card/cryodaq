@@ -16,10 +16,12 @@ the real loader against a real, deliberately broken configuration directory.
 from __future__ import annotations
 
 import logging
+import pathlib
 
 import pytest
 import yaml
 
+from cryodaq import logging_setup
 from cryodaq.gui import _theme_loader
 
 
@@ -103,6 +105,109 @@ def test_the_compatibility_loader_also_stops_stopping(themes_dir) -> None:
 
     assert _theme_loader._load_theme_pack(_theme_loader.DEFAULT_THEME)["BACKGROUND"] == "#1a1816"
     assert _theme_loader._load_theme_pack("gost")["BACKGROUND"] == "#1a1816"
+
+
+# ------------------------------------------------- the ways a file refuses to be READ
+
+
+def test_a_themes_directory_that_cannot_be_searched_does_not_stop_the_program(themes_dir, monkeypatch) -> None:
+    """`Path.is_file()` RAISES on EACCES or EIO. That is not a ThemePackError.
+
+    An access-control entry on the directory, or an unhealthy filesystem, made the stat
+    itself raise `OSError`, which walked straight past the handler that catches a bad pack
+    and ended the program during import -- exactly the unreadable-colours-file case this
+    module exists to survive. It is normalised now.
+    """
+
+    real_is_file = pathlib.Path.is_file
+
+    def _refuses(self):
+        if self.name.endswith(".yaml"):
+            raise PermissionError(13, "Permission denied")
+        return real_is_file(self)
+
+    monkeypatch.setattr(pathlib.Path, "is_file", _refuses)
+
+    name, pack = _theme_loader.resolve_theme()
+    assert name == _theme_loader.DEFAULT_THEME
+    assert pack["BACKGROUND"] == "#1a1816"
+
+
+def test_an_unreadable_settings_file_does_not_stop_the_program(themes_dir, monkeypatch) -> None:
+    """Same class, one level up: the file that only chooses a theme."""
+
+    def _refuses(self):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(pathlib.Path, "exists", _refuses)
+    _write(themes_dir, _theme_loader.DEFAULT_THEME, _good_pack())
+
+    name, _pack = _theme_loader.resolve_theme()
+    assert name == _theme_loader.DEFAULT_THEME
+
+
+@pytest.fixture
+def root_logging_restored():
+    """setup_logging replaces every root handler, so put them back afterwards."""
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    logging_setup._deferred_records.clear()
+    try:
+        yield
+    finally:
+        for handler in list(root.handlers):
+            if handler not in handlers:
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+                root.removeHandler(handler)
+        for handler in handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level)
+        logging_setup._deferred_records.clear()
+
+
+def test_the_reason_reaches_the_log_file_that_did_not_exist_yet(
+    themes_dir, tmp_path, monkeypatch, root_logging_restored
+) -> None:
+    """The record happens before logging exists, so it must be replayed, not just emitted.
+
+    `cryodaq.gui.theme` resolves the pack at module level and every entry point imports it
+    BEFORE calling setup_logging -- `gui/app.py` imports the theme at line 27 and configures
+    logging at line 431. A plain logger call in that window reaches no file handler, and
+    under the frozen pythonw launcher reaches nothing at all.
+
+    So this drives the WHOLE order production uses: resolve the pack first, configure
+    logging second, then read the file off disk. Asserting on a direct call to the replay
+    helper would stay green if setup_logging stopped calling it, which is the whole risk.
+    """
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    _theme_loader.resolve_theme()  # empty themes directory: the fallback fires
+    assert logging_setup._deferred_records, "the reason must be held for the log that does not exist yet"
+
+    logging_setup.setup_logging("theme-fallback-probe", console=False, file=True)
+    logging.shutdown()
+
+    written = (log_dir / "theme-fallback-probe.log").read_text(encoding="utf-8")
+    assert "built-in copy" in written, written
+    assert not logging_setup._deferred_records, "a replayed record must not be emitted twice"
+
+
+def test_the_deferred_list_cannot_grow_without_bound() -> None:
+    """A list filled before logging exists is a leak nothing would ever notice."""
+
+    logging_setup._deferred_records.clear()
+    for index in range(logging_setup._MAX_DEFERRED_RECORDS + 25):
+        logging_setup.defer_record(logging.ERROR, "record %d", index)
+    assert len(logging_setup._deferred_records) == logging_setup._MAX_DEFERRED_RECORDS
+    logging_setup._deferred_records.clear()
 
 
 # ------------------------------------------------------------- a working pack still wins

@@ -68,18 +68,45 @@ class _TokenRedactFilter(logging.Filter):
         if record.args:
             try:
                 if isinstance(record.args, tuple):
-                    record.args = tuple(
-                        _redact(a) if isinstance(a, str) else a for a in record.args
-                    )
+                    record.args = tuple(_redact(a) if isinstance(a, str) else a for a in record.args)
                 elif isinstance(record.args, dict):
-                    record.args = {
-                        k: (_redact(v) if isinstance(v, str) else v) for k, v in record.args.items()
-                    }
+                    record.args = {k: (_redact(v) if isinstance(v, str) else v) for k, v in record.args.items()}
             except Exception:
                 # Filter must never raise — drop redaction silently if the
                 # args object has an unexpected shape.
                 pass
         return True
+
+
+# RECORDS THAT HAPPEN BEFORE THERE IS ANYWHERE TO PUT THEM.
+#
+# Some facts are settled at import time. `cryodaq.gui.theme` resolves the colour pack at
+# module level, and every entry point imports GUI modules before it calls setup_logging --
+# `gui/app.py` imports the theme at line 27 and configures logging at line 431. A record
+# emitted in that window reaches no file handler, and under the frozen pythonw launcher it
+# reaches nothing at all, so "the reason is in the log" would simply be false.
+#
+# Anything in that position appends here instead, and setup_logging replays it the moment
+# there is somewhere for it to go. Bounded, because an unbounded list filled before logging
+# exists is a leak nothing would ever notice.
+_MAX_DEFERRED_RECORDS = 64
+_deferred_records: list[tuple[int, str, tuple[object, ...]]] = []
+
+
+def defer_record(level: int, message: str, *args: object) -> None:
+    """Hold one record until setup_logging has somewhere to put it."""
+
+    if len(_deferred_records) < _MAX_DEFERRED_RECORDS:
+        _deferred_records.append((level, message, args))
+
+
+def _replay_deferred_records() -> None:
+    """Emit everything held from before logging existed, oldest first, exactly once."""
+
+    held, _deferred_records[:] = list(_deferred_records), []
+    logger = logging.getLogger("cryodaq.startup")
+    for level, message, args in held:
+        logger.log(level, message, *args)
 
 
 def setup_logging(
@@ -154,6 +181,9 @@ def setup_logging(
             root.addHandler(file_handler)
         except Exception as exc:
             sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")
+
+    # Now that handlers exist, say the things that could not be said before they did.
+    _replay_deferred_records()
 
 
 def read_debug_mode_from_qsettings() -> bool:

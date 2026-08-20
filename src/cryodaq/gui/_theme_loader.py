@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 
 from cryodaq.core.atomic_write import atomic_write_text
+from cryodaq.logging_setup import defer_record
 from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -142,10 +143,20 @@ def _default_pack_or_last_resort() -> dict[str, Any]:
     try:
         return validate_theme_pack(DEFAULT_THEME)
     except ThemePackError as exc:
+        # This runs during `import cryodaq.gui.theme`, which every entry point does BEFORE
+        # it configures logging, so a plain logger call here reaches no file handler and,
+        # under the frozen pythonw launcher, nothing at all. Defer it: setup_logging replays
+        # it as soon as there is somewhere for it to go.
         logger.critical(
             "theme: default pack '%s' is unusable (%s); drawing with the built-in copy",
             DEFAULT_THEME,
             exc,
+        )
+        defer_record(
+            logging.CRITICAL,
+            "theme: default pack '%s' is unusable (%s); drawing with the built-in copy",
+            DEFAULT_THEME,
+            str(exc),
         )
         return last_resort_pack()
 
@@ -164,7 +175,13 @@ def _validate_theme_id(name: object) -> str:
 
 
 def _selected_theme_name() -> str:
-    if not SETTINGS_FILE.exists():
+    try:
+        settings_present = SETTINGS_FILE.exists()
+    except OSError:
+        # Same class as the pack stat below: an unsearchable directory raises here rather
+        # than answering False, and a settings file must never decide whether we start.
+        return DEFAULT_THEME
+    if not settings_present:
         return DEFAULT_THEME
     try:
         with SETTINGS_FILE.open(encoding="utf-8") as f:
@@ -205,7 +222,15 @@ def validate_theme_pack(name: str) -> dict[str, Any]:
 
     name = _validate_theme_id(name)
     pack_file = THEMES_DIR / f"{name}.yaml"
-    if not pack_file.is_file():
+    # is_file() RAISES on a directory that cannot be searched (EACCES from an ACL) or an
+    # unhealthy filesystem (EIO). That OSError is not a ThemePackError, so it walked past
+    # every handler below and still ended the program during import -- which is precisely
+    # the unreadable-colours-file case this module claims to survive.
+    try:
+        present = pack_file.is_file()
+    except OSError as exc:
+        raise ThemePackError(f"theme pack '{name}' could not be examined") from exc
+    if not present:
         raise ThemePackError(f"theme pack '{name}' is unavailable")
 
     try:
