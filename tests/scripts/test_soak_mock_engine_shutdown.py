@@ -63,8 +63,9 @@ def test_windows_shutdown_uses_ctrl_break_not_terminate(monkeypatch: pytest.Monk
     not hasattr(signal, "CTRL_BREAK_EVENT"),
     reason="CTRL_BREAK_EVENT is only deliverable on Windows",
 )
-def test_windows_ctrl_break_reaches_real_mock_engine(tmp_path: Path) -> None:
+def test_windows_ctrl_break_reaches_real_mock_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The production launch and SIGBREAK handler must produce a clean exit."""
+    monkeypatch.setenv("CRYODAQ_STATE_ROOT", str(tmp_path / "state"))
     result = run_soak(
         duration_s=5.0,
         grace_s=30.0,
@@ -75,6 +76,32 @@ def test_windows_ctrl_break_reaches_real_mock_engine(tmp_path: Path) -> None:
     assert result.alive_before_shutdown
     assert result.clean_shutdown
     assert result.exit_code == 0
+
+
+def test_readiness_timeout_is_independent_of_shutdown_grace(tmp_path: Path) -> None:
+    """A short shutdown grace must not kill a slowly ready engine."""
+    child = tmp_path / "slow_marker_child.py"
+    child.write_text(
+        "import sys\n"
+        "import time\n"
+        "time.sleep(0.15)\n"
+        f"sys.stderr.write({_ENGINE_READY_MARKER!r} + chr(10))\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    result = run_soak(
+        duration_s=0.0,
+        grace_s=0.05,
+        startup_timeout_s=0.5,
+        poll_interval_s=0.01,
+        log_path=tmp_path / "engine.log",
+        cmd=[sys.executable, str(child)],
+    )
+
+    assert result.alive_before_shutdown
 
 
 def test_posix_shutdown_still_uses_terminate(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -136,11 +136,15 @@ def run_soak(
     *,
     log_path: Path,
     grace_s: float = 30.0,
+    startup_timeout_s: float = 120.0,
     allowlist: Sequence[str] = DEFAULT_ALLOWLIST,
     cmd: Sequence[str] | None = None,
     poll_interval_s: float = 1.0,
 ) -> SoakResult:
-    """Run the bounded soak. Blocks for ~``duration_s`` + shutdown time."""
+    """Run the bounded soak after readiness within ``startup_timeout_s``.
+
+    ``grace_s`` applies only after the shutdown request.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     argv = list(cmd) if cmd is not None else _default_cmd()
 
@@ -162,7 +166,7 @@ def run_soak(
             env=child_env,
         )
         try:
-            ready_deadline = time.monotonic() + grace_s
+            ready_deadline = time.monotonic() + startup_timeout_s
             ready = False
             while time.monotonic() < ready_deadline:
                 if _ENGINE_READY_MARKER in log_path.read_text(encoding="utf-8", errors="replace"):
@@ -242,6 +246,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Seconds to wait for a clean SIGTERM shutdown before SIGKILL (default: 30).",
     )
     parser.add_argument(
+        "--startup-timeout",
+        type=float,
+        default=120.0,
+        help="Seconds to wait for engine readiness before failing the soak (default: 120).",
+    )
+    parser.add_argument(
         "--log-path",
         type=Path,
         default=None,
@@ -262,8 +272,17 @@ def main(argv: list[str] | None = None) -> int:
     log_path = args.log_path or Path(tempfile.mkstemp(prefix="cryodaq_soak_", suffix=".log")[1])
     allowlist = tuple(DEFAULT_ALLOWLIST) + tuple(args.allow)
 
-    print(f"[soak] duration={args.duration:.0f}s grace={args.grace:.0f}s log={log_path}")
-    result = run_soak(args.duration, log_path=log_path, grace_s=args.grace, allowlist=allowlist)
+    print(
+        f"[soak] duration={args.duration:.0f}s grace={args.grace:.0f}s "
+        f"startup_timeout={args.startup_timeout:.0f}s log={log_path}"
+    )
+    result = run_soak(
+        args.duration,
+        log_path=log_path,
+        grace_s=args.grace,
+        startup_timeout_s=args.startup_timeout,
+        allowlist=allowlist,
+    )
 
     print(
         f"[soak] alive_before_shutdown={result.alive_before_shutdown} "
