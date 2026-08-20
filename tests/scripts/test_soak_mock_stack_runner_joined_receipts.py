@@ -29,6 +29,8 @@ from cryodaq.periodic_state import (
 from scripts import soak_mock_stack as soak
 from scripts import soak_mock_stack_runner as runner
 
+_SHORT = __import__("scripts.soak_mock_stack", fromlist=["profile"]).profile("short")
+
 _POSIX_EVIDENCE = pytest.mark.skipif(os.name != "posix", reason="POSIX evidence filesystem authority")
 
 
@@ -212,7 +214,7 @@ def _prepare_real_periodic_acceptance(
         shutdown_elapsed=0.1,
         collector=SimpleNamespace(observations=()),  # type: ignore[arg-type]
     )
-    monkeypatch.setattr(runner._PosixSoakRunner, "_run_owned", lambda self, candidate: private_result)
+    monkeypatch.setattr(runner._PosixSoakRunner, "_run_owned", lambda self, candidate, selected: private_result)
     monkeypatch.setattr(runner._PosixSoakRunner, "_finish_owned", lambda self, candidate, result: None)
     owner = runner._PosixSoakRunner()
     owner._used = True
@@ -225,7 +227,7 @@ def _accept_real_periodic_evidence(
 ) -> tuple[soak.Evidence, tuple[dict[str, object], dict[str, object]]]:
     evidence, owner, records = _prepare_real_periodic_acceptance(monkeypatch, tmp_path)
     try:
-        runner._DELIVERY_EVIDENCE.run(owner, evidence)
+        runner._DELIVERY_EVIDENCE.run(owner, evidence, _SHORT)
         evidence._verify_periodic_delivery_seal()
     except BaseException:
         evidence.close()
@@ -325,7 +327,7 @@ def test_real_acceptance_rejects_png_mutation_before_private_seal_capture(
     monkeypatch.setattr(soak, "_atomic_json_at", interposed_atomic_json_at)
     try:
         with pytest.raises(ValueError, match="PNG"):
-            runner._DELIVERY_EVIDENCE.run(owner, evidence)
+            runner._DELIVERY_EVIDENCE.run(owner, evidence, _SHORT)
         assert evidence.state is soak.RunState.FAIL
     finally:
         evidence.close()
@@ -398,7 +400,7 @@ def test_real_periodic_acceptance_rejects_preexisting_hardlink(monkeypatch: pyte
     try:
         os.link(evidence.directory / str(records[0]["filename"]), linked)
         with pytest.raises(ValueError, match="identity is unsafe"):
-            runner._DELIVERY_EVIDENCE.run(owner, evidence)
+            runner._DELIVERY_EVIDENCE.run(owner, evidence, _SHORT)
         assert evidence.state is soak.RunState.FAIL
         assert json.loads((evidence.directory / "summary.json").read_text(encoding="utf-8"))["status"] == "FAIL"
     finally:
@@ -625,7 +627,13 @@ def test_caller_cannot_mint_without_triggering_owned_execution(monkeypatch: pyte
             runner._consume_periodic_delivery_authority(forged_authority, candidate_evidence)
     with pytest.raises(runner._RunnerFoundationError, match="unregistered"):
         runner._consume_periodic_delivery_authority(forged_authority, evidence)
-    assert tuple(inspect.signature(runner._DELIVERY_EVIDENCE.run).parameters) == ("runner", "evidence")
+    # The profile is forwarded now; a registry that drops it leaves the runner reading
+    # an unbound name, which crashed every real invocation once.
+    assert tuple(inspect.signature(runner._DELIVERY_EVIDENCE.run).parameters) == (
+        "runner",
+        "evidence",
+        "selected",
+    )
     with pytest.raises(TypeError, match="unexpected keyword"):
         runner._DELIVERY_EVIDENCE.run(  # type: ignore[call-arg]
             owner,
@@ -634,13 +642,13 @@ def test_caller_cannot_mint_without_triggering_owned_execution(monkeypatch: pyte
         )
     executions: list[object] = []
 
-    def execution_harness(self: object, candidate: object) -> runner._OwnedRunResult:
+    def execution_harness(self: object, candidate: object, selected: object) -> runner._OwnedRunResult:
         executions.extend((self, candidate))
         raise RuntimeError("owned execution reached")
 
     monkeypatch.setattr(runner._PosixSoakRunner, "_run_owned", execution_harness)
     with pytest.raises(RuntimeError, match="owned execution reached"):
-        runner._DELIVERY_EVIDENCE.run(owner, evidence)
+        runner._DELIVERY_EVIDENCE.run(owner, evidence, _SHORT)
     assert executions == [owner, evidence]
     assert not persisted.exists()
 
@@ -675,7 +683,7 @@ def test_integrated_owner_private_execution_harness_issues_one_exact_evidence_bo
         collector=Collector(),  # type: ignore[arg-type]
     )
 
-    def execution_harness(self: object, candidate: object) -> runner._OwnedRunResult:
+    def execution_harness(self: object, candidate: object, selected: object) -> runner._OwnedRunResult:
         executions.append((self, candidate))
         return private_result
 
@@ -684,7 +692,7 @@ def test_integrated_owner_private_execution_harness_issues_one_exact_evidence_bo
 
     monkeypatch.setattr(runner._PosixSoakRunner, "_run_owned", execution_harness)
     monkeypatch.setattr(runner._PosixSoakRunner, "_finish_owned", finish_harness)
-    runner._DELIVERY_EVIDENCE.run(owner, evidence)
+    runner._DELIVERY_EVIDENCE.run(owner, evidence, _SHORT)
     assert len(accepted) == 1
     assert executions == [(owner, evidence)]
     assert finalizations == [(owner, evidence, private_result)]

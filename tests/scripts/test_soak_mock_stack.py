@@ -1237,7 +1237,7 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
         def require_platform() -> None:
             return None
 
-        def run(self, evidence: soak.Evidence) -> None:
+        def run(self, evidence: soak.Evidence, selected=None) -> None:
             evidence.write_manifest(
                 {
                     "profile": "short",
@@ -1311,7 +1311,7 @@ class FakeRunner:
     def require_platform():
         return None
 
-    def run(self, evidence):
+    def run(self, evidence, selected=None):
         from scripts import soak_mock_stack as soak
         if type(evidence) is not soak.Evidence:
             raise TypeError("evidence must be the exact Evidence type")
@@ -1366,7 +1366,7 @@ class MustNotRun:
     def require_platform():
         Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("require-platform")
 
-    def run(self, evidence):
+    def run(self, evidence, selected=None):
         Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("run")
 
 runner._PosixSoakRunner = MustNotRun
