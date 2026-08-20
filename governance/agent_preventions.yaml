@@ -3282,6 +3282,14 @@ false_green_pairs:
     red_evidence: the_parser_regression_guard_was_removed_or_deselected_so_a_duplicate_G4_PROCEDURES_opener_outside_the_bounded_block_was_accepted_while_the_registered_exact_gate_set_guard_remained_green_2026_08_13_pending_immutable_capture
     green_evidence: pending
 
+  - id: DRAFT-GATE-EXPRESSION-EXACT-FALSE-GREEN-502
+    status: open
+    scope: product_contract
+    runtime_prevention_id: DRAFT-GATE-EXPRESSION-EXACT-001
+    guard: tests/governance/test_protected_ci_evidence_gate.py::test_draft_gate_expressions_are_compared_not_searched
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6448,4 +6456,26 @@ records:
       - node: tests/docs/test_evidence_packaging_readiness.py::test_procedure_parser_rejects_duplicate_opener_outside_bounded_block
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending
+  - id: DRAFT-GATE-EXPRESSION-EXACT-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every guard that decides whether a workflow expression has a required property.
+    classification: predicate_read_not_evaluated
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A workflow can lose its draft gate, its per-pull-request concurrency, or its cancellation while the guard that proves them stays green.
+    invariant: A workflow expression is compared with the exact expression reviewed FOR THAT WORKFLOW; asking whether it merely contains a substring is refused.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/governance/test_protected_ci_evidence_gate.py::test_every_pull_request_workflow_keeps_ready_to_draft_gating
+        ci_partition: remaining
+      - node: tests/governance/test_protected_ci_evidence_gate.py::test_draft_gate_expressions_are_compared_not_searched
+        ci_partition: remaining
+    automation_limit: The guard compares expressions as text against a reviewed list; it does not evaluate them the way the hosted runner does, so a new expression must be reasoned about by a person before it is added.
+    red_evidence: pending
     green_evidence: pending

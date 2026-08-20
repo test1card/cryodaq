@@ -37,16 +37,27 @@ _APPROVED_CANCEL_EXPRESSIONS = frozenset(
         "${{ github.ref != 'refs/heads/master' }}",
     }
 )
-# Every concurrency group reviewed as giving each pull request its OWN group. Membership,
-# never a substring search: `${{ startsWith(github.ref, 'refs/pull/') }}` mentions
-# `github.ref` and evaluates to the SAME group for every pull request, so activity on one
-# would cancel the jobs of the pull request that is about to merge.
-_APPROVED_CONCURRENCY_GROUPS = frozenset(
-    {
-        "${{ github.workflow }}-${{ github.ref }}",
-        "docs-gate-${{ github.ref }}",
-    }
-)
+# Every concurrency group reviewed as giving each pull request its OWN group, KEYED BY
+# THE WORKFLOW IT BELONGS TO. Two reasons it is not a plain set of strings:
+#
+#   * membership rather than a substring search, because
+#     `${{ startsWith(github.ref, 'refs/pull/') }}` mentions `github.ref` and evaluates to
+#     the SAME group for every pull request, so activity on one cancels the jobs of the
+#     pull request that is about to merge;
+#   * keyed by workflow, because a set alone lets one workflow adopt ANOTHER's reviewed
+#     group. Give `main.yml` the docs-gate group and both then share a group on a pull
+#     request while both enable cancellation -- whichever starts later cancels the other's
+#     required run, and a required context that was cancelled waits forever.
+#
+# `${{ github.workflow }}` already differs per workflow, which is why three of them share
+# that expression; `docs-gate.yml` spells its own name instead and therefore gets its own
+# entry rather than the shared one.
+_APPROVED_CONCURRENCY_GROUPS: dict[str, str] = {
+    "main.yml": "${{ github.workflow }}-${{ github.ref }}",
+    "protected-ci-evidence-gate.yml": "${{ github.workflow }}-${{ github.ref }}",
+    "windows-onedir-smoke.yml": "${{ github.workflow }}-${{ github.ref }}",
+    "docs-gate.yml": "docs-gate-${{ github.ref }}",
+}
 # Every job condition reviewed as running the job on a ready pull request and NOT on a
 # draft. Membership again: `... || true` contains the whole draft comparison and runs
 # every expensive job on every draft.
@@ -397,6 +408,62 @@ def test_attestation_uses_absolute_conda_interpreter() -> None:
     assert '"$interpreter" -B -m tools.ci_candidate_evidence attest-job' in identity["run"]
 
 
+def test_draft_gate_expressions_are_compared_not_searched() -> None:
+    """The paired guard for DRAFT-GATE-EXPRESSION-EXACT-001.
+
+    THE FALSE GREEN THIS EXISTS FOR IS A GUARD THAT READS AN EXPRESSION INSTEAD OF
+    COMPARING IT. Three shapes of it were confirmed on this branch, each one a
+    deterministic failure that a green suite had already survived:
+
+    * a job condition widened with `|| true` still CONTAINS the whole draft comparison,
+      and runs every expensive job on every draft;
+    * a concurrency group that merely MENTIONS `github.ref` can be the same for every
+      pull request, so activity on one cancels the jobs of the one about to merge;
+    * one workflow adopting ANOTHER's reviewed group passes a global membership check,
+      and then both share a group while both cancel.
+
+    So this runs those mutations against the real workflow payloads and requires the
+    gating assertion to reject each one. It calls the production assertion rather than
+    restating it, which is what makes weakening that assertion visible here.
+    """
+
+    import copy
+
+    workflows = dict(_pull_request_workflows())
+    assert "main.yml" in workflows, "the ordinary workflow is missing from the inventory"
+
+    def _refuses(name: str, payload: dict) -> bool:
+        try:
+            test_every_pull_request_workflow_keeps_ready_to_draft_gating(name, payload)
+        except AssertionError:
+            return True
+        return False
+
+    # The unmutated payload must PASS, or the mutations below prove nothing.
+    assert not _refuses("main.yml", copy.deepcopy(workflows["main.yml"])), (
+        "the reviewed workflow does not satisfy its own gating assertion"
+    )
+
+    widened = copy.deepcopy(workflows["main.yml"])
+    for job in widened["jobs"].values():
+        job["if"] = f"{job['if']} || true"
+    assert _refuses("main.yml", widened), "a condition widened with `|| true` was accepted"
+
+    constant_group = copy.deepcopy(workflows["main.yml"])
+    constant_group["concurrency"]["group"] = "${{ startsWith(github.ref, 'refs/pull/') }}"
+    assert _refuses("main.yml", constant_group), "a group that is constant per pull request was accepted"
+
+    borrowed_group = copy.deepcopy(workflows["main.yml"])
+    borrowed_group["concurrency"]["group"] = _APPROVED_CONCURRENCY_GROUPS["docs-gate.yml"]
+    assert _refuses("main.yml", borrowed_group), (
+        "one workflow adopted another's reviewed group and the guard accepted it"
+    )
+
+    inverted_cancel = copy.deepcopy(workflows["main.yml"])
+    inverted_cancel["concurrency"]["cancel-in-progress"] = "${{ github.event_name != 'pull_request' }}"
+    assert _refuses("main.yml", inverted_cancel), "an inverted cancellation expression was accepted"
+
+
 @pytest.mark.parametrize(
     ("workflow_name", "payload"),
     _pull_request_workflows(),
@@ -425,11 +492,17 @@ def test_every_pull_request_workflow_keeps_ready_to_draft_gating(workflow_name: 
 
     concurrency = payload["concurrency"]
     group = concurrency["group"]
-    assert group in _APPROVED_CONCURRENCY_GROUPS, (
-        f"{workflow_name}: concurrency group is {group!r}, which is not one of the reviewed "
-        f"groups {sorted(_APPROVED_CONCURRENCY_GROUPS)}. Asking only whether the expression "
-        "MENTIONS `github.ref` accepts a group that is the same for every pull request, and "
-        "then activity on any one of them cancels the jobs of the one about to merge."
+    expected_group = _APPROVED_CONCURRENCY_GROUPS.get(workflow_name)
+    assert expected_group is not None, (
+        f"{workflow_name}: no reviewed concurrency group is recorded for this workflow. A new "
+        "pull_request workflow must have its group reviewed here, not inherit one by accident."
+    )
+    assert group == expected_group, (
+        f"{workflow_name}: concurrency group is {group!r}, and the group reviewed for THIS "
+        f"workflow is {expected_group!r}. Two things this refuses: a group that merely mentions "
+        "`github.ref` and is therefore the same for every pull request; and one workflow "
+        "adopting another's reviewed group, after which both share a group on a pull request "
+        "while both cancel, so whichever starts later cancels the other's required run."
     )
     # AN APPROVED EXPRESSION, not a mention of the word. Asking whether the string
     # CONTAINS "pull_request" accepts `${{ github.event_name != 'pull_request' }}`, which
