@@ -293,6 +293,39 @@ def _manifest_digest(root: Path, paths: list[Path]) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def source_artifact_paths(project_root: Path) -> list[Path]:
+    """Every file whose bytes the artifact digest measures, in one place.
+
+    It was written inline inside the qualification context, which meant the ONLY way to
+    know what had been measured was to run the qualification again. The plugin pipeline
+    has to ask the same question immediately before it imports, so the answer lives here
+    and both callers use it.
+    """
+
+    package_root = project_root / "src" / "cryodaq"
+    if not package_root.is_dir():
+        raise QualificationReceiptError("source package manifest is unavailable")
+
+    def _measured(root: Path) -> list[Path]:
+        return [
+            path
+            for path in root.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
+        ]
+
+    package_paths = _measured(package_root)
+    if not package_paths:
+        raise QualificationReceiptError("source package manifest is empty")
+    plugins_root = project_root / "plugins"
+    return package_paths + (_measured(plugins_root) if plugins_root.is_dir() else [])
+
+
+def source_artifact_digest(project_root: Path) -> str:
+    """The artifact digest of the tree AS IT IS NOW."""
+
+    return _manifest_digest(project_root, source_artifact_paths(project_root))
+
+
 def source_checkout_qualification_context(
     *,
     project_root: Path,
@@ -328,22 +361,7 @@ def source_checkout_qualification_context(
     except (OSError, subprocess.SubprocessError) as exc:
         raise QualificationReceiptError("source build identity is unavailable") from exc
 
-    package_root = project_root / "src" / "cryodaq"
-    plugins_root = project_root / "plugins"
-    if not package_root.is_dir():
-        raise QualificationReceiptError("source package manifest is unavailable")
-    package_paths = [
-        path
-        for path in package_root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
-    ]
-    if not package_paths:
-        raise QualificationReceiptError("source package manifest is empty")
-    artifact_paths = package_paths + [
-        path
-        for path in plugins_root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc", ".pyo"}
-    ] if plugins_root.is_dir() else package_paths
+    artifact_paths = source_artifact_paths(project_root)
     config_paths = [
         path for path in config_directory.rglob("*") if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}
     ]

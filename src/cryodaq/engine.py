@@ -7004,7 +7004,16 @@ async def _run_engine(
     command_ingress = ZMQCommandIngressPair(ordinary=cmd_server, safe=safe_cmd_server)
 
     # Plugin Pipeline
-    plugin_pipeline = PluginPipeline(broker, _PLUGINS_DIR, hot_reload=qualification_receipt is None)
+    plugin_pipeline = PluginPipeline(
+        broker,
+        _PLUGINS_DIR,
+        hot_reload=qualification_receipt is None,
+        # A qualified run remeasures the artifacts immediately before importing plugins and
+        # refuses if they moved. Turning hot reload off is not enough on its own: it stops
+        # the watch loop, not the first import.
+        measured_artifact_sha256=(None if qualification_receipt is None else qualification_receipt.artifact_sha256),
+        project_root=_PROJECT_ROOT,
+    )
 
     # --- CooldownService (прогноз охлаждения) ---
     cooldown_service: Any = None

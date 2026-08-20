@@ -101,6 +101,8 @@ class PluginPipeline:
         *,
         batch_interval_s: float = 1.0,
         hot_reload: bool = True,
+        measured_artifact_sha256: str | None = None,
+        project_root: Path | None = None,
     ) -> None:
         """Инициализировать пайплайн.
 
@@ -114,6 +116,17 @@ class PluginPipeline:
         self._plugins: dict[str, AnalyticsPlugin] = {}
         self._batch_interval_s = batch_interval_s
         self._hot_reload = hot_reload
+        # WHAT WAS MEASURED, AND WHERE TO MEASURE IT AGAIN. Turning hot reload off only
+        # stops the later watch loop; the FIRST import still reads whatever is on disk at
+        # that moment. A plugin edited between qualification and start would therefore run
+        # unmeasured Python inside the engine while the receipt still claimed the measured
+        # build -- which is the one thing a qualified run must not be able to say.
+        self._measured_artifact_sha256 = measured_artifact_sha256
+        self._project_root = project_root
+        # Parks the watch task when hot reload is off. It is set by the same line that
+        # clears _running, so the task ends on the stop that happened rather than on the
+        # next tick of a timer that learns nothing.
+        self._watch_parked: asyncio.Event | None = None
         self._queue: asyncio.Queue[Reading] | None = None
         self._process_task: asyncio.Task[None] | None = None
         self._watch_task: asyncio.Task[None] | None = None
@@ -173,6 +186,25 @@ class PluginPipeline:
             and not self._watch_task.done()
         )
 
+    def _refuse_unmeasured_plugins(self) -> None:
+        """Remeasure immediately before importing, and refuse on any difference.
+
+        The comparison is the whole artifact manifest rather than the plugins alone,
+        because that is exactly what the receipt binds -- a narrower check would accept a
+        tree whose receipt no longer describes it.
+        """
+
+        if self._measured_artifact_sha256 is None or self._project_root is None:
+            return
+        from cryodaq.core.qualification import source_artifact_digest
+
+        current = source_artifact_digest(self._project_root)
+        if current != self._measured_artifact_sha256:
+            raise RuntimeError(
+                "source artifacts changed after qualification measured them; refusing to "
+                "import plugins into a qualified run"
+            )
+
     async def _start_locked(self) -> None:
         """Create exactly one subscription/task generation or roll it back."""
 
@@ -211,6 +243,7 @@ class PluginPipeline:
             logger.info("Пайплайн подписан на брокер как '%s'", _SUBSCRIBE_NAME)
 
             self._plugins_dir.mkdir(parents=True, exist_ok=True)
+            self._refuse_unmeasured_plugins()
             for path in sorted(self._plugins_dir.glob("*.py")):
                 self._load_plugin(path)
 
@@ -244,6 +277,8 @@ class PluginPipeline:
         """Attempt every exact owner settlement and retain ambiguous owners."""
 
         self._running = False
+        if self._watch_parked is not None:
+            self._watch_parked.set()
         failures: list[BaseException] = []
         cancellations: list[asyncio.CancelledError] = []
 
@@ -759,8 +794,10 @@ class PluginPipeline:
         обработку данных.
         """
         if not self._hot_reload:
-            while self._running:
-                await asyncio.sleep(_WATCH_INTERVAL_S)
+            if self._watch_parked is None:
+                self._watch_parked = asyncio.Event()
+            self._watch_parked.clear()
+            await self._watch_parked.wait()
             return
 
         known_files: dict[str, float] | None
