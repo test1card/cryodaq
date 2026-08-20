@@ -1049,7 +1049,44 @@ def test_faults_are_exactly_correlated_to_sample_transitions_and_injection_contr
     launcher_restart = json.loads(json.dumps(samples))
     launcher_restart[-1]["roles"]["launcher"].update({"epoch": 1, "pid": 110, "started_ns": 1100})
     errors = soak._validate_faults(faults, selected, launcher_restart)
-    assert "launcher or bridge restarted during fault qualification" in errors
+    assert "launcher restarted during fault qualification" in errors
+
+
+def test_a_bridge_replacement_is_expected_only_while_an_engine_fault_recovers() -> None:
+    """The bridge was forbidden outright, which was right until the engine could restart.
+
+    An engine replacement replaces the bridge on purpose -- a new child must not inherit an
+    old transport -- so this contract makes the same distinction the evidence stream makes.
+    A bridge transition inside a scheduled engine fault's recovery window is expected; one
+    anywhere else is still exactly the defect the old refusal was written for.
+    """
+
+    selected = soak.profile("short")
+    samples = _qualification_samples()
+    faults = _faults()
+    engine_fault_s = next(float(record["observed_s"]) for record in faults if record["target"] == "engine")
+
+    def _with_bridge_change_at(threshold: float) -> list[dict]:
+        changed = json.loads(json.dumps(samples))
+        for sample in changed:
+            if float(sample["elapsed_s"]) >= threshold:
+                sample["roles"]["bridge"].update({"epoch": 1, "pid": 131, "started_ns": 1310})
+        return changed
+
+    accompanying = _with_bridge_change_at(engine_fault_s + 1.0)
+    assert soak._validate_faults(faults, selected, accompanying) == [], (
+        "a bridge replaced while the engine fault recovers is what an engine restart does"
+    )
+
+    # Far from any engine fault: the original defect, and it must still be refused.
+    stray = _with_bridge_change_at(engine_fault_s + soak.RECOVERY_CEILING_S + 30.0)
+    errors = soak._validate_faults(faults, selected, stray)
+    assert any("bridge restarted outside" in error for error in errors), errors
+
+    # And a launcher transition has no such exception at all.
+    launcher_restart = json.loads(json.dumps(samples))
+    launcher_restart[-1]["roles"]["launcher"].update({"epoch": 1, "pid": 110, "started_ns": 1100})
+    assert "launcher restarted during fault qualification" in soak._validate_faults(faults, selected, launcher_restart)
 
 
 @_POSIX_EVIDENCE

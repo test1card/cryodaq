@@ -1578,24 +1578,50 @@ def _validate_faults(
                     )
                 )
             previous = current
-    if any(role in {"launcher", "bridge"} for role, *_ in transitions):
-        errors.append("launcher or bridge restarted during fault qualification")
+    # A LAUNCHER transition is still always a defect: nothing in this profile replaces it.
+    if any(role == "launcher" for role, *_ in transitions):
+        errors.append("launcher restarted during fault qualification")
+
     expected_transitions: list[tuple[str, float, tuple[int, int], tuple[int, int]]] = []
+    engine_fault_times: list[float] = []
     for record in records:
-        if str(record.get("target")) not in {"engine", "assistant"}:
+        target = str(record.get("target"))
+        if target not in {"engine", "assistant"}:
             continue
         try:
+            observed_s = float(record["observed_s"])
             expected_transitions.append(
                 (
-                    str(record["target"]),
-                    float(record["observed_s"]),
+                    target,
+                    observed_s,
                     (int(record["pre_pid"]), int(record["pre_started_ns"])),
                     (int(record["replacement_pid"]), int(record["replacement_started_ns"])),
                 )
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             errors.append("fault transition correlation schema is invalid")
-    for role, transition_s, old_identity, new_identity in transitions:
+            continue
+        if target == "engine":
+            engine_fault_times.append(observed_s)
+
+    # A BRIDGE transition used to be a defect without exception, which was right while an
+    # owned engine could never restart. It can now, and every engine replacement replaces
+    # the bridge on purpose -- a new child must not inherit an old transport -- so this
+    # contract has to make the same distinction the evidence stream makes: a bridge
+    # replacement that ACCOMPANIES a scheduled engine fault is expected, and one that
+    # happens anywhere else is still exactly the defect this refusal was written for.
+    bridge_transitions = [item for item in transitions if item[0] == "bridge"]
+    for _role, transition_s, _old_identity, _new_identity in bridge_transitions:
+        accompanying = [
+            fault_s for fault_s in engine_fault_times if fault_s < transition_s <= fault_s + RECOVERY_CEILING_S
+        ]
+        if len(accompanying) != 1:
+            errors.append("bridge restarted outside any scheduled engine fault recovery")
+    if len(bridge_transitions) > len(engine_fault_times):
+        errors.append("more bridge replacements than scheduled engine faults")
+
+    role_transitions = [item for item in transitions if item[0] in {"engine", "assistant"}]
+    for role, transition_s, old_identity, new_identity in role_transitions:
         candidates = [
             item
             for item in expected_transitions
@@ -1606,7 +1632,7 @@ def _validate_faults(
         ]
         if len(candidates) != 1:
             errors.append(f"{role} sample transition is phantom, unscheduled, or ambiguous")
-    if len(transitions) != len(expected_transitions):
+    if len(role_transitions) != len(expected_transitions):
         errors.append("fault ledger and sample epoch transitions are not one-to-one")
     return errors
 
