@@ -147,11 +147,19 @@ def test_the_short_profile_passes_the_selection_boundary(monkeypatch) -> None:
 
     instance = _runner_at_the_selection_boundary(monkeypatch)
 
-    # It fails at the NEXT check, on the object standing in for Evidence, and the message
-    # names that instead of either refusal. A bare `Exception` here would have hidden a
-    # refusal that fired for the wrong reason, and a registered guard refuses one anyway.
-    with pytest.raises(runner._RunnerFoundationError, match="process start identity is unavailable"):
+    # WHICH later failure arrives depends on the machine, so it must not be pinned. On this
+    # host the next check to speak is the process start identity; on the hosted runner the
+    # exported candidate tree is not a Git worktree and that check speaks first. Pinning the
+    # first message I happened to see turned a green test here into a red one there.
+    #
+    # What this test is FOR is that the short profile passes the two refusals, so it names
+    # the exception CLASS -- specific, as the registered guard requires -- and then asserts
+    # the message is neither refusal.
+    with pytest.raises(runner._RunnerFoundationError) as caught:
         instance._run_owned(object(), soak.profile("short"))
+    message = str(caught.value)
+    assert "not one of the reviewed profiles" not in message, message
+    assert "never seal" not in message, message
 
 
 @_POSIX_EVIDENCE
