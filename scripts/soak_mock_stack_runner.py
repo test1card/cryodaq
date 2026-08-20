@@ -2683,11 +2683,27 @@ def _parse_bridge_handshake(
 
 @dataclass(frozen=True, slots=True)
 class _BridgeEpoch:
-    """The bridge incarnation the runner currently accepts evidence about."""
+    """The bridge incarnation the runner currently accepts evidence about.
+
+    The bound identity travels with it. The role classifier is handed a bridge identity and
+    refuses a topology whose bridge is a different process, so an epoch that advanced
+    without carrying its identity left the classifier looking for a retired PID -- which
+    fails for as long as the ceiling allows, and then reports that the ENGINE never
+    recovered. Measured exactly that way before this field existed.
+    """
 
     bridge_pid: int
     restart_count: int
     sequence: int
+    identity: _ProcessIdentity
+
+
+def _role_identity_of(identity: _ProcessIdentity) -> Any:
+    """The role-topology form of one bound process identity."""
+
+    from scripts import soak_mock_stack as soak
+
+    return soak.ProcessIdentity(identity.pid, int(identity.start_identity.rsplit("=", 1)[1]))
 
 
 def _consume_bridge_stream_record(
@@ -2724,10 +2740,10 @@ def _consume_bridge_stream_record(
                 restart_count=record.restart_count,
                 retired_restart_count=record.retired_restart_count,
             )
-        return _BridgeEpoch(record.bridge_pid, record.restart_count, record.sequence)
+        return _BridgeEpoch(record.bridge_pid, record.restart_count, record.sequence, identity)
     if guard is not None:
         guard.observe(locked.identity_for_pid(record.bridge_pid), restart_count=record.restart_count)
-    return _BridgeEpoch(epoch.bridge_pid, epoch.restart_count, record.sequence)
+    return _BridgeEpoch(epoch.bridge_pid, epoch.restart_count, record.sequence, epoch.identity)
 
 
 def _parse_bridge_stream_record(
@@ -4121,11 +4137,13 @@ class _PosixSoakRunner:
                                 )
                                 bridge_identity = _bind_positive_bridge_identity(handshake, bridge_observation)
                                 bridge_guard = _BridgeEpochGuard(bridge_identity, handshake.restart_count)
-                                bridge_epoch = _BridgeEpoch(handshake.bridge_pid, handshake.restart_count, 0)
-                                bridge = soak.ProcessIdentity(
-                                    bridge_identity.pid,
-                                    int(bridge_identity.start_identity.rsplit("=", 1)[1]),
+                                bridge_epoch = _BridgeEpoch(
+                                    handshake.bridge_pid,
+                                    handshake.restart_count,
+                                    0,
+                                    bridge_identity,
                                 )
+                                bridge = _role_identity_of(bridge_identity)
                             else:
                                 bridge_epoch = _consume_bridge_stream_record(
                                     raw,
@@ -4192,6 +4210,7 @@ class _PosixSoakRunner:
                                 guard=bridge_guard,
                             )
                             bridge_sequence = bridge_epoch.sequence
+                            bridge = _role_identity_of(bridge_epoch.identity)
                         if elapsed >= next_sample or (
                             event_index < len(selected.events) and elapsed >= selected.events[event_index].at_s
                         ):
@@ -4312,6 +4331,9 @@ class _PosixSoakRunner:
                                         guard=bridge_guard,
                                     )
                                     bridge_sequence = bridge_epoch.sequence
+                                    # The classifier below is handed this identity; a
+                                    # replaced bridge must be the one it looks for.
+                                    bridge = _role_identity_of(bridge_epoch.identity)
                                 try:
                                     candidate, candidate_tree = self._load_roles(broad, launcher, bridge)
                                 except ValueError:
