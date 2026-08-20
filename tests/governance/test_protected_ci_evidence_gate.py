@@ -58,16 +58,49 @@ _APPROVED_CONCURRENCY_GROUPS: dict[str, str] = {
     "windows-onedir-smoke.yml": "${{ github.workflow }}-${{ github.ref }}",
     "docs-gate.yml": "docs-gate-${{ github.ref }}",
 }
+# `${{ github.workflow }}` is the workflow's top-level NAME, not its file name. Three
+# workflows share that expression, so their groups are distinct only while their names
+# are. Give two of them the same `name:` and they collide on a pull request while both
+# cancel -- either can then cancel the other's required run, and the filename-to-
+# expression table above would still accept it. So the group is EVALUATED for one
+# pull-request ref and the results must be distinct.
+_GROUP_PROBE_REF = "refs/pull/9999/merge"
+
+
+def _evaluated_group(payload: dict, group: str) -> str:
+    """Substitute the two context values these groups use, and nothing else.
+
+    A general expression evaluator is not needed and would be worse: the reviewed groups
+    use exactly these two, and a group that used anything else would fail the exact
+    comparison before reaching here.
+    """
+
+    workflow_name = payload.get("name")
+    assert isinstance(workflow_name, str) and workflow_name, "workflow has no top-level name"
+    return group.replace("${{ github.workflow }}", workflow_name).replace("${{ github.ref }}", _GROUP_PROBE_REF)
+
+
 # Every job condition reviewed as running the job on a ready pull request and NOT on a
 # draft. Membership again: `... || true` contains the whole draft comparison and runs
 # every expensive job on every draft.
-_APPROVED_DRAFT_CONDITIONS = frozenset(
-    {
-        "${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}",
-        "${{ !cancelled() && always() && (github.event_name != 'pull_request'"
-        " || github.event.pull_request.draft == false) }}",
-    }
+# KEYED BY WORKFLOW AND BY JOB. A global list lets a job borrow an expression reviewed
+# for a different dependency role: give `main.yml`'s `test` job the protected final
+# gate's `!cancelled() && always() && ...` and `always()` overrides the normal skip when
+# `candidate_identity` fails, so all eight matrix jobs launch with empty identity outputs
+# and a default checkout before failing. Same string, different role, different outcome.
+_ORDINARY_DRAFT_CONDITION = "${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}"
+_FINAL_GATE_DRAFT_CONDITION = (
+    "${{ !cancelled() && always() && (github.event_name != 'pull_request'"
+    " || github.event.pull_request.draft == false) }}"
 )
+_APPROVED_JOB_CONDITIONS: dict[tuple[str, str], str] = {
+    ("main.yml", "candidate_identity"): _ORDINARY_DRAFT_CONDITION,
+    ("main.yml", "test"): _ORDINARY_DRAFT_CONDITION,
+    ("docs-gate.yml", "docs-freshness"): _ORDINARY_DRAFT_CONDITION,
+    ("windows-onedir-smoke.yml", "windows-onedir"): _ORDINARY_DRAFT_CONDITION,
+    ("protected-ci-evidence-gate.yml", "protected-execution"): _ORDINARY_DRAFT_CONDITION,
+    ("protected-ci-evidence-gate.yml", "protected-ci-evidence-gate"): _FINAL_GATE_DRAFT_CONDITION,
+}
 
 
 def _workflow_trigger(payload: dict) -> dict:
@@ -408,6 +441,31 @@ def test_attestation_uses_absolute_conda_interpreter() -> None:
     assert '"$interpreter" -B -m tools.ci_candidate_evidence attest-job' in identity["run"]
 
 
+def test_every_workflow_evaluates_to_its_own_concurrency_group() -> None:
+    """`${{ github.workflow }}` is the workflow's NAME, so distinct files can still collide.
+
+    Three workflows share that expression. Give two of them the same top-level `name:` and
+    their groups become one group on a pull request while both cancel, so either can
+    cancel the other's required run -- and a filename-to-expression table accepts it.
+    """
+
+    workflows = _pull_request_workflows()
+    evaluated: dict[str, str] = {}
+    for name, payload in workflows:
+        group = payload["concurrency"]["group"]
+        evaluated[name] = _evaluated_group(payload, group)
+
+    collisions = {
+        value: sorted(n for n, v in evaluated.items() if v == value)
+        for value in set(evaluated.values())
+        if list(evaluated.values()).count(value) > 1
+    }
+    assert not collisions, (
+        "these workflows evaluate to the SAME concurrency group for one pull request, so "
+        f"either can cancel the other's required run: {collisions}"
+    )
+
+
 def test_draft_gate_expressions_are_compared_not_searched() -> None:
     """The paired guard for DRAFT-GATE-EXPRESSION-EXACT-001.
 
@@ -462,6 +520,20 @@ def test_draft_gate_expressions_are_compared_not_searched() -> None:
     inverted_cancel = copy.deepcopy(workflows["main.yml"])
     inverted_cancel["concurrency"]["cancel-in-progress"] = "${{ github.event_name != 'pull_request' }}"
     assert _refuses("main.yml", inverted_cancel), "an inverted cancellation expression was accepted"
+
+    borrowed_condition = copy.deepcopy(workflows["main.yml"])
+    borrowed_condition["jobs"]["test"]["if"] = _FINAL_GATE_DRAFT_CONDITION
+    assert _refuses("main.yml", borrowed_condition), (
+        "a job borrowed a condition reviewed for a different dependency role and was accepted"
+    )
+
+    # And the rename that makes two DIFFERENT files share one evaluated group.
+    renamed = copy.deepcopy(workflows["main.yml"])
+    renamed["name"] = dict(workflows)["protected-ci-evidence-gate.yml"]["name"]
+    assert _evaluated_group(renamed, renamed["concurrency"]["group"]) == _evaluated_group(
+        dict(workflows)["protected-ci-evidence-gate.yml"],
+        dict(workflows)["protected-ci-evidence-gate.yml"]["concurrency"]["group"],
+    ), "the rename does not actually collide, so this mutation proves nothing"
 
 
 @pytest.mark.parametrize(
@@ -518,9 +590,16 @@ def test_every_pull_request_workflow_keeps_ready_to_draft_gating(workflow_name: 
 
     for job_name, job in payload["jobs"].items():
         condition = job.get("if", "")
-        assert condition in _APPROVED_DRAFT_CONDITIONS, (
-            f"{workflow_name}: job {job_name!r} has condition {condition!r}, which is not one of "
-            f"the reviewed conditions {sorted(_APPROVED_DRAFT_CONDITIONS)}. Asking only whether "
-            "the condition CONTAINS the draft comparison accepts `... || true`, which runs every "
-            "expensive job on every draft while this guard stays green."
+        expected_condition = _APPROVED_JOB_CONDITIONS.get((workflow_name, job_name))
+        assert expected_condition is not None, (
+            f"{workflow_name}: job {job_name!r} has no reviewed condition of its own. A new job "
+            "must have its condition reviewed here rather than inheriting one by accident."
+        )
+        assert condition == expected_condition, (
+            f"{workflow_name}: job {job_name!r} has condition {condition!r}, and the condition "
+            f"reviewed for THIS job is {expected_condition!r}. Two things this refuses: a "
+            "condition widened with `|| true`, which runs every expensive job on every draft; "
+            "and a job borrowing an expression reviewed for a different dependency role, where "
+            "`always()` overrides the normal skip on a failed `needs` and launches the matrix "
+            "with empty identity outputs."
         )
