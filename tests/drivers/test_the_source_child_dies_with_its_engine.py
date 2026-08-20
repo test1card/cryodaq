@@ -307,18 +307,24 @@ def test_the_expected_parent_is_the_engines_pid_not_one_the_child_reads(tmp_path
     )
 
 
-def test_the_binding_runs_before_any_handle_exists() -> None:
+def test_the_binding_runs_before_any_handle_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     """Order matters: a VISA session opened first would be what the orphan holds."""
-
-    import inspect
 
     from cryodaq.drivers.transport import usbtmc
 
-    source = inspect.getsource(usbtmc._visa_process_main)
-    body = source.split('"""', 2)[-1]
-    assert "_bind_lifetime_to_parent(expected_parent)" in body, (
-        "the child must bind its lifetime to the parent the engine named"
-    )
-    assert body.index("_bind_lifetime_to_parent(") < body.index("_receive_document"), (
-        "the binding must happen before the child reads its first request"
-    )
+    events: list[tuple[str, object]] = []
+
+    def bind(expected_parent: int) -> None:
+        events.append(("bound", expected_parent))
+
+    def worker(connection: object) -> None:
+        assert events == [("bound", 321)]
+        events.append(("worker", connection))
+
+    connection = object()
+    monkeypatch.setattr(usbtmc, "_bind_lifetime_to_parent", bind)
+    monkeypatch.setattr(usbtmc, "_visa_worker_loop", worker)
+
+    usbtmc._visa_process_main(connection, 321)
+
+    assert events == [("bound", 321), ("worker", connection)]

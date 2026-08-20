@@ -118,6 +118,21 @@ def test_production_transport_has_no_executor_or_mutable_process_target_seam() -
     assert not hasattr(transport, "_process_target")
 
 
+def test_process_entry_requires_and_forwards_captured_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = _Connection()
+    bound_parent_ids: list[int] = []
+    worker_connections: list[_Connection] = []
+    monkeypatch.setattr(usbtmc, "_bind_lifetime_to_parent", bound_parent_ids.append)
+    monkeypatch.setattr(usbtmc, "_visa_worker_loop", worker_connections.append)
+
+    usbtmc._visa_process_main(connection, 321)
+
+    assert bound_parent_ids == [321]
+    assert worker_connections == [connection]
+    with pytest.raises(TypeError):
+        usbtmc._visa_process_main(connection)
+
+
 @pytest.mark.parametrize(
     "frame",
     [
@@ -224,7 +239,7 @@ def test_worker_rejects_invalid_operation_payload_with_fixed_code(monkeypatch, p
     )
     monkeypatch.setattr(usbtmc, "_blocking_open_handles", lambda _resource: (object(), Resource()))
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert len(connection.sent) == 2
     error = usbtmc._decode_ipc_frame(connection.sent[1])
@@ -260,7 +275,7 @@ def test_worker_exports_fixed_error_code_without_exception_text(monkeypatch) -> 
     )
     monkeypatch.setattr(usbtmc, "_blocking_open_handles", lambda _resource: (object(), Resource()))
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     wire = b"".join(connection.sent)
     assert secret.encode() not in wire
@@ -334,7 +349,7 @@ def test_worker_rejects_invalid_initial_request_before_native_open(
         lambda _resource: native_calls.append("open") or (object(), object()),
     )
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert native_calls == []
     assert connection.closed is True
@@ -384,7 +399,7 @@ def test_worker_rejects_invalid_query_or_close_before_native_call(
     )
     monkeypatch.setattr(usbtmc, "_blocking_open_handles", lambda _resource: (Manager(), Resource()))
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert native_calls == []
     assert connection.closed is True
@@ -415,7 +430,7 @@ def test_worker_rejects_float_timeout_frame_before_native_call(monkeypatch: pyte
         lambda _resource: (object(), type("Resource", (), {"query": lambda *_args: native_calls.append("query")})()),
     )
 
-    usbtmc._visa_process_main(connection)
+    usbtmc._visa_worker_loop(connection)
 
     assert native_calls == []
     assert connection.closed is True

@@ -488,11 +488,17 @@ def _bind_lifetime_to_parent(expected_parent: int) -> None:
         os._exit(0)
 
 
-def _visa_process_main(connection: Any, expected_parent: int = 0) -> None:
+def _visa_process_main(connection: Any, expected_parent: int) -> None:
     """Own native VISA handles behind a bounded, non-pickle protocol."""
 
     # Before anything else, and before any VISA handle exists.
     _bind_lifetime_to_parent(expected_parent)
+
+    _visa_worker_loop(connection)
+
+
+def _visa_worker_loop(connection: Any) -> None:
+    """Run the VISA request loop after the child lifetime is bound."""
 
     resource = None
     manager = None
