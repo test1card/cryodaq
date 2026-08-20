@@ -280,6 +280,219 @@ The irreducible hardware milestone then remains:
 
 Use `docs/lab_verification_checklist.md` as the turnkey protocol.
 
+### Measured position, 2026-08-18 — what the soak proves today
+
+Every statement here was measured on the day it is dated. Re-measure before you
+act on any of it; a number in a document is a record, not a result.
+
+**Physical testing on real hardware is a REQUIREMENT, not a formality, and no
+green software gate replaces it.** Read the irreducible hardware milestone above
+with that in mind: **Keithley A8-0 on real 2604B firmware is the heater-control
+gate, and no soak substitutes for it.** When that testing happens is scheduling,
+which belongs in the coordination channel and not in a public product plan.
+
+**The laboratory computer is on an uninterruptible power supply** (owner,
+2026-08-18). That removes ONE cause of host death — mains power loss — and only
+that one. A kernel panic, an out-of-memory kill, a storage or filesystem
+failure, or a crash of the program itself still kills the host mid-profile and
+still drops whatever measurements are not yet persisted.
+
+**A8c DOES NOT COVER PERSISTENCE, and naming them together must not suggest it
+does.** `docs/lab_verification_checklist.md` defines A8c as one thing only: kill
+the host and observe whether the Keithley output turns OFF without a further
+command. It states no database or durability criterion, so an A8c PASS is
+evidence about the SOURCE and about nothing else. Host-death persistence needs
+its own procedure and its own artifacts — what was written, what was reported as
+written, and what survived — or it must be recorded as an accepted residual with
+that decision named. Until one of those exists, it is an open gate with no
+prescribed evidence, which is worth saying plainly rather than leaving it beside
+a gate that looks like it would close it.
+
+**So host-death persistence remains OPEN, and the A8c host-death gate above
+remains a physical blocker.** Do not read the uninterruptible supply as closing
+either.
+
+**And it does not close the case that interrupted work on 2026-08-18 either.**
+That outage struck the DEVELOPMENT machine, which has no such supply; a supply
+attached to the laboratory computer cannot reach backwards to it. What the
+supply changes is the mains-loss risk for future runs performed ON THE
+LABORATORY MACHINE, and even there only once a run has bounded-runtime evidence
+to show what it survived. The development machine remains unprotected, so a run
+performed there remains exposed to exactly the failure already observed.
+
+#### The soak starts on Ubuntu 22.04, and the barrier has MOVED twice since
+
+**Read the dated measurements below as history, not as the current blocker.**
+The theme-pack cause described here was fixed: the runner declares
+`_ISOLATED_TRACKED_CONFIG_DIRS = ("themes",)` and `_materialize_isolated_mock_config`
+copies those packs into the isolated configuration. A roadmap that keeps an old
+diagnosis under "the next barrier" sends the next investigation down a road that
+is already built.
+
+**Measured 2026-08-20 on Ubuntu 22.04, the run gets much further and stops
+somewhere else entirely. Read this as DIRECTIONAL, not as qualification of any
+candidate**, and the reason is structural rather than an omission: the run was
+performed on a throwaway merge of several open branches, made to see whether they
+work together, so **no tracked commit produced it and none can be cited**. A
+result that names no immutable tree cannot tell a later reviewer whether it
+applies to the candidate in front of them. It becomes bindable once those
+branches merge and the soak is re-run at one candidate head; until then it says
+where to look and nothing more:
+
+- the engine fault at 185 s is **recovered**. `faults.jsonl` records
+  `ready: true`, `recovery_s: 6.749`, `bridge_data_resumed: true`, and a
+  replacement process identity. Where the run once stopped for good, it now
+  continues;
+- it then refuses with `assistant fault lacks a durable pre-fault receipt`;
+- and that refusal is three steps from its cause. Watching the periodic state
+  file DURING a run — it is deleted when the run ends — shows the periodic
+  reporter flapping between `ready` and `degraded_runtime` about once a second
+  for the whole run. `active` never leaves `null`, so **no slot is ever
+  allocated, so no receipt can ever be sealed**;
+- the reporter's own health names it: `periodic_live_source_stopped`, and
+  beneath that `periodic_engine_unavailable` — the periodic reporter cannot
+  obtain engine authority.
+
+**So the current barrier is engine authority for the periodic reporter**, and
+the receipt refusal is a consequence of it. Re-measure before naming a
+successor: this section has been wrong about the current barrier twice.
+
+The history that follows is kept because its measurements are still true of the
+commits they name.
+
+Measured at `fa52b35804` in a worktree cut from a native Linux clone:
+
+- the run reaches the runner phase and writes seven evidence files;
+- the exact-six integration gate **PASSES** (`exit_code 0`, `status PASS`);
+- it then fails at `_RunnerFoundationError: source stack did not reach the exact
+  four-role startup cut`.
+
+`log-launcher.txt` names the cause: the launcher cannot import, because
+`src/cryodaq/gui/theme.py` calls `resolve_theme()` at module import and the
+default pack `warm_stone` (`_theme_loader.py:26`) is not found. **The pack is
+not missing from the tree.** It is tracked, and `git archive` carries it into
+the sealed snapshot. It is missing from where the child is told to look:
+`_source_environment` sets `CRYODAQ_ROOT` to the ISOLATED root,
+`get_config_dir()` is `get_project_root() / "config"`, and that isolated
+`config/` holds only the curated passive set (`_ISOLATED_TRACKED_CONFIG_FILES`
+plus `_ISOLATED_STATIC_CONFIGS`), with no `themes/` among them.
+
+Measured on Ubuntu 22.04.5 with `evidence/tools/rootprobe.sh` in the workspace:
+
+- **A.** `CRYODAQ_ROOT` pointed at a directory without `config/` reproduces the
+  recorded traceback exactly, exit 1;
+- **B.** `CRYODAQ_ROOT` at the application tree with `CRYODAQ_STATE_ROOT` at the
+  isolated directory imports cleanly, exit 0 -- read-only configuration from the
+  application tree, writable `data/` and `logs/` under the isolated root. That
+  is the split `src/cryodaq/paths.py` already documents.
+
+The refusal itself was not changed at that commit. `resolve_theme()` stopping
+the program over a colour file was pinned by
+`tests/gui/test_theme_loader.py::test_missing_default_pack_raises`, and a tree
+with no `config/` has no safety configuration either. Whether it should stop was
+a behaviour decision, not a mechanism one — **and the owner has since decided
+it** (2026-08-20: *"файл цветов не должен останавливать"*), so that test now
+states the opposite and the loader falls back to a built-in copy.
+
+`tests/scripts/` on the target at that head: **264 passed, 8 skipped, 0 failed.**
+
+#### The environment recipe that works today
+
+**The checklist is the CANONICAL procedure, and it has been repaired in this
+same change** — an operator follows the checklist, so a roadmap that carried a
+working recipe beside a broken canonical one still left the operator at a
+dangling symlink. Its qualification section no longer links `.venv` at the
+unreadable path; it measures the interpreter on the machine and links only the
+interpreter. **The recipe below is the same one and is kept as the record of what
+was measured**, not as a competing procedure.
+
+The qualification section of `docs/lab_verification_checklist.md` is right about
+the important thing — the run must happen in a clone on a native Linux
+filesystem, never under `/mnt/c` — and **its runtime recipe is stale**. It
+symlinks `.venv` at `/root/cryodaq-soak-py313`. Measured 2026-08-18 on the
+laboratory WSL image: that path is not readable, and the interpreter present is
+`cryodaq-lab`, Python 3.14.6.
+
+What was measured to work:
+
+```bash
+git -C <native-clone> worktree add --detach <probe> <sha>
+cd <probe> && <conda-env>/bin/python -m venv --system-site-packages .venv
+PYTHONPATH="$PWD/src" .venv/bin/python -m scripts.soak_mock_stack --profile short --evidence-dir <dir>
+```
+
+Without `--system-site-packages` the runner stops at `ModuleNotFoundError: No
+module named 'yaml'`; a stock virtual environment has an empty `site-packages`.
+Write evidence outside `/tmp`: a WSL restart cleared it once on 2026-08-18 and
+took a launcher log with it.
+
+#### A measurement trap that produced four wrong answers in one evening
+
+A worktree created by Windows git holds a `.git` FILE whose gitdir is a Windows
+path. From WSL, git resolves nothing there, so **every test that shells out to
+git fails for a reason unrelated to the code**, while tests that never touch git
+pass normally. Two published claims had to be corrected. Measure the target in a
+worktree cut from a native Linux clone.
+
+#### The rungs to a laboratory-ready week
+
+Each rung is a stopping point: after it, the system is coherent even if work
+stops there.
+
+1. **Basic minimum** — acquisition, storage and export proven; heater-control
+   logic guarded; the instrument runs end to end once. Requires the conductivity
+   freshness bound, the exporter identity work, the analytics staleness work,
+   the theme-pack fix, and a sealed short-profile PASS.
+2. **Trust the evidence** — the suite that certifies the system is itself
+   trustworthy: no test leaves a production module mocked for the tests after
+   it, no unavailable source root passes as a compile check, no vacuous
+   assertion. Plus a 12-hour PASS.
+3. **Unattended week** — faults reach a human, configuration parsing has an
+   owner, the predictor baseline is honest. Plus a 72-hour PASS.
+4. **The week** — a 168-hour PASS on a frozen SHA.
+
+**Three of those four durations cannot be run today, and that is itself work on
+the path.** Measured in `scripts/soak_mock_stack.py` at this commit: exactly
+three profiles are registered — `short` (15 minutes), `12h` and `72h` — and
+**there is no 168-hour profile at all**. Asking for `12h` or `72h` prints
+`soak profile ... is defined but not activated` and exits 3, and the runner
+refuses them a second time with `the evidence contract seals exactly two
+receipts, so only the short profile can qualify`. So the rungs above are written
+against an instrument that, for rungs 2 to 4, does not yet exist. Before any of
+those rungs can be attempted, the evidence contract has to seal a receipt series
+rather than exactly two receipts, the long profiles have to be activated, and a
+168-hour profile has to be added. Read rungs 2 to 4 as gated on that work, and
+do not read a `short` PASS as partial credit toward them.
+
+**And a soak PASS is not the same evidence at every rung.** The mock stack
+drives mock sources and commands no heater, so its PASS says nothing about
+heater control or about the instrument running end to end. What the soak alone
+certifies is continuity: that the program keeps acquiring, keeps writing, and
+neither leaks nor stalls over the stated window. That is why the soak is graded
+as an instrument rather than a feature.
+
+**Rung 1 asks for two further things, and NEITHER of them is proved by A8-0.**
+Read `docs/lab_verification_checklist.md` and A8-0 says so itself: it runs *"при
+уже подтверждённом OFF и без подачи мощности"* — with the source already
+confirmed OFF and with no power applied — and it checks exactly one property,
+that the instrument answers a nonce-bound OFF command with the exact expected
+line and nothing else. It is a command-grammar gate on real firmware. **A rung
+that cited A8-0 for heater control could be declared complete without a heater
+ever being driven.**
+
+- **Heater control** is evidenced by the POWERED procedures: **A8b**, which
+  applies a safe low level, lets the watchdog window pass and requires the late
+  command to drive both outputs OFF and raise the latch; and **A8d**, which
+  measures terminal voltage, current, power and disconnect time on independent
+  instruments rather than trusting `source.output`. A8-0 stays open for its own
+  purpose and closes nothing else.
+- **The instrument running end to end has NO prescribed procedure**, and naming
+  that gap is more useful than assigning it to a gate that does not test it. The
+  checklist's A8 series covers the OFF command, the watchdog, host death and
+  terminal measurement — none of them is an end-to-end run of an experiment on
+  real hardware with acquisition, storage and export. Rung 1 cannot be closed
+  until that procedure exists and states its own evidence.
+
 ---
 
 ## ASC scalability milestone — F35
