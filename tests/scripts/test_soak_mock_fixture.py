@@ -364,7 +364,16 @@ def _fixture_payload_with(extra_paths: list[str]) -> dict:
     )
     return {
         "schema": "cryodaq-soak-source-fixture/v1",
-        "instrument_id": "LS218_1",
+        # READ THE LIVE NAME, never a literal. The validator's final gate is one `or`
+        # chain ending in `payload.get("instrument_id") != _expected_fixture_instrument()`,
+        # and that helper reads `runner._ISOLATED_MOCK_INSTRUMENT_NAME`, which is what is
+        # read here so the two cannot drift apart.
+        # so a stale literal here makes every payload from this helper fail on the
+        # INSTRUMENT before the condition under test is reached. That is what happened:
+        # the fixture moved to LS218_2 on master and these payloads still said LS218_1,
+        # so three tests went green while proving nothing. Measured: with the theme-presence
+        # and uniqueness guards DELETED from production, all three still passed.
+        "instrument_id": runner._ISOLATED_MOCK_INSTRUMENT_NAME,
         "authority": "passive_measurement",
         "mock": True,
         "descriptor_count": 16,
@@ -392,25 +401,27 @@ def test_a_non_file_in_the_tracked_directory_is_refused_by_name(tmp_path) -> Non
         runner._materialize_isolated_mock_config(out, source_root=source)
 
 
-def test_the_validator_still_refuses_a_fixture_with_no_theme_packs(tmp_path) -> None:
+def test_the_validator_still_refuses_a_fixture_with_no_theme_packs() -> None:
     """Teaching the validator a new shape must not teach it to accept a missing one.
 
     The launcher resolves a theme at import, so a fixture without the packs cannot start
     the program; a validator that shrugged at their absence would let that ship.
+
+    THE PAYLOAD MUST BE VALID IN EVERY OTHER RESPECT, and the first version was not. It
+    was hand-built with one entry and a zeroed tree hash, so the validator rejected it on
+    the hash long before the theme-presence check was reached, and the test stayed green
+    with that check DELETED from production. Measured by deleting it. Here the payload
+    comes from the same helper the positive cases use, so its tree hash is real and its
+    file set is complete; the ONLY thing missing is a member inside `themes`, which makes
+    the theme-presence check the condition that decides.
     """
+
     from scripts import soak_mock_stack as soak
 
-    payload = {
-        "schema": "cryodaq-soak-source-fixture/v1",
-        "instrument_id": "LS218_1",
-        "authority": "passive_measurement",
-        "mock": True,
-        "descriptor_count": 16,
-        "binding_count": 16,
-        "expected_readings_per_sample": 8,
-        "entries": [{"path": "experiment_templates", "kind": "directory"}],
-        "tree_sha256": "sha256:" + "0" * 64,
-    }
+    payload = _fixture_payload_with(["experiment_templates", "themes"])
+    assert not [entry for entry in payload["entries"] if str(entry["path"]).startswith("themes/")], (
+        "the payload must carry the themes DIRECTORY and no member inside it"
+    )
 
     assert soak._validate_source_fixture(payload) != []
 
