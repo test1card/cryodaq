@@ -1074,6 +1074,22 @@ def _validate_periodic_delivery_payload(
     return errors, tuple(artifact_names)
 
 
+def _expected_fixture_instrument() -> str:
+    """The instrument the RUNNER actually seals, read from the runner itself.
+
+    This was a hard-coded "LS218_1" and the runner moved to LS218_2, so the validator
+    rejected the exact payload the runner now writes -- and no test saw it, because every
+    manifest test hand-builds the payload. The soak would have run its full duration and
+    then failed its own verdict step. Reading the constant is what makes the two sides
+    unable to drift again; the module already imports the runner lazily elsewhere, so this
+    adds no new coupling.
+    """
+
+    from scripts import soak_mock_stack_runner as runner
+
+    return runner._ISOLATED_MOCK_INSTRUMENT_NAME
+
+
 def _validate_source_fixture(payload: object) -> list[str]:
     expected_files = {
         "agent.yaml",
@@ -1135,7 +1151,7 @@ def _validate_source_fixture(payload: object) -> list[str]:
         paths != sorted(paths)
         or set(paths) != expected_files | {"experiment_templates"}
         or payload.get("schema") != "cryodaq-soak-source-fixture/v1"
-        or payload.get("instrument_id") != "LS218_1"
+        or payload.get("instrument_id") != _expected_fixture_instrument()
         or payload.get("authority") != "passive_measurement"
         or payload.get("mock") is not True
         or payload.get("descriptor_count") != 16

@@ -143,17 +143,22 @@ if os.read(gate_fd, 1) != b"G":
 os.close(gate_fd)
 os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 """
-_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
+# LS218_2 rather than LS218_1, and the difference is the whole point: the engine
+# REFUSES to start a SafetyManager with no critical channel, and refuses again when a
+# declared channel is not classified safety-critical by its own descriptor. Every one
+# of LS218_1's sixteen descriptors is observational, so no declaration could satisfy
+# both, and the fixture could not start the engine at all. LS218_2 is the SAME driver
+# (lakeshore_218s), the same passive measurement authority, and the same reviewed
+# cardinality of sixteen descriptors and sixteen bindings, and it carries TWO
+# safety_critical_input channels. Nothing reviewed is loosened and no classification is
+# fabricated; the fixture simply uses the tracked instrument that has what the startup
+# path requires.
+_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_2"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
 _ISOLATED_STATIC_CONFIGS: Final = (
-    ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
-    (
-        "physical_alarms.yaml",
-        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n  escalate_to_safety: false\n",
-    ),
     ("plugins.yaml", "{}\n"),
     ("cooldown.yaml", "{}\n"),
 )
@@ -354,6 +359,34 @@ def _source_environment(
     }
 
 
+def _engine_critical_channel_ids(descriptors: list[dict]) -> list[str]:
+    """The channels the ENGINE will treat as critical, by the engine's own rule.
+
+    THE RULE IS COPIED FROM PRODUCTION, NOT INVENTED HERE, and the previous version of
+    this derivation did not match it. `safety_pattern_liveness.py` builds
+    `critical_manifest_ids` from descriptors whose **quantity is `temperature`** AND whose
+    safety class is `safety_critical_input`, then refuses when the declared set is not
+    exactly that set. It applies NO role test.
+
+    What the earlier filter did instead: it tested `safety_class` and excluded the
+    `source_readback` role. That role test is a NO-OP -- `descriptors.py` refuses any
+    descriptor that is `source_readback` without the `hazardous_source_readback` class, so
+    a channel can never be both `source_readback` and `safety_critical_input` -- and the
+    `quantity` test, the one that decides, was missing. The two agreed only because both of
+    LS218_2's safety-critical descriptors happen to be temperature (measured: Т11 and Т12,
+    both `quantity=temperature`, both `role=primary_measurement`). A non-temperature
+    safety-critical descriptor added later would have been OVER-declared, the engine's
+    union check would have fired, and the engine would have refused to start -- after the
+    fixture's own test had said it could.
+    """
+
+    return sorted(
+        item["channel_id"]
+        for item in descriptors
+        if item.get("quantity") == "temperature" and item.get("safety_class") == "safety_critical_input"
+    )
+
+
 def _materialize_isolated_mock_config(
     config_dir: Path,
     *,
@@ -481,6 +514,52 @@ asyncio.run(probe())
         raise _RunnerFoundationError("tracked passive soak descriptor bindings do not match")
     (config_dir / "channel_descriptors.yaml").write_text(
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    # `critical_channels` entries are EXACT canonical identities, not patterns:
+    # `_resolve_critical_bindings` does `if channel_id not in storage_catalog.by_channel_id`.
+    # The fixture used to declare the literal string ".*", meaning "everything", and no
+    # channel has that identity, so the engine refused to start at its boot-time safety
+    # liveness check -- the F-1 silent-safety-kill guard doing exactly its job. Measured on
+    # Ubuntu 22.04.5: the launcher started, the engine died before its readiness receipt,
+    # and the reason was
+    #   Dead safety/alarm channel pattern(s): 1 match NO channel on the plane their
+    #   consumer sees ... pattern='.*' source=safety.yaml critical_channels
+    # Deriving the list from the roster keeps the original intent -- every channel is
+    # critical -- and cannot drift from the descriptors the same call just wrote. For this
+    # fixture it is the two channels LS218_2 carries as safety-critical inputs; it was the
+    # EMPTY set while the fixture used LS218_1, whose sixteen descriptors are all
+    # observational, and an empty list is refused outright by the engine. Derived rather
+    # than assumed either way: a safety-critical descriptor added later is declared
+    # automatically, and one removed stops being declared.
+    critical_channels = _engine_critical_channel_ids(descriptor_manifest["descriptors"])
+    # The physical-alarms document is taken from the tracked base and then DISARMED,
+    # rather than written as a short static string. The production loader requires exactly
+    # cooldown, vacuum and landmarks, complete key sets in the first two, and the two
+    # canonical landmark channels with non-empty alias lists in the third, so a curtailed
+    # document cannot satisfy it and the engine refused to start on it. Only the three
+    # arming flags are overridden, so the soak stays passive while the document stays the
+    # reviewed one.
+    physical_raw = yaml.safe_load((source_dir / "physical_alarms.yaml").read_text(encoding="utf-8"))
+    if type(physical_raw) is not dict or set(physical_raw) != {"cooldown", "vacuum", "landmarks"}:
+        raise _RunnerFoundationError("tracked physical alarms config is malformed")
+    physical_raw["cooldown"]["enabled"] = False
+    physical_raw["vacuum"]["enabled"] = False
+    physical_raw["vacuum"]["escalate_to_safety"] = False
+    (config_dir / "physical_alarms.yaml").write_text(
+        yaml.safe_dump(physical_raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    (config_dir / "safety.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "critical_channels": critical_channels,
+                "require_keithley_for_run": False,
+                "keithley_channels": [],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     return readings_per_sample
