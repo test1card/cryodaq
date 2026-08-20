@@ -54,10 +54,21 @@ findmnt -no FSTYPE -T "$repo" | grep -E '^ext4$'
 
 # Подключить заранее проверенный dedicated runtime, не копируя site-packages
 # в tracked tree. .venv остаётся ignored и должен ссылаться только на него.
-mkdir .venv
-ln -s /root/cryodaq-soak-py313/bin .venv/bin
-ln -s /root/cryodaq-soak-py313/lib .venv/lib
-ln -s /root/cryodaq-soak-py313/pyvenv.cfg .venv/pyvenv.cfg
+#
+# ПУТЬ ИНТЕРПРЕТАТОРА ИЗМЕРЯЕТСЯ НА САМОЙ МАШИНЕ, а не берётся из этого файла.
+# Измерено 2026-08-18 на лабораторном образе WSL: путь /root/cryodaq-soak-py313,
+# который стоял здесь раньше, не читается, и запуск по нему обрывается на
+# .venv/bin/python. Установленный там интерпретатор — окружение cryodaq-lab,
+# /home/cryodaq/miniforge3/envs/cryodaq-lab/bin/python, Python 3.14.6.
+# Поэтому сначала определить путь на этой машине, проверить его, и только
+# потом делать ссылку. Одной ссылки на сам интерпретатор достаточно: префикс
+# и site-packages он определяет по своему настоящему пути.
+runtime=/home/cryodaq/miniforge3/envs/cryodaq-lab/bin/python   # проверить на машине
+runtime="$(readlink -f "$runtime")"
+test -x "$runtime"
+
+mkdir -p .venv/bin
+ln -sf "$runtime" .venv/bin/python
 
 .venv/bin/python --version
 .venv/bin/python -c "import sqlite3,sys; print(sys.executable); print(sqlite3.sqlite_version)"
