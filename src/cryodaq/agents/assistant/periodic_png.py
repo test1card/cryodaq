@@ -108,18 +108,26 @@ _RUNTIME_REASON_MAX_CHARS = 160
 # retries about once a second, and a week of that is a log file nobody can read and a disk
 # nobody budgeted for -- the exact failure mode a week-long run is supposed to survive.
 _RUNTIME_FAILED_LOG_INTERVAL_S = 60.0
+# Exactly what periodic_state._validated_text refuses, matched here so a reason is made
+# writable rather than discovered to be unwritable after the writer has already refused it.
+_PROHIBITED_LOCATOR = re.compile(r"\S*api\.telegram\.org/bot\S*", re.IGNORECASE)
 
 
 def _bounded_reason(cause: BaseException) -> str:
-    """One line of the exception's own words, bounded, redacted, never a traceback.
+    """One line of the exception's own words, bounded, sanitised, never a traceback.
 
     An exception can carry a credential -- an HTTP client error embedding a Telegram bot
     URL is the obvious one -- and this text goes into the health record, which is what a
-    support bundle carries OFF this machine. That is the export boundary, so the same
-    redaction the logging setup applies is applied here.
+    support bundle carries OFF this machine. That is the export boundary.
+
+    REDACTING THE CREDENTIAL IS NOT ENOUGH. periodic_state refuses ANY text matching
+    `api.telegram.org/bot`, credential or not, and _write_runtime_failed_health swallows
+    the refusal -- so a reason that merely mentioned the URL left the health record STALE
+    and said nothing at all. The whole prohibited locator goes, not only the secret inside
+    it, because the writer's rule is what decides whether this reason survives.
     """
 
-    detail = " ".join(_redact(str(cause)).split())
+    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", _redact(str(cause))).split())
     if len(detail) > _RUNTIME_REASON_MAX_CHARS:
         detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
     return detail
@@ -1952,15 +1960,14 @@ class PeriodicPngSupervisor:
     async def _handle_config_loader_failure(self, backoff_index: int, cause: BaseException | None = None) -> int:
         # The configuration loader is the OTHER way to reach "runtime unavailable", and it
         # discarded its exception as well. All three call sites feed this one handler.
+        # Through the limiter, and NAMING ITSELF. Passing only the cause left `because`
+        # empty, so this branch and the construction branch wrote identical durable text
+        # for identical exceptions -- the very ambiguity the change exists to remove.
+        because = f"the configuration could not be loaded from {self._config_dir}"
         if cause is not None:
-            _log.error(
-                "periodic configuration could not be loaded from %s; type=%s detail=%s",
-                self._config_dir,
-                type(cause).__name__,
-                _bounded_reason(cause),
-            )
+            self._log_runtime_failure(because, cause)
         if self._leader_fd is not None:
-            await self._stop_then_mark_runtime_failed(cause)
+            await self._stop_then_mark_runtime_failed(cause, because=because)
             self._release_leader()
         await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
         return min(backoff_index + 1, 5)
@@ -1981,7 +1988,7 @@ class PeriodicPngSupervisor:
             await self._stop_then_mark_engine_unavailable()
             return False
         except Exception as exc:
-            await self._stop_then_mark_runtime_failed(exc)
+            await self._stop_then_mark_runtime_failed(exc, because="the coordinator could not be constructed")
             return False
 
     async def _stop_then_mark_engine_unavailable(self) -> None:
@@ -1993,6 +2000,27 @@ class PeriodicPngSupervisor:
         await self._write_engine_unavailable_health()
         if cleanup_error is not None:
             raise cleanup_error
+
+    def _log_runtime_failure(self, because: str, cause: BaseException | None) -> None:
+        """One line per distinct reason, then at most one a minute while it persists.
+
+        EVERY caller comes through here. The configuration-loader handler logged directly
+        and bypassed the limit, so a reload failing once a second wrote once a second --
+        the flood this exists to stop, arriving by the other door.
+        """
+
+        signature = (because, "none" if cause is None else type(cause).__name__)
+        now_monotonic = self._clock.monotonic()
+        last = self._last_runtime_failure_log
+        if last is not None and last[0] == signature and now_monotonic - last[1] < _RUNTIME_FAILED_LOG_INTERVAL_S:
+            return
+        self._last_runtime_failure_log = (signature, now_monotonic)
+        _log.error(
+            "periodic runtime is unavailable; because=%s type=%s detail=%s",
+            because or "unstated",
+            signature[1],
+            "" if cause is None else _bounded_reason(cause),
+        )
 
     async def _stop_then_keep_monitor_health(self) -> None:
         """Stop the coordinator without overwriting a more specific reason.
@@ -2007,13 +2035,26 @@ class PeriodicPngSupervisor:
             await self._stop_coordinator()
         except BaseException as exc:
             cleanup_error = exc
-        if not await self._monitor_left_a_reason():
+        if await self._monitor_left_a_reason():
+            # The health is kept, but something still has to be SAID. Preserving it and
+            # logging nothing meant the next coordinator could put the record back to
+            # `ready` seconds later, leaving no trace anywhere that the live source had
+            # stopped at all -- worse than the vague sentence it replaced.
+            self._log_runtime_failure("the live-source monitor stopped the coordinator", None)
+        else:
             await self._write_runtime_failed_health(because="the monitor reported a failure")
         if cleanup_error is not None:
             raise cleanup_error
 
     async def _monitor_left_a_reason(self) -> bool:
-        """True when the persisted health already names something more specific than ours."""
+        """True only when the LIVE-SOURCE monitor is what wrote the persisted health.
+
+        Treating every other code as a monitor reason was too generous. A coordinator can
+        stop for reasons that leave an earlier, unrelated code behind -- a projection that
+        never completed, a disabled verification -- and preserving one of those would hide
+        the runtime failure that actually happened behind a stale status. Exactly one code
+        is written by the path this branch is deferring to, so exactly one is preserved.
+        """
 
         try:
             state = await self._run_blocking(load_periodic_state, self._data_dir)
@@ -2021,7 +2062,7 @@ class PeriodicPngSupervisor:
             code = health.get("error_code")
         except Exception:
             return False
-        return bool(code) and code != "periodic_runtime_failed"
+        return code == "periodic_live_source_stopped"
 
     async def _stop_then_mark_runtime_failed(
         self,
@@ -2150,17 +2191,7 @@ class PeriodicPngSupervisor:
         # whole run, no slot was ever allocated, no receipt was ever sealed, and the reason
         # existed only inside a swallowed exception.
         if cause is not None or because:
-            signature = (because, "none" if cause is None else type(cause).__name__)
-            now_monotonic = self._clock.monotonic()
-            last = self._last_runtime_failure_log
-            if last is None or last[0] != signature or now_monotonic - last[1] >= _RUNTIME_FAILED_LOG_INTERVAL_S:
-                self._last_runtime_failure_log = (signature, now_monotonic)
-                _log.error(
-                    "periodic runtime is unavailable; because=%s type=%s detail=%s",
-                    because or "unstated",
-                    signature[1],
-                    "" if cause is None else _bounded_reason(cause),
-                )
+            self._log_runtime_failure(because, cause)
         try:
             state = await self._run_blocking(load_periodic_state, self._data_dir)
             previous = float(state.payload["updated_at"])
