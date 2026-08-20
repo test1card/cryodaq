@@ -146,11 +146,12 @@ def test_the_short_profile_passes_the_selection_boundary(monkeypatch) -> None:
     """
 
     instance = _runner_at_the_selection_boundary(monkeypatch)
-    with pytest.raises(Exception) as caught:
+
+    # It fails at the NEXT check, on the object standing in for Evidence, and the message
+    # names that instead of either refusal. A bare `Exception` here would have hidden a
+    # refusal that fired for the wrong reason, and a registered guard refuses one anyway.
+    with pytest.raises(runner._RunnerFoundationError, match="process start identity is unavailable"):
         instance._run_owned(object(), soak.profile("short"))
-    message = str(caught.value)
-    assert "not one of the reviewed profiles" not in message
-    assert "never seal" not in message
 
 
 @_POSIX_EVIDENCE
