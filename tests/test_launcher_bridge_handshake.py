@@ -360,11 +360,18 @@ def _assistant_window() -> SimpleNamespace:
     )
 
 
+def _standalone_gui_window() -> SimpleNamespace:
+    """The third production spawn. It was missing, and a count could not have said so."""
+
+    return SimpleNamespace(_mock=MagicMock())
+
+
 @pytest.mark.parametrize(
     ("name", "start", "build_window"),
     [
         ("engine", launcher.LauncherWindow._start_engine, _engine_window),
         ("assistant", launcher.LauncherWindow._start_assistant, _assistant_window),
+        ("standalone gui", launcher.LauncherWindow._on_open_full_gui, _standalone_gui_window),
     ],
 )
 def test_every_production_spawn_strips_the_launcher_only_authority(
@@ -429,6 +436,9 @@ def test_child_environments_always_strip_launcher_only_descriptor_authority() ->
     spawn_builders = source.count("env = _without_soak_bridge_environment(os.environ)") + source.count(
         "env = _engine_child_environment(os.environ)"
     )
+    # Three production spawns: the engine, the assistant, and the standalone GUI. Each is
+    # ALSO intercepted at Popen in the test below, which is what would catch a fourth spawn
+    # appearing without one -- a count cannot.
     assert spawn_builders == 3, spawn_builders
 
 
