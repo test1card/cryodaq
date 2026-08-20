@@ -336,8 +336,8 @@ Instruments → Scheduler → SQLiteWriter → DataBroker → ZMQ → GUI (PySid
    эскалирует событие. **Контракт специфицирован и покрыт focused
    deterministic regressions; candidate-level гейт (exact-SHA CI,
    real-Windows, frozen-build и physical-lab evidence для frozen candidate,
-   реализующего контракт) остаётся open** — см. `docs/campaigns/` для
-   campaign-evidence по этому открытому гейту.
+   реализующего контракт) остаётся open**. Campaign-evidence по этому
+   открытому гейту хранится вне этого репозитория.
 5. Готовые точные Windows/physical evidence procedures с thresholds,
    abort/rollback и ожидаемыми артефактами.
 

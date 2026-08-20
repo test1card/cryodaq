@@ -386,16 +386,32 @@ fast-forward once the gates are verified in the merging turn on the exact
 head: green CI **and** a positive Codex verdict bound to that same SHA, plus a
 clean fast-forward check. Anything outside this repository remains owner-only.
 
-## [Owner] 2026-08-09 — The agent working layer moves out of temp; obligations are registered in-tree
+## [Owner] 2026-08-09 — entry withdrawn 2026-08-20
 
-The out-of-tree agent working layer (state, plans, evidence, campaign history)
-moved from the machine temp directory into a durable, agent-agnostic workspace
-beside the repository checkout, with one live state file and an integrity
-guard. Owner directions that are deferred behind trigger conditions are
-registered outside this repository, in one place, so that no direction depends
-on being remembered.
+**The body of this entry is removed, and the heading stays so that the sequence
+of decisions has no silent gap.** Its subject was how the owner's own working
+material is organised, which the decision below places outside this repository.
+Rewriting the entry in place would have been worse than removing it: this file
+is append-only, and an edited entry claims to be the original.
 
-**Why:** two owner directions recorded 2026-07-31 in a temp-directory file
-were invisible to repository search; one had its trigger fire and sat
-undischarged for nine days. Preservation, classification, and the migration
-were verified against byte-exact snapshots before anything was deleted.
+Nothing about the 2026-08-09 decision is lost. It is kept where its subject now
+lives.
+
+## [Owner] 2026-08-20 — This repository publishes the instrument and nothing else
+
+The working relationship, the plans, and the development directives are private.
+They are not published here. This repository is an instrument utility: the
+software, its tests, its guards, and the disclosure a user of the instrument
+needs.
+
+This SUPERSEDES the 2026-08-09 decision that put the register of deferred
+directions in the tree. That earlier decision was made to solve a real failure —
+a direction recorded outside the repository was invisible and sat undischarged
+for nine days — and the fix it chose traded one failure for a worse one: a
+private direction published in a public repository. The invisibility problem is
+answered by keeping the register in ONE place with a guard over it, not by
+choosing which repository that place is.
+
+**Obligation identifiers stay in this repository** wherever a reader needs to
+know that a deferred direction exists — the identifier and enough of its action
+to act on. What does not appear is a path, a location, or a name.

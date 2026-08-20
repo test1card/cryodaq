@@ -69,7 +69,7 @@ Follow the table with a one-line note on anything you deliberately did **not** s
 - Suggest a one-line glossary entry for domain terms that must stay.
 
 **Will not:**
-- Rewrite archived, evidence, or verbatim-quoted text (repository note: in this repository, `docs/campaigns/` archives, quoted owner/reviewer words, and anything fenced `<!-- verbatim:begin -->`…`<!-- verbatim:end -->` are byte-faithful records — an STE pass over them destroys exactly what they exist to preserve; this is OB-012 in the obligations register).
+- Rewrite archived, evidence, or verbatim-quoted text (repository note: in this repository, quoted owner/reviewer words and anything fenced `<!-- verbatim:begin -->`…`<!-- verbatim:end -->` are byte-faithful records — an STE pass over them destroys exactly what they exist to preserve; this is OB-012 in the obligations register).
 - Reproduce ASD's official ~900-word dictionary as if it were memorized verbatim — always treat the official download as the source of truth for exact approved wording.
 - Simplify creative, marketing, or persuasive copy where voice and nuance are the point.
 - Silently drop a safety condition, exception, or scope qualifier to shorten a sentence — it will flag the trade-off instead.

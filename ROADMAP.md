@@ -2,7 +2,7 @@
 
 > **Living document.** `CHANGELOG.md` is the authoritative shipped-history
 > record; this file is only the forward feature map. The active campaign, if
-> any, is recorded at `docs/campaigns/`.
+> any, is recorded outside this repository.
 >
 > **Current frontier:** v0.64.1 is shipped as the immutable `v0.64.1` tag, and the
 > release train v0.58.0 -> v0.64.0 closed the v0.60 Known Limitations backlog.
@@ -145,6 +145,26 @@ The owner-ratified P0-P9 plan that stood here is campaign history. It moved
 verbatim, with provenance, into the campaign record kept outside this
 repository. `docs/OPEN_CELLS.md` is the live disclosure register; it wins on any
 disagreement with this file.
+
+**The one rule from that plan that this file still USES is restated here in
+full**, because the outcome derived below decides which work may start, and a
+reader of this repository must be able to check that derivation without reaching
+for anything else:
+
+> The cycle starts when P2 begins and permits exactly one integration object and
+> one P5 frozen SHA. It terminates immediately with one of three outcomes.
+> **PR_READY:** P0-P8 pass for one unchanged P5 SHA. **NOT_PR_READY:** any
+> prerequisite check is red, cancelled, missing, stale, or bound to another SHA;
+> either mandatory reviewer withholds approval; a covered byte or mode changes
+> after P5; or the integration topology differs from P2. **MERGED_P9_OPEN:**
+> `master` has already been fast-forwarded at P9, but a post-fast-forward check
+> or settings verification fails.
+>
+> There is no correction, retry-until-green, refreeze, or "one more review"
+> sub-loop. A diagnostic rerun earns no acceptance credit. After a terminal
+> failure, further authoring requires a new owner-authorized bounded cycle.
+> Deferred disclosure rows do not extend the cycle and do not become merge
+> prerequisites merely because work on them remains possible.
 
 Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 (not copied from any document):
@@ -835,9 +855,15 @@ and gating on nothing but the owner's time at the stand.**
   the prevention record's `green_evidence`); the OC-039 disposition.
   Proves the PR-review-merge workflow end to end at small scale.
 <!-- phase-1-status=IN_PROGRESS : when every Phase 1 item below is merged, change
-     this token to phase-1-status=DONE. A registered obligation keys its trigger
-     to that exact token; do not reword it, translate it, or let an STE rewrite
-     touch it. -->
+     this token to phase-1-status=DONE. **OB-002 keys its trigger to that exact
+     token**, and what it defers is stated here so that flipping the token cannot
+     silently strand it: build the in-repository adaptation skill - a concise
+     procedural skill folder linked from AGENTS.md, detailed material in a
+     references subfolder, deterministic generation and validation in scripts,
+     built on the existing sources of truth; done when a cold mid-tier model
+     passes a forward test on a deliberately different example laboratory, graded
+     by a context that did not write the contract. Do not reword this token,
+     translate it, or let an STE rewrite touch it. -->
 - **Phase 1 — the descriptor spine.** The engine-loader ownership fix; then
   OC-031's registry re-key; then the OC-008/OC-030 site migrations in bounded
   batches carrying rendering evidence for every touched surface; OC-023 rides
