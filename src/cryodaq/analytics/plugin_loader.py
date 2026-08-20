@@ -121,6 +121,59 @@ class _MeasuredPluginFinder(importlib.abc.MetaPathFinder):
         )
 
 
+class _MeasuredPluginNamespace:
+    """Own `sys.modules` and `sys.meta_path` for the plugin package, for a generation.
+
+    THREE WAYS A FINDER ALONE LET UNMEASURED BYTES RUN, and all three come from the
+    same mistake: treating the import system as something to borrow for one module body
+    rather than a namespace to own for as long as the plugins are alive.
+
+    * **A cache answers before any finder does.** If `plugins.helper` is already in
+      `sys.modules` -- an installed distribution imported earlier, or a previous pipeline
+      generation -- the import returns that module and the finder is never consulted. So
+      the existing entries are REMOVED on entry and restored on exit, and while this owns
+      the namespace nothing can answer from the cache.
+    * **An import can happen later.** A plugin that starts a thread during import, or
+      imports a sibling from `process()`, runs after a module-scoped finder is gone. So
+      the finder lives for the whole generation and is removed when the generation
+      settles.
+    * **The synthetic package must not outlive the run.** Leaving `plugins` in
+      `sys.modules` changes process-wide import behaviour permanently, so unrelated code
+      importing a real distribution of that name would get an empty package. Exit removes
+      everything this created and puts back exactly what was there.
+    """
+
+    def __init__(self, package: str, plugins_dir: Path, measured: dict[Path, bytes]) -> None:
+        self._package = package
+        self._finder = _MeasuredPluginFinder(package, plugins_dir, measured)
+        self._saved: dict[str, types.ModuleType] = {}
+        self._installed = False
+
+    def _owned_names(self) -> list[str]:
+        prefix = f"{self._package}."
+        return [name for name in sys.modules if name == self._package or name.startswith(prefix)]
+
+    def install(self) -> None:
+        if self._installed:
+            raise RuntimeError("measured plugin namespace is already installed")
+        self._saved = {name: sys.modules.pop(name) for name in self._owned_names()}
+        sys.meta_path.insert(0, self._finder)
+        self._installed = True
+
+    def remove(self) -> None:
+        if not self._installed:
+            return
+        try:
+            sys.meta_path.remove(self._finder)
+        except ValueError:  # pragma: no cover - only if another owner removed it
+            pass
+        for name in self._owned_names():
+            del sys.modules[name]
+        sys.modules.update(self._saved)
+        self._saved = {}
+        self._installed = False
+
+
 class _PluginCleanupAmbiguity(RuntimeError):
     """A constructed but inactive plugin owner could not be torn down exactly."""
 
@@ -207,6 +260,8 @@ class PluginPipeline:
         # build -- which is the one thing a qualified run must not be able to say.
         self._measured_artifact_sha256 = measured_artifact_sha256
         self._project_root = project_root
+        # Owns the plugin package's import namespace while a qualified generation is live.
+        self._measured_namespace: _MeasuredPluginNamespace | None = None
         # Parks the watch task when hot reload is off. It is set by the same line that
         # clears _running, so the task ends on the stop that happened rather than on the
         # next tick of a timer that learns nothing.
@@ -360,6 +415,12 @@ class PluginPipeline:
                 for path in sorted(self._plugins_dir.glob("*.py")):
                     self._load_plugin(path)
             else:
+                # OWNED FOR THE GENERATION, not for one module body. A plugin can import a
+                # sibling from a thread it starts, or from `process()` long after startup.
+                self._measured_namespace = _MeasuredPluginNamespace(
+                    _MEASURED_PLUGIN_PACKAGE, self._plugins_dir, measured
+                )
+                self._measured_namespace.install()
                 for path in sorted(p for p in measured if p.suffix == ".py"):
                     self._load_plugin(path, measured=measured)
 
@@ -395,6 +456,13 @@ class PluginPipeline:
         self._running = False
         if self._watch_parked is not None:
             self._watch_parked.set()
+        # Give the plugin package's import namespace back before anything else settles.
+        # It is process-global state, so holding it after the generation ends would change
+        # how unrelated code imports for the rest of the process.
+        namespace = getattr(self, "_measured_namespace", None)
+        if namespace is not None:
+            namespace.remove()
+            self._measured_namespace = None
         failures: list[BaseException] = []
         cancellations: list[asyncio.CancelledError] = []
 
@@ -598,12 +666,11 @@ class PluginPipeline:
         its own annotations. It is removed again if the body raises, so a half-executed
         module is never left where the next import would find it.
 
-        The finder is installed only for the length of this import, and it serves only
-        the plugin package. A helper the plugin imports therefore comes from the same
-        measured bytes as the plugin, instead of from the path.
+        The plugin package's import namespace is owned by the generation, not by this
+        call -- see `_MeasuredPluginNamespace` for the three ways a per-import finder let
+        unmeasured helper bytes run anyway.
         """
 
-        finder = _MeasuredPluginFinder(_MEASURED_PLUGIN_PACKAGE, self._plugins_dir, measured)
         spec = importlib.util.spec_from_loader(
             module_name,
             _MeasuredBytesLoader(path, source),
@@ -612,18 +679,12 @@ class PluginPipeline:
         if spec is None or spec.loader is None:  # pragma: no cover - spec_from_loader is total here
             raise RuntimeError(f"measured plugin spec could not be built: {path}")
         module = importlib.util.module_from_spec(spec)
-        sys.meta_path.insert(0, finder)
         sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
         except BaseException:
             sys.modules.pop(module_name, None)
             raise
-        finally:
-            try:
-                sys.meta_path.remove(finder)
-            except ValueError:  # pragma: no cover - only if another owner removed it
-                pass
         return module
 
     def _load_plugin(self, path: Path, *, measured: dict[Path, bytes] | None = None) -> bool:

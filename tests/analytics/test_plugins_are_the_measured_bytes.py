@@ -14,6 +14,7 @@ describes.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -392,6 +393,40 @@ class WithMetadata(AnalyticsPlugin):
 """
 
 
+_DEFERRED_IMPORT_PLUGIN = """from cryodaq.analytics.base_plugin import AnalyticsPlugin
+
+
+class Deferred(AnalyticsPlugin):
+    MARKER = "deferred"
+
+    def read_marker(self):
+        from plugins.helper import MARKER
+
+        return MARKER
+
+    async def process(self, readings):
+        return []
+"""
+
+
+@contextmanager
+def _owned_namespace(pipeline: PluginPipeline, measured: dict[Path, bytes]):
+    """Own the plugin package the way a qualified generation does.
+
+    Uses the PRODUCTION owner rather than a stand-in, so a change to how the generation
+    takes and releases that namespace is felt here.
+    """
+
+    from cryodaq.analytics.plugin_loader import _MEASURED_PLUGIN_PACKAGE, _MeasuredPluginNamespace
+
+    namespace = _MeasuredPluginNamespace(_MEASURED_PLUGIN_PACKAGE, pipeline._plugins_dir, measured)
+    namespace.install()
+    try:
+        yield namespace
+    finally:
+        namespace.remove()
+
+
 def _qualified(tree: Path) -> PluginPipeline:
     from cryodaq.core.qualification import source_artifact_digest
 
@@ -422,8 +457,97 @@ def test_a_helper_the_plugin_imports_also_comes_from_the_snapshot(tree: Path) ->
 
     (plugins / "helper.py").write_text(_HELPER_SOURCE.format(marker="unmeasured"), encoding="utf-8")
 
-    assert pipeline._load_plugin(plugin, measured=measured) is True
+    with _owned_namespace(pipeline, measured):
+        assert pipeline._load_plugin(plugin, measured=measured) is True
     assert type(pipeline._plugins["importing"]).MARKER == "measured", "the plugin imported a helper nobody measured"
+
+
+def test_a_cached_helper_cannot_answer_before_the_snapshot(tree: Path) -> None:
+    """A cache answers before any finder does, so the cache must not be there.
+
+    An installed distribution named `plugins`, or a previous pipeline generation, leaves
+    `plugins.helper` in `sys.modules`; `from plugins.helper import ...` then returns that
+    module and the finder is never consulted.
+    """
+
+    import sys
+    import types as _types
+
+    plugins = tree / "plugins"
+    (plugins / "helper.py").write_text(_HELPER_SOURCE.format(marker="measured"), encoding="utf-8")
+    plugin = plugins / "importing.py"
+    plugin.write_text(_IMPORTING_PLUGIN, encoding="utf-8")
+
+    pipeline = _qualified(tree)
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None
+
+    # Something else got there first, and it is NOT the measured bytes.
+    intruder_package = _types.ModuleType("plugins")
+    intruder_package.__path__ = []
+    intruder_helper = _types.ModuleType("plugins.helper")
+    intruder_helper.MARKER = "cached-intruder"
+    sys.modules["plugins"] = intruder_package
+    sys.modules["plugins.helper"] = intruder_helper
+    try:
+        with _owned_namespace(pipeline, measured):
+            assert pipeline._load_plugin(plugin, measured=measured) is True
+        assert type(pipeline._plugins["importing"]).MARKER == "measured", (
+            "a cached module answered instead of the measured snapshot"
+        )
+        # And what was there before is exactly what is there after.
+        assert sys.modules["plugins"] is intruder_package
+        assert sys.modules["plugins.helper"] is intruder_helper
+    finally:
+        sys.modules.pop("plugins.helper", None)
+        sys.modules.pop("plugins", None)
+
+
+def test_the_synthetic_package_does_not_outlive_the_generation(tree: Path) -> None:
+    """Leaving it in `sys.modules` changes how the whole process imports, permanently."""
+
+    import sys
+
+    plugins = tree / "plugins"
+    (plugins / "helper.py").write_text(_HELPER_SOURCE.format(marker="measured"), encoding="utf-8")
+    plugin = plugins / "importing.py"
+    plugin.write_text(_IMPORTING_PLUGIN, encoding="utf-8")
+
+    pipeline = _qualified(tree)
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None
+
+    before_modules = "plugins" in sys.modules
+    before_meta = len(sys.meta_path)
+
+    with _owned_namespace(pipeline, measured):
+        assert pipeline._load_plugin(plugin, measured=measured) is True
+        assert "plugins" in sys.modules, "the synthetic package was never created"
+
+    assert ("plugins" in sys.modules) is before_modules, "the synthetic package outlived the run"
+    assert "plugins.helper" not in sys.modules
+    assert len(sys.meta_path) == before_meta, "the finder outlived the run"
+
+
+def test_an_import_deferred_past_startup_still_gets_the_snapshot(tree: Path) -> None:
+    """A plugin can import a sibling from `process()`, long after its body ran."""
+
+    plugins = tree / "plugins"
+    (plugins / "helper.py").write_text(_HELPER_SOURCE.format(marker="measured"), encoding="utf-8")
+    plugin = plugins / "deferred.py"
+    plugin.write_text(_DEFERRED_IMPORT_PLUGIN, encoding="utf-8")
+
+    pipeline = _qualified(tree)
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None
+
+    (plugins / "helper.py").write_text(_HELPER_SOURCE.format(marker="unmeasured"), encoding="utf-8")
+
+    with _owned_namespace(pipeline, measured):
+        assert pipeline._load_plugin(plugin, measured=measured) is True
+        loaded = pipeline._plugins["deferred"]
+        # The import happens HERE, after the module body finished.
+        assert loaded.read_marker() == "measured", "an import deferred past startup escaped the measured snapshot"
 
 
 def test_the_finder_is_not_left_installed(tree: Path) -> None:
