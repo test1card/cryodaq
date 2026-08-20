@@ -6,14 +6,13 @@
 **Релизная граница:** tag `v0.64.1`
 **Версия пакета:** 0.64.1 (released 2026-07-08)
 **Активная кампания:** нет. Кампания качества закрыта merge-ом PR #1
-(2026-07-31); архив — `docs/campaigns/`, отложенные обязательства с
-триггерами — `docs/OBLIGATIONS.md`.
+(2026-07-31). Отложенные обязательства с триггерами ведутся вне этого
+репозитория.
 
 ## Qualification checkpoint — merged 2026-07-31; campaign closed
 
 The release boundary remains tag `v0.64.1`. The qualification campaign
-(historically named "Montana"; verbatim records in
-`docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md`) produced a large non-deployable
+(historically named "Montana") produced a large non-deployable
 software checkpoint that was independently reviewed, approved through the
 out-of-tree approval records, and merged into `master` as PR #1 on 2026-07-31.
 The merge does not move the release boundary and does not establish release
@@ -28,7 +27,7 @@ Byzantine-candidate resistance inside pytest.
 **The live disclosure of what remains open is `docs/OPEN_CELLS.md`.** The
 register is actively maintained by post-merge PRs; where this file and the
 register disagree, the register wins. Deferred directions that carry trigger
-conditions are registered in `docs/OBLIGATIONS.md`. The pre-merge Cycle-2
+conditions are recorded outside this repository. The pre-merge Cycle-2
 narrative that stood here (dated 2026-07-29) — the judge pin, the pending P1
 receipts, the review-in-waiting framing — described the campaign before the
 merge and is superseded; it is preserved in the campaign archive rather than

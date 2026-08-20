@@ -142,9 +142,8 @@ retention/rotation lifecycle bug is fixed.
 ## Montana PR-readiness plan (2026-07-29) — closed; archived
 
 The owner-ratified P0-P9 plan that stood here is campaign history. It moved
-verbatim, with provenance, to `docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md`
-(section "Owner-ratified P0-P9 plan, extracted from ROADMAP.md").
-`docs/OPEN_CELLS.md` is the live disclosure register; it wins on any
+verbatim, with provenance, into the campaign record kept outside this
+repository. `docs/OPEN_CELLS.md` is the live disclosure register; it wins on any
 disagreement with this file.
 
 Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
@@ -171,8 +170,9 @@ Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 
 By the archived plan's own P9 definition those facts derive the outcome
 `MERGED_P9_OPEN`: merged on P7's exact-SHA evidence, with host migration and
-native workflow binding still open — registered as OB-007 in
-`docs/OBLIGATIONS.md`, which is the single live home of that residual. The
+native workflow binding still open — carried as OB-007 in the obligations
+register, which is the single live home of that residual and is kept outside
+this repository. The
 campaign threat-model ruling lives on in the OC-035 and OC-036 rows of the
 register. Several register rows still carry pre-merge Cycle-2 wording; a
 separate register-truth pass owns correcting that, and their pending language
@@ -573,9 +573,9 @@ safety boundaries.
 
 The owner requires all project documentation to use Simplified Technical
 English (ASD-STE100), via the skill installed at `docs/skills/asd-ste100/`.
-The obligation and its scope decision are OB-012 in `docs/OBLIGATIONS.md`;
-this entry is the plan for the retrofit of the EXISTING corpus, and the two
-documents reference each other so neither drifts alone.
+The obligation and its scope decision are OB-012 in the obligations register,
+which is kept outside this repository; this entry is the plan for the retrofit
+of the EXISTING corpus.
 
 Sequencing: this is a parallel documentation track. It must not displace the
 software-side pre-lab phases (H3/H4, F35, F36) above, which set the lab date.
@@ -626,8 +626,8 @@ archived campaign records are never rewritten.
 > and handoff gates are closed. The software, review and CI gates closed with
 > the 2026-07-31 merge; the publication/handoff residual is still open — the
 > terminal outcome derived in the stub above is `MERGED_P9_OPEN`, with host
-> migration and native workflow binding tracked as OB-007 in
-> `docs/OBLIGATIONS.md`. Items below that do not depend on that residual may
+> migration and native workflow binding tracked as OB-007 in the obligations
+> register. Items below that do not depend on that residual may
 > start; nothing here claims the P9 gates are complete. They are not retroactive Montana acceptance
 > criteria and must not delay the current branch merely to pursue an abstract
 > quality score. If future exploration exposes a violation of an existing
@@ -835,9 +835,9 @@ and gating on nothing but the owner's time at the stand.**
   the prevention record's `green_evidence`); the OC-039 disposition.
   Proves the PR-review-merge workflow end to end at small scale.
 <!-- phase-1-status=IN_PROGRESS : when every Phase 1 item below is merged, change
-     this token to phase-1-status=DONE. OB-002 in docs/OBLIGATIONS.md keys its
-     trigger to that exact token; do not reword it, translate it, or let an
-     STE rewrite touch it. -->
+     this token to phase-1-status=DONE. A registered obligation keys its trigger
+     to that exact token; do not reword it, translate it, or let an STE rewrite
+     touch it. -->
 - **Phase 1 — the descriptor spine.** The engine-loader ownership fix; then
   OC-031's registry re-key; then the OC-008/OC-030 site migrations in bounded
   batches carrying rendering evidence for every touched surface; OC-023 rides
@@ -1192,6 +1192,3 @@ and independent laboratory acceptance remain unchanged.
   plugin safety approval decision.
 - `docs/adr/003-governance-as-enforcement.md` — current mistake-to-rule-to-guard
   governance decision.
-- `docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md` — historical record of the
-  completed/superseded campaign coordination material split out of this file
-  and `PROJECT_STATUS.md`; not current policy.

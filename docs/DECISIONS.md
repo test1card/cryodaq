@@ -392,8 +392,8 @@ The out-of-tree agent working layer (state, plans, evidence, campaign history)
 moved from the machine temp directory into a durable, agent-agnostic workspace
 beside the repository checkout, with one live state file and an integrity
 guard. Owner directions that are deferred behind trigger conditions are
-registered in `docs/OBLIGATIONS.md` — the register is the single home for such
-directions and repository search must be able to find them.
+registered outside this repository, in one place, so that no direction depends
+on being remembered.
 
 **Why:** two owner directions recorded 2026-07-31 in a temp-directory file
 were invisible to repository search; one had its trigger fire and sat

@@ -150,10 +150,9 @@ files in this order:
 1. `AGENTS.md` completely;
 2. `ROADMAP.md`, especially "Current milestone — software-side pre-lab
    readiness" (the durable forward milestone); the former "Montana final
-   engineering, review, and publication checklist" was campaign-local, now
-   lives only in the historical `docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md`,
-   and is superseded by `ROADMAP.md`/`PROJECT_STATUS.md` for anything still
-   open;
+   engineering, review, and publication checklist" was campaign-local, is kept
+   outside this repository as history, and is superseded by
+   `ROADMAP.md`/`PROJECT_STATUS.md` for anything still open;
 3. this file completely;
 4. `PROJECT_STATUS.md` for open physical and release-boundary gates;
 5. this agent's own ignored context capsule from section 9, when it exists;

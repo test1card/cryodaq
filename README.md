@@ -178,8 +178,7 @@ The refactor merged into `master` on 2026-07-31 after independent review. The
 merge is a software checkpoint, not acceptance: it establishes no release
 readiness, physical-OFF proof, real-instrument, packaged-Windows, or
 laboratory-acceptance claim. `PROJECT_STATUS.md` defines the live boundary;
-`docs/OPEN_CELLS.md` is the live software-defect disclosure; deferred
-directions with trigger conditions are registered in `docs/OBLIGATIONS.md`.
+`docs/OPEN_CELLS.md` is the live software-defect disclosure.
 
 Historical checkpoint note: commit
 `503c8bf8d884654256ede4f08a9e44ab7b382242` is associated with reported
