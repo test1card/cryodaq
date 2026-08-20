@@ -15,6 +15,7 @@ the real loader against a real, deliberately broken configuration directory.
 
 from __future__ import annotations
 
+import ast
 import logging
 import pathlib
 
@@ -152,6 +153,8 @@ def root_logging_restored():
 
     root = logging.getLogger()
     handlers, level = list(root.handlers), root.level
+    logging_configured = logging_setup._logging_configured
+    logging_setup._logging_configured = False
     logging_setup._deferred_records.clear()
     try:
         yield
@@ -167,6 +170,7 @@ def root_logging_restored():
             if handler not in root.handlers:
                 root.addHandler(handler)
         root.setLevel(level)
+        logging_setup._logging_configured = logging_configured
         logging_setup._deferred_records.clear()
 
 
@@ -208,6 +212,27 @@ def test_the_deferred_list_cannot_grow_without_bound() -> None:
         logging_setup.defer_record(logging.ERROR, "record %d", index)
     assert len(logging_setup._deferred_records) == logging_setup._MAX_DEFERRED_RECORDS
     logging_setup._deferred_records.clear()
+
+
+def test_a_reason_after_logging_setup_is_not_replayed_by_later_reconfiguration(
+    themes_dir, tmp_path, monkeypatch, root_logging_restored
+) -> None:
+    """The launcher scans themes after setup_logging, so its reason is already durable."""
+
+    (themes_dir / "broken.yaml").write_text("not: [a, valid, pack", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    logging_setup.setup_logging("theme-inventory-first", console=False, file=True)
+    assert _theme_loader.available_themes() == []
+    logging.shutdown()
+    assert not logging_setup._deferred_records
+
+    logging_setup.setup_logging("theme-inventory-second", console=False, file=True)
+    logging.shutdown()
+    assert "ignoring invalid pack" in (log_dir / "theme-inventory-first.log").read_text(encoding="utf-8")
+    assert not (log_dir / "theme-inventory-second.log").exists()
 
 
 def test_the_theme_menu_survives_a_directory_it_cannot_read(themes_dir, monkeypatch) -> None:
@@ -286,9 +311,70 @@ def test_every_reason_this_module_gives_survives_to_the_log() -> None:
     """
 
     source = pathlib.Path(_theme_loader.__file__).read_text(encoding="utf-8")
-    bare = source.count("logger.warning(") + source.count("logger.error(") + source.count("logger.critical(")
-    assert bare == 0, f"{bare} reason(s) would be lost before logging exists; use _say_and_defer"
-    assert source.count("_say_and_defer(") >= 10
+    tree = ast.parse(source)
+    reason_methods = frozenset({"log", "warning", "error", "critical", "exception", "fatal"})
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    def enclosing_function(node: ast.AST) -> str | None:
+        while node := parents.get(node):
+            if isinstance(node, ast.FunctionDef):
+                return node.name
+        return None
+
+    bare_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "logger"
+        and node.func.attr in reason_methods
+    ]
+    assert len(bare_calls) == 1 and enclosing_function(bare_calls[0]) == "_say_and_defer", (
+        "reason-emitting logger calls must use _say_and_defer"
+    )
+
+    method_aliases = {
+        node.targets[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Attribute)
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "logger"
+        and node.value.attr in reason_methods
+    }
+    logger_aliases = {
+        node.targets[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "logger"
+    }
+    alias_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (
+            isinstance(node.func, ast.Name)
+            and node.func.id in method_aliases
+            or isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in logger_aliases
+            and node.func.attr in reason_methods
+        )
+    ]
+    assert not alias_calls, "logger aliases can bypass deferred diagnostic handling"
+
+    deferred_reason_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_say_and_defer"
+    ]
+    assert len(deferred_reason_calls) == 10, "each theme diagnostic path must call _say_and_defer"
 
 
 @pytest.mark.parametrize(

@@ -18,8 +18,8 @@ from typing import Any
 
 import yaml
 
+from cryodaq import logging_setup
 from cryodaq.core.atomic_write import atomic_write_text
-from cryodaq.logging_setup import defer_record
 from cryodaq.paths import get_config_dir
 
 logger = logging.getLogger(__name__)
@@ -170,17 +170,16 @@ def _validate_theme_id(name: object) -> str:
 
 
 def _say_and_defer(level: int, message: str, *args: object) -> None:
-    """Record something settled before logging exists, and again once it does.
+    """Record a diagnostic, deferring it only until setup_logging has run.
 
-    EVERY reason this module produces runs during `import cryodaq.gui.theme`, which every
-    entry point does before configuring logging. A plain call here reaches no file handler,
-    and under the frozen pythonw launcher reaches nothing at all. Doing it in one helper is
-    what stopped the deferral being remembered for some branches and forgotten for others,
-    which is exactly how three of these were missed.
+    Theme resolution produces records during import, before an entry point configures logging.
+    Inventory scans may instead happen after setup_logging, so queuing every record would replay
+    a diagnostic that was already written when a component later reconfigures logging.
     """
 
     logger.log(level, message, *args)
-    defer_record(level, message, *[str(arg) for arg in args])
+    if not logging_setup.logging_is_configured():
+        logging_setup.defer_record(level, message, *[str(arg) for arg in args])
 
 
 def _selected_theme_name() -> str:

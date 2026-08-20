@@ -91,6 +91,13 @@ class _TokenRedactFilter(logging.Filter):
 # exists is a leak nothing would ever notice.
 _MAX_DEFERRED_RECORDS = 64
 _deferred_records: list[tuple[int, str, tuple[object, ...]]] = []
+_logging_configured = False
+
+
+def logging_is_configured() -> bool:
+    """Return whether setup_logging has configured this process."""
+
+    return _logging_configured
 
 
 def defer_record(level: int, message: str, *args: object) -> None:
@@ -183,6 +190,8 @@ def setup_logging(
             sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")
 
     # Now that handlers exist, say the things that could not be said before they did.
+    global _logging_configured
+    _logging_configured = bool(root.handlers)
     _replay_deferred_records()
 
 
