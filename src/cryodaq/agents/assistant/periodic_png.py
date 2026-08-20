@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import re
@@ -94,6 +95,37 @@ _KNOWN_RENDER_OUTCOMES = frozenset(
         "render_failed",
     }
 )
+
+
+# This module had no logger at all, which is part of why a runtime that could not start
+# left nothing behind to read.
+_log = logging.getLogger(__name__)
+
+_RUNTIME_FAILED_TEXT = "periodic runtime is unavailable"
+_RUNTIME_REASON_MAX_CHARS = 160
+
+
+def _bounded_reason(cause: BaseException) -> str:
+    """One line of the exception's own words, bounded, never a traceback."""
+
+    detail = " ".join(str(cause).split())
+    if len(detail) > _RUNTIME_REASON_MAX_CHARS:
+        detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
+    return detail
+
+
+def _runtime_failed_text(cause: BaseException | None) -> str:
+    """The health text, with the cause when there is one.
+
+    The health record is what an operator reads, so the reason belongs in it and not only
+    in a log file that a support bundle may not carry.
+    """
+
+    if cause is None:
+        return _RUNTIME_FAILED_TEXT
+    detail = _bounded_reason(cause)
+    named = f"{_RUNTIME_FAILED_TEXT}: {type(cause).__name__}"
+    return f"{named}: {detail}" if detail else named
 
 
 def _known_render_outcome(error_code: str) -> bool:
@@ -1913,8 +1945,8 @@ class PeriodicPngSupervisor:
         except PeriodicSourceUnavailable:
             await self._stop_then_mark_engine_unavailable()
             return False
-        except Exception:
-            await self._stop_then_mark_runtime_failed()
+        except Exception as exc:
+            await self._stop_then_mark_runtime_failed(exc)
             return False
 
     async def _stop_then_mark_engine_unavailable(self) -> None:
@@ -1927,13 +1959,13 @@ class PeriodicPngSupervisor:
         if cleanup_error is not None:
             raise cleanup_error
 
-    async def _stop_then_mark_runtime_failed(self) -> None:
+    async def _stop_then_mark_runtime_failed(self, cause: BaseException | None = None) -> None:
         cleanup_error: BaseException | None = None
         try:
             await self._stop_coordinator()
         except BaseException as exc:
             cleanup_error = exc
-        await self._write_runtime_failed_health()
+        await self._write_runtime_failed_health(cause)
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -2036,7 +2068,19 @@ class PeriodicPngSupervisor:
         except Exception:
             return
 
-    async def _write_runtime_failed_health(self) -> None:
+    async def _write_runtime_failed_health(self, cause: BaseException | None = None) -> None:
+        # SAY WHAT WENT WRONG. This used to publish a fixed "periodic runtime is
+        # unavailable" and discard the exception that caused it, so a runtime that could
+        # not start left no way at all to find out why. Measured on the laboratory target:
+        # the isolated soak flapped between ready and degraded_runtime once a second for a
+        # whole run, no slot was ever allocated, no receipt was ever sealed, and the reason
+        # existed only inside a swallowed exception.
+        if cause is not None:
+            _log.error(
+                "periodic runtime could not start; type=%s detail=%s",
+                type(cause).__name__,
+                _bounded_reason(cause),
+            )
         try:
             state = await self._run_blocking(load_periodic_state, self._data_dir)
             previous = float(state.payload["updated_at"])
@@ -2046,7 +2090,7 @@ class PeriodicPngSupervisor:
                 state,
                 status="degraded_runtime",
                 code="periodic_runtime_failed",
-                text="periodic runtime is unavailable",
+                text=_runtime_failed_text(cause),
                 now=now,
             )
             active = _active(state)
