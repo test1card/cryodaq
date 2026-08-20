@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 import hashlib
 import io
 import json
@@ -2337,10 +2338,10 @@ class _DeliveryEvidenceRegistry:
     def __init__(self) -> None:
         self._records: dict[int, tuple[_DeliveryEvidenceAuthority, Any, dict[str, object]]] = {}
 
-    def run(self, runner: Any, evidence: Any) -> None:
+    def run(self, runner: Any, evidence: Any, selected: Any) -> None:
         if type(runner) is not _PosixSoakRunner or runner._used is not True:
             raise _RunnerFoundationError("delivery run is not owned by the active runner")
-        result = _PosixSoakRunner._run_owned(runner, evidence)
+        result = _PosixSoakRunner._run_owned(runner, evidence, selected)
         if type(result) is not _OwnedRunResult:
             raise _RunnerFoundationError("owned runner returned an invalid private result")
         proof = _validate_pre_post_receipts(
@@ -3669,8 +3670,12 @@ class _PosixSoakRunner:
             return None
         return payload if type(payload) is dict else None
 
-    def run(self, evidence: Any) -> None:
+    def run(self, evidence: Any, selected: Any = None) -> None:
         self.require_platform()
+        from scripts import soak_mock_stack as _soak_for_default
+
+        if selected is None:
+            selected = _soak_for_default.profile("short")
         if self._used:
             raise _RunnerFoundationError("POSIX soak runner is single-use")
         from scripts import soak_mock_stack as soak
@@ -3684,7 +3689,7 @@ class _PosixSoakRunner:
             # rolls back to the observed prior state.
             self._prior_subreaper = _runner_subreaper_state()
             _apply_runner_subreaper(True)
-            _DELIVERY_EVIDENCE.run(self, evidence)
+            _DELIVERY_EVIDENCE.run(self, evidence, selected)
         finally:
             if self._prior_subreaper is not None and not self._subreaper_restored:
                 self._restore_subreaper()
@@ -3698,7 +3703,7 @@ class _PosixSoakRunner:
             _apply_runner_subreaper(self._prior_subreaper)
             self._subreaper_restored = True
 
-    def _run_owned(self, evidence: Any) -> _OwnedRunResult:
+    def _run_owned(self, evidence: Any, selected: Any) -> _OwnedRunResult:
         """Run, validate, seal, and publish one short-soak terminal result."""
 
         import platform
@@ -3708,9 +3713,41 @@ class _PosixSoakRunner:
 
         from scripts import soak_mock_stack as soak
 
-        selected = soak.profile("short")
+        # THE PROFILE NOW ARRIVES FROM THE CALLER, and until this change it did not arrive
+        # at all: `main()` computed one, used it to name the evidence directory, and then
+        # called a runner that chose its own.
+        #
+        # THE REFUSAL STAYS, and its reason is now TRUE instead of tautological. The old
+        # line compared a name against the literal it had just asked for, which cannot
+        # fail. This one names the contract that actually forbids a long profile today:
+        # `Evidence` rejects a manifest whose `expected_receipts` is not 2
+        # (`soak_mock_stack.py`), and the qualification refuses a ledger whose length is
+        # not 2 (`_validate_pre_post_receipts`). A long profile could therefore start,
+        # fault processes for hours, and never seal. Admitting one before that contract
+        # changes would spend a night of machine time to produce nothing.
+        #
+        # IT COMPARES FIELDS, AND IT HAS TO BE CLASS-AGNOSTIC. Two stricter-looking checks
+        # were tried and both would have refused EVERY REAL RUN; a test that drives this
+        # boundary caught them before they shipped.
+        #
+        # The soak starts as `python -m scripts.soak_mock_stack`, so the entry module is
+        # `__main__` while this runner does `from scripts import soak_mock_stack`. Those are
+        # TWO module instances. `selected is soak.PROFILES[name]` is therefore false for
+        # every real run -- and so is `==`, because dataclass equality requires the same
+        # class and the two instances define two `SoakProfile` classes.
+        #
+        # Comparing the FIELDS answers the question that actually matters: does this profile
+        # carry what the reviewed profile of that name carries. A look-alike whose fields
+        # differ is refused; one identical in every field is the reviewed profile in all but
+        # object identity, and behaves as such.
+        registered = soak.PROFILES.get(getattr(selected, "name", None))
+        if registered is None or dataclasses.asdict(registered) != dataclasses.asdict(selected):
+            raise _RunnerFoundationError("soak profile is not one of the reviewed profiles")
         if selected.name != "short":
-            raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
+            raise _RunnerFoundationError(
+                "the evidence contract seals exactly two receipts, so only the short "
+                f"profile can qualify; {selected.name!r} would run and never seal"
+            )
         locked = _LockedPsutilObserver(psutil)
         owner_identity = locked.identity_for_pid(os.getpid())
         if locked.descendants(owner_identity, include_zombies=True):
@@ -3740,7 +3777,12 @@ class _PosixSoakRunner:
                 ).payload
         evidence.write_manifest(
             {
-                "profile": "short",
+                # The profile that RAN, never a literal. The thresholds beside this line
+                # already read `selected`; this one did not, so a manifest could have named
+                # the short profile while another one ran. Nothing can reach that state
+                # today because the entry point refuses every profile but the short one --
+                # which is exactly why it must be right before that refusal is ever lifted.
+                "profile": selected.name,
                 "git_sha": sha,
                 "dirty": False,
                 "platform": platform.platform(),
@@ -3750,6 +3792,9 @@ class _PosixSoakRunner:
                 "periodic_schedule": {
                     "interval_s": report_interval_s,
                     "selection_boundary_offset_s": report_boundary_offset_s,
+                    # Two, and NOT derived. `Evidence` rejects a manifest whose count is
+                    # not 2 and the qualification refuses a ledger that is not two records
+                    # long, so a derived count would only describe a run that cannot seal.
                     "expected_receipts": 2,
                 },
                 "source_fixture": source_fixture,
