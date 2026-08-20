@@ -396,36 +396,54 @@ def test_the_retired_bridge_cannot_speak_after_its_turnover(
 
         with pytest.raises(RuntimeError, match="bridge identity changed"):
             authority.emit_data_observed(bridge_pid=first, restart_count=1)
+        # The refusal quarantined the stream, which is the point: closing it again is a
+        # quiet no-op, and the descriptor is already gone.
+        assert authority._closed is True
     finally:
-        with pytest.raises(BaseException):
-            authority.close()  # the stream is quarantined, which is the refusal working
         os.close(read_fd)
 
 
 @_POSIX_HANDSHAKE
+@pytest.mark.parametrize(
+    ("what", "changes"),
+    [
+        ("a gap in the count", {"restart_count": 3}),
+        ("a repeated count", {"restart_count": 1}),
+        ("the launcher naming itself", {"bridge_pid": "self"}),
+    ],
+)
 def test_a_turnover_that_does_not_continue_the_epoch_quarantines_the_stream(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    what: str,
+    changes: dict,
 ) -> None:
-    """A gap, a repeat, or this process naming itself is still an unexplained change."""
+    """A gap, a repeat, or this process naming itself is still an unexplained change.
 
-    for changes in ({"restart_count": 3}, {"restart_count": 1}, {"bridge_pid": os.getpid()}):
-        read_fd, _write_fd, _nonce = _install_request(monkeypatch, tmp_path)
-        authority = launcher._consume_soak_bridge_handshake(
-            cli_mock=True,
-            tray_only=True,
-            replay_requested=False,
-            setup_wizard=False,
-        )
-        assert authority is not None
-        try:
-            authority.emit(bridge_pid=os.getpid() + 1000, restart_count=1)
-            os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
-            call = {"bridge_pid": os.getpid() + 2000, "restart_count": 2, **changes}
-            with pytest.raises(RuntimeError, match="does not continue the accepted epoch"):
-                authority.note_bridge_turnover(**call)
-        finally:
-            os.close(read_fd)
+    Parametrized rather than looped because the fixture builds a directory under tmp_path
+    and can therefore run once per test; the loop failed on its second turn for that
+    reason and said nothing about the contract.
+    """
+
+    read_fd, _write_fd, _nonce = _install_request(monkeypatch, tmp_path)
+    authority = launcher._consume_soak_bridge_handshake(
+        cli_mock=True,
+        tray_only=True,
+        replay_requested=False,
+        setup_wizard=False,
+    )
+    assert authority is not None
+    try:
+        authority.emit(bridge_pid=os.getpid() + 1000, restart_count=1)
+        os.read(read_fd, runner._MAX_BRIDGE_HANDSHAKE_BYTES + 1)
+        call = {"bridge_pid": os.getpid() + 2000, "restart_count": 2}
+        for key, value in changes.items():
+            call[key] = os.getpid() if value == "self" else value
+        with pytest.raises(RuntimeError, match="does not continue the accepted epoch"):
+            authority.note_bridge_turnover(**call)
+        assert authority._closed is True, what
+    finally:
+        os.close(read_fd)
 
 
 def test_child_environments_always_strip_launcher_only_descriptor_authority() -> None:
