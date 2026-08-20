@@ -322,6 +322,12 @@ def test_redaction_covers_nested_logs_urls_assignments_bearer_and_adjacent_argv(
         assert secret not in encoded
 
 
+def _runner_instrument() -> str:
+    from scripts import soak_mock_stack_runner as runner
+
+    return runner._ISOLATED_MOCK_INSTRUMENT_NAME
+
+
 def _source_fixture() -> dict[str, object]:
     files = (
         "agent.yaml",
@@ -356,7 +362,10 @@ def _source_fixture() -> dict[str, object]:
     )
     return {
         "schema": "cryodaq-soak-source-fixture/v1",
-        "instrument_id": "LS218_1",
+        # Read from the runner rather than written as a literal: a literal here is how the
+        # emitted fixture and the validator drifted apart in the first place, with every
+        # manifest test staying green while the real runner emitted a different instrument.
+        "instrument_id": _runner_instrument(),
         "authority": "passive_measurement",
         "mock": True,
         "descriptor_count": 16,
@@ -1228,7 +1237,7 @@ def test_cli_delegates_manifest_and_execution_to_integrated_runner(monkeypatch, 
         def require_platform() -> None:
             return None
 
-        def run(self, evidence: soak.Evidence) -> None:
+        def run(self, evidence: soak.Evidence, selected=None) -> None:
             evidence.write_manifest(
                 {
                     "profile": "short",
@@ -1302,7 +1311,7 @@ class FakeRunner:
     def require_platform():
         return None
 
-    def run(self, evidence):
+    def run(self, evidence, selected=None):
         from scripts import soak_mock_stack as soak
         if type(evidence) is not soak.Evidence:
             raise TypeError("evidence must be the exact Evidence type")
@@ -1357,7 +1366,7 @@ class MustNotRun:
     def require_platform():
         Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("require-platform")
 
-    def run(self, evidence):
+    def run(self, evidence, selected=None):
         Path(os.environ["CRYODAQ_PRELOAD_MARKER"]).write_text("run")
 
 runner._PosixSoakRunner = MustNotRun

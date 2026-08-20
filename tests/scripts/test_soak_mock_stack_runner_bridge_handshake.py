@@ -174,18 +174,43 @@ def test_windows_runner_activation_has_no_pid_fallback() -> None:
     assert not hasattr(runner, "_RunnerAuthority")
 
 
-def test_positive_bridge_binding_requires_exact_live_direct_child_role() -> None:
+def test_positive_bridge_binding_requires_exact_live_owned_child_role() -> None:
+    """The binder reads the OBSERVER's parentage verdict; it cannot look at processes.
+
+    The parent pid alone stopped being sufficient on Python 3.14 Linux, where forkserver
+    is the default and a multiprocessing child is forked from the fork server rather than
+    from the launcher. Measured on the laboratory machine: bridge 821, parent 820,
+    launcher 793. So the observer decides, and this asserts the binder refuses whenever
+    the observer did NOT decide in the bridge's favour -- including the case where the
+    parent pid happens to match but the verdict is absent, which is what a construction
+    that forgets the field produces.
+    """
     record = runner._BridgeHandshakeRecord("a" * 64, 100, 101, 1)
     identity = runner._ProcessIdentity(101, "darwin:start=1.25")
-    observation = runner._BridgeProcessObservation(identity, 100, "zmq_bridge", True)
+    observation = runner._BridgeProcessObservation(identity, 100, "zmq_bridge", True, 100)
     assert runner._bind_positive_bridge_identity(record, observation) == identity
 
+    # A fork-server child: the parent is NOT the launcher, and the observer proved the
+    # chain against the recorded launcher, so this is accepted for the same reason the
+    # direct child is.
+    forked = runner._BridgeProcessObservation(identity, 820, "zmq_bridge", True, 100)
+    assert runner._bind_positive_bridge_identity(record, forked) == identity
+
     attacks = (
-        runner._BridgeProcessObservation(identity, 99, "zmq_bridge", True),
-        runner._BridgeProcessObservation(identity, 100, "engine", True),
-        runner._BridgeProcessObservation(identity, 100, "assistant", True),
-        runner._BridgeProcessObservation(identity, 100, "zmq_bridge", False),
-        runner._BridgeProcessObservation(runner._ProcessIdentity(102, "darwin:start=1.25"), 100, "zmq_bridge", True),
+        runner._BridgeProcessObservation(identity, 99, "zmq_bridge", True, 0),
+        runner._BridgeProcessObservation(identity, 100, "engine", True, 100),
+        runner._BridgeProcessObservation(identity, 100, "assistant", True, 100),
+        runner._BridgeProcessObservation(identity, 100, "zmq_bridge", False, 100),
+        runner._BridgeProcessObservation(
+            runner._ProcessIdentity(102, "darwin:start=1.25"), 100, "zmq_bridge", True, 100
+        ),
+        # The default: a construction that forgets the verdict must REFUSE, never pass.
+        runner._BridgeProcessObservation(identity, 100, "zmq_bridge", True),
+        # Proved against a DIFFERENT launcher. A bare boolean could not tell this apart
+        # from the accepted case, which is the independent leg this field restores: the
+        # binder would otherwise SIGTERM a bridge belonging to another launcher, and its
+        # error would name a pid that took no part in the decision.
+        runner._BridgeProcessObservation(identity, 820, "zmq_bridge", True, 555),
     )
     for attack in attacks:
         with pytest.raises(runner._RunnerFoundationError):
