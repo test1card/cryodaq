@@ -41,6 +41,12 @@ async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> N
         *(name for name, _content in runner._ISOLATED_STATIC_CONFIGS),
         "instruments.yaml",
         "channel_descriptors.yaml",
+        # Derived from the roster rather than written as a static string; see the test
+        # below for why it cannot be one.
+        "safety.yaml",
+        # Taken from the tracked base and disarmed: the production loader requires a
+        # complete document and rejected the short static one.
+        "physical_alarms.yaml",
     }
     assert {path.name for path in tmp_path.iterdir()} == expected
     assert all(".local." not in name for name in expected)
