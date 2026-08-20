@@ -3387,8 +3387,8 @@ class LauncherWindow(QMainWindow):
             phase=phase,
         ):
             return False
-        self._engine_proc = None
         if getattr(self, "_replay_source", None) is not None:
+            self._engine_proc = None
             LauncherWindow._reset_replay_readiness_authority(self)
             return True
         if not LauncherWindow._retire_observed_engine_incarnation(self):
@@ -3397,6 +3397,7 @@ class LauncherWindow(QMainWindow):
                 "cannot be retired. Restart remains blocked."
             )
             return False
+        self._engine_proc = None
         return True
 
     def _settle_engine_shutdown_worker(self) -> bool:
@@ -3907,6 +3908,13 @@ class LauncherWindow(QMainWindow):
         replacement = getattr(self, "_engine_proc", None)
         observed = None if replacement is None else replacement.poll()
         if replacement is not None and observed is not None:
+            replacement_id = getattr(self, "_engine_instance_id", None)
+            logger.error(
+                "Engine replacement exited before readiness; phase=%s incarnation=%s code=%s.",
+                phase,
+                replacement_id if type(replacement_id) is str else "<unknown>",
+                observed,
+            )
             return _settle(observed)
 
         try:
@@ -3917,6 +3925,13 @@ class LauncherWindow(QMainWindow):
             late = getattr(self, "_engine_proc", None)
             late_code = None if late is None else late.poll()
             if late is not None and late_code is not None:
+                replacement_id = getattr(self, "_engine_instance_id", None)
+                logger.error(
+                    "Engine replacement exited before readiness; phase=%s incarnation=%s code=%s.",
+                    phase,
+                    replacement_id if type(replacement_id) is str else "<unknown>",
+                    late_code,
+                )
                 return _settle(late_code)
             return False, None, exc
         return True, None, None

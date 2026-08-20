@@ -414,6 +414,39 @@ def test_a_replacement_that_dies_before_readiness_schedules_another_try() -> Non
     single_shot.assert_called_once()
 
 
+def test_a_failed_replacement_logs_its_observed_incarnation_and_exit_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Replacement cleanup must not erase the evidence needed to diagnose the retry."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: 17)
+    launcher._restart_pending = True
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot"),
+    ):
+        LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+    recorded = "\n".join(record.getMessage() for record in caplog.records)
+    assert "a" * 32 in recorded, recorded
+    assert "code=17" in recorded, recorded
+
+
 def test_a_replacement_still_alive_is_asked_to_stop_as_before() -> None:
     """The other half of the same branch, so the change stays a distinction and not a hole.
 
@@ -574,6 +607,7 @@ def test_a_still_running_shutdown_worker_keeps_its_owner_and_holds() -> None:
 
     assert settled is False, "an owner that cannot be settled must still hold"
     assert launcher._engine_shutdown_worker is worker, "the reference must be KEPT, not dropped"
+    assert launcher._engine_proc is not None, "the observed terminal handle must remain available for re-settlement"
     assert launcher._engine_instance_id == "a" * 32, "and the identity must not be retired"
     assert worker.waited, "it must be given its bounded chance to finish first"
 
