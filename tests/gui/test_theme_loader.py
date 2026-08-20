@@ -179,11 +179,22 @@ def test_short_hex_rejected(monkeypatch, tmp_path):
     assert pack["ACCENT"] == "#b89e7a"  # fell back to stub
 
 
-def test_missing_default_pack_raises(monkeypatch, tmp_path):
+def test_missing_default_pack_falls_back_to_the_built_in_copy(monkeypatch, tmp_path):
+    """This test used to require a RuntimeError, and that is the defect it now pins.
+
+    ``cryodaq.gui.theme`` calls ``load_theme()`` at import, so raising here meant a
+    program that would not start because of a file that decides only which greys to
+    draw. Owner, 2026-08-20: "файл цветов не должен останавливать". The whole case is
+    covered in tests/gui/test_a_colours_file_cannot_stop_the_program.py; what this line
+    keeps is the same starting condition -- an empty themes directory -- so the module
+    that once demanded the raise now states the opposite in the same place.
+    """
+
     _isolate(monkeypatch, tmp_path)  # empty themes dir, no packs at all
 
-    with pytest.raises(RuntimeError, match="Default theme pack invalid"):
-        loader.load_theme()
+    pack = loader.load_theme()
+    assert pack["ACCENT"] == "#b89e7a"
+    assert set(loader.REQUIRED_TOKENS) <= set(pack)
 
 
 def test_post_build_seeds_theme_pack_for_frozen_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

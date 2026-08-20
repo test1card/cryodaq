@@ -69,6 +69,87 @@ REQUIRED_TOKENS = frozenset(
 )
 
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+# THE LAST RESORT, IN CODE.
+#
+# Every pack lives in a file, and a file can be missing, unreadable, truncated by a
+# half-finished copy, or edited into something that no longer parses. Until now that
+# ended the program before its first window: resolve_theme raised, gui.theme imports it
+# at module level, and the launcher died on a colours file -- while the cryostat was
+# cold and the run was hours in.
+#
+# Owner, 2026-08-20: "файл цветов не должен останавливать". So there is always something
+# to draw with. These are the values of config/themes/warm_stone.yaml, the default pack,
+# copied rather than invented, and a test pins them to that file so the two cannot drift
+# apart unnoticed. The description is deliberately NOT the file's own: it says where
+# these colours came from, so the operator is told rather than quietly handed a working
+# window over a broken configuration.
+_LAST_RESORT_PACK: dict[str, Any] = {
+    "__meta_name__": "Тёплый камень",
+    "__meta_description__": (
+        "Встроенная копия палитры по умолчанию. Файл темы не удалось прочитать, "
+        "поэтому цвета взяты из программы. Смотрите журнал."
+    ),
+    # Surfaces
+    "BACKGROUND": "#1a1816",
+    "SURFACE_PANEL": "#221f1c",
+    "SURFACE_CARD": "#2b2723",
+    "SURFACE_ELEVATED": "#332f2a",
+    "SURFACE_SUNKEN": "#15130f",
+    "SURFACE_MUTED": "#252220",
+    # Borders
+    "BORDER": "#3d3833",
+    "BORDER_SUBTLE": "#2d2925",
+    # Text
+    "FOREGROUND": "#e8e2d9",
+    "TEXT_SECONDARY": "#b6ada5",
+    "MUTED_FOREGROUND": "#7a7167",
+    "TEXT_DISABLED": "#5a554f",
+    # Neutral interaction
+    "SELECTION_BG": "#2c2723",
+    "FOCUS_RING": "#6b5d4d",
+    # Accent + scale
+    "ACCENT": "#b89e7a",
+    "ACCENT_300": "#9a8462",
+    "ACCENT_500": "#c9b391",
+    "ACCENT_600": "#dac7a8",
+    # Text on colored backgrounds
+    "ON_PRIMARY": "#141210",
+    "ON_DESTRUCTIVE": "#faf9f5",
+    # Status tiers -- safety semantics, so they match the default pack exactly
+    "STATUS_OK": "#4a8a5e",
+    "STATUS_WARNING": "#c4862e",
+    "STATUS_CAUTION": "#c4862e",
+    "STATUS_FAULT": "#c44545",
+    "STATUS_INFO": "#6490c4",
+    "STATUS_STALE": "#5a5d68",
+    "COLD_HIGHLIGHT": "#7ab8c4",
+}
+
+
+def last_resort_pack() -> dict[str, Any]:
+    """Return a private copy of the in-code pack, so no caller can corrupt it."""
+
+    return dict(_LAST_RESORT_PACK)
+
+
+def _default_pack_or_last_resort() -> dict[str, Any]:
+    """The default pack, or the in-code copy when even that cannot be read.
+
+    The check is kept and the reason is recorded. What is not done is stopping.
+    """
+
+    try:
+        return validate_theme_pack(DEFAULT_THEME)
+    except ThemePackError as exc:
+        logger.critical(
+            "theme: default pack '%s' is unusable (%s); drawing with the built-in copy",
+            DEFAULT_THEME,
+            exc,
+        )
+        return last_resort_pack()
+
+
 _THEME_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
@@ -166,18 +247,14 @@ def resolve_theme() -> tuple[str, dict[str, Any]]:
     try:
         return requested, validate_theme_pack(requested)
     except ThemePackError as exc:
-        if requested == DEFAULT_THEME:
-            raise RuntimeError(f"Default theme pack invalid: {exc}") from exc
-        logger.error(
-            "theme: rejected pack '%s' (%s); using %s",
-            requested,
-            exc,
-            DEFAULT_THEME,
-        )
-    try:
-        return DEFAULT_THEME, validate_theme_pack(DEFAULT_THEME)
-    except ThemePackError as exc:
-        raise RuntimeError(f"Default theme pack invalid: {exc}") from exc
+        if requested != DEFAULT_THEME:
+            logger.error(
+                "theme: rejected pack '%s' (%s); using %s",
+                requested,
+                exc,
+                DEFAULT_THEME,
+            )
+    return DEFAULT_THEME, _default_pack_or_last_resort()
 
 
 def _load_theme_pack(name: str) -> dict[str, Any]:
@@ -186,13 +263,9 @@ def _load_theme_pack(name: str) -> dict[str, Any]:
     try:
         return validate_theme_pack(name)
     except ThemePackError as exc:
-        if name == DEFAULT_THEME:
-            raise RuntimeError(f"Default theme pack invalid: {exc}") from exc
-        logger.error("theme: rejected pack '%s' (%s); using %s", name, exc, DEFAULT_THEME)
-        try:
-            return validate_theme_pack(DEFAULT_THEME)
-        except ThemePackError as default_exc:
-            raise RuntimeError(f"Default theme pack invalid: {default_exc}") from default_exc
+        if name != DEFAULT_THEME:
+            logger.error("theme: rejected pack '%s' (%s); using %s", name, exc, DEFAULT_THEME)
+        return _default_pack_or_last_resort()
 
 
 def load_theme() -> dict[str, Any]:
