@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import os
 import re
@@ -32,6 +33,7 @@ from cryodaq.agents.assistant.periodic_projection import (
     ProjectionSnapshot,
 )
 from cryodaq.instance_lock import release_lock, try_acquire_lock
+from cryodaq.logging_setup import _redact
 from cryodaq.periodic_config import (
     PeriodicPngConfig,
     PeriodicPngConfigLoad,
@@ -94,6 +96,61 @@ _KNOWN_RENDER_OUTCOMES = frozenset(
         "render_failed",
     }
 )
+
+
+# This module had no logger at all, which is part of why a runtime that could not start
+# left nothing behind to read.
+_log = logging.getLogger(__name__)
+
+_RUNTIME_FAILED_TEXT = "periodic runtime is unavailable"
+_RUNTIME_REASON_MAX_CHARS = 160
+# One line per distinct reason, then at most one per minute while it persists. The monitor
+# retries about once a second, and a week of that is a log file nobody can read and a disk
+# nobody budgeted for -- the exact failure mode a week-long run is supposed to survive.
+_RUNTIME_FAILED_LOG_INTERVAL_S = 60.0
+# Exactly what periodic_state._validated_text refuses, matched here so a reason is made
+# writable rather than discovered to be unwritable after the writer has already refused it.
+_PROHIBITED_LOCATOR = re.compile(r"\S*api\.telegram\.org/bot\S*", re.IGNORECASE)
+
+
+def _bounded_reason(cause: BaseException) -> str:
+    """One line of the exception's own words, bounded, sanitised, never a traceback.
+
+    An exception can carry a credential -- an HTTP client error embedding a Telegram bot
+    URL is the obvious one -- and this text goes into the health record, which is what a
+    support bundle carries OFF this machine. That is the export boundary.
+
+    REDACTING THE CREDENTIAL IS NOT ENOUGH. periodic_state refuses ANY text matching
+    `api.telegram.org/bot`, credential or not, and _write_runtime_failed_health swallows
+    the refusal -- so a reason that merely mentioned the URL left the health record STALE
+    and said nothing at all. The whole prohibited locator goes, not only the secret inside
+    it, because the writer's rule is what decides whether this reason survives.
+    """
+
+    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", _redact(str(cause))).split())
+    if len(detail) > _RUNTIME_REASON_MAX_CHARS:
+        detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
+    return detail
+
+
+def _runtime_failed_text(cause: BaseException | None, because: str = "") -> str:
+    """The health text, with whatever is known about why.
+
+    The health record is what an operator reads, and what a support bundle carries, so the
+    reason belongs in it and not only in a log file. Four different situations published
+    the identical sentence, which made a run that failed once a second look like one fault
+    repeating rather than one BRANCH repeating.
+    """
+
+    parts = [_RUNTIME_FAILED_TEXT]
+    if because:
+        parts.append(because)
+    if cause is not None:
+        parts.append(type(cause).__name__)
+        detail = _bounded_reason(cause)
+        if detail:
+            parts.append(detail)
+    return ": ".join(parts)
 
 
 def _known_render_outcome(error_code: str) -> bool:
@@ -1700,6 +1757,8 @@ class PeriodicPngSupervisor:
         self._coordinator: PeriodicPngCoordinator | None = None
         self._run_task: asyncio.Task[None] | None = None
         self._published_health_record: PeriodicStateDocument | None = None
+        # (reason signature, monotonic time) of the last runtime-failure line written.
+        self._last_runtime_failure_log: tuple[tuple[str, str], float] | None = None
 
     async def run(self) -> None:
         if self._run_task is not None and self._run_task is not asyncio.current_task():
@@ -1713,8 +1772,8 @@ class PeriodicPngSupervisor:
             while not self._stop_requested:
                 try:
                     load = await self._run_blocking(self._loader, self._config_dir)
-                except Exception:
-                    backoff_index = await self._handle_config_loader_failure(backoff_index)
+                except Exception as exc:
+                    backoff_index = await self._handle_config_loader_failure(backoff_index, exc)
                     continue
                 if not load.requested:
                     if self._leader_fd is not None:
@@ -1738,8 +1797,8 @@ class PeriodicPngSupervisor:
 
                 try:
                     load = await self._run_blocking(self._loader, self._config_dir)
-                except Exception:
-                    backoff_index = await self._handle_config_loader_failure(backoff_index)
+                except Exception as exc:
+                    backoff_index = await self._handle_config_loader_failure(backoff_index, exc)
                     continue
                 if not load.requested:
                     await self._stop_then_write_orderly(disabled=True)
@@ -1770,7 +1829,7 @@ class PeriodicPngSupervisor:
                     self._release_leader()
                     return
                 if self._coordinator is None:
-                    await self._stop_then_mark_runtime_failed()
+                    await self._stop_then_mark_runtime_failed(because="no coordinator was constructed")
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
@@ -1781,7 +1840,14 @@ class PeriodicPngSupervisor:
                     self._release_leader()
                     return
                 if outcome == "failed":
-                    await self._stop_then_mark_runtime_failed()
+                    # The monitor writes a health code of its OWN before returning here --
+                    # "periodic live source stopped unexpectedly" is the one seen on the
+                    # laboratory target -- and it is strictly more specific than anything
+                    # this branch knows. Naming the branch was not enough: the specific code
+                    # was still destroyed by the general one a fraction of a second later.
+                    # So this stops the coordinator and KEEPS whatever the monitor said,
+                    # writing its own only when the monitor left nothing.
+                    await self._stop_then_keep_monitor_health()
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
@@ -1789,8 +1855,8 @@ class PeriodicPngSupervisor:
 
                 try:
                     refreshed = await self._run_blocking(self._loader, self._config_dir)
-                except Exception:
-                    backoff_index = await self._handle_config_loader_failure(backoff_index)
+                except Exception as exc:
+                    backoff_index = await self._handle_config_loader_failure(backoff_index, exc)
                     continue
                 if not refreshed.requested:
                     await self._stop_then_write_orderly(disabled=True)
@@ -1811,13 +1877,13 @@ class PeriodicPngSupervisor:
                     self._release_leader()
                     return
                 if self._coordinator is None:
-                    await self._stop_then_mark_runtime_failed()
+                    await self._stop_then_mark_runtime_failed(because="the coordinator went absent")
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
                     continue
                 if refreshed.config != self._coordinator.config:
-                    await self._stop_then_mark_runtime_failed()
+                    await self._stop_then_mark_runtime_failed(because="the configuration changed")
                     if not await self._try_construct_and_start(refreshed.config):
                         self._release_leader()
                         if self._stop_requested:
@@ -1891,9 +1957,17 @@ class PeriodicPngSupervisor:
         finally:
             self._release_leader()
 
-    async def _handle_config_loader_failure(self, backoff_index: int) -> int:
+    async def _handle_config_loader_failure(self, backoff_index: int, cause: BaseException | None = None) -> int:
+        # The configuration loader is the OTHER way to reach "runtime unavailable", and it
+        # discarded its exception as well. All three call sites feed this one handler.
+        # Through the limiter, and NAMING ITSELF. Passing only the cause left `because`
+        # empty, so this branch and the construction branch wrote identical durable text
+        # for identical exceptions -- the very ambiguity the change exists to remove.
+        because = f"the configuration could not be loaded from {self._config_dir}"
+        if cause is not None:
+            self._log_runtime_failure(because, cause)
         if self._leader_fd is not None:
-            await self._stop_then_mark_runtime_failed()
+            await self._stop_then_mark_runtime_failed(cause, because=because)
             self._release_leader()
         await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
         return min(backoff_index + 1, 5)
@@ -1906,15 +1980,15 @@ class PeriodicPngSupervisor:
             return True
         except asyncio.CancelledError as cancelled:
             try:
-                await self._stop_then_mark_runtime_failed()
+                await self._stop_then_mark_runtime_failed(because="construction was cancelled")
             except BaseException as cleanup_error:
                 raise cancelled from cleanup_error
             raise
         except PeriodicSourceUnavailable:
             await self._stop_then_mark_engine_unavailable()
             return False
-        except Exception:
-            await self._stop_then_mark_runtime_failed()
+        except Exception as exc:
+            await self._stop_then_mark_runtime_failed(exc, because="the coordinator could not be constructed")
             return False
 
     async def _stop_then_mark_engine_unavailable(self) -> None:
@@ -1927,13 +2001,81 @@ class PeriodicPngSupervisor:
         if cleanup_error is not None:
             raise cleanup_error
 
-    async def _stop_then_mark_runtime_failed(self) -> None:
+    def _log_runtime_failure(self, because: str, cause: BaseException | None) -> None:
+        """One line per distinct reason, then at most one a minute while it persists.
+
+        EVERY caller comes through here. The configuration-loader handler logged directly
+        and bypassed the limit, so a reload failing once a second wrote once a second --
+        the flood this exists to stop, arriving by the other door.
+        """
+
+        signature = (because, "none" if cause is None else type(cause).__name__)
+        now_monotonic = self._clock.monotonic()
+        last = self._last_runtime_failure_log
+        if last is not None and last[0] == signature and now_monotonic - last[1] < _RUNTIME_FAILED_LOG_INTERVAL_S:
+            return
+        self._last_runtime_failure_log = (signature, now_monotonic)
+        _log.error(
+            "periodic runtime is unavailable; because=%s type=%s detail=%s",
+            because or "unstated",
+            signature[1],
+            "" if cause is None else _bounded_reason(cause),
+        )
+
+    async def _stop_then_keep_monitor_health(self) -> None:
+        """Stop the coordinator without overwriting a more specific reason.
+
+        The monitor persists its own health before it reports failure. Replacing that with
+        the general "runtime is unavailable" throws away the only sentence that says WHAT
+        went wrong, which is the whole complaint this change exists to answer.
+        """
+
         cleanup_error: BaseException | None = None
         try:
             await self._stop_coordinator()
         except BaseException as exc:
             cleanup_error = exc
-        await self._write_runtime_failed_health()
+        if await self._monitor_left_a_reason():
+            # The health is kept, but something still has to be SAID. Preserving it and
+            # logging nothing meant the next coordinator could put the record back to
+            # `ready` seconds later, leaving no trace anywhere that the live source had
+            # stopped at all -- worse than the vague sentence it replaced.
+            self._log_runtime_failure("the live-source monitor stopped the coordinator", None)
+        else:
+            await self._write_runtime_failed_health(because="the monitor reported a failure")
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    async def _monitor_left_a_reason(self) -> bool:
+        """True only when the LIVE-SOURCE monitor is what wrote the persisted health.
+
+        Treating every other code as a monitor reason was too generous. A coordinator can
+        stop for reasons that leave an earlier, unrelated code behind -- a projection that
+        never completed, a disabled verification -- and preserving one of those would hide
+        the runtime failure that actually happened behind a stale status. Exactly one code
+        is written by the path this branch is deferring to, so exactly one is preserved.
+        """
+
+        try:
+            state = await self._run_blocking(load_periodic_state, self._data_dir)
+            health = state.payload["health"]
+            code = health.get("error_code")
+        except Exception:
+            return False
+        return code == "periodic_live_source_stopped"
+
+    async def _stop_then_mark_runtime_failed(
+        self,
+        cause: BaseException | None = None,
+        *,
+        because: str = "",
+    ) -> None:
+        cleanup_error: BaseException | None = None
+        try:
+            await self._stop_coordinator()
+        except BaseException as exc:
+            cleanup_error = exc
+        await self._write_runtime_failed_health(cause, because=because)
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -2036,7 +2178,20 @@ class PeriodicPngSupervisor:
         except Exception:
             return
 
-    async def _write_runtime_failed_health(self) -> None:
+    async def _write_runtime_failed_health(
+        self,
+        cause: BaseException | None = None,
+        *,
+        because: str = "",
+    ) -> None:
+        # SAY WHAT WENT WRONG. This used to publish a fixed "periodic runtime is
+        # unavailable" and discard the exception that caused it, so a runtime that could
+        # not start left no way at all to find out why. Measured on the laboratory target:
+        # the isolated soak flapped between ready and degraded_runtime once a second for a
+        # whole run, no slot was ever allocated, no receipt was ever sealed, and the reason
+        # existed only inside a swallowed exception.
+        if cause is not None or because:
+            self._log_runtime_failure(because, cause)
         try:
             state = await self._run_blocking(load_periodic_state, self._data_dir)
             previous = float(state.payload["updated_at"])
@@ -2046,7 +2201,7 @@ class PeriodicPngSupervisor:
                 state,
                 status="degraded_runtime",
                 code="periodic_runtime_failed",
-                text="periodic runtime is unavailable",
+                text=_runtime_failed_text(cause, because),
                 now=now,
             )
             active = _active(state)
