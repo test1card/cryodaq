@@ -166,6 +166,13 @@ for anything else:
 > Deferred disclosure rows do not extend the cycle and do not become merge
 > prerequisites merely because work on them remains possible.
 
+**And the boundary that closes the residual**, without which the outcome below
+can be read but not resolved: `MERGED_P9_OPEN` becomes `MERGED_CHECKPOINT` only
+when all three of these hold — the build host is migrated, the workflow is bound
+natively, and a post-fast-forward protected run passes on `master` at the merged
+SHA. Until all three hold, the residual is open, and the items below that depend
+on it do not start.
+
 Terminal outcome, DERIVED from facts measured 2026-08-10 via the GitHub API
 (not copied from any document):
 

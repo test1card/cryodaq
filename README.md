@@ -120,8 +120,8 @@ Sensor calibration across three LakeShore instruments, grouped by the hardware t
 
 ## The laboratory-readiness refactor: what changed
 
-The qualification refactor (merged 2026-07-31; campaign records in
-archived outside this repository) moved CryoDAQ toward narrower ownership, explicit
+The qualification refactor (merged 2026-07-31; campaign records are archived
+outside this repository) moved CryoDAQ toward narrower ownership, explicit
 evidence, and visible failure boundaries while preserving the information-dense
 operator workflow. Several boundaries remain open below, so this is a design
 direction with open acceptance gates, not a finished system property.

@@ -69,7 +69,14 @@ Follow the table with a one-line note on anything you deliberately did **not** s
 - Suggest a one-line glossary entry for domain terms that must stay.
 
 **Will not:**
-- Rewrite archived, evidence, or verbatim-quoted text (repository note: in this repository, quoted owner/reviewer words and anything fenced `<!-- verbatim:begin -->`…`<!-- verbatim:end -->` are byte-faithful records — an STE pass over them destroys exactly what they exist to preserve, which the standing documentation direction excludes for that reason).
+- Do not rewrite archived text.
+- Do not rewrite evidence.
+- Do not rewrite a verbatim quotation.
+
+  In this repository, quoted owner or reviewer words are byte-faithful records.
+  Text fenced with `<!-- verbatim:begin -->` and `<!-- verbatim:end -->` is also a
+  byte-faithful record. A rewrite destroys what such a record exists to preserve.
+  The standing documentation direction excludes these texts for that reason.
 - Reproduce ASD's official ~900-word dictionary as if it were memorized verbatim — always treat the official download as the source of truth for exact approved wording.
 - Simplify creative, marketing, or persuasive copy where voice and nuance are the point.
 - Silently drop a safety condition, exception, or scope qualifier to shorten a sentence — it will flag the trade-off instead.
