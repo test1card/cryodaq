@@ -13,17 +13,28 @@ that, leaving the instrument sourcing while the software believes it is off. Two
 one source is the exact hazard the ownership design exists to prevent, and it is the reason
 an engine crash may be answered with a restart at all.
 
-WHICH CHILD IS ACTUALLY AT RISK, measured rather than assumed. A child sitting on its pipe
-between operations already dies by itself: the parent's death closes the write end, the read
-returns end-of-file, and it leaves. The FIRST version of this module tested exactly that
-child and passed with the binding removed -- it proved nothing. The child at risk is the one
-INSIDE a native VISA call, which is not reading the pipe and cannot see the end-of-file
-until the call returns. That is the child these tests use: one that is busy.
+WHICH CHILD IS AT RISK, and TWO measurement mistakes made on the way to knowing it.
+
+The first version killed a parent whose child was blocked reading the pipe, and passed with
+the binding removed: the parent's death closes the write end, the read returns end-of-file,
+and that child leaves by itself. It proved nothing.
+
+The second version used a child that stays busy -- which is the right shape, because a child
+inside a native call is not reading the pipe -- but ran its parent through `python -c`.
+`spawn` re-imports the main module to rebuild the target, and a `-c` main module cannot be
+re-imported, so the child died on a traceback before running a line. The control reported
+"no orphan" because the child was never alive to become one.
+
+Measured properly, with the parent as a real FILE: a busy child DOES survive a SIGKILLed
+parent, in every shape tried -- sleeping, spinning in Python, and blocked in a native call
+that holds the GIL. So the hazard is real, and each test below carries its own control.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -58,8 +69,8 @@ def _alive(pid: int) -> bool:
     return state.rsplit(")", 1)[-1].split()[0] != "Z"
 
 
-# A parent that starts a child which binds its lifetime and then stays BUSY -- never reading
-# the pipe, exactly like one inside a native call. It reports the child pid and waits to die.
+# The parent is written to a FILE, never passed with -c: `spawn` re-imports the main module
+# to rebuild the target, and a `-c` main module cannot be re-imported.
 _BUSY_CHILD_PARENT = textwrap.dedent(
     """
     import multiprocessing, sys, time
@@ -68,8 +79,9 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
     def _busy(_connection):
         from cryodaq.drivers.transport.usbtmc import _bind_lifetime_to_parent
         {binding}
-        # Whatever happens to the parent, this loop does not look at the pipe.
-        time.sleep(600)
+        # Whatever happens to the parent, this never looks at the pipe -- the shape of a
+        # child inside a native call.
+        {busy}
 
     if __name__ == "__main__":
         context = multiprocessing.get_context("spawn")
@@ -82,21 +94,34 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
     """
 )
 
+_BUSY_SHAPES = {
+    "sleeping": "time.sleep(600)",
+    "holding the GIL in a native call": "import ctypes; ctypes.PyDLL('libc.so.6').sleep(600)",
+}
 
-def _child_survives_a_killed_parent(*, bound: bool) -> bool:
+
+def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool:
     """Kill a parent with SIGKILL and report whether its busy child outlived it."""
 
-    program = _BUSY_CHILD_PARENT.format(
-        src=_SRC,
-        binding="_bind_lifetime_to_parent()" if bound else "pass",
+    parent_file = tmp_path / f"parent_{'bound' if bound else 'unbound'}_{abs(hash(busy))}.py"
+    parent_file.write_text(
+        _BUSY_CHILD_PARENT.format(
+            src=_SRC,
+            binding="_bind_lifetime_to_parent()" if bound else "pass",
+            busy=busy,
+        ),
+        encoding="utf-8",
     )
-    parent = subprocess.Popen([sys.executable, "-c", program], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    parent = subprocess.Popen([sys.executable, "-B", str(parent_file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         assert parent.stdout is not None
         line = parent.stdout.readline().decode().strip()
-        assert line.isdigit(), f"no child pid reported; stderr={parent.stderr.read()[:400]!r}"
+        assert line.isdigit(), f"no child pid reported; stderr={parent.stderr.read()[:600]!r}"
         child_pid = int(line)
-        assert _alive(child_pid), "the child must be running before the parent is killed"
+        # The child must be alive AND have got past its own start-up, or a control that
+        # reports "no orphan" is only reporting a child that never ran.
+        time.sleep(1.0)
+        assert _alive(child_pid), f"the child died before the parent was killed; stderr={parent.stderr.read()[:600]!r}"
 
         parent.kill()
         parent.wait(timeout=10)
@@ -110,33 +135,30 @@ def _child_survives_a_killed_parent(*, bound: bool) -> bool:
             parent.kill()
         parent.wait(timeout=10)
     if survived:
-        try:
-            os.kill(child_pid, 9)
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            os.kill(child_pid, signal.SIGKILL)
     return survived
 
 
 @_LINUX_ONLY
-def test_a_busy_child_outlives_a_killed_parent_without_the_binding() -> None:
-    """The control. Without it the hazard is real, and this is what proves it.
+@pytest.mark.parametrize("shape", sorted(_BUSY_SHAPES), ids=lambda s: s.replace(" ", "-"))
+def test_the_binding_decides_whether_a_busy_child_outlives_its_killed_parent(tmp_path, shape: str) -> None:
+    """Control and guard in one test, so neither can drift away from the other.
 
     SIGKILL is the one signal a process cannot handle, and therefore the one case the
-    daemonic flag can never cover. A child that is not reading its pipe does not notice.
+    daemonic flag can never cover. Without the binding the child survives; with it the
+    kernel kills it. If the control ever stops reproducing the orphan, this fails too --
+    which is the point, because a guard whose hazard cannot be reproduced is a guard nobody
+    can trust.
     """
 
-    assert _child_survives_a_killed_parent(bound=False), (
-        "the control must reproduce the orphan, or the guard below proves nothing"
+    busy = _BUSY_SHAPES[shape]
+    assert _child_survives_a_killed_parent(tmp_path, bound=False, busy=busy), (
+        f"the control must reproduce the orphan while {shape}, or the guard proves nothing"
     )
-
-
-@_LINUX_ONLY
-def test_the_binding_kills_the_busy_child_with_its_parent() -> None:
-    """The same child, bound. The kernel delivers what atexit never could."""
-
-    assert not _child_survives_a_killed_parent(bound=True), (
-        "the source-owning child outlived its killed parent; it could still finish a "
-        "write after a replacement engine had commanded OFF"
+    assert not _child_survives_a_killed_parent(tmp_path, bound=True, busy=busy), (
+        f"the source-owning child outlived its killed parent while {shape}; it could still "
+        "finish a write after a replacement engine had commanded OFF"
     )
 
 
