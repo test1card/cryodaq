@@ -99,6 +99,29 @@ _DISCONTINUITY_LOG_INTERVAL_S = 60.0
 _last_discontinuity_log: dict[str, float] = {}
 
 
+# A CLOSED VOCABULARY, not the exception text. The receive loop catches whatever the
+# frame handler raised, and putting that message into the reason would put frame content
+# -- values, identifiers, addresses -- into a log line and into a durable health record.
+# The category says which CLASS of thing went wrong, which is what a diagnosis needs.
+_INVALIDATION_CATEGORIES: dict[type[BaseException], str] = {
+    ValueError: "a frame was rejected as malformed, out of sequence, or counter-inconsistent",
+    TypeError: "a frame carried a value of the wrong type",
+    KeyError: "a frame was missing a required field",
+    OSError: "the subscriber transport failed",
+}
+
+
+def _invalidation_category(error: BaseException | None) -> str:
+    """Name the class of failure that took authority, never its text."""
+
+    if error is None:
+        return "the live generation was invalidated"
+    for kind, category in _INVALIDATION_CATEGORIES.items():
+        if isinstance(error, kind):
+            return category
+    return f"the receive path failed with {type(error).__name__}"
+
+
 def _say_discontinuity(reason: str) -> None:
     """Write the reason at most once a minute, per reason."""
 
@@ -613,6 +636,9 @@ class SequencedPeriodicLiveSources:
         self._running = False
         self._stopping = False
         self._invalid = False
+        # Set the moment authority is lost, and read by `wait()`. A default that says
+        # nothing would let a reader mistake "no reason recorded" for "no reason".
+        self._invalidation_reason = "the live generation was invalidated"
         self._closed = False
         self._generation = next(_GENERATION_COUNTER)
         self._session_id: str | None = None
@@ -624,10 +650,13 @@ class SequencedPeriodicLiveSources:
         self._provisional: list[_ProvisionalFrame] = []
         self._provisional_bytes = 0
 
-    def _invalidate(self) -> None:
+    def _invalidate(self, reason: str = "the live generation was invalidated") -> None:
+        """Take the generation down and REMEMBER WHY, so a later reader is not guessing."""
+
         if self._invalid or self._stopping:
             return
         self._invalid = True
+        self._invalidation_reason = reason
         self._running = False
         self._provisional.clear()
         self._provisional_bytes = 0
@@ -635,7 +664,7 @@ class SequencedPeriodicLiveSources:
         for task in (self._receive_task, self._monitor_task):
             if task is not None and task is not current and not task.done():
                 task.cancel()
-        discontinuity = PeriodicLiveDiscontinuity("the live generation was invalidated")
+        discontinuity = PeriodicLiveDiscontinuity(reason)
         marker = self._ready_marker
         if marker is not None and not marker.done():
             marker.set_exception(discontinuity)
@@ -834,11 +863,11 @@ class SequencedPeriodicLiveSources:
                 await self._handle_frame(parts)
         except asyncio.CancelledError:
             raise
-        except BaseException:
-            self._invalidate()
+        except BaseException as error:
+            self._invalidate(f"the receive loop stopped: {_invalidation_category(error)}")
         else:
             if not self._stopping:
-                self._invalidate()
+                self._invalidate("the receive loop ended while the source was still running")
 
     async def _monitor_loop(self) -> None:
         try:
@@ -860,18 +889,18 @@ class SequencedPeriodicLiveSources:
                         # expected until the first connection; after that,
                         # DISCONNECTED remains terminal authority loss.
                         continue
-                    self._invalidate()
+                    self._invalidate("the subscriber retried its connection after it had connected once")
                     return
                 if event in _MONITOR_FAILURE_EVENTS:
-                    self._invalidate()
+                    self._invalidate(f"the subscriber socket reported event {event!r}")
                     return
         except asyncio.CancelledError:
             raise
-        except BaseException:
-            self._invalidate()
+        except BaseException as error:
+            self._invalidate(f"the socket monitor stopped: {_invalidation_category(error)}")
         else:
             if not self._stopping:
-                self._invalidate()
+                self._invalidate("the socket monitor ended while the source was still running")
 
     async def start(
         self,
@@ -1049,10 +1078,10 @@ class SequencedPeriodicLiveSources:
                     self._provisional_last = None
             return marker_cut
         except asyncio.CancelledError:
-            self._invalidate()
+            self._invalidate("the barrier was cancelled")
             raise
         except BaseException as exc:
-            self._invalidate()
+            self._invalidate(f"the barrier failed with {type(exc).__name__}")
             if isinstance(exc, PeriodicLiveDiscontinuity):
                 raise
             raise PeriodicLiveDiscontinuity(f"the barrier failed with {type(exc).__name__}") from None
@@ -1082,7 +1111,9 @@ class SequencedPeriodicLiveSources:
             raise RuntimeError("periodic live source is not started")
         await asyncio.shield(failure)
         if self._invalid:
-            raise PeriodicLiveDiscontinuity("the source was already invalid when the wait ended")
+            # The reason the generation went down, not the fact that it is down. The
+            # second is what a caller already knows.
+            raise PeriodicLiveDiscontinuity(self._invalidation_reason)
 
     async def _stop_impl(self) -> None:
         self._stopping = True
