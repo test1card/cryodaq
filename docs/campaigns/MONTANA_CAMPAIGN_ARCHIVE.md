@@ -1625,34 +1625,6 @@ projector scale остаётся deferred.
    frozen-build, soak-duration, physical-hardware, F35 frozen-packaging и F36
    operator/accessibility/performance/scenario gates остаются открыты.
 
-## Out-of-tree campaign records (recorded 2026-08-10)
-
-The campaign's working corpus never lived in this repository. It was
-consolidated on 2026-08-09/10 out of the machine temp directory into a durable,
-agent-agnostic workspace folder named `cryodaq-workspace`, kept beside the
-repository checkout on the maintainer machine (deliberately not a tracked
-path; a private remote for it is queued with the owner as OB-008 in
-`docs/OBLIGATIONS.md`). What it holds:
-
-- **`evidence/pr1/`** — the authoritative PR #1 approval records the owner
-  ruled are internal rather than GitHub review states: the approver transcripts
-  and verdict files (sol, fable, glm-5.2, kimi), the merge card, and the PR's
-  review/comment JSON exports.
-- **`evidence/lanes/`** — the review-lane stores: briefs, per-lane result
-  verdicts, and full transcripts.
-- **`archive/`** — the retired campaign process layer (cycle plans, state-file
-  history, superseded plans and handovers) plus a byte-exact preservation
-  snapshot of the entire pre-consolidation corpus, taken 2026-08-09 before
-  anything was moved or deleted.
-- **`STATE.md`** — the single live agent state file that superseded the
-  campaign's state documents; its history is the workspace's git log.
-
-Deferred owner directions found in that corpus are registered in
-`docs/OBLIGATIONS.md`; durable owner rulings from it are recorded in
-`docs/DECISIONS.md`. Nothing in the workspace is repository policy: it is
-evidence and working state, selected per `AGENTS.md` "Rule scope and
-promotion".
-
 ## Owner-ratified P0-P9 plan, extracted from ROADMAP.md
 
 <!-- Extracted verbatim 2026-08-10 on branch docs/agent-layer-obligations,
