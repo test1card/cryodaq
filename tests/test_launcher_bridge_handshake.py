@@ -408,6 +408,45 @@ def test_every_production_spawn_strips_the_launcher_only_authority(
     )
 
 
+@_POSIX_HANDSHAKE
+def test_assistant_spawn_delegates_only_its_bounded_soak_artifact_grant(monkeypatch) -> None:
+    """The capability-bearing assistant path must pass only its child duplicate."""
+
+    _read_fd, artifact_fd = os.pipe()
+    capability = launcher._SoakArtifactCapability(artifact_fd, "e" * 64)
+    captured: dict[str, object] = {}
+
+    def _capture(*_args, **kwargs):
+        captured["env"] = dict(kwargs["env"])
+        captured["pass_fds"] = tuple(kwargs.get("pass_fds", ()))
+        raise RuntimeError("spawn intercepted after the capability grant was built")
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", _capture)
+    window = SimpleNamespace(
+        _assistant_proc=None,
+        _assistant_enabled=True,
+        _assistant_experiment_mode=False,
+        _assistant_periodic_requested=False,
+        _shutdown_requested=False,
+        _soak_artifact_capability=capability,
+    )
+    try:
+        with contextlib.suppress(RuntimeError):
+            launcher.LauncherWindow._start_assistant(window)
+
+        assert "env" in captured, "the assistant spawn was never reached"
+        child = captured["env"]
+        assert isinstance(child, dict)
+        delegated_fd = int(child[launcher._SOAK_ARTIFACT_FD_ENV])
+        assert delegated_fd != artifact_fd, "the assistant must not receive the launcher descriptor"
+        assert child[launcher._SOAK_ARTIFACT_NONCE_ENV] == "e" * 64
+        assert child[launcher._SOAK_ASSISTANT_GENERATION_ENV] == "1"
+        assert captured["pass_fds"] == (delegated_fd,), "only the delegated descriptor may cross exec"
+    finally:
+        capability.close()
+        os.close(_read_fd)
+
+
 def test_child_environments_always_strip_launcher_only_descriptor_authority() -> None:
     environment = {
         "SAFE": "1",

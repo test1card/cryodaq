@@ -1711,7 +1711,7 @@ def _pump_engine_stderr(
             raw_line = owner.readline(_MAX_ENGINE_STDERR_LINE_BYTES + 1)
             if not raw_line:
                 break
-            if len(raw_line) > _MAX_ENGINE_STDERR_LINE_BYTES or not raw_line.endswith(b"\n"):
+            if len(raw_line) > _MAX_ENGINE_STDERR_LINE_BYTES:
                 while raw_line and not raw_line.endswith(b"\n"):
                     raw_line = owner.readline(_MAX_ENGINE_STDERR_LINE_BYTES + 1)
                 stderr_logger.error("engine stderr line exceeded the forwarding bound")

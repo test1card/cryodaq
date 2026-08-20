@@ -154,6 +154,37 @@ def test_the_engine_end_replaces_a_token_through_its_real_logging_setup(tmp_path
     assert said in joined, "everything that is not that one credential shape must survive intact"
 
 
+def test_the_engine_end_replaces_a_token_in_formatted_exception_text(tmp_path, monkeypatch) -> None:
+    """The formatter must redact credentials appended from ``exc_info``."""
+
+    program = f"""\
+import logging
+from cryodaq.logging_setup import setup_logging
+setup_logging("stderr-contract-exception-probe", console=True, file=False)
+try:
+    raise RuntimeError("https://api.telegram.org/{_REAL_TOKEN_SHAPE}/getMe")
+except RuntimeError:
+    logging.getLogger("cryodaq.probe").exception("telegram call failed")
+logging.shutdown()
+"""
+    env = launcher._engine_child_environment(os.environ)
+    messages = _pump(_run_engine_like_child(program, env), tmp_path, monkeypatch)
+
+    joined = "\n".join(messages)
+    assert _REAL_TOKEN_SHAPE not in joined, "formatted exception text must not retain the token"
+    assert "bot***" in joined, f"the formatted exception must use the redaction marker; got {messages}"
+
+
+def test_a_bounded_final_stderr_fragment_is_forwarded_at_eof(tmp_path, monkeypatch) -> None:
+    """An abrupt child exit must not discard its final bounded diagnostic."""
+
+    said = b"native dependency failed before it could flush a newline"
+    messages = _pump(said, tmp_path, monkeypatch)
+
+    assert any(said.decode() in message for message in messages), messages
+    assert not any("exceeded the forwarding bound" in message for message in messages), messages
+
+
 def test_the_spawn_hands_the_operating_system_the_environment_under_test(monkeypatch) -> None:
     """Prove _start_engine PASSES that environment, not merely that it builds one.
 

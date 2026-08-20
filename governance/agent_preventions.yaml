@@ -580,7 +580,7 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
-    guard: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
+    guard: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_through_its_real_logging_setup
     ci_partition: remaining
     red_evidence: the_no_scrub_test_used_a_shape_production_never_matched_and_the_builder_count_included_the_helpers_own_call_so_a_spawn_regressing_to_a_bare_environ_stayed_green_2026_08_20_pending_immutable_capture
     green_evidence: pending
@@ -4237,6 +4237,12 @@ records:
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_an_over_long_line_is_reported_and_not_forwarded_whole
         ci_partition: remaining
       - node: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
+        ci_partition: remaining
+      - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_through_its_real_logging_setup
+        ci_partition: remaining
+      - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_in_formatted_exception_text
+        ci_partition: remaining
+      - node: tests/launcher/test_engine_stderr_is_kept.py::test_a_bounded_final_stderr_fragment_is_forwarded_at_eof
         ci_partition: remaining
     red_evidence: one_soak_run_wrote_104_identical_placeholder_records_and_kept_no_engine_words_2026_08_20_pending_immutable_capture
     green_evidence: pending
