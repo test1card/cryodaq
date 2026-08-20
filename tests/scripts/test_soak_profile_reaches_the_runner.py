@@ -3,9 +3,13 @@
 WHY THIS MODULE EXISTS. Until this change the profile was never passed. `main()` computed
 one, used it to name the evidence directory and to decide the activation refusal, and then
 called `runner._PosixSoakRunner().run(evidence)` — a runner that selected `short` for
-itself. Measured on the laboratory machine before the fix: a run asked for the `12h`
-profile stopped at elapsed 185.0 s on the SHORT profile's fault schedule, under the long
-profile's name.
+itself.
+
+HOW THAT WAS SEEN, stated exactly, because it cannot be reproduced through this entry
+point: the activation refusal was lifted on a THROWAWAY commit that was never pushed, and
+a run asked for the `12h` profile then stopped at elapsed 185.0 s on the SHORT profile's
+fault schedule, under the long profile's name. Through the entry point as it stands, a
+non-short profile returns 3 and never reaches the runner at all.
 
 Nothing here lifts the activation refusal. These tests are about one thing only: the
 profile reaches the runner, and asking for the short one still behaves exactly as before.
@@ -123,3 +127,37 @@ def test_main_hands_the_runner_the_profile_it_selected(tmp_path, monkeypatch) ->
     assert received[0] is soak.profile("short"), (
         "the runner must receive the profile the entry point selected, not choose its own"
     )
+
+
+def test_the_manifest_reports_the_profile_that_ran_and_counts_its_receipts() -> None:
+    """The manifest used to name the short profile and claim two receipts, as literals.
+
+    The thresholds beside those lines already read the selected profile, so a manifest could
+    have described a run that did not happen. Nothing reaches that state while the entry
+    point refuses every profile but the short one, which is exactly why it has to be right
+    BEFORE the refusal is lifted rather than after.
+
+    The short profile's own answer is pinned to 2 so its manifest cannot move: its chooser
+    places one boundary inside the 900-second run and the next past the end.
+    """
+
+    short = soak.profile("short")
+    assert runner._expected_report_receipts(short, 600, 500) == 2
+    assert runner._expected_report_receipts(short, 3600, 1) == 2, (
+        "the short answer must not depend on the interval, or its manifest could move"
+    )
+
+    twelve_hour = soak.profile("12h")
+    assert twelve_hour.duration_s == 12 * 3600
+
+    # Twelve hours at an hourly cadence crosses twelve boundaries, and the offset inside
+    # the first hour does not change that. I first wrote 13 for the second line; the test
+    # caught my arithmetic, which is what it is for.
+    assert runner._expected_report_receipts(twelve_hour, 3600, 3600) == 12
+    assert runner._expected_report_receipts(twelve_hour, 3600, 1) == 12
+
+    # A case that actually distinguishes: halve the cadence and the count halves.
+    assert runner._expected_report_receipts(twelve_hour, 7200, 7200) == 6
+
+    with pytest.raises(runner._RunnerFoundationError, match="report interval must be positive"):
+        runner._expected_report_receipts(twelve_hour, 0, 0)

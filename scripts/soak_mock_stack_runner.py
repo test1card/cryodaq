@@ -839,6 +839,27 @@ def _select_short_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
     raise _RunnerFoundationError("unable to align the reviewed short-soak report cadence")
 
 
+def _expected_report_receipts(selected: Any, interval_s: int, boundary_offset_s: int) -> int:
+    """How many periodic-report boundaries the run is expected to cross.
+
+    Two is the SHORT profile's own reservation, and it is returned as a literal so that
+    profile's manifest cannot move: its chooser places one boundary inside the 900-second
+    run and the next one past the end, and the second receipt is the settling one.
+
+    Any other profile crosses as many boundaries as its duration allows, so the number is
+    COUNTED. It used to be the literal 2 for every profile, beside a `"profile": "short"`
+    that was also a literal, so a manifest could have described a run that did not happen.
+    Nothing can reach that state while the entry point refuses every profile but the short
+    one -- which is why it has to be right BEFORE that refusal is lifted, not after.
+    """
+
+    if selected.name == "short":
+        return 2
+    if interval_s <= 0:
+        raise _RunnerFoundationError("report interval must be positive to count receipts")
+    return 1 + max(0, int((selected.duration_s - boundary_offset_s) // interval_s))
+
+
 def _select_long_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
     """Choose the report cadence for a profile that is NOT the short one.
 
@@ -3792,7 +3813,12 @@ class _PosixSoakRunner:
                 ).payload
         evidence.write_manifest(
             {
-                "profile": "short",
+                # The profile that RAN, never a literal. The thresholds beside this line
+                # already read `selected`; this one did not, so a manifest could have named
+                # the short profile while another one ran. Nothing can reach that state
+                # today because the entry point refuses every profile but the short one --
+                # which is exactly why it must be right before that refusal is ever lifted.
+                "profile": selected.name,
                 "git_sha": sha,
                 "dirty": False,
                 "platform": platform.platform(),
@@ -3802,7 +3828,9 @@ class _PosixSoakRunner:
                 "periodic_schedule": {
                     "interval_s": report_interval_s,
                     "selection_boundary_offset_s": report_boundary_offset_s,
-                    "expected_receipts": 2,
+                    "expected_receipts": _expected_report_receipts(
+                        selected, report_interval_s, report_boundary_offset_s
+                    ),
                 },
                 "source_fixture": source_fixture,
                 "fatal_log_allowlist": [],
