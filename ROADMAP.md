@@ -329,8 +329,15 @@ copies those packs into the isolated configuration. A roadmap that keeps an old
 diagnosis under "the next barrier" sends the next investigation down a road that
 is already built.
 
-**Measured 2026-08-20 on Ubuntu 22.04, at the heads then under review, the run
-gets much further and stops somewhere else entirely:**
+**Measured 2026-08-20 on Ubuntu 22.04, the run gets much further and stops
+somewhere else entirely. Read this as DIRECTIONAL, not as qualification of any
+candidate**, and the reason is structural rather than an omission: the run was
+performed on a throwaway merge of several open branches, made to see whether they
+work together, so **no tracked commit produced it and none can be cited**. A
+result that names no immutable tree cannot tell a later reviewer whether it
+applies to the candidate in front of them. It becomes bindable once those
+branches merge and the soak is re-run at one candidate head; until then it says
+where to look and nothing more:
 
 - the engine fault at 185 s is **recovered**. `faults.jsonl` records
   `ready: true`, `recovery_s: 6.749`, `bridge_data_resumed: true`, and a
@@ -391,12 +398,13 @@ states the opposite and the loader falls back to a built-in copy.
 
 #### The environment recipe that works today
 
-**Fixing this document is not enough: the checklist is the CANONICAL procedure,
-and an operator follows that.** While the two disagree, the operator meets a
-dangling symlink and fails at `.venv/bin/python` no matter what this roadmap
-says. Repairing `docs/lab_verification_checklist.md` belongs in the same slice
-as this section; until it lands, treat the recipe below as the one that was
-measured and the checklist as known-stale.
+**The checklist is the CANONICAL procedure, and it has been repaired in this
+same change** — an operator follows the checklist, so a roadmap that carried a
+working recipe beside a broken canonical one still left the operator at a
+dangling symlink. Its qualification section no longer links `.venv` at the
+unreadable path; it measures the interpreter on the machine and links only the
+interpreter. **The recipe below is the same one and is kept as the record of what
+was measured**, not as a competing procedure.
 
 The qualification section of `docs/lab_verification_checklist.md` is right about
 the important thing — the run must happen in a clone on a native Linux
@@ -458,12 +466,32 @@ do not read a `short` PASS as partial credit toward them.
 
 **And a soak PASS is not the same evidence at every rung.** The mock stack
 drives mock sources and commands no heater, so its PASS says nothing about
-heater control or about the instrument running end to end. Rung 1 asks for both
-of those, and they come from the physical Keithley A8-0 gate, not from a soak of
-any duration. What the soak alone certifies is continuity: that the program
-keeps acquiring, keeps writing, and neither leaks nor stalls over the stated
-window. That is why the soak is graded as an instrument rather than a feature —
-and also why it is only one of the two things a laboratory-ready rung needs.
+heater control or about the instrument running end to end. What the soak alone
+certifies is continuity: that the program keeps acquiring, keeps writing, and
+neither leaks nor stalls over the stated window. That is why the soak is graded
+as an instrument rather than a feature.
+
+**Rung 1 asks for two further things, and NEITHER of them is proved by A8-0.**
+Read `docs/lab_verification_checklist.md` and A8-0 says so itself: it runs *"при
+уже подтверждённом OFF и без подачи мощности"* — with the source already
+confirmed OFF and with no power applied — and it checks exactly one property,
+that the instrument answers a nonce-bound OFF command with the exact expected
+line and nothing else. It is a command-grammar gate on real firmware. **A rung
+that cited A8-0 for heater control could be declared complete without a heater
+ever being driven.**
+
+- **Heater control** is evidenced by the POWERED procedures: **A8b**, which
+  applies a safe low level, lets the watchdog window pass and requires the late
+  command to drive both outputs OFF and raise the latch; and **A8d**, which
+  measures terminal voltage, current, power and disconnect time on independent
+  instruments rather than trusting `source.output`. A8-0 stays open for its own
+  purpose and closes nothing else.
+- **The instrument running end to end has NO prescribed procedure**, and naming
+  that gap is more useful than assigning it to a gate that does not test it. The
+  checklist's A8 series covers the OFF command, the watchdog, host death and
+  terminal measurement — none of them is an end-to-end run of an experiment on
+  real hardware with acquisition, storage and export. Rung 1 cannot be closed
+  until that procedure exists and states its own evidence.
 
 ---
 
