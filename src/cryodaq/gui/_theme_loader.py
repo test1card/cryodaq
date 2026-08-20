@@ -147,16 +147,11 @@ def _default_pack_or_last_resort() -> dict[str, Any]:
         # it configures logging, so a plain logger call here reaches no file handler and,
         # under the frozen pythonw launcher, nothing at all. Defer it: setup_logging replays
         # it as soon as there is somewhere for it to go.
-        logger.critical(
-            "theme: default pack '%s' is unusable (%s); drawing with the built-in copy",
-            DEFAULT_THEME,
-            exc,
-        )
-        defer_record(
+        _say_and_defer(
             logging.CRITICAL,
             "theme: default pack '%s' is unusable (%s); drawing with the built-in copy",
             DEFAULT_THEME,
-            str(exc),
+            exc,
         )
         return last_resort_pack()
 
@@ -174,6 +169,20 @@ def _validate_theme_id(name: object) -> str:
     return name
 
 
+def _say_and_defer(level: int, message: str, *args: object) -> None:
+    """Record something settled before logging exists, and again once it does.
+
+    EVERY reason this module produces runs during `import cryodaq.gui.theme`, which every
+    entry point does before configuring logging. A plain call here reaches no file handler,
+    and under the frozen pythonw launcher reaches nothing at all. Doing it in one helper is
+    what stopped the deferral being remembered for some branches and forgotten for others,
+    which is exactly how three of these were missed.
+    """
+
+    logger.log(level, message, *args)
+    defer_record(level, message, *[str(arg) for arg in args])
+
+
 def _selected_theme_name() -> str:
     try:
         settings_present = SETTINGS_FILE.exists()
@@ -184,14 +193,7 @@ def _selected_theme_name() -> str:
         # It must also not disappear quietly. If the default pack is readable the fallback
         # below is never entered, so this is the ONLY place that can say why the operator's
         # chosen theme was ignored. Deferred as well, because this runs before logging.
-        logger.error("theme: cannot read %s (%s); using %s", SETTINGS_FILE, exc, DEFAULT_THEME)
-        defer_record(
-            logging.ERROR,
-            "theme: cannot read %s (%s); using %s",
-            str(SETTINGS_FILE),
-            str(exc),
-            DEFAULT_THEME,
-        )
+        _say_and_defer(logging.ERROR, "theme: cannot read %s (%s); using %s", SETTINGS_FILE, exc, DEFAULT_THEME)
         return DEFAULT_THEME
     if not settings_present:
         return DEFAULT_THEME
@@ -199,8 +201,11 @@ def _selected_theme_name() -> str:
         with SETTINGS_FILE.open(encoding="utf-8") as f:
             loaded = yaml.safe_load(f)
     except Exception as exc:
-        logger.warning(
-            "theme: failed to parse %s: %s; using %s",
+        # OSError from the OPEN belongs here too, not only the stat above: a settings file
+        # that exists and cannot be opened is the same operator-visible outcome.
+        _say_and_defer(
+            logging.WARNING,
+            "theme: failed to read %s: %s; using %s",
             SETTINGS_FILE,
             exc,
             DEFAULT_THEME,
@@ -211,7 +216,8 @@ def _selected_theme_name() -> str:
     elif isinstance(loaded, dict):
         data = loaded
     else:
-        logger.warning(
+        _say_and_defer(
+            logging.WARNING,
             "theme: settings in %s must be a mapping; using %s",
             SETTINGS_FILE,
             DEFAULT_THEME,
@@ -221,7 +227,8 @@ def _selected_theme_name() -> str:
     try:
         return _validate_theme_id(name)
     except ThemePackError:
-        logger.warning(
+        _say_and_defer(
+            logging.WARNING,
             "theme: invalid 'theme' value in %s; using %s",
             SETTINGS_FILE,
             DEFAULT_THEME,
@@ -285,7 +292,10 @@ def resolve_theme() -> tuple[str, dict[str, Any]]:
         return requested, validate_theme_pack(requested)
     except ThemePackError as exc:
         if requested != DEFAULT_THEME:
-            logger.error(
+            # The operator chose this pack. If the default one is readable the fallback is
+            # never entered, so without deferring here nothing ever says it was rejected.
+            _say_and_defer(
+                logging.ERROR,
                 "theme: rejected pack '%s' (%s); using %s",
                 requested,
                 exc,
@@ -301,7 +311,7 @@ def _load_theme_pack(name: str) -> dict[str, Any]:
         return validate_theme_pack(name)
     except ThemePackError as exc:
         if name != DEFAULT_THEME:
-            logger.error("theme: rejected pack '%s' (%s); using %s", name, exc, DEFAULT_THEME)
+            _say_and_defer(logging.ERROR, "theme: rejected pack '%s' (%s); using %s", name, exc, DEFAULT_THEME)
         return _default_pack_or_last_resort()
 
 
@@ -346,13 +356,7 @@ def available_themes() -> list[dict[str, str]]:
     try:
         present = THEMES_DIR.exists()
     except OSError as exc:
-        logger.error("theme: cannot scan %s (%s); offering no theme choices", THEMES_DIR, exc)
-        defer_record(
-            logging.ERROR,
-            "theme: cannot scan %s (%s); offering no theme choices",
-            str(THEMES_DIR),
-            str(exc),
-        )
+        _say_and_defer(logging.ERROR, "theme: cannot scan %s (%s); offering no theme choices", THEMES_DIR, exc)
         return []
     if not present:
         return []
@@ -362,19 +366,13 @@ def available_themes() -> list[dict[str, str]]:
     except OSError as exc:
         # exists() can answer while the listing still refuses, on a directory that is
         # readable but not searchable and on a filesystem that fails mid-scan.
-        logger.error("theme: cannot list %s (%s); offering no theme choices", THEMES_DIR, exc)
-        defer_record(
-            logging.ERROR,
-            "theme: cannot list %s (%s); offering no theme choices",
-            str(THEMES_DIR),
-            str(exc),
-        )
+        _say_and_defer(logging.ERROR, "theme: cannot list %s (%s); offering no theme choices", THEMES_DIR, exc)
         return []
     for pack_file in pack_files:
         try:
             pack = validate_theme_pack(pack_file.stem)
         except ThemePackError as exc:
-            logger.warning("theme: ignoring invalid pack %s: %s", pack_file, exc)
+            _say_and_defer(logging.WARNING, "theme: ignoring invalid pack %s: %s", pack_file, exc)
             continue
         results.append(
             {

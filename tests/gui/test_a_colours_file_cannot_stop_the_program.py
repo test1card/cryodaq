@@ -275,6 +275,78 @@ def test_an_ignored_theme_choice_says_why(themes_dir, tmp_path, monkeypatch, roo
     assert "cannot read" in written, written
 
 
+def test_every_reason_this_module_gives_survives_to_the_log() -> None:
+    """One rule, checked once, instead of remembering it at eleven call sites.
+
+    Three deferrals were missed by adding them one at a time: an unopenable settings file, a
+    rejected pack, and an invalid pack in the inventory. They are all the same thing -- a
+    reason produced during ``import cryodaq.gui.theme``, before any entry point has
+    configured logging -- so they all go through one helper, and this fails if a bare logger
+    call reappears.
+    """
+
+    source = pathlib.Path(_theme_loader.__file__).read_text(encoding="utf-8")
+    bare = source.count("logger.warning(") + source.count("logger.error(") + source.count("logger.critical(")
+    assert bare == 0, f"{bare} reason(s) would be lost before logging exists; use _say_and_defer"
+    assert source.count("_say_and_defer(") >= 10
+
+
+@pytest.mark.parametrize(
+    ("what", "arrange"),
+    [
+        ("an unopenable settings file", "unopenable"),
+        ("settings that are not a mapping", "not-a-mapping"),
+        ("an invalid theme identifier", "bad-id"),
+        ("a rejected chosen pack", "rejected"),
+    ],
+)
+def test_each_dropped_choice_says_why(
+    themes_dir, tmp_path, monkeypatch, root_logging_restored, what: str, arrange: str
+) -> None:
+    """Each way of ignoring the operator's choice must reach the log, not just the default.
+
+    In every one of these the DEFAULT pack is readable, so the last-resort branch is never
+    entered and these are the only places able to explain what happened.
+    """
+
+    _write(themes_dir, _theme_loader.DEFAULT_THEME, _good_pack())
+    settings = tmp_path / "settings.local.yaml"
+
+    if arrange == "unopenable":
+        settings.write_text("theme: gost\n", encoding="utf-8")
+        real_open = pathlib.Path.open
+
+        def _refuses(self, *args, **kwargs):
+            if self.name == "settings.local.yaml":
+                raise PermissionError(13, "Permission denied")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "open", _refuses)
+    elif arrange == "not-a-mapping":
+        settings.write_text("- just\n- a list\n", encoding="utf-8")
+    elif arrange == "bad-id":
+        settings.write_text("theme: 'Not A Valid Id!'\n", encoding="utf-8")
+    else:
+        settings.write_text("theme: gost\n", encoding="utf-8")
+        (themes_dir / "gost.yaml").write_text("not: [a, valid, pack", encoding="utf-8")
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    name, _pack = _theme_loader.resolve_theme()
+    assert name == _theme_loader.DEFAULT_THEME, what
+    assert logging_setup._deferred_records, f"{what}: nothing was held for the log"
+
+    monkeypatch.undo()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+    logging_setup.setup_logging("theme-choice-probe", console=False, file=True)
+    logging.shutdown()
+
+    written = (log_dir / "theme-choice-probe.log").read_text(encoding="utf-8")
+    assert "theme:" in written, f"{what}: {written!r}"
+
+
 # ------------------------------------------------------------- a working pack still wins
 
 
