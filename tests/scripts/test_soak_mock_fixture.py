@@ -32,12 +32,55 @@ def linux_subreaper():
         runner._set_runner_subreaper(prior)
 
 
+def test_the_isolated_config_carries_the_theme_pack_the_launcher_resolves_at_import(tmp_path) -> None:
+    """The launcher cannot start without the default theme pack, so the set must hold it.
+
+    This is not a preference about appearance. ``cryodaq.gui.theme`` resolves a theme at
+    module import, and the child is told to read configuration from the ISOLATED root, so
+    a root without the packs stops the source stack before any of it runs. Measured on
+    Ubuntu 22.04.5 before the fix: the short soak reached the runner phase, wrote seven
+    evidence files, passed the exact-six integration gate, and then failed with "source
+    stack did not reach the exact four-role startup cut", with the launcher log naming the
+    missing default pack.
+    """
+    from cryodaq.gui._theme_loader import DEFAULT_THEME
+
+    runner._materialize_isolated_mock_config(tmp_path)
+
+    themes = tmp_path / "themes"
+    assert themes.is_dir(), "the isolated config root must carry the theme directory"
+    names = {path.stem for path in themes.iterdir() if path.is_file()}
+    assert DEFAULT_THEME in names, (
+        f"the default pack {DEFAULT_THEME!r} decides whether the launcher imports at all; "
+        f"the isolated root holds {sorted(names)}"
+    )
+
+
+def test_a_missing_theme_directory_is_refused_by_name_rather_than_left_to_the_launcher(tmp_path) -> None:
+    """A source tree without the packs must fail HERE, where the cause is still readable.
+
+    Left to the launcher the same condition arrives as "source stack did not reach the
+    exact four-role startup cut", which names the symptom and not the subject, and that
+    cost a full measurement round to trace back.
+    """
+    hollow = tmp_path / "hollow"
+    (hollow / "config").mkdir(parents=True)
+    for name in runner._ISOLATED_TRACKED_CONFIG_FILES:
+        (hollow / "config" / name).write_text("channels: []\n", encoding="utf-8")
+
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(runner._RunnerFoundationError, match="config directory is unavailable: themes"):
+        runner._materialize_isolated_mock_config(out, source_root=hollow)
+
+
 @pytest.mark.asyncio
 async def test_isolated_source_fixture_is_one_passive_mock_sensor(tmp_path) -> None:
     runner._materialize_isolated_mock_config(tmp_path)
 
     expected = {
         *runner._ISOLATED_TRACKED_CONFIG_FILES,
+        *runner._ISOLATED_TRACKED_CONFIG_DIRS,
         *(name for name, _content in runner._ISOLATED_STATIC_CONFIGS),
         "instruments.yaml",
         "channel_descriptors.yaml",
@@ -204,6 +247,183 @@ def test_complete_fixture_seal_rejects_topology_template_mode_and_oversize(tmp_p
     monkeypatch.setattr(runner, "_MAX_SOURCE_FIXTURE_FILE_BYTES", 1)
     with pytest.raises(runner._RunnerFoundationError, match="exceeds the reviewed bound"):
         runner._source_fixture_seal(config_dir, expected_readings_per_sample=readings_per_sample)
+
+
+@_LINUX_PROCESS_AUTHORITY
+def test_a_real_seal_payload_is_accepted_by_the_acceptance_validator(tmp_path) -> None:
+    """The runner's seal and the ledger's validator must agree, and nothing tested that.
+
+    Every manifest test hand-builds the payload, so the two shapes were free to drift --
+    and they did: the seal grew a populated `themes` directory while the validator still
+    required the exact old topology, which would have destroyed every soak run at the
+    last gate, after the full duration had already been spent. A control that passes
+    while the real gate is broken is worse than no control, so this one feeds a payload
+    the runner ACTUALLY produced through the validator the ledger ACTUALLY calls.
+    """
+    from scripts import soak_mock_stack as soak
+
+    config = tmp_path / "config"
+    config.mkdir(mode=0o700)
+    # The sealed topology spans BOTH materialisers: the complete one writes the two
+    # files below and the empty template directory, the isolated one writes the rest.
+    # The complete one cannot be called here because it also measures the reading count
+    # in a subprocess and refuses without one, so its two files and its directory are
+    # written the same way and the assertion afterwards proves the union is exactly what
+    # the seal expects -- if either materialiser grows a file, this test says so.
+    (config / "agent.yaml").write_text(
+        "agent:\n  enabled: false\nreporting:\n  automatic_enabled: true\n", encoding="utf-8"
+    )
+    (config / "notifications.yaml").write_text(
+        "telegram:\n  bot_token: 'x'\n  chat_id: -1\nperiodic_report:\n  enabled: true\n  report_interval_s: 60\n",
+        encoding="utf-8",
+    )
+    (config / "experiment_templates").mkdir(mode=0o700)
+    # The isolated materialiser returns a measured count only when given an interpreter
+    # to measure with; on this path it returns None and the seal refuses a non-positive
+    # count, so the seal is asked for the value the acceptance validator checks.
+    runner._materialize_isolated_mock_config(config)
+    for item in config.iterdir():
+        if item.is_file():
+            item.chmod(0o600)
+
+    seal = runner._source_fixture_seal(config, expected_readings_per_sample=8)
+
+    assert soak._validate_source_fixture(seal.payload) == []
+
+    paths = [entry["path"] for entry in seal.payload["entries"]]
+    assert "themes" in paths, "the sealed topology must carry the theme directory"
+    assert any(path.startswith("themes/") for path in paths), "and the packs inside it"
+
+
+def test_a_stray_template_member_cannot_stand_in_for_the_theme_packs() -> None:
+    """The theme-presence check must be satisfied by THEMES, not by any member at all.
+
+    The first version treated both sealed directories alike, so one
+    `experiment_templates/anything` entry satisfied it while the payload carried no
+    theme pack at all -- a guard that guarded nothing, and a test that passed only
+    because its hand-built payload happened to have no members of either kind. The
+    runner seals `experiment_templates` EMPTY, so a member of it in an accepted manifest
+    means the manifest and the seal disagree.
+    """
+    from scripts import soak_mock_stack as soak
+
+    payload = _fixture_payload_with(["experiment_templates", "experiment_templates/stray", "themes"])
+
+    assert soak._validate_source_fixture(payload) != []
+
+
+def test_duplicate_entries_are_refused() -> None:
+    """Dropping the exact-count check must not make a duplicated entry acceptable.
+
+    Adjacent duplicates satisfy the sortedness check, set equality collapses them, and
+    the tree digest is recomputed from the payload's own entries, so it stays
+    self-consistent. Only an explicit uniqueness check catches it.
+    """
+    from scripts import soak_mock_stack as soak
+
+    payload = _fixture_payload_with(
+        ["experiment_templates", "themes", "themes/default_cool.yaml", "themes/default_cool.yaml"]
+    )
+
+    assert soak._validate_source_fixture(payload) != []
+
+
+def _fixture_payload_with(extra_paths: list[str]) -> dict:
+    """A structurally complete payload whose entry PATHS are the ones under test."""
+    import hashlib
+    import json
+
+    files = sorted(
+        {
+            "agent.yaml",
+            "alarms_v3.yaml",
+            "channel_descriptors.yaml",
+            "channels.yaml",
+            "cooldown.yaml",
+            "housekeeping.yaml",
+            "instruments.yaml",
+            "interlocks.yaml",
+            "notifications.yaml",
+            "physical_alarms.yaml",
+            "plugins.yaml",
+            "safety.yaml",
+        }
+    )
+    entries: list[dict] = []
+    for path in sorted(files + extra_paths):
+        if path in {"experiment_templates", "themes"}:
+            entries.append({"path": path, "kind": "directory"})
+        else:
+            entries.append({"path": path, "kind": "file", "bytes": 1, "sha256": "sha256:" + "0" * 64})
+    canonical = sorted(entries, key=lambda item: item["path"])
+    tree = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()
+    )
+    return {
+        "schema": "cryodaq-soak-source-fixture/v1",
+        # READ THE LIVE NAME, never a literal. The validator's final gate is one `or`
+        # chain ending in `payload.get("instrument_id") != _expected_fixture_instrument()`,
+        # and that helper reads `runner._ISOLATED_MOCK_INSTRUMENT_NAME`, which is what is
+        # read here so the two cannot drift apart.
+        # so a stale literal here makes every payload from this helper fail on the
+        # INSTRUMENT before the condition under test is reached. That is what happened:
+        # the fixture moved to LS218_2 on master and these payloads still said LS218_1,
+        # so three tests went green while proving nothing. Measured: with the theme-presence
+        # and uniqueness guards DELETED from production, all three still passed.
+        "instrument_id": runner._ISOLATED_MOCK_INSTRUMENT_NAME,
+        "authority": "passive_measurement",
+        "mock": True,
+        "descriptor_count": 16,
+        "binding_count": 16,
+        "expected_readings_per_sample": 8,
+        "entries": entries,
+        "tree_sha256": tree,
+    }
+
+
+def test_a_non_file_in_the_tracked_directory_is_refused_by_name(tmp_path) -> None:
+    """A skipped entry makes the isolated root diverge from the tracked tree in silence.
+
+    The seal seals what the child sees and never compares back to the source, so a
+    dropped subdirectory would surface later as a launcher failure with no named cause.
+    """
+    source = tmp_path / "src"
+    (source / "config" / "themes" / "nested").mkdir(parents=True)
+    for name in runner._ISOLATED_TRACKED_CONFIG_FILES:
+        (source / "config" / name).write_text("channels: []\n", encoding="utf-8")
+
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(runner._RunnerFoundationError, match="non-file entry"):
+        runner._materialize_isolated_mock_config(out, source_root=source)
+
+
+def test_the_validator_still_refuses_a_fixture_with_no_theme_packs() -> None:
+    """Teaching the validator a new shape must not teach it to accept a missing one.
+
+    The launcher resolves a theme at import, so a fixture without the packs cannot start
+    the program; a validator that shrugged at their absence would let that ship.
+
+    THE PAYLOAD MUST BE VALID IN EVERY OTHER RESPECT, and the first version was not. It
+    was hand-built with one entry and a zeroed tree hash, so the validator rejected it on
+    the hash long before the theme-presence check was reached, and the test stayed green
+    with that check DELETED from production. Measured by deleting it. Here the payload
+    comes from the same helper the positive cases use, so its tree hash is real and its
+    file set is complete; the ONLY thing missing is a member inside `themes`, which makes
+    the theme-presence check the condition that decides.
+    """
+
+    from scripts import soak_mock_stack as soak
+
+    payload = _fixture_payload_with(["experiment_templates", "themes"])
+    assert not [entry for entry in payload["entries"] if str(entry["path"]).startswith("themes/")], (
+        "the payload must carry the themes DIRECTORY and no member inside it"
+    )
+
+    assert soak._validate_source_fixture(payload) != []
 
 
 class _LogEvidence:
