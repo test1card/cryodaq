@@ -111,7 +111,12 @@ async def test_http_failure_is_not_reported_as_dispatched() -> None:
 
 
 @pytest.mark.asyncio
-async def test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered() -> None:
+@pytest.mark.parametrize(
+    "sender_result",
+    [True, 1],
+    ids=["literal_true", "non_boolean_truthy"],
+)
+async def test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered(sender_result: object) -> None:
     """Compatibility-only guard: no repository producer returns a bare ``True``.
 
     The production invocation path is ``assistant_main._load_telegram_sender``
@@ -130,7 +135,7 @@ async def test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered() ->
     )
 
     telegram = AsyncMock()
-    telegram._send_to_all = AsyncMock(return_value=True)
+    telegram._send_to_all = AsyncMock(return_value=sender_result)
     router = OutputRouter(telegram_bot=telegram, event_bus=AsyncMock())
 
     outcomes = await router.dispatch_detailed(
@@ -143,6 +148,24 @@ async def test_truthy_untyped_telegram_outcome_is_not_reported_as_delivered() ->
     assert outcomes == {"telegram": "outcome_unknown"}, (
         "an untyped truthy Telegram result must remain outcome_unknown; it is not service-reported delivery"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender_result", [False, None], ids=["false", "none"])
+async def test_falsey_untyped_telegram_outcome_is_reported_as_failed(sender_result: object) -> None:
+    """A falsey compatibility result is an explicit failure, not uncertainty."""
+    telegram = AsyncMock()
+    telegram._send_to_all = AsyncMock(return_value=sender_result)
+    router = OutputRouter(telegram_bot=telegram, event_bus=AsyncMock())
+
+    outcomes = await router.dispatch_detailed(
+        _Event(),
+        "response",
+        targets=[OutputTarget.TELEGRAM],
+        audit_id="audit-falsey-telegram-outcome",
+    )
+
+    assert outcomes == {"telegram": "failed"}
 
 
 @pytest.mark.asyncio

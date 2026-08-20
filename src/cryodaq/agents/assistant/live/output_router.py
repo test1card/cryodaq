@@ -131,10 +131,9 @@ class OutputRouter:
                                     str(chat_id): _normalize_telegram_recipient_outcome(state)
                                     for chat_id, state in sent.items()
                                 }
-                        elif sent is True:
-                            # A legacy boolean carries no Telegram acknowledgement tier.
-                            # In particular, it cannot prove that a truthy transport result
-                            # was service-reported delivery rather than an unknown outcome.
+                        elif sent:
+                            # An untyped compatibility result carries no Telegram
+                            # acknowledgement tier, so its delivery outcome is unknown.
                             outcomes["telegram"] = "outcome_unknown"
                         else:
                             outcomes["telegram"] = "failed"
