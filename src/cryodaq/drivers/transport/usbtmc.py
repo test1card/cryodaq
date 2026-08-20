@@ -451,16 +451,25 @@ def _blocking_close_handles(resource: Any, manager: Any) -> _HandleCloseOutcome:
 _PR_SET_PDEATHSIG = 1
 
 
-def _bind_lifetime_to_parent() -> None:
-    """Ask the kernel to kill this process when its parent dies. Linux only."""
+def _bind_lifetime_to_parent(expected_parent: int) -> None:
+    """Ask the kernel to kill this process when its parent dies. Linux only.
+
+    The expected parent is CAPTURED BY THE ENGINE before the spawn, never read here. Reading
+    it here looked equivalent and is not: if the engine dies before this child runs its first
+    instruction, and any ancestor is a Linux child subreaper, getppid() returns that
+    surviving ancestor. The child would then bind to the wrong process, the identity check
+    below would agree with itself, and the VISA owner would outlive the engine exactly as
+    before. The soak runner IS such a subreaper, so this is not hypothetical.
+    """
 
     if not sys.platform.startswith("linux"):
         # Elsewhere the daemonic flag remains the only mechanism, and an abruptly dead
         # parent can still leave this process behind. The laboratory target is Ubuntu.
         return
-    expected_parent = os.getppid()
-    if expected_parent <= 1:
-        # Already reparented: the parent died before we got here. Nothing can be bound.
+    if type(expected_parent) is not int or expected_parent <= 1:
+        os._exit(0)
+    if os.getppid() != expected_parent:
+        # Reparented before the first instruction: the engine is already gone.
         os._exit(0)
     try:
         import ctypes
@@ -474,16 +483,16 @@ def _bind_lifetime_to_parent() -> None:
         # would risk the orphan this exists to prevent.
         os._exit(0)
     if os.getppid() != expected_parent:
-        # The race: the parent died between the fork and the prctl above, so the signal we
+        # The race: the parent died between the check above and the prctl, so the signal we
         # just asked for will never arrive. Leave now, by ourselves.
         os._exit(0)
 
 
-def _visa_process_main(connection: Any) -> None:
+def _visa_process_main(connection: Any, expected_parent: int = 0) -> None:
     """Own native VISA handles behind a bounded, non-pickle protocol."""
 
     # Before anything else, and before any VISA handle exists.
-    _bind_lifetime_to_parent()
+    _bind_lifetime_to_parent(expected_parent)
 
     resource = None
     manager = None
@@ -816,7 +825,9 @@ class USBTMCTransport:
         parent_connection, child_connection = context.Pipe(duplex=True)
         process = context.Process(
             target=_visa_process_main,
-            args=(child_connection,),
+            # Captured HERE, in the engine, before the child exists. See
+            # _bind_lifetime_to_parent for why the child must not read it itself.
+            args=(child_connection, os.getpid()),
             daemon=True,
             name=f"cryodaq-usbtmc-{generation}",
         )

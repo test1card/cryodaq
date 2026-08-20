@@ -73,10 +73,10 @@ def _alive(pid: int) -> bool:
 # to rebuild the target, and a `-c` main module cannot be re-imported.
 _BUSY_CHILD_PARENT = textwrap.dedent(
     """
-    import multiprocessing, sys, time
+    import multiprocessing, os, sys, time
     sys.path.insert(0, {src!r})
 
-    def _busy(_connection):
+    def _busy(_connection, expected_parent):
         from cryodaq.drivers.transport.usbtmc import _bind_lifetime_to_parent
         {binding}
         # Whatever happens to the parent, this never looks at the pipe -- the shape of a
@@ -86,7 +86,7 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
     if __name__ == "__main__":
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
-        process = context.Process(target=_busy, args=(child_connection,), daemon=True)
+        process = context.Process(target=_busy, args=(child_connection, os.getpid()), daemon=True)
         process.start()
         child_connection.close()
         print(process.pid, flush=True)
@@ -107,21 +107,36 @@ def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool
     parent_file.write_text(
         _BUSY_CHILD_PARENT.format(
             src=_SRC,
-            binding="_bind_lifetime_to_parent()" if bound else "pass",
+            binding="_bind_lifetime_to_parent(expected_parent)" if bound else "pass",
             busy=busy,
         ),
         encoding="utf-8",
     )
     parent = subprocess.Popen([sys.executable, "-B", str(parent_file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def _diagnose(reason: str) -> str:
+        """Kill the parent FIRST, then read its stderr.
+
+        The parent sleeps for ten minutes and owns the write end of that pipe, so reading
+        it while the parent lives blocks until the sleep ends -- turning a clear startup
+        failure into a ten-minute hang with no message.
+        """
+
+        parent.kill()
+        parent.wait(timeout=10)
+        return f"{reason}; parent stderr={parent.stderr.read()[:600]!r}"
+
     try:
         assert parent.stdout is not None
         line = parent.stdout.readline().decode().strip()
-        assert line.isdigit(), f"no child pid reported; stderr={parent.stderr.read()[:600]!r}"
+        if not line.isdigit():
+            raise AssertionError(_diagnose("no child pid reported"))
         child_pid = int(line)
         # The child must be alive AND have got past its own start-up, or a control that
         # reports "no orphan" is only reporting a child that never ran.
         time.sleep(1.0)
-        assert _alive(child_pid), f"the child died before the parent was killed; stderr={parent.stderr.read()[:600]!r}"
+        if not _alive(child_pid):
+            raise AssertionError(_diagnose("the child died before the parent was killed"))
 
         parent.kill()
         parent.wait(timeout=10)
@@ -162,6 +177,33 @@ def test_the_binding_decides_whether_a_busy_child_outlives_its_killed_parent(tmp
     )
 
 
+def _probe(body: str) -> subprocess.CompletedProcess:
+    """Run one binding probe and require it to have REACHED the code under test.
+
+    An absent "KEPT RUNNING" is not proof by itself: an import error, a broken double, or
+    any unrelated failure produces the same silence. Every probe therefore prints a marker
+    the moment it is about to call the binder, and the exit status is checked as well.
+    """
+
+    program = textwrap.dedent(
+        f"""
+        import sys
+        sys.path.insert(0, {_SRC!r})
+        import cryodaq.drivers.transport.usbtmc as usbtmc
+        {body}
+        print("REACHED", flush=True)
+        usbtmc._bind_lifetime_to_parent(_expected)
+        print("KEPT RUNNING", flush=True)
+        """
+    )
+    finished = subprocess.run([sys.executable, "-c", program], capture_output=True, timeout=30)
+    assert b"REACHED" in finished.stdout, (
+        f"the probe never reached the binder, so it proves nothing; stderr={finished.stderr[:600]!r}"
+    )
+    assert finished.returncode == 0, f"the probe failed for an unrelated reason: {finished.stderr[:600]!r}"
+    return finished
+
+
 @_LINUX_ONLY
 def test_the_binding_refuses_rather_than_running_unbound() -> None:
     """A source-owning child that cannot be bound must not run at all.
@@ -170,48 +212,79 @@ def test_the_binding_refuses_rather_than_running_unbound() -> None:
     orphan the whole module exists to prevent, so the failure direction is deliberate.
     """
 
-    program = textwrap.dedent(
-        f"""
-        import ctypes, sys
-        sys.path.insert(0, {_SRC!r})
-        import cryodaq.drivers.transport.usbtmc as usbtmc
+    finished = _probe(
+        """
+        import ctypes, os
+        _expected = os.getppid()
+        _calls = []
 
         class _Refuses:
-            def prctl(self, *_args):
+            def prctl(self, *args):
+                _calls.append(args)
                 return -1
 
         ctypes.CDLL = lambda *a, **k: _Refuses()
-        usbtmc._bind_lifetime_to_parent()
-        print("KEPT RUNNING", flush=True)
         """
     )
-    finished = subprocess.run([sys.executable, "-c", program], capture_output=True, timeout=30)
     assert b"KEPT RUNNING" not in finished.stdout, (
         "a child that could not bind its lifetime to its parent must exit, not continue"
     )
 
 
 @_LINUX_ONLY
-def test_a_child_whose_parent_already_died_exits_by_itself() -> None:
-    """The classic race: the parent dies between the fork and the request.
+def test_the_parent_changing_after_the_request_is_caught() -> None:
+    """The race the second identity read exists for, exercised past prctl.
 
-    The kernel signal was asked for against a parent that is already gone, so it will never
-    arrive. Re-reading the parent identity afterwards is what catches it.
+    The earlier version made the FIRST read return 1, so the function left through the
+    already-reparented branch without ever loading libc or calling prctl -- deleting the
+    post-call comparison left it green. This one answers with a real parent first and a
+    different one after, and requires prctl to have been reached.
     """
 
-    program = textwrap.dedent(
-        f"""
-        import sys
-        sys.path.insert(0, {_SRC!r})
-        import cryodaq.drivers.transport.usbtmc as usbtmc
+    finished = _probe(
+        """
+        import ctypes, os
+        _expected = os.getppid()
+        _reads = iter([_expected, _expected + 100_000])
+        _marker = os.environ.get("CRYODAQ_PRCTL_MARKER", "/dev/null")
+        usbtmc.os.getppid = lambda: next(_reads, _expected + 100_000)
 
-        usbtmc.os.getppid = lambda: 1
-        usbtmc._bind_lifetime_to_parent()
-        print("KEPT RUNNING", flush=True)
+        class _Accepts:
+            def prctl(self, *_args):
+                open(_marker, "w").write("prctl reached")
+                return 0
+
+        ctypes.CDLL = lambda *a, **k: _Accepts()
         """
     )
-    finished = subprocess.run([sys.executable, "-c", program], capture_output=True, timeout=30)
-    assert b"KEPT RUNNING" not in finished.stdout
+    assert b"KEPT RUNNING" not in finished.stdout, (
+        "a child whose parent changed after the request must exit; the signal will never come"
+    )
+
+
+@_LINUX_ONLY
+def test_the_expected_parent_is_the_engines_pid_not_one_the_child_reads(tmp_path) -> None:
+    """Reading it in the child is unsafe under a subreaper, and the soak runner is one.
+
+    If the engine dies before the child's first instruction, getppid() answers with the
+    surviving ancestor. Binding to THAT is binding to the wrong process, and the second
+    read agrees with itself, so the orphan returns. The value therefore comes from the
+    engine, captured before the spawn.
+    """
+
+    import inspect
+
+    from cryodaq.drivers.transport import usbtmc
+
+    spawn = inspect.getsource(usbtmc.USBTMCTransport._settle_process_open)
+    assert "args=(child_connection, os.getpid())" in spawn, (
+        "the engine must capture its own pid and hand it to the child"
+    )
+    binder = inspect.getsource(usbtmc._bind_lifetime_to_parent)
+    assert "expected_parent: int" in binder
+    assert "expected_parent = os.getppid()" not in binder, (
+        "the child must not decide for itself which parent it belongs to"
+    )
 
 
 def test_the_binding_runs_before_any_handle_exists() -> None:
@@ -223,7 +296,9 @@ def test_the_binding_runs_before_any_handle_exists() -> None:
 
     source = inspect.getsource(usbtmc._visa_process_main)
     body = source.split('"""', 2)[-1]
-    assert "_bind_lifetime_to_parent()" in body, "the child must bind its lifetime to its parent"
-    assert body.index("_bind_lifetime_to_parent()") < body.index("_receive_document"), (
+    assert "_bind_lifetime_to_parent(expected_parent)" in body, (
+        "the child must bind its lifetime to the parent the engine named"
+    )
+    assert body.index("_bind_lifetime_to_parent(") < body.index("_receive_document"), (
         "the binding must happen before the child reads its first request"
     )
