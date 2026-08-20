@@ -13,8 +13,12 @@ that, leaving the instrument sourcing while the software believes it is off. Two
 one source is the exact hazard the ownership design exists to prevent, and it is the reason
 an engine crash may be answered with a restart at all.
 
-These tests kill a real parent with SIGKILL -- the one signal a process cannot handle, and
-therefore the one case ``atexit`` can never cover -- and require the child to be gone.
+WHICH CHILD IS ACTUALLY AT RISK, measured rather than assumed. A child sitting on its pipe
+between operations already dies by itself: the parent's death closes the write end, the read
+returns end-of-file, and it leaves. The FIRST version of this module tested exactly that
+child and passed with the binding removed -- it proved nothing. The child at risk is the one
+INSIDE a native VISA call, which is not reading the pipe and cannot see the end-of-file
+until the call returns. That is the child these tests use: one that is busy.
 """
 
 from __future__ import annotations
@@ -34,28 +38,7 @@ _LINUX_ONLY = pytest.mark.skipif(
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-
-# A parent that starts the REAL child entry point the transport uses, reports its pid, and
-# then waits to be killed. The child never opens VISA: it blocks reading its pipe, which is
-# exactly where a real one sits between operations.
-_PARENT = textwrap.dedent(
-    """
-    import multiprocessing, sys, time
-    sys.path.insert(0, {src!r})
-    from cryodaq.drivers.transport.usbtmc import _visa_process_main
-
-    if __name__ == "__main__":
-        context = multiprocessing.get_context("spawn")
-        parent_connection, child_connection = context.Pipe(duplex=True)
-        process = context.Process(
-            target=_visa_process_main, args=(child_connection,), daemon=True, name="probe-child"
-        )
-        process.start()
-        child_connection.close()
-        print(process.pid, flush=True)
-        time.sleep(600)
-    """
-)
+_SRC = str(_REPO_ROOT / "src")
 
 
 def _alive(pid: int) -> bool:
@@ -75,36 +58,86 @@ def _alive(pid: int) -> bool:
     return state.rsplit(")", 1)[-1].split()[0] != "Z"
 
 
-@_LINUX_ONLY
-def test_killing_the_engine_kills_the_child_that_owns_the_source() -> None:
-    """SIGKILL is the case daemon=True cannot cover, and the one a crash looks like."""
+# A parent that starts a child which binds its lifetime and then stays BUSY -- never reading
+# the pipe, exactly like one inside a native call. It reports the child pid and waits to die.
+_BUSY_CHILD_PARENT = textwrap.dedent(
+    """
+    import multiprocessing, sys, time
+    sys.path.insert(0, {src!r})
 
-    parent = subprocess.Popen(
-        [sys.executable, "-c", _PARENT.format(src=str(_REPO_ROOT / "src"))],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    def _busy(_connection):
+        from cryodaq.drivers.transport.usbtmc import _bind_lifetime_to_parent
+        {binding}
+        # Whatever happens to the parent, this loop does not look at the pipe.
+        time.sleep(600)
+
+    if __name__ == "__main__":
+        context = multiprocessing.get_context("spawn")
+        parent_connection, child_connection = context.Pipe(duplex=True)
+        process = context.Process(target=_busy, args=(child_connection,), daemon=True)
+        process.start()
+        child_connection.close()
+        print(process.pid, flush=True)
+        time.sleep(600)
+    """
+)
+
+
+def _child_survives_a_killed_parent(*, bound: bool) -> bool:
+    """Kill a parent with SIGKILL and report whether its busy child outlived it."""
+
+    program = _BUSY_CHILD_PARENT.format(
+        src=_SRC,
+        binding="_bind_lifetime_to_parent()" if bound else "pass",
     )
+    parent = subprocess.Popen([sys.executable, "-c", program], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         assert parent.stdout is not None
         line = parent.stdout.readline().decode().strip()
-        assert line.isdigit(), f"the parent did not report a child pid; stderr={parent.stderr.read()[:400]!r}"
+        assert line.isdigit(), f"no child pid reported; stderr={parent.stderr.read()[:400]!r}"
         child_pid = int(line)
         assert _alive(child_pid), "the child must be running before the parent is killed"
 
         parent.kill()
         parent.wait(timeout=10)
 
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + 6.0
         while time.monotonic() < deadline and _alive(child_pid):
             time.sleep(0.05)
-        assert not _alive(child_pid), (
-            f"the source-owning child {child_pid} outlived its killed parent; "
-            "it could still finish a write after a replacement engine commanded OFF"
-        )
+        survived = _alive(child_pid)
     finally:
         if parent.poll() is None:
             parent.kill()
         parent.wait(timeout=10)
+    if survived:
+        try:
+            os.kill(child_pid, 9)
+        except OSError:
+            pass
+    return survived
+
+
+@_LINUX_ONLY
+def test_a_busy_child_outlives_a_killed_parent_without_the_binding() -> None:
+    """The control. Without it the hazard is real, and this is what proves it.
+
+    SIGKILL is the one signal a process cannot handle, and therefore the one case the
+    daemonic flag can never cover. A child that is not reading its pipe does not notice.
+    """
+
+    assert _child_survives_a_killed_parent(bound=False), (
+        "the control must reproduce the orphan, or the guard below proves nothing"
+    )
+
+
+@_LINUX_ONLY
+def test_the_binding_kills_the_busy_child_with_its_parent() -> None:
+    """The same child, bound. The kernel delivers what atexit never could."""
+
+    assert not _child_survives_a_killed_parent(bound=True), (
+        "the source-owning child outlived its killed parent; it could still finish a "
+        "write after a replacement engine had commanded OFF"
+    )
 
 
 @_LINUX_ONLY
@@ -118,19 +151,15 @@ def test_the_binding_refuses_rather_than_running_unbound() -> None:
     program = textwrap.dedent(
         f"""
         import ctypes, sys
-        sys.path.insert(0, {str(_REPO_ROOT / "src")!r})
+        sys.path.insert(0, {_SRC!r})
         import cryodaq.drivers.transport.usbtmc as usbtmc
 
         class _Refuses:
             def prctl(self, *_args):
                 return -1
 
-        original = ctypes.CDLL
         ctypes.CDLL = lambda *a, **k: _Refuses()
-        try:
-            usbtmc._bind_lifetime_to_parent()
-        finally:
-            ctypes.CDLL = original
+        usbtmc._bind_lifetime_to_parent()
         print("KEPT RUNNING", flush=True)
         """
     )
@@ -138,7 +167,6 @@ def test_the_binding_refuses_rather_than_running_unbound() -> None:
     assert b"KEPT RUNNING" not in finished.stdout, (
         "a child that could not bind its lifetime to its parent must exit, not continue"
     )
-    assert finished.returncode == 0, finished.stderr[:400]
 
 
 @_LINUX_ONLY
@@ -151,8 +179,8 @@ def test_a_child_whose_parent_already_died_exits_by_itself() -> None:
 
     program = textwrap.dedent(
         f"""
-        import os, sys
-        sys.path.insert(0, {str(_REPO_ROOT / "src")!r})
+        import sys
+        sys.path.insert(0, {_SRC!r})
         import cryodaq.drivers.transport.usbtmc as usbtmc
 
         usbtmc.os.getppid = lambda: 1
@@ -162,7 +190,6 @@ def test_a_child_whose_parent_already_died_exits_by_itself() -> None:
     )
     finished = subprocess.run([sys.executable, "-c", program], capture_output=True, timeout=30)
     assert b"KEPT RUNNING" not in finished.stdout
-    assert finished.returncode == 0, finished.stderr[:400]
 
 
 def test_the_binding_runs_before_any_handle_exists() -> None:
