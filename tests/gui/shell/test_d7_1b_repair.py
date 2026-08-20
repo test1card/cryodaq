@@ -534,6 +534,69 @@ def test_a_replacement_that_exits_with_a_configuration_error_keeps_its_refusal()
     single_shot.assert_not_called()
 
 
+class _ShutdownWorker:
+    """A stand-in with the two methods the settler uses, and a settled/never-settles mode."""
+
+    def __init__(self, *, settles: bool) -> None:
+        self._settles = settles
+        self.waited: list[int] = []
+        self._finished = settles
+
+    def isFinished(self) -> bool:  # noqa: N802 -- Qt's spelling
+        return self._finished
+
+    def wait(self, milliseconds: int) -> bool:
+        self.waited.append(milliseconds)
+        # A worker that settles does so within its bound; one that does not, does not.
+        self._finished = self._settles
+        return self._finished
+
+
+def test_a_still_running_shutdown_worker_keeps_its_owner_and_holds() -> None:
+    """Dropping a live QThread's only reference is how Qt gets to destroy a running thread.
+
+    The worker is blocked inside send_command on the very bridge recovery is about to shut
+    down. Clearing it there raced that command and could stop the launcher with
+    "QThread: Destroyed while thread is still running" -- the opposite of recovering.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is False, "an owner that cannot be settled must still hold"
+    assert launcher._engine_shutdown_worker is worker, "the reference must be KEPT, not dropped"
+    assert launcher._engine_instance_id == "a" * 32, "and the identity must not be retired"
+    assert worker.waited, "it must be given its bounded chance to finish first"
+
+
+def test_a_shutdown_worker_that_finishes_is_settled_and_the_owner_retired() -> None:
+    """The ordinary case: it finishes inside the bound and everything proceeds."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_shutdown_worker = _ShutdownWorker(settles=True)
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is True
+    assert launcher._engine_shutdown_worker is None
+    assert launcher._engine_instance_id is None
+
+
 def test_a_lost_handle_keeps_its_authority_published() -> None:
     """Retiring identity is for an exit we WATCHED, never for one we did not.
 

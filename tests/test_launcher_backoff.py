@@ -27,6 +27,10 @@ def _make_launcher_mock(
     # tests/gui/shell/test_d7_1b_repair.py.
     w._engine_external = False
     w._engine_unsettled_incarnation = None
+    # A MagicMock answers every attribute, so this one has to be said out loud: a launcher
+    # that has not dispatched a shutdown has NO worker, and leaving it auto-vivified made
+    # the fixture claim one that was permanently "still running".
+    w._engine_shutdown_worker = None
     w._replay_source = Path("replay.db")
     w._engine_instance_id = None
     w._engine_shutdown_capability = None

@@ -86,6 +86,9 @@ _SHUTDOWN_RETRY_DELAYS_MS = (1_000, 3_000, 10_000, 30_000)
 # Bound on how long _stop_engine will wait for the engine process to exit
 # after a verified shutdown receipt, and the size of each non-blocking poll
 # slice within that budget (see _stop_engine's process.poll()/wait() use).
+# The shutdown worker's command carries its own timeout, so this is the second bound,
+# not the only one: it exists so a wedged worker cannot stall the Qt main thread.
+_ENGINE_SHUTDOWN_WORKER_SETTLE_MS = 5_000
 _ENGINE_EXIT_WAIT_BUDGET_S = 60.0
 _ENGINE_EXIT_POLL_SLICE_S = 1.0
 # Bounded, synchronous grace period given to a freshly started
@@ -3387,11 +3390,48 @@ class LauncherWindow(QMainWindow):
         self._engine_proc = None
         if getattr(self, "_replay_source", None) is not None:
             LauncherWindow._reset_replay_readiness_authority(self)
-        else:
-            LauncherWindow._retire_observed_engine_incarnation(self)
+            return True
+        if not LauncherWindow._retire_observed_engine_incarnation(self):
+            self._show_engine_down_banner(
+                "HOLD: the engine shutdown worker is still running, so this incarnation "
+                "cannot be retired. Restart remains blocked."
+            )
+            return False
         return True
 
-    def _retire_observed_engine_incarnation(self) -> None:
+    def _settle_engine_shutdown_worker(self) -> bool:
+        """Wait out the shutdown worker, bounded. False means it is still running.
+
+        The worker is a QThread whose run() is blocked inside send_command on the very
+        bridge the recovery path is about to shut down. Dropping the only reference to it
+        while it runs is how Qt gets to destroy a live thread -- and that stops the
+        launcher rather than recovering it, which is the opposite of the point.
+
+        Its command carries its own timeout, so waiting is bounded twice over. If it is
+        still running after that the reference is KEPT and this says so; an owner that
+        cannot be settled is the one thing that must still hold.
+        """
+
+        worker = getattr(self, "_engine_shutdown_worker", None)
+        if worker is None:
+            return True
+        try:
+            if worker.isFinished() is not True:
+                worker.wait(_ENGINE_SHUTDOWN_WORKER_SETTLE_MS)
+            settled = worker.isFinished() is True
+        except Exception as exc:
+            logger.critical(
+                "Engine shutdown worker could not be observed; phase=retire exception=%s",
+                type(exc).__name__,
+            )
+            return False
+        if not settled:
+            logger.critical("Engine shutdown worker is still running; its owner cannot be retired")
+            return False
+        self._engine_shutdown_worker = None
+        return True
+
+    def _retire_observed_engine_incarnation(self) -> bool:
         """Release the identity of an incarnation whose exit was observed.
 
         The sibling of _reset_replay_readiness_authority, for the live child.
@@ -3408,14 +3448,18 @@ class LauncherWindow(QMainWindow):
 
         These are the same fields the clean-shutdown path releases on its own success.
         The readers are settled before this runs, not by this.
+
+        Returns False when the shutdown worker is still running, because that owner cannot
+        be dropped while it is inside a command on a bridge that is about to close.
         """
 
+        if not LauncherWindow._settle_engine_shutdown_worker(self):
+            return False
         self._engine_instance_id = None
         self._engine_shutdown_capability = None
         self._engine_shutdown_request_id = None
         self._engine_shutdown_transport_identity = None
         self._engine_shutdown_receipt = None
-        self._engine_shutdown_worker = None
         self._engine_shutdown_wait_deadline = None
         self._engine_ready_nonce = None
         if not isinstance(getattr(self, "_engine_ready", None), threading.Event):
@@ -3425,6 +3469,7 @@ class LauncherWindow(QMainWindow):
         self._engine_ready.clear()
         with self._engine_ready_lock:
             self._engine_ready_state = {"receipt": None, "error": None}
+        return True
 
     def _reset_replay_readiness_authority(self) -> None:
         """Retire every in-process proof tied to one replay child session."""
