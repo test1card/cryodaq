@@ -3368,6 +3368,41 @@ class LauncherWindow(QMainWindow):
         )
         self.close()
 
+    def _retire_observed_engine_incarnation(self) -> None:
+        """Release the identity of an incarnation whose exit was observed.
+
+        The sibling of _reset_replay_readiness_authority, for the live child.
+
+        Clearing the process handle is not enough. _start_engine refuses to spawn while
+        ANY of the previous incarnation's identity is still published -- instance id,
+        shutdown capability, request id, transport identity, receipt, ready nonce -- and
+        that refusal is right: two engines sharing one identity is two writers on one
+        database. But an incarnation we watched exit is over, and leaving its identity
+        published turned the scheduled restart into a refusal, then a _stop_engine call
+        with no handle and retained authority, which is exactly the lost-handle HOLD this
+        crash path exists to avoid. The crash would have been converted back into the
+        stop it was meant to replace.
+
+        These are the same fields the clean-shutdown path releases on its own success.
+        The readers are settled before this runs, not by this.
+        """
+
+        self._engine_instance_id = None
+        self._engine_shutdown_capability = None
+        self._engine_shutdown_request_id = None
+        self._engine_shutdown_transport_identity = None
+        self._engine_shutdown_receipt = None
+        self._engine_shutdown_worker = None
+        self._engine_shutdown_wait_deadline = None
+        self._engine_ready_nonce = None
+        if not isinstance(getattr(self, "_engine_ready", None), threading.Event):
+            self._engine_ready = threading.Event()
+        if not isinstance(getattr(self, "_engine_ready_lock", None), type(threading.Lock())):
+            self._engine_ready_lock = threading.Lock()
+        self._engine_ready.clear()
+        with self._engine_ready_lock:
+            self._engine_ready_state = {"receipt": None, "error": None}
+
     def _reset_replay_readiness_authority(self) -> None:
         """Retire every in-process proof tied to one replay child session."""
 
@@ -5659,6 +5694,10 @@ class LauncherWindow(QMainWindow):
             self._engine_proc = None
             if getattr(self, "_replay_source", None) is not None:
                 LauncherWindow._reset_replay_readiness_authority(self)
+            else:
+                # No restart is scheduled here, but the operator is told to fix the files
+                # and press the restart button, and that button reaches the same preflight.
+                LauncherWindow._retire_observed_engine_incarnation(self)
             if not self._config_error_modal_shown:
                 self._config_error_modal_shown = True
             self._show_engine_down_banner(
@@ -5708,6 +5747,8 @@ class LauncherWindow(QMainWindow):
         self._engine_proc = None
         if getattr(self, "_replay_source", None) is not None:
             LauncherWindow._reset_replay_readiness_authority(self)
+        else:
+            LauncherWindow._retire_observed_engine_incarnation(self)
 
         tray = getattr(self, "_tray", None)
         if tray is not None and tray.isVisible():

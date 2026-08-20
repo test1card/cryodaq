@@ -107,8 +107,12 @@ def test_owned_config_error_exit_refuses_restart_without_latching_an_unsettled_i
 
     assert w._engine_unsettled_incarnation is None
     assert w._engine_proc is None
-    assert w._engine_instance_id == "a" * 32
-    assert w._engine_shutdown_capability == "b" * 64
+    # The incarnation is retired here too. No restart is SCHEDULED after a configuration
+    # error, but the modal tells the operator to fix config/*.yaml and press the restart
+    # button, and that button reaches the same spawn preflight -- which refuses while the
+    # dead incarnation's identity is still published.
+    assert w._engine_instance_id is None
+    assert w._engine_shutdown_capability is None
     assert w._restart_giving_up is True
     assert w._config_error_modal_shown is True
     mock_qtimer.singleShot.assert_not_called()

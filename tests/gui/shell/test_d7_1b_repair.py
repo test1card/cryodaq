@@ -308,6 +308,87 @@ def test_observed_owned_engine_exit_names_the_incarnation_and_code_in_the_log(
     assert "code=9" in recorded, recorded
 
 
+def _authority_of(launcher: SimpleNamespace) -> dict[str, object]:
+    """Every field the real _start_engine preflight reads as published identity."""
+
+    return {
+        name: getattr(launcher, name, None)
+        for name in (
+            "_engine_instance_id",
+            "_engine_shutdown_capability",
+            "_engine_shutdown_request_id",
+            "_engine_shutdown_transport_identity",
+            "_engine_shutdown_receipt",
+            "_engine_ready_nonce",
+        )
+    }
+
+
+def test_the_scheduled_restart_actually_reaches_the_spawn() -> None:
+    """Clearing the handle is not enough, and the preflight is where that showed.
+
+    _start_engine refuses to spawn while ANY of the previous incarnation's identity is
+    still published, and that refusal is right -- two engines on one identity is two
+    writers on one database. But the crash path used to clear only the process handle,
+    so the scheduled restart hit "prior launcher-owned engine authority remains live",
+    recovery called _stop_engine with no handle and retained authority, and the crash
+    turned back into the lost-handle HOLD this change exists to avoid.
+
+    This drives the REAL preflight rather than asserting on the fields, because the
+    fields are only interesting insofar as that code reads them.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    assert any(value is not None for value in _authority_of(launcher).values()), (
+        "the fixture must start with published authority, or this proves nothing"
+    )
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+    single_shot.assert_called_once()
+
+    assert all(value is None for value in _authority_of(launcher).values()), (
+        f"the observed incarnation must be retired; still published: {_authority_of(launcher)}"
+    )
+
+    # Now run the production preflight itself. It will fail later, on something this
+    # stand-in launcher does not have, and WHICH failure is the whole point: it must not
+    # be either refusal, because both of those block the restart the owner asked for.
+    try:
+        LauncherWindow._start_engine(launcher)
+    except BaseException as exc:
+        message = str(exc)
+    else:
+        message = ""
+    assert "prior launcher-owned engine authority remains live" not in message, message
+    assert "restart remains in HOLD" not in message, message
+
+
+def test_a_lost_handle_keeps_its_authority_published() -> None:
+    """Retiring identity is for an exit we WATCHED, never for one we did not.
+
+    With no handle and no exit code the old incarnation may still be running, and its
+    identity is what stops a second one being spawned beside it.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = None
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot"),
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._engine_instance_id == "a" * 32
+    assert launcher._engine_shutdown_capability == "b" * 64
+
+
 def test_owned_config_error_exit_records_the_reason_and_refuses_to_retry() -> None:
     """A configuration error must not become a restart loop into the same failure.
 
