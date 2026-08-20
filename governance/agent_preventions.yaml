@@ -4216,7 +4216,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: Windows terminate or kill can bypass engine cleanup while process death is reported as successful shutdown.
-    invariant: Launcher success requires engine-incarnation-bound global OFF, teardown, and exit receipts; a late reply remains bound to its exact request ID and transport generation until reconciled before bridge identity release. Forced death remains HOLD and permanently blocks restart or clean-exit claims, but the HOLD evidence latch must never block bounded terminate, kill, wait, stderr-reader settlement, or release of a terminal OS process handle. An unexpected exit the launcher OBSERVED, with the process handle still held and the exit code already read, is not forced death and is not held; it settles its crashed-child readers, records the incarnation and the exit code, and takes the reviewed crash path, which retries forever except after a configuration error, whose reviewed refusal stands. An unexpected exit with the process handle LOST while shutdown authority is published remains HOLD, because an engine that cannot be proven dead may still be writing, and a second engine beside it would put two writers on one database.
+    invariant: Launcher success requires engine-incarnation-bound global OFF, teardown, and exit receipts; a late reply remains bound to its exact request ID and transport generation until reconciled before bridge identity release. Forced death remains HOLD and permanently blocks restart or clean-exit claims, but the HOLD evidence latch must never block bounded terminate, kill, wait, stderr-reader settlement, or release of a terminal OS process handle. An unexpected exit the launcher OBSERVED, with the process handle still held and the exit code already read, is not forced death and is not held; it settles its crashed-child readers, records the incarnation and the exit code, and takes the reviewed crash path, which retries forever except after a configuration error, whose reviewed refusal stands. An unexpected exit with the process handle LOST while shutdown authority is published remains HOLD, because an engine that cannot be proven dead may still be writing, and a second engine beside it would put two writers on one database. The same distinction governs a REPLACEMENT that fails to reach readiness; a replacement observed terminal is settled rather than asked for a shutdown receipt it cannot give, including when it dies between the reading and the dispatch, and a replacement that exits with the configuration-error code keeps the reviewed refusal instead of being rescheduled into the same invalid files.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -4234,6 +4234,14 @@ records:
       - node: tests/gui/shell/test_d7_1b_repair.py::test_observed_owned_engine_exit_settles_readers_and_restarts_forever
         ci_partition: gui
       - node: tests/gui/shell/test_d7_1b_repair.py::test_owned_config_error_exit_records_the_reason_and_refuses_to_retry
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_that_dies_before_readiness_schedules_another_try
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_still_alive_is_asked_to_stop_as_before
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_that_exits_with_a_configuration_error_keeps_its_refusal
         ci_partition: gui
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending

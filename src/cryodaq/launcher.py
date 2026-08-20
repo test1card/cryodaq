@@ -3830,6 +3830,52 @@ class LauncherWindow(QMainWindow):
         self._data_timer.start()
         self._health_timer.start()
 
+    def _settle_replacement_child(self, *, phase: str) -> tuple[bool, int | None, Exception | None]:
+        """Finish with the replacement child. Returns (settled, observed exit code, error).
+
+        The exit code comes back because the caller has to know whether this was a
+        configuration error: that one code must keep its reviewed refusal instead of being
+        rescheduled into the same bad files forever.
+        """
+
+        owner = (
+            getattr(self, "_replay_session_id", None)
+            if getattr(self, "_replay_source", None) is not None
+            else getattr(self, "_engine_instance_id", None)
+        )
+        if type(owner) is not str:
+            owner = "<unknown>"
+
+        def _settle(returncode: int) -> tuple[bool, int | None, Exception | None]:
+            try:
+                if LauncherWindow._settle_observed_engine_exit(
+                    self,
+                    owner_id=owner,
+                    returncode=returncode,
+                    phase=f"{phase}-replacement-exit",
+                ):
+                    return True, returncode, None
+            except Exception as exc:
+                return False, returncode, exc
+            return False, returncode, RuntimeError("replacement engine readers did not settle")
+
+        replacement = getattr(self, "_engine_proc", None)
+        observed = None if replacement is None else replacement.poll()
+        if replacement is not None and observed is not None:
+            return _settle(observed)
+
+        try:
+            self._stop_engine()
+        except Exception as exc:
+            # It may have died during the handoff. Re-read before deciding: a child that is
+            # terminal NOW is an observed exit, whatever it was a moment ago.
+            late = getattr(self, "_engine_proc", None)
+            late_code = None if late is None else late.poll()
+            if late is not None and late_code is not None:
+                return _settle(late_code)
+            return False, None, exc
+        return True, None, None
+
     def _recover_failed_engine_restart(
         self,
         *,
@@ -3845,6 +3891,7 @@ class LauncherWindow(QMainWindow):
         if getattr(self, "_replay_source", None) is not None:
             self._replay_session_verified = False
         settlement_errors: dict[str, Exception] = {}
+        replacement_exit_code: int | None = None
         if child_start_attempted:
             # A REPLACEMENT that exited before readiness is a child we watched die, not one
             # we have to ask to stop. _stop_engine cannot get a shutdown receipt out of a
@@ -3852,31 +3899,19 @@ class LauncherWindow(QMainWindow):
             # meant a recurring startup crash still stopped an unattended run after exactly
             # one retry. Owner, 2026-08-20: "программа ВЕРНЕТСЯ". So an observed exit takes
             # the observed-exit route here too, and only a LIVE child is asked to stop.
-            replacement = getattr(self, "_engine_proc", None)
-            replacement_code = None if replacement is None else replacement.poll()
-            if replacement is not None and replacement_code is not None:
-                owner = (
-                    getattr(self, "_replay_session_id", None)
-                    if getattr(self, "_replay_source", None) is not None
-                    else getattr(self, "_engine_instance_id", None)
+            #
+            # A child can also die BETWEEN this poll and the dispatch inside _stop_engine.
+            # Deciding once on a stale reading would put the same permanent HOLD back for a
+            # narrower window, so the live branch re-reads after a failed stop and settles
+            # the exit if one has since happened.
+            settled, replacement_exit_code, settlement_error = LauncherWindow._settle_replacement_child(
+                self,
+                phase=phase,
+            )
+            if not settled:
+                settlement_errors["engine_child"] = settlement_error or RuntimeError(
+                    "replacement engine child did not settle"
                 )
-                if type(owner) is not str:
-                    owner = "<unknown>"
-                try:
-                    if not LauncherWindow._settle_observed_engine_exit(
-                        self,
-                        owner_id=owner,
-                        returncode=replacement_code,
-                        phase=f"{phase}-replacement-exit",
-                    ):
-                        settlement_errors["engine_child"] = RuntimeError("replacement engine readers did not settle")
-                except Exception as exc:
-                    settlement_errors["engine_child"] = exc
-            else:
-                try:
-                    self._stop_engine()
-                except Exception as exc:
-                    settlement_errors["engine_child"] = exc
         if settle_bridge:
             try:
                 self._bridge.shutdown()
@@ -3891,6 +3926,26 @@ class LauncherWindow(QMainWindow):
             )
             if raise_on_hold:
                 raise RuntimeError(f"{phase} failed and ownership remains unsettled") from failure
+            return False
+
+        from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
+
+        if replacement_exit_code == ENGINE_CONFIG_ERROR_EXIT_CODE:
+            # The reviewed refusal for this one code must survive the replacement path too.
+            # Rescheduling here would retry the same invalid files forever and never show
+            # the operator which ones to fix. The handle and identity are already settled.
+            logger.critical(
+                "Engine replacement exited with CONFIG ERROR (code %d). NOT auto-restarting.",
+                replacement_exit_code,
+            )
+            self._restart_giving_up = True
+            if not self._config_error_modal_shown:
+                self._config_error_modal_shown = True
+            self._show_engine_down_banner(
+                "ОШИБКА КОНФИГУРАЦИИ: Engine не запускается. Автоперезапуск отключён.\n"
+                "Исправьте config/*.yaml (см. logs/engine.log), затем нажмите "
+                "«Перезапустить Engine»."
+            )
             return False
 
         logger.error(

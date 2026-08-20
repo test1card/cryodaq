@@ -447,6 +447,93 @@ def test_a_replacement_still_alive_is_asked_to_stop_as_before() -> None:
     assert "stop_engine" in calls, "a live child must still be asked to stop"
 
 
+def test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held() -> None:
+    """The window between the poll and the dispatch was still a permanent HOLD.
+
+    A replacement alive at the first poll takes the live-child branch. If it exits before
+    _stop_engine reaches its own dispatch, _stop_engine sees a terminal process, cannot
+    obtain a shutdown receipt, and raises -- which latched the same permanent HOLD this
+    change exists to remove, for a narrower window. Deciding once on a stale reading is the
+    defect; a child that is terminal NOW is an observed exit, whatever it was a moment ago.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    polls = iter([None, 1, 1, 1, 1, 1])
+    launcher._engine_proc = SimpleNamespace(poll=lambda: next(polls, 1))
+    launcher._restart_pending = True
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    def _stop_that_finds_it_terminal() -> None:
+        calls.append("stop_engine")
+        raise RuntimeError("engine child died without an exact shutdown receipt")
+
+    launcher._stop_engine = _stop_that_finds_it_terminal
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        rescheduled = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+    assert "stop_engine" in calls, "the live reading must still take the stop path"
+    assert rescheduled is True, "and the exit observed during the handoff must still settle"
+    assert launcher._engine_unsettled_incarnation is None
+    assert launcher._restart_giving_up is False
+    single_shot.assert_called_once()
+
+
+def test_a_replacement_that_exits_with_a_configuration_error_keeps_its_refusal() -> None:
+    """One exit code must not be rescheduled, and the replacement path forgot that.
+
+    Settling the observed exit clears the handle and its code, so the reschedule below saw
+    no return code at all and booked another attempt. If the configuration became invalid
+    between the original crash and its replacement, the launcher would retry the same bad
+    files forever and never show the operator which ones to fix.
+    """
+
+    from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: ENGINE_CONFIG_ERROR_EXIT_CODE)
+    launcher._restart_pending = True
+    launcher._stop_engine = lambda: calls.append("stop_engine")
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        rescheduled = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+    assert rescheduled is False, "a configuration error must not book another attempt"
+    assert launcher._restart_giving_up is True
+    assert launcher._config_error_modal_shown is True
+    assert launcher._engine_unsettled_incarnation is None, "and it must not trap the operator's quit"
+    single_shot.assert_not_called()
+
+
 def test_a_lost_handle_keeps_its_authority_published() -> None:
     """Retiring identity is for an exit we WATCHED, never for one we did not.
 
