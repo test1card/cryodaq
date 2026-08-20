@@ -137,12 +137,47 @@ def test_the_receive_path_conditions_are_distinguishable() -> None:
     said = {
         periodic_runtime._invalidation_category(periodic_runtime._FrameRejected(category, "detail"))
         for category in (
-            "a frame was malformed",
+            "a reading frame did not parse",
             "the reading sequence has a gap",
             "the publisher's drop or failure counters changed",
         )
     }
     assert len(said) == 3, said
+
+
+def test_no_two_rejection_sites_share_a_category_by_accident() -> None:
+    """MEASURED, not assumed: one bucket covered eleven different checks.
+
+    On Ubuntu 22.04 the first run at this branch's head reported
+    `the receive loop stopped: a frame was malformed` over and over -- a sentence shared
+    by the transport envelope, the reading frame, the reading shape, the reading value,
+    the raw value, the metadata, the event shape, the event payload, the barrier marker
+    and the multipart frame. Ten checks, one diagnosis, and no way to tell which fired.
+
+    So this reads the categories out of the module and requires that a category is either
+    used once, or used by sites that genuinely mean the same thing -- which is a decision
+    a person makes and records HERE, not a coincidence of drafting.
+    """
+
+    import collections
+    import re
+    from pathlib import Path
+
+    source = Path(periodic_runtime.__file__).read_text(encoding="utf-8")
+    categories = re.findall(r"_FrameRejected\(\s*['\"](.+?)['\"]\s*,", source)
+    assert len(categories) >= 20, f"only {len(categories)} rejection sites found"
+
+    # Categories deliberately shared, each with the reason it is shared.
+    SHARED = {
+        "the frame carried an invalid transport envelope": 3,  # three fields of one envelope
+        "the provisional buffer overflowed": 2,  # by frame count and by byte count
+    }
+    counted = collections.Counter(categories)
+    unexpected = {category: count for category, count in counted.items() if count > 1 and SHARED.get(category) != count}
+    assert not unexpected, (
+        "these categories are used by more sites than were deliberately shared, so a "
+        f"diagnosis cannot say which check fired: {unexpected}"
+    )
 
 
 def test_a_rejected_frame_reaches_the_loop_reason(caplog: pytest.LogCaptureFixture) -> None:
