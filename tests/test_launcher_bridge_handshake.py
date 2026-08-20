@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -314,6 +316,91 @@ def test_handshake_rejects_parent_replacement_between_observation_and_resolution
         os.close(read_fd)
 
 
+def _intercepted_spawn_environment(monkeypatch, start, window) -> dict[str, str]:
+    """Read the environment ONE production spawn actually hands the operating system."""
+
+    captured: dict[str, dict[str, str]] = {}
+
+    def _capture(*_args, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        raise RuntimeError("spawn intercepted after its environment was built")
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", _capture)
+    with contextlib.suppress(BaseException):
+        start(window)
+    assert "env" in captured, "the spawn was never reached; this would prove nothing"
+    return captured["env"]
+
+
+def _engine_window() -> SimpleNamespace:
+    """The state _start_engine touches on the way to its spawn, and nothing else.
+
+    Every field is literal. Filling the Nones with mocks made
+    `_engine_unsettled_incarnation` truthy, which is the HOLD refusal, so the spawn was
+    never reached and the test proved nothing -- caught by its own guard assertion.
+    """
+
+    return SimpleNamespace(
+        _engine_proc=None,
+        _engine_external=False,
+        _replay_source=None,
+        _engine_unsettled_incarnation=None,
+        _check_predictor_bootstrap_hint=MagicMock(),
+        _mock=True,
+    )
+
+
+def _assistant_window() -> SimpleNamespace:
+    return SimpleNamespace(
+        _assistant_proc=None,
+        _assistant_enabled=True,
+        _assistant_experiment_mode=False,
+        _assistant_periodic_requested=False,
+        _shutdown_requested=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "start", "build_window"),
+    [
+        ("engine", launcher.LauncherWindow._start_engine, _engine_window),
+        ("assistant", launcher.LauncherWindow._start_assistant, _assistant_window),
+    ],
+)
+def test_every_production_spawn_strips_the_launcher_only_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    start,
+    build_window,
+) -> None:
+    """Bind the assertion to the spawns themselves, not to a count of helper calls.
+
+    The launcher-only descriptor variables grant authority over the runner's evidence
+    stream. A child that inherits them can write into it. Counting builder calls could not
+    see a spawn that stopped using one, so each spawn is intercepted at Popen and the
+    environment on its way to the operating system is read directly.
+    """
+
+    monkeypatch.setenv(launcher._SOAK_BRIDGE_FD_ENV, "9")
+    monkeypatch.setenv(launcher._SOAK_BRIDGE_NONCE_ENV, "c" * 64)
+    monkeypatch.setenv(launcher._SOAK_ARTIFACT_FD_ENV, "11")
+    monkeypatch.setenv(launcher._SOAK_ARTIFACT_NONCE_ENV, "d" * 64)
+    monkeypatch.setenv("CRYODAQ_SPAWN_CANARY", "kept")
+
+    child = _intercepted_spawn_environment(monkeypatch, start, build_window())
+
+    for variable in (
+        launcher._SOAK_BRIDGE_FD_ENV,
+        launcher._SOAK_BRIDGE_NONCE_ENV,
+        launcher._SOAK_ARTIFACT_FD_ENV,
+        launcher._SOAK_ARTIFACT_NONCE_ENV,
+    ):
+        assert variable not in child, f"{name} child inherited {variable}"
+    assert child.get("CRYODAQ_SPAWN_CANARY") == "kept", (
+        f"{name} child must inherit everything that is NOT launcher-only"
+    )
+
+
 def test_child_environments_always_strip_launcher_only_descriptor_authority() -> None:
     environment = {
         "SAFE": "1",
@@ -334,15 +421,15 @@ def test_child_environments_always_strip_launcher_only_descriptor_authority() ->
     assert engine_child["SAFE"] == "1"
     assert environment[launcher._SOAK_BRIDGE_FD_ENV] == "9"
 
-    # Every child environment must still come from one of the two builders, never from a
-    # bare os.environ. Both forms count, so moving a spawn behind the helper is allowed
-    # and dropping the stripping altogether is not.
+    # A count is a proxy, and this one was loose: it included the helper's OWN internal
+    # call, so a spawn regressing to a bare os.environ merely dropped the total from four
+    # to three and still passed. Count only the builders that take os.environ -- the
+    # helper takes `base` -- so each remaining one is a production spawn.
     source = Path("src/cryodaq/launcher.py").read_text(encoding="utf-8")
-    builders = source.count("env = _without_soak_bridge_environment(") + source.count(
-        "env = _engine_child_environment("
+    spawn_builders = source.count("env = _without_soak_bridge_environment(os.environ)") + source.count(
+        "env = _engine_child_environment(os.environ)"
     )
-    assert builders >= 3, builders
-    assert "env = _engine_child_environment(os.environ)" in source
+    assert spawn_builders == 3, spawn_builders
 
 
 def test_bridge_pid_accessor_is_read_only_hint_and_never_a_process_handle() -> None:
