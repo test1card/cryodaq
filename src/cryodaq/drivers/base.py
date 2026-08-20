@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -104,9 +105,30 @@ class InstrumentDriver(ABC):
         """Опросить все каналы. Вернуть список показаний."""
 
     async def safe_read(self) -> list[Reading]:
-        """Потокобезопасный опрос с блокировкой (один запрос за раз)."""
+        """Потокобезопасный опрос с блокировкой (один запрос за раз).
+
+        F81 finding: the acquisition epoch is stamped at the base polling
+        boundary, not per driver. Every driver that does not stamp its own
+        ``acquisition_started_monotonic``/``acquisition_started_at`` on each
+        Reading still gets one here, so the conductivity panel's per-sample
+        freshness proof works for a temperature channel from any
+        ``InstrumentDriver`` — the panel offers a generic Т-prefixed channel
+        contract and must not reject every sample of a driver that never stamps
+        its own epoch. Drivers that stamp their own values are left untouched.
+        """
         async with self._lock:
-            return await self.read_channels()
+            epoch_wall = time.time()
+            epoch_monotonic = time.monotonic()
+            readings = await self.read_channels()
+        if isinstance(readings, list):
+            for reading in readings:
+                if type(reading) is not Reading:
+                    continue
+                metadata = reading.metadata if isinstance(reading.metadata, dict) else None
+                if metadata is not None and "acquisition_started_monotonic" not in metadata:
+                    metadata["acquisition_started_monotonic"] = epoch_monotonic
+                    metadata["acquisition_started_at"] = epoch_wall
+        return readings
 
     def failure_readings(self) -> list[Reading]:
         """Return current non-usable readings when a whole poll fails.

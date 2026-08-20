@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -125,10 +126,21 @@ async def test_mock_returns_8_channels() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=True)
     await driver.connect()
 
+    acquisition_call_started_at = datetime.now(UTC).timestamp()
+    acquisition_call_started_monotonic = time.monotonic()
     readings = await driver.read_channels()
+    acquisition_call_finished_monotonic = time.monotonic()
+    acquisition_call_finished_at = datetime.now(UTC).timestamp()
 
     assert len(readings) == 8
     for r in readings:
+        acquisition_started_at = r.metadata.get("acquisition_started_at")
+        assert isinstance(acquisition_started_at, float)
+        assert acquisition_call_started_at <= acquisition_started_at <= acquisition_call_finished_at
+        acquisition_started_monotonic = r.metadata.get("acquisition_started_monotonic")
+        assert isinstance(acquisition_started_monotonic, float)
+        assert acquisition_call_started_monotonic <= acquisition_started_monotonic
+        assert acquisition_started_monotonic <= acquisition_call_finished_monotonic
         assert isinstance(r, Reading)
         assert r.unit == "K"
         assert r.status == ChannelStatus.OK
@@ -811,6 +823,8 @@ async def test_status_refresh_failure_marks_cached_status_stale() -> None:
     driver = LakeShore218S("ls218s", "GPIB0::12::INSTR", mock=False)
     driver._connected = True
     driver._last_status_result = {1: 17}
+    # Fresh WSL instances can have monotonic uptime below the 60 s refresh interval.
+    driver._last_status_check = -float("inf")
     driver.read_status = AsyncMock(side_effect=RuntimeError("RDGST unavailable"))  # type: ignore[method-assign]
     driver._read_krdg_channels = AsyncMock(
         return_value=[

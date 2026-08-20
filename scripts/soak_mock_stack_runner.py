@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 import hashlib
 import io
 import json
@@ -143,17 +144,31 @@ if os.read(gate_fd, 1) != b"G":
 os.close(gate_fd)
 os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 """
-_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
+# LS218_2 rather than LS218_1, and the difference is the whole point: the engine
+# REFUSES to start a SafetyManager with no critical channel, and refuses again when a
+# declared channel is not classified safety-critical by its own descriptor. Every one
+# of LS218_1's sixteen descriptors is observational, so no declaration could satisfy
+# both, and the fixture could not start the engine at all. LS218_2 is the SAME driver
+# (lakeshore_218s), the same passive measurement authority, and the same reviewed
+# cardinality of sixteen descriptors and sixteen bindings, and it carries TWO
+# safety_critical_input channels. Nothing reviewed is loosened and no classification is
+# fabricated; the fixture simply uses the tracked instrument that has what the startup
+# path requires.
+_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_2"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
+# The launcher resolves a theme at IMPORT time, so a config root without the theme
+# packs kills the source stack before any of it runs. Measured on Ubuntu 22.04.5:
+# the short soak reached the runner phase, wrote its evidence files, passed the
+# exact-six gate, and then failed with "source stack did not reach the exact
+# four-role startup cut" -- because the child is told to read config from the
+# ISOLATED root, and this set is everything that root gets. Theme packs carry no
+# hardware authority, so copying them does not weaken the isolation the curated
+# set exists to provide; they are colours.
+_ISOLATED_TRACKED_CONFIG_DIRS: Final = ("themes",)
 _ISOLATED_STATIC_CONFIGS: Final = (
-    ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
-    (
-        "physical_alarms.yaml",
-        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n  escalate_to_safety: false\n",
-    ),
     ("plugins.yaml", "{}\n"),
     ("cooldown.yaml", "{}\n"),
 )
@@ -289,9 +304,11 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
     return captured
 
 
-def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[str, str]:
+def _controlled_test_environment(
+    repo_root: Path, site_packages: Path, *, runtime_library_dir: Path | None = None
+) -> dict[str, str]:
     root = Path(repo_root).resolve()
-    return {
+    environment = {
         "HOME": "/nonexistent",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -305,6 +322,22 @@ def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[s
         "XDG_CACHE_HOME": "/nonexistent",
         "XDG_CONFIG_HOME": "/nonexistent",
     }
+    # This stage COPIES the interpreter into the snapshot, and a relocated interpreter
+    # cannot use the run-paths that were relative to where it used to live. The first
+    # extension module that needs the C++ runtime then loads the SYSTEM one, and every
+    # library loaded afterwards is stuck with it. Measured on Ubuntu 22.04.5 with a
+    # conda interpreter: `import zmq` then `import sqlite3` raises
+    #   ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version `CXXABI_1.3.15'
+    #   not found (required by <prefix>/lib/libicui18n.so.78)
+    # and collection of the exact-six module fails with it, while either import alone
+    # succeeds. Naming the interpreter's OWN library directory removes the ambiguity;
+    # the value is derived from the interpreter, never inherited from the caller, so
+    # the environment stays closed.
+    if runtime_library_dir is not None:
+        resolved_library_dir = Path(runtime_library_dir).resolve()
+        if resolved_library_dir.is_dir():
+            environment["LD_LIBRARY_PATH"] = str(resolved_library_dir)
+    return environment
 
 
 def _controlled_git_environment() -> dict[str, str]:
@@ -354,6 +387,34 @@ def _source_environment(
     }
 
 
+def _engine_critical_channel_ids(descriptors: list[dict]) -> list[str]:
+    """The channels the ENGINE will treat as critical, by the engine's own rule.
+
+    THE RULE IS COPIED FROM PRODUCTION, NOT INVENTED HERE, and the previous version of
+    this derivation did not match it. `safety_pattern_liveness.py` builds
+    `critical_manifest_ids` from descriptors whose **quantity is `temperature`** AND whose
+    safety class is `safety_critical_input`, then refuses when the declared set is not
+    exactly that set. It applies NO role test.
+
+    What the earlier filter did instead: it tested `safety_class` and excluded the
+    `source_readback` role. That role test is a NO-OP -- `descriptors.py` refuses any
+    descriptor that is `source_readback` without the `hazardous_source_readback` class, so
+    a channel can never be both `source_readback` and `safety_critical_input` -- and the
+    `quantity` test, the one that decides, was missing. The two agreed only because both of
+    LS218_2's safety-critical descriptors happen to be temperature (measured: Т11 and Т12,
+    both `quantity=temperature`, both `role=primary_measurement`). A non-temperature
+    safety-critical descriptor added later would have been OVER-declared, the engine's
+    union check would have fired, and the engine would have refused to start -- after the
+    fixture's own test had said it could.
+    """
+
+    return sorted(
+        item["channel_id"]
+        for item in descriptors
+        if item.get("quantity") == "temperature" and item.get("safety_class") == "safety_critical_input"
+    )
+
+
 def _materialize_isolated_mock_config(
     config_dir: Path,
     *,
@@ -369,6 +430,30 @@ def _materialize_isolated_mock_config(
         if not source.is_file():
             raise _RunnerFoundationError(f"required tracked soak config is unavailable: {name}")
         (config_dir / name).write_bytes(source.read_bytes())
+    for name in _ISOLATED_TRACKED_CONFIG_DIRS:
+        source = source_dir / name
+        if not source.is_dir():
+            raise _RunnerFoundationError(f"required tracked soak config directory is unavailable: {name}")
+        target = config_dir / name
+        target.mkdir(mode=0o700)
+        copied = 0
+        for item in sorted(source.iterdir()):
+            # Refused by NAME rather than skipped. A skipped entry makes the isolated
+            # root diverge from the tracked tree silently, and the seal seals what the
+            # child sees without ever comparing back to the source, so the divergence
+            # would surface later as a launcher failure with no named cause.
+            if not item.is_file():
+                raise _RunnerFoundationError(
+                    f"tracked soak config directory holds a non-file entry: {name}/{item.name}"
+                )
+            copy = target / item.name
+            copy.write_bytes(item.read_bytes())
+            # The caller's chmod sweep only reaches the top level, and the seal demands
+            # 0o600 on every sealed file.
+            copy.chmod(0o600)
+            copied += 1
+        if copied == 0:
+            raise _RunnerFoundationError(f"tracked soak config directory is empty: {name}")
     for name, content in _ISOLATED_STATIC_CONFIGS:
         (config_dir / name).write_text(content, encoding="utf-8")
 
@@ -483,6 +568,52 @@ asyncio.run(probe())
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+    # `critical_channels` entries are EXACT canonical identities, not patterns:
+    # `_resolve_critical_bindings` does `if channel_id not in storage_catalog.by_channel_id`.
+    # The fixture used to declare the literal string ".*", meaning "everything", and no
+    # channel has that identity, so the engine refused to start at its boot-time safety
+    # liveness check -- the F-1 silent-safety-kill guard doing exactly its job. Measured on
+    # Ubuntu 22.04.5: the launcher started, the engine died before its readiness receipt,
+    # and the reason was
+    #   Dead safety/alarm channel pattern(s): 1 match NO channel on the plane their
+    #   consumer sees ... pattern='.*' source=safety.yaml critical_channels
+    # Deriving the list from the roster keeps the original intent -- every channel is
+    # critical -- and cannot drift from the descriptors the same call just wrote. For this
+    # fixture it is the two channels LS218_2 carries as safety-critical inputs; it was the
+    # EMPTY set while the fixture used LS218_1, whose sixteen descriptors are all
+    # observational, and an empty list is refused outright by the engine. Derived rather
+    # than assumed either way: a safety-critical descriptor added later is declared
+    # automatically, and one removed stops being declared.
+    critical_channels = _engine_critical_channel_ids(descriptor_manifest["descriptors"])
+    # The physical-alarms document is taken from the tracked base and then DISARMED,
+    # rather than written as a short static string. The production loader requires exactly
+    # cooldown, vacuum and landmarks, complete key sets in the first two, and the two
+    # canonical landmark channels with non-empty alias lists in the third, so a curtailed
+    # document cannot satisfy it and the engine refused to start on it. Only the three
+    # arming flags are overridden, so the soak stays passive while the document stays the
+    # reviewed one.
+    physical_raw = yaml.safe_load((source_dir / "physical_alarms.yaml").read_text(encoding="utf-8"))
+    if type(physical_raw) is not dict or set(physical_raw) != {"cooldown", "vacuum", "landmarks"}:
+        raise _RunnerFoundationError("tracked physical alarms config is malformed")
+    physical_raw["cooldown"]["enabled"] = False
+    physical_raw["vacuum"]["enabled"] = False
+    physical_raw["vacuum"]["escalate_to_safety"] = False
+    (config_dir / "physical_alarms.yaml").write_text(
+        yaml.safe_dump(physical_raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    (config_dir / "safety.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "critical_channels": critical_channels,
+                "require_keithley_for_run": False,
+                "keithley_channels": [],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     return readings_per_sample
 
 
@@ -569,7 +700,7 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
             or stat.S_IMODE(directory_opened.st_mode) != 0o700
         ):
             raise _RunnerFoundationError("passive source fixture directory identity is unsafe")
-        expected_names = expected_files | {"experiment_templates"}
+        expected_names = expected_files | {"experiment_templates"} | set(_ISOLATED_TRACKED_CONFIG_DIRS)
         if set(os.listdir(directory_fd)) != expected_names:
             raise _RunnerFoundationError("passive source fixture topology is not exact")
 
@@ -592,10 +723,11 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
 
         entries: list[dict[str, object]] = [{"path": "experiment_templates", "kind": "directory"}]
         nofollow = getattr(os, "O_NOFOLLOW", 0)
-        for name in sorted(expected_files):
-            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+
+        def seal_file(name: str, parent_fd: int, label: str) -> None:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             try:
-                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+                fd = os.open(name, os.O_RDONLY | nofollow, dir_fd=parent_fd)
             except OSError as exc:
                 raise _RunnerFoundationError("passive source fixture file identity is unsafe") from exc
             try:
@@ -619,18 +751,49 @@ def _source_fixture_seal(config_dir: Path, *, expected_readings_per_sample: int)
                     raise _RunnerFoundationError("passive source fixture changed during sealing")
             finally:
                 os.close(fd)
-            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             if identity(after) != identity(opened):
                 raise _RunnerFoundationError("passive source fixture changed during sealing")
-            identities.append((name, *identity(opened)))
+            identities.append((label, *identity(opened)))
             entries.append(
                 {
-                    "path": name,
+                    "path": label,
                     "kind": "file",
                     "bytes": content_bytes,
                     "sha256": f"sha256:{content_sha256.hexdigest()}",
                 }
             )
+
+        for name in sorted(expected_files):
+            seal_file(name, directory_fd, name)
+
+        # The theme packs are a POPULATED tracked directory, unlike the empty template
+        # directory above. They are sealed exactly as the files are -- identity, no
+        # links, exact mode, content hashed -- because a directory the launcher must
+        # read at import is the last place an unsealed byte belongs.
+        for tracked in sorted(_ISOLATED_TRACKED_CONFIG_DIRS):
+            sub_before = os.stat(tracked, dir_fd=directory_fd, follow_symlinks=False)
+            sub_fd = os.open(tracked, flags, dir_fd=directory_fd)
+            try:
+                sub_opened = os.fstat(sub_fd)
+                if (
+                    not stat.S_ISDIR(sub_opened.st_mode)
+                    or not os.path.samestat(sub_before, sub_opened)
+                    or sub_opened.st_uid != os.getuid()
+                    or stat.S_IMODE(sub_opened.st_mode) != 0o700
+                ):
+                    raise _RunnerFoundationError("passive source fixture directory identity is unsafe")
+                identities.append((tracked, *identity(sub_opened)))
+                entries.append({"path": tracked, "kind": "directory"})
+                sub_names = sorted(os.listdir(sub_fd))
+                if not sub_names:
+                    raise _RunnerFoundationError("passive source fixture tracked directory is empty")
+                for sub_name in sub_names:
+                    seal_file(sub_name, sub_fd, f"{tracked}/{sub_name}")
+                if sorted(os.listdir(sub_fd)) != sub_names:
+                    raise _RunnerFoundationError("passive source fixture topology changed during sealing")
+            finally:
+                os.close(sub_fd)
         if set(os.listdir(directory_fd)) != expected_names:
             raise _RunnerFoundationError("passive source fixture topology changed during sealing")
         if identity(os.fstat(directory_fd)) != identity(directory_opened):
@@ -759,14 +922,62 @@ def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_
     evidence.write_log("log-launcher.txt", payload.decode("utf-8"))
 
 
+_ENGINE_STDERR_EVIDENCE_NAME: Final = "log-engine-stderr.txt"
+_ENGINE_STDERR_ABSENT_MARKER: Final = (
+    "<no engine stderr log was written under the isolated state root; the engine either "
+    "never started or never opened its stderr log>\n"
+)
+
+
+def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
+    """Publish the engine's own stderr, so a dead engine can say why it died.
+
+    Without this the run reports a CONDITION without its SUBJECT. The launcher forwards
+    engine stderr to a rotating log under the writable state root, which for this run is
+    the runner's own temporary directory and is deleted with it, so
+    ``Launcher construction failed; phase=engine exception=RuntimeError`` arrived with no
+    way to see the engine's traceback. Measured 2026-08-19 on Ubuntu 22.04.5: the evidence
+    bundle held six files and none of them was that log.
+
+    The artifact is ALWAYS written, and says so when the log is absent, because a missing
+    file is indistinguishable from a publisher that silently did nothing.
+    """
+
+    from scripts.soak_mock_stack import redact_text
+
+    path = Path(state_root) / "logs" / "engine.stderr.log"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
+        return
+
+    encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
+    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
+        # Keep the END: a traceback's cause is written last, and the bound exists to
+        # protect the bundle's size, not to choose which half of the failure survives.
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
+        tail = encoded[-tail_bytes:]
+        while tail and tail[0] & 0xC0 == 0x80:
+            tail = tail[1:]
+        encoded = _TRUNCATED_LAUNCHER_LOG_MARKER + tail
+    evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
+
+
 @contextmanager
 def _launcher_log_capture(
     evidence: Any,
     path: Path,
     *,
     settle_writer: Callable[[], None] | None = None,
+    state_root: Path | None = None,
 ):
-    """Capture stdout through a continuously drained, memory-bounded pipe."""
+    """Capture stdout through a continuously drained, memory-bounded pipe.
+
+    ``state_root`` names the writable root the child was given, so the engine's own
+    stderr log can be published beside the launcher log. It is optional so a caller
+    that has no such root is unchanged.
+    """
 
     if path.exists():
         raise FileExistsError(path)
@@ -789,10 +1000,17 @@ def _launcher_log_capture(
                 drain.writer.close()
         except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
             primary.add_note(f"launcher diagnostic capture failed: {capture_error}")
+        if state_root is not None:
+            try:
+                _publish_engine_stderr(evidence, state_root)
+            except Exception as engine_error:  # noqa: BLE001 - preserve the primary failure
+                primary.add_note(f"engine stderr capture failed: {engine_error}")
         raise
     else:
         raw, total_bytes = drain.finish()
         _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
+        if state_root is not None:
+            _publish_engine_stderr(evidence, state_root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -922,7 +1140,9 @@ def _sealed_execution_snapshot(git_sha: str):
             snapshot_interpreter = root / ".venv/bin/python"
             snapshot_interpreter.parent.mkdir(parents=True)
             _copy_running_executable(resolved, snapshot_interpreter)
-            environment = _controlled_test_environment(root, site_packages)
+            environment = _controlled_test_environment(
+                root, site_packages, runtime_library_dir=Path(sys.base_prefix) / "lib"
+            )
             code = "from pathlib import Path; import cryodaq; print(Path(cryodaq.__file__).resolve())"
             imported = subprocess.run(
                 (str(snapshot_interpreter), "-c", code),
@@ -1191,6 +1411,48 @@ class _LockedPsutilObserver:
             raise _RunnerFoundationError("PID/start identity changed; refusing process operation")
         return process
 
+    def _forkserver_of(self, pid: int, *, expected_launcher_pid: int) -> int | None:
+        """Return `pid` if it is THIS launcher's multiprocessing fork server, else None.
+
+        Python 3.14 makes `forkserver` the Linux default, and the laboratory target is
+        3.14.6, so a multiprocessing child is forked from a fork-server process and is not
+        a direct child of the launcher. Measured on that machine: bridge 821 reported
+        parent 820 while the launcher was 793. The direct-child rule was true under `fork`,
+        the previous default, and silently stopped being true.
+
+        The property the rule exists to prove is that the bridge belongs to THIS launcher,
+        and a two-step chain proves exactly that -- but only when the intermediate is both
+        a direct child of the launcher AND recognisably the fork server. Anything looser
+        would accept a grandchild of an unrelated shape, so both halves are checked and
+        neither is inferred from the other.
+        """
+
+        try:
+            candidate = self._process(pid)
+            candidate_parent = int(candidate.ppid())
+            candidate_argv = " ".join(candidate.cmdline())
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError):
+            return None
+        # THE DIRECT-CHILD REQUIREMENT IS WHAT MAKES THE NEXT TEST SOUND, and it is not
+        # defence in depth -- it is load-bearing. Measured on the laboratory interpreter
+        # (Python 3.14.6, `evidence/tools/` probe): a process forked BY the fork server
+        # inherits the fork server's command line EXACTLY. The bridge's own argv therefore
+        # contains `multiprocessing.forkserver` too. So the module token alone identifies
+        # the fork server AND every one of its children, and only the parent tells them
+        # apart: the fork server's parent is the launcher, its children's parent is the
+        # fork server.
+        if candidate_parent != expected_launcher_pid:
+            return None
+        # This is a SUBSTRING test and the comment used to claim it was an exact match on
+        # the module. It was not, and it cannot be: the token lives inside a `-c` code
+        # string, measured as
+        #   python -B -c "import sys; from multiprocessing.forkserver import main; main(...)"
+        # so there is no argument equal to the module name to compare against. The check
+        # is sound because of the parent test above, not because of this one.
+        if "multiprocessing.forkserver" not in candidate_argv:
+            return None
+        return pid
+
     def observe_assistant(self, pid: int, *, expected_launcher_pid: int) -> _AssistantProcessObservation:
         process = self._process(pid)
         identity = self._identity(process)
@@ -1218,9 +1480,18 @@ class _LockedPsutilObserver:
             pass
         else:
             raise _RunnerFoundationError("positive bridge identity collides with another child role")
-        observation = _BridgeProcessObservation(identity, parent_pid, "zmq_bridge", True)
-        if parent_pid != expected_launcher_pid:
-            raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+        belongs = parent_pid == expected_launcher_pid or (
+            self._forkserver_of(parent_pid, expected_launcher_pid=expected_launcher_pid) is not None
+        )
+        observation = _BridgeProcessObservation(
+            identity, parent_pid, "zmq_bridge", True, expected_launcher_pid if belongs else 0
+        )
+        if not belongs:
+            raise _RunnerFoundationError(
+                "reported bridge does not belong to this launcher: "
+                f"bridge pid {pid} reports parent {parent_pid}, launcher is {expected_launcher_pid}, "
+                "and that parent is not this launcher's multiprocessing fork server"
+            )
         return observation
 
     def signal_exact(self, identity: _ProcessIdentity, signum: int) -> None:
@@ -2067,10 +2338,10 @@ class _DeliveryEvidenceRegistry:
     def __init__(self) -> None:
         self._records: dict[int, tuple[_DeliveryEvidenceAuthority, Any, dict[str, object]]] = {}
 
-    def run(self, runner: Any, evidence: Any) -> None:
+    def run(self, runner: Any, evidence: Any, selected: Any) -> None:
         if type(runner) is not _PosixSoakRunner or runner._used is not True:
             raise _RunnerFoundationError("delivery run is not owned by the active runner")
-        result = _PosixSoakRunner._run_owned(runner, evidence)
+        result = _PosixSoakRunner._run_owned(runner, evidence, selected)
         if type(result) is not _OwnedRunResult:
             raise _RunnerFoundationError("owned runner returned an invalid private result")
         proof = _validate_pre_post_receipts(
@@ -2229,6 +2500,25 @@ class _BridgeProcessObservation:
     parent_pid: int
     role: str
     alive: bool
+    # The launcher pid the observer PROVED this bridge belongs to: either as a direct
+    # child, or forked from a fork server that is itself a direct child. Zero means the
+    # observer proved nothing, which is the default, so a construction that forgets the
+    # field REFUSES rather than passes.
+    #
+    # It carries the PID and not a bare boolean on purpose. A boolean says only that some
+    # launcher was proved, and the binder could not tell WHICH, so its error message named
+    # a pid that had taken no part in the decision. The two pids coincide at today's single
+    # call site; they would not have to at a second one.
+    #
+    # BE CLEAR ABOUT WHAT THE BINDER'S COMPARISON IS AND IS NOT. It is a FAIL-CLOSED
+    # cross-check, not a second independent look at the process table -- the binder cannot
+    # look at processes at all. `observe_bridge` already RAISES when it proves nothing, so
+    # for any observation that function returns the comparison is satisfied by
+    # construction. Its value is against an observation built by hand, or by a future
+    # second call site, that never verified anything: the field defaults to zero and the
+    # binder refuses. Saying it restores an independent parentage check would be a claim
+    # the code does not support.
+    verified_against_launcher_pid: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2249,7 +2539,11 @@ def _bind_positive_assistant_identity(
     if type(expected_launcher_pid) is not int or expected_launcher_pid <= 0:
         raise _RunnerFoundationError("launcher identity is invalid")
     if observation.parent_pid != expected_launcher_pid:
-        raise _RunnerFoundationError("reported assistant is not a direct launcher child")
+        raise _RunnerFoundationError(
+            "reported assistant is not a direct launcher child: "
+            f"assistant pid {observation.identity.pid} reports parent {observation.parent_pid}, "
+            f"launcher is {expected_launcher_pid}"
+        )
     if observation.role != "assistant":
         raise _RunnerFoundationError("reported PID is not the allowlisted assistant role")
     return observation.identity
@@ -2265,8 +2559,18 @@ def _bind_positive_bridge_identity(
         raise _RunnerFoundationError("reported bridge process is not alive")
     if observation.identity.pid != record.bridge_pid:
         raise _RunnerFoundationError("observer bridge PID contradicts launcher record")
-    if type(observation.parent_pid) is not int or observation.parent_pid != record.launcher_pid:
-        raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+    if (
+        type(observation.parent_pid) is not int
+        or type(observation.verified_against_launcher_pid) is not int
+        or observation.verified_against_launcher_pid != record.launcher_pid
+    ):
+        raise _RunnerFoundationError(
+            "reported bridge does not belong to this launcher: "
+            f"bridge pid {observation.identity.pid} reports parent {observation.parent_pid!r}; "
+            f"the observer proved it belongs to launcher "
+            f"{observation.verified_against_launcher_pid!r}, and the record names "
+            f"{record.launcher_pid}"
+        )
     if observation.role != "zmq_bridge":
         raise _RunnerFoundationError("reported PID is not the allowlisted bridge role")
     return observation.identity
@@ -2447,14 +2751,35 @@ def _decode_complete_output(stdout: _StreamEvidence, payload: bytes) -> str:
 
 
 _DIAGNOSTIC_OUTPUT_LIMIT = 4096
+_DIAGNOSTIC_HEAD_SHARE = _DIAGNOSTIC_OUTPUT_LIMIT // 2
+_DIAGNOSTIC_TRUNCATION_MARKER = "\n...[truncated %d character(s); the tail of the stream follows]\n"
 
 
 def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
+    """Describe a failed child run, keeping the END of each stream as well as its start.
+
+    Keeping only the first characters is what a length bound does if nobody chooses,
+    and for a pytest child it discards exactly the part that says what went wrong:
+    the assertion, the traceback and the short test summary all sit at the END. A
+    real ubuntu-latest failure arrived here as four kilobytes of the child test's own
+    source text, then ``...[truncated]`` where the cause would have been, which is a
+    message that names a condition and withholds its subject.
+
+    The bound itself is unchanged: at most ``_DIAGNOSTIC_OUTPUT_LIMIT`` characters of
+    a stream reach the message. They are now taken from both ends instead of one.
+    """
+
     def bounded(payload: bytes) -> str:
         text = payload.decode("utf-8", errors="replace")
-        if len(text) > _DIAGNOSTIC_OUTPUT_LIMIT:
-            text = text[:_DIAGNOSTIC_OUTPUT_LIMIT] + "\n...[truncated]"
-        return text if text else "<empty>"
+        if not text:
+            return "<empty>"
+        if len(text) <= _DIAGNOSTIC_OUTPUT_LIMIT:
+            return text
+        tail_share = _DIAGNOSTIC_OUTPUT_LIMIT - _DIAGNOSTIC_HEAD_SHARE
+        dropped = len(text) - _DIAGNOSTIC_OUTPUT_LIMIT
+        return (
+            text[:_DIAGNOSTIC_HEAD_SHARE] + (_DIAGNOSTIC_TRUNCATION_MARKER % dropped) + text[len(text) - tail_share :]
+        )
 
     return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
         stderr
@@ -3345,8 +3670,12 @@ class _PosixSoakRunner:
             return None
         return payload if type(payload) is dict else None
 
-    def run(self, evidence: Any) -> None:
+    def run(self, evidence: Any, selected: Any = None) -> None:
         self.require_platform()
+        from scripts import soak_mock_stack as _soak_for_default
+
+        if selected is None:
+            selected = _soak_for_default.profile("short")
         if self._used:
             raise _RunnerFoundationError("POSIX soak runner is single-use")
         from scripts import soak_mock_stack as soak
@@ -3360,7 +3689,7 @@ class _PosixSoakRunner:
             # rolls back to the observed prior state.
             self._prior_subreaper = _runner_subreaper_state()
             _apply_runner_subreaper(True)
-            _DELIVERY_EVIDENCE.run(self, evidence)
+            _DELIVERY_EVIDENCE.run(self, evidence, selected)
         finally:
             if self._prior_subreaper is not None and not self._subreaper_restored:
                 self._restore_subreaper()
@@ -3374,7 +3703,7 @@ class _PosixSoakRunner:
             _apply_runner_subreaper(self._prior_subreaper)
             self._subreaper_restored = True
 
-    def _run_owned(self, evidence: Any) -> _OwnedRunResult:
+    def _run_owned(self, evidence: Any, selected: Any) -> _OwnedRunResult:
         """Run, validate, seal, and publish one short-soak terminal result."""
 
         import platform
@@ -3384,9 +3713,41 @@ class _PosixSoakRunner:
 
         from scripts import soak_mock_stack as soak
 
-        selected = soak.profile("short")
+        # THE PROFILE NOW ARRIVES FROM THE CALLER, and until this change it did not arrive
+        # at all: `main()` computed one, used it to name the evidence directory, and then
+        # called a runner that chose its own.
+        #
+        # THE REFUSAL STAYS, and its reason is now TRUE instead of tautological. The old
+        # line compared a name against the literal it had just asked for, which cannot
+        # fail. This one names the contract that actually forbids a long profile today:
+        # `Evidence` rejects a manifest whose `expected_receipts` is not 2
+        # (`soak_mock_stack.py`), and the qualification refuses a ledger whose length is
+        # not 2 (`_validate_pre_post_receipts`). A long profile could therefore start,
+        # fault processes for hours, and never seal. Admitting one before that contract
+        # changes would spend a night of machine time to produce nothing.
+        #
+        # IT COMPARES FIELDS, AND IT HAS TO BE CLASS-AGNOSTIC. Two stricter-looking checks
+        # were tried and both would have refused EVERY REAL RUN; a test that drives this
+        # boundary caught them before they shipped.
+        #
+        # The soak starts as `python -m scripts.soak_mock_stack`, so the entry module is
+        # `__main__` while this runner does `from scripts import soak_mock_stack`. Those are
+        # TWO module instances. `selected is soak.PROFILES[name]` is therefore false for
+        # every real run -- and so is `==`, because dataclass equality requires the same
+        # class and the two instances define two `SoakProfile` classes.
+        #
+        # Comparing the FIELDS answers the question that actually matters: does this profile
+        # carry what the reviewed profile of that name carries. A look-alike whose fields
+        # differ is refused; one identical in every field is the reviewed profile in all but
+        # object identity, and behaves as such.
+        registered = soak.PROFILES.get(getattr(selected, "name", None))
+        if registered is None or dataclasses.asdict(registered) != dataclasses.asdict(selected):
+            raise _RunnerFoundationError("soak profile is not one of the reviewed profiles")
         if selected.name != "short":
-            raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
+            raise _RunnerFoundationError(
+                "the evidence contract seals exactly two receipts, so only the short "
+                f"profile can qualify; {selected.name!r} would run and never seal"
+            )
         locked = _LockedPsutilObserver(psutil)
         owner_identity = locked.identity_for_pid(os.getpid())
         if locked.descendants(owner_identity, include_zombies=True):
@@ -3416,7 +3777,12 @@ class _PosixSoakRunner:
                 ).payload
         evidence.write_manifest(
             {
-                "profile": "short",
+                # The profile that RAN, never a literal. The thresholds beside this line
+                # already read `selected`; this one did not, so a manifest could have named
+                # the short profile while another one ran. Nothing can reach that state
+                # today because the entry point refuses every profile but the short one --
+                # which is exactly why it must be right before that refusal is ever lifted.
+                "profile": selected.name,
                 "git_sha": sha,
                 "dirty": False,
                 "platform": platform.platform(),
@@ -3426,6 +3792,9 @@ class _PosixSoakRunner:
                 "periodic_schedule": {
                     "interval_s": report_interval_s,
                     "selection_boundary_offset_s": report_boundary_offset_s,
+                    # Two, and NOT derived. `Evidence` rejects a manifest whose count is
+                    # not 2 and the qualification refuses a ledger that is not two records
+                    # long, so a derived count would only describe a run that cannot seal.
                     "expected_receipts": 2,
                 },
                 "source_fixture": source_fixture,
@@ -3534,7 +3903,7 @@ class _PosixSoakRunner:
                         )
                         launcher_settled = True
 
-                with _launcher_log_capture(evidence, log_path, settle_writer=settle_log_writer) as log:
+                with _launcher_log_capture(evidence, log_path, settle_writer=settle_log_writer, state_root=root) as log:
                     process, launcher_identity = _spawn_gated_source(
                         environment=environment,
                         stdout=log,
@@ -3585,12 +3954,36 @@ class _PosixSoakRunner:
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
-                            except ValueError:
+                            except ValueError as exc:
+                                # Kept, not swallowed. The refusal below used to say only
+                                # that roles were missing, so the classifier's own reason --
+                                # which names the process and the topology it rejected --
+                                # was discarded at the one place it could have been read.
                                 roles = None
+                                roles_refusal = str(exc)
                         if roles is None:
                             time.sleep(0.1)
+                    roles_refusal = locals().get("roles_refusal", "")
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
-                        raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
+                        # Name WHICH of the four preconditions is missing. The bare
+                        # sentence sends the next turn to read the whole startup path,
+                        # and it has: the run gets further after every fix and stops here
+                        # again, each time for a different reason the message did not say.
+                        missing = ", ".join(
+                            name
+                            for name, value in (
+                                ("roles", roles),
+                                ("handshake", handshake),
+                                ("bridge", bridge),
+                                ("bridge_guard", bridge_guard),
+                            )
+                            if value is None
+                        )
+                        detail = f"; last classifier refusal: {roles_refusal}" if roles_refusal else ""
+                        raise _RunnerFoundationError(
+                            "source stack did not reach the exact four-role startup cut; "
+                            f"still missing: {missing}{detail}"
+                        )
 
                     _validate_short_soak_runtime_schedule(report_interval_s, time.time())
 
@@ -3753,8 +4146,14 @@ class _PosixSoakRunner:
                                     break
                                 time.sleep(0.1)
                             if replacement_roles is None or replacement_tree is None:
+                                # Name WHICH child. The bare sentence leaves the reader to
+                                # guess between three roles with three different meanings:
+                                # a bridge that cannot recover is a defect, an engine that
+                                # does not is a deliberate permanent HOLD, and an assistant
+                                # is a third thing again. Guessing between them is exactly
+                                # what a refusal should make unnecessary.
                                 raise _RunnerFoundationError(
-                                    "faulted child did not recover within the reviewed ceiling"
+                                    f"faulted {event.target} did not recover within the reviewed ceiling"
                                 )
                             epochs[event.target] += 1
                             current = replacement_roles

@@ -82,6 +82,28 @@ _STABILITY_THRESHOLD = 0.01  # К/мин
 _BANNER_AUTO_CLEAR_MS = 4000
 _REFRESH_INTERVAL_MS = 1000
 _AUTO_TIMER_INTERVAL_MS = 1000
+# F81 finding: a fixed freshness window silently rejects every sample of an
+# otherwise healthy instrument whose configured poll_interval_s (registry allows
+# up to 86_400 s) or successful read (up to 300 s) exceeds 10 seconds, leaving
+# the sweep in "stabilizing" forever. The window is therefore derived from the
+# observed acquisition cadence of the bound channels (median of recent
+# inter-sample monotonic acquisition gaps), with this constant kept as the
+# fail-closed floor: a dead feed still ages past any finite window.
+_AUTO_SAMPLE_MAX_AGE_S = 10.0
+_AUTO_SAMPLE_AGE_CADENCE_FACTOR = 3.0
+_AUTO_CADENCE_SAMPLE_SLOTS = 9
+_ACQUISITION_STARTED_AT = "acquisition_started_at"
+# F81 finding C: a fixed 300-second predictor window with the default 30-point
+# minimum silently never yields a valid prediction for a cadence slower than
+# 10 seconds (300/30), so a healthy 30-second-cadence channel holds ~10 points
+# and the sweep sits in "stabilizing" forever. The predictor window is derived
+# from the observed cadence of the bound temperature feeds (window = cadence x
+# min_points, floored at 300 s) so every bound channel can accumulate the
+# minimum point count inside it. The minimum itself is not lowered: fewer
+# points would weaken the exponential fit.
+_PREDICTOR_BASE_WINDOW_S = 300.0
+_PREDICTOR_MIN_POINTS = 30
+_PREDICTOR_UPDATE_INTERVAL_S = 10.0
 
 _COL_HEADERS: tuple[str, ...] = (
     "Пара",
@@ -226,8 +248,6 @@ class ConductivityPanel(QWidget):
         self._checkboxes: dict[str, QCheckBox] = {}
         self._plot_items: dict[str, pg.PlotDataItem] = {}
 
-        self._predictor = SteadyStatePredictor(window_s=300.0, update_interval_s=10.0)
-
         # Public guard state. "stabilizing" is retained through settling,
         # command-pending, Stop-pending, and outcome-unknown substates until
         # current-authority Stop settlement permits idle/done publication.
@@ -247,6 +267,29 @@ class ConductivityPanel(QWidget):
         # reply must retain the last-known ACTIVE state so external finalize
         # guards cannot be cleared by GUI inference.
         self._auto_outcome_unknown = False
+        self._auto_step_ack_wall_s: float | None = None
+        self._auto_step_ack_monotonic_s: float | None = None
+        self._auto_step_temperature_channels: tuple[str, ...] = ()
+        self._auto_step_power_channel: str | None = None
+        self._auto_step_temperature_values: dict[str, float] = {}
+        self._auto_step_temperature_received_at: dict[str, float] = {}
+        self._auto_step_power_value: float | None = None
+        self._auto_step_power_received_at: float | None = None
+
+        # F81 finding: per-channel observed acquisition cadence (monotonic gap
+        # between successive samples of the same channel). The freshness window
+        # is derived from the median of the most recent gaps so a configured
+        # poll_interval_s or slow read above 10 seconds does not reject every
+        # healthy sample, while the 10-second floor stays fail-closed.
+        self._auto_cadence_gaps: dict[str, deque[float]] = {}
+        self._auto_last_acquisition_s: dict[str, float] = {}
+
+        # F81 finding C: the predictor is constructed after the step's channel
+        # state and cadence dictionaries so its window can be derived from the
+        # observed temperature cadence (see _make_auto_predictor). At this
+        # point no cadence has been observed yet, so the base window applies.
+        self._auto_predictor_window_s: float = _PREDICTOR_BASE_WINDOW_S
+        self._predictor = self._make_auto_predictor()
 
         self._all_channels = _get_temperature_channels()
         get_channel_manager().on_change(self._on_channels_changed)
@@ -807,12 +850,174 @@ class ConductivityPanel(QWidget):
         self._power_channel = text
         self._update_power_label()
 
-    def _smu_channel(self) -> str:
-        parts = self._power_channel.split("/")
+    @staticmethod
+    def _smu_channel_for(power_channel: str) -> str:
+        parts = power_channel.split("/")
         return parts[1] if len(parts) >= 2 else "smua"
+
+    def _smu_channel(self) -> str:
+        return self._smu_channel_for(self._power_channel)
+
+    @staticmethod
+    def _reading_monotonic_metadata(reading: Reading, key: str) -> float | None:
+        metadata = reading.metadata if isinstance(reading.metadata, dict) else {}
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            return None
+        try:
+            monotonic_value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return monotonic_value if math.isfinite(monotonic_value) else None
+
+    def _observe_auto_cadence(self, channel: str, acquisition_started_monotonic: float | None) -> None:
+        """Record the inter-sample acquisition gap for one channel.
+
+        F81 finding: the freshness window must track the instrument's actual
+        acquisition cadence, not a fixed 10-second constant, or a configured
+        poll_interval_s above 10 seconds rejects every healthy sample. The gap
+        is measured between successive samples of the same channel on the same
+        monotonic clock (``acquisition_started_monotonic``).
+
+        F81 finding C: when a slow cadence is observed after the sweep has
+        already started (the predictor was built before the first samples of the
+        step arrived), the predictor window must be grown to match, or the feed
+        can never accumulate the 30-point minimum and the sweep sits in
+        "stabilizing" forever.
+        """
+        if acquisition_started_monotonic is None:
+            return
+        previous = self._auto_last_acquisition_s.get(channel)
+        self._auto_last_acquisition_s[channel] = acquisition_started_monotonic
+        if previous is None:
+            return
+        gap = acquisition_started_monotonic - previous
+        if gap <= 0:
+            return
+        self._auto_cadence_gaps.setdefault(channel, deque(maxlen=_AUTO_CADENCE_SAMPLE_SLOTS)).append(gap)
+        if self._auto_state != "stabilizing":
+            return
+        required = self._required_predictor_window_s()
+        if required > self._auto_predictor_window_s:
+            self._auto_predictor_window_s = required
+            self._predictor = SteadyStatePredictor(
+                window_s=required,
+                update_interval_s=_PREDICTOR_UPDATE_INTERVAL_S,
+            )
+
+    def _auto_feed_max_age_s(self, channel: str) -> float:
+        """Fail-closed freshness window for ONE feed, from its own cadence.
+
+        F81/P1 finding: the earlier helper computed a single window as the
+        maximum median cadence across every bound feed and applied it to every
+        temperature and power sample, so a slow temperature channel widened the
+        power-feed failure bound and a stale power value could advance the
+        heater. Each selected feed now carries its own cadence and its own
+        bound. Uses the median of that feed's most recent inter-sample gaps so
+        a single long gap (for example a one-off slow read within the permitted
+        300-second timeout) cannot inflate the window, while the 10-second
+        floor keeps the guard fail-closed: a genuinely dead feed still ages
+        past any finite window. When no cadence has been observed yet, the
+        floor applies unchanged.
+        """
+        gaps = self._auto_cadence_gaps.get(channel)
+        if not gaps:
+            return _AUTO_SAMPLE_MAX_AGE_S
+        ordered = sorted(gaps)
+        return max(_AUTO_SAMPLE_MAX_AGE_S, _AUTO_SAMPLE_AGE_CADENCE_FACTOR * ordered[len(ordered) // 2])
+
+    def _reset_auto_temperature_evidence(self) -> None:
+        self._auto_step_temperature_values.clear()
+        self._auto_step_temperature_received_at.clear()
+        self._predictor = self._make_auto_predictor()
+
+    def _make_auto_predictor(self) -> SteadyStatePredictor:
+        """Construct the predictor sized to the observed temperature cadence.
+
+        F81 finding C: a fixed 300-second window with the 30-point minimum
+        holds only ~10 points of a 30-second-cadence feed, so the predictor
+        never yields a valid prediction and the sweep stays in "stabilizing"
+        forever. Derive the window from the slowest bound temperature feed so
+        every bound channel can accumulate the minimum point count inside it.
+        The 30-point minimum is not lowered: fewer points would weaken the
+        exponential fit. When no cadence has been observed yet, the base window
+        applies unchanged. The derived window is stored on the panel so
+        _observe_auto_cadence can grow it if a slow cadence arrives after the
+        sweep has started.
+        """
+        window_s = self._required_predictor_window_s()
+        self._auto_predictor_window_s = window_s
+        return SteadyStatePredictor(
+            window_s=window_s,
+            update_interval_s=_PREDICTOR_UPDATE_INTERVAL_S,
+        )
+
+    def _required_predictor_window_s(self) -> float:
+        """Predictor window the bound temperature feeds' cadence demands.
+
+        F81 finding C: the slowest temperature feed bound to the auto step
+        drives the predictor window, so a 30-second feed widens the window to
+        900 seconds instead of silently never producing a valid prediction.
+        When no cadence has been observed yet for any bound feed, the base
+        window applies unchanged.
+        """
+        cadence = self._bound_temperature_cadence_s()
+        if cadence is None:
+            return _PREDICTOR_BASE_WINDOW_S
+        # Rounded UP, and the rounding is load-bearing rather than cosmetic. The cadence
+        # is a MEASURED median of observed gaps, so a nominal 30-second feed arrives as
+        # 29.999999999999996 and the product lands one unit in the last place BELOW the
+        # window that holds the required number of points -- 899.9999999999999 instead of
+        # 900.0. A window a hair too short holds one point fewer than the count this
+        # method exists to guarantee, which is the "silently never producing a valid
+        # prediction" failure named above. Measured at master on Ubuntu 22.04.5: the
+        # guard test failed 1 run in 12 for exactly this, so it also cost a CI round in
+        # eight, on a queue that is already the constraint.
+        # ONE CADENCE OF HEADROOM, and the arithmetic is why. The predictor prunes at
+        # `now - window_s` and refuses below `min_points`. N points spaced by one cadence
+        # SPAN (N-1) cadences, so a window of exactly `cadence * points` fits the required
+        # points with a single cadence to spare -- and any delay longer than one cadence
+        # between the oldest sample and the update tick drops that sample, leaves N-1
+        # points, and the prediction goes invalid with tau, amplitude and settled all zero.
+        # A feed that is one cycle late therefore never accumulates its count, which is the
+        # "silently never producing a valid prediction" failure this method exists to
+        # prevent, arriving through the window instead of through the point count. Measured
+        # on a loaded hosted runner: exactly that shape, with the window assertion passing
+        # and the prediction invalid.
+        return max(
+            _PREDICTOR_BASE_WINDOW_S,
+            float(math.ceil(cadence * (_PREDICTOR_MIN_POINTS + 1))),
+        )
+
+    def _bound_temperature_cadence_s(self) -> float | None:
+        """Median of medians of the step's temperature feeds' observed cadence.
+
+        F81 finding C: the slowest temperature feed bound to the auto step
+        drives the predictor window, so a 30-second feed widens the window to
+        900 seconds instead of silently never producing a valid prediction.
+        Only channels actually bound to the current step are considered, so an
+        unrelated slow channel cannot inflate the predictor window.
+        """
+        medians: list[float] = []
+        for channel in self._auto_step_temperature_channels:
+            gaps = self._auto_cadence_gaps.get(channel)
+            if not gaps:
+                continue
+            ordered = sorted(gaps)
+            medians.append(ordered[len(ordered) // 2])
+        return max(medians) if medians else None
 
     def _on_channels_changed(self) -> None:
         new_channels = _get_temperature_channels()
+        active = self._auto_state == "stabilizing"
+        bound_channels = self._auto_step_temperature_channels if active else ()
+        if bound_channels:
+            display_names = dict(self._all_channels)
+            new_ids = {ch_id for ch_id, _ in new_channels}
+            new_channels.extend(
+                (ch_id, display_names.get(ch_id, ch_id)) for ch_id in bound_channels if ch_id not in new_ids
+            )
+
         new_ids = {ch_id for ch_id, _ in new_channels}
         old_ids = set(self._checkboxes.keys())
         name_map = dict(new_channels)
@@ -826,9 +1031,11 @@ class ConductivityPanel(QWidget):
                 if item.opts.get("name") != new_name:
                     item.opts["name"] = new_name
             self._all_channels = new_channels
+            self._update_control_enablement()
             return
 
         checked = {ch_id for ch_id, cb in self._checkboxes.items() if cb.isChecked()}
+        checked.update(bound_channels)
         self._all_channels = new_channels
         while self._ch_layout.count():
             item = self._ch_layout.takeAt(0)
@@ -837,15 +1044,16 @@ class ConductivityPanel(QWidget):
                 w.setParent(None)
                 w.deleteLater()
         self._checkboxes.clear()
-        for ch_id, display_name in self._all_channels:
+        rows_per_col = max(1, (len(self._all_channels) + 1) // 2)
+        for idx, (ch_id, display_name) in enumerate(self._all_channels):
             cb = QCheckBox(display_name)
             cb.setStyleSheet(f"color: {theme.FOREGROUND}; background: transparent;")
             cb.setChecked(ch_id in checked)
             cb.stateChanged.connect(lambda state, cid=ch_id: self._on_check(cid, state))
             self._checkboxes[ch_id] = cb
-            self._ch_layout.addWidget(cb)
-        self._ch_layout.addStretch()
-        self._chain = [ch for ch in self._chain if ch in new_ids]
+            self._ch_layout.addWidget(cb, idx % rows_per_col, idx // rows_per_col)
+        self._ch_layout.setRowStretch(rows_per_col, 1)
+        self._chain = list(bound_channels) if bound_channels else [ch for ch in self._chain if ch in new_ids]
         for ch_id in list(self._plot_items.keys()):
             if ch_id not in new_ids:
                 self._plot.removeItem(self._plot_items.pop(ch_id))
@@ -855,6 +1063,7 @@ class ConductivityPanel(QWidget):
         for ch_id in list(self._rate_buffers.keys()):
             if ch_id not in new_ids:
                 del self._rate_buffers[ch_id]
+        self._update_control_enablement()
         logger.info("ConductivityPanel: rebuilt (%d channels)", len(new_channels))
 
     # ------------------------------------------------------------------
@@ -877,8 +1086,30 @@ class ConductivityPanel(QWidget):
         ch = reading.channel
         ch_id = self._resolve_channel_id(ch)
         ts = reading.timestamp.timestamp()
+        received_at = self._reading_monotonic_metadata(reading, "bridge_ingress_monotonic")
+        acquisition_started_monotonic = self._reading_monotonic_metadata(reading, "acquisition_started_monotonic")
+        self._observe_auto_cadence(ch_id or ch, acquisition_started_monotonic)
         # NaN-доктрина (A3): статус — дискриминатор годности; не годное
         # температурное показание не питает SteadyStatePredictor.
+        auto_step_fresh = (
+            self._auto_step_ack_monotonic_s is not None
+            and acquisition_started_monotonic is not None
+            and acquisition_started_monotonic >= self._auto_step_ack_monotonic_s
+        )
+        # F81-1: the engine-side publisher queue can stall before the bridge
+        # ingress stamp, so a post-ack sample can wait upstream and arrive
+        # with a fresh ingress stamp after publication resumes. Bound the
+        # acquisition-to-ingress age with the same cadence-derived window
+        # _auto_tick applies to bridge ingress, so a stale sample that merely
+        # looks fresh cannot refill the predictor or advance the sweep.
+        auto_step_current = (
+            auto_step_fresh
+            and received_at is not None
+            and received_at - acquisition_started_monotonic <= self._auto_feed_max_age_s(ch_id or ch)
+        )
+        selected_auto_temperature = self._auto_state == "stabilizing" and ch_id in self._auto_step_temperature_channels
+        if selected_auto_temperature and not reading.is_usable():
+            self._reset_auto_temperature_evidence()
         if ch_id is not None and reading.unit == "K" and reading.is_usable():
             # Hide the empty-state overlay only when a real temperature
             # reading lands — a power-only reading has nothing to plot,
@@ -890,10 +1121,23 @@ class ConductivityPanel(QWidget):
             if ch_id in self._buffers:
                 self._buffers[ch_id].append((ts, reading.value))
                 self._rate_buffers[ch_id].append((ts, reading.value))
-            self._predictor.add_point(ch_id, ts, reading.value)
+            if not selected_auto_temperature or auto_step_current:
+                self._predictor.add_point(ch_id, ts, reading.value)
+            if selected_auto_temperature and auto_step_current:
+                self._auto_step_temperature_values[ch_id] = reading.value
+                self._auto_step_temperature_received_at[ch_id] = received_at
         if ch == self._power_channel:
             self._power = reading.value
             self._power_received = True
+        selected_auto_power = self._auto_state == "stabilizing" and ch == self._auto_step_power_channel
+        if selected_auto_power:
+            if auto_step_current and reading.is_usable():
+                self._auto_step_power_value = reading.value
+                self._auto_step_power_received_at = received_at
+            elif not reading.is_usable():
+                self._auto_step_power_value = None
+                self._auto_step_power_received_at = None
+                self._reset_auto_temperature_evidence()
 
     # ------------------------------------------------------------------
     # Refresh
@@ -1161,7 +1405,14 @@ class ConductivityPanel(QWidget):
             text = f"{first3}, ... , {powers[-1]:.4g}  ({len(powers)} шагов)"
         self._power_preview.setText("Список мощностей: " + text)
 
-    def _send_auto_cmd(self, cmd: dict, *, stop_intent: str | None = None) -> bool:
+    def _send_auto_cmd(
+        self,
+        cmd: dict,
+        *,
+        stop_intent: str | None = None,
+        evidence_power_channel: str | None = None,
+        evidence_temperature_channels: tuple[str, ...] | None = None,
+    ) -> bool:
         """Dispatch one generation-bound command while live authority exists."""
 
         if not self._connected:
@@ -1183,6 +1434,8 @@ class ConductivityPanel(QWidget):
             operation_generation: int = expected_operation_generation,
             completed_worker: ZmqCommandWorker = worker,
             command_stop_intent: str | None = stop_intent,
+            command_power_channel: str | None = evidence_power_channel,
+            command_temperature_channels: tuple[str, ...] | None = evidence_temperature_channels,
         ) -> None:
             self._on_auto_cmd_result(
                 command_token,
@@ -1192,6 +1445,8 @@ class ConductivityPanel(QWidget):
                 operation_generation,
                 completed_worker,
                 command_stop_intent,
+                command_power_channel,
+                command_temperature_channels,
             )
 
         worker.finished.connect(_completed)
@@ -1209,6 +1464,8 @@ class ConductivityPanel(QWidget):
         expected_operation_generation: int,
         worker: ZmqCommandWorker | None = None,
         stop_intent: str | None = None,
+        evidence_power_channel: str | None = None,
+        evidence_temperature_channels: tuple[str, ...] | None = None,
     ) -> None:
         """Commit only the exact current operation's authoritative reply."""
 
@@ -1260,6 +1517,14 @@ class ConductivityPanel(QWidget):
                 self._commit_auto_stop()
             return
 
+        if command.get("cmd") == "keithley_set_target":
+            if evidence_power_channel is None or evidence_temperature_channels is None:
+                self._latch_auto_outcome_unknown("В ответе команды нет идентичности измерительного шага.")
+                return
+            self._arm_auto_step_evidence(
+                power_channel=evidence_power_channel,
+                temperature_channels=evidence_temperature_channels,
+            )
         self._update_control_enablement()
 
     def _latch_auto_outcome_unknown(self, reason: str) -> None:
@@ -1272,6 +1537,30 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText("ИСХОД НЕИЗВЕСТЕН — последнее известное: АВТОИЗМЕРЕНИЕ АКТИВНО. " + reason)
         self._update_control_enablement()
+
+    def _invalidate_auto_step_evidence(self) -> None:
+        self._auto_step_ack_wall_s = None
+        self._auto_step_ack_monotonic_s = None
+        self._reset_auto_temperature_evidence()
+        self._auto_step_power_value = None
+        self._auto_step_power_received_at = None
+
+    def _arm_auto_step_evidence(
+        self,
+        *,
+        power_channel: str,
+        temperature_channels: tuple[str, ...],
+    ) -> None:
+        """Start one evidence epoch after the target command is acknowledged."""
+
+        self._auto_step_ack_wall_s = time.time()
+        self._auto_step_ack_monotonic_s = time.monotonic()
+        self._auto_step_start = self._auto_step_ack_monotonic_s
+        self._auto_step_power_channel = power_channel
+        self._auto_step_temperature_channels = temperature_channels
+        self._reset_auto_temperature_evidence()
+        self._auto_step_power_value = None
+        self._auto_step_power_received_at = None
 
     @Slot()
     def _on_auto_start(self) -> None:
@@ -1299,6 +1588,7 @@ class ConductivityPanel(QWidget):
         self._auto_operation_generation += 1
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
+        self._invalidate_auto_step_evidence()
 
         self._auto_start_btn.setEnabled(False)
         self._auto_stop_btn.setEnabled(True)
@@ -1306,14 +1596,21 @@ class ConductivityPanel(QWidget):
         self._auto_progress.setValue(0)
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText(f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт")
+        self._update_control_enablement()
 
         self._auto_step_start = time.monotonic()
+        self._auto_step_power_channel = self._power_channel
+        self._auto_step_temperature_channels = tuple(self._chain)
+        power_channel = self._auto_step_power_channel
+        temperature_channels = self._auto_step_temperature_channels
         dispatched = self._send_auto_cmd(
             {
                 "cmd": "keithley_set_target",
-                "channel": self._smu_channel(),
+                "channel": self._smu_channel_for(power_channel),
                 "p_target": powers[0],
-            }
+            },
+            evidence_power_channel=power_channel,
+            evidence_temperature_channels=temperature_channels,
         )
         if not dispatched:
             self._latch_auto_outcome_unknown("Начальная команда мощности не отправлена.")
@@ -1337,7 +1634,10 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setText("Останов запрошен — ожидается подтверждение отключения источника")
         self._update_control_enablement()
         if not self._send_auto_cmd(
-            {"cmd": "keithley_stop", "channel": self._smu_channel()},
+            {
+                "cmd": "keithley_stop",
+                "channel": self._smu_channel_for(self._auto_step_power_channel or self._power_channel),
+            },
             stop_intent="operator",
         ):
             self._auto_pending_stop_intent = None
@@ -1353,7 +1653,7 @@ class ConductivityPanel(QWidget):
         self._auto_progress.setVisible(False)
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText("Остановлено оператором — отключение подтверждено")
-        self._update_control_enablement()
+        self._on_channels_changed()
         logger.info("Автоизмерение: остановлено оператором, отключение подтверждено")
         self.auto_sweep_aborted.emit("operator_stop")
 
@@ -1367,13 +1667,15 @@ class ConductivityPanel(QWidget):
             or self._auto_pending_stop_intent is not None
         ):
             return
-        elapsed = time.monotonic() - self._auto_step_start
+        now_monotonic = time.monotonic()
+        elapsed = now_monotonic - self._auto_step_start
         step_total = len(self._auto_power_list)
         step_idx = self._auto_step
         P = self._auto_power_list[step_idx]
+        temperature_channels = self._auto_step_temperature_channels
 
         settled_values: list[float] = []
-        for ch in self._chain:
+        for ch in temperature_channels:
             pred = self._predictor.get_prediction(ch)
             if pred is not None and pred.valid:
                 settled_values.append(pred.percent_settled)
@@ -1382,7 +1684,33 @@ class ConductivityPanel(QWidget):
         min_settled = min(settled_values) if settled_values else 0.0
         threshold = self._settled_pct_spin.value()
         min_wait = self._min_wait_spin.value()
-        is_stable = elapsed >= min_wait and min_settled >= threshold
+        temperature_ages_are_current = bool(temperature_channels) and all(
+            ch in self._auto_step_temperature_values
+            and ch in self._auto_step_temperature_received_at
+            and now_monotonic - self._auto_step_temperature_received_at[ch] <= self._auto_feed_max_age_s(ch)
+            for ch in temperature_channels
+        )
+        if not temperature_ages_are_current and self._auto_step_temperature_values:
+            self._reset_auto_temperature_evidence()
+            settled_values = [0.0 for _ in temperature_channels]
+            min_settled = 0.0
+        power_feed = self._auto_step_power_channel
+        power_age_is_current = (
+            power_feed is not None
+            and self._auto_step_power_value is not None
+            and self._auto_step_power_received_at is not None
+            and now_monotonic - self._auto_step_power_received_at <= self._auto_feed_max_age_s(power_feed)
+        )
+        if not power_age_is_current:
+            self._auto_step_power_value = None
+            self._auto_step_power_received_at = None
+            self._reset_auto_temperature_evidence()
+            temperature_ages_are_current = False
+            settled_values = [0.0 for _ in temperature_channels]
+            min_settled = 0.0
+        is_stable = (
+            elapsed >= min_wait and min_settled >= threshold and temperature_ages_are_current and power_age_is_current
+        )
 
         step_progress = min(min_settled / threshold, 1.0) if threshold > 0 else 1.0
         pct = int(((step_idx + step_progress) / step_total) * 100)
@@ -1400,13 +1728,20 @@ class ConductivityPanel(QWidget):
                 self._auto_complete()
             else:
                 next_p = self._auto_power_list[self._auto_step]
-                self._auto_step_start = time.monotonic()
+                power_channel = self._auto_step_power_channel
+                temperature_channels = self._auto_step_temperature_channels
+                self._invalidate_auto_step_evidence()
+                if power_channel is None or not temperature_channels:
+                    self._latch_auto_outcome_unknown("Идентичность следующего измерительного шага потеряна.")
+                    return
                 self._send_auto_cmd(
                     {
                         "cmd": "keithley_set_target",
-                        "channel": self._smu_channel(),
+                        "channel": self._smu_channel_for(power_channel),
                         "p_target": next_p,
-                    }
+                    },
+                    evidence_power_channel=power_channel,
+                    evidence_temperature_channels=temperature_channels,
                 )
                 logger.info(
                     "Автоизмерение: шаг %d/%d, P=%.4g Вт",
@@ -1416,18 +1751,19 @@ class ConductivityPanel(QWidget):
                 )
 
     def _auto_record_point(self) -> None:
-        P = self._auto_power_list[self._auto_step]
-        if len(self._chain) < 2:
+        P = self._auto_step_power_value
+        temperature_channels = self._auto_step_temperature_channels
+        if len(temperature_channels) < 2 or P is None:
             return
-        hot_ch = self._chain[0]
-        cold_ch = self._chain[-1]
-        T_hot = self._temps.get(hot_ch, float("nan"))
-        T_cold = self._temps.get(cold_ch, float("nan"))
+        hot_ch = temperature_channels[0]
+        cold_ch = temperature_channels[-1]
+        T_hot = self._auto_step_temperature_values.get(hot_ch, float("nan"))
+        T_cold = self._auto_step_temperature_values.get(cold_ch, float("nan"))
         dT = T_hot - T_cold
         R = dT / P if P != 0 and math.isfinite(dT) else float("nan")
         G = P / dT if dT != 0 and math.isfinite(dT) else float("nan")
         settled_values = []
-        for ch in self._chain:
+        for ch in temperature_channels:
             pred = self._predictor.get_prediction(ch)
             if pred and pred.valid:
                 settled_values.append(pred.percent_settled)
@@ -1465,7 +1801,10 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setText("Все точки записаны — ожидается подтверждение отключения источника")
         self._update_control_enablement()
         if not self._send_auto_cmd(
-            {"cmd": "keithley_stop", "channel": self._smu_channel()},
+            {
+                "cmd": "keithley_stop",
+                "channel": self._smu_channel_for(self._auto_step_power_channel or self._power_channel),
+            },
             stop_intent="complete",
         ):
             self._auto_pending_stop_intent = None
@@ -1478,7 +1817,7 @@ class ConductivityPanel(QWidget):
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
         self._auto_progress.setValue(100)
-        self._update_control_enablement()
+        self._on_channels_changed()
         n = len(self._auto_results)
         self._auto_status_label.setText(f"Завершено: {n} точек измерено; отключение источника подтверждено")
         logger.info("Автоизмерение: завершено, %d точек", n)
@@ -1702,6 +2041,9 @@ class ConductivityPanel(QWidget):
         stop_ok = self._connected and active and self._auto_pending_stop_intent is None
         self._auto_start_btn.setEnabled(start_ok)
         self._auto_stop_btn.setEnabled(stop_ok)
+        self._power_combo.setEnabled(not active)
+        for checkbox in self._checkboxes.values():
+            checkbox.setEnabled(not active)
 
     def get_auto_state(self) -> str:
         """Return the conservative public auto-sweep guard state.

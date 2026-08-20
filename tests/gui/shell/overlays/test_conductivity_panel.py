@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
+import socket
+import threading
+import time
 from datetime import UTC, datetime
+from typing import Any
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import msgpack
 import pytest
+import zmq
 from PySide6.QtWidgets import QApplication
 
-from cryodaq.drivers.base import Reading
+from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, zmq_bridge_main
+from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel, _pct_color
+from cryodaq.gui.zmq_client import ZmqBridge
 
 
 @pytest.fixture(scope="session")
@@ -77,26 +86,91 @@ class _DeferredWorker:
         self.finished.emit(result)
 
 
-def _temp_reading(channel: str, value: float) -> Reading:
+def _temp_reading(
+    channel: str,
+    value: float,
+    *,
+    timestamp: datetime | None = None,
+    acquisition_started_at: float | None = None,
+    acquisition_started_monotonic: float | None = None,
+    bridge_ingress_monotonic: float | None = None,
+    status: ChannelStatus = ChannelStatus.OK,
+) -> Reading:
+    now = timestamp or datetime.now(UTC)
+    now_monotonic = time.monotonic()
     return Reading(
-        timestamp=datetime.now(UTC),
+        timestamp=now,
         instrument_id="LakeShore_1",
         channel=channel,
         value=value,
         unit="K",
-        metadata={},
+        status=status,
+        metadata={
+            "acquisition_started_at": now.timestamp() if acquisition_started_at is None else acquisition_started_at,
+            "acquisition_started_monotonic": (
+                now_monotonic if acquisition_started_monotonic is None else acquisition_started_monotonic
+            ),
+            "bridge_ingress_monotonic": (
+                now_monotonic if bridge_ingress_monotonic is None else bridge_ingress_monotonic
+            ),
+        },
     )
 
 
-def _power_reading(value: float, *, channel: str = "Keithley_1/smua/power") -> Reading:
+def _power_reading(
+    value: float,
+    *,
+    channel: str = "Keithley_1/smua/power",
+    timestamp: datetime | None = None,
+    acquisition_started_at: float | None = None,
+    acquisition_started_monotonic: float | None = None,
+    bridge_ingress_monotonic: float | None = None,
+    status: ChannelStatus = ChannelStatus.OK,
+) -> Reading:
+    now = timestamp or datetime.now(UTC)
+    now_monotonic = time.monotonic()
     return Reading(
-        timestamp=datetime.now(UTC),
+        timestamp=now,
         instrument_id="Keithley_1",
         channel=channel,
         value=value,
         unit="W",
-        metadata={},
+        status=status,
+        metadata={
+            "acquisition_started_at": now.timestamp() if acquisition_started_at is None else acquisition_started_at,
+            "acquisition_started_monotonic": (
+                now_monotonic if acquisition_started_monotonic is None else acquisition_started_monotonic
+            ),
+            "bridge_ingress_monotonic": (
+                now_monotonic if bridge_ingress_monotonic is None else bridge_ingress_monotonic
+            ),
+        },
     )
+
+
+def _reserve_bridge_endpoints() -> tuple[Any, Any, int, Any, int]:
+    """Reserve two demonstrably distinct loopback ZMQ bridge ports.
+
+    F81 finding: ``_find_free_port()`` released its port before the parent
+    bound it, so the OS could reassign the number, or hand the same number to
+    a second ``_find_free_port()`` call — either made the registered backlog
+    guard fail nondeterministically under parallel CI. The PUB endpoint is now
+    bound directly by ZMQ (port 0, actual port read from LAST_ENDPOINT) and
+    the command endpoint is held open on a plain socket for the whole test, so
+    the two are distinct by construction and neither is ever released before
+    use. Returns (context, pub_socket, pub_port, cmd_reservation, cmd_port).
+    """
+    ctx = zmq.Context()
+    pub = ctx.socket(zmq.PUB)
+    pub.setsockopt(zmq.LINGER, 0)
+    pub.bind("tcp://127.0.0.1:0")
+    endpoint = pub.getsockopt(zmq.LAST_ENDPOINT)
+    pub_port = int(endpoint.rsplit(b":", 1)[-1])
+    cmd_reservation = socket.socket()
+    cmd_reservation.bind(("127.0.0.1", 0))
+    cmd_port = cmd_reservation.getsockname()[1]
+    assert pub_port != cmd_port, f"bridge endpoints collided: pub={pub_port}, cmd={cmd_port}"
+    return ctx, pub, pub_port, cmd_reservation, cmd_port
 
 
 def _stub_channels(panel: ConductivityPanel, ids: list[str]) -> None:
@@ -661,6 +735,584 @@ def test_auto_tick_does_not_advance_before_min_wait(app, monkeypatch):
     assert panel._auto_step == initial_step
 
 
+def test_auto_tick_requires_fresh_power_and_temperature_samples_after_target_ack(app, monkeypatch):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.01))
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    panel._auto_timer.stop()
+
+
+@pytest.mark.parametrize("acquisition_proof", ["before_ack", "missing", "backlogged"])
+def test_auto_tick_rejects_samples_without_post_ack_acquisition_proof(app, monkeypatch, acquisition_proof):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    assert panel._auto_step_ack_wall_s is not None
+    ack_monotonic = getattr(panel, "_auto_step_ack_monotonic_s", _time.monotonic())
+    acquisition_start = None
+    acquisition_start_monotonic = None
+    ingress_monotonic = None
+    if acquisition_proof == "before_ack":
+        acquisition_start = panel._auto_step_ack_wall_s + 100.0
+        acquisition_start_monotonic = ack_monotonic - 1.0
+    elif acquisition_proof == "backlogged":
+        # A post-ack reading held in the engine-side publisher queue. Push the
+        # ack epoch 30 s into the past and acquire 10 s after it; the real
+        # bridge stamps a fresh ingress timestamp on arrival, so only the
+        # acquisition-to-ingress age bound can reject the sample.
+        panel._auto_step_ack_monotonic_s = ack_monotonic - 30.0
+        ack_monotonic = ack_monotonic - 30.0
+        acquisition_start_monotonic = ack_monotonic + 10.0
+    queued_readings = []
+    for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+        reading = _temp_reading(
+            channel,
+            value,
+            acquisition_started_at=acquisition_start,
+            acquisition_started_monotonic=acquisition_start_monotonic,
+            bridge_ingress_monotonic=ingress_monotonic,
+        )
+        if acquisition_proof == "missing":
+            reading.metadata.clear()
+        queued_readings.append(reading)
+    power_reading = _power_reading(
+        0.01,
+        acquisition_started_at=acquisition_start,
+        acquisition_started_monotonic=acquisition_start_monotonic,
+        bridge_ingress_monotonic=ingress_monotonic,
+    )
+    if acquisition_proof == "missing":
+        power_reading.metadata.clear()
+    queued_readings.append(power_reading)
+    if acquisition_proof == "backlogged":
+        # F81-2: exercise the production bridge ingress path. The engine-side
+        # publisher queue can stall BEFORE the bridge ingress stamp, so a
+        # post-ack reading can wait upstream and receive a fresh ingress stamp
+        # only when publication resumes. Spawn the real zmq_bridge_main
+        # subprocess and publish over a real ZMQ SUB/PUB pair, so the
+        # production stamp at core/zmq_subprocess.py is what supplies the
+        # freshness proof instead of a hand-inserted queue item.
+        # F81 finding: the endpoints must stay reserved until they are bound —
+        # a released port can be reassigned by the OS, and two successive
+        # _find_free_port() calls can return the same port, so the guard could
+        # fail nondeterministically. _reserve_bridge_endpoints() holds the PUB
+        # on the live ZMQ socket and the command port on an open reservation.
+        ctx, pub, pub_port, cmd_reservation, cmd_port = _reserve_bridge_endpoints()
+        data_q: mp.Queue = mp.Queue(maxsize=10_000)
+        cmd_q: mp.Queue = mp.Queue(maxsize=1_000)
+        reply_q: mp.Queue = mp.Queue(maxsize=1_000)
+        shutdown_event: mp.Event = mp.Event()
+        bridge_proc = mp.Process(
+            target=zmq_bridge_main,
+            args=(
+                f"tcp://127.0.0.1:{pub_port}",
+                f"tcp://127.0.0.1:{cmd_port}",
+                data_q,
+                cmd_q,
+                reply_q,
+                shutdown_event,
+            ),
+            daemon=True,
+        )
+        bridge_proc.start()
+
+        time.sleep(0.3)
+
+        stop_emit = threading.Event()
+
+        def _emit_readings() -> None:
+            while not stop_emit.is_set():
+                for reading in queued_readings:
+                    payload = msgpack.packb(
+                        {
+                            "ts": reading.timestamp.timestamp(),
+                            "iid": reading.instrument_id,
+                            "ch": reading.channel,
+                            "v": reading.value,
+                            "u": reading.unit,
+                            "st": reading.status.value,
+                            "meta": {
+                                key: value
+                                for key, value in reading.metadata.items()
+                                if key != "bridge_ingress_monotonic"
+                            },
+                        }
+                    )
+                    try:
+                        pub.send_multipart([DEFAULT_TOPIC, payload])
+                    except zmq.ZMQError:
+                        return
+                time.sleep(0.05)
+
+        emitter = threading.Thread(target=_emit_readings, daemon=True)
+        emitter.start()
+
+        bridge = object.__new__(ZmqBridge)
+        bridge._data_queue = data_q
+        bridge._bridge_instance_id = "conductivity-backlog-test"
+        bridge._last_reading_time = 0.0
+        bridge._last_heartbeat = 0.0
+        bridge._last_cmd_timeout = 0.0
+        received_readings = []
+        seen = set()
+        deadline = _time.monotonic() + 10.0
+        try:
+            while _time.monotonic() < deadline and len(seen) < 3:
+                for reading in bridge.poll_readings():
+                    key = (reading.channel, reading.value)
+                    if key not in seen:
+                        seen.add(key)
+                        received_readings.append(reading)
+                time.sleep(0.05)
+        finally:
+            stop_emit.set()
+            emitter.join(timeout=1.0)
+            pub.close(linger=0)
+            ctx.term()
+            cmd_reservation.close()
+            shutdown_event.set()
+            bridge_proc.join(timeout=3.0)
+            if bridge_proc.is_alive():
+                bridge_proc.kill()
+                bridge_proc.join(timeout=2.0)
+        assert len(received_readings) == 3, (
+            f"production bridge ingress produced {len(received_readings)} readings, expected 3"
+        )
+        # The production stamp at core/zmq_subprocess.py must be what supplied
+        # the freshness proof — deleting it must turn this guard red.
+        ingress_stamps = []
+        for reading in received_readings:
+            metadata = reading.metadata if isinstance(reading.metadata, dict) else {}
+            ingress_stamps.append(metadata.get("bridge_ingress_monotonic"))
+        assert all(isinstance(value, float) for value in ingress_stamps), (
+            "production bridge ingress stamp missing — core/zmq_subprocess.py stamp deleted?"
+        )
+        fresh_ingress = max(ingress_stamps)
+        stale_acquisition = min(
+            float(reading.metadata["acquisition_started_monotonic"]) for reading in received_readings
+        )
+        assert fresh_ingress - stale_acquisition > getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0), (
+            "backlogged scenario does not exceed the acquisition-to-ingress age bound"
+        )
+        queued_readings = received_readings
+    for reading in queued_readings:
+        panel._handle_reading(reading)
+
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    panel._auto_timer.stop()
+
+
+def test_auto_tick_advances_with_slow_acquisition_cadence(app, monkeypatch):
+    """A healthy instrument configured with a 30-second acquisition cadence must
+    still advance the sweep — driving the REAL SteadyStatePredictor.
+
+    F81 finding: the freshness window was a fixed 10 seconds, so a configured
+    poll_interval_s above 10 seconds (the registry allows up to 86,400) left a
+    healthy sweep in "stabilizing" forever — the freshest sample aged past the
+    fixed window between arrivals and evidence was cleared every tick. The
+    window is now derived from the observed inter-sample acquisition cadence
+    (3× the median gap, floor 10 s), so a 30-second cadence keeps the freshest
+    sample current long enough to record the point.
+
+    F81 finding C: widening freshness alone still does not advance a
+    30-second-cadence sweep, because the predictor kept a fixed 300-second
+    window with a 30-point minimum — such a feed holds ~10 points and never
+    yields a valid prediction. This test therefore drives the REAL predictor
+    (no get_prediction stub): the window is derived from the observed cadence
+    (30 s × 30 points = 900 s), the real predictor accumulates 30 points, and
+    only then does the sweep advance.
+    """
+    import time as _time
+    from datetime import UTC, datetime
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    # Establish the 30-second acquisition cadence BEFORE Start, as the real
+    # instruments poll continuously and the panel observes their cadence while
+    # idle. Without this the predictor would be built before any cadence was
+    # known and could not accumulate the minimum inside its window.
+    now_mono = _time.monotonic()
+    for offset in (60.0, 30.0):
+        acquisition = now_mono - offset
+        ingress = acquisition + 1.0
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+        panel._handle_reading(
+            _power_reading(
+                0.012,
+                acquisition_started_monotonic=acquisition,
+                bridge_ingress_monotonic=ingress,
+            )
+        )
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    # The observed 30-second cadence must widen the freshness window past the
+    # old fixed 10-second limit AND derive the predictor window to 30 s x 30
+    # points = 900 s, so the real predictor can actually accumulate the minimum
+    # point count inside its window.
+    assert panel._auto_feed_max_age_s("Т1") > 10.0
+    assert panel._auto_feed_max_age_s("Keithley_1/smua/power") > 10.0
+    assert panel._predictor._window_s >= 900.0
+
+    # Simulate poll_interval_s = 30 s: feed 30 acquisition cycles spanning 900
+    # seconds, each channel's sample stamped 30 seconds after the previous one,
+    # arriving ~1 s later. Shift the ack epoch back so every cycle is post-ack
+    # (as the real engine stamps acquisition before I/O). The wall-clock
+    # timestamps span the window too, because the real predictor prunes by the
+    # wall-clock reading timestamp.
+    ack = panel._auto_step_ack_monotonic_s
+    panel._auto_step_ack_monotonic_s = ack - 1000.0
+    panel._auto_step_start = _time.monotonic() - 60.0
+    now_wall = _time.time()
+    for cycle in range(30):
+        offset = 870.0 - cycle * 30.0  # 870, 840, ..., 0
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
+        ts = datetime.fromtimestamp(now_wall - offset, tz=UTC)
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    timestamp=ts,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+        panel._handle_reading(
+            _power_reading(
+                0.012,
+                timestamp=ts,
+                acquisition_started_monotonic=acquisition,
+                bridge_ingress_monotonic=ingress,
+            )
+        )
+
+    # Drive the real predictor exactly as the production refresh tick does, then
+    # let _auto_tick read its real predictions (no get_prediction stub).
+    panel._predictor.update(_time.time())
+    pred = panel._predictor.get_prediction("Т1")
+    assert pred is not None and pred.valid, (
+        "the real predictor must yield a valid prediction for a 30-second cadence inside its cadence-derived window"
+    )
+
+    panel._auto_tick()
+
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
+    panel._auto_timer.stop()
+
+
+def test_auto_predictor_window_grows_when_slow_cadence_observed_mid_step(app, monkeypatch):
+    """The predictor window must grow if a slow cadence is first observed after
+    the step armed (the predictor was built before the feed's cadence was known).
+
+    F81 finding C: a sweep started before any temperature sample arrived is
+    armed with the base 300-second predictor window. If the bound feeds then
+    turn out to have a 30-second cadence, the predictor can never accumulate its
+    30-point minimum inside a 300-second window and the sweep would silently sit
+    in "stabilizing" forever. The moment the cadence is observed, the predictor
+    window must grow to match (30 s x 30 points = 900 s).
+    """
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    # No temperature sample arrived before the ack, so the predictor is still
+    # at the base window.
+    assert panel._predictor._window_s == 300.0
+
+    # Two temperature samples 30 seconds apart establish the cadence mid-step.
+    ack = panel._auto_step_ack_monotonic_s
+    for offset in (30.0, 0.0):
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+
+    # The predictor window must have grown to fit the observed 30-second
+    # cadence's minimum point count.
+    assert panel._predictor._window_s >= 900.0
+    panel._auto_timer.stop()
+
+
+def test_auto_tick_slow_temperature_cadence_does_not_relax_power_feed_bound(app, monkeypatch):
+    """A slow temperature feed must not widen the power feed's failure bound.
+
+    F81/P1 finding: the freshness window was computed once across all bound
+    feeds as 3x the slowest channel's median cadence and then applied to every
+    temperature AND power sample. A 30-second temperature feed therefore
+    expanded the power-feed window to 90 seconds; if the Keithley then went
+    silent after one usable sample, continuing temperature updates could still
+    satisfy settling and advance to the next power target using that stale
+    power value. Each selected feed now keeps its own cadence and its own
+    bound, so the fast power feed's bound stays tight regardless of how slow a
+    temperature channel is.
+    """
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    # Simulate the mixed-cadence scenario: temperature feeds at a 30-second
+    # cadence (a slow channel), the power feed at a 1-second cadence (the
+    # normally-fast Keithley). Shift the ack epoch back so every sample is
+    # post-ack, as the real engine stamps acquisition before I/O.
+    ack = panel._auto_step_ack_monotonic_s
+    panel._auto_step_ack_monotonic_s = ack - 90.0
+    panel._auto_step_start = _time.monotonic() - 60.0
+
+    for offset in (60.0, 30.0):
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
+        for channel, value in (("Т1", 110.0), ("Т2", 100.0)):
+            panel._handle_reading(
+                _temp_reading(
+                    channel,
+                    value,
+                    acquisition_started_monotonic=acquisition,
+                    bridge_ingress_monotonic=ingress,
+                )
+            )
+    # The fast power feed: two samples 1 second apart establish its own 1-second
+    # cadence, then it goes silent after the second (freshest) sample.
+    for offset in (16.0, 15.0):
+        acquisition = ack - offset
+        ingress = acquisition + 1.0
+        panel._handle_reading(
+            _power_reading(
+                0.012,
+                acquisition_started_monotonic=acquisition,
+                bridge_ingress_monotonic=ingress,
+            )
+        )
+
+    # The slow temperature feed widened ITS OWN bound past 10 s, but must not
+    # have relaxed the fast power feed's bound (which stays at the 10-second
+    # floor: 3 x the 1-second cadence would be 3 s < 10 s).
+    assert panel._auto_feed_max_age_s("Т1") > 10.0
+    assert panel._auto_feed_max_age_s("Keithley_1/smua/power") == 10.0
+
+    # Continuing temperature updates can satisfy settling, but the last power
+    # sample (14 s old at tick) is far beyond the power feed's own 10-second
+    # bound — the sweep must NOT advance to the next power target on that stale
+    # power value.
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    panel._auto_timer.stop()
+
+
+def test_auto_step_keeps_commanded_channels_when_controls_change(app, monkeypatch):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2", "Т3"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    assert _DeferredWorker.instances[-1].cmd["channel"] == "smua"
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    original_checkboxes = dict(panel._checkboxes)
+    monkeypatch.setattr(module, "_get_temperature_channels", lambda: [("Т2", "Т2"), ("Т3", "Т3"), ("Т4", "Т4")])
+    panel._on_channels_changed()
+    assert panel._chain == ["Т1", "Т2"]
+    assert set(panel._checkboxes) == {"Т1", "Т2", "Т3", "Т4"}
+    assert all(panel._checkboxes[channel] is not original_checkboxes[channel] for channel in original_checkboxes)
+    assert all(not checkbox.isEnabled() for checkbox in panel._checkboxes.values())
+
+    panel._on_power_changed("Keithley_1/smub/power")
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012, channel="Keithley_1/smua/power"))
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+
+    panel._auto_tick()
+
+    assert panel._auto_step == 1
+    assert panel._auto_results[0]["T_hot"] == pytest.approx(110.0)
+    assert panel._auto_results[0]["T_cold"] == pytest.approx(100.0)
+    assert _DeferredWorker.instances[-1].cmd["channel"] == "smua"
+    panel._on_auto_stop()
+    assert _DeferredWorker.instances[-1].cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    _DeferredWorker.instances[-1].finish({"ok": True})
+    assert panel._auto_state == "idle"
+    assert set(panel._checkboxes) == {"Т2", "Т3", "Т4"}
+    assert panel._chain == ["Т2"]
+    assert all(checkbox.isEnabled() for checkbox in panel._checkboxes.values())
+    panel._auto_timer.stop()
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["sensor_error", "sensor_error_without_provenance", "power_sensor_error", "silence"],
+)
+def test_auto_tick_requires_current_usable_feeds(app, monkeypatch, failure_mode):
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as module
+
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    _DeferredWorker.instances[-1].finish({"ok": True})
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012))
+
+    if failure_mode.startswith("sensor_error"):
+        reading = _temp_reading(
+            "Т1",
+            float("nan"),
+            status=ChannelStatus.SENSOR_ERROR,
+        )
+        if failure_mode == "sensor_error_without_provenance":
+            reading.metadata.clear()
+        panel._handle_reading(reading)
+    elif failure_mode == "power_sensor_error":
+        panel._handle_reading(_power_reading(float("nan"), status=ChannelStatus.SENSOR_ERROR))
+        panel._handle_reading(_power_reading(0.012))
+    else:
+        sample_max_age_s = getattr(module, "_AUTO_SAMPLE_MAX_AGE_S", 10.0)
+        stale_received_at = _time.monotonic() - sample_max_age_s - 1.0
+        panel._auto_step_temperature_received_at = {"Т1": stale_received_at, "Т2": stale_received_at}
+        panel._auto_step_power_received_at = stale_received_at
+
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+
+    assert panel._auto_step == 0
+    assert panel._auto_results == []
+    if failure_mode == "power_sensor_error":
+        panel._handle_reading(_temp_reading("Т1", 110.0))
+        panel._handle_reading(_temp_reading("Т2", 100.0))
+        panel._handle_reading(_power_reading(0.012))
+        panel._auto_tick()
+        assert panel._auto_step == 1
+        assert len(panel._auto_results) == 1
+    panel._auto_timer.stop()
+
+
 def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     import time as _time
 
@@ -681,6 +1333,9 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     panel.set_connected(True)
     panel._on_auto_start()
     _DeferredWorker.instances[-1].finish({"ok": True})
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012))
 
     def _fake_get_prediction(ch: str):
         return _StubPrediction(percent_settled=99.0)
@@ -688,8 +1343,6 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     panel._predictor.get_prediction = _fake_get_prediction  # type: ignore[method-assign]
     # Pretend min_wait elapsed.
     panel._auto_step_start = _time.monotonic() - 60.0
-    # Feed temps: T_hot=110, T_cold=100, P=0.01 → dT=10, R=1000, G=0.001
-    panel._temps = {"Т1": 110.0, "Т2": 100.0}
     panel._auto_tick()
 
     # Advanced to step 1 and recorded exactly one point.
@@ -698,16 +1351,23 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
 
     # Assert exact recorded values in _auto_results[0].
     rec = panel._auto_results[0]
-    assert rec["P"] == pytest.approx(0.01, rel=1e-9), f"P={rec['P']}"
+    assert rec["P"] == pytest.approx(0.012, rel=1e-9), f"P={rec['P']}"
     assert rec["dT"] == pytest.approx(10.0, rel=1e-9), f"dT={rec['dT']}"
-    assert rec["R"] == pytest.approx(1000.0, rel=1e-6), f"R={rec['R']}"
-    assert rec["G"] == pytest.approx(0.001, rel=1e-6), f"G={rec['G']}"
+    assert rec["R"] == pytest.approx(10.0 / 0.012, rel=1e-6), f"R={rec['R']}"
+    assert rec["G"] == pytest.approx(0.0012, rel=1e-6), f"G={rec['G']}"
 
     # Next keithley_set_target must have been dispatched for step 2 (p=0.02).
     assert len(_DeferredWorker.instances) == 2
     next_cmd = _DeferredWorker.instances[-1].cmd
     assert next_cmd["cmd"] == "keithley_set_target"
     assert next_cmd["p_target"] == pytest.approx(0.02, rel=1e-9), f"next p={next_cmd}"
+
+    _DeferredWorker.instances[-1].finish({"ok": True})
+    panel._predictor.get_prediction = _fake_get_prediction  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+    panel._auto_tick()
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
 
     # Progress bar must be between 0 and 99 (stepped past first point).
     progress = panel._auto_progress.value()
