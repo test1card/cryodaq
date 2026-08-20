@@ -203,7 +203,6 @@ def test_a_turnover_is_accepted_only_when_it_continues_the_accepted_epoch() -> N
         {"restart_count": 1},  # a repeat
         {"retired_restart_count": 2},  # retires a count that was never accepted
         {"retired_bridge_pid": 999},  # retires a bridge that was never accepted
-        {"bridge_pid": 101},  # the same process, renamed as a replacement
         {"bridge_pid": 100},  # the launcher itself
         {"bridge_pid": -1},
         {"bridge_pid": True},
@@ -213,6 +212,26 @@ def test_a_turnover_is_accepted_only_when_it_continues_the_accepted_epoch() -> N
     ):
         with pytest.raises(runner._RunnerFoundationError):
             _read(_encode(_turnover_record(**changes)))
+
+
+def test_a_reused_process_number_is_not_by_itself_a_refusal() -> None:
+    """A PID is not an identity, and Linux reuses them.
+
+    Refusing a turnover whose replacement carries the retired PID looked like a safety
+    check and was the opposite: it happens BEFORE the observer and the epoch guard can
+    compare the full (pid, start) identity, which are the only two things that can tell
+    one process from another. A same-IDENTITY claim is still refused, by the guard.
+    """
+
+    accepted = _read(_encode(_turnover_record(bridge_pid=101)))
+    assert accepted.bridge_pid == 101
+
+    first = runner._ProcessIdentity(101, "linux:start=1.0")
+    reused = runner._ProcessIdentity(101, "linux:start=2.0")
+    guard = runner._BridgeEpochGuard(first, 1)
+    guard.advance(reused, restart_count=2, retired_restart_count=1)
+    with pytest.raises(runner._RunnerFoundationError):
+        runner._BridgeEpochGuard(first, 1).advance(first, restart_count=2, retired_restart_count=1)
 
 
 def test_after_a_turnover_the_old_bridge_can_no_longer_speak() -> None:

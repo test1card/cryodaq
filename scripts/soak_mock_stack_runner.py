@@ -2808,6 +2808,11 @@ def _parse_bridge_stream_record(
     )
 
 
+# A PID IS NOT AN IDENTITY. Refusing a turnover whose replacement REUSES the retired PID
+# looked like a safety check and was the opposite: Linux does reuse process numbers, and
+# refusing here happens BEFORE observe_bridge and _BridgeEpochGuard.advance can compare the
+# full (pid, start) identity -- the two places that can actually tell one process from
+# another. A same-process claim is still refused, by the guard, on the whole identity.
 def _parse_bridge_turnover(
     value: dict[str, object],
     *,
@@ -2849,7 +2854,6 @@ def _parse_bridge_turnover(
         or type(bridge_pid) is not int
         or bridge_pid <= 0
         or bridge_pid == expected_launcher_pid
-        or bridge_pid == expected_bridge_pid
         or type(restart_count) is not int
         or restart_count != expected_restart_count + 1
         or type(sequence) is not int

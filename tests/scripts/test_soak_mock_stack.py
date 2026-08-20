@@ -444,6 +444,12 @@ def _qualification_samples() -> list[dict[str, object]]:
         elapsed = sample["elapsed_s"]
         if elapsed >= 190:
             sample["roles"]["engine"].update({"pid": 21, "started_ns": 210, "epoch": 1})
+            # THE BRIDGE GOES WITH IT. Every scheduled engine replacement shuts the bridge
+            # down and starts another, because a new child must not inherit an old
+            # transport. This fixture showed the engine replaced and the bridge untouched,
+            # which is a run that cannot happen -- and it was the baseline several tests
+            # called clean.
+            sample["roles"]["bridge"].update({"pid": 31, "started_ns": 310, "epoch": 1})
         if elapsed >= 305:
             sample["roles"]["assistant"].update({"pid": 23, "started_ns": 230, "epoch": 1})
     return samples
@@ -1067,10 +1073,15 @@ def test_a_bridge_replacement_is_expected_only_while_an_engine_fault_recovers() 
     engine_fault_s = next(float(record["observed_s"]) for record in faults if record["target"] == "engine")
 
     def _with_bridge_change_at(threshold: float) -> list[dict]:
+        """The baseline already replaces the bridge with the engine; MOVE that one."""
+
         changed = json.loads(json.dumps(samples))
         for sample in changed:
+            row = sample["roles"]["bridge"]
             if float(sample["elapsed_s"]) >= threshold:
-                sample["roles"]["bridge"].update({"epoch": 1, "pid": 131, "started_ns": 1310})
+                row.update({"epoch": 1, "pid": 131, "started_ns": 1310})
+            else:
+                row.update({"epoch": 0, "pid": 13, "started_ns": 130})
         return changed
 
     accompanying = _with_bridge_change_at(engine_fault_s + 1.0)
@@ -1078,10 +1089,20 @@ def test_a_bridge_replacement_is_expected_only_while_an_engine_fault_recovers() 
         "a bridge replaced while the engine fault recovers is what an engine restart does"
     )
 
-    # Far from any engine fault: the original defect, and it must still be refused.
+    # Far from any engine fault: the original defect, and it must still be refused. Two
+    # complaints are correct here, and both are true: this replacement accompanies no
+    # fault, and that fault has no accompanying replacement.
     stray = _with_bridge_change_at(engine_fault_s + soak.RECOVERY_CEILING_S + 30.0)
     errors = soak._validate_faults(faults, selected, stray)
     assert any("bridge restarted outside" in error for error in errors), errors
+    assert any("not accompanied by exactly one" in error for error in errors), errors
+
+    # And an engine fault with NO replacement at all -- the gap a count ceiling missed.
+    none_at_all = json.loads(json.dumps(samples))
+    for sample in none_at_all:
+        sample["roles"]["bridge"].update({"epoch": 0, "pid": 13, "started_ns": 130})
+    errors = soak._validate_faults(faults, selected, none_at_all)
+    assert any("not accompanied by exactly one" in error for error in errors), errors
 
     # And a launcher transition has no such exception at all.
     launcher_restart = json.loads(json.dumps(samples))

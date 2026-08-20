@@ -1610,6 +1610,11 @@ def _validate_faults(
     # contract has to make the same distinction the evidence stream makes: a bridge
     # replacement that ACCOMPANIES a scheduled engine fault is expected, and one that
     # happens anywhere else is still exactly the defect this refusal was written for.
+    # ONE-TO-ONE, IN BOTH DIRECTIONS. A ceiling on the count only catches an excess, so an
+    # engine fault with NO bridge replacement still passed -- and that is not a cosmetic
+    # gap: every scheduled engine replacement shuts the bridge down and starts another,
+    # because a new child must not inherit an old transport. A run whose evidence shows the
+    # engine replaced and the bridge untouched did not do what the launcher does.
     bridge_transitions = [item for item in transitions if item[0] == "bridge"]
     for _role, transition_s, _old_identity, _new_identity in bridge_transitions:
         accompanying = [
@@ -1617,8 +1622,10 @@ def _validate_faults(
         ]
         if len(accompanying) != 1:
             errors.append("bridge restarted outside any scheduled engine fault recovery")
-    if len(bridge_transitions) > len(engine_fault_times):
-        errors.append("more bridge replacements than scheduled engine faults")
+    for fault_s in engine_fault_times:
+        replacements = [item for item in bridge_transitions if fault_s < item[1] <= fault_s + RECOVERY_CEILING_S]
+        if len(replacements) != 1:
+            errors.append("engine fault is not accompanied by exactly one bridge replacement")
 
     role_transitions = [item for item in transitions if item[0] in {"engine", "assistant"}]
     for role, transition_s, old_identity, new_identity in role_transitions:
