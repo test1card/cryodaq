@@ -119,6 +119,13 @@ BASELINE_ARTIFACT = ROOT / "governance" / "agent_preventions_baseline.json"
 GENERATOR_SOURCE = ROOT / "tools" / "governance_contract.py"
 
 
+def _overlay_baseline_generator_candidate(clone: Path) -> None:
+    """Place the uncommitted generator and registry under test into ``clone``."""
+    for source in (GENERATOR_SOURCE, REGISTRY_PATH):
+        destination = clone / source.relative_to(ROOT)
+        shutil.copy2(source, destination)
+
+
 def test_generated_baseline_artifact_contains_no_carriage_return() -> None:
     """The tracked derived baseline is LF-only and carries no byte-order mark."""
     raw = BASELINE_ARTIFACT.read_bytes()
@@ -152,6 +159,7 @@ def test_baseline_generator_pins_the_line_separator_explicitly(tmp_path: Path) -
         check=True,
         capture_output=True,
     )
+    _overlay_baseline_generator_candidate(clone)
 
     clone_environment = dict(os.environ)
     clone_environment["PYTHONPATH"] = str(clone)
@@ -173,31 +181,38 @@ def test_baseline_generator_pins_the_line_separator_explicitly(tmp_path: Path) -
 
 
 def test_tracked_baseline_is_never_mutated_by_the_real_command(tmp_path: Path) -> None:
-    """Recreate the passing-run mutation and prove the real tracked artifact is untouched.
+    """Regenerate a stale clone baseline without mutating this checkout.
 
-    The first draft of the generator guard executed the real --write-baseline command with
-    cwd at the repository root, and the passing run rewrote the tracked
-    governance/agent_preventions_baseline.json -- measured 2026-08-15: git status showed
-    that path modified after an otherwise green suite. A green run repairing tracked
-    governance state can hide exactly the drift the stale-pair check exists to report, so
-    the command was moved to tmp_path, but nothing registered the old shape as a regression.
-    This guard recreates it: it executes the exact maintainer command against the real
-    repository root, then proves the tracked artifact's bytes are unchanged. A mismatch is
-    restored before the assertion reports, so the guard itself never repairs tracked state.
+    The former regression guard executed --write-baseline at ROOT, so its passing run
+    rewrote the tracked artifact it was meant to protect. Exercise the real writer only in
+    a Git-backed clone with a deliberately stale artifact: it must repair that clone while
+    the source checkout remains byte-identical. This makes a regression back to ROOT visible
+    without allowing the test itself to mutate or restore tracked governance state.
     """
     before = BASELINE_ARTIFACT.read_bytes()
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "-c", "advice.detachedHead=false", "clone", "--quiet", str(ROOT), str(clone)],
+        check=True,
+        capture_output=True,
+    )
+    _overlay_baseline_generator_candidate(clone)
+    clone_baseline = clone / BASELINE_ARTIFACT.relative_to(ROOT)
+    stale = clone_baseline.read_bytes() + b"\n"
+    clone_baseline.write_bytes(stale)
+
+    clone_environment = dict(os.environ)
+    clone_environment["PYTHONPATH"] = str(clone)
     completed = subprocess.run(
-        [sys.executable, str(GENERATOR_SOURCE), "--write-baseline"],
-        cwd=ROOT,
+        [sys.executable, "tools/governance_contract.py", "--write-baseline"],
+        cwd=clone,
+        env=clone_environment,
         capture_output=True,
         text=True,
     )
-    try:
-        assert completed.returncode == 0, completed.stderr
-        assert BASELINE_ARTIFACT.read_bytes() == before, (
-            "the real --write-baseline command mutated the tracked baseline; a test run "
-            "must never rewrite a tracked governance artifact"
-        )
-    finally:
-        if BASELINE_ARTIFACT.read_bytes() != before:
-            BASELINE_ARTIFACT.write_bytes(before)
+    assert completed.returncode == 0, completed.stderr
+    assert clone_baseline.read_bytes() != stale, "the isolated writer did not refresh the stale baseline"
+    assert BASELINE_ARTIFACT.read_bytes() == before, (
+        "the real --write-baseline command mutated the tracked baseline; a test run must never "
+        "rewrite a tracked governance artifact"
+    )

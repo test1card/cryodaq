@@ -3253,7 +3253,7 @@ false_green_pairs:
     status: open
     scope: repository
     runtime_prevention_id: BASELINE-LF-GENERATION-001
-    guard: tests/governance/test_receipt_guard_eol.py::test_generated_baseline_artifact_contains_no_carriage_return
+    guard: tests/governance/test_receipt_guard_eol.py::test_receipt_bound_guards_are_checked_out_with_lf
     ci_partition: remaining
     red_evidence: the_artifact_bytes_guard_examines_only_the_checkout_materialization_so_removing_the_gitattributes_pin_left_it_green_on_an_LF_checkout_while_git_check_attr_reported_the_baseline_text_and_eol_attributes_unspecified_2026_08_16_pending_immutable_capture
     green_evidence: pending
@@ -6442,6 +6442,8 @@ records:
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/governance/test_receipt_guard_eol.py::test_generated_baseline_artifact_contains_no_carriage_return
+        ci_partition: remaining
+      - node: tests/governance/test_receipt_guard_eol.py::test_receipt_bound_guards_are_checked_out_with_lf
         ci_partition: remaining
       - node: tests/governance/test_receipt_guard_eol.py::test_baseline_generator_pins_the_line_separator_explicitly
         ci_partition: remaining
