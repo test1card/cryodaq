@@ -137,9 +137,7 @@ def test_evidence_inventory_guard_binds_the_named_facility() -> None:
     retired_symbols = set(RETIRED_PERIODIC_REPORTER_SYMBOLS)
 
     named_live = {
-        symbol.removeprefix("cryodaq.agents.")
-        for symbol in live_symbols
-        if symbol.endswith("_periodic_report_tick")
+        symbol.removeprefix("cryodaq.agents.") for symbol in live_symbols if symbol.endswith("_periodic_report_tick")
     }
     named_retired = {symbol.rsplit(".", 1)[-1] for symbol in retired_symbols}
 
@@ -150,35 +148,41 @@ def test_evidence_inventory_guard_binds_the_named_facility() -> None:
     assert all(symbol in claim for symbol in named_retired)
     assert "Bind the evidence to the facility under review" in rule
 
+
 def test_evidence_measurement_guard_requires_immutable_identity() -> None:
     claim = _ob014_claim()
-    assert 'Bind a measurement to an immutable commit id' in claim
-    assert 'origin/master' in claim
-    assert 'not a binding' in claim
+    assert "Bind a measurement to an immutable commit id" in claim
+    assert "origin/master" in claim
+    assert "not a binding" in claim
+
 
 def test_evidence_retrieval_guard_covers_every_identifier() -> None:
     claim = _ob014_claim()
-    assert 'verify retrievability in a fresh clone' in claim
-    assert 'every repository evidence identifier' in claim
-    assert 'every identifier in its Discharge cell resolves' in claim
+    assert "verify retrievability in a fresh clone" in claim
+    assert "every repository evidence identifier" in claim
+    assert "every identifier in its Discharge cell resolves" in claim
+
 
 def test_evidence_authorization_guard_rejects_artifact_substitution() -> None:
     claim = _ob014_claim()
-    assert 'Quote the authorisation when the trigger needs one' in claim
-    assert 'artifact existence is not permission to create it' in claim
-    assert 'fail-closed outcome' in claim
+    assert "Quote the authorisation when the trigger needs one" in claim
+    assert "artifact existence is not permission to create it" in claim
+    assert "fail-closed outcome" in claim
+
 
 def test_evidence_candidate_guard_requires_candidate_and_measured_equality() -> None:
     claim = _ob014_claim()
-    assert 'exact candidate tree under review' in claim
-    assert 'immutable tree or commit actually measured' in claim
-    assert 'require them to be equal' in claim
+    assert "exact candidate tree under review" in claim
+    assert "immutable tree or commit actually measured" in claim
+    assert "require them to be equal" in claim
+
 
 def test_evidence_per_commit_guard_requires_each_commit_result() -> None:
     claim = _ob014_claim()
-    assert 'inspect every commit in the compared range' in claim
-    assert 'Record per-commit deletion results' in claim
-    assert 'final-tip diff does not test intermediate deletion and restoration' in claim
+    assert "inspect every commit in the compared range" in claim
+    assert "Record per-commit deletion results" in claim
+    assert "final-tip diff does not test intermediate deletion and restoration" in claim
+
 
 def _obligation_claim(identifier: str) -> str:
     lines = (ROOT / "docs/OBLIGATIONS.md").read_text(encoding="utf-8").splitlines()
@@ -193,14 +197,38 @@ def _ob014_claim() -> str:
     return _obligation_claim("OB-014")
 
 
+def test_plugin_measured_bytes_false_green_guard_drives_production() -> None:
+    """The paired guard for PLUGIN-MEASURED-BYTES-001.
+
+    The escape this pair exists for is a regression that READS production instead of
+    running it. The first shape of that regression asserted the string
+    `_refuse_unmeasured_plugins()` appeared in the source of `_start_locked`, which a
+    rename leaves green and a re-read of the path leaves green as well -- while the
+    property is gone. So the pair checks two things a false green cannot satisfy: the
+    regression must construct the loader and call it, and it must not settle for reading
+    source text.
+    """
+
+    regression = (ROOT / "tests/analytics/test_plugins_are_the_measured_bytes.py").read_text(encoding="utf-8")
+    assert "inspect.getsource" not in regression, (
+        "the regression reads production source; a rename would leave it green"
+    )
+    assert "pipeline._load_plugin(" in regression, "the regression must RUN the loader"
+    assert "measured=measured" in regression, "the regression must exercise the qualified branch"
+
+    loader = (ROOT / "src/cryodaq/analytics/plugin_loader.py").read_text(encoding="utf-8")
+    assert "asyncio.to_thread(self._measured_plugin_bytes)" in loader, (
+        "the measurement must run off the engine event loop"
+    )
+    assert "measured.get(path)" in loader, "the qualified import must execute the snapshot"
+
+
 def test_evidence_inventory_false_green_guard_uses_the_actual_claim() -> None:
     claim = _ob013_claim()
     live_symbols = {facility.symbol for facility in PERIODIC_REPORTER_FACILITIES}
     retired_symbols = set(RETIRED_PERIODIC_REPORTER_SYMBOLS)
     named_live = {
-        symbol.removeprefix("cryodaq.agents.")
-        for symbol in live_symbols
-        if symbol.endswith("_periodic_report_tick")
+        symbol.removeprefix("cryodaq.agents.") for symbol in live_symbols if symbol.endswith("_periodic_report_tick")
     }
     named_retired = {symbol.rsplit(".", 1)[-1] for symbol in retired_symbols}
 

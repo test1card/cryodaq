@@ -56,6 +56,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: PLUGIN-MEASURED-BYTES-FALSE-GREEN-501
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PLUGIN-MEASURED-BYTES-001
+    guard: tests/governance/test_agent_preventions.py::test_plugin_measured_bytes_false_green_guard_drives_production
+    ci_partition: remaining
+    red_evidence: pending
+    green_evidence: pending
   - id: EVIDENCE-INVENTORY-BINDING-FALSE-GREEN-001
     status: open
     scope: repository
@@ -6456,6 +6464,36 @@ records:
       - node: tests/docs/test_evidence_packaging_readiness.py::test_procedure_parser_rejects_duplicate_opener_outside_bounded_block
         ci_partition: remaining
     red_evidence: the_final_gate_slice_extended_to_EOF_so_moving_G8_3_evidence_below_the_G4_PROCEDURES_terminator_left_the_actual_gate_without_evidence_while_the_guard_stayed_green_2026_08_12_pending_immutable_capture
+    green_evidence: pending
+  - id: PLUGIN-MEASURED-BYTES-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every import a qualified run performs from the analytics plugin directory.
+    classification: unmeasured_execution
+    correction_owner: reviewer
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A qualified run can execute Python nobody measured while the receipt still names the measured build.
+    invariant: A qualified run executes the exact plugin bytes the artifact digest measured; the bytes are read before the comparison, never re-read from the path, and no bytecode cache is consulted or written.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/analytics/test_plugins_are_the_measured_bytes.py::test_the_bytes_are_read_before_the_comparison_not_after_it
+        ci_partition: remaining
+      - node: tests/analytics/test_plugins_are_the_measured_bytes.py::test_a_stale_bytecode_cache_cannot_be_executed_by_a_qualified_run
+        ci_partition: remaining
+      - node: tests/analytics/test_plugins_are_the_measured_bytes.py::test_the_measured_configuration_is_applied_not_the_current_file
+        ci_partition: remaining
+      - node: tests/analytics/test_plugins_are_the_measured_bytes.py::test_the_engine_reads_the_digest_the_receipt_actually_carries
+        ci_partition: remaining
+      - node: tests/analytics/test_plugins_are_the_measured_bytes.py::test_a_qualified_run_refuses_a_plugin_changed_after_measurement
+        ci_partition: remaining
+      - node: tests/governance/test_agent_preventions.py::test_plugin_measured_bytes_false_green_guard_drives_production
+        ci_partition: remaining
+    automation_limit: The guards bind the loader and the engine expression by running them; they do not observe a real laboratory startup, so an end-to-end qualified run remains separate evidence.
+    red_evidence: pending
     green_evidence: pending
   - id: EVIDENCE-INVENTORY-BINDING-001
     status: open

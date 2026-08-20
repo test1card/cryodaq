@@ -7011,7 +7011,13 @@ async def _run_engine(
         # A qualified run remeasures the artifacts immediately before importing plugins and
         # refuses if they moved. Turning hot reload off is not enough on its own: it stops
         # the watch loop, not the first import.
-        measured_artifact_sha256=(None if qualification_receipt is None else qualification_receipt.artifact_sha256),
+        # THE DIGEST LIVES ON THE CONTEXT, NOT ON THE RECEIPT. `QualificationReceipt` is a
+        # slotted dataclass carrying receipt_id, the two expiry stamps and `context`, so the
+        # shorter spelling raised AttributeError on EVERY qualified startup and the program
+        # exited before acquisition began -- the qualified path being the laboratory path.
+        measured_artifact_sha256=(
+            None if qualification_receipt is None else qualification_receipt.context.artifact_sha256
+        ),
         project_root=_PROJECT_ROOT,
     )
 

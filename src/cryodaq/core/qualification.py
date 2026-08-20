@@ -300,6 +300,15 @@ def source_artifact_paths(project_root: Path) -> list[Path]:
     know what had been measured was to run the qualification again. The plugin pipeline
     has to ask the same question immediately before it imports, so the answer lives here
     and both callers use it.
+
+    WHY EXCLUDING `__pycache__` AND `.pyc` IS SAFE, and what it depends on. A cache entry
+    is selected whenever the source size and modification time it records still agree, so
+    a same-size or same-second edit leaves stale bytecode selectable while the measured
+    `.py` reads as new. Excluding the cache from the digest therefore only holds while
+    nothing qualified EXECUTES a cache entry. That is enforced at the one place that
+    imports: `PluginPipeline._load_plugin` compiles the measured bytes for a qualified run
+    and never goes through the import machinery. Do not relax that without measuring
+    bytecode here as well.
     """
 
     package_root = project_root / "src" / "cryodaq"

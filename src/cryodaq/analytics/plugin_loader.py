@@ -186,17 +186,40 @@ class PluginPipeline:
             and not self._watch_task.done()
         )
 
-    def _refuse_unmeasured_plugins(self) -> None:
-        """Remeasure immediately before importing, and refuse on any difference.
+    def _measured_plugin_bytes(self) -> dict[Path, bytes] | None:
+        """Read the plugin bytes, then prove the tree still matches the receipt.
+
+        Returns the bytes to execute, or ``None`` when the run is not qualified and the
+        ordinary on-disk import applies.
+
+        THE ORDER IS THE WHOLE POINT, and it is READ FIRST, COMPARE SECOND. Checking the
+        tree and then importing from disk are two filesystem operations with a window
+        between them: a plugin written inside that window is imported without ever
+        reaching the compared digest, while the receipt still claims the measured build.
+        Reading first closes it from both sides -- a file changed BEFORE the comparison
+        is caught by the comparison, and a file changed AFTER it is never read again,
+        because the import runs from these bytes and not from the path.
 
         The comparison is the whole artifact manifest rather than the plugins alone,
         because that is exactly what the receipt binds -- a narrower check would accept a
         tree whose receipt no longer describes it.
+
+        Blocking work only: this walks the source tree and reads every artifact, so the
+        caller runs it in a worker thread rather than on the engine event loop.
         """
 
         if self._measured_artifact_sha256 is None or self._project_root is None:
-            return
+            return None
         from cryodaq.core.qualification import source_artifact_digest
+
+        snapshot: dict[Path, bytes] = {}
+        for path in sorted(self._plugins_dir.glob("*.py")):
+            snapshot[path] = path.read_bytes()
+            # The configuration is measured by the same manifest and drives the same
+            # plugin, so it is bound in the same snapshot rather than re-read later.
+            config_path = path.with_suffix(".yaml")
+            if config_path.is_file():
+                snapshot[config_path] = config_path.read_bytes()
 
         current = source_artifact_digest(self._project_root)
         if current != self._measured_artifact_sha256:
@@ -204,6 +227,7 @@ class PluginPipeline:
                 "source artifacts changed after qualification measured them; refusing to "
                 "import plugins into a qualified run"
             )
+        return snapshot
 
     async def _start_locked(self) -> None:
         """Create exactly one subscription/task generation or roll it back."""
@@ -243,9 +267,20 @@ class PluginPipeline:
             logger.info("Пайплайн подписан на брокер как '%s'", _SUBSCRIBE_NAME)
 
             self._plugins_dir.mkdir(parents=True, exist_ok=True)
-            self._refuse_unmeasured_plugins()
-            for path in sorted(self._plugins_dir.glob("*.py")):
-                self._load_plugin(path)
+            # OFF THE EVENT LOOP. `interlock_engine.start()` has already completed by the
+            # time this runs, so measuring the tree here stalled every live engine
+            # coroutine for the length of a full recursive scan on a large checkout.
+            measured = (
+                await asyncio.to_thread(self._measured_plugin_bytes)
+                if self._measured_artifact_sha256 is not None
+                else None
+            )
+            if measured is None:
+                for path in sorted(self._plugins_dir.glob("*.py")):
+                    self._load_plugin(path)
+            else:
+                for path in sorted(p for p in measured if p.suffix == ".py"):
+                    self._load_plugin(path, measured=measured)
 
             self._process_task = _create_owned_task(
                 self._process_loop(),
@@ -468,8 +503,12 @@ class PluginPipeline:
     # Загрузка / выгрузка плагинов
     # ------------------------------------------------------------------
 
-    def _load_plugin(self, path: Path) -> bool:
+    def _load_plugin(self, path: Path, *, measured: dict[Path, bytes] | None = None) -> bool:
         """Загрузить плагин из файла.
+
+        ``measured`` -- уже прочитанные байты плагина и его конфигурации на
+        квалифицированном запуске. Если он передан, выполняются ИМЕННО эти байты:
+        файл больше не читается, и кэш байт-кода не участвует.
 
         Импортирует модуль, находит первый конкретный подкласс
         :class:`~cryodaq.analytics.base_plugin.AnalyticsPlugin`,
@@ -489,13 +528,31 @@ class PluginPipeline:
                     plugin_id,
                 )
                 return False
-            spec = importlib.util.spec_from_file_location(f"cryodaq_plugin_{plugin_id}", path)
-            if spec is None or spec.loader is None:
-                logger.error("Не удалось создать spec для плагина '%s': %s", plugin_id, path)
-                return False
+            module_name = f"cryodaq_plugin_{plugin_id}"
+            if measured is None:
+                spec = importlib.util.spec_from_file_location(module_name, path)
+                if spec is None or spec.loader is None:
+                    logger.error("Не удалось создать spec для плагина '%s': %s", plugin_id, path)
+                    return False
 
-            module: types.ModuleType = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)  # type: ignore[union-attr]
+                module: types.ModuleType = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)  # type: ignore[union-attr]
+            else:
+                # EXECUTE THE MEASURED BYTES, NOT THE PATH. `SourceFileLoader` may select an
+                # existing `__pycache__` entry, and a cache entry is valid whenever the
+                # recorded source size and modification time still agree -- which a
+                # same-size or same-second edit preserves. The qualification digest
+                # measures `.py` and deliberately excludes `.pyc`, so that stale bytecode
+                # would execute while both comparisons passed. Compiling the snapshot here
+                # is what makes the exclusion safe: no cache is consulted and none is
+                # written, because nothing goes through the import machinery.
+                source = measured.get(path)
+                if source is None:
+                    logger.error("Плагин '%s' отсутствует в измеренном снимке: %s", plugin_id, path)
+                    return False
+                module = types.ModuleType(module_name)
+                module.__file__ = str(path)
+                exec(compile(source, str(path), "exec"), module.__dict__)  # noqa: S102
 
             plugin_cls: type[AnalyticsPlugin] | None = None
             for _name, obj in inspect.getmembers(module, inspect.isclass):
@@ -540,7 +597,7 @@ class PluginPipeline:
                 if plugin.plugin_id != plugin_id:
                     plugin._plugin_id = plugin_id
                 config_path = path.with_suffix(".yaml")
-                config_exists = config_path.exists()
+                config_exists = config_path in measured if measured is not None else config_path.exists()
             except BaseException as preparation_failure:
                 return self._reject_constructed_plugin(
                     plugin_id,
@@ -550,8 +607,14 @@ class PluginPipeline:
 
             if config_exists:
                 try:
-                    with config_path.open("r", encoding="utf-8") as fh:
-                        loaded_config = yaml.safe_load(fh)
+                    if measured is None:
+                        with config_path.open("r", encoding="utf-8") as fh:
+                            loaded_config = yaml.safe_load(fh)
+                    else:
+                        # The configuration was measured by the same manifest and read in
+                        # the same snapshot, so a qualified run applies those bytes rather
+                        # than whatever the file holds now.
+                        loaded_config = yaml.safe_load(measured[config_path].decode("utf-8"))
                     if loaded_config is None:
                         config: dict[str, Any] = {}
                     elif type(loaded_config) is dict:
