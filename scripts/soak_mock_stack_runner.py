@@ -1325,6 +1325,48 @@ class _LockedPsutilObserver:
             raise _RunnerFoundationError("PID/start identity changed; refusing process operation")
         return process
 
+    def _forkserver_of(self, pid: int, *, expected_launcher_pid: int) -> int | None:
+        """Return `pid` if it is THIS launcher's multiprocessing fork server, else None.
+
+        Python 3.14 makes `forkserver` the Linux default, and the laboratory target is
+        3.14.6, so a multiprocessing child is forked from a fork-server process and is not
+        a direct child of the launcher. Measured on that machine: bridge 821 reported
+        parent 820 while the launcher was 793. The direct-child rule was true under `fork`,
+        the previous default, and silently stopped being true.
+
+        The property the rule exists to prove is that the bridge belongs to THIS launcher,
+        and a two-step chain proves exactly that -- but only when the intermediate is both
+        a direct child of the launcher AND recognisably the fork server. Anything looser
+        would accept a grandchild of an unrelated shape, so both halves are checked and
+        neither is inferred from the other.
+        """
+
+        try:
+            candidate = self._process(pid)
+            candidate_parent = int(candidate.ppid())
+            candidate_argv = " ".join(candidate.cmdline())
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError):
+            return None
+        # THE DIRECT-CHILD REQUIREMENT IS WHAT MAKES THE NEXT TEST SOUND, and it is not
+        # defence in depth -- it is load-bearing. Measured on the laboratory interpreter
+        # (Python 3.14.6, `evidence/tools/` probe): a process forked BY the fork server
+        # inherits the fork server's command line EXACTLY. The bridge's own argv therefore
+        # contains `multiprocessing.forkserver` too. So the module token alone identifies
+        # the fork server AND every one of its children, and only the parent tells them
+        # apart: the fork server's parent is the launcher, its children's parent is the
+        # fork server.
+        if candidate_parent != expected_launcher_pid:
+            return None
+        # This is a SUBSTRING test and the comment used to claim it was an exact match on
+        # the module. It was not, and it cannot be: the token lives inside a `-c` code
+        # string, measured as
+        #   python -B -c "import sys; from multiprocessing.forkserver import main; main(...)"
+        # so there is no argument equal to the module name to compare against. The check
+        # is sound because of the parent test above, not because of this one.
+        if "multiprocessing.forkserver" not in candidate_argv:
+            return None
+        return pid
+
     def observe_assistant(self, pid: int, *, expected_launcher_pid: int) -> _AssistantProcessObservation:
         process = self._process(pid)
         identity = self._identity(process)
@@ -1352,9 +1394,18 @@ class _LockedPsutilObserver:
             pass
         else:
             raise _RunnerFoundationError("positive bridge identity collides with another child role")
-        observation = _BridgeProcessObservation(identity, parent_pid, "zmq_bridge", True)
-        if parent_pid != expected_launcher_pid:
-            raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+        belongs = parent_pid == expected_launcher_pid or (
+            self._forkserver_of(parent_pid, expected_launcher_pid=expected_launcher_pid) is not None
+        )
+        observation = _BridgeProcessObservation(
+            identity, parent_pid, "zmq_bridge", True, expected_launcher_pid if belongs else 0
+        )
+        if not belongs:
+            raise _RunnerFoundationError(
+                "reported bridge does not belong to this launcher: "
+                f"bridge pid {pid} reports parent {parent_pid}, launcher is {expected_launcher_pid}, "
+                "and that parent is not this launcher's multiprocessing fork server"
+            )
         return observation
 
     def signal_exact(self, identity: _ProcessIdentity, signum: int) -> None:
@@ -2363,6 +2414,25 @@ class _BridgeProcessObservation:
     parent_pid: int
     role: str
     alive: bool
+    # The launcher pid the observer PROVED this bridge belongs to: either as a direct
+    # child, or forked from a fork server that is itself a direct child. Zero means the
+    # observer proved nothing, which is the default, so a construction that forgets the
+    # field REFUSES rather than passes.
+    #
+    # It carries the PID and not a bare boolean on purpose. A boolean says only that some
+    # launcher was proved, and the binder could not tell WHICH, so its error message named
+    # a pid that had taken no part in the decision. The two pids coincide at today's single
+    # call site; they would not have to at a second one.
+    #
+    # BE CLEAR ABOUT WHAT THE BINDER'S COMPARISON IS AND IS NOT. It is a FAIL-CLOSED
+    # cross-check, not a second independent look at the process table -- the binder cannot
+    # look at processes at all. `observe_bridge` already RAISES when it proves nothing, so
+    # for any observation that function returns the comparison is satisfied by
+    # construction. Its value is against an observation built by hand, or by a future
+    # second call site, that never verified anything: the field defaults to zero and the
+    # binder refuses. Saying it restores an independent parentage check would be a claim
+    # the code does not support.
+    verified_against_launcher_pid: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2383,7 +2453,11 @@ def _bind_positive_assistant_identity(
     if type(expected_launcher_pid) is not int or expected_launcher_pid <= 0:
         raise _RunnerFoundationError("launcher identity is invalid")
     if observation.parent_pid != expected_launcher_pid:
-        raise _RunnerFoundationError("reported assistant is not a direct launcher child")
+        raise _RunnerFoundationError(
+            "reported assistant is not a direct launcher child: "
+            f"assistant pid {observation.identity.pid} reports parent {observation.parent_pid}, "
+            f"launcher is {expected_launcher_pid}"
+        )
     if observation.role != "assistant":
         raise _RunnerFoundationError("reported PID is not the allowlisted assistant role")
     return observation.identity
@@ -2399,8 +2473,18 @@ def _bind_positive_bridge_identity(
         raise _RunnerFoundationError("reported bridge process is not alive")
     if observation.identity.pid != record.bridge_pid:
         raise _RunnerFoundationError("observer bridge PID contradicts launcher record")
-    if type(observation.parent_pid) is not int or observation.parent_pid != record.launcher_pid:
-        raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+    if (
+        type(observation.parent_pid) is not int
+        or type(observation.verified_against_launcher_pid) is not int
+        or observation.verified_against_launcher_pid != record.launcher_pid
+    ):
+        raise _RunnerFoundationError(
+            "reported bridge does not belong to this launcher: "
+            f"bridge pid {observation.identity.pid} reports parent {observation.parent_pid!r}; "
+            f"the observer proved it belongs to launcher "
+            f"{observation.verified_against_launcher_pid!r}, and the record names "
+            f"{record.launcher_pid}"
+        )
     if observation.role != "zmq_bridge":
         raise _RunnerFoundationError("reported PID is not the allowlisted bridge role")
     return observation.identity
@@ -3740,12 +3824,36 @@ class _PosixSoakRunner:
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
-                            except ValueError:
+                            except ValueError as exc:
+                                # Kept, not swallowed. The refusal below used to say only
+                                # that roles were missing, so the classifier's own reason --
+                                # which names the process and the topology it rejected --
+                                # was discarded at the one place it could have been read.
                                 roles = None
+                                roles_refusal = str(exc)
                         if roles is None:
                             time.sleep(0.1)
+                    roles_refusal = locals().get("roles_refusal", "")
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
-                        raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
+                        # Name WHICH of the four preconditions is missing. The bare
+                        # sentence sends the next turn to read the whole startup path,
+                        # and it has: the run gets further after every fix and stops here
+                        # again, each time for a different reason the message did not say.
+                        missing = ", ".join(
+                            name
+                            for name, value in (
+                                ("roles", roles),
+                                ("handshake", handshake),
+                                ("bridge", bridge),
+                                ("bridge_guard", bridge_guard),
+                            )
+                            if value is None
+                        )
+                        detail = f"; last classifier refusal: {roles_refusal}" if roles_refusal else ""
+                        raise _RunnerFoundationError(
+                            "source stack did not reach the exact four-role startup cut; "
+                            f"still missing: {missing}{detail}"
+                        )
 
                     _validate_short_soak_runtime_schedule(report_interval_s, time.time())
 
@@ -3908,8 +4016,14 @@ class _PosixSoakRunner:
                                     break
                                 time.sleep(0.1)
                             if replacement_roles is None or replacement_tree is None:
+                                # Name WHICH child. The bare sentence leaves the reader to
+                                # guess between three roles with three different meanings:
+                                # a bridge that cannot recover is a defect, an engine that
+                                # does not is a deliberate permanent HOLD, and an assistant
+                                # is a third thing again. Guessing between them is exactly
+                                # what a refusal should make unnecessary.
                                 raise _RunnerFoundationError(
-                                    "faulted child did not recover within the reviewed ceiling"
+                                    f"faulted {event.target} did not recover within the reviewed ceiling"
                                 )
                             epochs[event.target] += 1
                             current = replacement_roles

@@ -262,17 +262,74 @@ def classify_tree(
     if bridge_identity is None:
         raise ValueError("positive bridge identity is unavailable")
     bridge = tree.get(bridge_identity)
-    if bridge is None or bridge.parent_pid != root.pid:
-        raise ValueError("positive bridge identity is not a direct launcher child")
+    if bridge is None:
+        raise ValueError("positive bridge identity is absent from observed tree")
+
+    # Python 3.14 makes `forkserver` the Linux default, and the laboratory target is
+    # 3.14.6, so a multiprocessing child is forked from a fork-server process that is
+    # itself a direct child of the launcher. Two consequences here, and BOTH refused the
+    # whole run: the bridge is not a direct child any more, and the fork server itself is
+    # a descendant whose argv matches no role, so it read as an unclassified process.
+    #
+    # The property this function proves is unchanged -- every live descendant is accounted
+    # for and belongs to this launcher. The fork server is accounted for BY NAME rather
+    # than excused, so an unexpected descendant still refuses.
+    #
+    # THE NAME ALONE IS NOT ENOUGH, and this was measured rather than reasoned about. A
+    # process forked BY the fork server inherits the fork server's command line EXACTLY:
+    # on the laboratory interpreter the fork server and the child it forked print
+    # byte-identical argv. So `multiprocessing.forkserver` appears in the argv of the fork
+    # server AND of every child it makes, the bridge included. Matching on the token alone
+    # would excuse every multiprocessing child from role classification by name, and then
+    # "an unexpected descendant still refuses" would be false for exactly the descendants
+    # this check exists to catch.
+    #
+    # Only the PARENT separates them: the fork server and the resource tracker are direct
+    # children of the launcher, their children are not. Both sets below therefore require
+    # a direct child of the root, which is the same requirement the runner's
+    # `_forkserver_of` makes, so the two implementations prove the same property instead
+    # of one proving a weaker one.
+    # multiprocessing starts TWO helper processes, not one: the fork server and the
+    # resource tracker. Both are launched with `-c` and name their module inside that
+    # code string, and both are descendants of this launcher with no role of their own.
+    # Measured on the laboratory machine: accepting only the fork server left
+    # `unclassified descendant process: pid 801 argv ['python', '-B', '-s', '-c']`, which
+    # is the tracker. Naming both is what accounts for them; excusing every `-c` child
+    # would not.
+    infrastructure = {
+        identity
+        for identity, item in tree.items()
+        if identity != root
+        and item.parent_pid == root.pid
+        and any(
+            module in argument
+            for argument in item.argv
+            for module in ("multiprocessing.forkserver", "multiprocessing.resource_tracker")
+        )
+    }
+    forkservers = {
+        identity
+        for identity, item in tree.items()
+        if identity in infrastructure and any("multiprocessing.forkserver" in argument for argument in item.argv)
+    }
+    if bridge.parent_pid != root.pid and not any(bridge.parent_pid == identity.pid for identity in forkservers):
+        raise ValueError(
+            "positive bridge identity is neither a launcher child nor a fork-server child: "
+            f"bridge parent {bridge.parent_pid}, launcher {root.pid}, "
+            f"fork servers {sorted(identity.pid for identity in forkservers)}"
+        )
     if exact_process_role(bridge.argv) is not None:
         raise ValueError("positive bridge identity collides with an engine/assistant role")
     result = {"launcher": root, "bridge": bridge_identity}
     for identity, item in tree.items():
-        if identity in {root, bridge_identity}:
+        if identity in {root, bridge_identity} or identity in infrastructure:
             continue
         role = exact_process_role(item.argv)
         if role is None:
-            raise ValueError("unclassified descendant process")
+            raise ValueError(
+                f"unclassified descendant process: pid {identity.pid} parent {item.parent_pid} "
+                f"argv {[argument[:120] for argument in item.argv]}"
+            )
         if role in result:
             raise ValueError(f"duplicate live {role} process")
         result[role] = identity
