@@ -67,16 +67,44 @@ def test_the_fixture_declares_critical_channels_that_actually_exist(tmp_path) ->
         "these are identities, not patterns; a wildcard here matches no channel at all"
     )
 
-    # And the declaration must match the DESCRIPTORS, not the roster: the liveness check
-    # also requires safety_class SAFETY_CRITICAL_INPUT and a role that is not
-    # SOURCE_READBACK, so declaring the whole roster only moves the refusal to the next
-    # plane. For this fixture that leaves the two channels LS218_2 carries as
-    # safety-critical inputs. The assertion below derives the expectation from the
-    # descriptors rather than naming those two, so the test follows a descriptor added or
-    # removed later instead of blocking it.
+    # And the declaration must match the DESCRIPTORS by the ENGINE's rule, not the
+    # fixture's. `safety_pattern_liveness.py` builds `critical_manifest_ids` from
+    # descriptors whose QUANTITY is temperature AND whose safety class is
+    # safety_critical_input, and refuses when the declared set is not exactly that set. It
+    # applies no role test at all.
+    #
+    # THE EARLIER VERSION OF THIS ASSERTION RESTATED THE FIXTURE'S OWN FILTER, so it could
+    # not detect drift from the engine: both sides would have moved together and stayed
+    # green while the engine refused to start. Here the expectation is written out from
+    # the production rule instead.
     expected = sorted(
         item["channel_id"]
         for item in descriptors["descriptors"]
-        if item.get("safety_class") == "safety_critical_input" and item.get("role") != "source_readback"
+        if item.get("quantity") == "temperature"
+        and item.get("safety_class") == "safety_critical_input"
     )
     assert sorted(declared) == expected
+    assert declared, "an empty critical_channels list is refused by the engine outright"
+
+
+def test_a_non_temperature_safety_critical_descriptor_is_not_declared() -> None:
+    """The rule the engine applies, exercised on a descriptor the fixture does not carry.
+
+    This is the case the previous assertion could never reach. LS218_2's two safety-critical
+    descriptors are both `quantity=temperature`, so every filter that tests safety class
+    alone agrees with the engine TODAY. A safety-critical descriptor of another quantity
+    would be over-declared by such a filter, the engine's union check would fire, and the
+    engine would refuse to start -- while the fixture's own test still passed.
+    """
+
+    from scripts.soak_mock_stack_runner import _engine_critical_channel_ids
+
+    descriptors = [
+        {"channel_id": "A", "quantity": "temperature", "safety_class": "safety_critical_input"},
+        {"channel_id": "B", "quantity": "pressure", "safety_class": "safety_critical_input"},
+        {"channel_id": "C", "quantity": "temperature", "safety_class": "observational"},
+        {"channel_id": "D", "quantity": "raw_sensor", "safety_class": "safety_critical_input"},
+    ]
+    assert _engine_critical_channel_ids(descriptors) == ["A"], (
+        "only a temperature descriptor classified safety-critical is what the engine counts"
+    )

@@ -359,6 +359,35 @@ def _source_environment(
     }
 
 
+def _engine_critical_channel_ids(descriptors: list[dict]) -> list[str]:
+    """The channels the ENGINE will treat as critical, by the engine's own rule.
+
+    THE RULE IS COPIED FROM PRODUCTION, NOT INVENTED HERE, and the previous version of
+    this derivation did not match it. `safety_pattern_liveness.py` builds
+    `critical_manifest_ids` from descriptors whose **quantity is `temperature`** AND whose
+    safety class is `safety_critical_input`, then refuses when the declared set is not
+    exactly that set. It applies NO role test.
+
+    What the earlier filter did instead: it tested `safety_class` and excluded the
+    `source_readback` role. That role test is a NO-OP -- `descriptors.py` refuses any
+    descriptor that is `source_readback` without the `hazardous_source_readback` class, so
+    a channel can never be both `source_readback` and `safety_critical_input` -- and the
+    `quantity` test, the one that decides, was missing. The two agreed only because both of
+    LS218_2's safety-critical descriptors happen to be temperature (measured: Т11 and Т12,
+    both `quantity=temperature`, both `role=primary_measurement`). A non-temperature
+    safety-critical descriptor added later would have been OVER-declared, the engine's
+    union check would have fired, and the engine would have refused to start -- after the
+    fixture's own test had said it could.
+    """
+
+    return sorted(
+        item["channel_id"]
+        for item in descriptors
+        if item.get("quantity") == "temperature"
+        and item.get("safety_class") == "safety_critical_input"
+    )
+
+
 def _materialize_isolated_mock_config(
     config_dir: Path,
     *,
@@ -498,20 +527,13 @@ asyncio.run(probe())
     #   Dead safety/alarm channel pattern(s): 1 match NO channel on the plane their
     #   consumer sees ... pattern='.*' source=safety.yaml critical_channels
     # Deriving the list from the roster keeps the original intent -- every channel is
-    # critical -- and cannot drift from the descriptors the same call just wrote.
-    # A declared identity must ALSO be classified safety-critical by its own descriptor:
-    # the check requires `safety_class is SAFETY_CRITICAL_INPUT` and a role that is not
-    # SOURCE_READBACK. For this fixture that is the two channels LS218_2 carries as
-    # safety-critical inputs; it was the EMPTY set while the fixture used LS218_1, whose
-    # sixteen descriptors are all observational, and an empty list is refused outright by
-    # the engine. Derived rather than assumed either way: a safety-critical descriptor
-    # added later is declared automatically, and one removed stops being declared, so the
-    # fixture cannot quietly monitor something that is gone or miss something that is new.
-    critical_channels = sorted(
-        item["channel_id"]
-        for item in descriptor_manifest["descriptors"]
-        if item.get("safety_class") == "safety_critical_input" and item.get("role") != "source_readback"
-    )
+    # critical -- and cannot drift from the descriptors the same call just wrote. For this
+    # fixture it is the two channels LS218_2 carries as safety-critical inputs; it was the
+    # EMPTY set while the fixture used LS218_1, whose sixteen descriptors are all
+    # observational, and an empty list is refused outright by the engine. Derived rather
+    # than assumed either way: a safety-critical descriptor added later is declared
+    # automatically, and one removed stops being declared.
+    critical_channels = _engine_critical_channel_ids(descriptor_manifest["descriptors"])
     # The physical-alarms document is taken from the tracked base and then DISARMED,
     # rather than written as a short static string. The production loader requires exactly
     # cooldown, vacuum and landmarks, complete key sets in the first two, and the two
