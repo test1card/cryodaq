@@ -111,11 +111,35 @@ _INVALIDATION_CATEGORIES: dict[type[BaseException], str] = {
 }
 
 
+class _FrameRejected(ValueError):
+    """A frame this source refused, carrying the CATEGORY of the refusal.
+
+    WHY THE CATEGORY IS CHOSEN HERE. The receive loop catches whatever the frame handler
+    raised, and a class-only mapping gave one sentence to six different conditions -- a
+    malformed wire payload, a sequence gap, a changed publisher counter, a provisional
+    overflow, an orphan barrier, and a callback that returned an awaitable. Those
+    implicate different components and need different remedies. The rejection site is the
+    only place that knows which one it was, so it says so.
+
+    It stays a `ValueError` so every existing handler keeps working, and the detail
+    message is unchanged -- the category is the addition, and it is the part that reaches
+    the log and the durable record. The detail never does, because a frame's own text
+    carries values, channel names and addresses.
+    """
+
+    def __init__(self, category: str, detail: str) -> None:
+        super().__init__(detail)
+        self.category = category
+
+
 def _invalidation_category(error: BaseException | None) -> str:
     """Name the class of failure that took authority, never its text."""
 
     if error is None:
         return "the live generation was invalidated"
+    if isinstance(error, _FrameRejected):
+        # Chosen at the rejection site, which is the only place that knew.
+        return error.category
     for kind, category in _INVALIDATION_CATEGORIES.items():
         if isinstance(error, kind):
             return category
@@ -683,19 +707,19 @@ class SequencedPeriodicLiveSources:
             "sequence",
             "persistence_authoritative",
         }:
-            raise ValueError("invalid transport")
+            raise _FrameRejected("a frame was malformed", "invalid transport")
         session = _text(value["session_id"], maximum=32, allow_empty=False)
         if value["schema"] != PERIODIC_STREAM_SCHEMA or _TOKEN.fullmatch(session) is None:
-            raise ValueError("invalid transport")
+            raise _FrameRejected("a frame was malformed", "invalid transport")
         authoritative = value["persistence_authoritative"]
         if type(authoritative) is not bool:
-            raise ValueError("invalid transport")
+            raise _FrameRejected("a frame was malformed", "invalid transport")
         return _Transport(session, _exact_int(value["sequence"], minimum=1), authoritative)
 
     @classmethod
     def _reading(cls, raw: bytes) -> tuple[_Transport, Reading]:
         if not raw or len(raw) > MAX_DATA_MSG_SIZE:
-            raise ValueError("invalid reading frame")
+            raise _FrameRejected("a frame was malformed", "invalid reading frame")
         data = msgpack.unpackb(
             raw,
             raw=False,
@@ -708,7 +732,7 @@ class SequencedPeriodicLiveSources:
         )
         expected = {"ts", "iid", "ch", "v", "u", "st", "raw", "meta", "transport"}
         if not isinstance(data, dict) or set(data) != expected:
-            raise ValueError("invalid reading shape")
+            raise _FrameRejected("a frame was malformed", "invalid reading shape")
         transport = cls._transport(data["transport"])
         timestamp = _finite_number(data["ts"])
         instrument = _text(data["iid"], maximum=256)
@@ -717,13 +741,13 @@ class SequencedPeriodicLiveSources:
         status = ChannelStatus(_text(data["st"], maximum=32, allow_empty=False))
         value = data["v"]
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-            raise ValueError("invalid reading value")
+            raise _FrameRejected("a frame was malformed", "invalid reading value")
         raw_value = data["raw"]
         if raw_value is not None and (isinstance(raw_value, bool) or not isinstance(raw_value, (int, float))):
-            raise ValueError("invalid raw reading value")
+            raise _FrameRejected("a frame was malformed", "invalid raw reading value")
         metadata = data["meta"]
         if not isinstance(metadata, dict) or len(metadata) > 256:
-            raise ValueError("invalid reading metadata")
+            raise _FrameRejected("a frame was malformed", "invalid reading metadata")
         reading = Reading(
             timestamp=datetime.fromtimestamp(timestamp, tz=UTC),
             instrument_id=instrument,
@@ -740,14 +764,16 @@ class SequencedPeriodicLiveSources:
     def _event(cls, raw: bytes) -> tuple[_Transport, Mapping[str, object]]:
         event = _bounded_json(raw)
         if set(event) != {"event_type", "ts", "payload", "experiment_id", "transport"}:
-            raise ValueError("invalid event shape")
+            raise _FrameRejected("a frame was malformed", "invalid event shape")
         transport = cls._transport(event["transport"])
         if transport.persistence_authoritative:
-            raise ValueError("event cannot claim persistence authority")
+            raise _FrameRejected(
+                "an event claimed persistence authority it does not have", "event cannot claim persistence authority"
+            )
         _text(event["event_type"], maximum=128, allow_empty=False)
         _finite_number(event["ts"])
         if not isinstance(event["payload"], Mapping) or len(event["payload"]) > 256:
-            raise ValueError("invalid event payload")
+            raise _FrameRejected("a frame was malformed", "invalid event payload")
         if event["experiment_id"] is not None:
             _text(event["experiment_id"], maximum=256, allow_empty=False)
         public = dict(event)
@@ -761,7 +787,10 @@ class SequencedPeriodicLiveSources:
             close = getattr(result, "close", None)
             if callable(close):
                 close()
-            raise ValueError("periodic live callbacks must be synchronous")
+            raise _FrameRejected(
+                "a periodic callback returned an awaitable instead of running synchronously",
+                "periodic live callbacks must be synchronous",
+            )
 
     def _validate_next(self, session: str, sequence: int, *, provisional: bool) -> None:
         expected_session = (
@@ -769,7 +798,7 @@ class SequencedPeriodicLiveSources:
         )
         previous = self._provisional_last if provisional else self._last_sequence
         if expected_session != session or previous is None or sequence != previous + 1:
-            raise ValueError("stream discontinuity")
+            raise _FrameRejected("the reading sequence has a gap", "stream discontinuity")
 
     async def _semantic_frame(self, topic: bytes, raw: bytes) -> tuple[_Transport, _ProvisionalFrame]:
         if topic == DEFAULT_TOPIC:
@@ -780,7 +809,9 @@ class SequencedPeriodicLiveSources:
         if topic == EVENTS_TOPIC:
             transport, event = self._event(raw)
             return transport, _ProvisionalFrame(transport.sequence, "event", event, len(raw))
-        raise ValueError("unknown participating topic")
+        raise _FrameRejected(
+            "a frame arrived on a topic this source does not participate in", "unknown participating topic"
+        )
 
     def _dispatch(self, frame: _ProvisionalFrame) -> None:
         if frame.kind == "reading":
@@ -805,7 +836,7 @@ class SequencedPeriodicLiveSources:
             "alarm_state_token",
         }
         if set(payload) != marker_keys:
-            raise ValueError("invalid barrier marker shape")
+            raise _FrameRejected("a frame was malformed", "invalid barrier marker shape")
         nonce, cut = _parse_cut({"ok": True, **payload}, generation=self._generation)
         marker = self._ready_marker
         if self._ready_active and self._session_id is None and nonce in self._retired_ready_nonces:
@@ -815,22 +846,22 @@ class SequencedPeriodicLiveSources:
             # matching marker remains outside the accepted stream prefix.
             return
         if not self._ready_active or nonce != self._ready_nonce or marker is None or marker.done():
-            raise ValueError("orphan barrier")
+            raise _FrameRejected("a barrier answer arrived that no request expected", "orphan barrier")
         if self._session_id is None:
             if self._provisional_cut is not None:
-                raise ValueError("duplicate startup barrier")
+                raise _FrameRejected("a second startup barrier arrived for one request", "duplicate startup barrier")
             self._provisional_cut = cut
             self._provisional_last = cut.sequence
         else:
             self._validate_next(cut.session_id, cut.sequence, provisional=False)
             if cut.reading_drop_count != self._drop_baseline or cut.publish_failure_count != self._failure_baseline:
-                raise ValueError("publisher counters changed")
+                raise _FrameRejected("the publisher's drop or failure counters changed", "publisher counters changed")
             self._last_sequence = cut.sequence
         marker.set_result(cut)
 
     async def _handle_frame(self, parts: list[bytes]) -> None:
         if len(parts) != 2 or parts[0] not in {DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC}:
-            raise ValueError("invalid multipart frame")
+            raise _FrameRejected("a frame was malformed", "invalid multipart frame")
         async with self._state_lock:
             if self._invalid or not self._running:
                 raise PeriodicLiveDiscontinuity("a frame arrived after the source stopped")
@@ -845,9 +876,9 @@ class SequencedPeriodicLiveSources:
             elif self._provisional_cut is not None:
                 self._validate_next(transport.session_id, transport.sequence, provisional=True)
                 if len(self._provisional) >= self._max_provisional_frames:
-                    raise ValueError("provisional frame overflow")
+                    raise _FrameRejected("the provisional buffer overflowed", "provisional frame overflow")
                 if self._provisional_bytes + frame.encoded_bytes > self._max_provisional_bytes:
-                    raise ValueError("provisional byte overflow")
+                    raise _FrameRejected("the provisional buffer overflowed", "provisional byte overflow")
                 self._provisional.append(frame)
                 self._provisional_bytes += frame.encoded_bytes
                 self._provisional_last = transport.sequence
@@ -1081,7 +1112,15 @@ class SequencedPeriodicLiveSources:
             self._invalidate("the barrier was cancelled")
             raise
         except BaseException as exc:
-            self._invalidate(f"the barrier failed with {type(exc).__name__}")
+            # KEEP THE NAME THE BARRIER ALREADY CHOSE. Replacing it with the class name
+            # threw away a reason that had been worked out -- and the live watcher, which
+            # `_invalidate` releases, then reported the generic replacement to whoever was
+            # waiting. The immediate caller saw the detail; the later observer did not.
+            self._invalidate(
+                exc.reason
+                if isinstance(exc, PeriodicLiveDiscontinuity)
+                else f"the barrier failed with {type(exc).__name__}"
+            )
             if isinstance(exc, PeriodicLiveDiscontinuity):
                 raise
             raise PeriodicLiveDiscontinuity(f"the barrier failed with {type(exc).__name__}") from None

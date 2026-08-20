@@ -112,3 +112,98 @@ def test_wait_reports_the_reason_rather_than_the_state() -> None:
         assert "the subscriber transport failed" in str(raised.value)
 
     asyncio.run(_drive())
+
+
+def test_the_rejection_site_chooses_the_category_not_the_class() -> None:
+    """`ValueError` covered six conditions with one sentence.
+
+    A malformed payload, a sequence gap, a changed publisher counter, a provisional
+    overflow, an orphan barrier and a synchronous-callback violation implicate different
+    components and need different remedies. The rejection site is the only place that
+    knows which one it was.
+    """
+
+    rejected = periodic_runtime._FrameRejected("the reading sequence has a gap", "stream discontinuity")
+
+    assert isinstance(rejected, ValueError), "existing handlers select on ValueError"
+    assert periodic_runtime._invalidation_category(rejected) == "the reading sequence has a gap"
+    # The detail stays available to a local handler and never becomes the category.
+    assert str(rejected) == "stream discontinuity"
+
+
+def test_the_receive_path_conditions_are_distinguishable() -> None:
+    """Three conditions the week-long run keeps hitting must read differently."""
+
+    said = {
+        periodic_runtime._invalidation_category(periodic_runtime._FrameRejected(category, "detail"))
+        for category in (
+            "a frame was malformed",
+            "the reading sequence has a gap",
+            "the publisher's drop or failure counters changed",
+        )
+    }
+    assert len(said) == 3, said
+
+
+def test_a_rejected_frame_reaches_the_loop_reason(caplog: pytest.LogCaptureFixture) -> None:
+    """Driven through `_receive_loop`, with the frame handler refusing a real frame."""
+
+    source = _fresh()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [b"topic", b"payload"]
+
+    async def _refuse(_parts):
+        raise periodic_runtime._FrameRejected(
+            "the publisher's drop or failure counters changed", "publisher counters changed"
+        )
+
+    source._socket = _Socket()
+    source._handle_frame = _refuse
+
+    periodic_runtime._last_discontinuity_log.clear()
+    with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+        asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "counters changed" in source._invalidation_reason
+    assert "publisher counters changed" != source._invalidation_reason, (
+        "the frame's own detail must not become the reason"
+    )
+
+
+def test_a_named_barrier_failure_survives_to_the_watcher() -> None:
+    """Driven through the REAL `ready()` -> `_invalidate` -> `wait()` path.
+
+    `ready()` works out a reason and raises it. The outer handler recorded the CLASS name
+    instead, so the immediate caller saw the detail while the watcher released by
+    `_invalidate` reported the generic replacement to whoever was waiting.
+
+    An earlier version of this test called `_invalidate` with the reason itself, which
+    proved only that a string survives a setter -- reverting the fix left it green.
+    """
+
+    source = _fresh()
+    source._ready_active = False
+    source._ready_task = None
+    source._retired_ready_nonces = set()
+    source._connected = None  # `ready()` refuses here, with a reason it chose
+
+    async def _drive() -> None:
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity):
+            await _SOURCE.ready(source)
+
+        assert source._invalid is True
+        assert "connection event" in source._invalidation_reason, (
+            f"the barrier's own reason was replaced: {source._invalidation_reason!r}"
+        )
+
+        # And the watcher, which is the LATER observer, gets that same reason.
+        failure = asyncio.get_running_loop().create_future()
+        failure.set_result(None)
+        source._failure = failure
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await _SOURCE.wait(source)
+        assert "connection event" in str(raised.value)
+
+    asyncio.run(_drive())

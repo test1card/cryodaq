@@ -969,6 +969,71 @@ _ASSISTANT_LOG_ABSENT_MARKER: Final = (
     "<no assistant log was written under the isolated state root; the assistant either "
     "never started or never opened its log>\n"
 )
+_ASSISTANT_LOG_REFUSED_MARKER: Final = (
+    "<the assistant log was refused: the path under the isolated state root is not a "
+    "regular file. The measured process can write that directory, so a symbolic link "
+    "there would have copied an unrelated file into this bundle.>\n"
+)
+
+
+def _read_regular_file_no_follow(path: Path) -> bytes | None:
+    """Read a file the MEASURED PROCESS can replace, without following a link.
+
+    The isolated state root is writable by the very process this bundle describes. If it
+    replaces `logs/assistant.log` with a symbolic link before teardown, an ordinary read
+    copies whatever the runner can reach into the retained evidence. So the open refuses
+    to follow a link, and the descriptor is checked to be a regular file before a byte is
+    read -- the check is on the DESCRIPTOR, not on the path, because a path can change
+    between the check and the open.
+
+    Returns ``None`` when the path is not a regular file, so the caller can say so.
+    """
+
+    # TWO CHECKS, because neither is enough alone. `O_NOFOLLOW` does not exist on
+    # Windows, where `getattr` would quietly return 0 and the open would follow the link
+    # -- a guard that is absent on one platform is a guard that is untested there. So the
+    # link is rejected first by `lstat`, which does not follow, and the open still asks
+    # for `O_NOFOLLOW` where the platform has it.
+    try:
+        link_info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(link_info.st_mode):
+        return None
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _assistant_log_files(state_root: Path) -> list[Path]:
+    """The active log and every rotated backup, oldest first.
+
+    `setup_logging` rotates the assistant log daily and keeps up to fourteen dated
+    backups. On a multi-day run the decisive line is often written on the day it happened
+    and never repeats, so reading only the active file retains the last day and deletes
+    the cause -- the exact evidence loss this publisher exists to stop.
+    """
+
+    directory = Path(state_root) / "logs"
+    active = directory / "assistant.log"
+    try:
+        rotated = sorted(p for p in directory.glob("assistant.log.*") if p.name != active.name)
+    except OSError:
+        rotated = []
+    return [*rotated, active]
 
 
 def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
@@ -981,24 +1046,39 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     condition took the live source lived only inside a directory the run removes, and
     the bundle a week-long run leaves behind never held it.
 
-    The artifact is ALWAYS written, and says so when the log is absent, because a
-    missing file is indistinguishable from a publisher that silently did nothing. This
-    is the same shape as the engine stderr publisher above, for the same reason.
+    The artifact is ALWAYS written, and says so when the log is absent or when the path
+    is not a regular file, because a missing file is indistinguishable from a publisher
+    that silently did nothing.
     """
 
     from scripts.soak_mock_stack import redact_text
 
-    path = Path(state_root) / "logs" / "assistant.log"
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_ABSENT_MARKER)
+    collected: list[bytes] = []
+    refused = False
+    for path in _assistant_log_files(state_root):
+        # `lexists`, not `exists`: a broken link EXISTS as a link and must be reported as
+        # refused, while `exists()` would answer False and skip it in silence.
+        if not os.path.lexists(path):
+            continue
+        raw = _read_regular_file_no_follow(path)
+        if raw is None:
+            refused = True
+            continue
+        collected.append(raw)
+
+    if not collected:
+        evidence.write_log(
+            _ASSISTANT_LOG_EVIDENCE_NAME,
+            _ASSISTANT_LOG_REFUSED_MARKER if refused else _ASSISTANT_LOG_ABSENT_MARKER,
+        )
         return
 
-    encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
+    encoded = redact_text(b"".join(collected).decode("utf-8", errors="replace")).encode("utf-8")
+    if refused:
+        encoded = _ASSISTANT_LOG_REFUSED_MARKER.encode("utf-8") + encoded
     if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
-        # Keep the END, for the reason the engine publisher keeps it: the bound protects
-        # the bundle's size and must not choose which half of the failure survives.
+        # Keep the END, across the rotated files as one stream: the bound protects the
+        # bundle's size and must not choose which half of the failure survives.
         tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
         tail = encoded[-tail_bytes:]
         while tail and tail[0] & 0xC0 == 0x80:

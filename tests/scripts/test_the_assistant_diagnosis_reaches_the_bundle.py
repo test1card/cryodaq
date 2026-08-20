@@ -130,3 +130,65 @@ def test_the_FAILURE_path_publishes_it(tmp_path: Path, state_root: Path) -> None
         "a failing soak published no assistant log, which is the run that needed it"
     )
     assert "receive loop ended" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+
+
+def test_a_rotated_day_is_not_left_behind(state_root: Path) -> None:
+    """`setup_logging` rotates the assistant log daily and keeps dated backups.
+
+    On a multi-day run the decisive line is written on the day it happened and often
+    never repeats. Reading only the active file retains the last day and deletes the
+    cause -- the same evidence loss this publisher exists to stop, one layer down.
+    """
+
+    logs = state_root / "logs"
+    (logs / "assistant.log.2026-08-14").write_bytes(b"THE CAUSE, written on day one\n")
+    (logs / "assistant.log.2026-08-17").write_bytes(b"a quiet middle day\n")
+    (logs / "assistant.log").write_bytes(b"the last day, which says nothing\n")
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "THE CAUSE, written on day one" in published, "the rotated day was dropped"
+    assert "the last day" in published
+
+
+def test_the_rotated_stream_is_ordered_oldest_first(state_root: Path) -> None:
+    """The bound keeps the END, so the newest must be last or the bound drops the wrong half."""
+
+    logs = state_root / "logs"
+    (logs / "assistant.log.2026-08-14").write_bytes(b"FIRST\n")
+    (logs / "assistant.log").write_bytes(b"LAST\n")
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert published.index("FIRST") < published.index("LAST")
+
+
+def test_a_symbolic_link_is_refused_rather_than_followed(state_root: Path, tmp_path: Path) -> None:
+    """The measured process can write that directory, so its topology is not trusted.
+
+    Replacing the log with a link to any runner-readable file would otherwise copy that
+    file into the retained bundle.
+    """
+
+    import os
+
+    secret = tmp_path / "not-for-the-bundle.txt"
+    secret.write_bytes(b"SOMETHING THE BUNDLE MUST NOT CARRY\n")
+    link = state_root / "logs" / "assistant.log"
+    try:
+        os.symlink(secret, link)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged Windows
+        pytest.skip("this platform does not allow creating a symbolic link here")
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "SOMETHING THE BUNDLE MUST NOT CARRY" not in published
+    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER, (
+        "a refused path must SAY it was refused, or it reads as an absent log"
+    )
