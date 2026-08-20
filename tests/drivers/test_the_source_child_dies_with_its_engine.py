@@ -77,6 +77,19 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
     sys.path.insert(0, {src!r})
 
     def _busy(_connection, expected_parent):
+        # DETACH THIS PROCESS FROM THE HARNESS BEFORE DOING ANYTHING ELSE. The control case
+        # deliberately leaks a process, and a leaked process that still holds pytest's
+        # stdout and stderr keeps those pipes open after pytest exits -- which broke the
+        # continuous integration runner's receipt accounting on a suite where every single
+        # test had passed. The hazard under test is the process outliving its parent, not
+        # the pipes it happens to hold.
+        import os as _os
+        _null = _os.open(_os.devnull, _os.O_RDWR)
+        for _fd in (0, 1, 2):
+            _os.dup2(_null, _fd)
+        if _null > 2:
+            _os.close(_null)
+
         from cryodaq.drivers.transport.usbtmc import _bind_lifetime_to_parent
         {binding}
         # Whatever happens to the parent, this never looks at the pipe -- the shape of a
@@ -150,8 +163,15 @@ def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool
             parent.kill()
         parent.wait(timeout=10)
     if survived:
+        # Reaping it is not optional either. It is no longer anyone's child, so nothing
+        # will wait on it, and leaving it running is how one test's deliberate leak becomes
+        # the next test's environment.
         with contextlib.suppress(OSError):
             os.kill(child_pid, signal.SIGKILL)
+        gone_by = time.monotonic() + 10.0
+        while time.monotonic() < gone_by and _alive(child_pid):
+            time.sleep(0.05)
+        assert not _alive(child_pid), f"the control's leaked child {child_pid} could not be killed"
     return survived
 
 
