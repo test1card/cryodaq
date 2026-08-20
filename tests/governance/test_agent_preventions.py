@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import copy
 import hashlib
 import json
@@ -197,30 +198,65 @@ def _ob014_claim() -> str:
     return _obligation_claim("OB-014")
 
 
-def test_plugin_measured_bytes_false_green_guard_drives_production() -> None:
+def test_plugin_measured_bytes_false_green_guard_drives_production(tmp_path: Path) -> None:
     """The paired guard for PLUGIN-MEASURED-BYTES-001.
 
-    The escape this pair exists for is a regression that READS production instead of
-    running it. The first shape of that regression asserted the string
-    `_refuse_unmeasured_plugins()` appeared in the source of `_start_locked`, which a
-    rename leaves green and a re-read of the path leaves green as well -- while the
-    property is gone. So the pair checks two things a false green cannot satisfy: the
-    regression must construct the loader and call it, and it must not settle for reading
-    source text.
+    THE FALSE GREEN THIS EXISTS FOR IS A GUARD THAT READS PRODUCTION INSTEAD OF RUNNING
+    IT. The first shape of this pair searched the loader for two substrings. Weaken the
+    runtime regression so it no longer checks executed bytes while keeping those
+    substrings, or re-read the path while leaving a dead `measured.get(path)` behind,
+    and that pair stayed green while the property was gone.
+
+    So this runs the failure shape itself, on a tree of its own, through the real
+    `PluginPipeline`: the file on disk is changed AFTER the measurement, and what
+    executes must still be the measured bytes. It shares no fixture, no constant and no
+    text with the runtime regression, so weakening that regression cannot quiet it.
     """
 
-    regression = (ROOT / "tests/analytics/test_plugins_are_the_measured_bytes.py").read_text(encoding="utf-8")
-    assert "inspect.getsource" not in regression, (
-        "the regression reads production source; a rename would leave it green"
-    )
-    assert "pipeline._load_plugin(" in regression, "the regression must RUN the loader"
-    assert "measured=measured" in regression, "the regression must exercise the qualified branch"
+    from cryodaq.analytics.plugin_loader import PluginPipeline
+    from cryodaq.core.qualification import source_artifact_digest
 
-    loader = (ROOT / "src/cryodaq/analytics/plugin_loader.py").read_text(encoding="utf-8")
-    assert "asyncio.to_thread(self._measured_plugin_bytes)" in loader, (
-        "the measurement must run off the engine event loop"
+    class _Broker:
+        async def subscribe(self, _name: str, **_kwargs: object) -> asyncio.Queue:
+            return asyncio.Queue()
+
+        async def unsubscribe(self, _name: str, **_kwargs: object) -> bool:
+            return True
+
+    plugin_body = (
+        "from cryodaq.analytics.base_plugin import AnalyticsPlugin\n\n\n"
+        "class Probe(AnalyticsPlugin):\n"
+        '    MARKER = "{marker}"\n\n'
+        "    async def process(self, readings):\n"
+        "        return []\n"
     )
-    assert "measured.get(path)" in loader, "the qualified import must execute the snapshot"
+
+    package = tmp_path / "src" / "cryodaq"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    probe = plugins / "probe.py"
+    probe.write_text(plugin_body.format(marker="measured"), encoding="utf-8")
+
+    pipeline = PluginPipeline(
+        _Broker(),
+        plugins,
+        hot_reload=False,
+        measured_artifact_sha256=source_artifact_digest(tmp_path),
+        project_root=tmp_path,
+    )
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None and probe in measured, "the qualified path produced no snapshot"
+
+    # The disk changes after the measurement. This is the whole failure shape.
+    probe.write_text(plugin_body.format(marker="unmeasured"), encoding="utf-8")
+
+    assert pipeline._load_plugin(probe, measured=measured) is True
+    executed = type(pipeline._plugins["probe"]).MARKER
+    assert executed == "measured", (
+        "a qualified run executed bytes nobody measured; PLUGIN-MEASURED-BYTES-001 is not enforced"
+    )
 
 
 def test_evidence_inventory_false_green_guard_uses_the_actual_claim() -> None:

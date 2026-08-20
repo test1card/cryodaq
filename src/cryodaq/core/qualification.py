@@ -281,16 +281,26 @@ def verify_artifact_qualification_receipt(
     )
 
 
-def _manifest_digest(root: Path, paths: list[Path]) -> str:
+def _manifest_digest_of(root: Path, captured: dict[Path, bytes]) -> str:
+    """Digest EXACTLY the bytes given, so a caller can execute the same ones.
+
+    There is one hashing implementation and both entry points go through it. A second
+    implementation is how a digest and the thing it describes drift apart.
+    """
+
     digest = hashlib.sha256()
-    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
+    for path in sorted(captured, key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8")
-        raw = path.read_bytes()
+        raw = captured[path]
         digest.update(len(relative).to_bytes(4, "big"))
         digest.update(relative)
         digest.update(len(raw).to_bytes(8, "big"))
         digest.update(raw)
     return f"sha256:{digest.hexdigest()}"
+
+
+def _manifest_digest(root: Path, paths: list[Path]) -> str:
+    return _manifest_digest_of(root, {path: path.read_bytes() for path in paths})
 
 
 def source_artifact_paths(project_root: Path) -> list[Path]:
@@ -330,9 +340,30 @@ def source_artifact_paths(project_root: Path) -> list[Path]:
 
 
 def source_artifact_digest(project_root: Path) -> str:
-    """The artifact digest of the tree AS IT IS NOW."""
+    """The artifact digest of the tree AS IT IS NOW.
+
+    Use this only to ANSWER a question about the tree. A caller that will then EXECUTE
+    what it measured must use `capture_source_artifacts` instead -- see the reason
+    written there.
+    """
 
     return _manifest_digest(project_root, source_artifact_paths(project_root))
+
+
+def capture_source_artifacts(project_root: Path) -> tuple[str, dict[Path, bytes]]:
+    """Read every measured artifact ONCE, and digest exactly the bytes that were read.
+
+    WHY A SECOND READ IS NOT THE SAME READ. `source_artifact_digest` opens the paths
+    again, so the bytes it hashes need not be the bytes a caller then executes. A
+    plugin that changes from the receipt's bytes A to unmeasured bytes B, is captured
+    as B, and is restored to A by an editor rollback or a concurrent updater before the
+    digest runs, hashes as A -- and the caller executes B under a receipt that still
+    verifies. Reading first is only half the ordering; the other half is that the
+    comparison and the execution share ONE set of bytes, which is what this returns.
+    """
+
+    captured = {path: path.read_bytes() for path in source_artifact_paths(project_root)}
+    return _manifest_digest_of(project_root, captured), captured
 
 
 def source_checkout_qualification_context(

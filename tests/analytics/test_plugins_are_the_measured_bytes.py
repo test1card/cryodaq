@@ -321,3 +321,218 @@ def test_the_engine_reads_the_digest_the_receipt_actually_carries() -> None:
         {"qualification_receipt": receipt},
     )
     assert evaluated == "sha256:" + "c" * 64, "the engine does not read the digest the receipt carries"
+
+
+_HELPER_SOURCE = """MARKER = "{marker}"
+"""
+
+_IMPORTING_PLUGIN = """from cryodaq.analytics.base_plugin import AnalyticsPlugin
+from plugins.helper import MARKER
+
+
+class Importing(AnalyticsPlugin):
+    MARKER = MARKER
+
+    async def process(self, readings):
+        return []
+"""
+
+_DATACLASS_PLUGIN = """from dataclasses import dataclass
+
+from cryodaq.analytics.base_plugin import AnalyticsPlugin
+
+
+@dataclass
+class Setting:
+    value: int = 3
+
+
+class WithDataclass(AnalyticsPlugin):
+    MARKER = "dataclass-ok"
+
+    async def process(self, readings):
+        return []
+"""
+
+_ANNOTATION_PLUGIN = """from dataclasses import dataclass
+
+from cryodaq.analytics.base_plugin import AnalyticsPlugin
+
+
+def _probe(value: int) -> None:
+    return None
+
+
+@dataclass
+class Setting:
+    value: int = 3
+
+
+class WithDataclass(AnalyticsPlugin):
+    MARKER = "dataclass-ok"
+    # `int` if this source's own semantics are used; the STRING "int" if the loader's
+    # `from __future__ import annotations` leaked into it.
+    ANNOTATION_IS_A_STRING = isinstance(_probe.__annotations__["value"], str)
+
+    async def process(self, readings):
+        return []
+"""
+
+_METADATA_PLUGIN = """from cryodaq.analytics.base_plugin import AnalyticsPlugin
+
+ORIGIN = __spec__.origin
+LOADER_NAME = type(__loader__).__name__
+
+
+class WithMetadata(AnalyticsPlugin):
+    MARKER = ORIGIN
+
+    async def process(self, readings):
+        return []
+"""
+
+
+def _qualified(tree: Path) -> PluginPipeline:
+    from cryodaq.core.qualification import source_artifact_digest
+
+    return PluginPipeline(
+        _Broker(),
+        tree / "plugins",
+        hot_reload=False,
+        measured_artifact_sha256=source_artifact_digest(tree),
+        project_root=tree,
+    )
+
+
+def test_a_helper_the_plugin_imports_also_comes_from_the_snapshot(tree: Path) -> None:
+    """`from plugins.helper import ...` handed the import to the ordinary machinery.
+
+    The helper is measured by the same manifest, so the receipt stayed valid while
+    unmeasured helper bytes executed inside a qualified run.
+    """
+
+    plugins = tree / "plugins"
+    (plugins / "helper.py").write_text(_HELPER_SOURCE.format(marker="measured"), encoding="utf-8")
+    plugin = plugins / "importing.py"
+    plugin.write_text(_IMPORTING_PLUGIN, encoding="utf-8")
+
+    pipeline = _qualified(tree)
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None and (plugins / "helper.py") in measured
+
+    (plugins / "helper.py").write_text(_HELPER_SOURCE.format(marker="unmeasured"), encoding="utf-8")
+
+    assert pipeline._load_plugin(plugin, measured=measured) is True
+    assert type(pipeline._plugins["importing"]).MARKER == "measured", "the plugin imported a helper nobody measured"
+
+
+def test_the_finder_is_not_left_installed(tree: Path) -> None:
+    """It serves the plugin package, so it must not outlive the import that needs it."""
+
+    import sys
+
+    (tree / "plugins" / "example.py").write_text(_PLUGIN_SOURCE.format(marker="anything"), encoding="utf-8")
+    pipeline = _qualified(tree)
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None
+
+    before = list(sys.meta_path)
+    pipeline._load_plugin(tree / "plugins" / "example.py", measured=measured)
+    assert list(sys.meta_path) == before
+
+
+def test_the_plugin_keeps_its_own_annotation_semantics(tree: Path) -> None:
+    """`compile` inherits the CALLER's future flags unless told not to.
+
+    This module enables postponed annotations. A plugin that does not enable them was
+    executed under semantics its source never declared.
+
+    The property is read from the PLUGIN's own annotations, not from whether it loaded.
+    An earlier version of this test used a `@dataclass` and stayed green with the flag
+    inherited, because registering the module in `sys.modules` repairs the dataclass
+    case on its own -- so it was measuring the registration, not the flag.
+    """
+
+    plugin = tree / "plugins" / "withdata.py"
+    plugin.write_text(_ANNOTATION_PLUGIN, encoding="utf-8")
+
+    pipeline = _qualified(tree)
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None
+
+    assert pipeline._load_plugin(plugin, measured=measured) is True, "a valid plugin was skipped under qualification"
+    loaded = type(pipeline._plugins["withdata"])
+    assert loaded.ANNOTATION_IS_A_STRING is False, (
+        "the plugin was executed with postponed annotations it never declared"
+    )
+    assert loaded.MARKER == "dataclass-ok", "the dataclass inside the plugin did not build"
+
+
+def test_ordinary_import_metadata_is_present(tree: Path) -> None:
+    """A bare ModuleType leaves `__spec__` and `__loader__` as None.
+
+    A plugin that reads either loaded fine unqualified and raised under qualification,
+    where the outer handler dropped it without a word.
+    """
+
+    plugin = tree / "plugins" / "withmeta.py"
+    plugin.write_text(_METADATA_PLUGIN, encoding="utf-8")
+
+    pipeline = _qualified(tree)
+    measured = pipeline._measured_plugin_bytes()
+    assert measured is not None
+
+    assert pipeline._load_plugin(plugin, measured=measured) is True
+    assert type(pipeline._plugins["withmeta"]).MARKER == str(plugin)
+
+
+def test_the_compared_digest_is_computed_from_the_captured_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading twice reopens the window in the other direction.
+
+    Bytes that change to B and back to A between the capture and the digest hash as A
+    while B is what would execute. The two must be one read.
+    """
+
+    from cryodaq.core.qualification import capture_source_artifacts
+
+    package = tmp_path / "src" / "cryodaq"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    target = plugins / "example.py"
+    # Written as BYTES. `write_text` translates the line ending on Windows, so a test
+    # that writes text and expects the bytes it wrote is measuring the writer, not the
+    # code under test.
+    target.write_bytes(b"VALUE = 1\n")
+
+    # THE RACE, MADE DETERMINISTIC. The first read of this file answers with the
+    # unmeasured bytes B; every later read answers with A again, exactly as an editor
+    # rollback or a concurrent updater would. An implementation that reads a second time
+    # therefore hashes A while holding B -- and would execute B under a receipt that
+    # verifies.
+    real_read_bytes = Path.read_bytes
+    seen: list[Path] = []
+
+    def _read_once_then_restore(self: Path) -> bytes:
+        if self == target and not seen:
+            seen.append(self)
+            return b"VALUE = 999\n"
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read_once_then_restore)
+    digest, captured = capture_source_artifacts(tmp_path)
+    monkeypatch.undo()
+
+    assert captured[target] == b"VALUE = 999\n", "the capture did not take the first read"
+
+    from cryodaq.core.qualification import _manifest_digest_of
+
+    assert digest == _manifest_digest_of(tmp_path, captured), (
+        "the digest describes bytes other than the ones it returned"
+    )
+    assert digest != capture_source_artifacts(tmp_path)[0], (
+        "the digest of the changed bytes equals the digest of the file on disk"
+    )

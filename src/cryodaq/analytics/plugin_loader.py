@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import inspect
 import logging
+import sys
 import types
 from collections.abc import Coroutine
 from pathlib import Path
@@ -35,6 +38,87 @@ _MAX_DERIVED_METRICS_PER_PLUGIN_BATCH = 500
 _MAX_PLUGIN_TEXT_LENGTH = 255
 _WATCH_INTERVAL_S = 5.0
 _SUBSCRIBE_NAME = "plugin_pipeline"
+# The package name a plugin uses to import a sibling helper. It is served from the
+# measured snapshot during a qualified load and is not otherwise importable.
+_MEASURED_PLUGIN_PACKAGE = "plugins"
+
+
+class _MeasuredBytesLoader(importlib.abc.InspectLoader):
+    """Execute the exact bytes qualification measured, and nothing from a path.
+
+    This is a real loader rather than a bare ``exec`` for three reasons, each of which
+    was a way a valid plugin behaved differently once the run was qualified:
+
+    * ``compile`` inherits the CALLER's future flags by default, and this module enables
+      ``from __future__ import annotations``. A plugin that deliberately does not enable
+      postponed annotations would have been executed under semantics its source never
+      declared. ``dont_inherit=True`` gives the plugin its own.
+    * a bare ``types.ModuleType`` leaves ``__spec__`` and ``__loader__`` as ``None``, so
+      a plugin that reads ordinary import metadata raised under qualification and was
+      silently skipped by the outer handler while loading fine unqualified.
+    * the module must be in ``sys.modules`` while its body runs, or a plain
+      ``@dataclass`` fails to resolve its own annotations.
+
+    No bytecode cache is read and none is written, because nothing reaches the path.
+    """
+
+    def __init__(self, path: Path, source: bytes) -> None:
+        self._path = path
+        self._source = source
+
+    def get_source(self, fullname: str) -> str:
+        return self._source.decode("utf-8")
+
+    def get_code(self, fullname: str) -> types.CodeType:
+        return compile(self._source, str(self._path), "exec", dont_inherit=True)
+
+    def get_filename(self, fullname: str) -> str:
+        return str(self._path)
+
+    def is_package(self, fullname: str) -> bool:
+        return False
+
+
+class _MeasuredPluginFinder(importlib.abc.MetaPathFinder):
+    """Serve imports of the plugin package from the snapshot instead of the disk.
+
+    A measured plugin that does ``from plugins.helper import ...`` handed that import
+    to the ordinary machinery, which reads the path or a bytecode cache. The helper is
+    measured by the same manifest, so the receipt stayed valid while unmeasured helper
+    bytes executed inside a qualified run. This finder is installed only for the length
+    of the qualified load and serves only the plugin package.
+    """
+
+    def __init__(self, package: str, plugins_dir: Path, measured: dict[Path, bytes]) -> None:
+        self._package = package
+        self._plugins_dir = plugins_dir
+        self._measured = measured
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: object = None,
+        target: object = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        if fullname == self._package:
+            spec = importlib.machinery.ModuleSpec(fullname, None, is_package=True)
+            spec.submodule_search_locations = []
+            return spec
+        prefix = f"{self._package}."
+        if not fullname.startswith(prefix):
+            return None
+        stem = fullname[len(prefix) :]
+        if "." in stem:
+            return None
+        candidate = self._plugins_dir / f"{stem}.py"
+        source = self._measured.get(candidate)
+        if source is None:
+            return None
+        return importlib.util.spec_from_loader(
+            fullname,
+            _MeasuredBytesLoader(candidate, source),
+            origin=str(candidate),
+        )
 
 
 class _PluginCleanupAmbiguity(RuntimeError):
@@ -192,13 +276,15 @@ class PluginPipeline:
         Returns the bytes to execute, or ``None`` when the run is not qualified and the
         ordinary on-disk import applies.
 
-        THE ORDER IS THE WHOLE POINT, and it is READ FIRST, COMPARE SECOND. Checking the
-        tree and then importing from disk are two filesystem operations with a window
-        between them: a plugin written inside that window is imported without ever
-        reaching the compared digest, while the receipt still claims the measured build.
-        Reading first closes it from both sides -- a file changed BEFORE the comparison
-        is caught by the comparison, and a file changed AFTER it is never read again,
-        because the import runs from these bytes and not from the path.
+        THE MEASUREMENT AND THE EXECUTION SHARE ONE READ. Checking the tree and then
+        importing from the path are two filesystem operations with a window between
+        them: a plugin written inside that window is imported without ever reaching the
+        compared digest, while the receipt still claims the measured build. Reading
+        first is only half of closing that -- the other half is that the bytes compared
+        and the bytes executed are the SAME bytes, so `capture_source_artifacts` digests
+        exactly what it returns. Reading twice would reopen the window in the other
+        direction: bytes that change to B and back to A between the two reads hash as A
+        while B is what was captured.
 
         The comparison is the whole artifact manifest rather than the plugins alone,
         because that is exactly what the receipt binds -- a narrower check would accept a
@@ -210,24 +296,19 @@ class PluginPipeline:
 
         if self._measured_artifact_sha256 is None or self._project_root is None:
             return None
-        from cryodaq.core.qualification import source_artifact_digest
+        from cryodaq.core.qualification import capture_source_artifacts
 
-        snapshot: dict[Path, bytes] = {}
-        for path in sorted(self._plugins_dir.glob("*.py")):
-            snapshot[path] = path.read_bytes()
-            # The configuration is measured by the same manifest and drives the same
-            # plugin, so it is bound in the same snapshot rather than re-read later.
-            config_path = path.with_suffix(".yaml")
-            if config_path.is_file():
-                snapshot[config_path] = config_path.read_bytes()
-
-        current = source_artifact_digest(self._project_root)
+        current, captured = capture_source_artifacts(self._project_root)
         if current != self._measured_artifact_sha256:
             raise RuntimeError(
                 "source artifacts changed after qualification measured them; refusing to "
                 "import plugins into a qualified run"
             )
-        return snapshot
+        # The snapshot is a SUBSET of the digested bytes, never a second reading of the
+        # same files. Everything under the plugin directory is kept, not only the `.py`
+        # entry points: a plugin's YAML drives it, and a helper module it imports is
+        # served to the import machinery from here.
+        return {path: raw for path, raw in captured.items() if path.parent == self._plugins_dir}
 
     async def _start_locked(self) -> None:
         """Create exactly one subscription/task generation or roll it back."""
@@ -503,6 +584,48 @@ class PluginPipeline:
     # Загрузка / выгрузка плагинов
     # ------------------------------------------------------------------
 
+    def _import_measured_module(
+        self,
+        module_name: str,
+        path: Path,
+        source: bytes,
+        measured: dict[Path, bytes],
+    ) -> types.ModuleType:
+        """Import the measured bytes the way an ordinary import would.
+
+        The module is registered in `sys.modules` while its body runs, because that is
+        what a real import does and what a plain `@dataclass` needs in order to resolve
+        its own annotations. It is removed again if the body raises, so a half-executed
+        module is never left where the next import would find it.
+
+        The finder is installed only for the length of this import, and it serves only
+        the plugin package. A helper the plugin imports therefore comes from the same
+        measured bytes as the plugin, instead of from the path.
+        """
+
+        finder = _MeasuredPluginFinder(_MEASURED_PLUGIN_PACKAGE, self._plugins_dir, measured)
+        spec = importlib.util.spec_from_loader(
+            module_name,
+            _MeasuredBytesLoader(path, source),
+            origin=str(path),
+        )
+        if spec is None or spec.loader is None:  # pragma: no cover - spec_from_loader is total here
+            raise RuntimeError(f"measured plugin spec could not be built: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.meta_path.insert(0, finder)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(module_name, None)
+            raise
+        finally:
+            try:
+                sys.meta_path.remove(finder)
+            except ValueError:  # pragma: no cover - only if another owner removed it
+                pass
+        return module
+
     def _load_plugin(self, path: Path, *, measured: dict[Path, bytes] | None = None) -> bool:
         """Загрузить плагин из файла.
 
@@ -543,16 +666,14 @@ class PluginPipeline:
                 # recorded source size and modification time still agree -- which a
                 # same-size or same-second edit preserves. The qualification digest
                 # measures `.py` and deliberately excludes `.pyc`, so that stale bytecode
-                # would execute while both comparisons passed. Compiling the snapshot here
-                # is what makes the exclusion safe: no cache is consulted and none is
-                # written, because nothing goes through the import machinery.
+                # would execute while both comparisons passed. Loading the snapshot here is
+                # what makes the exclusion safe: no cache is consulted and none is written,
+                # because nothing resolves through a path.
                 source = measured.get(path)
                 if source is None:
                     logger.error("Плагин '%s' отсутствует в измеренном снимке: %s", plugin_id, path)
                     return False
-                module = types.ModuleType(module_name)
-                module.__file__ = str(path)
-                exec(compile(source, str(path), "exec"), module.__dict__)  # noqa: S102
+                module = self._import_measured_module(module_name, path, source, measured)
 
             plugin_cls: type[AnalyticsPlugin] | None = None
             for _name, obj in inspect.getmembers(module, inspect.isclass):
