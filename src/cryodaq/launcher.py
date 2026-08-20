@@ -1683,6 +1683,22 @@ class _EngineStderrAcquisitionOwner:
         self.settlement_state = _OwnerSettlementState.SETTLED
 
 
+def _engine_child_environment(base: Mapping[str, str]) -> dict[str, str]:
+    """Build the engine child's base environment.
+
+    Two stream properties are decided here rather than inherited. Output must not sit in
+    a buffer that a crash then discards, and the child must ENCODE in the encoding the
+    stderr pump DECODES. Without the second one, a host whose stream encoding is a
+    single-byte code page turns the engine's Russian diagnostics into replacement
+    characters, which loses exactly the explanation the pump exists to keep.
+    """
+
+    env = _without_soak_bridge_environment(base)
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def _pump_engine_stderr(
     pipe: IO[bytes] | _EngineStderrStreamOwner,
     stderr_logger: logging.Logger,
@@ -2704,8 +2720,7 @@ class LauncherWindow(QMainWindow):
                         python = str(pythonw)
                 cmd = [python, "-m", "cryodaq.engine"]
 
-        env = _without_soak_bridge_environment(os.environ)
-        env["PYTHONUNBUFFERED"] = "1"
+        env = _engine_child_environment(os.environ)
         engine_instance_id: str | None = None
         engine_shutdown_capability: str | None = None
         engine_ready_nonce: str | None = None
