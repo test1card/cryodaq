@@ -324,8 +324,25 @@ def test_child_environments_always_strip_launcher_only_descriptor_authority() ->
     assert child == {"SAFE": "1"}
     assert environment[launcher._SOAK_BRIDGE_FD_ENV] == "9"
 
+    # The engine's child environment is built by a named helper now, so the property is
+    # checked by RUNNING that helper rather than by counting one literal. Counting the
+    # literal was a proxy, and moving the call behind a function broke the proxy while
+    # leaving the property intact -- which is exactly the failure a proxy invites.
+    engine_child = launcher._engine_child_environment(environment)
+    assert launcher._SOAK_BRIDGE_FD_ENV not in engine_child
+    assert launcher._SOAK_BRIDGE_NONCE_ENV not in engine_child
+    assert engine_child["SAFE"] == "1"
+    assert environment[launcher._SOAK_BRIDGE_FD_ENV] == "9"
+
+    # Every child environment must still come from one of the two builders, never from a
+    # bare os.environ. Both forms count, so moving a spawn behind the helper is allowed
+    # and dropping the stripping altogether is not.
     source = Path("src/cryodaq/launcher.py").read_text(encoding="utf-8")
-    assert source.count("env = _without_soak_bridge_environment(os.environ)") >= 3
+    builders = source.count("env = _without_soak_bridge_environment(") + source.count(
+        "env = _engine_child_environment("
+    )
+    assert builders >= 3, builders
+    assert "env = _engine_child_environment(os.environ)" in source
 
 
 def test_bridge_pid_accessor_is_read_only_hint_and_never_a_process_handle() -> None:
