@@ -2747,7 +2747,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, interrupt_handler)
-        runner._PosixSoakRunner().run(evidence)
+        # Pass the profile this function selected. It used not to be passed at all, so the
+        # runner chose its own and a request for another profile was silently ignored.
+        runner._PosixSoakRunner().run(evidence, selected)
         return 0
     except RunInterrupted as exc:
         evidence.finish_fail(

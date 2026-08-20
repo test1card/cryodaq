@@ -125,6 +125,7 @@ _ARTIFACT_NONCE_ENV: Final = "CRYODAQ_SOAK_ARTIFACT_NONCE"
 _FRAME_PREFIX: Final = struct.Struct("!I")
 _ARTIFACT_IO_TIMEOUT_S: Final = 10.0
 _POST_ACK_HEALTH_TIMEOUT_S: Final = 40.0
+_LONG_SOAK_REPORT_INTERVAL_S: Final = 3600
 _SHORT_SOAK_NEXT_REPORT_MIN_S: Final = 450
 _SHORT_SOAK_NEXT_REPORT_MAX_S: Final = 600
 _SHORT_SOAK_THIRD_REPORT_FLOOR_S: Final = 1050
@@ -836,6 +837,43 @@ def _select_short_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
         ):
             return interval_s, next_offset_s
     raise _RunnerFoundationError("unable to align the reviewed short-soak report cadence")
+
+
+def _select_long_soak_report_schedule(now_epoch: float) -> tuple[int, int]:
+    """Choose the report cadence for a profile that is NOT the short one.
+
+    A SIBLING, not an edit to the short-soak chooser, and the reason is that the two want
+    opposite things. The short chooser solves a puzzle: find an interval whose FIRST
+    boundary lands 450-600 s into a 900-second run and whose SECOND lands at 1050 s or
+    later -- that is, exactly ONE report inside the run and the next one safely outside
+    it. A twelve-hour run wants no such reservation; it crosses many boundaries by itself
+    and the cadence only has to be sane.
+
+    Leaving the short chooser untouched is what makes the short profile behave IDENTICALLY
+    after this change, by construction rather than by testing.
+    """
+
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError("long-soak schedule epoch is invalid")
+    interval_s = _LONG_SOAK_REPORT_INTERVAL_S
+    next_offset_s = (-int(now_epoch)) % interval_s or interval_s
+    return interval_s, next_offset_s
+
+
+def _validate_long_soak_runtime_schedule(interval_s: int, now_epoch: float) -> int:
+    """Re-check the long cadence after startup, without the short run's reservation.
+
+    The short validator refuses unless the first boundary is still 395-700 s in and the
+    second still falls past 900 s, because startup latency can eat a 15-minute run's only
+    report. Nothing of that applies to a run measured in hours, so this checks the shape of
+    the numbers and nothing else -- it must not invent a refusal the run cannot deserve.
+    """
+
+    if type(interval_s) is not int or interval_s < 60 or interval_s > 86_400:
+        raise _RunnerFoundationError("long-soak report interval is invalid")
+    if isinstance(now_epoch, bool) or not isinstance(now_epoch, (int, float)) or not math.isfinite(now_epoch):
+        raise _RunnerFoundationError("long-soak runtime epoch is invalid")
+    return (-int(now_epoch)) % interval_s or interval_s
 
 
 def _validate_short_soak_runtime_schedule(interval_s: int, now_epoch: float) -> int:
@@ -3669,7 +3707,7 @@ class _PosixSoakRunner:
             return None
         return payload if type(payload) is dict else None
 
-    def run(self, evidence: Any) -> None:
+    def run(self, evidence: Any, selected: Any = None) -> None:
         self.require_platform()
         if self._used:
             raise _RunnerFoundationError("POSIX soak runner is single-use")
@@ -3708,15 +3746,29 @@ class _PosixSoakRunner:
 
         from scripts import soak_mock_stack as soak
 
-        selected = soak.profile("short")
-        if selected.name != "short":
-            raise _RunnerFoundationError("activation is restricted to the reviewed short profile")
+        # THE PROFILE NOW ARRIVES FROM THE CALLER, and until this change it did not arrive
+        # at all: `main()` computed one, used it to name the evidence directory, and then
+        # called a runner that chose its own. Defaulting to the short profile keeps every
+        # existing caller -- including two tests that call `run(evidence)` -- behaving
+        # exactly as before.
+        #
+        # The check that replaces the old one is STRICTER, not looser. It used to compare a
+        # name against the literal it had just asked for, which cannot fail unless
+        # `soak.profile` is replaced. This asks whether the object IS the registered
+        # profile, so a hand-built look-alike is refused as well.
+        if selected is None:
+            selected = soak.profile("short")
+        if selected is not soak.PROFILES.get(getattr(selected, "name", None)):
+            raise _RunnerFoundationError("soak profile is not one of the reviewed profiles")
         locked = _LockedPsutilObserver(psutil)
         owner_identity = locked.identity_for_pid(os.getpid())
         if locked.descendants(owner_identity, include_zombies=True):
             raise _RunnerFoundationError("qualification owner has unexpected live descendants")
         collector = _CleanShaCollector(_REPO_ROOT)
-        report_interval_s, report_boundary_offset_s = _select_short_soak_report_schedule(time.time())
+        if selected.name == "short":
+            report_interval_s, report_boundary_offset_s = _select_short_soak_report_schedule(time.time())
+        else:
+            report_interval_s, report_boundary_offset_s = _select_long_soak_report_schedule(time.time())
         sha = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=_REPO_ROOT,
@@ -3940,7 +3992,10 @@ class _PosixSoakRunner:
                             f"still missing: {missing}{detail}"
                         )
 
-                    _validate_short_soak_runtime_schedule(report_interval_s, time.time())
+                    if selected.name == "short":
+                        _validate_short_soak_runtime_schedule(report_interval_s, time.time())
+                    else:
+                        _validate_long_soak_runtime_schedule(report_interval_s, time.time())
 
                     start = time.monotonic()
                     next_sample = 0.0
