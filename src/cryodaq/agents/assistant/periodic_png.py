@@ -114,18 +114,24 @@ def _bounded_reason(cause: BaseException) -> str:
     return detail
 
 
-def _runtime_failed_text(cause: BaseException | None) -> str:
-    """The health text, with the cause when there is one.
+def _runtime_failed_text(cause: BaseException | None, because: str = "") -> str:
+    """The health text, with whatever is known about why.
 
-    The health record is what an operator reads, so the reason belongs in it and not only
-    in a log file that a support bundle may not carry.
+    The health record is what an operator reads, and what a support bundle carries, so the
+    reason belongs in it and not only in a log file. Four different situations published
+    the identical sentence, which made a run that failed once a second look like one fault
+    repeating rather than one BRANCH repeating.
     """
 
-    if cause is None:
-        return _RUNTIME_FAILED_TEXT
-    detail = _bounded_reason(cause)
-    named = f"{_RUNTIME_FAILED_TEXT}: {type(cause).__name__}"
-    return f"{named}: {detail}" if detail else named
+    parts = [_RUNTIME_FAILED_TEXT]
+    if because:
+        parts.append(because)
+    if cause is not None:
+        parts.append(type(cause).__name__)
+        detail = _bounded_reason(cause)
+        if detail:
+            parts.append(detail)
+    return ": ".join(parts)
 
 
 def _known_render_outcome(error_code: str) -> bool:
@@ -1802,7 +1808,7 @@ class PeriodicPngSupervisor:
                     self._release_leader()
                     return
                 if self._coordinator is None:
-                    await self._stop_then_mark_runtime_failed()
+                    await self._stop_then_mark_runtime_failed(because="no coordinator was constructed")
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
@@ -1813,7 +1819,12 @@ class PeriodicPngSupervisor:
                     self._release_leader()
                     return
                 if outcome == "failed":
-                    await self._stop_then_mark_runtime_failed()
+                    # The monitor already wrote a health code of its own before returning
+                    # here -- "periodic live source stopped unexpectedly" is the one seen on
+                    # the laboratory target -- and this used to overwrite it with a sentence
+                    # that named nothing. Say which branch this is, so the two can be told
+                    # apart in a run that repeats once a second.
+                    await self._stop_then_mark_runtime_failed(because="the monitor reported a failure")
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
@@ -1843,13 +1854,13 @@ class PeriodicPngSupervisor:
                     self._release_leader()
                     return
                 if self._coordinator is None:
-                    await self._stop_then_mark_runtime_failed()
+                    await self._stop_then_mark_runtime_failed(because="the coordinator went absent")
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
                     continue
                 if refreshed.config != self._coordinator.config:
-                    await self._stop_then_mark_runtime_failed()
+                    await self._stop_then_mark_runtime_failed(because="the configuration changed")
                     if not await self._try_construct_and_start(refreshed.config):
                         self._release_leader()
                         if self._stop_requested:
@@ -1947,7 +1958,7 @@ class PeriodicPngSupervisor:
             return True
         except asyncio.CancelledError as cancelled:
             try:
-                await self._stop_then_mark_runtime_failed()
+                await self._stop_then_mark_runtime_failed(because="construction was cancelled")
             except BaseException as cleanup_error:
                 raise cancelled from cleanup_error
             raise
@@ -1968,13 +1979,18 @@ class PeriodicPngSupervisor:
         if cleanup_error is not None:
             raise cleanup_error
 
-    async def _stop_then_mark_runtime_failed(self, cause: BaseException | None = None) -> None:
+    async def _stop_then_mark_runtime_failed(
+        self,
+        cause: BaseException | None = None,
+        *,
+        because: str = "",
+    ) -> None:
         cleanup_error: BaseException | None = None
         try:
             await self._stop_coordinator()
         except BaseException as exc:
             cleanup_error = exc
-        await self._write_runtime_failed_health(cause)
+        await self._write_runtime_failed_health(cause, because=because)
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -2077,18 +2093,24 @@ class PeriodicPngSupervisor:
         except Exception:
             return
 
-    async def _write_runtime_failed_health(self, cause: BaseException | None = None) -> None:
+    async def _write_runtime_failed_health(
+        self,
+        cause: BaseException | None = None,
+        *,
+        because: str = "",
+    ) -> None:
         # SAY WHAT WENT WRONG. This used to publish a fixed "periodic runtime is
         # unavailable" and discard the exception that caused it, so a runtime that could
         # not start left no way at all to find out why. Measured on the laboratory target:
         # the isolated soak flapped between ready and degraded_runtime once a second for a
         # whole run, no slot was ever allocated, no receipt was ever sealed, and the reason
         # existed only inside a swallowed exception.
-        if cause is not None:
+        if cause is not None or because:
             _log.error(
-                "periodic runtime could not start; type=%s detail=%s",
-                type(cause).__name__,
-                _bounded_reason(cause),
+                "periodic runtime is unavailable; because=%s type=%s detail=%s",
+                because or "unstated",
+                "none" if cause is None else type(cause).__name__,
+                "" if cause is None else _bounded_reason(cause),
             )
         try:
             state = await self._run_blocking(load_periodic_state, self._data_dir)
@@ -2099,7 +2121,7 @@ class PeriodicPngSupervisor:
                 state,
                 status="degraded_runtime",
                 code="periodic_runtime_failed",
-                text=_runtime_failed_text(cause),
+                text=_runtime_failed_text(cause, because),
                 now=now,
             )
             active = _active(state)
