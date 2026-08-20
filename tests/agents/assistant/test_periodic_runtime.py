@@ -1336,41 +1336,73 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
         await cache.stop()
 
 
-async def test_a_reading_carrying_a_descriptor_envelope_is_accepted() -> None:
-    """`zmq_bridge` attaches `desc` whenever it has a channel-descriptor envelope.
+def _published_reading_bytes(*, descriptor_envelope: bytes | None) -> bytes:
+    """Build a reading frame with the PRODUCTION packer.
 
-    The contract used to compare the key set with `!=`, so an ordinary reading with a
-    descriptor was refused exactly as hard as one missing a required field -- and the
-    refusal invalidates the whole generation. Measured on Ubuntu 22.04 on 2026-08-20,
-    after the topic fix, this became the most frequent reason the periodic source lost
-    authority.
+    Hand-building the payload is how producer and consumer drift apart without a test
+    noticing: the consumer's expectation gets written twice, once in production and once
+    in the test, and the producer is in neither. `_pack_reading` is what the engine
+    actually calls, so a rename or an omission there reddens this instead of reaching a
+    laboratory run.
     """
 
-    import msgpack
+    from datetime import UTC, datetime
 
-    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+    from cryodaq.core.zmq_bridge import _pack_reading
+    from cryodaq.drivers.base import ChannelStatus, Reading
 
-    payload = {
-        "ts": 1_700_000_000.0,
-        "iid": "ls",
-        "ch": "T2",
-        "v": 2.0,
-        "u": "K",
-        "st": "ok",
-        "raw": None,
-        "meta": {},
-        "transport": {
+    reading = Reading(
+        timestamp=datetime.fromtimestamp(1_700_000_000.0, tz=UTC),
+        instrument_id="ls",
+        channel="T2",
+        value=2.0,
+        unit="K",
+        status=ChannelStatus.OK,
+        raw=None,
+        metadata={},
+    )
+    return _pack_reading(
+        reading,
+        transport={
             "schema": "cryodaq.periodic.stream/v1",
             "session_id": "1" * 32,
             "sequence": 1,
             "persistence_authoritative": True,
         },
-        "desc": b"an opaque descriptor envelope",
-    }
-    transport, reading = SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
+        descriptor_envelope=descriptor_envelope,
+    )
+
+
+async def test_a_reading_carrying_a_descriptor_envelope_is_accepted() -> None:
+    """The publisher attaches `desc` whenever it has a channel-descriptor envelope.
+
+    Its own docstring calls that key additive and expects a consumer to ignore unknown
+    keys structurally. This consumer did not: it compared the key set with `!=`, so an
+    ordinary reading with a descriptor was refused exactly as hard as one missing a
+    required field -- and the refusal invalidates the whole generation.
+
+    Measured on Ubuntu 22.04 on 2026-08-20, after the topic fix removed the previous
+    dominant cause, this became the most frequent reason the source lost authority.
+    """
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    frame = _published_reading_bytes(descriptor_envelope=b"an opaque descriptor envelope")
+    transport, reading = SequencedPeriodicLiveSources._reading(frame)
 
     assert reading.channel == "T2"
     assert transport.sequence == 1
+
+
+async def test_a_reading_without_a_descriptor_is_still_accepted() -> None:
+    """The publisher omits the key entirely when it has nothing to attach."""
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    frame = _published_reading_bytes(descriptor_envelope=None)
+    _transport, reading = SequencedPeriodicLiveSources._reading(frame)
+
+    assert reading.channel == "T2"
 
 
 async def test_a_reading_missing_a_required_field_is_still_refused() -> None:
@@ -1381,17 +1413,12 @@ async def test_a_reading_missing_a_required_field_is_still_refused() -> None:
 
     from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
 
-    payload = {
-        "ts": 1_700_000_000.0,
-        "iid": "ls",
-        "ch": "T2",
-        "v": 2.0,
-        "u": "K",
-        "st": "ok",
-        "raw": None,
-        "meta": {},
-        # `transport` deliberately absent
-    }
+    # The production packer always writes the required keys, so this one is built by
+    # REMOVING a key from a real frame rather than by writing a payload from scratch.
+    frame = _published_reading_bytes(descriptor_envelope=None)
+    payload = msgpack.unpackb(frame, raw=False)
+    del payload["transport"]
+
     with _pytest.raises(ValueError, match="missing="):
         SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
 
@@ -1404,26 +1431,34 @@ async def test_an_unknown_field_is_refused_and_not_echoed() -> None:
 
     from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
 
-    payload = {
-        "ts": 1_700_000_000.0,
-        "iid": "ls",
-        "ch": "T2",
-        "v": 2.0,
-        "u": "K",
-        "st": "ok",
-        "raw": None,
-        "meta": {},
-        "transport": {
-            "schema": "cryodaq.periodic.stream/v1",
-            "session_id": "1" * 32,
-            "sequence": 1,
-            "persistence_authoritative": True,
-        },
-        "smuggled_secret_name": 1,
-    }
+    frame = _published_reading_bytes(descriptor_envelope=None)
+    payload = msgpack.unpackb(frame, raw=False)
+    payload["smuggled_secret_name"] = 1
+
     with _pytest.raises(ValueError) as raised:
         SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
 
     said = str(raised.value)
     assert "unexpected_key_count=1" in said
     assert "smuggled_secret_name" not in said, "an unknown key name reached the message"
+
+
+async def test_every_key_the_publisher_writes_is_known_to_this_consumer() -> None:
+    """The producer/consumer contract, checked in one place instead of two.
+
+    This is the drift itself: the publisher grew `desc` and the consumer's key set did
+    not. Asking the packer what it writes -- with and without the optional envelope --
+    makes a future addition redden here rather than in a laboratory run.
+    """
+
+    import msgpack
+
+    from cryodaq.agents.assistant import periodic_runtime
+
+    known = periodic_runtime._READING_REQUIRED_KEYS | periodic_runtime._READING_OPTIONAL_KEYS
+    for envelope in (None, b"an opaque descriptor envelope"):
+        written = set(msgpack.unpackb(_published_reading_bytes(descriptor_envelope=envelope), raw=False))
+        unknown = sorted(written - known)
+        assert not unknown, f"the publisher writes keys this consumer refuses: {unknown}"
+        missing = sorted(periodic_runtime._READING_REQUIRED_KEYS - written)
+        assert not missing, f"the consumer requires keys the publisher does not write: {missing}"
