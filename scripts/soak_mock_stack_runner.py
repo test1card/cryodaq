@@ -117,7 +117,10 @@ os.close(release_fd)
 _MAX_START_IDENTITY_BYTES: Final = 128
 _BRIDGE_HANDSHAKE_SCHEMA: Final = "cryodaq.soak.bridge-identity"
 _BRIDGE_DATA_SCHEMA: Final = "cryodaq.soak.bridge-data"
-_BRIDGE_HANDSHAKE_VERSION: Final = 1
+_BRIDGE_TURNOVER_SCHEMA: Final = "cryodaq.soak.bridge-turnover"
+# Version 2 adds the turnover record. Both ends ship in one commit, so a mismatch here
+# means a stale reader, which must refuse loudly rather than misread the stream.
+_BRIDGE_HANDSHAKE_VERSION: Final = 2
 _MAX_BRIDGE_HANDSHAKE_BYTES: Final = 512
 _BRIDGE_FD_ENV: Final = "CRYODAQ_SOAK_BRIDGE_FD"
 _BRIDGE_NONCE_ENV: Final = "CRYODAQ_SOAK_BRIDGE_NONCE"
@@ -1628,6 +1631,25 @@ class _BridgeDataRecord:
     sequence: int
 
 
+@dataclass(frozen=True, slots=True)
+class _BridgeTurnoverRecord:
+    """One announced, continuous replacement of the launcher's bridge.
+
+    An engine restart replaces the bridge on purpose -- a new child must not inherit an old
+    transport -- so the accepted epoch has to be able to move. It moves only across a record
+    that names the retired identity and a restart count exactly one higher; anything else is
+    still an unexplained change and still terminal.
+    """
+
+    nonce: str
+    launcher_pid: int
+    retired_bridge_pid: int
+    retired_restart_count: int
+    bridge_pid: int
+    restart_count: int
+    sequence: int
+
+
 class _BridgeHandshakePipe:
     """Runner-owned POSIX one-shot pipe; it grants no evidence acceptance."""
 
@@ -2550,7 +2572,7 @@ def _bind_positive_assistant_identity(
 
 
 def _bind_positive_bridge_identity(
-    record: _BridgeHandshakeRecord,
+    record: _BridgeHandshakeRecord | _BridgeTurnoverRecord,
     observation: _BridgeProcessObservation,
 ) -> _ProcessIdentity:
     """Bind reported PID to one positive direct-child observer identity."""
@@ -2594,6 +2616,23 @@ class _BridgeEpochGuard:
         if type(restart_count) is not int or identity != self._identity or restart_count != self._restart_count:
             self._terminal = True
             raise _RunnerFoundationError("bridge PID/start identity changed or restarted")
+
+    def advance(self, identity: _ProcessIdentity, *, restart_count: int, retired_restart_count: int) -> None:
+        """Accept one announced replacement. A gap or a repeat is still terminal."""
+
+        if self._terminal:
+            raise _RunnerFoundationError("bridge epoch guard is terminal")
+        if (
+            type(restart_count) is not int
+            or type(retired_restart_count) is not int
+            or retired_restart_count != self._restart_count
+            or restart_count != self._restart_count + 1
+            or identity == self._identity
+        ):
+            self._terminal = True
+            raise _RunnerFoundationError("bridge turnover does not continue the accepted epoch")
+        self._identity = identity
+        self._restart_count = restart_count
 
 
 def _parse_bridge_handshake(
@@ -2642,22 +2681,167 @@ def _parse_bridge_handshake(
     return _BridgeHandshakeRecord(nonce, launcher_pid, bridge_pid, restart_count)
 
 
-def _parse_bridge_data(
+@dataclass(frozen=True, slots=True)
+class _BridgeEpoch:
+    """The bridge incarnation the runner currently accepts evidence about."""
+
+    bridge_pid: int
+    restart_count: int
+    sequence: int
+
+
+def _consume_bridge_stream_record(
+    raw: bytes,
+    *,
+    nonce: str,
+    launcher_pid: int,
+    epoch: _BridgeEpoch,
+    locked: object,
+    guard: _BridgeEpochGuard | None,
+) -> _BridgeEpoch:
+    """Fold one record into the accepted epoch, or refuse.
+
+    A data fact only advances the sequence. A turnover moves the whole epoch, and it does
+    so only after the SAME positive observation the first bridge had to pass: the named
+    process must be alive, carry the bridge role, and belong to this launcher. A record
+    that says the bridge changed is not itself proof that it changed legitimately.
+    """
+
+    record = _parse_bridge_stream_record(
+        raw,
+        expected_nonce=nonce,
+        expected_launcher_pid=launcher_pid,
+        expected_bridge_pid=epoch.bridge_pid,
+        expected_restart_count=epoch.restart_count,
+        after_sequence=epoch.sequence,
+    )
+    if type(record) is _BridgeTurnoverRecord:
+        observation = locked.observe_bridge(record.bridge_pid, expected_launcher_pid=launcher_pid)
+        identity = _bind_positive_bridge_identity(record, observation)
+        if guard is not None:
+            guard.advance(
+                identity,
+                restart_count=record.restart_count,
+                retired_restart_count=record.retired_restart_count,
+            )
+        return _BridgeEpoch(record.bridge_pid, record.restart_count, record.sequence)
+    if guard is not None:
+        guard.observe(locked.identity_for_pid(record.bridge_pid), restart_count=record.restart_count)
+    return _BridgeEpoch(epoch.bridge_pid, epoch.restart_count, record.sequence)
+
+
+def _parse_bridge_stream_record(
     payload: bytes,
     *,
     expected_nonce: str,
     expected_launcher_pid: int,
     expected_bridge_pid: int,
+    expected_restart_count: int,
+    after_sequence: int,
+) -> _BridgeDataRecord | _BridgeTurnoverRecord:
+    """Parse one bounded record of the launcher's bridge stream, against the live epoch.
+
+    Two kinds share the stream and one sequence, so ordering between them is total: an
+    observed-data fact about the accepted bridge, and a turnover announcing the next one.
+    """
+
+    if not payload or len(payload) > _MAX_BRIDGE_HANDSHAKE_BYTES or not payload.endswith(b"\n"):
+        raise _RunnerFoundationError("bridge stream record is incomplete or oversized")
+    try:
+        value = json.loads(payload[:-1].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _RunnerFoundationError("bridge stream record is not canonical JSON") from exc
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+    if type(value) is not dict or canonical != payload:
+        raise _RunnerFoundationError("bridge stream record schema is invalid")
+    schema = value.get("schema")
+    if schema == _BRIDGE_TURNOVER_SCHEMA:
+        return _parse_bridge_turnover(
+            value,
+            expected_nonce=expected_nonce,
+            expected_launcher_pid=expected_launcher_pid,
+            expected_bridge_pid=expected_bridge_pid,
+            expected_restart_count=expected_restart_count,
+            after_sequence=after_sequence,
+        )
+    return _parse_bridge_data(
+        value,
+        expected_nonce=expected_nonce,
+        expected_launcher_pid=expected_launcher_pid,
+        expected_bridge_pid=expected_bridge_pid,
+        expected_restart_count=expected_restart_count,
+        after_sequence=after_sequence,
+    )
+
+
+def _parse_bridge_turnover(
+    value: dict[str, object],
+    *,
+    expected_nonce: str,
+    expected_launcher_pid: int,
+    expected_bridge_pid: int,
+    expected_restart_count: int,
+    after_sequence: int,
+) -> _BridgeTurnoverRecord:
+    """Parse one announced replacement, and refuse anything that is not continuous."""
+
+    expected = {
+        "schema",
+        "version",
+        "nonce",
+        "launcher_pid",
+        "retired_bridge_pid",
+        "retired_restart_count",
+        "bridge_pid",
+        "restart_count",
+        "sequence",
+    }
+    if set(value) != expected:
+        raise _RunnerFoundationError("bridge turnover schema is invalid")
+    sequence = value["sequence"]
+    bridge_pid = value["bridge_pid"]
+    restart_count = value["restart_count"]
+    if (
+        type(value["version"]) is not int
+        or value["version"] != _BRIDGE_HANDSHAKE_VERSION
+        or value["nonce"] != expected_nonce
+        or value["launcher_pid"] != expected_launcher_pid
+        or value["retired_bridge_pid"] != expected_bridge_pid
+        or type(value["retired_restart_count"]) is not int
+        or value["retired_restart_count"] != expected_restart_count
+        or isinstance(bridge_pid, bool)
+        or type(bridge_pid) is not int
+        or bridge_pid <= 0
+        or bridge_pid == expected_launcher_pid
+        or bridge_pid == expected_bridge_pid
+        or type(restart_count) is not int
+        or restart_count != expected_restart_count + 1
+        or type(sequence) is not int
+        or sequence <= after_sequence
+    ):
+        raise _RunnerFoundationError("bridge turnover does not continue the accepted epoch")
+    return _BridgeTurnoverRecord(
+        expected_nonce,
+        expected_launcher_pid,
+        expected_bridge_pid,
+        expected_restart_count,
+        bridge_pid,
+        restart_count,
+        sequence,
+    )
+
+
+def _parse_bridge_data(
+    value: dict[str, object],
+    *,
+    expected_nonce: str,
+    expected_launcher_pid: int,
+    expected_bridge_pid: int,
+    expected_restart_count: int,
     after_sequence: int,
 ) -> _BridgeDataRecord:
     """Parse one bounded launcher-observed bridge-data fact."""
 
-    if not payload or len(payload) > _MAX_BRIDGE_HANDSHAKE_BYTES or not payload.endswith(b"\n"):
-        raise _RunnerFoundationError("bridge data fact is incomplete or oversized")
-    try:
-        value = json.loads(payload[:-1].decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise _RunnerFoundationError("bridge data fact is not canonical JSON") from exc
     expected = {
         "schema",
         "version",
@@ -2667,8 +2851,7 @@ def _parse_bridge_data(
         "restart_count",
         "sequence",
     }
-    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
-    if type(value) is not dict or set(value) != expected or canonical != payload:
+    if set(value) != expected:
         raise _RunnerFoundationError("bridge data fact schema is invalid")
     sequence = value["sequence"]
     if (
@@ -2679,7 +2862,7 @@ def _parse_bridge_data(
         or value["launcher_pid"] != expected_launcher_pid
         or value["bridge_pid"] != expected_bridge_pid
         or type(value["restart_count"]) is not int
-        or value["restart_count"] != 1
+        or value["restart_count"] != expected_restart_count
         or type(sequence) is not int
         or sequence <= after_sequence
     ):
@@ -2688,7 +2871,7 @@ def _parse_bridge_data(
         expected_nonce,
         expected_launcher_pid,
         expected_bridge_pid,
-        1,
+        expected_restart_count,
         sequence,
     )
 
@@ -3938,19 +4121,21 @@ class _PosixSoakRunner:
                                 )
                                 bridge_identity = _bind_positive_bridge_identity(handshake, bridge_observation)
                                 bridge_guard = _BridgeEpochGuard(bridge_identity, handshake.restart_count)
+                                bridge_epoch = _BridgeEpoch(handshake.bridge_pid, handshake.restart_count, 0)
                                 bridge = soak.ProcessIdentity(
                                     bridge_identity.pid,
                                     int(bridge_identity.start_identity.rsplit("=", 1)[1]),
                                 )
                             else:
-                                data = _parse_bridge_data(
+                                bridge_epoch = _consume_bridge_stream_record(
                                     raw,
-                                    expected_nonce=handshake.nonce,
-                                    expected_launcher_pid=process.pid,
-                                    expected_bridge_pid=handshake.bridge_pid,
-                                    after_sequence=bridge_sequence,
+                                    nonce=handshake.nonce,
+                                    launcher_pid=process.pid,
+                                    epoch=bridge_epoch,
+                                    locked=locked,
+                                    guard=None,
                                 )
-                                bridge_sequence = data.sequence
+                                bridge_sequence = bridge_epoch.sequence
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
@@ -3998,18 +4183,15 @@ class _PosixSoakRunner:
                         now = time.monotonic()
                         elapsed = now - start
                         for raw in self._pipe_records(bridge_pipe, bridge_buffer):
-                            data = _parse_bridge_data(
+                            bridge_epoch = _consume_bridge_stream_record(
                                 raw,
-                                expected_nonce=handshake.nonce,
-                                expected_launcher_pid=process.pid,
-                                expected_bridge_pid=handshake.bridge_pid,
-                                after_sequence=bridge_sequence,
+                                nonce=handshake.nonce,
+                                launcher_pid=process.pid,
+                                epoch=bridge_epoch,
+                                locked=locked,
+                                guard=bridge_guard,
                             )
-                            bridge_sequence = data.sequence
-                            bridge_guard.observe(
-                                locked.identity_for_pid(data.bridge_pid),
-                                restart_count=data.restart_count,
-                            )
+                            bridge_sequence = bridge_epoch.sequence
                         if elapsed >= next_sample or (
                             event_index < len(selected.events) and elapsed >= selected.events[event_index].at_s
                         ):
@@ -4116,14 +4298,20 @@ class _PosixSoakRunner:
                             replacement_tree = None
                             while time.monotonic() < recovery_deadline:
                                 for raw in self._pipe_records(bridge_pipe, bridge_buffer):
-                                    data = _parse_bridge_data(
+                                    # An ENGINE fault reaches recovery only through a NEW
+                                    # data fact, and the engine's replacement replaces the
+                                    # bridge on its way. Without the turnover this drain
+                                    # quarantined the stream and the sequence could never
+                                    # advance again -- so the engine "never recovered".
+                                    bridge_epoch = _consume_bridge_stream_record(
                                         raw,
-                                        expected_nonce=handshake.nonce,
-                                        expected_launcher_pid=process.pid,
-                                        expected_bridge_pid=handshake.bridge_pid,
-                                        after_sequence=bridge_sequence,
+                                        nonce=handshake.nonce,
+                                        launcher_pid=process.pid,
+                                        epoch=bridge_epoch,
+                                        locked=locked,
+                                        guard=bridge_guard,
                                     )
-                                    bridge_sequence = data.sequence
+                                    bridge_sequence = bridge_epoch.sequence
                                 try:
                                     candidate, candidate_tree = self._load_roles(broad, launcher, bridge)
                                 except ValueError:

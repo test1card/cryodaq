@@ -133,8 +133,12 @@ def test_parser_rejects_noncanonical_or_unexpected_record_without_pid_eliminatio
             )
 
 
-def test_bridge_data_parser_requires_exact_epoch_and_monotonic_sequence() -> None:
-    value = {
+def _encode(value: dict) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def _data_record(**changes) -> dict:
+    return {
         "schema": runner._BRIDGE_DATA_SCHEMA,
         "version": runner._BRIDGE_HANDSHAKE_VERSION,
         "nonce": "a" * 64,
@@ -142,29 +146,108 @@ def test_bridge_data_parser_requires_exact_epoch_and_monotonic_sequence() -> Non
         "bridge_pid": 101,
         "restart_count": 1,
         "sequence": 2,
+        **changes,
     }
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-    assert (
-        runner._parse_bridge_data(
-            payload,
-            expected_nonce="a" * 64,
-            expected_launcher_pid=100,
-            expected_bridge_pid=101,
-            after_sequence=1,
-        ).sequence
-        == 2
+
+
+def _turnover_record(**changes) -> dict:
+    return {
+        "schema": runner._BRIDGE_TURNOVER_SCHEMA,
+        "version": runner._BRIDGE_HANDSHAKE_VERSION,
+        "nonce": "a" * 64,
+        "launcher_pid": 100,
+        "retired_bridge_pid": 101,
+        "retired_restart_count": 1,
+        "bridge_pid": 202,
+        "restart_count": 2,
+        "sequence": 2,
+        **changes,
+    }
+
+
+def _read(payload: bytes, *, bridge_pid: int = 101, restart_count: int = 1, after: int = 1):
+    return runner._parse_bridge_stream_record(
+        payload,
+        expected_nonce="a" * 64,
+        expected_launcher_pid=100,
+        expected_bridge_pid=bridge_pid,
+        expected_restart_count=restart_count,
+        after_sequence=after,
     )
+
+
+def test_bridge_data_parser_requires_exact_epoch_and_monotonic_sequence() -> None:
+    assert _read(_encode(_data_record())).sequence == 2
     for changes in ({"sequence": 1}, {"bridge_pid": 102}, {"restart_count": 2}, {"nonce": "b" * 64}):
-        attack = {**value, **changes}
-        encoded = json.dumps(attack, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         with pytest.raises(runner._RunnerFoundationError):
-            runner._parse_bridge_data(
-                encoded,
-                expected_nonce="a" * 64,
-                expected_launcher_pid=100,
-                expected_bridge_pid=101,
-                after_sequence=1,
-            )
+            _read(_encode(_data_record(**changes)))
+
+
+def test_a_turnover_is_accepted_only_when_it_continues_the_accepted_epoch() -> None:
+    """The pin is not loosened; the epoch moves, and only by exactly one.
+
+    An engine restart replaces the bridge on purpose, so the accepted epoch has to be able
+    to move or the stream quarantines on the first legitimate replacement and the run loses
+    every later fact. What must NOT become possible is an unexplained change: a turnover
+    that skips a count, repeats one, forgets which bridge it retired, or names the same
+    process again is still terminal.
+    """
+
+    accepted = _read(_encode(_turnover_record()))
+    assert type(accepted) is runner._BridgeTurnoverRecord
+    assert (accepted.bridge_pid, accepted.restart_count, accepted.sequence) == (202, 2, 2)
+
+    for changes in (
+        {"restart_count": 3},  # a gap
+        {"restart_count": 1},  # a repeat
+        {"retired_restart_count": 2},  # retires a count that was never accepted
+        {"retired_bridge_pid": 999},  # retires a bridge that was never accepted
+        {"bridge_pid": 101},  # the same process, renamed as a replacement
+        {"bridge_pid": 100},  # the launcher itself
+        {"bridge_pid": -1},
+        {"bridge_pid": True},
+        {"sequence": 1},  # out of order against the shared sequence
+        {"nonce": "b" * 64},
+        {"version": 1},  # a stale writer must be refused, not misread
+    ):
+        with pytest.raises(runner._RunnerFoundationError):
+            _read(_encode(_turnover_record(**changes)))
+
+
+def test_after_a_turnover_the_old_bridge_can_no_longer_speak() -> None:
+    """Evidence must belong to exactly one process, before and after the change."""
+
+    accepted = _read(_encode(_turnover_record()))
+    with pytest.raises(runner._RunnerFoundationError):
+        _read(
+            _encode(_data_record(sequence=3)),
+            bridge_pid=accepted.bridge_pid,
+            restart_count=accepted.restart_count,
+            after=accepted.sequence,
+        )
+    survivor = _read(
+        _encode(_data_record(bridge_pid=202, restart_count=2, sequence=3)),
+        bridge_pid=accepted.bridge_pid,
+        restart_count=accepted.restart_count,
+        after=accepted.sequence,
+    )
+    assert survivor.sequence == 3
+
+
+def test_the_epoch_guard_advances_by_one_and_refuses_anything_else() -> None:
+    first = runner._ProcessIdentity(101, "linux:start=1.0")
+    second = runner._ProcessIdentity(202, "linux:start=2.0")
+    guard = runner._BridgeEpochGuard(first, 1)
+    guard.advance(second, restart_count=2, retired_restart_count=1)
+    guard.observe(second, restart_count=2)
+    with pytest.raises(runner._RunnerFoundationError):
+        guard.observe(first, restart_count=1)
+
+    fresh = runner._BridgeEpochGuard(first, 1)
+    with pytest.raises(runner._RunnerFoundationError):
+        fresh.advance(second, restart_count=3, retired_restart_count=1)
+    with pytest.raises(runner._RunnerFoundationError):
+        runner._BridgeEpochGuard(first, 1).advance(first, restart_count=2, retired_restart_count=1)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows activation refusal")
