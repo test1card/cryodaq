@@ -368,6 +368,85 @@ def test_the_scheduled_restart_actually_reaches_the_spawn() -> None:
     assert "restart remains in HOLD" not in message, message
 
 
+def test_a_replacement_that_dies_before_readiness_schedules_another_try() -> None:
+    """One retry is not "retrying forever", and that is where it stopped.
+
+    When the REPLACEMENT engine exits before readiness, _start_engine raises with the new
+    handle still held. _recover_failed_engine_restart then called _stop_engine, which
+    cannot get a shutdown receipt out of a child that is already terminal, so it raised,
+    and that raise latched a permanent HOLD. A recurring startup crash -- or a
+    configuration error hit during the replacement attempt -- therefore stopped an
+    unattended run after exactly one retry.
+
+    A child we watched die is settled, not asked to stop. This drives the real recovery
+    entry point and requires it to schedule another attempt.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    # The state after a failed replacement: a new handle, already terminal.
+    launcher._engine_proc = SimpleNamespace(poll=lambda: calls.append("poll") or 1)
+    launcher._restart_pending = True
+    launcher._stop_engine = lambda: calls.append("stop_engine")
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        rescheduled = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+    assert rescheduled is True, "recovery must schedule another attempt, not give up"
+    assert "stop_engine" not in calls, "a terminal child must not be asked for a shutdown receipt"
+    assert launcher._engine_unsettled_incarnation is None
+    assert launcher._restart_giving_up is False
+    assert launcher._restart_pending is True
+    single_shot.assert_called_once()
+
+
+def test_a_replacement_still_alive_is_asked_to_stop_as_before() -> None:
+    """The other half of the same branch, so the change stays a distinction and not a hole.
+
+    A replacement that is still RUNNING when readiness fails has no observed exit, so it
+    still goes through _stop_engine, which owns the bounded shutdown and its receipt.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: None)
+    launcher._restart_pending = True
+    launcher._stop_engine = lambda: calls.append("stop_engine")
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot"),
+    ):
+        LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+    assert "stop_engine" in calls, "a live child must still be asked to stop"
+
+
 def test_a_lost_handle_keeps_its_authority_published() -> None:
     """Retiring identity is for an exit we WATCHED, never for one we did not.
 

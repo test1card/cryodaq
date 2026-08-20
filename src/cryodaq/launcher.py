@@ -3368,6 +3368,29 @@ class LauncherWindow(QMainWindow):
         )
         self.close()
 
+    def _settle_observed_engine_exit(self, *, owner_id: str, returncode: int | None, phase: str) -> bool:
+        """Finish with an incarnation whose exit was observed. True if it settled.
+
+        Three steps that must not drift apart, and did: settle the crashed child's readers
+        or HOLD, release the handle, then retire the identity. Two callers need exactly
+        this -- the crash handler, and the recovery path for a REPLACEMENT that died before
+        readiness -- so they share it rather than each keeping their own copy.
+        """
+
+        if not LauncherWindow._settle_crashed_engine_readers_or_hold(
+            self,
+            owner_id=owner_id,
+            returncode=returncode,
+            phase=phase,
+        ):
+            return False
+        self._engine_proc = None
+        if getattr(self, "_replay_source", None) is not None:
+            LauncherWindow._reset_replay_readiness_authority(self)
+        else:
+            LauncherWindow._retire_observed_engine_incarnation(self)
+        return True
+
     def _retire_observed_engine_incarnation(self) -> None:
         """Release the identity of an incarnation whose exit was observed.
 
@@ -3823,10 +3846,37 @@ class LauncherWindow(QMainWindow):
             self._replay_session_verified = False
         settlement_errors: dict[str, Exception] = {}
         if child_start_attempted:
-            try:
-                self._stop_engine()
-            except Exception as exc:
-                settlement_errors["engine_child"] = exc
+            # A REPLACEMENT that exited before readiness is a child we watched die, not one
+            # we have to ask to stop. _stop_engine cannot get a shutdown receipt out of a
+            # terminal child, so it raised, and that raise latched a permanent HOLD -- which
+            # meant a recurring startup crash still stopped an unattended run after exactly
+            # one retry. Owner, 2026-08-20: "программа ВЕРНЕТСЯ". So an observed exit takes
+            # the observed-exit route here too, and only a LIVE child is asked to stop.
+            replacement = getattr(self, "_engine_proc", None)
+            replacement_code = None if replacement is None else replacement.poll()
+            if replacement is not None and replacement_code is not None:
+                owner = (
+                    getattr(self, "_replay_session_id", None)
+                    if getattr(self, "_replay_source", None) is not None
+                    else getattr(self, "_engine_instance_id", None)
+                )
+                if type(owner) is not str:
+                    owner = "<unknown>"
+                try:
+                    if not LauncherWindow._settle_observed_engine_exit(
+                        self,
+                        owner_id=owner,
+                        returncode=replacement_code,
+                        phase=f"{phase}-replacement-exit",
+                    ):
+                        settlement_errors["engine_child"] = RuntimeError("replacement engine readers did not settle")
+                except Exception as exc:
+                    settlement_errors["engine_child"] = exc
+            else:
+                try:
+                    self._stop_engine()
+                except Exception as exc:
+                    settlement_errors["engine_child"] = exc
         if settle_bridge:
             try:
                 self._bridge.shutdown()
@@ -5684,20 +5734,15 @@ class LauncherWindow(QMainWindow):
             )
             if type(owner_id) is not str:
                 owner_id = "<unknown>"
-            if not LauncherWindow._settle_crashed_engine_readers_or_hold(
+            # No restart is scheduled here, but the operator is told to fix the files and
+            # press the restart button, and that button reaches the same spawn preflight.
+            if not LauncherWindow._settle_observed_engine_exit(
                 self,
                 owner_id=owner_id,
                 returncode=returncode,
                 phase="config-error",
             ):
                 return
-            self._engine_proc = None
-            if getattr(self, "_replay_source", None) is not None:
-                LauncherWindow._reset_replay_readiness_authority(self)
-            else:
-                # No restart is scheduled here, but the operator is told to fix the files
-                # and press the restart button, and that button reaches the same preflight.
-                LauncherWindow._retire_observed_engine_incarnation(self)
             if not self._config_error_modal_shown:
                 self._config_error_modal_shown = True
             self._show_engine_down_banner(
@@ -5737,18 +5782,13 @@ class LauncherWindow(QMainWindow):
         )
         if type(owner_id) is not str:
             owner_id = "<unknown>"
-        if not LauncherWindow._settle_crashed_engine_readers_or_hold(
+        if not LauncherWindow._settle_observed_engine_exit(
             self,
             owner_id=owner_id,
             returncode=returncode,
             phase="retryable-exit",
         ):
             return
-        self._engine_proc = None
-        if getattr(self, "_replay_source", None) is not None:
-            LauncherWindow._reset_replay_readiness_authority(self)
-        else:
-            LauncherWindow._retire_observed_engine_incarnation(self)
 
         tray = getattr(self, "_tray", None)
         if tray is not None and tray.isVisible():
