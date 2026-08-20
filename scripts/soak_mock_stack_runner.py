@@ -143,7 +143,17 @@ if os.read(gate_fd, 1) != b"G":
 os.close(gate_fd)
 os.execve("/proc/self/exe", sys.argv[2:], os.environ)
 """
-_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_1"
+# LS218_2 rather than LS218_1, and the difference is the whole point: the engine
+# REFUSES to start a SafetyManager with no critical channel, and refuses again when a
+# declared channel is not classified safety-critical by its own descriptor. Every one
+# of LS218_1's sixteen descriptors is observational, so no declaration could satisfy
+# both, and the fixture could not start the engine at all. LS218_2 is the SAME driver
+# (lakeshore_218s), the same passive measurement authority, and the same reviewed
+# cardinality of sixteen descriptors and sixteen bindings, and it carries TWO
+# safety_critical_input channels. Nothing reviewed is loosened and no classification is
+# fabricated; the fixture simply uses the tracked instrument that has what the startup
+# path requires.
+_ISOLATED_MOCK_INSTRUMENT_NAME: Final = "LS218_2"
 _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
 # The launcher resolves a theme at IMPORT time, so a config root without the theme
 # packs kills the source stack before any of it runs. Measured on Ubuntu 22.04.5:
@@ -155,14 +165,9 @@ _ISOLATED_TRACKED_CONFIG_FILES: Final = ("channels.yaml",)
 # set exists to provide; they are colours.
 _ISOLATED_TRACKED_CONFIG_DIRS: Final = ("themes",)
 _ISOLATED_STATIC_CONFIGS: Final = (
-    ("safety.yaml", "critical_channels:\n  - '.*'\nrequire_keithley_for_run: false\nkeithley_channels: []\n"),
     ("interlocks.yaml", "interlocks: []\n"),
     ("alarms_v3.yaml", "{}\n"),
     ("housekeeping.yaml", "{}\n"),
-    (
-        "physical_alarms.yaml",
-        "cooldown:\n  enabled: false\nvacuum:\n  enabled: false\n  escalate_to_safety: false\n",
-    ),
     ("plugins.yaml", "{}\n"),
     ("cooldown.yaml", "{}\n"),
 )
@@ -298,9 +303,11 @@ def _copy_running_executable(expected: Path, destination: Path) -> str:
     return captured
 
 
-def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[str, str]:
+def _controlled_test_environment(
+    repo_root: Path, site_packages: Path, *, runtime_library_dir: Path | None = None
+) -> dict[str, str]:
     root = Path(repo_root).resolve()
-    return {
+    environment = {
         "HOME": "/nonexistent",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -314,6 +321,22 @@ def _controlled_test_environment(repo_root: Path, site_packages: Path) -> dict[s
         "XDG_CACHE_HOME": "/nonexistent",
         "XDG_CONFIG_HOME": "/nonexistent",
     }
+    # This stage COPIES the interpreter into the snapshot, and a relocated interpreter
+    # cannot use the run-paths that were relative to where it used to live. The first
+    # extension module that needs the C++ runtime then loads the SYSTEM one, and every
+    # library loaded afterwards is stuck with it. Measured on Ubuntu 22.04.5 with a
+    # conda interpreter: `import zmq` then `import sqlite3` raises
+    #   ImportError: /lib/x86_64-linux-gnu/libstdc++.so.6: version `CXXABI_1.3.15'
+    #   not found (required by <prefix>/lib/libicui18n.so.78)
+    # and collection of the exact-six module fails with it, while either import alone
+    # succeeds. Naming the interpreter's OWN library directory removes the ambiguity;
+    # the value is derived from the interpreter, never inherited from the caller, so
+    # the environment stays closed.
+    if runtime_library_dir is not None:
+        resolved_library_dir = Path(runtime_library_dir).resolve()
+        if resolved_library_dir.is_dir():
+            environment["LD_LIBRARY_PATH"] = str(resolved_library_dir)
+    return environment
 
 
 def _controlled_git_environment() -> dict[str, str]:
@@ -361,6 +384,34 @@ def _source_environment(
         **bridge_grant,
         **artifact_grant,
     }
+
+
+def _engine_critical_channel_ids(descriptors: list[dict]) -> list[str]:
+    """The channels the ENGINE will treat as critical, by the engine's own rule.
+
+    THE RULE IS COPIED FROM PRODUCTION, NOT INVENTED HERE, and the previous version of
+    this derivation did not match it. `safety_pattern_liveness.py` builds
+    `critical_manifest_ids` from descriptors whose **quantity is `temperature`** AND whose
+    safety class is `safety_critical_input`, then refuses when the declared set is not
+    exactly that set. It applies NO role test.
+
+    What the earlier filter did instead: it tested `safety_class` and excluded the
+    `source_readback` role. That role test is a NO-OP -- `descriptors.py` refuses any
+    descriptor that is `source_readback` without the `hazardous_source_readback` class, so
+    a channel can never be both `source_readback` and `safety_critical_input` -- and the
+    `quantity` test, the one that decides, was missing. The two agreed only because both of
+    LS218_2's safety-critical descriptors happen to be temperature (measured: Т11 and Т12,
+    both `quantity=temperature`, both `role=primary_measurement`). A non-temperature
+    safety-critical descriptor added later would have been OVER-declared, the engine's
+    union check would have fired, and the engine would have refused to start -- after the
+    fixture's own test had said it could.
+    """
+
+    return sorted(
+        item["channel_id"]
+        for item in descriptors
+        if item.get("quantity") == "temperature" and item.get("safety_class") == "safety_critical_input"
+    )
 
 
 def _materialize_isolated_mock_config(
@@ -514,6 +565,52 @@ asyncio.run(probe())
         raise _RunnerFoundationError("tracked passive soak descriptor bindings do not match")
     (config_dir / "channel_descriptors.yaml").write_text(
         yaml.safe_dump(descriptor_manifest, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    # `critical_channels` entries are EXACT canonical identities, not patterns:
+    # `_resolve_critical_bindings` does `if channel_id not in storage_catalog.by_channel_id`.
+    # The fixture used to declare the literal string ".*", meaning "everything", and no
+    # channel has that identity, so the engine refused to start at its boot-time safety
+    # liveness check -- the F-1 silent-safety-kill guard doing exactly its job. Measured on
+    # Ubuntu 22.04.5: the launcher started, the engine died before its readiness receipt,
+    # and the reason was
+    #   Dead safety/alarm channel pattern(s): 1 match NO channel on the plane their
+    #   consumer sees ... pattern='.*' source=safety.yaml critical_channels
+    # Deriving the list from the roster keeps the original intent -- every channel is
+    # critical -- and cannot drift from the descriptors the same call just wrote. For this
+    # fixture it is the two channels LS218_2 carries as safety-critical inputs; it was the
+    # EMPTY set while the fixture used LS218_1, whose sixteen descriptors are all
+    # observational, and an empty list is refused outright by the engine. Derived rather
+    # than assumed either way: a safety-critical descriptor added later is declared
+    # automatically, and one removed stops being declared.
+    critical_channels = _engine_critical_channel_ids(descriptor_manifest["descriptors"])
+    # The physical-alarms document is taken from the tracked base and then DISARMED,
+    # rather than written as a short static string. The production loader requires exactly
+    # cooldown, vacuum and landmarks, complete key sets in the first two, and the two
+    # canonical landmark channels with non-empty alias lists in the third, so a curtailed
+    # document cannot satisfy it and the engine refused to start on it. Only the three
+    # arming flags are overridden, so the soak stays passive while the document stays the
+    # reviewed one.
+    physical_raw = yaml.safe_load((source_dir / "physical_alarms.yaml").read_text(encoding="utf-8"))
+    if type(physical_raw) is not dict or set(physical_raw) != {"cooldown", "vacuum", "landmarks"}:
+        raise _RunnerFoundationError("tracked physical alarms config is malformed")
+    physical_raw["cooldown"]["enabled"] = False
+    physical_raw["vacuum"]["enabled"] = False
+    physical_raw["vacuum"]["escalate_to_safety"] = False
+    (config_dir / "physical_alarms.yaml").write_text(
+        yaml.safe_dump(physical_raw, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    (config_dir / "safety.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "critical_channels": critical_channels,
+                "require_keithley_for_run": False,
+                "keithley_channels": [],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     return readings_per_sample
@@ -1042,7 +1139,9 @@ def _sealed_execution_snapshot(git_sha: str):
             snapshot_interpreter = root / ".venv/bin/python"
             snapshot_interpreter.parent.mkdir(parents=True)
             _copy_running_executable(resolved, snapshot_interpreter)
-            environment = _controlled_test_environment(root, site_packages)
+            environment = _controlled_test_environment(
+                root, site_packages, runtime_library_dir=Path(sys.base_prefix) / "lib"
+            )
             code = "from pathlib import Path; import cryodaq; print(Path(cryodaq.__file__).resolve())"
             imported = subprocess.run(
                 (str(snapshot_interpreter), "-c", code),
@@ -1311,6 +1410,48 @@ class _LockedPsutilObserver:
             raise _RunnerFoundationError("PID/start identity changed; refusing process operation")
         return process
 
+    def _forkserver_of(self, pid: int, *, expected_launcher_pid: int) -> int | None:
+        """Return `pid` if it is THIS launcher's multiprocessing fork server, else None.
+
+        Python 3.14 makes `forkserver` the Linux default, and the laboratory target is
+        3.14.6, so a multiprocessing child is forked from a fork-server process and is not
+        a direct child of the launcher. Measured on that machine: bridge 821 reported
+        parent 820 while the launcher was 793. The direct-child rule was true under `fork`,
+        the previous default, and silently stopped being true.
+
+        The property the rule exists to prove is that the bridge belongs to THIS launcher,
+        and a two-step chain proves exactly that -- but only when the intermediate is both
+        a direct child of the launcher AND recognisably the fork server. Anything looser
+        would accept a grandchild of an unrelated shape, so both halves are checked and
+        neither is inferred from the other.
+        """
+
+        try:
+            candidate = self._process(pid)
+            candidate_parent = int(candidate.ppid())
+            candidate_argv = " ".join(candidate.cmdline())
+        except (self._psutil.NoSuchProcess, self._psutil.AccessDenied, OSError, TypeError, ValueError):
+            return None
+        # THE DIRECT-CHILD REQUIREMENT IS WHAT MAKES THE NEXT TEST SOUND, and it is not
+        # defence in depth -- it is load-bearing. Measured on the laboratory interpreter
+        # (Python 3.14.6, `evidence/tools/` probe): a process forked BY the fork server
+        # inherits the fork server's command line EXACTLY. The bridge's own argv therefore
+        # contains `multiprocessing.forkserver` too. So the module token alone identifies
+        # the fork server AND every one of its children, and only the parent tells them
+        # apart: the fork server's parent is the launcher, its children's parent is the
+        # fork server.
+        if candidate_parent != expected_launcher_pid:
+            return None
+        # This is a SUBSTRING test and the comment used to claim it was an exact match on
+        # the module. It was not, and it cannot be: the token lives inside a `-c` code
+        # string, measured as
+        #   python -B -c "import sys; from multiprocessing.forkserver import main; main(...)"
+        # so there is no argument equal to the module name to compare against. The check
+        # is sound because of the parent test above, not because of this one.
+        if "multiprocessing.forkserver" not in candidate_argv:
+            return None
+        return pid
+
     def observe_assistant(self, pid: int, *, expected_launcher_pid: int) -> _AssistantProcessObservation:
         process = self._process(pid)
         identity = self._identity(process)
@@ -1338,9 +1479,18 @@ class _LockedPsutilObserver:
             pass
         else:
             raise _RunnerFoundationError("positive bridge identity collides with another child role")
-        observation = _BridgeProcessObservation(identity, parent_pid, "zmq_bridge", True)
-        if parent_pid != expected_launcher_pid:
-            raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+        belongs = parent_pid == expected_launcher_pid or (
+            self._forkserver_of(parent_pid, expected_launcher_pid=expected_launcher_pid) is not None
+        )
+        observation = _BridgeProcessObservation(
+            identity, parent_pid, "zmq_bridge", True, expected_launcher_pid if belongs else 0
+        )
+        if not belongs:
+            raise _RunnerFoundationError(
+                "reported bridge does not belong to this launcher: "
+                f"bridge pid {pid} reports parent {parent_pid}, launcher is {expected_launcher_pid}, "
+                "and that parent is not this launcher's multiprocessing fork server"
+            )
         return observation
 
     def signal_exact(self, identity: _ProcessIdentity, signum: int) -> None:
@@ -2349,6 +2499,25 @@ class _BridgeProcessObservation:
     parent_pid: int
     role: str
     alive: bool
+    # The launcher pid the observer PROVED this bridge belongs to: either as a direct
+    # child, or forked from a fork server that is itself a direct child. Zero means the
+    # observer proved nothing, which is the default, so a construction that forgets the
+    # field REFUSES rather than passes.
+    #
+    # It carries the PID and not a bare boolean on purpose. A boolean says only that some
+    # launcher was proved, and the binder could not tell WHICH, so its error message named
+    # a pid that had taken no part in the decision. The two pids coincide at today's single
+    # call site; they would not have to at a second one.
+    #
+    # BE CLEAR ABOUT WHAT THE BINDER'S COMPARISON IS AND IS NOT. It is a FAIL-CLOSED
+    # cross-check, not a second independent look at the process table -- the binder cannot
+    # look at processes at all. `observe_bridge` already RAISES when it proves nothing, so
+    # for any observation that function returns the comparison is satisfied by
+    # construction. Its value is against an observation built by hand, or by a future
+    # second call site, that never verified anything: the field defaults to zero and the
+    # binder refuses. Saying it restores an independent parentage check would be a claim
+    # the code does not support.
+    verified_against_launcher_pid: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2369,7 +2538,11 @@ def _bind_positive_assistant_identity(
     if type(expected_launcher_pid) is not int or expected_launcher_pid <= 0:
         raise _RunnerFoundationError("launcher identity is invalid")
     if observation.parent_pid != expected_launcher_pid:
-        raise _RunnerFoundationError("reported assistant is not a direct launcher child")
+        raise _RunnerFoundationError(
+            "reported assistant is not a direct launcher child: "
+            f"assistant pid {observation.identity.pid} reports parent {observation.parent_pid}, "
+            f"launcher is {expected_launcher_pid}"
+        )
     if observation.role != "assistant":
         raise _RunnerFoundationError("reported PID is not the allowlisted assistant role")
     return observation.identity
@@ -2385,8 +2558,18 @@ def _bind_positive_bridge_identity(
         raise _RunnerFoundationError("reported bridge process is not alive")
     if observation.identity.pid != record.bridge_pid:
         raise _RunnerFoundationError("observer bridge PID contradicts launcher record")
-    if type(observation.parent_pid) is not int or observation.parent_pid != record.launcher_pid:
-        raise _RunnerFoundationError("reported bridge is not a direct launcher child")
+    if (
+        type(observation.parent_pid) is not int
+        or type(observation.verified_against_launcher_pid) is not int
+        or observation.verified_against_launcher_pid != record.launcher_pid
+    ):
+        raise _RunnerFoundationError(
+            "reported bridge does not belong to this launcher: "
+            f"bridge pid {observation.identity.pid} reports parent {observation.parent_pid!r}; "
+            f"the observer proved it belongs to launcher "
+            f"{observation.verified_against_launcher_pid!r}, and the record names "
+            f"{record.launcher_pid}"
+        )
     if observation.role != "zmq_bridge":
         raise _RunnerFoundationError("reported PID is not the allowlisted bridge role")
     return observation.identity
@@ -3726,12 +3909,36 @@ class _PosixSoakRunner:
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
-                            except ValueError:
+                            except ValueError as exc:
+                                # Kept, not swallowed. The refusal below used to say only
+                                # that roles were missing, so the classifier's own reason --
+                                # which names the process and the topology it rejected --
+                                # was discarded at the one place it could have been read.
                                 roles = None
+                                roles_refusal = str(exc)
                         if roles is None:
                             time.sleep(0.1)
+                    roles_refusal = locals().get("roles_refusal", "")
                     if roles is None or handshake is None or bridge is None or bridge_guard is None:
-                        raise _RunnerFoundationError("source stack did not reach the exact four-role startup cut")
+                        # Name WHICH of the four preconditions is missing. The bare
+                        # sentence sends the next turn to read the whole startup path,
+                        # and it has: the run gets further after every fix and stops here
+                        # again, each time for a different reason the message did not say.
+                        missing = ", ".join(
+                            name
+                            for name, value in (
+                                ("roles", roles),
+                                ("handshake", handshake),
+                                ("bridge", bridge),
+                                ("bridge_guard", bridge_guard),
+                            )
+                            if value is None
+                        )
+                        detail = f"; last classifier refusal: {roles_refusal}" if roles_refusal else ""
+                        raise _RunnerFoundationError(
+                            "source stack did not reach the exact four-role startup cut; "
+                            f"still missing: {missing}{detail}"
+                        )
 
                     _validate_short_soak_runtime_schedule(report_interval_s, time.time())
 
@@ -3894,8 +4101,14 @@ class _PosixSoakRunner:
                                     break
                                 time.sleep(0.1)
                             if replacement_roles is None or replacement_tree is None:
+                                # Name WHICH child. The bare sentence leaves the reader to
+                                # guess between three roles with three different meanings:
+                                # a bridge that cannot recover is a defect, an engine that
+                                # does not is a deliberate permanent HOLD, and an assistant
+                                # is a third thing again. Guessing between them is exactly
+                                # what a refusal should make unnecessary.
                                 raise _RunnerFoundationError(
-                                    "faulted child did not recover within the reviewed ceiling"
+                                    f"faulted {event.target} did not recover within the reviewed ceiling"
                                 )
                             epochs[event.target] += 1
                             current = replacement_roles
