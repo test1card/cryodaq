@@ -224,7 +224,18 @@ async def test_constructor_is_resource_free_and_rejects_non_loopback() -> None:
         PeriodicEngineQuery("tcp://0.0.0.0:5556")
 
 
-async def test_start_connects_before_one_all_topic_subscription() -> None:
+async def test_start_connects_before_subscribing_to_the_participating_topics() -> None:
+    """Connect first, then subscribe -- and subscribe to those three topics only.
+
+    The all-topic subscription this replaces also received `operator.snapshot`, which
+    the publisher sends on the same socket. `_handle_frame` refuses a frame on a topic
+    this source does not participate in, and that refusal invalidates the whole
+    generation, so an ordinary operator snapshot took the periodic source's authority.
+
+    Connect-before-subscribe is required by the supported macOS/Python/pyzmq
+    combination, so the ORDER is part of what this pins.
+    """
+
     class Query:
         async def barrier(self, _nonce: str) -> BarrierQueryResult:
             raise AssertionError
@@ -239,10 +250,32 @@ async def test_start_connects_before_one_all_topic_subscription() -> None:
         await live.start(lambda _reading: None, lambda _event: None)
         assert operations == [
             ("connect", "tcp://127.0.0.1:5555"),
-            ("subscribe", b""),
+            ("subscribe", DEFAULT_TOPIC),
+            ("subscribe", EVENTS_TOPIC),
+            ("subscribe", PERIODIC_BARRIER_TOPIC),
         ]
+        assert b"" not in [value for name, value in operations if name == "subscribe"], (
+            "an all-topic subscription also receives operator.snapshot, which this source "
+            "refuses as a protocol violation"
+        )
     finally:
         await live.stop()
+
+
+async def test_the_subscription_and_the_refusal_name_the_same_topics() -> None:
+    """A topic in one and not the other is either a silent drop or a fatal refusal."""
+
+    from cryodaq.agents.assistant import periodic_runtime
+
+    assert periodic_runtime._PARTICIPATING_TOPICS == (
+        DEFAULT_TOPIC,
+        EVENTS_TOPIC,
+        PERIODIC_BARRIER_TOPIC,
+    )
+    # And the publisher's fourth topic is deliberately NOT in it.
+    from cryodaq.core.zmq_subprocess import OPERATOR_SNAPSHOT_TOPIC
+
+    assert OPERATOR_SNAPSHOT_TOPIC not in periodic_runtime._PARTICIPATING_TOPICS
 
 
 async def test_startup_marker_buffers_then_filters_and_dispatches_in_order() -> None:

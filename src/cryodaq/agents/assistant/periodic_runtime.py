@@ -88,6 +88,12 @@ _MONITOR_FAILURE_EVENTS = frozenset(
 )
 
 
+# The topics this source participates in. `_handle_frame` refuses anything else as a
+# protocol violation, so the SUBSCRIBE list and that refusal must name the SAME set: a
+# topic in one and not the other is either a silent drop or a fatal refusal.
+_PARTICIPATING_TOPICS: tuple[bytes, ...] = (DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC)
+
+
 class PeriodicLiveDiscontinuity(PeriodicSourceUnavailable):
     """Fixed failure raised after the private live generation loses authority."""
 
@@ -765,7 +771,7 @@ class SequencedPeriodicLiveSources:
         marker.set_result(cut)
 
     async def _handle_frame(self, parts: list[bytes]) -> None:
-        if len(parts) != 2 or parts[0] not in {DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC}:
+        if len(parts) != 2 or parts[0] not in _PARTICIPATING_TOPICS:
             raise ValueError("invalid multipart frame")
         async with self._state_lock:
             if self._invalid or not self._running:
@@ -872,11 +878,27 @@ class SequencedPeriodicLiveSources:
             )
             self._monitor.setsockopt(zmq.LINGER, 0)
             self._socket.connect(self._address)
-            # One all-topic subscription is one propagation unit: receiving
-            # the exact nonce barrier therefore also proves that readings and
-            # events use the same active SUB pipe.  Connect-before-subscribe is
-            # required by the supported macOS/Python/pyzmq combination.
-            self._socket.setsockopt(zmq.SUBSCRIBE, b"")
+            # SUBSCRIBE TO WHAT THIS SOURCE PARTICIPATES IN, AND TO NOTHING ELSE.
+            #
+            # This used to subscribe to every topic with `b""`, and the reasoning was
+            # sound when it was written: one subscription is one propagation unit, so
+            # receiving the exact nonce barrier also proved that readings and events use
+            # the same active SUB pipe. That argument still holds with three
+            # subscriptions -- one socket, one connection, one pipe -- and the all-topic
+            # form acquired a defect the day a FOURTH topic appeared on the publisher.
+            #
+            # `zmq_bridge.publish_operator_snapshot` sends `operator.snapshot` on the
+            # sole PUB socket. An all-topic subscriber receives it, `_handle_frame`
+            # refuses it as a frame that is not two parts on a participating topic, and
+            # that refusal INVALIDATES THE WHOLE GENERATION. Measured on Ubuntu 22.04 on
+            # 2026-08-20, it was the most frequent reason the periodic source lost
+            # authority during a run -- which is why no periodic slot was ever allocated
+            # and no receipt could be sealed.
+            #
+            # Connect-before-subscribe is required by the supported macOS/Python/pyzmq
+            # combination, so the order below is deliberate.
+            for topic in _PARTICIPATING_TOPICS:
+                self._socket.setsockopt(zmq.SUBSCRIBE, topic)
             self._running = True
             self._receive_task = asyncio.create_task(self._receive_loop(), name="periodic_live_receive")
             self._monitor_task = asyncio.create_task(self._monitor_loop(), name="periodic_live_monitor")
