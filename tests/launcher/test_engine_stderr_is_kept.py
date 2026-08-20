@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import io
 
-import pytest
-
 from cryodaq import launcher
 
 
