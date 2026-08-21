@@ -172,10 +172,7 @@ async def test_the_memory_of_unbound_channel_names_stays_bounded(tmp_path: Path)
 
     writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([_descriptor()]))
     overflow = _MAX_REMEMBERED_UNBOUND_CHANNELS + 40
-    assert (
-        await writer.write_immediate([_reading(f"sensor.unknown.{index}", 1.0) for index in range(overflow)])
-        is True
-    )
+    assert await writer.write_immediate([_reading(f"sensor.unknown.{index}", 1.0) for index in range(overflow)]) is True
     await writer.stop()
 
     assert len(_rows(tmp_path)) == overflow

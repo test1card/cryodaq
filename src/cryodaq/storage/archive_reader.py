@@ -1379,9 +1379,7 @@ class ArchiveReader:
                                         # A database written before catalogs existed reaches
                                         # this line with catalog_is_installed False and is
                                         # resolved as legacy exactly as before.
-                                        raise _DescriptorReadError(
-                                            BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING
-                                        )
+                                        raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
                                     descriptor = resolve_legacy_descriptor(
                                         instrument_text,
                                         channel_text,
@@ -2122,9 +2120,7 @@ class ArchiveReader:
                                     # Same rule as the hot path: rotated data that carried a
                                     # descriptor catalog cannot contain pre-catalog history,
                                     # so a row without an identity is missing one.
-                                    raise _DescriptorReadError(
-                                        BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING
-                                    )
+                                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
                                 descriptor = resolve_legacy_descriptor(instrument, channel, unit)
                             else:
                                 descriptor = descriptor_map.get(descriptor_hash)
