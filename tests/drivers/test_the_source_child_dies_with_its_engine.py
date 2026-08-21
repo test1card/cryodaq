@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -92,6 +93,8 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
 
         from cryodaq.drivers.transport.usbtmc import _bind_lifetime_to_parent
         {binding}
+        _connection.send("READY")
+        _connection.close()
         # Whatever happens to the parent, this never looks at the pipe -- the shape of a
         # child inside a native call.
         {busy}
@@ -102,7 +105,11 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
         process = context.Process(target=_busy, args=(child_connection, os.getpid()), daemon=True)
         process.start()
         child_connection.close()
-        print(process.pid, flush=True)
+        if not parent_connection.poll(10):
+            raise RuntimeError("child did not report readiness after binding")
+        if parent_connection.recv() != "READY":
+            raise RuntimeError("child reported an invalid readiness marker")
+        print(f"READY {{process.pid}}", flush=True)
         time.sleep(600)
     """
 )
@@ -111,6 +118,16 @@ _BUSY_SHAPES = {
     "sleeping": "time.sleep(600)",
     "holding the GIL in a native call": "import ctypes; ctypes.PyDLL('libc.so.6').sleep(600)",
 }
+
+
+def _read_startup_line(stream, *, timeout: float) -> str:
+    """Return one flushed parent startup line, or an empty string at the deadline."""
+
+    with selectors.DefaultSelector() as selector:
+        selector.register(stream, selectors.EVENT_READ)
+        if not selector.select(timeout):
+            return ""
+    return stream.readline().decode().strip()
 
 
 def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool:
@@ -141,13 +158,14 @@ def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool
 
     try:
         assert parent.stdout is not None
-        line = parent.stdout.readline().decode().strip()
-        if not line.isdigit():
+        line = _read_startup_line(parent.stdout, timeout=10.0)
+        marker, _, reported_pid = line.partition(" ")
+        if marker != "READY" or not reported_pid.isdigit():
             raise AssertionError(_diagnose("no child pid reported"))
-        child_pid = int(line)
-        # The child must be alive AND have got past its own start-up, or a control that
-        # reports "no orphan" is only reporting a child that never ran.
-        time.sleep(1.0)
+        child_pid = int(reported_pid)
+        # READY is sent by the child only after the binding (or its equivalent no-binding
+        # control point). Killing the parent only after this marker makes the test prove
+        # the parent-death guard rather than a late child's initial identity check.
         if not _alive(child_pid):
             raise AssertionError(_diagnose("the child died before the parent was killed"))
 
