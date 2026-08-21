@@ -194,7 +194,7 @@ def _event(sequence: int) -> bytes:
     ).encode()
 
 
-async def _until(condition, *, timeout: float = 5.0) -> bool:
+async def _until(condition, *, deadline_s: float = 5.0) -> bool:
     """Poll a condition to a deadline instead of sleeping for a guessed interval.
 
     A fixed sleep before asserting delivery is a race dressed as a test: on a loaded
@@ -205,7 +205,7 @@ async def _until(condition, *, timeout: float = 5.0) -> bool:
     """
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
+    deadline = loop.time() + deadline_s
     while loop.time() < deadline:
         if condition():
             return True
