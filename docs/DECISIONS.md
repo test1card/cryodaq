@@ -399,3 +399,24 @@ directions and repository search must be able to find them.
 were invisible to repository search; one had its trigger fire and sat
 undischarged for nine days. Preservation, classification, and the migration
 were verified against byte-exact snapshots before anything was deleted.
+
+## [Owner] 2026-08-21 — The generated architecture pair is regenerated after each merge, not on every branch
+
+The two generated documentation artifacts — the important-architecture diagram
+and the current-candidate metrics document — are regenerated after each merge to
+the default branch, rather than on every pull request. The generator, both
+files, and the freshness guard all stay. The guard continues to run in the
+default suite on every push of every branch; what changed is that the pair must
+equal a regeneration only on the default branch. Off it, the pair must be either
+byte-identical to the branch's base or a deliberate regeneration from the
+branch's own index.
+
+**Why:** the metrics document records a fingerprint of the source tree, so its
+bytes differ on every branch, so every branch had to regenerate and commit both
+files — which meant every branch edited the same two files and they conflicted
+with each other by construction. Measured 2026-08-21: forty of the forty-two
+open pull requests conflicted, and this pair was the machine-generated worst of
+the four files that caused it. Prevention of a stale pair reaching the default
+branch belongs to the merge procedure, which regenerates as the last commit
+before the merging checks; the guard is the public detection half and reddens
+the default branch within one push if that procedure is ever bypassed.
