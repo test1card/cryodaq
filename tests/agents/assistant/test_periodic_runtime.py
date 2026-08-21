@@ -402,9 +402,7 @@ async def test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal() -> N
         # A topic the publisher might add tomorrow. It starts with a subscribed one, so the
         # socket delivers it whatever this source intended.
         await publisher.send_multipart([DEFAULT_TOPIC + b".detail", b"payload of a topic added later"])
-        assert await _until(lambda: live._foreign_topic_frames == 1), (
-            "the prefix-extension frame was not delivered"
-        )
+        assert await _until(lambda: live._foreign_topic_frames == 1), "the prefix-extension frame was not delivered"
         assert live._invalid is False, "a topic somebody else added invalidated this generation"
 
         # And the source still works afterwards, which is the point of not refusing.
