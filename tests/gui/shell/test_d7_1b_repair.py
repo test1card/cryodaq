@@ -308,6 +308,29 @@ def test_observed_owned_engine_exit_names_the_incarnation_and_code_in_the_log(
     assert "code=9" in recorded, recorded
 
 
+def test_observed_engine_exit_logs_identity_before_fallible_producer_invalidation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An invalidation failure must not erase the observed exit's identity evidence."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 23)
+    launcher._invalidate_engine_producer = MagicMock(side_effect=RuntimeError("invalidation failed"))
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with caplog.at_level("WARNING", logger="cryodaq.launcher"):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    recorded = "\n".join(record.getMessage() for record in caplog.records)
+    assert "a" * 32 in recorded, recorded
+    assert "code=23" in recorded, recorded
+    launcher._invalidate_engine_producer.assert_called_once_with()
+    assert launcher._restart_giving_up is True
+
+
 def _authority_of(launcher: SimpleNamespace) -> dict[str, object]:
     """Every field the real _start_engine preflight reads as published identity."""
 
@@ -609,7 +632,7 @@ def test_a_still_running_shutdown_worker_keeps_its_owner_and_holds() -> None:
     assert launcher._engine_shutdown_worker is worker, "the reference must be KEPT, not dropped"
     assert launcher._engine_proc is not None, "the observed terminal handle must remain available for re-settlement"
     assert launcher._engine_instance_id == "a" * 32, "and the identity must not be retired"
-    assert worker.waited, "it must be given its bounded chance to finish first"
+    assert worker.waited == [], "the Qt health callback must poll rather than wait for the worker"
 
 
 def test_a_shutdown_worker_that_finishes_is_settled_and_the_owner_retired() -> None:

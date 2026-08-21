@@ -86,9 +86,8 @@ _SHUTDOWN_RETRY_DELAYS_MS = (1_000, 3_000, 10_000, 30_000)
 # Bound on how long _stop_engine will wait for the engine process to exit
 # after a verified shutdown receipt, and the size of each non-blocking poll
 # slice within that budget (see _stop_engine's process.poll()/wait() use).
-# The shutdown worker's command carries its own timeout, so this is the second bound,
-# not the only one: it exists so a wedged worker cannot stall the Qt main thread.
-_ENGINE_SHUTDOWN_WORKER_SETTLE_MS = 5_000
+# The shutdown worker's command carries its own timeout. Engine-exit handling polls its
+# settlement instead of waiting here so a wedged worker cannot stall the Qt main thread.
 _ENGINE_EXIT_WAIT_BUDGET_S = 60.0
 _ENGINE_EXIT_POLL_SLICE_S = 1.0
 # Bounded, synchronous grace period given to a freshly started
@@ -3401,24 +3400,22 @@ class LauncherWindow(QMainWindow):
         return True
 
     def _settle_engine_shutdown_worker(self) -> bool:
-        """Wait out the shutdown worker, bounded. False means it is still running.
+        """Poll the shutdown worker. False means it is still running.
 
         The worker is a QThread whose run() is blocked inside send_command on the very
         bridge the recovery path is about to shut down. Dropping the only reference to it
         while it runs is how Qt gets to destroy a live thread -- and that stops the
         launcher rather than recovering it, which is the opposite of the point.
 
-        Its command carries its own timeout, so waiting is bounded twice over. If it is
-        still running after that the reference is KEPT and this says so; an owner that
-        cannot be settled is the one thing that must still hold.
+        Its command carries its own timeout. If it is still running the reference is KEPT
+        and the next health tick polls again; an owner that cannot be settled is the one
+        thing that must still hold.
         """
 
         worker = getattr(self, "_engine_shutdown_worker", None)
         if worker is None:
             return True
         try:
-            if worker.isFinished() is not True:
-                worker.wait(_ENGINE_SHUTDOWN_WORKER_SETTLE_MS)
             settled = worker.isFinished() is True
         except Exception as exc:
             logger.critical(
@@ -5750,6 +5747,19 @@ class LauncherWindow(QMainWindow):
         process = self._engine_proc
         if process is not None:
             returncode = process.poll()
+        observed_owner_id = (
+            getattr(self, "_replay_session_id", None)
+            if getattr(self, "_replay_source", None) is not None
+            else getattr(self, "_engine_instance_id", None)
+        )
+        if type(observed_owner_id) is not str:
+            observed_owner_id = "<unknown>"
+        if process is not None and returncode is not None:
+            logger.warning(
+                "Engine exit observed before producer invalidation; incarnation=%s code=%s.",
+                observed_owner_id,
+                returncode,
+            )
         if getattr(self, "_replay_source", None) is not None and (process is None or returncode is not None):
             self._replay_session_verified = False
 
