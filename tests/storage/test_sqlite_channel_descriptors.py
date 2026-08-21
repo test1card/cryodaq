@@ -287,9 +287,13 @@ async def test_catalog_rollback_fails_before_new_reading(tmp_path: Path) -> None
 #
 # The absent-channel behaviour now lives in
 # tests/storage/test_unbound_channel_keeps_the_batch.py: the row is written WITHOUT a
-# descriptor identity (the schema's descriptor_hash is nullable and the archive reader
-# already reports DESCRIPTOR_HASH_MISSING as a bounded-read issue), and the fact is said
-# at a bounded rate and counted.
+# descriptor identity, and the fact is said at a bounded rate and counted.
+#
+# An earlier version of this comment said the archive reader ALREADY reported such a row
+# as DESCRIPTOR_HASH_MISSING. It did not. The bounded reader resolved a null identity
+# through resolve_legacy_descriptor, handing the row a fabricated pre-catalog identity
+# and marking the read complete. That reader was changed in the same slice, so the
+# statement is now true because the change made it true.
 @pytest.mark.parametrize(
     "changes",
     [

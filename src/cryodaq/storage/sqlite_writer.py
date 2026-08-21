@@ -81,6 +81,11 @@ _UNBOUND_CHANNEL_LOG_INTERVAL_S = 300.0
 # The channel names are supplied by drivers, so the memory of them is bounded rather
 # than trusted to stay small across a week-long run.
 _MAX_REMEMBERED_UNBOUND_CHANNELS = 256
+# A per-channel limit alone does not bound the log: a driver cycling through more
+# distinct labels than are remembered evicts each one before it returns, so every
+# reading looks new and speaks. This is the hard ceiling that rotation cannot defeat --
+# at most this many NAMED lines per interval, plus one aggregate line.
+_UNBOUND_NAMED_LINES_PER_INTERVAL = 8
 _SQLITE_NATIVE_AUTHORITY_ACTIVATION_LOCK = threading.RLock()
 
 
@@ -2519,6 +2524,11 @@ class SQLiteWriter:
         # bounded rate and counted. See _descriptor_hash_or_none.
         self._unbound_channel_said: dict[str, float] = {}
         self._unbound_channel_rows = 0
+        self._unbound_window_start = time.monotonic()
+        self._unbound_window_rows = 0
+        self._unbound_window_channels: set[str] = set()
+        self._unbound_window_channels_overflowed = False
+        self._unbound_named_lines_in_window = 0
         self._commit_owner_key = object()
         self._commit_revision = 0
         self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
@@ -7317,7 +7327,11 @@ class SQLiteWriter:
         assert isinstance(receipt, CommittedBatchReceipt)
         return receipt.entries
 
-    def _descriptor_hash_or_none(self, reading: Reading) -> str | None:
+    def _descriptor_hash_or_none(
+        self,
+        reading: Reading,
+        unbound: list[tuple[str, BaseException]],
+    ) -> str | None:
         """Bind a reading to its descriptor, or record that it has none.
 
         AN UNBOUND CHANNEL MUST COST ITS OWN LABEL, NEVER THE BATCH. This used to call
@@ -7340,10 +7354,20 @@ class SQLiteWriter:
         changing a unit produces a channel the descriptor catalog does not yet describe.
 
         A row with no descriptor hash is an ANTICIPATED state, not a corrupt one: the
-        archive reader already carries ``DESCRIPTOR_HASH_MISSING`` as a bounded-read
-        issue and reports it. So the reading is stored with its timestamp, value, unit
+        column is nullable and the archive reader carries ``DESCRIPTOR_HASH_MISSING`` as
+        a bounded-read issue. So the reading is stored with its timestamp, value, unit
         and status, and it is stored WITHOUT a descriptor identity, which is the truth
-        about it. The descriptor-authoritative path (``write_committed``) is unaffected:
+        about it.
+
+        CORRECTION, and the reason the reader changed in the same slice. An earlier
+        version of this docstring said the reader ALREADY reported that issue for a null
+        hash. It did not, and review was right to say so: the bounded reader resolved a
+        null through ``resolve_legacy_descriptor``, which handed the row a fabricated
+        pre-catalog identity and left the read marked complete. A newly unbound row would
+        then have been carried through descriptor reporting as ordinary described
+        history. The reader now reports the missing identity whenever the archive itself
+        carries a descriptor catalog, so the claim above is true because this change made
+        it true, not because it was already so. The descriptor-authoritative path (``write_committed``) is unaffected:
         there every reading is bound by the live catalog owner before admission, and an
         unbindable reading is still refused before it reaches storage.
         """
@@ -7367,31 +7391,80 @@ class SQLiteWriter:
             # not be the quantity the descriptor names, and storing it would put a wrong
             # number under a real identity. Those keep their registered fail-closed
             # refusal of the whole batch.
-            self._unbound_channel_rows += 1
-            self._say_channel_is_unbound(reading.channel, absent)
+            unbound.append((str(reading.channel), absent))
             return None
 
-    def _say_channel_is_unbound(self, channel: object, cause: BaseException) -> None:
-        """Say it once per channel per interval, not once per reading."""
+    def _record_unbound_channels(self, unbound: list[tuple[str, BaseException]]) -> None:
+        """Count and say what was actually STORED, after the transaction committed.
 
-        key = str(channel)
+        Called from the commit path, never from the row builder. A batch can still be
+        destroyed after its rows are built -- a described channel whose unit disagrees
+        raises, and a disk-full fault returns False -- and announcing "readings are being
+        saved" for rows that were then discarded would be a false statement, made worse
+        by the rate limiter holding its tongue about it for the next interval.
+        """
+
+        if not unbound:
+            return
+        self._unbound_channel_rows += len(unbound)
         now = time.monotonic()
-        previous = self._unbound_channel_said.get(key)
+        if now - self._unbound_window_start >= _UNBOUND_CHANNEL_LOG_INTERVAL_S:
+            self._close_unbound_window(now)
+        for channel, cause in unbound:
+            self._unbound_window_rows += 1
+            if len(self._unbound_window_channels) < _MAX_REMEMBERED_UNBOUND_CHANNELS:
+                self._unbound_window_channels.add(channel)
+            elif channel not in self._unbound_window_channels:
+                self._unbound_window_channels_overflowed = True
+            self._say_channel_is_unbound(channel, cause, now)
+
+    def _close_unbound_window(self, now: float) -> None:
+        """One aggregate line per interval, whatever the driver does with names."""
+
+        if self._unbound_window_rows:
+            distinct = len(self._unbound_window_channels)
+            logger.warning(
+                "Итог за интервал: %d показаний сохранены без идентичности описания, "
+                "каналов %s%d. Всего с момента запуска: %d. "
+                "Дополните каталог описаний каналов.",
+                self._unbound_window_rows,
+                "не менее " if self._unbound_window_channels_overflowed else "",
+                distinct,
+                self._unbound_channel_rows,
+            )
+        self._unbound_window_start = now
+        self._unbound_window_rows = 0
+        self._unbound_window_channels = set()
+        self._unbound_window_channels_overflowed = False
+        self._unbound_named_lines_in_window = 0
+
+    def _say_channel_is_unbound(self, channel: str, cause: BaseException, now: float) -> None:
+        """Name a channel at most once per interval, and name at most a few of them.
+
+        The per-channel limit alone is not a bound. A faulty driver cycling through more
+        distinct labels than are remembered evicts each label before it returns, so every
+        label looks new and every reading speaks. The named-line ceiling is what actually
+        holds the week: past it, the interval's aggregate line carries the rest.
+        """
+
+        previous = self._unbound_channel_said.get(channel)
         if previous is not None and now - previous < _UNBOUND_CHANNEL_LOG_INTERVAL_S:
             return
-        if key not in self._unbound_channel_said and len(self._unbound_channel_said) >= _MAX_REMEMBERED_UNBOUND_CHANNELS:
-            # Forget the channel that spoke longest ago. Saying one line twice costs a
-            # log line; remembering every name a driver ever emitted costs the week.
+        if self._unbound_named_lines_in_window >= _UNBOUND_NAMED_LINES_PER_INTERVAL:
+            return
+        if channel not in self._unbound_channel_said and len(self._unbound_channel_said) >= _MAX_REMEMBERED_UNBOUND_CHANNELS:
+            # Forget the channel that spoke longest ago.
             self._unbound_channel_said.pop(
                 min(self._unbound_channel_said, key=self._unbound_channel_said.__getitem__),
                 None,
             )
-        self._unbound_channel_said[key] = now
+        self._unbound_channel_said[channel] = now
+        self._unbound_named_lines_in_window += 1
         logger.warning(
             "Канал '%s' не описан в каталоге описаний каналов (%s). "
             "Показания сохраняются, но без идентичности описания "
             "(таких строк с момента запуска: %d). Дополните каталог описаний каналов.",
-            key,
+            channel,
             cause,
             self._unbound_channel_rows,
         )
@@ -7423,6 +7496,12 @@ class SQLiteWriter:
         """
         rows = []
         skipped = 0
+        # Collected while the rows are built, SAID only after the transaction commits.
+        # Counting here would announce readings that a later row in the same batch can
+        # still destroy -- a mismatch raises, a disk-full fault returns False -- and the
+        # rate limiter would then hold its tongue for the next five minutes about rows
+        # that were never stored.
+        unbound: list[tuple[str, BaseException]] = []
         for r in batch:
             if r.value is None:
                 skipped += 1
@@ -7446,7 +7525,7 @@ class SQLiteWriter:
                 skipped += 1
                 continue
             stored_value, stored_status = encode(r.value, r.status)
-            descriptor_hash = self._descriptor_hash_or_none(r)
+            descriptor_hash = self._descriptor_hash_or_none(r, unbound)
             rows.append(
                 (
                     r.timestamp.timestamp(),
@@ -7499,6 +7578,9 @@ class SQLiteWriter:
                 # A successful write resets the locked-DB streak (roadmap A6).
                 self._locked_failure_count = 0
                 self._locked_failure_first_ts = None
+                # These rows are on disk now. The retry loop reaches this point once,
+                # so a retried transaction cannot count the same rows twice.
+                self._record_unbound_channels(unbound)
                 break
             except sqlite3.OperationalError as exc:
                 conn.rollback()
