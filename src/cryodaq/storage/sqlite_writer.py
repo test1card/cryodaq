@@ -7452,7 +7452,8 @@ class SQLiteWriter:
             return
         if self._unbound_named_lines_in_window >= _UNBOUND_NAMED_LINES_PER_INTERVAL:
             return
-        if channel not in self._unbound_channel_said and len(self._unbound_channel_said) >= _MAX_REMEMBERED_UNBOUND_CHANNELS:
+        unknown_channel = channel not in self._unbound_channel_said
+        if unknown_channel and len(self._unbound_channel_said) >= _MAX_REMEMBERED_UNBOUND_CHANNELS:
             # Forget the channel that spoke longest ago.
             self._unbound_channel_said.pop(
                 min(self._unbound_channel_said, key=self._unbound_channel_said.__getitem__),
