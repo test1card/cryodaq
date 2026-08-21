@@ -59,6 +59,7 @@ from cryodaq.storage._windows_secure_read import (
 )
 from cryodaq.storage.channel_descriptors import (
     ChannelDescriptorStorageError,
+    ChannelNotDescribedError,
     DescriptorBoundReading,
     LiveChannelDescriptorCatalog,
     descriptor_hash_for_reading,
@@ -7349,28 +7350,26 @@ class SQLiteWriter:
 
         if self._channel_catalog is None:
             return None
-        if reading.channel not in self._channel_catalog.by_channel_id:
-            # ABSENT, not disagreeing. A channel the catalog never names is the re-wiring
-            # case, and it is answered here. A channel the catalog DOES name whose
-            # instrument or unit disagrees is a different thing -- the reading may not be
-            # what the descriptor says it is -- and that case keeps its registered
-            # fail-closed refusal (test_descriptor_mismatch_rejects_whole_batch_atomically).
-            self._unbound_channel_rows += 1
-            self._say_channel_is_unbound(
-                reading.channel,
-                ChannelDescriptorStorageError("channel is absent from the descriptor catalog"),
+        try:
+            return descriptor_hash_for_reading(
+                self._channel_catalog,
+                instrument_id=reading.instrument_id,
+                channel=reading.channel,
+                unit=reading.unit,
             )
+        except ChannelNotDescribedError as absent:
+            # ABSENT, not disagreeing -- and the catalog says so, through its own error
+            # type. This writer never compares channel spellings to decide it; the
+            # declaring authority is the catalog.
+            #
+            # Every OTHER descriptor failure, including a described channel whose
+            # instrument or unit disagrees, is deliberately NOT caught: the reading may
+            # not be the quantity the descriptor names, and storing it would put a wrong
+            # number under a real identity. Those keep their registered fail-closed
+            # refusal of the whole batch.
+            self._unbound_channel_rows += 1
+            self._say_channel_is_unbound(reading.channel, absent)
             return None
-        # A DESCRIBED channel whose instrument or unit disagrees is deliberately NOT
-        # caught here: the reading may not be the quantity the descriptor names, and
-        # storing it would put a wrong number under a real identity. That case keeps its
-        # registered fail-closed refusal of the whole batch.
-        return descriptor_hash_for_reading(
-            self._channel_catalog,
-            instrument_id=reading.instrument_id,
-            channel=reading.channel,
-            unit=reading.unit,
-        )
 
     def _say_channel_is_unbound(self, channel: object, cause: BaseException) -> None:
         """Say it once per channel per interval, not once per reading."""
