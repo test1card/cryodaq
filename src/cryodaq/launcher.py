@@ -3966,6 +3966,11 @@ class LauncherWindow(QMainWindow):
                 phase=phase,
             )
             if not settled:
+                # The retained worker is still executing its shutdown command on this
+                # bridge. Leave both intact; the next health tick re-enters the observed
+                # exit path and retires the owner only after the worker finishes.
+                if getattr(self, "_engine_shutdown_worker", None) is not None:
+                    return False
                 settlement_errors["engine_child"] = settlement_error or RuntimeError(
                     "replacement engine child did not settle"
                 )
@@ -5877,6 +5882,25 @@ class LauncherWindow(QMainWindow):
             )
             return
 
+        shutdown_worker_pending = getattr(self, "_engine_shutdown_worker", None) is not None
+        owner_id = (
+            getattr(self, "_replay_session_id", None)
+            if getattr(self, "_replay_source", None) is not None
+            else getattr(self, "_engine_instance_id", None)
+        )
+        if type(owner_id) is not str:
+            owner_id = "<unknown>"
+        # A shutdown worker still owns a command on the bridge. It must settle before
+        # this crash consumes a backoff slot or announces a restart attempt. The no-worker
+        # path retains its existing fail-closed reader-settlement ordering below.
+        if shutdown_worker_pending and not LauncherWindow._settle_observed_engine_exit(
+            self,
+            owner_id=owner_id,
+            returncode=returncode,
+            phase="retryable-exit",
+        ):
+            return
+
         # Retry forever: backoff caps at the last slot (120s), no give-up.
         backoff_idx = min(self._restart_attempts, len(self._restart_backoff_s) - 1)
         delay_s = self._restart_backoff_s[backoff_idx]
@@ -5900,14 +5924,7 @@ class LauncherWindow(QMainWindow):
             f"Engine остановлен — перезапуск через {delay_s} с "
             f"(попытка {self._restart_attempts}). Запись данных приостановлена."
         )
-        owner_id = (
-            getattr(self, "_replay_session_id", None)
-            if getattr(self, "_replay_source", None) is not None
-            else getattr(self, "_engine_instance_id", None)
-        )
-        if type(owner_id) is not str:
-            owner_id = "<unknown>"
-        if not LauncherWindow._settle_observed_engine_exit(
+        if not shutdown_worker_pending and not LauncherWindow._settle_observed_engine_exit(
             self,
             owner_id=owner_id,
             returncode=returncode,

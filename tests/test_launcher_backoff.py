@@ -305,6 +305,44 @@ def test_handle_engine_exit_schedules_backoff_timer_on_normal_crash():
     assert w._restart_attempts == 1
 
 
+def test_observed_exit_is_counted_only_after_its_shutdown_worker_settles():
+    """Repeated health polls must not consume backoff attempts before retirement is possible."""
+    from cryodaq.launcher import LauncherWindow
+
+    class _PendingWorker:
+        def __init__(self) -> None:
+            self.finished = False
+
+        def isFinished(self) -> bool:  # noqa: N802 -- Qt API spelling
+            return self.finished
+
+    w = _make_launcher_mock(returncode=1, restart_attempts=0)
+    w._replay_source = None
+    w._engine_instance_id = "a" * 32
+    w._engine_shutdown_capability = "b" * 64
+    worker = _PendingWorker()
+    w._engine_shutdown_worker = worker
+
+    with (
+        patch("cryodaq.launcher.QTimer") as mock_qtimer,
+        patch("cryodaq.launcher.time") as mock_time,
+    ):
+        mock_time.monotonic.return_value = 0.0
+        LauncherWindow._handle_engine_exit(w)
+        LauncherWindow._handle_engine_exit(w)
+
+        assert w._restart_attempts == 0
+        assert w._restart_pending is False
+        mock_qtimer.singleShot.assert_not_called()
+
+        worker.finished = True
+        LauncherWindow._handle_engine_exit(w)
+
+    assert w._restart_attempts == 1
+    assert w._restart_pending is True
+    assert mock_qtimer.singleShot.call_args.args[0] == 3_000
+
+
 def test_handle_engine_exit_restart_pending_guard_is_noop():
     """When _restart_pending is True, _handle_engine_exit must return immediately."""
     from cryodaq.launcher import LauncherWindow

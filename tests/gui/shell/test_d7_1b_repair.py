@@ -549,6 +549,45 @@ def test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held
     single_shot.assert_called_once()
 
 
+def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown() -> None:
+    """A live shutdown worker owns the bridge until its next health-tick poll settles it."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+    launcher._restart_pending = True
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with patch("cryodaq.launcher.time.monotonic", return_value=10.0):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+    assert deferred is False
+    assert launcher._engine_shutdown_worker is worker
+    launcher._bridge.shutdown.assert_not_called()
+    assert launcher._restart_giving_up is False
+
+    worker._finished = True
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=11.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._engine_shutdown_worker is None
+    assert launcher._restart_attempts == 1
+    assert single_shot.call_args.args[0] == 3_000
+
+
 def test_a_replacement_that_exits_with_a_configuration_error_keeps_its_refusal() -> None:
     """One exit code must not be rescheduled, and the replacement path forgot that.
 
