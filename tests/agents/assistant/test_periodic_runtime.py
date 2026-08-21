@@ -194,6 +194,25 @@ def _event(sequence: int) -> bytes:
     ).encode()
 
 
+async def _until(condition, *, timeout: float = 5.0) -> bool:
+    """Poll a condition to a deadline instead of sleeping for a guessed interval.
+
+    A fixed sleep before asserting delivery is a race dressed as a test: on a loaded
+    runner the receive task may legitimately not have run yet, and the guard fails while
+    the transport is behaving correctly. Polling to a generous deadline is deterministic
+    in both directions -- it returns as soon as the condition holds, and it fails only
+    when the condition never holds.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if condition():
+            return True
+        await asyncio.sleep(0.005)
+    return condition()
+
+
 async def _publisher() -> tuple[zmq.asyncio.Context, zmq.asyncio.Socket, str]:
     context = zmq.asyncio.Context()
     socket = context.socket(zmq.PUB)
@@ -344,9 +363,7 @@ async def test_the_engines_fourth_topic_never_reaches_this_source_over_a_real_so
 
         await publisher.send_multipart([OPERATOR_SNAPSHOT_TOPIC, b"an operator snapshot payload"])
         await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
-        await asyncio.sleep(0.05)
-
-        assert readings == ["T11"], readings
+        assert await _until(lambda: readings == ["T11"]), readings
         assert live._invalid is False, "an operator snapshot took the live generation's authority"
         assert live._foreign_topic_frames == 0, "the snapshot should not have been delivered at all"
     finally:
@@ -385,15 +402,14 @@ async def test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal() -> N
         # A topic the publisher might add tomorrow. It starts with a subscribed one, so the
         # socket delivers it whatever this source intended.
         await publisher.send_multipart([DEFAULT_TOPIC + b".detail", b"payload of a topic added later"])
-        await asyncio.sleep(0.05)
-
-        assert live._foreign_topic_frames == 1, "the prefix-extension frame was not delivered"
+        assert await _until(lambda: live._foreign_topic_frames == 1), (
+            "the prefix-extension frame was not delivered"
+        )
         assert live._invalid is False, "a topic somebody else added invalidated this generation"
 
         # And the source still works afterwards, which is the point of not refusing.
         await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
-        await asyncio.sleep(0.05)
-        assert readings == ["T11"], readings
+        assert await _until(lambda: readings == ["T11"]), readings
     finally:
         await live.stop()
         publisher.close(linger=0)
@@ -426,14 +442,11 @@ async def test_a_foreign_topic_is_ignored_whatever_shape_its_envelope_has() -> N
 
         await publisher.send_multipart([DEFAULT_TOPIC + b".one"])
         await publisher.send_multipart([DEFAULT_TOPIC + b".three", b"second", b"third"])
-        await asyncio.sleep(0.05)
-
-        assert live._foreign_topic_frames == 2, live._foreign_topic_frames
+        assert await _until(lambda: live._foreign_topic_frames == 2), live._foreign_topic_frames
         assert live._invalid is False, "a foreign envelope shape invalidated the generation"
 
         await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
-        await asyncio.sleep(0.05)
-        assert readings == ["T11"], readings
+        assert await _until(lambda: readings == ["T11"]), readings
     finally:
         await live.stop()
         publisher.close(linger=0)
@@ -465,6 +478,30 @@ async def test_the_shared_sequence_belongs_only_to_the_topics_that_are_followed(
     with pytest.raises(ValueError, match="sequenced topics"):
         await publisher._send_allocated(b"readings.detail", lambda _sequence: b"payload")
     assert publisher._sequence == before, "a refused topic still moved the counter"
+
+
+async def test_a_publisher_nobody_follows_is_refused_before_it_can_swallow_a_queue() -> None:
+    """The refusal has to happen at CONSTRUCTION, because the send path swallows.
+
+    `_publish_loop` catches whatever `_publish_reading` raises and still calls
+    `queue.task_done()`. So a publisher built on a topic outside the sequenced set would
+    drain its queue while sending nothing: every reading lost, the queue reporting itself
+    handled, and the publisher still alive. The per-send guard alone therefore converts a
+    wiring mistake into silent data loss, which is the one outcome this project exists to
+    prevent.
+
+    No production call site passes a custom topic today, measured 2026-08-21 -- the three
+    constructions in `src/` all take the default. This refuses the shape rather than
+    waiting for someone to reach it.
+    """
+
+    from cryodaq.core.zmq_bridge import ZMQPublisher
+
+    with pytest.raises(ValueError, match="subscribers follow"):
+        ZMQPublisher(topic=b"nobody.follows.this")
+
+    # And the ordinary construction is untouched.
+    assert ZMQPublisher()._topic == DEFAULT_TOPIC
 
 
 async def test_a_malformed_frame_on_a_participating_topic_is_still_refused() -> None:

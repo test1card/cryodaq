@@ -714,6 +714,16 @@ class ZMQPublisher:
         applied_cold_stage_channel: str | None = None,
     ) -> None:
         self._address = address
+        if topic not in _SEQUENCED_TOPICS:
+            # AT CONSTRUCTION, WHERE IT IS LOUD. The per-send guard below is the same rule,
+            # but reaching it costs data: `_publish_loop` catches whatever `_publish_reading`
+            # raises and still calls `queue.task_done()`, so a publisher built on an
+            # unfollowed topic would drain its queue while sending nothing -- silent loss of
+            # every reading, with the publisher still reporting itself alive.
+            #
+            # This is a wiring mistake, not an operator action, so there is nobody to guide
+            # through it; the honest answer is to refuse the object rather than the data.
+            raise ValueError("publisher topic must be one this transport's subscribers follow")
         self._topic = topic
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
