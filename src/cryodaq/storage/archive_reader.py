@@ -1269,6 +1269,11 @@ class ArchiveReader:
             reading_columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
             has_descriptor_hash = "descriptor_hash" in reading_columns
             descriptor_map: dict[str, ResolvedStorageDescriptor] = {}
+            # Whether THIS database was written by a catalog-bearing writer. It cannot be
+            # read off descriptor_map: that map is filtered to the hashes the readings
+            # actually reference, so a day whose rows are all unbound would leave it empty
+            # in a database that does carry a catalog.
+            catalog_is_installed = False
             if has_descriptor_hash:
                 if (
                     conn.execute(
@@ -1281,6 +1286,9 @@ class ArchiveReader:
                     verify_descriptor_storage(conn)
                 except ChannelDescriptorStorageError as exc:
                     raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH) from exc
+                catalog_is_installed = (
+                    conn.execute("SELECT 1 FROM main.channel_descriptors LIMIT 1").fetchone() is not None
+                )
                 descriptor_rows = conn.execute(
                     "SELECT DISTINCT descriptor_hash FROM readings WHERE descriptor_hash IS NOT NULL LIMIT ?",
                     (MAX_ARCHIVE_DESCRIPTORS + 1,),
@@ -1359,6 +1367,19 @@ class ArchiveReader:
                                 status_text = _bounded_text(status_value, minimum=0, maximum=64)
                                 decoded = _bounded_value(value, status_text)
                                 if descriptor_hash is None:
+                                    if catalog_is_installed:
+                                        # NOT pre-catalog history. This database has a
+                                        # descriptor catalog, so a row without an identity
+                                        # is a row whose channel the catalog does not
+                                        # describe. Synthesising a legacy descriptor here
+                                        # would hand it a fabricated identity and mark the
+                                        # read complete, and descriptor reporting would then
+                                        # carry it as an ordinary described reading.
+                                        #
+                                        # A database written before catalogs existed reaches
+                                        # this line with catalog_is_installed False and is
+                                        # resolved as legacy exactly as before.
+                                        raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
                                     descriptor = resolve_legacy_descriptor(
                                         instrument_text,
                                         channel_text,
@@ -1972,6 +1993,12 @@ class ArchiveReader:
                 max_arrow_batch_bytes=max_arrow_batch_bytes,
                 deadline_monotonic=deadline_monotonic,
             )
+            # The rotated index records how many descriptor rows travelled with this
+            # parquet. A positive count is the cold equivalent of an installed catalog,
+            # and it is read from the index rather than from descriptor_map for the same
+            # reason: that map names only the hashes the rows reference.
+            cold_catalog_rows = (source.index_entry or {}).get("channel_descriptors_rows")
+            cold_catalog_is_installed = type(cold_catalog_rows) is int and cold_catalog_rows > 0
             has_descriptor_hash = "descriptor_hash" in parquet.schema_arrow.names
             start_scalar = pa.scalar(
                 datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=start_us),
@@ -2089,6 +2116,11 @@ class ArchiveReader:
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
                             if descriptor_hash is None:
+                                if cold_catalog_is_installed:
+                                    # Same rule as the hot path: rotated data that carried a
+                                    # descriptor catalog cannot contain pre-catalog history,
+                                    # so a row without an identity is missing one.
+                                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
                                 descriptor = resolve_legacy_descriptor(instrument, channel, unit)
                             else:
                                 descriptor = descriptor_map.get(descriptor_hash)

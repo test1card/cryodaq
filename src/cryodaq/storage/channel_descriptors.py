@@ -182,6 +182,23 @@ class ChannelDescriptorStorageError(RuntimeError):
     """The SQLite descriptor authority is malformed, corrupt, or ambiguous."""
 
 
+class ChannelNotDescribedError(ChannelDescriptorStorageError):
+    """The catalog describes no channel under this identity at all.
+
+    Distinct from every other descriptor failure, and distinct for one reason: an
+    ABSENT channel has no descriptor to contradict, while a channel the catalog DOES
+    describe, whose instrument or unit disagrees, may not be the quantity the descriptor
+    names. Callers that answer the two cases differently must tell them apart through
+    this type, never by comparing channel spellings themselves -- the spelling sweep
+    (tests/test_c2_repo_wide_spelling_sweep.py) rejects membership tests over identity,
+    and it is right to: the declaring authority for "is this channel described" is the
+    catalog, not the caller.
+
+    It remains a ChannelDescriptorStorageError, so every existing handler that fails
+    closed on the base class keeps failing closed on this one.
+    """
+
+
 class _StrictDescriptorLoader(OwnedSafeLoader):
     """Bounded YAML grammar with neither aliases nor duplicate mapping keys.
 
@@ -1231,7 +1248,7 @@ def descriptor_hash_for_reading(
         raise ChannelDescriptorStorageError("descriptor-required reading identity must use exact strings")
     descriptor = catalog.by_channel_id.get(channel)
     if descriptor is None:
-        raise ChannelDescriptorStorageError("descriptor-required reading has an unknown channel_id")
+        raise ChannelNotDescribedError("descriptor-required reading has an unknown channel_id")
     if descriptor.instrument_id != instrument_id:
         raise ChannelDescriptorStorageError("reading instrument_id disagrees with descriptor")
     if descriptor.unit != unit:
