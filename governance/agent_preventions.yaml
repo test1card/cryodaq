@@ -3435,6 +3435,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_ready_file_was_written_in_place_so_a_launcher_polling_by_existence_could_read_a_partially_written_document_while_no_registered_guard_asserted_atomic_publish
     green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: PERIODIC-LIVE-PRODUCER-CONSUMER-DRIFT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-LIVE-FRAME-ADMISSION-001
+    guard: tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer
+    ci_partition: agents
+    red_evidence: local_executed_on_commit_88c9d5d2b501903397a0a4b39b7fcd5df81c3abf_tree_9fc31fa06ef93b26231bc940a753ba2f69e4f739_guard_blob_e422b8183d003e11207f251fddaae9e3a9420826_python_3_14_3_with_production_blob_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_exact_node_selected_1_failed_exit_1_stdout_stderr_sha256_5cb0b341ae735f134e635be046498d422bdc977c691ebe2d169ab2d4cf1d7c77_production_blob_verified_restored_to_a84280547bb656941c092643746a766e0270c4e9_after_the_run
+    green_evidence: local_executed_on_commit_88c9d5d2b501903397a0a4b39b7fcd5df81c3abf_tree_9fc31fa06ef93b26231bc940a753ba2f69e4f739_guard_blob_e422b8183d003e11207f251fddaae9e3a9420826_python_3_14_3_exact_nodes_selected_7_passed_exit_0_stdout_stderr_sha256_522203b2e27ff8e2daccc326414508d9aabdb6cea7719e1c99b83a9caf0ad8c6_pending_sealed_hosted_agents_artifact
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -5870,6 +5878,7 @@ records:
         - production_test_divergence
         - publication_loss
         - retained_handle_loss
+        - server_client_contract_split
         - silent_failure
         - stale_authority
     red_evidence: registry_corpus_on_2026_07_26_contains_five_classifications_with_exactly_two_records_and_no_prior_class_level_disposition_or_enforcement
@@ -6726,3 +6735,36 @@ records:
         ci_partition: remaining
     red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
     green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition
+  - id: PERIODIC-LIVE-FRAME-ADMISSION-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: The SequencedPeriodicLiveSources subscription set and the reading admission contract in src/cryodaq/agents/assistant/periodic_runtime.py.
+    classification: server_client_contract_split
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: The periodic live consumer subscribed to fewer topics than its own refusal path treated as participating, and its reading contract did not name the descriptor envelope key the publisher had grown. A frame the publisher legitimately writes is then refused, and a refusal invalidates the whole live generation, so a laboratory run loses the periodic source and does not say a wrong thing about why.
+    invariant: The topics the consumer subscribes to are exactly the topics its refusal path names as participating; a reading is admitted when it carries every required key, with or without the optional descriptor envelope; a reading missing a required key is refused; an unknown key is refused and its name is never echoed into the message, only its count.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_start_connects_before_subscribing_to_the_participating_topics
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_the_subscription_and_the_refusal_name_the_same_topics
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_reading_carrying_a_descriptor_envelope_is_accepted
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_reading_without_a_descriptor_is_still_accepted
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_reading_missing_a_required_field_is_still_refused
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_an_unknown_field_is_refused_and_not_echoed
+        ci_partition: agents
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer
+        ci_partition: agents
+    automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
+    red_evidence: local_executed_on_commit_88c9d5d2b501903397a0a4b39b7fcd5df81c3abf_tree_9fc31fa06ef93b26231bc940a753ba2f69e4f739_guard_blob_e422b8183d003e11207f251fddaae9e3a9420826_python_3_14_3_with_production_blob_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_exact_nodes_selected_5_failed_1_passed_exit_1_stdout_stderr_sha256_5050b4981b79aaa7dd050efb26aa98543c70fb0190abb3b7b9498fbb27416a39_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_production_blob_verified_restored_to_a84280547bb656941c092643746a766e0270c4e9_after_the_run
+    green_evidence: local_executed_on_commit_88c9d5d2b501903397a0a4b39b7fcd5df81c3abf_tree_9fc31fa06ef93b26231bc940a753ba2f69e4f739_guard_blob_e422b8183d003e11207f251fddaae9e3a9420826_python_3_14_3_exact_nodes_selected_7_passed_exit_0_stdout_stderr_sha256_522203b2e27ff8e2daccc326414508d9aabdb6cea7719e1c99b83a9caf0ad8c6_pending_sealed_hosted_agents_artifact
