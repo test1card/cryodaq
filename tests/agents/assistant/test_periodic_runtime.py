@@ -400,6 +400,73 @@ async def test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal() -> N
         context.term()
 
 
+async def test_a_foreign_topic_is_ignored_whatever_shape_its_envelope_has() -> None:
+    """The frame count is a rule about OUR topics, so it cannot be applied before the topic.
+
+    A future topic is free to use one frame or three. If the count were checked first, such
+    a frame would raise and invalidate the generation, and the non-fatal handling would
+    have protected only foreign topics that happened to share our two-part envelope --
+    which is no protection at all. Driven over the real socket, because the shape of what
+    ZMQ delivers is the whole question.
+    """
+
+    context, publisher, address = await _publisher()
+    readings: list[str] = []
+
+    class Query:
+        async def barrier(self, nonce: str) -> BarrierQueryResult:
+            cut, marker = _cut(10, nonce=nonce)
+            await publisher.send_multipart([PERIODIC_BARRIER_TOPIC, marker])
+            return BarrierQueryResult(True, nonce, cut, None)
+
+    live = SequencedPeriodicLiveSources(Query(), address)
+    try:
+        await live.start(lambda reading: readings.append(reading.channel), lambda _event: None)
+        await live.ready()
+
+        await publisher.send_multipart([DEFAULT_TOPIC + b".one"])
+        await publisher.send_multipart([DEFAULT_TOPIC + b".three", b"second", b"third"])
+        await asyncio.sleep(0.05)
+
+        assert live._foreign_topic_frames == 2, live._foreign_topic_frames
+        assert live._invalid is False, "a foreign envelope shape invalidated the generation"
+
+        await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
+        await asyncio.sleep(0.05)
+        assert readings == ["T11"], readings
+    finally:
+        await live.stop()
+        publisher.close(linger=0)
+        context.term()
+
+
+async def test_the_shared_sequence_belongs_only_to_the_topics_that_are_followed() -> None:
+    """Ignoring a foreign frame is safe only if that frame never took a sequence number.
+
+    `_allocate_sequence` advances ONE counter for the whole socket, and this subscriber
+    validates that counter for continuity. If a future topic were published through the
+    allocating path, ignoring its frame would leave a GAP, and the next participating frame
+    would invalidate the generation anyway -- the ignore would have bought nothing.
+
+    So the publisher refuses to allocate for a topic outside the sequenced set, and it
+    refuses BEFORE the counter moves, so the refusal itself leaves no gap.
+    """
+
+    from cryodaq.core.zmq_bridge import _SEQUENCED_TOPICS, ZMQPublisher
+
+    assert _SEQUENCED_TOPICS == periodic_runtime._PARTICIPATING_TOPICS, (
+        "the topics that consume the sequence and the topics this source follows must be "
+        "the same set, or a published frame creates a gap nobody can close"
+    )
+
+    publisher = ZMQPublisher()
+    publisher._send_lock = asyncio.Lock()
+    before = publisher._sequence
+    with pytest.raises(ValueError, match="sequenced topics"):
+        await publisher._send_allocated(b"readings.detail", lambda _sequence: b"payload")
+    assert publisher._sequence == before, "a refused topic still moved the counter"
+
+
 async def test_a_malformed_frame_on_a_participating_topic_is_still_refused() -> None:
     """The boundary: ignoring a foreign topic must not soften the real contract.
 

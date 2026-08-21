@@ -216,6 +216,19 @@ PERIODIC_STREAM_SCHEMA = "cryodaq.periodic.stream/v1"
 PERIODIC_BARRIER_SCHEMA = "cryodaq.periodic.barrier/v1"
 PERIODIC_QUERY_SCHEMA = "cryodaq.periodic.query/v1"
 PERIODIC_BARRIER_TOPIC = b"periodic.barrier"
+
+# THE TOPICS THAT CONSUME THE SHARED SEQUENCE, and the only ones allowed to.
+#
+# `_allocate_sequence` advances one counter for the whole socket, and the private
+# subscriber validates that counter for continuity. A topic outside this set that
+# allocated a sequence would therefore create a GAP for every subscriber that does
+# not participate in it -- and a gap invalidates the whole live generation, which is
+# the failure this file's fourth topic already caused once by a different route.
+#
+# A new topic joins this set only together with the subscribers that must follow it.
+# Publishing outside the sequence is the ordinary case: `publish_operator_snapshot`
+# does not allocate, which is why an operator snapshot never disturbed continuity.
+_SEQUENCED_TOPICS: tuple[bytes, ...] = (DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC)
 PERIODIC_QUERY_MAX_BYTES = 64 * 1024
 PERIODIC_MAX_SEQUENCE = 2**63 - 1
 _PERIODIC_BARRIER_TIMEOUT_S = 1.5
@@ -771,6 +784,10 @@ class ZMQPublisher:
         encode: Callable[[int], bytes],
     ) -> int:
         """Allocate, encode, and send while the caller owns ``_send_lock``."""
+        if topic not in _SEQUENCED_TOPICS:
+            # Refused BEFORE the counter moves, so a refusal costs nothing and leaves no
+            # gap behind. See _SEQUENCED_TOPICS for why a gap is not a cosmetic problem.
+            raise ValueError("only sequenced topics may consume the shared sequence")
         sequence = self._allocate_sequence()
         try:
             frame = encode(sequence)

@@ -806,7 +806,7 @@ class SequencedPeriodicLiveSources:
         marker.set_result(cut)
 
     async def _handle_frame(self, parts: list[bytes]) -> None:
-        if len(parts) != 2:
+        if not parts:
             raise ValueError("invalid multipart frame")
         if parts[0] not in _PARTICIPATING_TOPICS:
             # NOT OURS, AND NOT A VIOLATION. A SUBSCRIBE is a byte PREFIX, so subscribing
@@ -816,6 +816,13 @@ class SequencedPeriodicLiveSources:
             # just corrected for. Count it and move on.
             self._foreign_topic_frames += 1
             return
+        # THE FRAME COUNT IS A RULE ABOUT OUR OWN TOPICS, so it is applied after the topic
+        # is classified and never before. Checking it first would make a foreign topic
+        # fatal whenever it used one or three parts instead of two -- the non-fatal
+        # handling above would then have protected only foreign topics that happened to
+        # share our envelope shape, which is no protection at all.
+        if len(parts) != 2:
+            raise ValueError("invalid multipart frame")
         async with self._state_lock:
             if self._invalid or not self._running:
                 raise PeriodicLiveDiscontinuity()
