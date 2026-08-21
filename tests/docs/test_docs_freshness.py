@@ -2566,7 +2566,59 @@ def _branch_base_sha() -> str | None:
         return None
 
 
-def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
+def derived_pair_state(
+    *,
+    committed: dict[str, bytes],
+    at_base: dict[str, bytes] | None,
+    regenerated: dict[str, bytes],
+) -> str:
+    """Classify the derived pair: "untouched", "regenerated", or "divergent".
+
+    This is a pure function over bytes so the three cases can be exercised deterministically
+    instead of only in prose. Review asked for that after a false green survived a
+    description of it, and after a duplicate definition of the guard let the OLD guard
+    answer while the new one sat unused above it. Both mistakes are invisible to a check
+    that can only be run against whatever the working tree happens to hold.
+
+    "untouched" means the branch inherited both files and never maintained them, which is
+    the ordinary state and the whole point of the change. "regenerated" means the branch
+    produced them from its own index deliberately. Anything else is "divergent": edited,
+    hand-merged, or half-regenerated, and it is refused everywhere.
+    """
+
+    if at_base is not None and all(committed[path] == at_base[path] for path in committed):
+        return "untouched"
+    if all(committed[path] == regenerated[path] for path in committed):
+        return "regenerated"
+    return "divergent"
+
+
+def test_derived_pair_state_separates_inherited_regenerated_and_edited() -> None:
+    """The reviewer's reproduction, encoded rather than described.
+
+    The false green that review found was a pair whose two files agreed with each other
+    while one carried an edited metric. That is the third case here, and it must classify
+    as divergent whatever the other two files say.
+    """
+
+    metrics, diagram = "docs/current_candidate_metrics.md", "docs/architecture-montana-important.svg"
+    inherited = {metrics: b"metrics as inherited", diagram: b"diagram as inherited"}
+    produced = {metrics: b"metrics from this index", diagram: b"diagram from this index"}
+
+    assert derived_pair_state(committed=dict(inherited), at_base=inherited, regenerated=produced) == "untouched"
+    assert derived_pair_state(committed=dict(produced), at_base=inherited, regenerated=produced) == "regenerated"
+
+    # The reproduction: one file edited, the other left alone.
+    edited = {metrics: b"metrics with a false number", diagram: inherited[diagram]}
+    assert derived_pair_state(committed=edited, at_base=inherited, regenerated=produced) == "divergent"
+
+    # And with no base to compare against -- an unresolvable base -- only a real
+    # regeneration is accepted, which is the behaviour this guard had before the change.
+    assert derived_pair_state(committed=dict(inherited), at_base=None, regenerated=produced) == "divergent"
+    assert derived_pair_state(committed=dict(produced), at_base=None, regenerated=produced) == "regenerated"
+
+
+def test_montana_report_inventory_metrics_match_frozen_index_snapshot(tmp_path) -> None:
     """Bind one generated metric block and the surviving SVG to one index snapshot.
 
     THE DERIVED PAIR IS REGENERATED AFTER EACH MERGE TO MASTER, NOT ON EVERY BRANCH.
@@ -2613,12 +2665,24 @@ def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
     assert frozen_paths and contents
     svg_path = REPO_ROOT / "docs/architecture-montana-important.svg"
     committed = {path: generator._git_bytes("show", f":{path}") for path in _DERIVED_PAIR}
-    regenerated = generator.current_metrics_bytes(snapshot, committed["docs/architecture-montana-important.svg"])
-    is_regeneration = committed["docs/current_candidate_metrics.md"] == regenerated
+
+    # RENDER THE DIAGRAM AND COMPARE ITS BYTES. `current_metrics_bytes` consults the SVG it
+    # is handed only for its line count, so comparing the metrics document alone would let a
+    # branch alter the diagram's content or its recorded tree fingerprint -- without changing
+    # the number of lines -- and still look like a regeneration. The release freshness gate
+    # already renders and compares bytes; this does the same rather than trusting a proxy.
+    rendered_path = tmp_path / "architecture-montana-important.svg"
+    generator.important_svg("montana", list(frozen_paths), contents.__getitem__, rendered_path, snapshot)
+    rendered_svg = rendered_path.read_bytes()
+    regenerated = {
+        "docs/architecture-montana-important.svg": rendered_svg,
+        "docs/current_candidate_metrics.md": generator.current_metrics_bytes(snapshot, rendered_svg),
+    }
+    is_regeneration = all(committed[path] == regenerated[path] for path in _DERIVED_PAIR)
 
     if _tree_is_exactly_master():
         assert is_regeneration
-        metrics = regenerated.decode("utf-8")
+        metrics = regenerated["docs/current_candidate_metrics.md"].decode("utf-8")
         svg_metadata = _svg_metadata(svg_path)
         assert f"| Source snapshot tree | `{snapshot.tree_sha}` |" in metrics
         assert f"| Source snapshot object manifest SHA-256 | `{snapshot.object_manifest_sha256()}` |" in metrics
@@ -2626,15 +2690,14 @@ def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
         assert svg_metadata["source_tree_file_count"] == len(snapshot.paths)
     else:
         base = _branch_base_sha()
-        untouched = False
+        at_base: dict[str, bytes] | None = None
         if base is not None:
             try:
-                untouched = all(
-                    generator._git_bytes("show", f"{base}:{path}") == committed[path] for path in _DERIVED_PAIR
-                )
+                at_base = {path: generator._git_bytes("show", f"{base}:{path}") for path in _DERIVED_PAIR}
             except (subprocess.CalledProcessError, OSError):
-                untouched = False
-        assert untouched or is_regeneration, (
+                at_base = None
+        state = derived_pair_state(committed=committed, at_base=at_base, regenerated=regenerated)
+        assert state != "divergent", (
             "the derived pair is neither what this branch inherited from its base nor a "
             "regeneration from this branch's index, so one of the two generated files was "
             "edited or hand-merged instead of regenerated"
