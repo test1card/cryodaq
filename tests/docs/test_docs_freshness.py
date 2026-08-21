@@ -2504,25 +2504,93 @@ def test_claim_corrections_changed_python_count_matches_workflow_index() -> None
         assert_current(non_ancestor_workflow, corrections)
 
 
+def _tree_is_exactly_master() -> bool:
+    """Positive evidence that this checkout IS master. Anything unprovable is a branch.
+
+    Read the two callers below before changing this: the strict half of the derived-pair
+    guard runs when this returns True, and the self-agreement half runs when it returns
+    False. Returning True by mistake makes every branch regenerate the pair again;
+    returning False on master would let a stale pair reach the default branch unnoticed,
+    which is why the environment variable is checked first and trusted.
+    """
+
+    if os.environ.get("GITHUB_REF") == "refs/heads/master":
+        return True
+    try:
+        head = subprocess.run(
+            ("git", "rev-parse", "HEAD"), cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        master = subprocess.run(
+            ("git", "rev-parse", "origin/master"), cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    return bool(head) and head == master
+
+
 def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
-    """Bind one generated metric block and the surviving SVG to one index snapshot."""
+    """Bind one generated metric block and the surviving SVG to one index snapshot.
+
+    THE DERIVED PAIR IS REGENERATED AFTER EACH MERGE TO MASTER, NOT ON EVERY BRANCH.
+    Owner decision of 2026-08-21, taken on a measurement: the metrics file records a tree
+    fingerprint, so it differs on every branch, so every branch had to regenerate and
+    commit both files -- and every branch therefore edited the same two files. Forty of
+    the forty-two open pull requests conflicted, and the pair was the machine-generated
+    worst of the four files that did it. The generator, the files and this check all stay;
+    what moved is WHERE the pair must be current.
+
+    THIS IS NOT THE RELEASE-ONLY MOVE THAT REVIEW REJECTED. An earlier branch took a
+    different guard out of the default suite into a release-only one, and review found the
+    move left it unexecuted on every pull request and branch push; it was put back. This
+    guard still runs in the default suite, on every push of every branch, exactly as
+    before. What changed is the ASSERTION it makes off master, not whether it runs.
+
+    - On master -- and only on positive evidence of master -- the pair must equal a
+      regeneration from the current index, byte for byte. That is the whole of the old
+      behaviour, unchanged.
+    - Anywhere else the pair must be INTERNALLY SELF-AGREED: the tree fingerprint the
+      metrics file records is the one the diagram's own metadata records, and both
+      artifacts carry their fields. That still catches the documented branch-side hazard,
+      a hand-merged hunk that leaves a generated file disagreeing with its generator,
+      without requiring the branch to touch either file.
+
+    Master is the backstop that makes the relaxed half safe. The workflow runs this suite
+    on every push to every branch INCLUDING master, so a merge that ships a stale pair
+    reddens master mechanically. And nothing becomes master except by becoming master:
+    merges here are fast-forwards of a branch head that took master in, and that step
+    regenerates the pair to a fixed point and refuses to proceed with an uncommitted diff.
+    So the head that becomes master already carries a current pair.
+    """
     import tools.generate_montana_architecture_svgs as generator
 
     snapshot, frozen_paths, contents = _architecture_inventory()
     assert frozen_paths and contents
     svg_path = REPO_ROOT / "docs/architecture-montana-important.svg"
-
-    expected = generator.current_metrics_bytes(
-        snapshot, generator._git_bytes("show", ":docs/architecture-montana-important.svg")
-    )
-    assert generator._git_bytes("show", ":docs/current_candidate_metrics.md") == expected
-
-    metrics = expected.decode("utf-8")
+    committed_metrics = generator._git_bytes("show", ":docs/current_candidate_metrics.md")
     svg_metadata = _svg_metadata(svg_path)
-    assert f"| Source snapshot tree | `{snapshot.tree_sha}` |" in metrics
-    assert f"| Source snapshot object manifest SHA-256 | `{snapshot.object_manifest_sha256()}` |" in metrics
-    assert svg_metadata["source_tree_sha"] == snapshot.tree_sha
-    assert svg_metadata["source_tree_file_count"] == len(snapshot.paths)
+
+    if _tree_is_exactly_master():
+        expected = generator.current_metrics_bytes(
+            snapshot, generator._git_bytes("show", ":docs/architecture-montana-important.svg")
+        )
+        assert committed_metrics == expected
+        metrics = expected.decode("utf-8")
+        assert f"| Source snapshot tree | `{snapshot.tree_sha}` |" in metrics
+        assert f"| Source snapshot object manifest SHA-256 | `{snapshot.object_manifest_sha256()}` |" in metrics
+        assert svg_metadata["source_tree_sha"] == snapshot.tree_sha
+        assert svg_metadata["source_tree_file_count"] == len(snapshot.paths)
+    else:
+        metrics = committed_metrics.decode("utf-8")
+        recorded_tree = re.search(r"\| Source snapshot tree \| `([0-9a-f]{40})` \|", metrics)
+        assert recorded_tree is not None, "the metrics file records no source snapshot tree"
+        assert re.search(r"\| Source snapshot object manifest SHA-256 \| `[0-9a-f]{64}` \|", metrics), (
+            "the metrics file records no object manifest digest"
+        )
+        assert svg_metadata["source_tree_sha"] == recorded_tree.group(1), (
+            "the diagram and the metrics file name different source trees, so one of them was "
+            "edited or hand-merged instead of regenerated"
+        )
+        assert type(svg_metadata["source_tree_file_count"]) is int
 
     report = _read(REPO_ROOT / "docs/MONTANA_REFACTOR_REPORT.md")
     metrics_link = "[generated current-candidate metrics](current_candidate_metrics.md)"
