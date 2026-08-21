@@ -312,6 +312,118 @@ async def test_startup_marker_buffers_then_filters_and_dispatches_in_order() -> 
         context.term()
 
 
+async def test_the_engines_fourth_topic_never_reaches_this_source_over_a_real_socket() -> None:
+    """The laboratory failure, reproduced through a real PUB/SUB socket rather than a mock.
+
+    The assertions on the mocked socket compare constants: they show the SUBSCRIBE list is
+    the intended one, and nothing more. What actually cost the laboratory a week was
+    transport behaviour -- an `operator.snapshot` published on the SAME socket arrived,
+    `_handle_frame` refused it, and the refusal invalidated the whole live generation.
+
+    So this publishes that fourth topic on the real socket after readiness and then a
+    perfectly ordinary reading, and requires the reading to arrive with the generation
+    still authoritative. Under the previous `SUBSCRIBE b""` the snapshot was delivered and
+    this goes red.
+    """
+
+    from cryodaq.core.zmq_subprocess import OPERATOR_SNAPSHOT_TOPIC
+
+    context, publisher, address = await _publisher()
+    readings: list[str] = []
+
+    class Query:
+        async def barrier(self, nonce: str) -> BarrierQueryResult:
+            cut, marker = _cut(10, nonce=nonce)
+            await publisher.send_multipart([PERIODIC_BARRIER_TOPIC, marker])
+            return BarrierQueryResult(True, nonce, cut, None)
+
+    live = SequencedPeriodicLiveSources(Query(), address)
+    try:
+        await live.start(lambda reading: readings.append(reading.channel), lambda _event: None)
+        await live.ready()
+
+        await publisher.send_multipart([OPERATOR_SNAPSHOT_TOPIC, b"an operator snapshot payload"])
+        await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
+        await asyncio.sleep(0.05)
+
+        assert readings == ["T11"], readings
+        assert live._invalid is False, "an operator snapshot took the live generation's authority"
+        assert live._foreign_topic_frames == 0, "the snapshot should not have been delivered at all"
+    finally:
+        await live.stop()
+        publisher.close(linger=0)
+        context.term()
+
+
+async def test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal() -> None:
+    """ZMQ SUBSCRIBE is a byte PREFIX, so this source cannot choose what arrives.
+
+    Subscribing to `b"readings"` also delivers a future `b"readings.detail"`. No list this
+    consumer keeps can prevent that -- the publisher owns its own topics. If admission
+    refused such a frame, one new publisher topic would invalidate an unrelated consumer's
+    whole generation: the same failure shape that has just been corrected and registered.
+
+    Measured 2026-08-21: no topic in use today is a byte-prefix of another, so this is a
+    guard against the next one being added, not a reproduction of a live defect. That is
+    exactly why it is written now -- the cost of finding out later is a laboratory week.
+    """
+
+    context, publisher, address = await _publisher()
+    readings: list[str] = []
+
+    class Query:
+        async def barrier(self, nonce: str) -> BarrierQueryResult:
+            cut, marker = _cut(10, nonce=nonce)
+            await publisher.send_multipart([PERIODIC_BARRIER_TOPIC, marker])
+            return BarrierQueryResult(True, nonce, cut, None)
+
+    live = SequencedPeriodicLiveSources(Query(), address)
+    try:
+        await live.start(lambda reading: readings.append(reading.channel), lambda _event: None)
+        await live.ready()
+
+        # A topic the publisher might add tomorrow. It starts with a subscribed one, so the
+        # socket delivers it whatever this source intended.
+        await publisher.send_multipart([DEFAULT_TOPIC + b".detail", b"payload of a topic added later"])
+        await asyncio.sleep(0.05)
+
+        assert live._foreign_topic_frames == 1, "the prefix-extension frame was not delivered"
+        assert live._invalid is False, "a topic somebody else added invalidated this generation"
+
+        # And the source still works afterwards, which is the point of not refusing.
+        await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
+        await asyncio.sleep(0.05)
+        assert readings == ["T11"], readings
+    finally:
+        await live.stop()
+        publisher.close(linger=0)
+        context.term()
+
+
+async def test_a_malformed_frame_on_a_participating_topic_is_still_refused() -> None:
+    """The boundary: ignoring a foreign topic must not soften the real contract.
+
+    A frame that is not two parts, or a reading whose shape is wrong on a topic this
+    source DOES participate in, is a protocol violation and still invalidates the
+    generation. Only "this frame is not addressed to me" became non-fatal.
+    """
+
+    live = SequencedPeriodicLiveSources(_UnusedQuery())
+    live._running = True
+    live._failure = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(ValueError, match="invalid multipart frame"):
+        await live._handle_frame([DEFAULT_TOPIC])
+    with pytest.raises(ValueError, match="invalid multipart frame"):
+        await live._handle_frame([DEFAULT_TOPIC, b"one", b"two"])
+    assert live._foreign_topic_frames == 0
+
+
+class _UnusedQuery:
+    async def barrier(self, _nonce: str) -> BarrierQueryResult:
+        raise AssertionError("this test never reaches the barrier")
+
+
 async def test_startup_retries_dropped_first_marker_with_fresh_matching_nonce() -> None:
     nonces: list[str] = []
     readings: list[str] = []
@@ -642,8 +754,19 @@ async def test_forbidden_marker_ok_prefix_topic_and_changed_baseline_fail_closed
     forbidden["ok"] = True
     with pytest.raises(ValueError, match="marker shape"):
         await live._handle_frame([PERIODIC_BARRIER_TOPIC, json.dumps(forbidden).encode()])
-    with pytest.raises(ValueError, match="multipart"):
-        await live._handle_frame([DEFAULT_TOPIC + b".suffix", b"x"])
+    # DELIBERATE REVERSAL, 2026-08-21. This line used to require a refusal for a topic that
+    # merely EXTENDS a subscribed one, and that is now wrong: ZMQ SUBSCRIBE matches by byte
+    # prefix, so subscribing to b"readings" delivers a future b"readings.detail" whatever
+    # this source intends. Refusing it invalidates the whole live generation -- so one new
+    # topic on the publisher would kill an unrelated consumer, which is the exact failure
+    # this branch exists to correct, arriving by a second door.
+    #
+    # Fail-closed is preserved where it means something: the frame is not ACTED ON, and no
+    # reading from it reaches the broker. It is counted instead of being made fatal.
+    # See test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal.
+    before = live._foreign_topic_frames
+    await live._handle_frame([DEFAULT_TOPIC + b".suffix", b"x"])
+    assert live._foreign_topic_frames == before + 1
 
     live._session_id = SESSION
     live._last_sequence = 1

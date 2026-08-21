@@ -88,9 +88,19 @@ _MONITOR_FAILURE_EVENTS = frozenset(
 )
 
 
-# The topics this source participates in. `_handle_frame` refuses anything else as a
-# protocol violation, so the SUBSCRIBE list and that refusal must name the SAME set: a
-# topic in one and not the other is either a silent drop or a fatal refusal.
+# The topics this source participates in.
+#
+# ZMQ SUBSCRIBE MATCHES BY PREFIX, NOT BY EQUALITY, and that is why admission cannot be
+# a refusal. Subscribing to b"readings" also delivers a future b"readings.detail", and
+# no list this consumer keeps can prevent that -- the publisher owns its own topics.
+# So `_handle_frame` IGNORES AND COUNTS a frame on a topic outside this tuple, and
+# refuses only what is genuinely malformed. A refusal invalidates the whole generation,
+# and a topic somebody else added must never be able to kill this source. Measured on
+# 2026-08-20: an ordinary `operator.snapshot` did exactly that.
+#
+# Equality between this tuple and the SUBSCRIBE list is still required, because a topic
+# subscribed but not admitted is a silent drop, and one admitted but not subscribed is a
+# frame that never arrives.
 _PARTICIPATING_TOPICS: tuple[bytes, ...] = (DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC)
 
 # THE READING CONTRACT, SPLIT INTO WHAT MUST BE THERE AND WHAT MAY BE.
@@ -592,6 +602,9 @@ class SequencedPeriodicLiveSources:
         self._failure: asyncio.Future[None] | None = None
         self._connected: asyncio.Event | None = None
         self._state_lock = asyncio.Lock()
+        # Frames delivered by prefix matching on a topic this source does not
+        # participate in. Counted rather than refused; see _handle_frame.
+        self._foreign_topic_frames = 0
         self._ready_active = False
         self._ready_nonce: str | None = None
         self._retired_ready_nonces: set[str] = set()
@@ -793,8 +806,16 @@ class SequencedPeriodicLiveSources:
         marker.set_result(cut)
 
     async def _handle_frame(self, parts: list[bytes]) -> None:
-        if len(parts) != 2 or parts[0] not in _PARTICIPATING_TOPICS:
+        if len(parts) != 2:
             raise ValueError("invalid multipart frame")
+        if parts[0] not in _PARTICIPATING_TOPICS:
+            # NOT OURS, AND NOT A VIOLATION. A SUBSCRIBE is a byte PREFIX, so subscribing
+            # to b"readings" also delivers anything the publisher later names
+            # b"readings.<something>". Refusing that would let one new publisher topic
+            # invalidate this source's whole generation -- the exact failure this class was
+            # just corrected for. Count it and move on.
+            self._foreign_topic_frames += 1
+            return
         async with self._state_lock:
             if self._invalid or not self._running:
                 raise PeriodicLiveDiscontinuity()
