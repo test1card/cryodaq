@@ -218,9 +218,19 @@ where that is made true; it is not advisory.
 
    Run it until it reaches a fixed point — a second run must change nothing —
    then commit `docs/architecture-montana-important.svg` and
-   `docs/current_candidate_metrics.md` together. **Refuse to continue while
-   `git diff --name-only` reports either file**, because a pair that is staged
-   and not committed passes a local check and pushes the previous bytes.
+   `docs/current_candidate_metrics.md` together. Refuse to continue while
+
+   ```
+   git diff --name-only HEAD -- docs/architecture-montana-important.svg docs/current_candidate_metrics.md
+   ```
+
+   reports either file. **Compare against `HEAD`, not against the index.** A bare
+   `git diff --name-only` shows only worktree-versus-index changes, so a pair that
+   was regenerated and STAGED but never committed prints nothing — while the
+   freshness guard reads those same staged bytes and passes. The local check would
+   then agree with itself and the pushed commit would still carry the stale pair,
+   which is the one state this step exists to refuse. Comparing with `HEAD` sees
+   staged and unstaged alike.
 
    This step exists because a branch is deliberately NOT required to keep the
    pair current — see the owner decision of 2026-08-21 in `docs/DECISIONS.md`.
