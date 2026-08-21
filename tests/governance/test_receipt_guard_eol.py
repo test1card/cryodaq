@@ -126,6 +126,20 @@ def _overlay_baseline_generator_candidate(clone: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _run_baseline_generator_in_clone(clone: Path) -> subprocess.CompletedProcess[str]:
+    """Run the mutation-capable baseline writer outside this checkout."""
+    assert clone.resolve() != ROOT.resolve(), "the baseline writer must never target ROOT"
+    clone_environment = dict(os.environ)
+    clone_environment["PYTHONPATH"] = str(clone)
+    return subprocess.run(
+        [sys.executable, "tools/governance_contract.py", "--write-baseline"],
+        cwd=clone,
+        env=clone_environment,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_generated_baseline_artifact_contains_no_carriage_return() -> None:
     """The tracked derived baseline is LF-only and carries no byte-order mark."""
     raw = BASELINE_ARTIFACT.read_bytes()
@@ -161,15 +175,7 @@ def test_baseline_generator_pins_the_line_separator_explicitly(tmp_path: Path) -
     )
     _overlay_baseline_generator_candidate(clone)
 
-    clone_environment = dict(os.environ)
-    clone_environment["PYTHONPATH"] = str(clone)
-    completed = subprocess.run(
-        [sys.executable, "tools/governance_contract.py", "--write-baseline"],
-        cwd=clone,
-        env=clone_environment,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_baseline_generator_in_clone(clone)
     assert completed.returncode == 0, completed.stderr
 
     generated = (clone / "governance" / "agent_preventions_baseline.json").read_bytes()
@@ -201,15 +207,7 @@ def test_tracked_baseline_is_never_mutated_by_the_real_command(tmp_path: Path) -
     stale = clone_baseline.read_bytes() + b"\n"
     clone_baseline.write_bytes(stale)
 
-    clone_environment = dict(os.environ)
-    clone_environment["PYTHONPATH"] = str(clone)
-    completed = subprocess.run(
-        [sys.executable, "tools/governance_contract.py", "--write-baseline"],
-        cwd=clone,
-        env=clone_environment,
-        capture_output=True,
-        text=True,
-    )
+    completed = _run_baseline_generator_in_clone(clone)
     assert completed.returncode == 0, completed.stderr
     assert clone_baseline.read_bytes() != stale, "the isolated writer did not refresh the stale baseline"
     assert BASELINE_ARTIFACT.read_bytes() == before, (
