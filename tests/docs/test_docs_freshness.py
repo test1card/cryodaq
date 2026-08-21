@@ -2504,25 +2504,205 @@ def test_claim_corrections_changed_python_count_matches_workflow_index() -> None
         assert_current(non_ancestor_workflow, corrections)
 
 
-def test_montana_report_inventory_metrics_match_frozen_index_snapshot() -> None:
-    """Bind one generated metric block and the surviving SVG to one index snapshot."""
+_DERIVED_PAIR = (
+    "docs/current_candidate_metrics.md",
+    "docs/architecture-montana-important.svg",
+)
+
+
+def _git_text(*args: str) -> str:
+    return subprocess.run(("git", *args), cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _tree_is_exactly_master() -> bool:
+    """Positive evidence that this checkout IS master. Anything unprovable is a branch.
+
+    Three independent signals, because one of them is missing in each of the three places
+    this runs: the workflow sets GITHUB_REF; a developer checkout has HEAD attached to a
+    branch by name; a detached checkout of the same commit has neither. A checkout need
+    not have a remote called `origin` at all, so that comparison is the last resort and
+    its failure is not an error.
+
+    Returning True by mistake makes every branch regenerate the pair again; returning
+    False on master would let a stale pair sit on the default branch unnoticed.
+    """
+
+    if os.environ.get("GITHUB_REF") == "refs/heads/master":
+        return True
+    try:
+        if _git_text("symbolic-ref", "-q", "HEAD") == "refs/heads/master":
+            return True
+    except (subprocess.CalledProcessError, OSError):
+        pass
+    try:
+        return _git_text("rev-parse", "HEAD") == _git_text("rev-parse", "origin/master")
+    except (subprocess.CalledProcessError, OSError):
+        return False
+
+
+def _branch_base_sha() -> str | None:
+    """The commit this branch is measured against, or None when it cannot be established.
+
+    In the workflow the pull-request event payload carries the base commit exactly; guessing
+    at ref names instead is how a branch gets compared against the wrong object. Locally the
+    merge base with origin/master is the same thing. When neither can be had, the caller
+    falls back to requiring a regeneration -- the behaviour this guard had before -- rather
+    than assuming anything.
+    """
+
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if event_path:
+        try:
+            with open(event_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            base = payload.get("pull_request", {}).get("base", {}).get("sha")
+            if type(base) is str and base:
+                return base
+        except (OSError, ValueError, AttributeError):
+            pass
+    try:
+        return _git_text("merge-base", "HEAD", "origin/master") or None
+    except (subprocess.CalledProcessError, OSError):
+        return None
+
+
+def derived_pair_state(
+    *,
+    committed: dict[str, bytes],
+    at_base: dict[str, bytes] | None,
+    regenerated: dict[str, bytes],
+) -> str:
+    """Classify the derived pair: "untouched", "regenerated", or "divergent".
+
+    This is a pure function over bytes so the three cases can be exercised deterministically
+    instead of only in prose. Review asked for that after a false green survived a
+    description of it, and after a duplicate definition of the guard let the OLD guard
+    answer while the new one sat unused above it. Both mistakes are invisible to a check
+    that can only be run against whatever the working tree happens to hold.
+
+    "untouched" means the branch inherited both files and never maintained them, which is
+    the ordinary state and the whole point of the change. "regenerated" means the branch
+    produced them from its own index deliberately. Anything else is "divergent": edited,
+    hand-merged, or half-regenerated, and it is refused everywhere.
+    """
+
+    if at_base is not None and all(committed[path] == at_base[path] for path in committed):
+        return "untouched"
+    if all(committed[path] == regenerated[path] for path in committed):
+        return "regenerated"
+    return "divergent"
+
+
+def test_derived_pair_state_separates_inherited_regenerated_and_edited() -> None:
+    """The reviewer's reproduction, encoded rather than described.
+
+    The false green that review found was a pair whose two files agreed with each other
+    while one carried an edited metric. That is the third case here, and it must classify
+    as divergent whatever the other two files say.
+    """
+
+    metrics, diagram = "docs/current_candidate_metrics.md", "docs/architecture-montana-important.svg"
+    inherited = {metrics: b"metrics as inherited", diagram: b"diagram as inherited"}
+    produced = {metrics: b"metrics from this index", diagram: b"diagram from this index"}
+
+    assert derived_pair_state(committed=dict(inherited), at_base=inherited, regenerated=produced) == "untouched"
+    assert derived_pair_state(committed=dict(produced), at_base=inherited, regenerated=produced) == "regenerated"
+
+    # The reproduction: one file edited, the other left alone.
+    edited = {metrics: b"metrics with a false number", diagram: inherited[diagram]}
+    assert derived_pair_state(committed=edited, at_base=inherited, regenerated=produced) == "divergent"
+
+    # And with no base to compare against -- an unresolvable base -- only a real
+    # regeneration is accepted, which is the behaviour this guard had before the change.
+    assert derived_pair_state(committed=dict(inherited), at_base=None, regenerated=produced) == "divergent"
+    assert derived_pair_state(committed=dict(produced), at_base=None, regenerated=produced) == "regenerated"
+
+
+def test_montana_report_inventory_metrics_match_frozen_index_snapshot(tmp_path) -> None:
+    """Bind one generated metric block and the surviving SVG to one index snapshot.
+
+    THE DERIVED PAIR IS REGENERATED AFTER EACH MERGE TO MASTER, NOT ON EVERY BRANCH.
+    Owner decision of 2026-08-21, recorded in docs/DECISIONS.md, taken on a measurement:
+    the metrics document records a fingerprint of the source tree, so its bytes differ on
+    every branch, so every branch had to regenerate and commit both generated files -- and
+    every branch therefore edited the same two files. Forty of the forty-two open pull
+    requests conflicted, and this pair was the machine-generated worst of the four files
+    that caused it.
+
+    THIS IS NOT THE RELEASE-ONLY MOVE THAT REVIEW REJECTED. An earlier branch took a
+    DIFFERENT guard out of the default suite into a release-only one, and review found the
+    move left it unexecuted on every pull request and branch push; it was put back, and
+    rightly. This guard still runs in the default suite, on every push of every branch
+    including master. What changed is the assertion it makes off master, not whether it
+    runs.
+
+    On master the pair must equal a regeneration from the current index, byte for byte:
+    the old behaviour entire. Off master the pair must be in ONE OF TWO honest states --
+
+      (1) the branch did not touch it: both files are byte-identical to the branch's base,
+          which is what an ordinary branch inherits and never has to maintain; or
+      (2) the branch regenerated it deliberately: the pair equals a regeneration from this
+          branch's own index.
+
+    An earlier version of this change accepted a weaker off-master assertion -- that the
+    two artifacts merely agreed with each other about a tree fingerprint. Review reproduced
+    a false green against it by editing one metric value in the metrics document and
+    staging only that file: the artifacts still agreed, and the guard passed while
+    publishing a false number. Neither arm above admits that -- the bytes differ from the
+    base, and they are not a regeneration.
+
+    WHAT THIS GUARD DOES AND DOES NOT PROMISE. It does not by itself prevent a stale pair
+    from being admitted: a branch can pass arm (1) and, fast-forwarded to master, make the
+    strict run red. Prevention belongs to the merge procedure, which regenerates the pair
+    as the last commit before the merging checks and refuses on any diff. This guard is
+    the public DETECTION half, and it is mechanical: the workflow runs on every push to
+    every branch including master, so a bypassed procedure reddens the default branch
+    within one push instead of going unnoticed.
+    """
     import tools.generate_montana_architecture_svgs as generator
 
     snapshot, frozen_paths, contents = _architecture_inventory()
     assert frozen_paths and contents
     svg_path = REPO_ROOT / "docs/architecture-montana-important.svg"
+    committed = {path: generator._git_bytes("show", f":{path}") for path in _DERIVED_PAIR}
 
-    expected = generator.current_metrics_bytes(
-        snapshot, generator._git_bytes("show", ":docs/architecture-montana-important.svg")
-    )
-    assert generator._git_bytes("show", ":docs/current_candidate_metrics.md") == expected
+    # RENDER THE DIAGRAM AND COMPARE ITS BYTES. `current_metrics_bytes` consults the SVG it
+    # is handed only for its line count, so comparing the metrics document alone would let a
+    # branch alter the diagram's content or its recorded tree fingerprint -- without changing
+    # the number of lines -- and still look like a regeneration. The release freshness gate
+    # already renders and compares bytes; this does the same rather than trusting a proxy.
+    rendered_path = tmp_path / "architecture-montana-important.svg"
+    generator.important_svg("montana", list(frozen_paths), contents.__getitem__, rendered_path, snapshot)
+    rendered_svg = rendered_path.read_bytes()
+    regenerated = {
+        "docs/architecture-montana-important.svg": rendered_svg,
+        "docs/current_candidate_metrics.md": generator.current_metrics_bytes(snapshot, rendered_svg),
+    }
+    is_regeneration = all(committed[path] == regenerated[path] for path in _DERIVED_PAIR)
 
-    metrics = expected.decode("utf-8")
-    svg_metadata = _svg_metadata(svg_path)
-    assert f"| Source snapshot tree | `{snapshot.tree_sha}` |" in metrics
-    assert f"| Source snapshot object manifest SHA-256 | `{snapshot.object_manifest_sha256()}` |" in metrics
-    assert svg_metadata["source_tree_sha"] == snapshot.tree_sha
-    assert svg_metadata["source_tree_file_count"] == len(snapshot.paths)
+    if _tree_is_exactly_master():
+        assert is_regeneration
+        metrics = regenerated["docs/current_candidate_metrics.md"].decode("utf-8")
+        svg_metadata = _svg_metadata(svg_path)
+        assert f"| Source snapshot tree | `{snapshot.tree_sha}` |" in metrics
+        assert f"| Source snapshot object manifest SHA-256 | `{snapshot.object_manifest_sha256()}` |" in metrics
+        assert svg_metadata["source_tree_sha"] == snapshot.tree_sha
+        assert svg_metadata["source_tree_file_count"] == len(snapshot.paths)
+    else:
+        base = _branch_base_sha()
+        at_base: dict[str, bytes] | None = None
+        if base is not None:
+            try:
+                at_base = {path: generator._git_bytes("show", f"{base}:{path}") for path in _DERIVED_PAIR}
+            except (subprocess.CalledProcessError, OSError):
+                at_base = None
+        state = derived_pair_state(committed=committed, at_base=at_base, regenerated=regenerated)
+        assert state != "divergent", (
+            "the derived pair is neither what this branch inherited from its base nor a "
+            "regeneration from this branch's index, so one of the two generated files was "
+            "edited or hand-merged instead of regenerated"
+        )
+        metrics = committed["docs/current_candidate_metrics.md"].decode("utf-8")
 
     report = _read(REPO_ROOT / "docs/MONTANA_REFACTOR_REPORT.md")
     metrics_link = "[generated current-candidate metrics](current_candidate_metrics.md)"

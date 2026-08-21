@@ -201,6 +201,55 @@ then adjudicate every failing node.
   rewriting history. Each requires its own current authority.
 - `RELEASE_CHECKLIST.md` applies only when an actual release is authorized.
 
+### 6.1 Merging a branch into the default branch
+
+Merges into `master` are fast-forwards of a branch head. That head therefore
+becomes the default branch unchanged, so everything the default branch must
+satisfy has to be true of the head BEFORE the fast-forward. This procedure is
+where that is made true; it is not advisory.
+
+1. Take the current `master` into the branch and resolve conflicts.
+2. **Regenerate the derived documentation pair as the LAST commit**, after every
+   content commit, and COMMIT it rather than leaving it staged:
+
+   ```
+   PYTHONPATH=. python tools/generate_montana_architecture_svgs.py
+   ```
+
+   Run it until it reaches a fixed point — a second run must change nothing —
+   then commit `docs/architecture-montana-important.svg` and
+   `docs/current_candidate_metrics.md` together. Refuse to continue while
+
+   ```
+   git diff --name-only HEAD -- docs/architecture-montana-important.svg docs/current_candidate_metrics.md
+   ```
+
+   reports either file. **Compare against `HEAD`, not against the index.** A bare
+   `git diff --name-only` shows only worktree-versus-index changes, so a pair that
+   was regenerated and STAGED but never committed prints nothing — while the
+   freshness guard reads those same staged bytes and passes. The local check would
+   then agree with itself and the pushed commit would still carry the stale pair,
+   which is the one state this step exists to refuse. Comparing with `HEAD` sees
+   staged and unstaged alike.
+
+   This step exists because a branch is deliberately NOT required to keep the
+   pair current — see the owner decision of 2026-08-21 in `docs/DECISIONS.md`.
+   Nothing else regenerates it, so omitting this step admits a green head that
+   reddens the default branch on its next push.
+
+3. **Requalify at the new head**: the full required checks must succeed against
+   that exact commit, and the review verdict must name that exact commit. A
+   verdict bound to an earlier head is not a verdict for this one, and the
+   regeneration in step 2 creates a new head every time.
+4. Fast-forward only after steps 2 and 3 both hold at the same commit.
+
+**Fail-closed outcome:** if the pair cannot be regenerated to a fixed point, or
+the requalified head is not green, or no verdict names it, the merge does not
+happen. There is no partial form of this procedure.
+
+**Owner:** whoever performs the merge. The authority to merge does not include
+the authority to skip a term of the gate.
+
 ## 7. GUI and product design
 
 Operator interfaces answer: can the run proceed, what is happening, what needs
