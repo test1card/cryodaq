@@ -273,10 +273,26 @@ async def test_catalog_rollback_fails_before_new_reading(tmp_path: Path) -> None
         conn.close()
 
 
+# An ABSENT channel is no longer in this list, and that is a deliberate contract change
+# (2026-08-21). It used to be the first case here. Measured on the real acquisition path
+# -- scheduler -> write_immediate -> _write_batch -> _write_day_batch -- refusing the
+# batch for an absent channel destroyed every good reading beside it, on every
+# acquisition cycle, for as long as the catalog gap lasted. A re-wired or newly added
+# sensor produces exactly that gap in an ordinary laboratory week.
+#
+# The cases that REMAIN are the ones where the catalog does describe the channel and the
+# reading disagrees with it. There, the reading may not be the quantity the descriptor
+# names, so storing it would put a wrong number under a real identity, and the batch is
+# still refused whole.
+#
+# The absent-channel behaviour now lives in
+# tests/storage/test_unbound_channel_keeps_the_batch.py: the row is written WITHOUT a
+# descriptor identity (the schema's descriptor_hash is nullable and the archive reader
+# already reports DESCRIPTOR_HASH_MISSING as a bounded-read issue), and the fact is said
+# at a bounded rate and counted.
 @pytest.mark.parametrize(
     "changes",
     [
-        {"channel": "unknown"},
         {"instrument_id": "other"},
         {"unit": "°C"},
         {"instrument_id": ""},
