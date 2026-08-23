@@ -89,6 +89,10 @@ def test_live_red_reproduction_receipts_bind_executed_preserved_defects() -> Non
         "CONDUCTIVITY-GUARD-KEITHLEY-ACQUISITION-FALSE-GREEN-081",
         "CONDUCTIVITY-GUARD-LAKESHORE-ACQUISITION-FALSE-GREEN-081",
         "CONDUCTIVITY-GUARD-UNUSABLE-FEED-FALSE-GREEN-081",
+        # Both periodic entries bind executed red-reproduction receipts that exist
+        # under governance/red_reproductions/, so this set is fully green.
+        "PERIODIC-LIVE-FRAME-ADMISSION-001",
+        "PERIODIC-LIVE-PRODUCER-CONSUMER-DRIFT-FALSE-GREEN-001",
     }
 
 

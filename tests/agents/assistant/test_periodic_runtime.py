@@ -478,15 +478,22 @@ async def test_the_shared_sequence_belongs_only_to_the_topics_that_are_followed(
     assert publisher._sequence == before, "a refused topic still moved the counter"
 
 
-async def test_a_publisher_nobody_follows_is_refused_before_it_can_swallow_a_queue() -> None:
+async def test_the_queue_backed_reading_publisher_accepts_only_the_default_topic() -> None:
     """The refusal has to happen at CONSTRUCTION, because the send path swallows.
 
     `_publish_loop` catches whatever `_publish_reading` raises and still calls
-    `queue.task_done()`. So a publisher built on a topic outside the sequenced set would
-    drain its queue while sending nothing: every reading lost, the queue reporting itself
-    handled, and the publisher still alive. The per-send guard alone therefore converts a
-    wiring mistake into silent data loss, which is the one outcome this project exists to
-    prevent.
+    `queue.task_done()`. So a publisher built on a topic its queue-backed readings are
+    not shaped for would drain its queue while sending nothing: every reading lost, the
+    queue reporting itself handled, and the publisher still alive. The per-send guard
+    alone therefore converts a wiring mistake into silent data loss, which is the one
+    outcome this project exists to prevent.
+
+    The sequenced event and barrier topics must ALSO be refused at construction even
+    though `_send_allocated` admits them: the queue path sends msgpack READINGS, while
+    those topics carry JSON events and barrier envelopes parsed as such by live
+    consumers. A reading published onto either would invalidate their generation while
+    the send reports success, so the queue-backed publisher takes DEFAULT_TOPIC only --
+    `publish_event` and `barrier` select their own topics themselves.
 
     No production call site passes a custom topic today, measured 2026-08-21 -- the three
     constructions in `src/` all take the default. This refuses the shape rather than
@@ -497,6 +504,10 @@ async def test_a_publisher_nobody_follows_is_refused_before_it_can_swallow_a_que
 
     with pytest.raises(ValueError, match="subscribers follow"):
         ZMQPublisher(topic=b"nobody.follows.this")
+    with pytest.raises(ValueError, match="subscribers follow"):
+        ZMQPublisher(topic=EVENTS_TOPIC)
+    with pytest.raises(ValueError, match="subscribers follow"):
+        ZMQPublisher(topic=PERIODIC_BARRIER_TOPIC)
 
     # And the ordinary construction is untouched.
     assert ZMQPublisher()._topic == DEFAULT_TOPIC
@@ -1669,21 +1680,32 @@ async def test_an_unknown_field_is_refused_and_not_echoed() -> None:
 
 
 async def test_every_key_the_publisher_writes_is_known_to_this_consumer() -> None:
-    """The producer/consumer contract, checked in one place instead of two.
+    """The producer/consumer contract, proven through the real consumer parser.
 
-    This is the drift itself: the publisher grew `desc` and the consumer's key set did
-    not. Asking the packer what it writes -- with and without the optional envelope --
-    makes a future addition redden here rather than in a laboratory run.
+    This is the drift itself: the publisher grew `desc` and the consumer refused whole
+    frames. Comparing key sets with the consumer's private vocabulary cannot see a
+    broken parser -- it stays green even when every `_reading` call fails. So both
+    production-packed variants, with and without the optional descriptor envelope, go
+    through `SequencedPeriodicLiveSources._reading` itself, and the returned transport
+    and reading are asserted for stable semantics. A key the packer adds, one it stops
+    writing, or a parser that mangles what it accepts reddens here rather than in a
+    laboratory run.
     """
 
-    import msgpack
+    from cryodaq.drivers.base import ChannelStatus
 
-    from cryodaq.agents.assistant import periodic_runtime
-
-    known = periodic_runtime._READING_REQUIRED_KEYS | periodic_runtime._READING_OPTIONAL_KEYS
+    timestamp = datetime.fromtimestamp(1_700_000_000.0, tz=UTC)
     for envelope in (None, b"an opaque descriptor envelope"):
-        written = set(msgpack.unpackb(_published_reading_bytes(descriptor_envelope=envelope), raw=False))
-        unknown = sorted(written - known)
-        assert not unknown, f"the publisher writes keys this consumer refuses: {unknown}"
-        missing = sorted(periodic_runtime._READING_REQUIRED_KEYS - written)
-        assert not missing, f"the consumer requires keys the publisher does not write: {missing}"
+        frame = _published_reading_bytes(descriptor_envelope=envelope)
+        transport, reading = SequencedPeriodicLiveSources._reading(frame)
+        assert transport.session_id == SESSION
+        assert transport.sequence == 1
+        assert transport.persistence_authoritative is True
+        assert reading.timestamp == timestamp
+        assert reading.instrument_id == "ls"
+        assert reading.channel == "T2"
+        assert reading.value == 2.0
+        assert reading.unit == "K"
+        assert reading.status == ChannelStatus.OK
+        assert reading.raw is None
+        assert reading.metadata == {}
