@@ -216,8 +216,16 @@ where that is made true; it is not advisory.
    PYTHONPATH=. python tools/generate_montana_architecture_svgs.py
    ```
 
-   Run it until it reaches a fixed point — a second run must change nothing —
-   then commit `docs/architecture-montana-important.svg` and
+   **The generator writes more than the pair.** It also produces three
+   campaign-only diagrams under `docs/refactor/`, which are neither tracked nor
+   ignored. The exact-checkout runner rejects a worktree with ANY untracked
+   path — it reads `git status --porcelain=v1 --untracked-files=all` and
+   requires it empty — so leaving them behind fails requalification for a
+   reason that has nothing to do with the change. Delete `docs/refactor/`
+   after the generator has reached its fixed point, and before step 3.
+
+   Run the generator until it reaches a fixed point — a second run must change
+   nothing — then commit `docs/architecture-montana-important.svg` and
    `docs/current_candidate_metrics.md` together. Refuse to continue while
 
    ```
@@ -238,14 +246,17 @@ where that is made true; it is not advisory.
    reddens the default branch on its next push.
 
 3. **Requalify at the new head**: the full required checks must succeed against
-   that exact commit, and the review verdict must name that exact commit. A
-   verdict bound to an earlier head is not a verdict for this one, and the
-   regeneration in step 2 creates a new head every time.
+   that exact commit, and **both** independently attributable review receipts
+   must name that exact commit — the routine review and the separate
+   fresh-context breadth review that section 4 requires. One receipt is not the
+   gate. This matters more here than elsewhere: **regeneration in step 2 creates
+   a new head every time, which invalidates every receipt earned before it**, so
+   both must be re-earned rather than carried over.
 4. Fast-forward only after steps 2 and 3 both hold at the same commit.
 
 **Fail-closed outcome:** if the pair cannot be regenerated to a fixed point, or
-the requalified head is not green, or no verdict names it, the merge does not
-happen. There is no partial form of this procedure.
+the requalified head is not green, or either receipt is missing at that exact
+commit, the merge does not happen. There is no partial form of this procedure.
 
 **Owner:** whoever performs the merge. The authority to merge does not include
 the authority to skip a term of the gate.

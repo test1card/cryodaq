@@ -2560,10 +2560,39 @@ def _branch_base_sha() -> str | None:
                 return base
         except (OSError, ValueError, AttributeError):
             pass
+    # NOT `origin/master` ALONE. A clone may call its remote `upstream`, or have no remote
+    # at all, and then the base cannot be established -- which classifies an inherited pair
+    # as divergent and brings back exactly the per-branch regeneration this change removes.
+    # The local branch is tried first because it needs no remote; the configured default
+    # branch of whatever remote exists is tried last.
+    # ORDER MATTERS, and getting it wrong is not harmless. A LOCAL `master` is often behind
+    # the remote -- a developer checkout usually is -- and a merge base against a stale ref
+    # yields an old commit whose pair differs, which classifies an inherited pair as
+    # divergent. Measured: putting the local ref first reddened this very guard. So remote
+    # refs are tried first, and the local branch is the last resort for a clone that has no
+    # remote at all.
+    candidates: list[str] = ["origin/master"]
     try:
-        return _git_text("merge-base", "HEAD", "origin/master") or None
+        remotes = _git_text("remote").split()
     except (subprocess.CalledProcessError, OSError):
-        return None
+        remotes = []
+    for remote in remotes:
+        try:
+            head_ref = _git_text("symbolic-ref", f"refs/remotes/{remote}/HEAD")
+        except (subprocess.CalledProcessError, OSError):
+            head_ref = ""
+        if head_ref.startswith("refs/remotes/"):
+            candidates.append(head_ref[len("refs/remotes/") :])
+        candidates.append(f"{remote}/master")
+    candidates.append("master")
+    for candidate in candidates:
+        try:
+            base = _git_text("merge-base", "HEAD", candidate)
+        except (subprocess.CalledProcessError, OSError):
+            continue
+        if base:
+            return base
+    return None
 
 
 def derived_pair_state(
