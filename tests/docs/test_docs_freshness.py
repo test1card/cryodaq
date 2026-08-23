@@ -158,7 +158,12 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
 
 # A RECORDED measurement, not a re-derivable one: the number of C2 challenges
 # whose fingerprint the registry rejects on the declared minimum interpreter.
-# RE-MEASURED 2026-08-09 on the OC-023 tree: 108 errors over 134 challenges.
+# RE-MEASURED 2026-08-14 at immutable commit
+# `92aeb74c90f89fe89a9e1ff4c3208e15f1a80c20` on the OC-011 tree:
+# 106 errors over 133 challenges.
+# The sweep LOST a site when OC-011 gave `/temps` descriptor authority, which
+# retired registration C2-105, so both halves moved again. 3.13 and 3.14 were
+# re-measured the same turn and both give 0 over the same 133.
 # The previous 110-over-135 pair was taken before this branch registered the
 # interlock-binding sites, and BOTH halves had drifted -- the numerator is not
 # reusable across a changed sweep any more than the denominator is.
@@ -174,7 +179,7 @@ def test_open_cells_dispositions_match_recorded_evidence() -> None:
 # This guard runs on ONE interpreter and cannot measure another; pinning the
 # figure here means the row and the constant move together, and moving them
 # requires re-running the sweep on that interpreter.
-_RECORDED_MINIMUM_INTERPRETER_ERRORS = 108
+_RECORDED_MINIMUM_INTERPRETER_ERRORS = 106
 
 
 @cache

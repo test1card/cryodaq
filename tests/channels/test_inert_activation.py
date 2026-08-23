@@ -259,6 +259,14 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
                 " as _decode_persisted_channel_envelope",
             }
         ),
+        # THE TELEGRAM SURFACE IS AN APPROVED PASSIVE READER, and it is on this list because
+        # of what it is allowed to do rather than because it appeared. It reads ONE declared
+        # property, `ChannelQuantity`, so `/temps` can select temperature channels by their
+        # DECLARED quantity instead of by a Cyrillic-Te name prefix. It writes nothing to the
+        # contract and commands nothing; the catalog reaches it from its only production
+        # constructor. If this entry ever grows a second name, ask what the surface started
+        # doing with the contract before widening it.
+        "notifications/telegram_commands.py": _direct_imports("cryodaq.channels.descriptors", "ChannelQuantity"),
         "reporting/descriptor_projection.py": _direct_imports(
             "cryodaq.channels.persistence",
             "PersistedChannelEnvelopeError",
