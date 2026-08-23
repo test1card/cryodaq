@@ -3443,8 +3443,8 @@ false_green_pairs:
     ci_partition: agents
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/periodic_live_producer_consumer_drift_false_green_001.json
-      sha256: sha256:e5bca22a8c000039a9fd468374b3fd273f432ed8b3f3d3a6c25e845bac8c0e15
-    green_evidence: local_executed_python_3_14_3_guard_blob_201595771538b97a8d86c49ca61e8d454a80ffdd_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_dfdd7700a26b3c350ecd10a67d1b30f2d93e46dde99b86b7a515ff24a6d2f502_pending_sealed_hosted_agents_artifact
+      sha256: sha256:288315d5aa930f494f3dad85a679c99b192c7b0b31601e355b2c605cff26b4cc
+    green_evidence: local_executed_python_3_14_3_guard_blob_8fbf5d5fa85641e22d86220b6c5aad078acc9499_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_c720bef0f7371af8c18291fe31df3bc199401f7482a653d045ae0289706b6b96_pending_sealed_hosted_agents_artifact
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6783,7 +6783,7 @@ records:
       No sealed hosted agents artifact can be produced from this machine, so this record remains
       open until the hosted partition seals it. The final-shape local red evidence consists of two
       executed tools/red_reproduction.py receipts. Both bind final guard blob
-      201595771538b97a8d86c49ca61e8d454a80ffdd to defective commit
+      8fbf5d5fa85641e22d86220b6c5aad078acc9499 to defective commit
       062a0e3b6d9f332b47c33942d1f95ea6ace10146 and its recorded source blobs. The runtime receipt
       executes the twelve registered nodes that fail on that defect. The paired false-green receipt
       executes its single registered node. The local green execution binds the same guard blob with
@@ -6793,5 +6793,5 @@ records:
       certify none of the final registered guards.
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/periodic_live_frame_admission_001.json
-      sha256: sha256:cd8b944db0649e74cfb1b62ebd63f847d17701a9a9ac6e5e464d59ad320f6004
-    green_evidence: local_executed_python_3_14_3_guard_blob_201595771538b97a8d86c49ca61e8d454a80ffdd_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_dfdd7700a26b3c350ecd10a67d1b30f2d93e46dde99b86b7a515ff24a6d2f502_pending_sealed_hosted_agents_artifact
+      sha256: sha256:653ecfd12faed2e3d9579cee5a19bc7a9e60fa2b21407b72be18401a2678fc22
+    green_evidence: local_executed_python_3_14_3_guard_blob_8fbf5d5fa85641e22d86220b6c5aad078acc9499_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_c720bef0f7371af8c18291fe31df3bc199401f7482a653d045ae0289706b6b96_pending_sealed_hosted_agents_artifact
