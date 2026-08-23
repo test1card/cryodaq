@@ -201,6 +201,82 @@ then adjudicate every failing node.
   rewriting history. Each requires its own current authority.
 - `RELEASE_CHECKLIST.md` applies only when an actual release is authorized.
 
+### 6.1 Merging a branch into the default branch
+
+Merges into `master` are fast-forwards of a branch head. That head therefore
+becomes the default branch unchanged, so everything the default branch must
+satisfy has to be true of the head BEFORE the fast-forward. This procedure is
+where that is made true; it is not advisory.
+
+1. Take the current `master` into the branch and resolve conflicts.
+2. **Regenerate the derived documentation pair as the LAST commit**, after every
+   content commit, and COMMIT it rather than leaving it staged:
+
+   ```
+   PYTHONPATH=. python tools/generate_montana_architecture_svgs.py
+   ```
+
+   **The generator writes more than the pair.** It also produces three
+   campaign-only diagrams under `docs/refactor/`, which are neither tracked nor
+   ignored. The exact-checkout runner rejects a worktree with ANY untracked
+   path — it reads `git status --porcelain=v1 --untracked-files=all` and
+   requires it empty — so leaving them behind fails requalification for a
+   reason that has nothing to do with the change.
+
+   Remove **those three files by name**, after the generator has reached its
+   fixed point and before step 3, and remove the directory only if it is then
+   empty:
+
+   ```
+   rm -f docs/refactor/architecture-before-all-files.svg \
+         docs/refactor/architecture-montana-all-files.svg \
+         docs/refactor/architecture-before-important.svg
+   rmdir docs/refactor 2>/dev/null || true
+   ```
+
+   **Never delete the directory itself outright.** It is untracked, so anything
+   else living there is unrecoverable — somebody's working notes or evidence,
+   with no copy in git. `rmdir` refuses a directory that is not empty, which is
+   exactly the behaviour wanted: if something else is there, the merger sees it
+   and decides, rather than a procedure deciding for them.
+
+   Run the generator until it reaches a fixed point — a second run must change
+   nothing — then commit `docs/architecture-montana-important.svg` and
+   `docs/current_candidate_metrics.md` together. Refuse to continue while
+
+   ```
+   git diff --name-only HEAD -- docs/architecture-montana-important.svg docs/current_candidate_metrics.md
+   ```
+
+   reports either file. **Compare against `HEAD`, not against the index.** A bare
+   `git diff --name-only` shows only worktree-versus-index changes, so a pair that
+   was regenerated and STAGED but never committed prints nothing — while the
+   freshness guard reads those same staged bytes and passes. The local check would
+   then agree with itself and the pushed commit would still carry the stale pair,
+   which is the one state this step exists to refuse. Comparing with `HEAD` sees
+   staged and unstaged alike.
+
+   This step exists because a branch is deliberately NOT required to keep the
+   pair current — see the owner decision of 2026-08-21 in `docs/DECISIONS.md`.
+   Nothing else regenerates it, so omitting this step admits a green head that
+   reddens the default branch on its next push.
+
+3. **Requalify at the new head**: the full required checks must succeed against
+   that exact commit, and **both** independently attributable review receipts
+   must name that exact commit — the routine review and the separate
+   fresh-context breadth review that section 4 requires. One receipt is not the
+   gate. This matters more here than elsewhere: **regeneration in step 2 creates
+   a new head every time, which invalidates every receipt earned before it**, so
+   both must be re-earned rather than carried over.
+4. Fast-forward only after steps 2 and 3 both hold at the same commit.
+
+**Fail-closed outcome:** if the pair cannot be regenerated to a fixed point, or
+the requalified head is not green, or either receipt is missing at that exact
+commit, the merge does not happen. There is no partial form of this procedure.
+
+**Owner:** whoever performs the merge. The authority to merge does not include
+the authority to skip a term of the gate.
+
 ## 7. GUI and product design
 
 Operator interfaces answer: can the run proceed, what is happening, what needs
