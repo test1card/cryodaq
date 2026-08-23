@@ -1509,17 +1509,8 @@ _REGISTRY_ROWS = (
         "OPEN-ROUTING-DEBT",
         "periodic report grouping inferred from channel spelling",
     ),
-    (
-        "C2-105",
-        _Challenge(
-            "src/cryodaq/notifications/telegram_commands.py",
-            "TelegramCommandBot._cmd_temps",
-            "identity spelling operation startswith()",
-            "3c6dbafb8e26ad2968c1",
-        ),
-        "OPEN-ROUTING-DEBT",
-        "operator notification routing infers semantics from identity spelling",
-    ),
+    # C2-105 RETIRED: TelegramCommandBot._cmd_temps now selects the declared
+    # descriptor quantity, so a channel rename cannot change its physical role.
     (
         "C2-106",
         _Challenge(

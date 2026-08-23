@@ -7121,6 +7121,7 @@ async def _run_engine(
                         allowed_chat_ids=allowed_ids,
                         poll_interval_s=float(cmd_cfg.get("poll_interval_s", 2.0)),
                         command_handler=handle_gui_command,
+                        channel_descriptor_catalog=live_descriptor_catalog,
                         verify_ssl=verify_ssl,
                     )
                     logger.info(
