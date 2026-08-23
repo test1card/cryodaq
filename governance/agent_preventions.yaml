@@ -587,10 +587,26 @@ false_green_pairs:
   - id: LAUNCHER-SPAWN-COVERAGE-FALSE-GREEN-502
     status: open
     scope: product_contract
-    runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
+    runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
     guard: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
     ci_partition: remaining
     red_evidence: the_builder_count_included_the_helpers_own_call_so_a_production_spawn_regressing_to_a_bare_environ_stayed_green_2026_08_20_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-EXCEPTION-REDACTION-FALSE-GREEN-503
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
+    guard: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_in_formatted_exception_text
+    ci_partition: remaining
+    red_evidence: message_and_argument_redaction_tests_stayed_green_while_formatter_exception_traceback_text_leaked_the_token_2026_08_20_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-EOF-FRAGMENT-FALSE-GREEN-504
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
+    guard: tests/launcher/test_engine_stderr_is_kept.py::test_a_bounded_final_stderr_fragment_is_forwarded_at_eof
+    ci_partition: remaining
+    red_evidence: over_long_line_tests_stayed_green_while_a_bounded_final_non_newline_diagnostic_was_discarded_at_eof_2026_08_20_pending_immutable_capture
     green_evidence: pending
   - id: LAUNCHER-STDOUT-INHERIT-FALSE-GREEN-002
     status: open
@@ -4252,8 +4268,6 @@ records:
         ci_partition: remaining
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_an_over_long_line_is_reported_and_not_forwarded_whole
         ci_partition: remaining
-      - node: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
-        ci_partition: remaining
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_through_its_real_logging_setup
         ci_partition: remaining
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_in_formatted_exception_text
@@ -5713,6 +5727,8 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
+      - node: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
+        ci_partition: remaining
       - node: tests/launcher/test_launcher_descriptor_poison_guards.py::test_poisoned_soak_handshake_cannot_emit_to_reused_descriptor
         ci_partition: remaining
       - node: tests/launcher/test_launcher_descriptor_poison_guards.py::test_poisoned_soak_capability_cannot_duplicate_reused_descriptor
