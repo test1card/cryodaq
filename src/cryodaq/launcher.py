@@ -84,12 +84,11 @@ _PERIODIC_HEALTH_READ_FAILED_CODE = "H3_HEALTH_READ_FAILED"
 _PERIODIC_RUNTIME_UNAVAILABLE_CODE = "H3_RUNTIME_UNAVAILABLE"
 _SHUTDOWN_RETRY_DELAYS_MS = (1_000, 3_000, 10_000, 30_000)
 # Bound on how long _stop_engine will wait for the engine process to exit
-# after a verified shutdown receipt, and the size of each non-blocking poll
-# slice within that budget (see _stop_engine's process.poll()/wait() use).
+# after a verified shutdown receipt. The exit is observed with process.poll()
+# on settlement callbacks, never process.wait() on the Qt thread.
 # The shutdown worker's command carries its own timeout. Engine-exit handling polls its
 # settlement instead of waiting here so a wedged worker cannot stall the Qt main thread.
 _ENGINE_EXIT_WAIT_BUDGET_S = 60.0
-_ENGINE_EXIT_POLL_SLICE_S = 1.0
 # Bounded, synchronous grace period given to a freshly started
 # _EngineShutdownWorker before _stop_engine gives up on this pass and defers
 # to the shutdown-retry timer. A reply that lands within this window (the
@@ -293,21 +292,27 @@ def _parse_bridge_unknown_outcome_envelope(receipt: object) -> tuple[str, int] |
         and generation >= 0
     ):
         return None
-    if "delivery_state" in receipt:
-        delivery_state = receipt["delivery_state"]
-        if type(delivery_state) is not str or delivery_state not in {"dispatched", "unknown"}:
-            return None
-    if "commit_state" in receipt:
-        commit_state = receipt["commit_state"]
-        if type(commit_state) is not str or commit_state != "unknown":
-            return None
-    if "error_code" in receipt:
+    transport_keys = {"delivery_state", "commit_state"}
+    safe_transport_keys = transport_keys | {"error_code", "retry_safe"}
+    receipt_keys = set(receipt)
+    if receipt_keys not in {
+        _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | transport_keys,
+        _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | safe_transport_keys,
+    }:
+        return None
+    delivery_state = receipt["delivery_state"]
+    commit_state = receipt["commit_state"]
+    if (
+        type(delivery_state) is not str
+        or delivery_state not in {"dispatched", "unknown"}
+        or type(commit_state) is not str
+        or commit_state != "unknown"
+    ):
+        return None
+    if receipt_keys == _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | safe_transport_keys:
         error_code = receipt["error_code"]
-        if type(error_code) is not str or not error_code:
-            return None
-    if "retry_safe" in receipt:
         retry_safe = receipt["retry_safe"]
-        if type(retry_safe) is not bool:
+        if type(error_code) is not str or not error_code or type(retry_safe) is not bool:
             return None
     return request_id, generation
 
@@ -3792,22 +3797,12 @@ class LauncherWindow(QMainWindow):
                 if deadline is None:
                     deadline = time.monotonic() + _ENGINE_EXIT_WAIT_BUDGET_S
                     self._engine_shutdown_wait_deadline = deadline
-                remaining = deadline - time.monotonic()
-                # A single process.wait(timeout=60) would hold the Qt main
-                # thread for up to 60s straight, same freeze as the ZMQ
-                # round-trip above. Poll in slices of at most
-                # _ENGINE_EXIT_POLL_SLICE_S instead: each call blocks briefly
-                # (or not at all, once the budget is spent) and then returns
-                # control to the caller, which — on "not settled yet" — hands
-                # control back to the Qt event loop so the HOLD alarm and
-                # tray keep updating between slices. The shutdown-retry timer
-                # re-enters for the next slice; the overall budget is tracked
-                # in _engine_shutdown_wait_deadline across those calls.
-                if remaining > 0:
-                    try:
-                        process.wait(timeout=min(_ENGINE_EXIT_POLL_SLICE_S, remaining))
-                    except subprocess.TimeoutExpired:
-                        pass
+                # Do not wait for the process here. Even a one-second slice blocks
+                # the Qt thread, and over a sixty-second exit budget re-entered every
+                # 200 ms that is roughly a second blocked in every 1.2 -- the operator's
+                # HOLD alarm, tray and actions all lag exactly during recovery. The
+                # settlement callback re-enters instead, and this deadline keeps the
+                # same bounded budget across those passes.
                 if process.poll() is None:
                     if time.monotonic() < deadline:
                         raise RuntimeError(
@@ -4128,6 +4123,16 @@ class LauncherWindow(QMainWindow):
                     settle_bridge=settle_bridge,
                     raise_on_hold=raise_on_hold,
                 ):
+                    # NOTE, and it is why nothing is latched here. Review is right that an
+                    # unready replacement can be read as recovered: `_is_engine_alive` tests
+                    # only `process.poll()`, so the next health tick can clear the operator's
+                    # banner mid-recovery. But `_restart_giving_up` is the WRONG instrument
+                    # for it -- setting it exactly where a settlement retry has just been
+                    # scheduled says "stop trying" and "try again shortly" in the same
+                    # breath, and it breaks three guards that exist to stop a stale
+                    # settlement from cancelling a manual restart that already succeeded.
+                    # The fix belongs in the liveness question itself, next to the replay
+                    # session check that already refuses a running-but-unverified source.
                     return False
                 settlement_errors["engine_child"] = settlement_error or RuntimeError(
                     "replacement engine child did not settle"
