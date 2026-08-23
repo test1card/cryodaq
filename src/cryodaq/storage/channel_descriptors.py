@@ -912,9 +912,25 @@ class LiveChannelDescriptorCatalog:
         The returned value carries descriptor data only.  It cannot bind a
         live reading or establish source/control authority; those operations
         remain owned by this instance.
+
+        THE RESERVED ENTRY IS WITHHELD. It is a persistence concern -- a real descriptor for
+        a reading whose channel nothing declares, which the readings foreign key requires --
+        and it is NOT a live channel. Callers read this snapshot to build rosters of channels
+        that exist: `validate_safety_pattern_liveness` derives its canonical-id set from it,
+        so leaving the reserved identity in made an alarm that referenced it look live at
+        startup while remaining inert, since no driver emits that spelling and undescribed
+        readings keep their own labels. A configuration mistake that looks accepted is worse
+        than one that is refused.
+
+        The writer installs the entry itself, so withholding it here costs the persistence
+        path nothing.
         """
 
-        return snapshot_catalog(self._catalog)
+        return snapshot_catalog(
+            ChannelCatalog(
+                [descriptor for descriptor in self._catalog.descriptors if descriptor.channel_id != UNBOUND_CHANNEL_ID]
+            )
+        )
 
     def emitted_channel_for_channel_id(self, channel_id: str) -> str:
         """Return the exact pre-bind emitted label for one declared channel."""

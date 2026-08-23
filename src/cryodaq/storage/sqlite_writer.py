@@ -86,6 +86,20 @@ _MAX_REMEMBERED_UNBOUND_CHANNELS = 256
 # reading looks new and speaks. This is the hard ceiling that rotation cannot defeat --
 # at most this many NAMED lines per interval, plus one aggregate line.
 _UNBOUND_NAMED_LINES_PER_INTERVAL = 8
+# How many DISTINCT undescribed labels may be stored under their own name.
+#
+# Keeping the emitted label is what makes an unbound row still say where it came from,
+# but every distinct label is also a CHANNEL to a reader. `query_reading_rows_bounded`
+# declares a channel budget -- production uses 64 -- and refuses the WHOLE SOURCE with
+# CHANNEL_LIMIT when it is exceeded. Review reproduced that with 65 admitted labels: the
+# valid described measurements vanished from the experiment snapshot along with the
+# undescribed ones. A fix for one loss of data must not create another.
+#
+# So beyond this bound the value, timestamp, unit and status are still stored, and the
+# label is replaced by the reserved channel identity. A bounded loss of one label is not
+# comparable to losing every reading in the day, and the aggregate log line says how many
+# distinct labels were seen.
+_MAX_NAMED_UNBOUND_CHANNELS = 32
 _SQLITE_NATIVE_AUTHORITY_ACTIVATION_LOCK = threading.RLock()
 
 
@@ -2543,6 +2557,9 @@ class SQLiteWriter:
         self._unbound_window_channels: set[str] = set()
         self._unbound_window_channels_overflowed = False
         self._unbound_named_lines_in_window = 0
+        # Distinct undescribed labels stored under their own name; see
+        # _MAX_NAMED_UNBOUND_CHANNELS for why this is bounded.
+        self._named_unbound_channels: set[str] = set()
         self._commit_owner_key = object()
         self._commit_revision = 0
         self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
@@ -7234,6 +7251,9 @@ class SQLiteWriter:
 
         bound = batch
         by_day: dict[date, list[Reading]] = {}
+        # The descriptor ADMISSION chose, per reading, so a row cannot disagree with its
+        # own receipt when the emitted label it keeps would resolve to something else.
+        admitted_by_day: dict[date, list[str]] = {}
         for item in bound:
             reading = item.reading
             nonfinite = not math.isfinite(reading.value)
@@ -7246,20 +7266,24 @@ class SQLiteWriter:
             # agree. For a reading admitted against the RESERVED entry there is no canonical
             # identity to adopt, and the emitted label is the only truth left about which
             # channel produced the value -- so it is kept.
-            stable = (
-                reading
-                if item.descriptor.channel_id == UNBOUND_CHANNEL_ID
-                else replace(reading, channel=item.descriptor.channel_id)
-            )
+            # ...and it is kept only up to a bounded number of DISTINCT labels. Every
+            # distinct label is a channel to a reader, and a bounded read refuses the whole
+            # source once its channel budget is exceeded -- see _MAX_NAMED_UNBOUND_CHANNELS.
+            if item.descriptor.channel_id == UNBOUND_CHANNEL_ID:
+                stored_channel = self._stored_channel_for_unbound(str(reading.channel))
+                stable = reading if stored_channel == reading.channel else replace(reading, channel=stored_channel)
+            else:
+                stable = replace(reading, channel=item.descriptor.channel_id)
             timestamp = (
                 reading.timestamp.astimezone(UTC)
                 if reading.timestamp.tzinfo is not None
                 else reading.timestamp.replace(tzinfo=UTC)
             )
             by_day.setdefault(timestamp.date(), []).append(stable)
+            admitted_by_day.setdefault(timestamp.date(), []).append(item.descriptor.descriptor_hash)
 
         for day, stable_readings in sorted(by_day.items()):
-            if not self._write_day_batch(self._ensure_connection(day), stable_readings):
+            if not self._write_day_batch(self._ensure_connection(day), stable_readings, admitted_by_day[day]):
                 return None
         return bound
 
@@ -7504,7 +7528,24 @@ class SQLiteWriter:
             self._unbound_channel_rows,
         )
 
-    def _write_day_batch(self, conn: sqlite3.Connection, batch: list[Reading]) -> bool:
+    def _stored_channel_for_unbound(self, emitted: str) -> str:
+        """The label an undescribed reading is stored under, bounded by distinct count."""
+
+        if emitted in self._named_unbound_channels:
+            return emitted
+        if len(self._named_unbound_channels) < _MAX_NAMED_UNBOUND_CHANNELS:
+            self._named_unbound_channels.add(emitted)
+            return emitted
+        # Past the bound the VALUE is still stored; only the label gives way. See
+        # _MAX_NAMED_UNBOUND_CHANNELS: an unbounded roster empties a bounded read entirely.
+        return UNBOUND_CHANNEL_ID
+
+    def _write_day_batch(
+        self,
+        conn: sqlite3.Connection,
+        batch: list[Reading],
+        admitted_hashes: list[str] | None = None,
+    ) -> bool:
         """Write a single day's readings to the given connection.
 
         Returns True if the batch was durably committed (or there was
@@ -7537,7 +7578,7 @@ class SQLiteWriter:
         # rate limiter would then hold its tongue for the next five minutes about rows
         # that were never stored.
         unbound: list[tuple[str, BaseException]] = []
-        for r in batch:
+        for index, r in enumerate(batch):
             if r.value is None:
                 skipped += 1
                 continue
@@ -7560,7 +7601,17 @@ class SQLiteWriter:
                 skipped += 1
                 continue
             stored_value, stored_status = encode(r.value, r.status)
-            descriptor_hash = self._descriptor_hash_or_none(r, unbound)
+            if admitted_hashes is not None:
+                # THE DESCRIPTOR ADMISSION CHOSE, NOT A SECOND RESOLUTION OF THE LABEL.
+                # On the live path the label kept in the row is the one the instrument
+                # emitted, and resolving it again here can find a DIFFERENT descriptor --
+                # when a binding aliases an emitted label to another canonical id and a
+                # reading arrives under that canonical id, the second resolution succeeds
+                # and the row would store a real identity while the commit receipt carries
+                # the reserved one. The row and its receipt must not disagree.
+                descriptor_hash = admitted_hashes[index]
+            else:
+                descriptor_hash = self._descriptor_hash_or_none(r, unbound)
             rows.append(
                 (
                     r.timestamp.timestamp(),

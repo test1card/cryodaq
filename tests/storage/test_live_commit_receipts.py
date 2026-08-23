@@ -364,11 +364,14 @@ async def test_midnight_partial_commit_never_issues_whole_batch_receipt(
     real_write = writer._write_day_batch
     call_count = 0
 
-    def fail_second_day(conn: sqlite3.Connection, batch: list[Reading]) -> bool:
+    # Forwards whatever it was given. `_write_day_batch` also takes the descriptors that
+    # admission chose, and a double that pins the signature breaks on every honest change to
+    # it -- this one stands in for the whole call and never inspects its arguments.
+    def fail_second_day(*args: object, **kwargs: object) -> bool:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return real_write(conn, batch)
+            return real_write(*args, **kwargs)
         if failure_mode == "swallowed":
             return False
         raise sqlite3.OperationalError("simulated second-day persistence failure")
@@ -398,7 +401,7 @@ async def test_swallowed_persistence_failure_returns_no_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     writer = SQLiteWriter(tmp_path, channel_catalog=_owner())
-    monkeypatch.setattr(writer, "_write_day_batch", lambda _conn, _batch: False)
+    monkeypatch.setattr(writer, "_write_day_batch", lambda *_args, **_kwargs: False)
 
     assert await writer.write_committed([_reading()]) is None
     assert len(writer._issued_commits) == 0
@@ -1372,7 +1375,7 @@ async def test_commit_revision_is_integrity_bound_and_advances_only_for_issued_r
     writer = SQLiteWriter(tmp_path, channel_catalog=_owner())
     first = await writer.write_committed([_reading(value=1.0)])
     assert first is not None
-    monkeypatch.setattr(writer, "_write_day_batch", lambda _conn, _batch: False)
+    monkeypatch.setattr(writer, "_write_day_batch", lambda *_args, **_kwargs: False)
     assert await writer.write_committed([_reading(value=2.0)]) is None
     monkeypatch.undo()
     second = await writer.write_committed([_reading(value=3.0)])

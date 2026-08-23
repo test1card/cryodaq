@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -565,21 +566,75 @@ async def test_the_live_path_still_refuses_a_disagreeing_instrument(tmp_path: Pa
     await writer.stop()
 
 
-def test_the_reserved_entry_is_in_the_catalog_and_not_in_the_bindings() -> None:
-    """The distinction that made the manifest guards agree again.
+def test_the_reserved_entry_declares_nothing_and_is_visible_nowhere_public() -> None:
+    """Three places it must NOT appear, each found by a guard rather than by reasoning.
 
-    The bindings are what the tracked manifest DECLARES -- which emitted label belongs to
+    The BINDINGS are what the tracked manifest declares -- which emitted label belongs to
     which channel of which instrument. The reserved entry declares nothing; it exists so a
     reading with no declaration has a real descriptor to reference, which the foreign key
-    requires. An earlier version put it in both, and the live catalog then claimed a channel
-    the manifest never declared.
+    requires. An earlier version put it in the bindings, and the manifest guards reported
+    that the live catalog was claiming a channel the manifest never declared.
+
+    The INSTRUMENT SET follows from the bindings, so it is clean for the same reason. Before
+    that correction, startup refused with "instrument mismatch (extra=['cryodaq'])".
+
+    The PUBLIC SNAPSHOT is read to build rosters of channels that exist -- the safety-pattern
+    liveness check derives its canonical-id set from it. Leaving the reserved identity there
+    made an alarm referencing it look accepted at startup while remaining inert, because no
+    driver emits that spelling. A configuration mistake that looks accepted is worse than one
+    that is refused.
     """
 
     from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
 
     owner = _live()
-    assert UNBOUND_CHANNEL_ID in owner.storage_catalog_snapshot().by_channel_id
     assert UNBOUND_CHANNEL_ID not in set(owner._bindings.values())
-    # And therefore it cannot pollute the instruments a configuration must name.
     assert unbound_channel_descriptor().instrument_id not in owner.instrument_ids
+    assert UNBOUND_CHANNEL_ID not in owner.storage_catalog_snapshot().by_channel_id
     owner.require_exact_instruments((INSTRUMENT,))
+
+    # And it is nonetheless installed where the foreign key needs it, which is the whole
+    # reason it exists. The writer puts it there itself.
+    assert any(
+        descriptor.channel_id == UNBOUND_CHANNEL_ID
+        for descriptor in SQLiteWriter(Path(tempfile.mkdtemp()), channel_catalog=_live())._channel_catalog.descriptors
+    )
+
+
+async def test_a_flood_of_undescribed_labels_cannot_empty_a_bounded_read(tmp_path: Path) -> None:
+    """A fix for one loss of data must not create another. This is the second one, pinned.
+
+    Every distinct label is a CHANNEL to a reader. `query_reading_rows_bounded` declares a
+    channel budget -- production uses 64 -- and refuses the WHOLE SOURCE with CHANNEL_LIMIT
+    when it is exceeded. Review reproduced exactly that with 65 admitted labels: the valid
+    described measurements disappeared from the experiment snapshot along with the
+    undescribed ones.
+
+    So the number of distinct labels stored under their own name is bounded. Past the bound
+    the value, timestamp, unit and status are still stored and only the label gives way --
+    a bounded loss of one label is not comparable to losing every reading in the day.
+    """
+
+    from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
+    from cryodaq.storage.sqlite_writer import _MAX_NAMED_UNBOUND_CHANNELS
+
+    flood = _MAX_NAMED_UNBOUND_CHANNELS + 40
+    writer = SQLiteWriter(tmp_path, channel_catalog=_live())
+    batch = [_reading("sensor.main", 1.0)] + [
+        _reading(f"sensor.flood.{index}", float(index + 2)) for index in range(flood)
+    ]
+    assert await writer.write_committed(batch) is not None
+    await writer.stop()
+
+    persisted = _rows(tmp_path)
+    assert len(persisted) == flood + 1, "every reading must still be stored"
+
+    distinct = {row[0] for row in persisted}
+    assert len(distinct) <= _MAX_NAMED_UNBOUND_CHANNELS + 2, sorted(distinct)[:5]
+    assert UNBOUND_CHANNEL_ID in distinct, "the excess labels give way to the reserved identity"
+
+    # And a bounded read with a production-sized channel budget still returns the described
+    # measurement, which is the whole point.
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    assert BoundedReadIssueCode.CHANNEL_LIMIT not in {issue.code for issue in result.issues}
+    assert any(row.channel == "sensor.main" for row in result.rows)
