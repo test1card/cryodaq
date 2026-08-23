@@ -436,8 +436,11 @@ async def test_live_unbound_admission_is_counted_after_the_commit(tmp_path: Path
         await writer.stop()
 
 
-async def test_full_live_roster_reserves_no_extra_discovered_channel(tmp_path: Path) -> None:
-    """An unbound live reading cannot take the 65th slot from a full production roster."""
+async def test_full_live_roster_reserves_no_extra_discovered_channel(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A collapsed unbound row cannot hide a full production roster."""
 
     catalog = ChannelCatalog(
         [
@@ -452,15 +455,26 @@ async def test_full_live_roster_reserves_no_extra_discovered_channel(tmp_path: P
     )
     writer = SQLiteWriter(tmp_path, channel_catalog=LiveChannelDescriptorCatalog(catalog))
     try:
-        assert await writer.write_committed([_reading("sensor.rewired", 4.2)]) is not None
+        with caplog.at_level(logging.WARNING, logger="cryodaq.storage.sqlite_writer"):
+            assert (
+                await writer.write_committed(
+                    [_reading(f"sensor.{index}", float(index)) for index in range(64)]
+                    + [_reading("sensor.rewired", 64.0)]
+                )
+                is not None
+            )
     finally:
         await writer.stop()
 
     unbound = unbound_channel_descriptor()
-    assert _rows(tmp_path) == [(unbound.channel_id, 4.2, unbound.descriptor_hash)]
+    persisted = _rows(tmp_path)
+    assert len(persisted) == 65
+    assert (unbound.channel_id, 64.0, unbound.descriptor_hash) in persisted
     result = _read_bounded(tmp_path, tmp_path / "archive")
-    assert result.discovered_channels == (unbound.channel_id,)
+    assert result.discovered_channels == tuple(sorted(f"sensor.{index}" for index in range(64)))
     assert BoundedReadIssueCode.CHANNEL_LIMIT not in {issue.code for issue in result.issues}
+    assert {row.channel for row in result.rows} == set(result.discovered_channels)
+    assert any("sensor.rewired" in record.getMessage() for record in caplog.records)
 
 
 async def test_the_replay_layer_is_where_the_missing_identity_is_reported(tmp_path: Path) -> None:

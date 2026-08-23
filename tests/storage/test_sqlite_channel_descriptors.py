@@ -434,6 +434,20 @@ async def test_hot_reader_enables_foreign_keys_and_returns_frozen_owned_value(tm
         conn.close()
 
 
+async def test_hot_reader_returns_unbound_row_without_fabricating_a_descriptor(tmp_path: Path) -> None:
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([_descriptor()]))
+    assert await writer.write_immediate([_reading(channel="sensor.rewired")]) is True
+    await writer.stop()
+
+    conn = sqlite3.connect(str(_db_path(tmp_path)))
+    try:
+        resolved = read_sqlite_reading(conn, 1)
+        assert resolved.channel == "sensor.rewired"
+        assert resolved.descriptor is None
+    finally:
+        conn.close()
+
+
 def test_hot_reader_preserves_exact_unmigrated_legacy_row_as_frozen_value(tmp_path: Path) -> None:
     path = _db_path(tmp_path)
     conn = sqlite3.connect(str(path))

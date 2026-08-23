@@ -1500,7 +1500,7 @@ def read_sqlite_reading(conn: sqlite3.Connection, reading_id: object) -> Resolve
         raise ChannelDescriptorStorageError("hot reading row has invalid SQLite value types")
     descriptor = (
         None
-        if reading_columns == _LEGACY_READING_COLUMNS
+        if reading_columns == _LEGACY_READING_COLUMNS or descriptor_hash == UNBOUND_DESCRIPTOR_HASH
         else resolve_sqlite_descriptor(
             conn,
             descriptor_hash,

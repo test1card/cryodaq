@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from urllib.parse import quote
 
+from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import (
     UNBOUND_DESCRIPTOR_HASH,
@@ -1204,6 +1205,8 @@ class ArchiveReader:
         ok = True
         try:
             conn, identity, expired = self._open_bounded_sqlite(source, deadline_monotonic=deadline_monotonic)
+            reading_columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
+            has_descriptor_hash = "descriptor_hash" in reading_columns
             legacy = conn.execute("SELECT 1 FROM readings WHERE typeof(timestamp) = 'text' LIMIT 1")
             try:
                 if next(iter(legacy), None) is not None:
@@ -1217,7 +1220,9 @@ class ArchiveReader:
                     issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                     return False
                 sql = (
-                    "SELECT id, channel FROM readings NOT INDEXED "
+                    "SELECT id, channel"
+                    + (", descriptor_hash" if has_descriptor_hash else "")
+                    + " FROM readings NOT INDEXED "
                     "WHERE typeof(timestamp) IN ('real','integer') "
                     "AND timestamp >= ? AND timestamp < ?"
                 )
@@ -1233,12 +1238,17 @@ class ArchiveReader:
                 cursor = conn.execute(sql, params)
                 count = 0
                 try:
-                    for row_id, raw_channel in cursor:
+                    for row in cursor:
+                        row_id, raw_channel = row[:2]
                         if type(row_id) is not int or (last_id is not None and row_id <= last_id):
                             raise ValueError("invalid discovery keyset id")
                         last_id = row_id
                         count += 1
-                        channels.add(_bounded_text(raw_channel, minimum=1, maximum=256))
+                        channel = _bounded_text(raw_channel, minimum=1, maximum=256)
+                        descriptor_hash = row[2] if has_descriptor_hash else None
+                        if channel == UNBOUND_CHANNEL_ID and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                            continue
+                        channels.add(channel)
                         if len(channels) > max_channels:
                             issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
                             return False

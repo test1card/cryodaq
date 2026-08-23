@@ -7254,6 +7254,7 @@ class SQLiteWriter:
         # The descriptor ADMISSION chose, per reading, so a row cannot disagree with its
         # own receipt when the emitted label it keeps would resolve to something else.
         admitted_by_day: dict[date, list[str]] = {}
+        unbound_emitted_by_day: dict[date, list[str | None]] = {}
         for item in bound:
             reading = item.reading
             nonfinite = not math.isfinite(reading.value)
@@ -7281,9 +7282,17 @@ class SQLiteWriter:
             )
             by_day.setdefault(timestamp.date(), []).append(stable)
             admitted_by_day.setdefault(timestamp.date(), []).append(item.descriptor.descriptor_hash)
+            unbound_emitted_by_day.setdefault(timestamp.date(), []).append(
+                str(reading.channel) if item.descriptor.channel_id == UNBOUND_CHANNEL_ID else None
+            )
 
         for day, stable_readings in sorted(by_day.items()):
-            if not self._write_day_batch(self._ensure_connection(day), stable_readings, admitted_by_day[day]):
+            if not self._write_day_batch(
+                self._ensure_connection(day),
+                stable_readings,
+                admitted_by_day[day],
+                unbound_emitted_by_day[day],
+            ):
                 return None
         return bound
 
@@ -7549,6 +7558,7 @@ class SQLiteWriter:
         conn: sqlite3.Connection,
         batch: list[Reading],
         admitted_hashes: list[str] | None = None,
+        admitted_unbound_channels: list[str | None] | None = None,
     ) -> bool:
         """Write a single day's readings to the given connection.
 
@@ -7618,7 +7628,7 @@ class SQLiteWriter:
                 if descriptor_hash == self._unbound_descriptor.descriptor_hash:
                     unbound.append(
                         (
-                            str(r.channel),
+                            admitted_unbound_channels[index] if admitted_unbound_channels is not None else r.channel,
                             ChannelNotDescribedError("live descriptor admission used the reserved unbound identity"),
                         )
                     )
