@@ -247,6 +247,71 @@ class _ShutdownPhase(Enum):
     COMPLETE = auto()
 
 
+_UNKNOWN_OUTCOME_ENVELOPE_REQUEST_ID_CHARS = frozenset("0123456789abcdef")
+_UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS = frozenset(
+    {"ok", "error", "request_id", "generation", "dispatched", "outcome_unknown"}
+)
+_UNKNOWN_OUTCOME_ENVELOPE_TRANSPORT_KEYS = frozenset({"delivery_state", "commit_state", "error_code", "retry_safe"})
+
+
+def _parse_bridge_unknown_outcome_envelope(receipt: object) -> tuple[str, int] | None:
+    """Strictly parse one actual ``ZmqBridge.send_command`` unknown-outcome envelope.
+
+    A dispatched non-read command whose outcome the bridge cannot prove comes
+    back as one envelope family: the post-dispatch timeout, post-dispatch
+    cancellation, and lifecycle-settlement paths carry ``delivery_state`` and
+    ``commit_state`` beside the core evidence
+    (``zmq_client._send_command_once`` / ``_settle_pending_for_lifecycle_locked``),
+    and the safe-transport failure paths additionally carry ``error_code`` and
+    ``retry_safe``. Returns that result's exact ``(request_id, generation)``
+    reconciliation identity, or None when the object is not from this family --
+    a settled reply, a definitely-unsent rejection, or unknown-outcome evidence
+    so malformed that its identity cannot be trusted. A caller that saw the
+    result claim ``outcome_unknown`` must treat None as HOLD evidence, never
+    as settled.
+    """
+
+    if type(receipt) is not dict:
+        return None
+    if set(receipt) - (_UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | _UNKNOWN_OUTCOME_ENVELOPE_TRANSPORT_KEYS):
+        return None
+    if not (
+        receipt.get("ok") is False
+        and type(receipt.get("error")) is str
+        and bool(receipt["error"])
+        and receipt.get("dispatched") is True
+        and receipt.get("outcome_unknown") is True
+    ):
+        return None
+    request_id = receipt.get("request_id")
+    generation = receipt.get("generation")
+    if not (
+        type(request_id) is str
+        and len(request_id) == 32
+        and all(character in _UNKNOWN_OUTCOME_ENVELOPE_REQUEST_ID_CHARS for character in request_id)
+        and type(generation) is int
+        and generation >= 0
+    ):
+        return None
+    if "delivery_state" in receipt:
+        delivery_state = receipt["delivery_state"]
+        if type(delivery_state) is not str or delivery_state not in {"dispatched", "unknown"}:
+            return None
+    if "commit_state" in receipt:
+        commit_state = receipt["commit_state"]
+        if type(commit_state) is not str or commit_state != "unknown":
+            return None
+    if "error_code" in receipt:
+        error_code = receipt["error_code"]
+        if type(error_code) is not str or not error_code:
+            return None
+    if "retry_safe" in receipt:
+        retry_safe = receipt["retry_safe"]
+        if type(retry_safe) is not bool:
+            return None
+    return request_id, generation
+
+
 class _EngineShutdownWorker(ZmqCommandWorker):
     """Runs the blocking ``launcher_shutdown`` round-trip off the Qt main thread.
 
@@ -3430,33 +3495,17 @@ class LauncherWindow(QMainWindow):
             )
             return False
         receipt = getattr(worker, "result", None)
-        expected_unknown_keys = {
-            "ok",
-            "error",
-            "request_id",
-            "generation",
-            "dispatched",
-            "outcome_unknown",
-        }
-        if type(receipt) is dict and set(receipt) == expected_unknown_keys and receipt["outcome_unknown"] is True:
-            request_id = receipt["request_id"]
-            generation = receipt["generation"]
-            if not (
-                receipt["ok"] is False
-                and type(receipt["error"]) is str
-                and type(request_id) is str
-                and len(request_id) == 32
-                and all(character in "0123456789abcdef" for character in request_id)
-                and type(generation) is int
-                and generation >= 0
-                and receipt["dispatched"] is True
-            ):
-                logger.critical("Finished engine shutdown worker has malformed unknown-outcome evidence")
-                self._engine_shutdown_hold_reason = (
-                    "the finished shutdown worker left unknown-outcome evidence this launcher cannot read, "
-                    "so its identity is held rather than guessed at"
-                )
-                return False
+        claims_unknown_outcome = type(receipt) is dict and receipt.get("outcome_unknown") is True
+        unknown_identity = _parse_bridge_unknown_outcome_envelope(receipt)
+        if claims_unknown_outcome and unknown_identity is None:
+            logger.critical("Finished engine shutdown worker has malformed unknown-outcome evidence")
+            self._engine_shutdown_hold_reason = (
+                "the finished shutdown worker left unknown-outcome evidence this launcher cannot read, "
+                "so its identity is held rather than guessed at"
+            )
+            return False
+        if unknown_identity is not None:
+            request_id, generation = unknown_identity
             self._engine_shutdown_transport_identity = (request_id, generation)
             late_result = self._bridge.reconcile_late_result(request_id, generation=generation)
             if late_result is None:
@@ -3690,30 +3739,12 @@ class LauncherWindow(QMainWindow):
                     if receipt is None:
                         raise RuntimeError("engine shutdown worker settled without a result; launcher remains in HOLD")
             if receipt is not None:
-                expected_unknown_keys = {
-                    "ok",
-                    "error",
-                    "request_id",
-                    "generation",
-                    "dispatched",
-                    "outcome_unknown",
-                }
-                if (
-                    type(receipt) is dict
-                    and set(receipt) == expected_unknown_keys
-                    and receipt["ok"] is False
-                    and type(receipt["error"]) is str
-                    and type(receipt["request_id"]) is str
-                    and len(receipt["request_id"]) == 32
-                    and all(character in "0123456789abcdef" for character in receipt["request_id"])
-                    and type(receipt["generation"]) is int
-                    and receipt["generation"] >= 0
-                    and receipt["dispatched"] is True
-                    and receipt["outcome_unknown"] is True
-                ):
+                unknown_identity = _parse_bridge_unknown_outcome_envelope(receipt)
+                if unknown_identity is not None:
+                    unknown_request_id, unknown_generation = unknown_identity
                     self._engine_shutdown_transport_identity = (
-                        receipt["request_id"],
-                        receipt["generation"],
+                        unknown_request_id,
+                        unknown_generation,
                     )
                     raise RuntimeError(
                         "engine shutdown transport outcome remains unknown; launcher retains exact reconciliation "
@@ -3987,6 +4018,69 @@ class LauncherWindow(QMainWindow):
             return False, None, exc
         return True, None, None
 
+    def _schedule_owner_bound_settlement_retry(
+        self,
+        *,
+        phase: str,
+        failure: Exception,
+        child_start_attempted: bool,
+        settle_bridge: bool,
+        raise_on_hold: bool,
+    ) -> bool:
+        """Schedule one settlement pass bound to the captured pending owner.
+
+        Binding the deferred poll to the restart generation orphaned it whenever
+        a manual restart advanced that generation while the old owner was still
+        pending: the queued callback went inert, no replacement was scheduled,
+        and ``_restart_giving_up`` kept the health timer from settling either.
+        Ownership of the pending command -- the exact worker thread, the exact
+        process handle, both incarnation ids, and the retained transport
+        identity -- is what decides whether this pass may still run. A changed
+        owner means some other path already took responsibility and this one
+        must stay inert; an unchanged owner continues settling regardless of
+        how far the restart generation moved meanwhile. Returns False when no
+        settlement evidence is pending, so the caller keeps its plain latch.
+        """
+
+        deadline = getattr(self, "_engine_shutdown_wait_deadline", None)
+        receipt = getattr(self, "_engine_shutdown_receipt", None)
+        receipt_waiting_for_exit = (
+            type(receipt) is dict and type(deadline) in (int, float) and time.monotonic() < deadline
+        )
+        captured_owner = (
+            getattr(self, "_engine_shutdown_worker", None),
+            getattr(self, "_engine_proc", None),
+            getattr(self, "_replay_session_id", None),
+            getattr(self, "_engine_instance_id", None),
+            getattr(self, "_engine_shutdown_transport_identity", None),
+        )
+        if captured_owner[0] is None and captured_owner[4] is None and not receipt_waiting_for_exit:
+            return False
+
+        def _retry_owner_bound_settlement() -> None:
+            if not LauncherWindow._runtime_callback_is_current(self):
+                return
+            live_owner = (
+                getattr(self, "_engine_shutdown_worker", None),
+                getattr(self, "_engine_proc", None),
+                getattr(self, "_replay_session_id", None),
+                getattr(self, "_engine_instance_id", None),
+                getattr(self, "_engine_shutdown_transport_identity", None),
+            )
+            if live_owner != captured_owner:
+                return
+            LauncherWindow._recover_failed_engine_restart(
+                self,
+                phase=phase,
+                failure=failure,
+                child_start_attempted=child_start_attempted,
+                settle_bridge=settle_bridge,
+                raise_on_hold=raise_on_hold,
+            )
+
+        QTimer.singleShot(_ENGINE_SHUTDOWN_WORKER_GRACE_MS, _retry_owner_bound_settlement)
+        return True
+
     def _recover_failed_engine_restart(
         self,
         *,
@@ -4020,32 +4114,20 @@ class LauncherWindow(QMainWindow):
                 phase=phase,
             )
             if not settled:
-                # The retained worker is still executing its shutdown command on this bridge.
-                # Leave both intact and schedule a later settlement pass; manual restart has
-                # already stopped the health timer.
-                deadline = getattr(self, "_engine_shutdown_wait_deadline", None)
-                receipt = getattr(self, "_engine_shutdown_receipt", None)
-                receipt_waiting_for_exit = (
-                    type(receipt) is dict and type(deadline) in (int, float) and time.monotonic() < deadline
-                )
-                if getattr(self, "_engine_shutdown_worker", None) is not None or receipt_waiting_for_exit:
-                    settlement_generation = getattr(self, "_restart_generation", None)
-
-                    def _retry_replacement_settlement() -> None:
-                        if not LauncherWindow._runtime_callback_is_current(self):
-                            return
-                        if getattr(self, "_restart_generation", None) != settlement_generation:
-                            return
-                        LauncherWindow._recover_failed_engine_restart(
-                            self,
-                            phase=phase,
-                            failure=failure,
-                            child_start_attempted=child_start_attempted,
-                            settle_bridge=settle_bridge,
-                            raise_on_hold=raise_on_hold,
-                        )
-
-                    QTimer.singleShot(_ENGINE_SHUTDOWN_WORKER_GRACE_MS, _retry_replacement_settlement)
+                # A retained worker is still executing its shutdown command on this
+                # bridge, a verified receipt still awaits process exit, or the exact
+                # transport identity of an unknown-outcome command still awaits late
+                # reconciliation. Leave that pending owner -- and the bridge it is
+                # bound to -- intact, and schedule a later settlement pass bound to
+                # that owner; manual restart has already stopped the health timer.
+                if LauncherWindow._schedule_owner_bound_settlement_retry(
+                    self,
+                    phase=phase,
+                    failure=failure,
+                    child_start_attempted=child_start_attempted,
+                    settle_bridge=settle_bridge,
+                    raise_on_hold=raise_on_hold,
+                ):
                     return False
                 settlement_errors["engine_child"] = settlement_error or RuntimeError(
                     "replacement engine child did not settle"
@@ -4131,7 +4213,6 @@ class LauncherWindow(QMainWindow):
         self._restart_giving_up = False
         self._restart_attempts = 0
         self._config_error_modal_shown = False
-        LauncherWindow._advance_restart_generation(self)
         self._restart_pending = False
         try:
             self._invalidate_engine_producer()
@@ -4153,7 +4234,22 @@ class LauncherWindow(QMainWindow):
                 failure=exc,
                 unsettled=("engine_child",),
             )
+            # The latch shows the operator the truth: ownership is unsettled right
+            # now. If a pending owner remains -- the old worker still inside its
+            # command, or its unknown outcome awaiting late reconciliation -- this
+            # owner-bound retry keeps settling that exact owner; without it the
+            # latched giving_up flag blocks every other settlement path and the
+            # pending command strands with zero further callbacks.
+            LauncherWindow._schedule_owner_bound_settlement_retry(
+                self,
+                phase="old-engine-settlement",
+                failure=exc,
+                child_start_attempted=True,
+                settle_bridge=True,
+                raise_on_hold=False,
+            )
             return
+        LauncherWindow._advance_restart_generation(self)
         try:
             self._bridge.shutdown()
         except Exception as exc:

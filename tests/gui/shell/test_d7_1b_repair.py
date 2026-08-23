@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import inspect
+import threading
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cryodaq.engine import ENGINE_CONFIG_ERROR_EXIT_CODE
-from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION
+from cryodaq.gui.zmq_client import CLIENT_PROTOCOL_VERSION, LateCommandResult
 from cryodaq.launcher import LauncherWindow
 
 
@@ -592,6 +593,45 @@ def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
     assert single_shot.call_args.args[0] == 3_000
 
 
+def test_failed_manual_restart_keeps_replacement_settlement_poll_live() -> None:
+    """A failed manual stop must leave the retained worker's settlement poll current."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+    launcher._stop_engine = lambda: (_ for _ in ()).throw(RuntimeError("shutdown worker is still running"))
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+        callback = settlement_shot.call_args.args[1]
+
+        LauncherWindow._restart_engine(launcher)
+        assert launcher._restart_giving_up is True
+        assert launcher._restart_generation == 0
+
+        worker._finished = True
+        callback()
+
+    assert launcher._engine_shutdown_worker is None
+    assert launcher._restart_attempts == 1
+    assert launcher._restart_giving_up is False
+
+
 def test_verified_receipt_exit_wait_keeps_repolling_until_the_budget_spends() -> None:
     """A verified shutdown receipt with exit budget left must keep settling, not HOLD.
 
@@ -777,6 +817,8 @@ def _unknown_outcome_shutdown_worker(request_id: str, generation: int) -> _Shutd
         "generation": generation,
         "dispatched": True,
         "outcome_unknown": True,
+        "delivery_state": "dispatched",
+        "commit_state": "unknown",
     }
     return worker
 
@@ -1269,3 +1311,450 @@ def test_each_hold_banner_names_the_check_that_refused() -> None:
         LauncherWindow._settle_observed_engine_exit(launcher, owner_id="a" * 32, returncode=9, phase="probe")
         spoken.append(said[0])
     assert len(set(spoken)) == 4, spoken
+
+
+# ---------------------------------------------------------------------------
+# P1-A: real ZmqBridge-produced unknown-outcome envelopes must be parsed by the
+# one strict shared parser in BOTH shutdown paths, reconciled exactly, and only
+# then released. The production envelopes below are produced by the real
+# ``ZmqBridge.send_command`` (via the live_zmq_bridge fixture), never by a
+# hand-authored dictionary.
+# ---------------------------------------------------------------------------
+
+
+def _canonical_launcher_shutdown_command() -> dict[str, str]:
+    """The exact envelope _stop_engine dispatches on the preemptive safe lane."""
+
+    return {
+        "cmd": "launcher_shutdown",
+        "engine_instance_id": "a" * 32,
+        "request_id": "c" * 32,
+        "shutdown_capability": "b" * 64,
+    }
+
+
+def _assert_unknown_envelope_core(result: dict) -> None:
+    assert type(result) is dict
+    assert result["ok"] is False
+    assert type(result["error"]) is str and result["error"]
+    assert type(result["request_id"]) is str and len(result["request_id"]) == 32
+    assert all(character in "0123456789abcdef" for character in result["request_id"])
+    assert type(result["generation"]) is int and result["generation"] >= 0
+    assert result["dispatched"] is True
+    assert result["outcome_unknown"] is True
+
+
+def _drain_bridge_unknown_owner(bridge: object, result: dict) -> None:
+    """Route one exact late reply so the bridge's terminal close stays legal."""
+
+    request_id = result["request_id"]
+    with bridge._pending_lock:
+        if request_id not in bridge._outcome_unknown:
+            return
+        assert bridge._route_reply_locked(
+            {"_rid": request_id, "ok": True},
+            source_generation=result["generation"],
+            source_lane="safe",
+        )
+    assert bridge.reconcile_late_result(request_id, generation=result["generation"]) is not None
+
+
+def _settle_real_envelope_through_retirement(result: dict) -> tuple[object, SimpleNamespace]:
+    """Feed a real send_command envelope through the retirement settlement path.
+
+    Returns (reconcile-mock-carrying bridge, launcher). Asserts the launcher
+    reconciled the exact transport identity BEFORE releasing its owner.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    settle_bridge = MagicMock()
+    launcher._bridge = settle_bridge
+    settle_bridge.reconcile_late_result.return_value = LateCommandResult(
+        request_id=result["request_id"],
+        generation=result["generation"],
+        reply={"ok": True},
+    )
+    worker = _ShutdownWorker(settles=True)
+    worker.result = result
+    launcher._engine_shutdown_worker = worker
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is True
+    settle_bridge.reconcile_late_result.assert_called_once_with(
+        result["request_id"],
+        generation=result["generation"],
+    )
+    assert launcher._engine_shutdown_worker is None, "reconciled evidence may be released"
+    assert launcher._engine_shutdown_transport_identity is None
+    assert launcher._engine_instance_id is None, "the owner retires only after reconciliation"
+    return settle_bridge, launcher
+
+
+def test_real_bridge_cancellation_unknown_envelope_is_reconciled_before_release(
+    live_zmq_bridge,
+) -> None:
+    """A REAL send_command post-dispatch cancellation must reconcile, not release.
+
+    The candidate accepted only a hand-authored six-key dictionary; the real
+    cancellation envelope also carries delivery_state and commit_state, was
+    therefore invisible to it, released the finished worker with zero
+    reconcile_late_result calls, and dropped the transport identity of a
+    command whose outcome was unknown.
+    """
+
+    bridge = live_zmq_bridge
+    cancelled = threading.Event()
+
+    class _SafeQueue:
+        def __init__(self) -> None:
+            self.items: list[dict] = []
+
+        def put_nowait(self, item: dict) -> None:
+            self.items.append(item)
+            cancelled.set()
+
+    original_queue = bridge._safe_cmd_queue
+    bridge._safe_cmd_queue = _SafeQueue()
+    try:
+        result = bridge.send_command(_canonical_launcher_shutdown_command(), cancellation_requested=cancelled)
+    finally:
+        bridge._safe_cmd_queue = original_queue
+
+    _assert_unknown_envelope_core(result)
+    assert set(result) == {
+        "ok",
+        "error",
+        "request_id",
+        "generation",
+        "dispatched",
+        "outcome_unknown",
+        "delivery_state",
+        "commit_state",
+    }
+    assert result["delivery_state"] == "dispatched"
+    assert result["commit_state"] == "unknown"
+    assert result["request_id"] in bridge._outcome_unknown
+
+    try:
+        _settle_real_envelope_through_retirement(result)
+    finally:
+        _drain_bridge_unknown_owner(bridge, result)
+
+
+def test_real_bridge_timeout_unknown_envelope_is_reconciled_before_release(
+    live_zmq_bridge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A REAL send_command timeout envelope carries the transport vocabulary.
+
+    This is the exact shape the finding described: dispatched non-read
+    command, no reply inside the command deadline, outcome unknown -- plus
+    delivery_state/commit_state that the six-key candidate check rejected.
+    """
+
+    bridge = live_zmq_bridge
+    monkeypatch.setattr("cryodaq.gui.zmq_client._CMD_REPLY_TIMEOUT_S", 0.2)
+
+    result = bridge.send_command(_canonical_launcher_shutdown_command())
+
+    _assert_unknown_envelope_core(result)
+    assert result["delivery_state"] == "dispatched"
+    assert result["commit_state"] == "unknown"
+    assert result["request_id"] in bridge._outcome_unknown
+
+    try:
+        _settle_real_envelope_through_retirement(result)
+    finally:
+        monkeypatch.undo()
+        _drain_bridge_unknown_owner(bridge, result)
+
+
+def test_real_bridge_safe_transport_failure_envelope_is_reconciled_before_release(
+    live_zmq_bridge,
+) -> None:
+    """A REAL safe-pipe death after dispatch stays an unknown receipt.
+
+    Recording the generation fatal settles the dispatched command through the
+    lifecycle path, so the caller receives the dispatched/unknown vocabulary
+    envelope -- still bound to its exact request id and generation, still
+    required to reconcile before any release.
+    """
+
+    bridge = live_zmq_bridge
+
+    class _BrokenSafeQueue:
+        def put_nowait(self, item: dict) -> None:
+            raise OSError("safe pipe died")
+
+    original_queue = bridge._safe_cmd_queue
+    bridge._safe_cmd_queue = _BrokenSafeQueue()
+    try:
+        result = bridge.send_command(_canonical_launcher_shutdown_command())
+    finally:
+        bridge._safe_cmd_queue = original_queue
+
+    _assert_unknown_envelope_core(result)
+    assert result["delivery_state"] == "dispatched"
+    assert result["commit_state"] == "unknown"
+    assert result["request_id"] in bridge._outcome_unknown
+
+    try:
+        _settle_real_envelope_through_retirement(result)
+    finally:
+        request_id = result["request_id"]
+        with bridge._pending_lock:
+            future = bridge._outcome_unknown.pop(request_id, None)
+            if future is not None:
+                bridge._release_request_identity_locked(request_id)
+
+
+def test_extended_unknown_envelopes_refuse_malformed_evidence() -> None:
+    """Extended production shapes parse exactly; corrupted variants stay HOLD."""
+
+    def _launcher_with(receipt: dict) -> tuple[SimpleNamespace, MagicMock, list[str]]:
+        calls: list[str] = []
+        launcher = _exited_owned_launcher(calls, 9)
+        settle_bridge = MagicMock()
+        launcher._bridge = settle_bridge
+        worker = _ShutdownWorker(settles=True)
+        worker.result = receipt
+        launcher._engine_shutdown_worker = worker
+        return launcher, settle_bridge, calls
+
+    valid_timeout = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after timeout",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "dispatched": True,
+        "outcome_unknown": True,
+        "delivery_state": "dispatched",
+        "commit_state": "unknown",
+    }
+    # Exact key-for-key copy of zmq_client's post-enqueue non-read failure
+    # return (engine_unavailable after dispatch): the family variant that adds
+    # error_code and retry_safe beside the transport vocabulary.
+    valid_safe_transport = {
+        "ok": False,
+        "error_code": "engine_unavailable",
+        "error": "Engine command transport is unavailable after dispatch.",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "delivery_state": "unknown",
+        "commit_state": "unknown",
+        "dispatched": True,
+        "outcome_unknown": True,
+        "retry_safe": False,
+    }
+    for label, receipt in (
+        ("valid-timeout", valid_timeout),
+        ("valid-safe-transport", valid_safe_transport),
+    ):
+        launcher, settle_bridge, _ = _launcher_with(dict(receipt))
+        settle_bridge.reconcile_late_result.return_value = LateCommandResult(
+            request_id=receipt["request_id"],
+            generation=receipt["generation"],
+            reply={"ok": True},
+        )
+        settled = LauncherWindow._settle_observed_engine_exit(
+            launcher,
+            owner_id="a" * 32,
+            returncode=9,
+            phase="probe",
+        )
+        assert settled is True, label
+        settle_bridge.reconcile_late_result.assert_called_once_with(
+            receipt["request_id"],
+            generation=receipt["generation"],
+        )
+        assert launcher._engine_shutdown_worker is None, label
+
+    malformed_overrides = [
+        ("bad-delivery-state-type", {"delivery_state": 42}),
+        ("wrong-commit-state-value", {"commit_state": "committed"}),
+        ("bad-error-code-type", {"error_code": None}),
+        ("bad-retry-safe-type", {"retry_safe": "no"}),
+        ("foreign-key", {"operator_hint": "guess"}),
+    ]
+    for base_label, base in (("timeout", valid_timeout), ("safe-transport", valid_safe_transport)):
+        for override_label, override in malformed_overrides:
+            if base_label == "timeout" and override_label in {"bad-error-code-type", "bad-retry-safe-type"}:
+                continue
+            label = f"{base_label}/{override_label}"
+            launcher, settle_bridge, _calls = _launcher_with({**base, **override})
+            said: list[str] = []
+            launcher._show_engine_down_banner = said.append
+            settled = LauncherWindow._settle_observed_engine_exit(
+                launcher,
+                owner_id="a" * 32,
+                returncode=9,
+                phase="probe",
+            )
+            assert settled is False, label
+            settle_bridge.reconcile_late_result.assert_not_called()
+            assert launcher._engine_shutdown_worker is not None, label
+            assert launcher._engine_instance_id == "a" * 32, label
+            assert len(said) == 1, (label, said)
+            assert "cannot read" in said[0], (label, said[0])
+
+
+# ---------------------------------------------------------------------------
+# P1-B: deferred settlement passes are bound to the captured pending OWNER --
+# exact worker thread, process handle, incarnation ids, retained transport
+# identity -- never to the restart generation alone.
+# ---------------------------------------------------------------------------
+
+
+def test_manual_restart_generation_advance_keeps_the_old_owner_settlement_alive() -> None:
+    """Ordering 1: old worker pending, manual restart advances generation, worker finishes.
+
+    The generation-bound callback exited silently on the mismatch, nothing
+    rescheduled it, and the latched giving_up flag kept the health timer from
+    settling either -- the finished worker's unknown outcome stranded forever.
+    The owner-bound callback must keep settling that exact old owner.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+        callback = settlement_shot.call_args.args[1]
+
+        # The operator's manual restart advances the generation while the SAME
+        # old worker remains the pending owner of the outstanding command.
+        LauncherWindow._advance_restart_generation(launcher)
+        assert launcher._restart_giving_up is False
+
+        worker._finished = True
+        callback()
+
+        # The pass ran: the finished owner settled, giving_up cleared, and the
+        # bounded retry machinery booked the next attempt.
+        assert launcher._engine_shutdown_worker is None
+        assert launcher._restart_giving_up is False
+        assert launcher._restart_attempts == 1
+        assert settlement_shot.call_count == 2
+        assert settlement_shot.call_args.args[0] == 3_000
+
+
+def test_settlement_callback_is_inert_when_a_new_engine_already_owns_the_slot() -> None:
+    """Ordering 2: ownership moved without any generation change stays inert.
+
+    Generation equality alone would let this poll run against the NEW healthy
+    incarnation and stop it as though it were the failed replacement. The
+    owner binding refuses because every captured component moved.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_shutdown_worker = _ShutdownWorker(settles=False)
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+        callback = settlement_shot.call_args.args[1]
+
+        # A completed turnover drained the old worker and a healthy engine now
+        # owns the slot -- with the restart generation left untouched.
+        launcher._engine_shutdown_worker = None
+        healthy = SimpleNamespace(
+            poll=lambda: calls.append("new_poll") or None,
+            terminate=lambda: calls.append("terminate"),
+            kill=lambda: calls.append("kill"),
+            wait=lambda *_: calls.append("wait"),
+        )
+        launcher._engine_proc = healthy
+        launcher._engine_instance_id = "f" * 32
+        callback()
+
+    assert launcher._engine_proc is healthy, "the healthy replacement must keep its handle"
+    assert "terminate" not in calls and "kill" not in calls and "wait" not in calls
+    assert "new_poll" not in calls, "the new owner must not even be polled by the stale pass"
+    assert launcher._restart_giving_up is False, "an inert pass must not latch HOLD"
+    launcher._bridge.shutdown.assert_not_called()
+
+
+def test_interrupted_manual_restart_schedules_owner_bound_settlement_continuation() -> None:
+    """A manual stop failing mid-command latches AND keeps settling that owner.
+
+    Latching alone stranded the pending shutdown command: giving_up blocked
+    the health timer and nothing else ever re-entered _stop_engine, so the
+    bridge could even be torn down under an unresolved transport identity.
+    The failed stop must schedule one owner-bound continuation instead --
+    without shutting the bridge the reconciliation depends on.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: None)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+    launcher._restart_pending = False
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    def _stop_that_finds_the_worker_running() -> None:
+        calls.append("stop_engine")
+        raise RuntimeError(
+            "engine shutdown command is dispatched on a background worker awaiting its reply; launcher remains in HOLD"
+        )
+
+    launcher._stop_engine = _stop_that_finds_the_worker_running
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        LauncherWindow._restart_engine(launcher)
+
+        assert launcher._restart_giving_up is True, "the latch must show the operator the truth"
+        assert settlement_shot.call_args.args[0] == 200, "one owner-bound continuation must be scheduled"
+        callback = settlement_shot.call_args.args[1]
+
+        # Whatever moved meanwhile (here: another generation advance), the same
+        # old owner still holds the pending command.
+        LauncherWindow._advance_restart_generation(launcher)
+        callback()
+
+        assert calls.count("stop_engine") == 2, "the interrupted stop must be retried for the same owner"
+        assert settlement_shot.call_count == 2, "still-unsettled evidence reschedules the pass"
+        assert launcher._bridge.shutdown.call_count == 0, (
+            "the bridge must survive while the old command's outcome is unresolved"
+        )
