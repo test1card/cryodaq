@@ -94,6 +94,32 @@ _deferred_records: list[tuple[int, str, tuple[object, ...]]] = []
 _logging_configured = False
 
 
+class _EmissionTrackingHandlerMixin:
+    """Remember whether the most recent handler emission reached its stream."""
+
+    _last_emission_succeeded = False
+    _emission_failed = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._emission_failed = False
+        super().emit(record)
+        self._last_emission_succeeded = not self._emission_failed
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        self._emission_failed = True
+        super().handleError(record)
+
+
+class _EmissionTrackingStreamHandler(_EmissionTrackingHandlerMixin, logging.StreamHandler):
+    """A stream handler that exposes whether its last write succeeded."""
+
+
+class _EmissionTrackingTimedRotatingFileHandler(
+    _EmissionTrackingHandlerMixin, logging.handlers.TimedRotatingFileHandler
+):
+    """A rotating file handler that exposes whether its last write succeeded."""
+
+
 def logging_is_configured() -> bool:
     """Return whether setup_logging has configured this process."""
 
@@ -112,8 +138,27 @@ def _replay_deferred_records() -> None:
 
     held, _deferred_records[:] = list(_deferred_records), []
     logger = logging.getLogger("cryodaq.startup")
+    handlers = list(logging.getLogger().handlers)
+    retained: list[tuple[int, str, tuple[object, ...]]] = []
     for level, message, args in held:
+        for handler in handlers:
+            handler._last_emission_succeeded = False
         logger.log(level, message, *args)
+        if not any(getattr(handler, "_last_emission_succeeded", False) for handler in handlers):
+            retained.append((level, message, args))
+    _deferred_records[:0] = retained
+
+
+def _warn_file_logging_failure(component: str, exc: Exception) -> None:
+    """Write a file-logging warning when the windowed launcher has stderr."""
+
+    stderr = getattr(sys, "stderr", None)
+    if stderr is None or not callable(getattr(stderr, "write", None)):
+        return
+    try:
+        stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")
+    except Exception:
+        pass
 
 
 def _stream_is_writable(handler: logging.StreamHandler) -> bool:
@@ -185,7 +230,7 @@ def setup_logging(
     redact = _TokenRedactFilter()
 
     if console:
-        stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler = _EmissionTrackingStreamHandler(sys.stderr)
         stream_handler.setFormatter(formatter)
         stream_handler.addFilter(redact)
         if _stream_is_writable(stream_handler):
@@ -195,7 +240,7 @@ def setup_logging(
         try:
             log_dir = get_logs_dir()
             log_path = log_dir / f"{component}.log"
-            file_handler = logging.handlers.TimedRotatingFileHandler(
+            file_handler = _EmissionTrackingTimedRotatingFileHandler(
                 log_path,
                 when=when,
                 backupCount=backup_count,
@@ -213,7 +258,7 @@ def setup_logging(
             file_handler.addFilter(redact)
             root.addHandler(file_handler)
         except Exception as exc:
-            sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")
+            _warn_file_logging_failure(component, exc)
 
     # Replay only after a handler that can actually take a record exists.
     global _logging_configured

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import io
 import logging
+import sys
 
 
 def test_setup_logging_creates_file(tmp_path, monkeypatch):
@@ -124,6 +125,91 @@ def test_setup_logging_keeps_deferred_records_until_a_handler_exists(tmp_path, m
         written = (log_dir / "durable-handler.log").read_text(encoding="utf-8")
         assert "deferred startup failure" in written
         assert not logging_setup._deferred_records
+    finally:
+        for handler in list(root.handlers):
+            if handler not in handlers:
+                handler.close()
+                root.removeHandler(handler)
+        for handler in handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level)
+        logging_setup._logging_configured = configured
+        logging_setup._deferred_records[:] = deferred
+
+
+def test_setup_logging_tolerates_file_failure_without_stderr(monkeypatch):
+    """A windowed launcher must survive when neither logging sink can start."""
+
+    from cryodaq import logging_setup
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    configured = logging_setup._logging_configured
+    deferred = list(logging_setup._deferred_records)
+
+    def unavailable_log_dir():
+        raise OSError("unavailable")
+
+    try:
+        logging_setup._logging_configured = False
+        logging_setup._deferred_records.clear()
+        logging_setup.defer_record(logging.ERROR, "startup diagnostic")
+        monkeypatch.setattr(sys, "stderr", None)
+        monkeypatch.setattr(logging_setup, "get_logs_dir", unavailable_log_dir)
+
+        logging_setup.setup_logging("launcher", console=True, file=True)
+
+        assert logging_setup._deferred_records == [(logging.ERROR, "startup diagnostic", ())]
+        assert not logging_setup.logging_is_configured()
+    finally:
+        for handler in list(root.handlers):
+            if handler not in handlers:
+                handler.close()
+                root.removeHandler(handler)
+        for handler in handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level)
+        logging_setup._logging_configured = configured
+        logging_setup._deferred_records[:] = deferred
+
+
+def test_setup_logging_retains_deferred_records_after_file_write_failure(tmp_path, monkeypatch):
+    """A file handler that cannot write must not consume startup diagnostics."""
+
+    from cryodaq import logging_setup
+
+    class FailingStream:
+        closed = False
+
+        def write(self, _message):
+            raise OSError("disk full")
+
+        def flush(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    configured = logging_setup._logging_configured
+    deferred = list(logging_setup._deferred_records)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    try:
+        logging_setup._logging_configured = False
+        logging_setup._deferred_records.clear()
+        logging_setup.defer_record(logging.ERROR, "startup diagnostic")
+        monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+        monkeypatch.setattr(logging.FileHandler, "_open", lambda _handler: FailingStream())
+
+        logging_setup.setup_logging("launcher", console=False, file=True)
+
+        assert logging_setup._deferred_records == [(logging.ERROR, "startup diagnostic", ())]
+        assert logging_setup.logging_is_configured()
     finally:
         for handler in list(root.handlers):
             if handler not in handlers:
