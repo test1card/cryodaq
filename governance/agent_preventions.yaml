@@ -6760,5 +6760,7 @@ records:
         ci_partition: agents
       - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_alternating_persisting_failures_are_limited_per_signature
         ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_every_runtime_failure_entry_point_is_rate_limited
+        ci_partition: agents
     red_evidence: unrenderable_exception_propagated_from_bounded_reason_before_the_writer_replaced_starting_health_a_loader_path_containing_api_telegram_org_bot_was_rejected_by_periodic_state_and_alternating_failure_signatures_emitted_once_per_second_while_source_and_helper_tests_stayed_green_pending_immutable_capture
     green_evidence: pending

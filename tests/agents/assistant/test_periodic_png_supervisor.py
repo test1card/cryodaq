@@ -390,7 +390,7 @@ async def test_unexplained_coordinator_disappearance_is_degraded_not_orderly(
             assert coordinator is not None
             await coordinator.stop()
             self._coordinator = None
-            return "poll"
+            return "poll", None
 
     class BackoffClock(Clock):
         def __init__(self) -> None:
@@ -755,7 +755,7 @@ async def test_critical_runtime_failure_marks_nonready_before_re_election(
 ) -> None:
     class FailedCoordinator(Coordinator):
         async def wait(self) -> None:
-            raise RuntimeError("critical loop failed")
+            raise ValueError("sqlite write exploded")
 
     class BackoffClock(Clock):
         def __init__(self) -> None:
@@ -781,7 +781,10 @@ async def test_critical_runtime_failure_marks_nonready_before_re_election(
         if (await _load_stable(tmp_path)).payload["health"]["status"] == "degraded_runtime":
             break
         await asyncio.sleep(0.001)
-    assert (await _load_stable(tmp_path)).payload["health"]["status"] == ("degraded_runtime")
+    health = (await _load_stable(tmp_path)).payload["health"]
+    assert health["status"] == "degraded_runtime"
+    assert "ValueError" in health["error_text"]
+    assert "sqlite write exploded" in health["error_text"]
     fd = None
     for _ in _settle_attempts():
         fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)

@@ -116,7 +116,11 @@ _PROHIBITED_LOCATOR = re.compile(r"\S*api\.telegram\.org/bot\S*", re.IGNORECASE)
 def _bounded_text(value: str) -> str:
     """Return state-safe diagnostic text within the runtime health budget."""
 
-    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", _redact(value)).split())
+    # Bound before locator matching: its leading ``\S*`` backtracks quadratically
+    # through a long whitespace-free diagnostic when no locator is present.
+    source = value.encode("utf-8", errors="replace").decode("utf-8")
+    source = source[: _RUNTIME_REASON_MAX_CHARS * 16]
+    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", _redact(source)).split())
     if len(detail) > _RUNTIME_REASON_MAX_CHARS:
         detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
     return detail
@@ -1845,7 +1849,7 @@ class PeriodicPngSupervisor:
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
                     continue
-                outcome = await self._monitor_iteration()
+                outcome, cause = await self._monitor_iteration()
                 if outcome == "stop":
                     await self._stop_then_write_orderly(disabled=False)
                     self._release_leader()
@@ -1858,7 +1862,7 @@ class PeriodicPngSupervisor:
                     # was still destroyed by the general one a fraction of a second later.
                     # So this stops the coordinator and KEEPS whatever the monitor said,
                     # writing its own only when the monitor left nothing.
-                    await self._stop_then_keep_monitor_health()
+                    await self._stop_then_keep_monitor_health(cause)
                     self._release_leader()
                     await self._sleep_or_stop(_ELECTION_BACKOFF[min(backoff_index, 5)])
                     backoff_index = min(backoff_index + 1, 5)
@@ -2034,7 +2038,7 @@ class PeriodicPngSupervisor:
             "" if cause is None else _bounded_reason(cause),
         )
 
-    async def _stop_then_keep_monitor_health(self) -> None:
+    async def _stop_then_keep_monitor_health(self, cause: BaseException | None = None) -> None:
         """Stop the coordinator without overwriting a more specific reason.
 
         The monitor persists its own health before it reports failure. Replacing that with
@@ -2054,7 +2058,7 @@ class PeriodicPngSupervisor:
             # stopped at all -- worse than the vague sentence it replaced.
             self._log_runtime_failure("the live-source monitor stopped the coordinator", None)
         else:
-            await self._write_runtime_failed_health(because="the monitor reported a failure")
+            await self._write_runtime_failed_health(cause, because="the monitor reported a failure")
         if cleanup_error is not None:
             raise cleanup_error
 
@@ -2112,7 +2116,7 @@ class PeriodicPngSupervisor:
             raise cleanup_error
         return wrote
 
-    async def _monitor_iteration(self) -> str:
+    async def _monitor_iteration(self) -> tuple[str, BaseException | None]:
         assert self._coordinator is not None and self._stop_event is not None
         wait_task = asyncio.create_task(self._coordinator.wait())
         poll_task = asyncio.create_task(self._clock.sleep(_CONFIG_POLL_S))
@@ -2121,16 +2125,16 @@ class PeriodicPngSupervisor:
         try:
             done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             if stop_task in done:
-                return "stop"
+                return "stop", None
             if wait_task in done:
                 try:
                     await wait_task
                 except asyncio.CancelledError:
-                    return "stop" if self._stop_requested else "failed"
-                except Exception:
-                    return "failed"
-                return "failed"
-            return "poll"
+                    return ("stop" if self._stop_requested else "failed"), None
+                except Exception as exc:
+                    return "failed", exc
+                return "failed", None
+            return "poll", None
         finally:
             for task in tasks:
                 if not task.done():

@@ -109,6 +109,40 @@ def test_a_very_long_exception_cannot_fill_the_health_record() -> None:
     assert text.endswith("\u2026")
 
 
+def test_production_writer_replaces_invalid_unicode_in_failure_reasons(tmp_path) -> None:
+    state = load_periodic_state(tmp_path)
+    ready = set_periodic_health(state, status="ready", code=None, text="", now=1.0)
+    write_periodic_state(tmp_path, ready)
+    supervisor, _clock = _supervisor(tmp_path, lambda _config: pytest.fail("factory must not run"))
+
+    asyncio.run(supervisor._write_runtime_failed_health(RuntimeError("bad surrogate: \ud800")))
+
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "degraded_runtime"
+    assert health["error_code"] == "periodic_runtime_failed"
+    assert "bad surrogate" in health["error_text"]
+    health["error_text"].encode("utf-8", errors="strict")
+
+
+def test_production_writer_bounds_long_whitespace_free_failure_reasons(tmp_path, monkeypatch) -> None:
+    observed_lengths: list[int] = []
+
+    class Locator:
+        def sub(self, replacement: str, value: str) -> str:
+            observed_lengths.append(len(value))
+            return value
+
+    monkeypatch.setattr(periodic_png, "_PROHIBITED_LOCATOR", Locator())
+    supervisor, _clock = _supervisor(tmp_path, lambda _config: pytest.fail("factory must not run"))
+
+    asyncio.run(supervisor._write_runtime_failed_health(RuntimeError("x" * 100_000)))
+
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "degraded_runtime"
+    assert len(health["error_text"]) <= periodic_png._RUNTIME_REASON_MAX_CHARS
+    assert max(observed_lengths) == periodic_png._RUNTIME_REASON_MAX_CHARS * 16
+
+
 @pytest.mark.parametrize(
     ("persisted_code", "preserved"),
     [
