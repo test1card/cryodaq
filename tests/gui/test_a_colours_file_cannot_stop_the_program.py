@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import logging
 import pathlib
+import sys
 
 import pytest
 import yaml
@@ -204,6 +205,53 @@ def test_the_reason_reaches_the_log_file_that_did_not_exist_yet(
     assert not logging_setup._deferred_records, "a replayed record must not be emitted twice"
 
 
+def test_a_deferred_reason_is_retained_when_the_log_file_cannot_be_opened(
+    tmp_path, monkeypatch, root_logging_restored
+) -> None:
+    """An unopenable path must not count as a sink that took the record."""
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    # A directory where the log file belongs: opening it raises, writing to it
+    # would have failed silently.
+    (log_dir / "unopenable.log").mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    logging_setup.defer_record(logging.ERROR, "diagnostic that must remain queued")
+    logging_setup.setup_logging("unopenable", console=False, file=True)
+
+    assert logging_setup._deferred_records == [(logging.ERROR, "diagnostic that must remain queued", ())]
+    assert not logging_setup.logging_is_configured()
+
+
+def test_a_deferred_reason_is_retained_when_there_is_no_console_stream(monkeypatch, root_logging_restored) -> None:
+    """A windowed launcher has no stderr, and StreamHandler accepts that in silence."""
+
+    monkeypatch.setattr(sys, "stderr", None)
+
+    logging_setup.defer_record(logging.ERROR, "diagnostic that must remain queued")
+    logging_setup.setup_logging("no-console", console=True, file=False)
+
+    assert logging_setup._deferred_records == [(logging.ERROR, "diagnostic that must remain queued", ())]
+    assert not logging_setup.logging_is_configured()
+
+
+def test_the_readiness_check_writes_nothing_of_its_own(tmp_path, monkeypatch, root_logging_restored, capsys) -> None:
+    """Whatever proves the sink usable must not itself appear in the operator's log."""
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    logging_setup.defer_record(logging.ERROR, "the only line that belongs here")
+    logging_setup.setup_logging("quiet-readiness", console=True, file=True)
+
+    written = (log_dir / "quiet-readiness.log").read_text(encoding="utf-8")
+    assert "the only line that belongs here" in written
+    assert len([line for line in written.splitlines() if line.strip()]) == 1, written
+    assert "probe" not in written.lower(), written
+
+
 def test_the_deferred_list_cannot_grow_without_bound() -> None:
     """A list filled before logging exists is a leak nothing would ever notice."""
 
@@ -232,7 +280,10 @@ def test_a_reason_after_logging_setup_is_not_replayed_by_later_reconfiguration(
     logging_setup.setup_logging("theme-inventory-second", console=False, file=True)
     logging.shutdown()
     assert "ignoring invalid pack" in (log_dir / "theme-inventory-first.log").read_text(encoding="utf-8")
-    assert not (log_dir / "theme-inventory-second.log").exists()
+    # The second configuration opens its file when it is built, so the file exists. What
+    # must not happen -- and what this test is named for -- is the reason being replayed
+    # into it.
+    assert (log_dir / "theme-inventory-second.log").read_text(encoding="utf-8") == ""
 
 
 def test_the_theme_menu_survives_a_directory_it_cannot_read(themes_dir, monkeypatch) -> None:

@@ -116,6 +116,24 @@ def _replay_deferred_records() -> None:
         logger.log(level, message, *args)
 
 
+def _stream_is_writable(handler: logging.StreamHandler) -> bool:
+    """Return whether ``handler`` has a stream that will accept a record.
+
+    Checked WITHOUT emitting anything. A probe record would be formatted and
+    written like any other, so the operator would read a line in the console and
+    in the log file describing something that never happened.
+
+    The case this exists for: under a windowed launcher ``sys.stderr`` can be
+    None or already closed, and ``StreamHandler`` accepts it without complaint.
+    Every record then dies inside ``handleError``, which is silent by design.
+    """
+
+    stream = getattr(handler, "stream", None)
+    if stream is None or getattr(stream, "closed", False):
+        return False
+    return callable(getattr(stream, "write", None))
+
+
 def setup_logging(
     component: str,
     *,
@@ -170,7 +188,8 @@ def setup_logging(
         stream_handler = logging.StreamHandler(sys.stderr)
         stream_handler.setFormatter(formatter)
         stream_handler.addFilter(redact)
-        root.addHandler(stream_handler)
+        if _stream_is_writable(stream_handler):
+            root.addHandler(stream_handler)
 
     if file:
         try:
@@ -181,7 +200,14 @@ def setup_logging(
                 when=when,
                 backupCount=backup_count,
                 encoding="utf-8",
-                delay=True,
+                # OPEN THE FILE NOW, not at the first record. With delay=True an
+                # unwritable path raises nothing here, so the handler is added, the
+                # process believes logging exists, and the held startup diagnostics
+                # are replayed into a sink that fails on every one of them --
+                # silently, because handler errors are swallowed by design.
+                # Opening eagerly turns that into the exception this block already
+                # knows how to handle: warn, and carry on with the console.
+                delay=False,
             )
             file_handler.setFormatter(formatter)
             file_handler.addFilter(redact)
@@ -189,7 +215,7 @@ def setup_logging(
         except Exception as exc:
             sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")
 
-    # Replay only after at least one handler exists.
+    # Replay only after a handler that can actually take a record exists.
     global _logging_configured
     _logging_configured = bool(root.handlers)
     if _logging_configured:

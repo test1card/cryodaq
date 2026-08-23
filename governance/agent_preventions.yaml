@@ -6726,3 +6726,28 @@ records:
         ci_partition: remaining
     red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
     green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition
+  - id: THEME-DIAGNOSTIC-DEFERRAL-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Theme diagnostics emitted before logging setup and their deferred replay through logging_setup.setup_logging.
+    classification: diagnostic_loss
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: The process believes logging exists, replays every held startup diagnostic into a sink that fails on all of them, and the failures are swallowed by logging's own error handling -- so the operator is left with an empty log and no reason for degraded presentation.
+    invariant: A diagnostic held from before logging existed is replayed only into a handler that has proved it can take a record -- the file handler by opening its file when it is built, the console handler by having a stream that is present and open.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_a_deferred_reason_is_retained_when_the_log_file_cannot_be_opened
+        ci_partition: gui
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_a_deferred_reason_is_retained_when_there_is_no_console_stream
+        ci_partition: gui
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_the_readiness_check_writes_nothing_of_its_own
+        ci_partition: gui
+    automation_limit: The evidence below is content-addressed and local. The three guards are in the gui partition, which the hosted remaining partition does not run, so a hosted run cannot be cited for them.
+    red_evidence: with_only_production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_replaced_by_master_blob_30eda78ec923876f0a96dcb74970556af182fe94_all_three_guards_error_because_master_carries_no_deferral_mechanism_at_all_transcript_sha256_85c33e11b2d4cabd1ab3fa085f4030ca784a7e48c7681814081705e7f20de33a_and_the_two_narrow_controls_on_this_branch_each_reddened_exactly_the_guard_for_that_property_delay_true_transcript_sha256_3c952d42188db22bef278203db5248d33c2aa98e454307c9b81357676fddcdc8_and_console_check_removed_transcript_sha256_70c8922526e5f0b73ef1e50219a123ffc1264abaa93f948796d533b39b5e5a77
+    green_evidence: production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_with_guard_blob_2def5032dff4521689f0b3bb8106fba7b565642c_28_passed_transcript_sha256_66cf5d92b91282dadbf9ad9fd20b0cde436d85089f6ec1c64b5836d3952445cc
