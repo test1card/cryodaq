@@ -969,6 +969,13 @@ _ASSISTANT_LOG_ABSENT_MARKER: Final = (
     "<no assistant log was written under the isolated state root; the assistant either "
     "never started or never opened its log>\n"
 )
+_ASSISTANT_LOG_REPLACED_MARKER: Final = (
+    "REFUSED: the log directory was not the same directory after the read as before it. "
+    "This platform has no descriptor-anchored traversal, so the read cannot be bound to "
+    "the directory that was validated; what it can do is prove afterwards that nothing "
+    "swapped underneath it, and that proof failed. Nothing read is published, because a "
+    "stream that may have come from a replaced directory is worse than none."
+)
 _ASSISTANT_LOG_REFUSED_MARKER: Final = (
     "<the assistant log was refused: the path under the isolated state root is not a "
     "regular file. The measured process can write that directory, so a symbolic link "
@@ -976,7 +983,9 @@ _ASSISTANT_LOG_REFUSED_MARKER: Final = (
 )
 
 
-def _read_regular_file_no_follow(path: Path) -> bytes | None:
+def _read_regular_file_no_follow(
+    directory_descriptor: int | None, path: Path | str, *, maximum_bytes: int
+) -> tuple[bytes, int] | None:
     """Read a file the MEASURED PROCESS can replace, without following a link.
 
     The isolated state root is writable by the very process this bundle describes. If it
@@ -986,7 +995,7 @@ def _read_regular_file_no_follow(path: Path) -> bytes | None:
     read -- the check is on the DESCRIPTOR, not on the path, because a path can change
     between the check and the open.
 
-    Returns ``None`` when the path is not a regular file, so the caller can say so.
+    Returns the bounded tail and full descriptor size when safe; otherwise ``None``.
     """
 
     # TWO CHECKS, because neither is enough alone. `O_NOFOLLOW` does not exist on
@@ -995,7 +1004,7 @@ def _read_regular_file_no_follow(path: Path) -> bytes | None:
     # link is rejected first by `lstat`, which does not follow, and the open still asks
     # for `O_NOFOLLOW` where the platform has it.
     try:
-        link_info = os.lstat(path)
+        link_info = os.lstat(path, dir_fd=directory_descriptor)
     except OSError:
         return None
     if not stat.S_ISREG(link_info.st_mode):
@@ -1003,22 +1012,43 @@ def _read_regular_file_no_follow(path: Path) -> bytes | None:
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(path, flags, dir_fd=directory_descriptor)
     except OSError:
         return None
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             return None
+        size = info.st_size
+        if size > maximum_bytes:
+            os.lseek(descriptor, size - maximum_bytes, os.SEEK_SET)
         with os.fdopen(descriptor, "rb", closefd=True) as handle:
             descriptor = -1
-            return handle.read()
+            return handle.read(maximum_bytes), size
     finally:
         if descriptor >= 0:
             os.close(descriptor)
 
 
-def _assistant_log_files(state_root: Path) -> list[Path]:
+def _directory_identity(directory: Path) -> tuple[int, int] | None:
+    """The volume and index of ``directory``, or None if it is not a plain directory.
+
+    Used only where descriptor-relative traversal does not exist. Comparing this before
+    and after the reads does not CLOSE the replacement window -- nothing on that platform
+    can -- but it turns a read from a directory somebody swapped in into a refusal
+    instead of into published evidence.
+    """
+
+    try:
+        info = os.lstat(directory)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _assistant_log_files(state_root: Path) -> tuple[int, list[str]] | None:
     """The active log and every rotated backup, oldest first.
 
     `setup_logging` rotates the assistant log daily and keeps up to fourteen dated
@@ -1028,12 +1058,41 @@ def _assistant_log_files(state_root: Path) -> list[Path]:
     """
 
     directory = Path(state_root) / "logs"
-    active = directory / "assistant.log"
+    active = "assistant.log"
     try:
-        rotated = sorted(p for p in directory.glob("assistant.log.*") if p.name != active.name)
+        directory_info = os.lstat(directory)
+        if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
+            return None
+        if os.name == "nt":
+            # Windows lacks descriptor-relative `open`; explicitly reject reparse roots,
+            # then use a non-globbing enumeration. Any directory access failure is refused.
+            # The window this leaves open -- the directory replaced between here and the
+            # leaf reads -- cannot be closed on this platform, so the publisher proves
+            # afterwards that the directory did not change, and refuses if it did.
+            rotated = sorted(name for name in os.listdir(directory) if name.startswith("assistant.log."))
+            return None, [*(directory / name for name in rotated), directory / active]
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_descriptor = os.open(directory, directory_flags)
     except OSError:
-        rotated = []
-    return [*rotated, active]
+        # The measured process can replace `logs`, so a descriptor is the authority for
+        # traversal. Do not fall back to pathname globbing when opening it fails.
+        return None
+    keep_descriptor = False
+    try:
+        opened_info = os.fstat(directory_descriptor)
+        if not stat.S_ISDIR(opened_info.st_mode) or (
+            (opened_info.st_dev, opened_info.st_ino) != (directory_info.st_dev, directory_info.st_ino)
+        ):
+            return None
+        rotated = sorted(name for name in os.listdir(directory_descriptor) if name.startswith("assistant.log."))
+    except OSError:
+        return None
+    else:
+        keep_descriptor = True
+        return directory_descriptor, [*rotated, active]
+    finally:
+        if not keep_descriptor:
+            os.close(directory_descriptor)
 
 
 def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
@@ -1053,18 +1112,48 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
 
     from scripts.soak_mock_stack import redact_text
 
-    collected: list[bytes] = []
+    logs_directory = Path(state_root) / "logs"
+    # On the descriptor path this is None and unused: the descriptor IS the binding.
+    identity_before = _directory_identity(logs_directory) if os.name == "nt" else None
+
+    selected = _assistant_log_files(state_root)
+    if selected is None:
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_REFUSED_MARKER)
+        return
+    directory_descriptor, paths = selected
+
+    # Walk newest-to-oldest and prepend each retained suffix. This preserves the
+    # combined stream's tail while never acquiring more than the bundle can retain.
+    # A per-file cap would still read one full cap for every rotated day before the
+    # deque could discard it.
+    collected: deque[bytes] = deque()
+    retained_bytes = 0
+    source_bytes = 0
     refused = False
-    for path in _assistant_log_files(state_root):
-        # `lexists`, not `exists`: a broken link EXISTS as a link and must be reported as
-        # refused, while `exists()` would answer False and skip it in silence.
-        if not os.path.lexists(path):
-            continue
-        raw = _read_regular_file_no_follow(path)
-        if raw is None:
-            refused = True
-            continue
-        collected.append(raw)
+    try:
+        for path in reversed(paths):
+            # Descriptor-relative opens determine presence and reject link replacements.
+            if directory_descriptor is None and not os.path.lexists(path):
+                continue
+            remaining = max(_MAX_LAUNCHER_LOG_BYTES - retained_bytes, 0)
+            result = _read_regular_file_no_follow(directory_descriptor, path, maximum_bytes=remaining)
+            if result is None:
+                refused = True
+                continue
+            raw, size = result
+            source_bytes += size
+            if raw:
+                collected.appendleft(raw)
+                retained_bytes += len(raw)
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+
+    if directory_descriptor is None and (
+        identity_before is None or _directory_identity(logs_directory) != identity_before
+    ):
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_REPLACED_MARKER)
+        return
 
     if not collected:
         evidence.write_log(
@@ -1076,7 +1165,7 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     encoded = redact_text(b"".join(collected).decode("utf-8", errors="replace")).encode("utf-8")
     if refused:
         encoded = _ASSISTANT_LOG_REFUSED_MARKER.encode("utf-8") + encoded
-    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
+    if source_bytes > _MAX_LAUNCHER_LOG_BYTES or len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
         # Keep the END, across the rotated files as one stream: the bound protects the
         # bundle's size and must not choose which half of the failure survives.
         tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
@@ -2909,9 +2998,7 @@ def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
             text[:_DIAGNOSTIC_HEAD_SHARE] + (_DIAGNOSTIC_TRUNCATION_MARKER % dropped) + text[len(text) - tail_share :]
         )
 
-    return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
-        stderr
-    )
+    return f"exit code {exit_code}; captured stdout:\n{bounded(stdout)}; captured stderr:\n{bounded(stderr)}"
 
 
 def _parse_exact_collection(

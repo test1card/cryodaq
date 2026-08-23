@@ -13,6 +13,7 @@ logger would have stayed green through exactly this failure.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -167,6 +168,34 @@ def test_the_rotated_stream_is_ordered_oldest_first(state_root: Path) -> None:
     assert published.index("FIRST") < published.index("LAST")
 
 
+def test_rotated_log_reads_never_exceed_the_global_retained_tail(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive the publisher over two rotated files, observing its real descriptor reads."""
+
+    logs = state_root / "logs"
+    (logs / "assistant.log.2026-08-14").write_bytes(b"OLDEST-" + b"x" * runner._MAX_LAUNCHER_LOG_BYTES)
+    (logs / "assistant.log").write_bytes(
+        b"NEWEST-" + b"y" * runner._MAX_LAUNCHER_LOG_BYTES + b"NEWEST-ACTIVE-CONTENT\n"
+    )
+    original = runner._read_regular_file_no_follow
+    requested: list[int] = []
+
+    def observe(directory_descriptor: int | None, path: Path | str, *, maximum_bytes: int):
+        result = original(directory_descriptor, path, maximum_bytes=maximum_bytes)
+        if result is not None:
+            requested.append(len(result[0]))
+        return result
+
+    monkeypatch.setattr(runner, "_read_regular_file_no_follow", observe)
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    assert sum(requested) <= runner._MAX_LAUNCHER_LOG_BYTES
+    assert "NEWEST-ACTIVE-CONTENT" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+
+
 def test_a_symbolic_link_is_refused_rather_than_followed(state_root: Path, tmp_path: Path) -> None:
     """The measured process can write that directory, so its topology is not trusted.
 
@@ -192,3 +221,131 @@ def test_a_symbolic_link_is_refused_rather_than_followed(state_root: Path, tmp_p
     assert published == runner._ASSISTANT_LOG_REFUSED_MARKER, (
         "a refused path must SAY it was refused, or it reads as an absent log"
     )
+
+
+def test_a_hard_link_is_refused_rather_than_copied(state_root: Path, tmp_path: Path) -> None:
+    """A hard link has no unsafe pathname component, so the descriptor must reject it."""
+
+    import os
+
+    secret = tmp_path / "not-for-the-bundle.txt"
+    secret.write_bytes(b"HARD-LINKED SECRET\n")
+    os.link(secret, state_root / "logs" / "assistant.log")
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "HARD-LINKED SECRET" not in published
+    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+
+
+def test_a_linked_logs_directory_is_refused_rather_than_traversed(state_root: Path, tmp_path: Path) -> None:
+    """The directory is child-writable too, so validating only a final leaf is insufficient."""
+
+    import os
+
+    external = tmp_path / "external-logs"
+    external.mkdir()
+    (external / "assistant.log").write_bytes(b"OUTSIDE THE ISOLATED ROOT\n")
+    logs = state_root / "logs"
+    logs.rmdir()
+    try:
+        os.symlink(external, logs, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - unprivileged Windows
+        pytest.skip("this platform does not allow creating a directory symbolic link here")
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "OUTSIDE THE ISOLATED ROOT" not in published
+    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+
+
+def test_directory_open_failure_is_refused_without_pathname_fallback(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed descriptor open must not restore child-controlled pathname traversal."""
+
+    (state_root / "logs" / "assistant.log").write_bytes(b"MUST NOT BE READ AFTER OPEN FAILURE\n")
+
+    def refuse_directory_access(*_args: object, **_kwargs: object) -> int:
+        raise OSError("simulated directory-open failure")
+
+    if os.name == "nt":
+        monkeypatch.setattr(runner.os, "listdir", refuse_directory_access)
+    else:
+        monkeypatch.setattr(runner.os, "open", refuse_directory_access)
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "MUST NOT BE READ AFTER OPEN FAILURE" not in published
+    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_a_junction_logs_directory_is_refused_rather_than_traversed(state_root: Path, tmp_path: Path) -> None:
+    """A Windows junction is not a symlink but can redirect the child-controlled directory."""
+
+    import _winapi
+
+    external = tmp_path / "external-logs"
+    external.mkdir()
+    (external / "assistant.log").write_bytes(b"OUTSIDE THE ISOLATED ROOT THROUGH JUNCTION\n")
+    logs = state_root / "logs"
+    logs.rmdir()
+    _winapi.CreateJunction(str(external), str(logs))
+    assert os.path.isjunction(logs)
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "OUTSIDE THE ISOLATED ROOT THROUGH JUNCTION" not in published
+    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+
+
+def test_a_logs_directory_swapped_during_the_read_is_refused_not_published(monkeypatch, tmp_path) -> None:
+    """Where the read cannot be anchored, prove afterwards that nothing was swapped.
+
+    Review found the hole and it is real: without descriptor-relative open, a child of the
+    measured run can replace `logs` between the moment it is validated and the moment a
+    leaf is read. That window cannot be closed on such a platform. What can be done is to
+    notice, and to publish nothing rather than a stream that may have come from elsewhere.
+    """
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "assistant.log").write_text("lost authority: out of sequence\n", encoding="utf-8")
+
+    monkeypatch.setattr(runner.os, "name", "nt")
+    identities = iter([(1, 111), (1, 222)])
+    monkeypatch.setattr(runner, "_directory_identity", lambda _directory: next(identities))
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, tmp_path)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert published == runner._ASSISTANT_LOG_REPLACED_MARKER
+    assert "lost authority" not in published, "a read from a swapped directory must not be published"
+
+
+def test_an_unchanged_logs_directory_still_publishes(monkeypatch, tmp_path) -> None:
+    """The proof must not refuse the ordinary case, or it has only broken the publisher."""
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "assistant.log").write_text("lost authority: out of sequence\n", encoding="utf-8")
+
+    monkeypatch.setattr(runner.os, "name", "nt")
+    monkeypatch.setattr(runner, "_directory_identity", lambda _directory: (1, 111))
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, tmp_path)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "lost authority" in published
+    assert published != runner._ASSISTANT_LOG_REPLACED_MARKER

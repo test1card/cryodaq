@@ -15,8 +15,10 @@ record.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
+import msgpack
 import pytest
 
 from cryodaq.agents.assistant import periodic_runtime
@@ -50,10 +52,13 @@ def _fresh() -> object:
 def test_the_category_names_the_class_not_the_text() -> None:
     """A malformed frame's own message must not become the reason."""
 
-    reason = periodic_runtime._invalidation_category(ValueError("channel Т12 at 10.0.0.7 said 4.21"))
+    # The channel identifiers in this laboratory are Cyrillic. A redactor exercised only
+    # with ASCII passes while leaking the names actually in use.
+    for identifier in ("T12", "Т12"):
+        reason = periodic_runtime._invalidation_category(ValueError(f"channel {identifier} at 10.0.0.7 said 4.21"))
 
-    assert "out of sequence" in reason or "malformed" in reason
-    assert "10.0.0.7" not in reason and "Т12" not in reason and "4.21" not in reason
+        assert "out of sequence" in reason or "malformed" in reason
+        assert "10.0.0.7" not in reason and identifier not in reason and "4.21" not in reason
 
 
 def test_every_mapped_class_has_its_own_sentence() -> None:
@@ -242,3 +247,128 @@ def test_a_named_barrier_failure_survives_to_the_watcher() -> None:
         assert "connection event" in str(raised.value)
 
     asyncio.run(_drive())
+
+
+def test_an_invalid_transport_sequence_reaches_the_loop_reason(caplog: pytest.LogCaptureFixture) -> None:
+    """A real reading frame must recategorize its helper validator failure."""
+
+    source = _fresh()
+    source._state_lock = asyncio.Lock()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [
+                periodic_runtime.DEFAULT_TOPIC,
+                msgpack.packb(
+                    {
+                        "ts": 1.0,
+                        "iid": "instrument",
+                        "ch": "channel",
+                        "v": 1.0,
+                        "u": "K",
+                        "st": "ok",
+                        "raw": None,
+                        "meta": {},
+                        "transport": {
+                            "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                            "session_id": "0" * 32,
+                            "sequence": "not-an-integer",
+                            "persistence_authoritative": False,
+                        },
+                    },
+                    use_bin_type=True,
+                ),
+            ]
+
+    source._socket = _Socket()
+
+    periodic_runtime._last_discontinuity_log.clear()
+    with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+        asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "transport sequence was invalid" in source._invalidation_reason
+
+
+@pytest.mark.parametrize(
+    ("topic", "payload", "expected"),
+    [
+        (
+            periodic_runtime.DEFAULT_TOPIC,
+            msgpack.packb(
+                {
+                    "ts": "not-a-timestamp",
+                    "iid": "instrument",
+                    "ch": "channel",
+                    "v": 1.0,
+                    "u": "K",
+                    "st": "ok",
+                    "raw": None,
+                    "meta": {},
+                    "transport": {
+                        "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                        "session_id": "0" * 32,
+                        "sequence": 1,
+                        "persistence_authoritative": False,
+                    },
+                },
+                use_bin_type=True,
+            ),
+            "a reading frame did not validate",
+        ),
+        (periodic_runtime.EVENTS_TOPIC, b"not-json", "an event frame did not validate"),
+    ],
+)
+def test_parser_failures_reach_the_receive_loop_with_their_own_categories(
+    topic: bytes, payload: bytes, expected: str
+) -> None:
+    """Drive helpers and parsers through the loop instead of classifying their exceptions directly."""
+
+    source = _fresh()
+    source._state_lock = asyncio.Lock()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [topic, payload]
+
+    source._socket = _Socket()
+
+    asyncio.run(_SOURCE._receive_loop(source))
+
+    assert expected in source._invalidation_reason
+
+
+def test_an_event_sequence_gap_names_the_global_stream_in_the_receive_loop() -> None:
+    """Events and readings share the same transport sequence, so the diagnosis must not blame readings."""
+
+    source = _fresh()
+    source._session_id = "0" * 32
+    source._last_sequence = 1
+    source._state_lock = asyncio.Lock()
+    source._on_event = lambda _event: None
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [
+                periodic_runtime.EVENTS_TOPIC,
+                json.dumps(
+                    {
+                        "event_type": "notice",
+                        "ts": 1.0,
+                        "payload": {},
+                        "experiment_id": None,
+                        "transport": {
+                            "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                            "session_id": "0" * 32,
+                            "sequence": 3,
+                            "persistence_authoritative": False,
+                        },
+                    }
+                ).encode(),
+            ]
+
+    source._socket = _Socket()
+
+    asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "global stream sequence has a gap" in source._invalidation_reason
+    assert "reading sequence" not in source._invalidation_reason

@@ -714,7 +714,11 @@ class SequencedPeriodicLiveSources:
         authoritative = value["persistence_authoritative"]
         if type(authoritative) is not bool:
             raise _FrameRejected("the frame carried an invalid transport envelope", "invalid transport")
-        return _Transport(session, _exact_int(value["sequence"], minimum=1), authoritative)
+        try:
+            sequence = _exact_int(value["sequence"], minimum=1)
+        except ValueError as exc:
+            raise _FrameRejected("the transport sequence was invalid", "invalid transport sequence") from exc
+        return _Transport(session, sequence, authoritative)
 
     @classmethod
     def _reading(cls, raw: bytes) -> tuple[_Transport, Reading]:
@@ -798,16 +802,26 @@ class SequencedPeriodicLiveSources:
         )
         previous = self._provisional_last if provisional else self._last_sequence
         if expected_session != session or previous is None or sequence != previous + 1:
-            raise _FrameRejected("the reading sequence has a gap", "stream discontinuity")
+            raise _FrameRejected("the global stream sequence has a gap", "stream discontinuity")
 
     async def _semantic_frame(self, topic: bytes, raw: bytes) -> tuple[_Transport, _ProvisionalFrame]:
         if topic == DEFAULT_TOPIC:
-            transport, reading = self._reading(raw)
+            try:
+                transport, reading = self._reading(raw)
+            except _FrameRejected:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise _FrameRejected("a reading frame did not validate", "invalid reading fields") from exc
             if transport.persistence_authoritative:
                 return transport, _ProvisionalFrame(transport.sequence, "reading", reading, len(raw))
             return transport, _ProvisionalFrame(transport.sequence, "filtered", None, len(raw))
         if topic == EVENTS_TOPIC:
-            transport, event = self._event(raw)
+            try:
+                transport, event = self._event(raw)
+            except _FrameRejected:
+                raise
+            except (TypeError, ValueError) as exc:
+                raise _FrameRejected("an event frame did not validate", "invalid event fields") from exc
             return transport, _ProvisionalFrame(transport.sequence, "event", event, len(raw))
         raise _FrameRejected(
             "a frame arrived on a topic this source does not participate in", "unknown participating topic"
