@@ -3441,8 +3441,10 @@ false_green_pairs:
     runtime_prevention_id: PERIODIC-LIVE-FRAME-ADMISSION-001
     guard: tests/agents/assistant/test_periodic_runtime.py::test_every_key_the_publisher_writes_is_known_to_this_consumer
     ci_partition: agents
-    red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
-    green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/periodic_live_producer_consumer_drift_false_green_001.json
+      sha256: sha256:288315d5aa930f494f3dad85a679c99b192c7b0b31601e355b2c605cff26b4cc
+    green_evidence: local_executed_python_3_14_3_guard_blob_8fbf5d5fa85641e22d86220b6c5aad078acc9499_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_c720bef0f7371af8c18291fe31df3bc199401f7482a653d045ae0289706b6b96_pending_sealed_hosted_agents_artifact
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6739,13 +6741,13 @@ records:
     status: open
     scope: product_contract
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: The SequencedPeriodicLiveSources subscription set and the reading admission contract in src/cryodaq/agents/assistant/periodic_runtime.py.
+    applies_to: The SequencedPeriodicLiveSources subscription set and the reading admission contract in src/cryodaq/agents/assistant/periodic_runtime.py, plus the ZMQPublisher queue-backed reading-publisher construction contract in src/cryodaq/core/zmq_bridge.py.
     classification: server_client_contract_split
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
     consequence: The periodic live consumer subscribed to EVERY topic on the publisher's sole PUB socket with an empty-prefix SUBSCRIBE, while its own admission path accepted only the three topics this source participates in. The subscription was therefore BROADER than the refusal rather than narrower -- the day a fourth topic appeared on that socket, the consumer received frames it was built to refuse, and a refusal invalidates the whole live generation. Separately, the reading contract did not name the descriptor envelope key the publisher had grown, so a frame the publisher legitimately writes was refused for that reason too. Either way a laboratory run loses the periodic source. An earlier version of this record stated the subscription relationship in the wrong direction; the direction matters, because the over-broad form is what makes a new publisher topic a fault in an unrelated consumer.
-    invariant: The topics the consumer subscribes to are EXACTLY the topics its admission path names as participating -- neither broader, which turns a new publisher topic into a fatal refusal, nor narrower, which silently drops a frame this source needs. That equality is a statement about INTENT and it is not what the transport enforces -- a ZMQ SUBSCRIBE matches a byte PREFIX, so a subscription to a topic also delivers every topic that extends it, and no list the consumer keeps can prevent that because the publisher owns its own topics. Admission therefore IGNORES AND COUNTS a frame whose topic is not exactly participating, and refuses only what is malformed on a topic that is. A frame nobody addressed to this source must never be able to invalidate its generation, and that holds WHATEVER ENVELOPE SHAPE it carries -- the two-part frame count is a rule about participating topics and is applied only after the topic is classified. It also requires that a foreign topic never consumes the shared sequence, since ignoring a frame that took a sequence number leaves a gap and the next participating frame invalidates the generation anyway; the publisher refuses to allocate for a topic outside the sequenced set, and refuses before the counter moves; a reading is admitted when it carries every required key, with or without the optional descriptor envelope; a reading missing a required key is refused; an unknown key is refused and its name is never echoed into the message, only its count.
+    invariant: The topics the consumer subscribes to are EXACTLY the topics its admission path names as participating -- neither broader, which turns a new publisher topic into a fatal refusal, nor narrower, which silently drops a frame this source needs. That equality is a statement about INTENT and it is not what the transport enforces -- a ZMQ SUBSCRIBE matches a byte PREFIX, so a subscription to a topic also delivers every topic that extends it, and no list the consumer keeps can prevent that because the publisher owns its own topics. Admission therefore IGNORES AND COUNTS a frame whose topic is not exactly participating, and refuses only what is malformed on a topic that is. A frame nobody addressed to this source must never be able to invalidate its generation, and that holds WHATEVER ENVELOPE SHAPE it carries -- the two-part frame count is a rule about participating topics and is applied only after the topic is classified. It also requires that a foreign topic never consumes the shared sequence, since ignoring a frame that took a sequence number leaves a gap and the next participating frame invalidates the generation anyway; the publisher refuses to allocate for a topic outside the sequenced set, and refuses before the counter moves; on the producing side, the queue-backed reading publisher accepts DEFAULT_TOPIC alone at construction -- EVENTS_TOPIC and PERIODIC_BARRIER_TOPIC remain sequenced service topics emitted only through the dedicated event and barrier methods, never through the queue-backed reading path, because a msgpack reading sent onto either sequenced topic would be parsed as that frame type and invalidate the live generation while the send reports success; a reading is admitted when it carries every required key, with or without the optional descriptor envelope; a reading missing a required key is refused; an unknown key is refused and its name is never echoed into the message, only its count.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#architecture-and-extension-rules
@@ -6775,8 +6777,21 @@ records:
         ci_partition: agents
       - node: tests/agents/assistant/test_periodic_runtime.py::test_the_shared_sequence_belongs_only_to_the_topics_that_are_followed
         ci_partition: agents
-      - node: tests/agents/assistant/test_periodic_runtime.py::test_a_publisher_nobody_follows_is_refused_before_it_can_swallow_a_queue
+      - node: tests/agents/assistant/test_periodic_runtime.py::test_the_queue_backed_reading_publisher_accepts_only_the_default_topic
         ci_partition: agents
-    automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
-    red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
-    green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+    automation_limit: >-
+      No sealed hosted agents artifact can be produced from this machine, so this record remains
+      open until the hosted partition seals it. The final-shape local red evidence consists of two
+      executed tools/red_reproduction.py receipts. Both bind final guard blob
+      8fbf5d5fa85641e22d86220b6c5aad078acc9499 to defective commit
+      062a0e3b6d9f332b47c33942d1f95ea6ace10146 and its recorded source blobs. The runtime receipt
+      executes the twelve registered nodes that fail on that defect. The paired false-green receipt
+      executes its single registered node. The local green execution binds the same guard blob with
+      periodic_runtime blob cf63760bdf65f205955a02ba5a324e434a8a55e5 and zmq_bridge blob
+      49c078363c772407cae216774583a430f912af33. All thirteen registered nodes passed with exit zero.
+      Earlier commit, tree, intermediate guard, and origin/master descriptions are superseded and
+      certify none of the final registered guards.
+    red_evidence:
+      locator: red-reproduction:governance/red_reproductions/periodic_live_frame_admission_001.json
+      sha256: sha256:653ecfd12faed2e3d9579cee5a19bc7a9e60fa2b21407b72be18401a2678fc22
+    green_evidence: local_executed_python_3_14_3_guard_blob_8fbf5d5fa85641e22d86220b6c5aad078acc9499_periodic_runtime_blob_cf63760bdf65f205955a02ba5a324e434a8a55e5_zmq_bridge_blob_49c078363c772407cae216774583a430f912af33_exact_13_registered_nodes_selected_13_passed_exit_0_combined_output_sha256_c720bef0f7371af8c18291fe31df3bc199401f7482a653d045ae0289706b6b96_pending_sealed_hosted_agents_artifact

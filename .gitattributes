@@ -1,6 +1,7 @@
 *.ttf binary
 *.otf binary
 governance/red_reproductions/*.json -text
+tests/agents/assistant/test_periodic_runtime.py text eol=lf
 tests/core/test_alarm_config_validation.py text eol=lf
 tests/core/test_alarm_v2_integration.py text eol=lf
 tests/drivers/test_keithley_disconnect_verified_off.py text eol=lf
