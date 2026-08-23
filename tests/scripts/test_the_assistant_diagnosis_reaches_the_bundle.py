@@ -196,6 +196,26 @@ def test_rotated_log_reads_never_exceed_the_global_retained_tail(
     assert "NEWEST-ACTIVE-CONTENT" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
 
 
+def test_a_refusal_notice_survives_active_log_truncation(state_root: Path, tmp_path: Path) -> None:
+    """A bounded payload must retain the warning that another enumerated log was refused."""
+
+    import os
+
+    secret = tmp_path / "not-for-the-bundle.txt"
+    secret.write_bytes(b"HARD-LINKED SECRET\n")
+    os.link(secret, state_root / "logs" / "assistant.log.2026-08-14")
+    (state_root / "logs" / "assistant.log").write_bytes(b"x" * runner._MAX_LAUNCHER_LOG_BYTES + b"ACTIVE LOG END\n")
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER in published
+    assert runner._TRUNCATED_LAUNCHER_LOG_MARKER.decode("utf-8") in published
+    assert "ACTIVE LOG END" in published
+    assert "HARD-LINKED SECRET" not in published
+
+
 def test_a_symbolic_link_is_refused_rather_than_followed(state_root: Path, tmp_path: Path) -> None:
     """The measured process can write that directory, so its topology is not trusted.
 
@@ -308,6 +328,13 @@ def test_a_junction_logs_directory_is_refused_rather_than_traversed(state_root: 
     assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
 
 
+def test_pathname_log_traversal_selection_is_patchable_without_changing_os() -> None:
+    """The Windows branch must be selectable without creating a hybrid process."""
+
+    assert runner._assistant_log_uses_pathname_traversal(platform="nt")
+    assert not runner._assistant_log_uses_pathname_traversal(platform="posix")
+
+
 def test_a_logs_directory_swapped_during_the_read_is_refused_not_published(monkeypatch, tmp_path) -> None:
     """Where the read cannot be anchored, prove afterwards that nothing was swapped.
 
@@ -321,7 +348,7 @@ def test_a_logs_directory_swapped_during_the_read_is_refused_not_published(monke
     logs.mkdir()
     (logs / "assistant.log").write_text("lost authority: out of sequence\n", encoding="utf-8")
 
-    monkeypatch.setattr(runner.os, "name", "nt")
+    monkeypatch.setattr(runner, "_assistant_log_uses_pathname_traversal", lambda: True)
     identities = iter([(1, 111), (1, 222)])
     monkeypatch.setattr(runner, "_directory_identity", lambda _directory: next(identities))
 
@@ -340,7 +367,7 @@ def test_an_unchanged_logs_directory_still_publishes(monkeypatch, tmp_path) -> N
     logs.mkdir()
     (logs / "assistant.log").write_text("lost authority: out of sequence\n", encoding="utf-8")
 
-    monkeypatch.setattr(runner.os, "name", "nt")
+    monkeypatch.setattr(runner, "_assistant_log_uses_pathname_traversal", lambda: True)
     monkeypatch.setattr(runner, "_directory_identity", lambda _directory: (1, 111))
 
     evidence = _Evidence()

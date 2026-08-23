@@ -712,6 +712,34 @@ async def test_monitor_tolerates_only_preconnect_retry(monkeypatch: pytest.Monke
     await live.stop()
 
 
+async def test_monitor_decode_failure_is_classified_as_monitor_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Query:
+        async def barrier(self, _nonce: str) -> BarrierQueryResult:
+            raise AssertionError
+
+    class Monitor:
+        async def recv_multipart(self) -> list[bytes]:
+            return [b"malformed monitor event"]
+
+        def close(self, *, linger: int) -> None:
+            assert linger == 0
+
+    monkeypatch.setattr(
+        periodic_runtime,
+        "parse_monitor_message",
+        lambda _frames: (_ for _ in ()).throw(RuntimeError("malformed multipart event")),
+    )
+    live = SequencedPeriodicLiveSources(Query())
+    live._running = True
+    live._failure = asyncio.get_running_loop().create_future()
+    live._monitor = Monitor()  # type: ignore[assignment]
+
+    await live._monitor_loop()
+
+    assert live._invalid
+    assert live._invalidation_reason == "the socket monitor stopped: the monitor path failed with RuntimeError"
+
+
 async def test_stop_is_shared_idempotent_and_terminal() -> None:
     class Query:
         async def barrier(self, _nonce: str) -> BarrierQueryResult:

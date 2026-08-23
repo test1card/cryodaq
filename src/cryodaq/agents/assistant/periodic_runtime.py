@@ -942,7 +942,7 @@ class SequencedPeriodicLiveSources:
         except asyncio.CancelledError:
             raise
         except BaseException as error:
-            self._invalidate(f"the socket monitor stopped: {_invalidation_category(error)}")
+            self._invalidate(f"the socket monitor stopped: the monitor path failed with {type(error).__name__}")
         else:
             if not self._stopping:
                 self._invalidate("the socket monitor ended while the source was still running")

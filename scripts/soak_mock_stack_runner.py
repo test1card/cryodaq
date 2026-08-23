@@ -983,6 +983,12 @@ _ASSISTANT_LOG_REFUSED_MARKER: Final = (
 )
 
 
+def _assistant_log_uses_pathname_traversal(*, platform: str | None = None) -> bool:
+    """Whether this platform lacks descriptor-relative log traversal."""
+
+    return (os.name if platform is None else platform) == "nt"
+
+
 def _read_regular_file_no_follow(
     directory_descriptor: int | None, path: Path | str, *, maximum_bytes: int
 ) -> tuple[bytes, int] | None:
@@ -1030,6 +1036,18 @@ def _read_regular_file_no_follow(
             os.close(descriptor)
 
 
+def _assistant_log_path_is_absent(directory_descriptor: int | None, path: Path | str) -> bool:
+    """Return whether a log leaf is absent without following a replacement link."""
+
+    try:
+        os.lstat(path, dir_fd=directory_descriptor)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _directory_identity(directory: Path) -> tuple[int, int] | None:
     """The volume and index of ``directory``, or None if it is not a plain directory.
 
@@ -1048,7 +1066,7 @@ def _directory_identity(directory: Path) -> tuple[int, int] | None:
     return (info.st_dev, info.st_ino)
 
 
-def _assistant_log_files(state_root: Path) -> tuple[int, list[str]] | None:
+def _assistant_log_files(state_root: Path) -> tuple[int | None, list[Path | str]] | None:
     """The active log and every rotated backup, oldest first.
 
     `setup_logging` rotates the assistant log daily and keeps up to fourteen dated
@@ -1063,7 +1081,7 @@ def _assistant_log_files(state_root: Path) -> tuple[int, list[str]] | None:
         directory_info = os.lstat(directory)
         if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
             return None
-        if os.name == "nt":
+        if _assistant_log_uses_pathname_traversal():
             # Windows lacks descriptor-relative `open`; explicitly reject reparse roots,
             # then use a non-globbing enumeration. Any directory access failure is refused.
             # The window this leaves open -- the directory replaced between here and the
@@ -1114,7 +1132,7 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
 
     logs_directory = Path(state_root) / "logs"
     # On the descriptor path this is None and unused: the descriptor IS the binding.
-    identity_before = _directory_identity(logs_directory) if os.name == "nt" else None
+    identity_before = _directory_identity(logs_directory) if _assistant_log_uses_pathname_traversal() else None
 
     selected = _assistant_log_files(state_root)
     if selected is None:
@@ -1132,8 +1150,8 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     refused = False
     try:
         for path in reversed(paths):
-            # Descriptor-relative opens determine presence and reject link replacements.
-            if directory_descriptor is None and not os.path.lexists(path):
+            # A missing leaf is absent; every existing leaf must pass the no-follow read.
+            if _assistant_log_path_is_absent(directory_descriptor, path):
                 continue
             remaining = max(_MAX_LAUNCHER_LOG_BYTES - retained_bytes, 0)
             result = _read_regular_file_no_follow(directory_descriptor, path, maximum_bytes=remaining)
@@ -1149,7 +1167,7 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
         if directory_descriptor is not None:
             os.close(directory_descriptor)
 
-    if directory_descriptor is None and (
+    if _assistant_log_uses_pathname_traversal() and (
         identity_before is None or _directory_identity(logs_directory) != identity_before
     ):
         evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_REPLACED_MARKER)
@@ -1162,17 +1180,17 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
         )
         return
 
-    encoded = redact_text(b"".join(collected).decode("utf-8", errors="replace")).encode("utf-8")
-    if refused:
-        encoded = _ASSISTANT_LOG_REFUSED_MARKER.encode("utf-8") + encoded
+    payload = redact_text(b"".join(collected).decode("utf-8", errors="replace")).encode("utf-8")
+    refusal_notice = _ASSISTANT_LOG_REFUSED_MARKER.encode("utf-8") if refused else b""
+    encoded = refusal_notice + payload
     if source_bytes > _MAX_LAUNCHER_LOG_BYTES or len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
         # Keep the END, across the rotated files as one stream: the bound protects the
         # bundle's size and must not choose which half of the failure survives.
-        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
-        tail = encoded[-tail_bytes:]
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER) - len(refusal_notice)
+        tail = payload[-tail_bytes:]
         while tail and tail[0] & 0xC0 == 0x80:
             tail = tail[1:]
-        encoded = _TRUNCATED_LAUNCHER_LOG_MARKER + tail
+        encoded = _TRUNCATED_LAUNCHER_LOG_MARKER + refusal_notice + tail
     evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
 
 
