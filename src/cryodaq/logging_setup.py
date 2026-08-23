@@ -68,18 +68,21 @@ class _TokenRedactFilter(logging.Filter):
         if record.args:
             try:
                 if isinstance(record.args, tuple):
-                    record.args = tuple(
-                        _redact(a) if isinstance(a, str) else a for a in record.args
-                    )
+                    record.args = tuple(_redact(a) if isinstance(a, str) else a for a in record.args)
                 elif isinstance(record.args, dict):
-                    record.args = {
-                        k: (_redact(v) if isinstance(v, str) else v) for k, v in record.args.items()
-                    }
+                    record.args = {k: (_redact(v) if isinstance(v, str) else v) for k, v in record.args.items()}
             except Exception:
                 # Filter must never raise — drop redaction silently if the
                 # args object has an unexpected shape.
                 pass
         return True
+
+
+class _TokenRedactFormatter(logging.Formatter):
+    """Redact credentials added while formatting exception tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _redact(super().format(record))
 
 
 def setup_logging(
@@ -125,7 +128,7 @@ def setup_logging(
 
     root.setLevel(level)
 
-    formatter = logging.Formatter(
+    formatter = _TokenRedactFormatter(
         fmt="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
