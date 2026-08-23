@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -273,7 +275,8 @@ def test_a_turnover_is_not_a_reading(monkeypatch) -> None:
         def identity_for_pid(self, pid):
             return runner._ProcessIdentity(pid, "linux:start=1.0")
 
-    start = runner._BridgeEpoch(101, 1, 0, runner._ProcessIdentity(101, "linux:start=1.0"), 0)
+    first_identity = runner._ProcessIdentity(101, "linux:start=1.0")
+    start = runner._BridgeEpoch(101, 1, 0, first_identity, 0, None)
 
     after_data = runner._consume_bridge_stream_record(
         _encode(_data_record(sequence=1)),
@@ -284,45 +287,336 @@ def test_a_turnover_is_not_a_reading(monkeypatch) -> None:
         guard=None,
     )
     assert after_data.data_sequence == 1, "a reading advances the data sequence"
+    assert after_data.data_identity == first_identity
 
-    after_turnover = runner._consume_bridge_stream_record(
-        _encode(_turnover_record(sequence=2)),
+    after_retired_data = runner._consume_bridge_stream_record(
+        _encode(_data_record(sequence=2)),
         nonce="a" * 64,
         launcher_pid=100,
         epoch=after_data,
         locked=_Locked(),
         guard=None,
     )
-    assert after_turnover.sequence == 2, "the shared stream sequence advances"
-    assert after_turnover.data_sequence == 1, "but no reading has arrived from the new bridge yet"
+    assert runner._bridge_data_resumed_in_current_epoch(after_retired_data, after_sequence=1)
+
+    after_turnover = runner._consume_bridge_stream_record(
+        _encode(_turnover_record(sequence=3)),
+        nonce="a" * 64,
+        launcher_pid=100,
+        epoch=after_retired_data,
+        locked=_Locked(),
+        guard=None,
+    )
+    assert after_turnover.sequence == 3, "the shared stream sequence advances"
+    assert after_turnover.data_sequence == 2, "retired data remains associated with the old bridge"
+    assert after_turnover.data_identity == first_identity
     assert after_turnover.bridge_pid == 202
+    assert not runner._bridge_data_resumed_in_current_epoch(after_turnover, after_sequence=1)
 
     after_next = runner._consume_bridge_stream_record(
-        _encode(_data_record(bridge_pid=202, restart_count=2, sequence=3)),
+        _encode(_data_record(bridge_pid=202, restart_count=2, sequence=4)),
         nonce="a" * 64,
         launcher_pid=100,
         epoch=after_turnover,
         locked=_Locked(),
         guard=None,
     )
-    assert after_next.data_sequence == 3, "and the first real reading from it does advance it"
+    assert after_next.data_sequence == 4, "and the first real reading from it does advance it"
+    assert after_next.data_identity == after_next.identity
+    assert runner._bridge_data_resumed_in_current_epoch(after_next, after_sequence=1)
 
 
-def test_the_recovery_check_and_its_evidence_field_read_the_data_sequence() -> None:
-    """Both places that decide "the engine recovered" must read the same, right thing.
+class _RecoveryHarness:
+    """A stub ``self`` for ``_PosixSoakRunner._fault_recovery``.
 
-    This is a source assertion on purpose: the surrounding loop needs a live launcher, a
-    live bridge and a real fault schedule, so the two lines cannot be reached in isolation.
-    It is a backstop for the behavioural test above, not a substitute for it.
+    The real recovery loop needs a live launcher, a live bridge and a real fault
+    schedule, so this drives the unbound production method against scripted pipes,
+    classifiers and evidence instead. Everything below the method -- stream parsing,
+    epoch folding, the guard, the decision predicate, the evidence fields -- is the
+    real production code under test.
     """
 
-    source = Path(runner.__file__).read_text(encoding="utf-8")
-    assert "bridge_sequence = bridge_epoch.sequence" not in source, (
-        "no drain may track the shared stream sequence as if it were the data sequence"
+    def __init__(self, *, stream, load_results, periodic_state=None):
+        self._pending_stream = list(stream)
+        self._load_results = list(load_results)
+        self._load_results_last = None
+        self._periodic_state = periodic_state
+        self.retained = bytearray()
+        self.load_bridge_arguments = []
+        self.signals = []
+        self.rows: dict[str, list] = {}
+
+    def _pipe_records(self, pipe, retained):
+        drained, self._pending_stream = self._pending_stream, []
+        return drained
+
+    def _load_roles(self, observer, launcher, bridge):
+        self.load_bridge_arguments.append(bridge)
+        if self._load_results:
+            result = self._load_results.pop(0)
+        else:
+            result = self._load_results_last
+        if result is None:
+            raise AssertionError("classifier script exhausted without a repeatable outcome")
+        self._load_results_last = result
+        if isinstance(result, Exception):
+            raise result
+        roles, tree = result
+        return dict(roles), dict(tree)
+
+    _load_results_last = None
+
+    def _periodic_cut(self, data_dir):
+        return None if self._periodic_state is None else dict(self._periodic_state)
+
+    def append(self, name, payload):
+        self.rows.setdefault(name, []).append(payload)
+
+
+class _ObservingLauncher:
+    """Observer double bound to two bridge incarnations and one launcher."""
+
+    def __init__(self):
+        self.old_engine = runner._ProcessIdentity(301, "linux:start=3.0")
+        self.signals = []
+
+    def identity_for_pid(self, pid):
+        return {
+            101: runner._ProcessIdentity(101, "linux:start=1"),
+            202: runner._ProcessIdentity(202, "linux:start=2"),
+            301: runner._ProcessIdentity(301, "linux:start=3"),
+            303: runner._ProcessIdentity(303, "linux:start=5"),
+        }[pid]
+
+    def observe_bridge(self, pid, *, expected_launcher_pid):
+        identity = self.identity_for_pid(pid)
+        return runner._BridgeProcessObservation(
+            identity, expected_launcher_pid, "zmq_bridge", True, expected_launcher_pid
+        )
+
+    def signal_exact(self, identity, signal_number):
+        self.signals.append((identity, signal_number))
+
+
+def _snapshots_for(roles):
+    from scripts import soak_mock_stack as soak
+
+    return {
+        identity: soak.ProcessSnapshot(
+            identity=identity,
+            parent_pid=100,
+            argv=(role,),
+            name=role,
+            rss_bytes=1024,
+            threads=2,
+            descriptors=8,
+        )
+        for role, identity in roles.items()
+    }
+
+
+def _role_world():
+    from scripts import soak_mock_stack as soak
+
+    roles_old = {
+        "launcher": soak.ProcessIdentity(100, 9),
+        "engine": soak.ProcessIdentity(301, 3),
+        "bridge": soak.ProcessIdentity(101, 1),
+        "assistant": soak.ProcessIdentity(303, 5),
+    }
+    roles_engine_new = dict(
+        roles_old,
+        engine=soak.ProcessIdentity(302, 4),
+        # After the turnover the classifier reports the replacement bridge topology.
+        bridge=soak.ProcessIdentity(202, 2),
     )
-    assert source.count("bridge_sequence = bridge_epoch.data_sequence") == 3, (
-        "all three drains must track the last DATA record"
+    return soak, roles_old, roles_engine_new
+
+
+def test_recovery_loop_refuses_an_engine_replacement_that_has_not_emitted_data(monkeypatch) -> None:
+    """The actual recovery decision, not just its predicate, must demand new-epoch data.
+
+    A late record from the RETIRED bridge can sit queued while the recovery baseline is
+    captured; the shared stream sequence then already exceeds that baseline the moment a
+    turnover arrives, although the replacement itself has never delivered a reading. The
+    loop must keep waiting anyway, and run out of its ceiling naming the engine -- never
+    record such an engine as recovered.
+    """
+
+    clock = iter((0.0, 0.0, 0.4))
+    monkeypatch.setattr(runner, "_RECOVERY_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+    soak, roles_old, roles_replaced = _role_world()
+    observer = _ObservingLauncher()
+    harness = _RecoveryHarness(
+        stream=[
+            _encode(_data_record(sequence=3)),
+            _encode(_turnover_record(sequence=4)),
+        ],
+        load_results=[(roles_replaced, _snapshots_for(roles_replaced))],
     )
+    guard = runner._BridgeEpochGuard(runner._ProcessIdentity(101, "linux:start=1"), 1)
+    start_epoch = runner._BridgeEpoch(101, 1, 2, runner._ProcessIdentity(101, "linux:start=1"), 2, None)
+
+    with pytest.raises(runner._RunnerFoundationError, match="faulted engine did not recover"):
+        runner._PosixSoakRunner._fault_recovery(
+            harness,
+            event=soak.FaultEvent(target="engine", at_s=5.0),
+            elapsed=12.5,
+            current=dict(roles_old),
+            last_health=7.0,
+            start=0.0,
+            next_sample=20.0,
+            data_dir=Path("unused"),
+            evidence=harness,
+            pipe=None,
+            retained=harness.retained,
+            nonce="a" * 64,
+            launcher_pid=100,
+            locked=observer,
+            guard=guard,
+            broad=None,
+            launcher=soak.ProcessIdentity(100, 9),
+            bridge=soak.ProcessIdentity(101, 1),
+            epochs={"launcher": 0, "engine": 0, "bridge": 0, "assistant": 0},
+            bridge_epoch=start_epoch,
+            bridge_sequence=2,
+        )
+
+    assert [(identity.pid, number) for identity, number in observer.signals] == [(301, signal.SIGTERM)], (
+        "the fault is still signalled exactly once, at the old engine"
+    )
+    assert harness.load_bridge_arguments, "the classifier kept being consulted during the wait"
+    assert harness.load_bridge_arguments[0] == soak.ProcessIdentity(202, 2), (
+        "the classifier is handed the replacement bridge identity, not the retired one"
+    )
+    assert "faults.jsonl" not in harness.rows, "no fault evidence may exist for a run that never recovered"
+
+
+def test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_records_it() -> None:
+    """Turnover then DATA from the new bridge: acceptance, epoch bookkeeping, evidence.
+
+    This executes the recovery-loop call sites themselves: the drain folds the turnover
+    (advancing the bridge epoch) and the first replacement reading, the decision predicate
+    passes only then, and the written fault record carries the live predicate's verdict.
+    """
+
+    soak, roles_old, roles_replaced = _role_world()
+    observer = _ObservingLauncher()
+    harness = _RecoveryHarness(
+        stream=[
+            _encode(_turnover_record(sequence=3)),
+            _encode(_data_record(bridge_pid=202, restart_count=2, sequence=4)),
+        ],
+        load_results=[
+            ValueError("replacement not visible yet"),
+            (roles_replaced, _snapshots_for(roles_replaced)),
+        ],
+    )
+    guard = runner._BridgeEpochGuard(runner._ProcessIdentity(101, "linux:start=1"), 1)
+    start_epoch = runner._BridgeEpoch(101, 1, 2, runner._ProcessIdentity(101, "linux:start=1"), 2, None)
+    epochs = {"launcher": 0, "engine": 0, "bridge": 0, "assistant": 0}
+
+    outcome = runner._PosixSoakRunner._fault_recovery(
+        harness,
+        event=soak.FaultEvent(target="engine", at_s=5.0),
+        elapsed=12.5,
+        current=dict(roles_old),
+        last_health=7.0,
+        start=time.monotonic(),
+        next_sample=20.0,
+        data_dir=Path("unused"),
+        evidence=harness,
+        pipe=None,
+        retained=harness.retained,
+        nonce="a" * 64,
+        launcher_pid=100,
+        locked=observer,
+        guard=guard,
+        broad=None,
+        launcher=soak.ProcessIdentity(100, 9),
+        bridge=soak.ProcessIdentity(101, 1),
+        epochs=epochs,
+        bridge_epoch=start_epoch,
+        bridge_sequence=2,
+    )
+
+    assert epochs == {"launcher": 0, "engine": 1, "bridge": 1, "assistant": 0}
+    assert outcome.current["engine"] == soak.ProcessIdentity(302, 4)
+    assert outcome.bridge_epoch.identity == runner._ProcessIdentity(202, "linux:start=2")
+    assert outcome.bridge_sequence == 4, "the returned data sequence is the replacement's reading"
+    assert outcome.bridge == soak.ProcessIdentity(202, 2)
+
+    (sample,) = harness.rows["samples.jsonl"]
+    assert set(sample["roles"]) == {"launcher", "engine", "bridge", "assistant"}
+    assert sample["roles"]["engine"]["pid"] == 302 and sample["roles"]["engine"]["epoch"] == 1
+    assert sample["roles"]["bridge"]["pid"] == 202 and sample["roles"]["bridge"]["epoch"] == 1
+
+    (record,) = harness.rows["faults.jsonl"]
+    assert record["target"] == "engine"
+    assert record["observed_s"] == 12.5, "observed_s is the outer loop's elapsed at signal time"
+    assert (record["pre_pid"], record["recheck_pid"], record["replacement_pid"]) == (301, 301, 302)
+    assert record["ready"] is True
+    assert record["bridge_data_resumed"] is True
+    assert record["newer_h3_health"] is True, "an engine fault makes no health claim, so the field short-circuits"
+    assert record["signal"] == "SIGTERM"
+    assert record["injection_method"] == "observer.signal_exact_identity/v1"
+    assert runner._bridge_data_resumed_in_current_epoch(outcome.bridge_epoch, after_sequence=2), (
+        "the recorded verdict equals the live predicate over the returned epoch"
+    )
+
+
+def test_an_assistant_recovery_records_resumed_data_truth_without_bridge_traffic() -> None:
+    """The evidence field stays target-aware even with nothing resuming.
+
+    An assistant fault does not touch the bridge, so there is no bridge data to resume;
+    the field must still say True because the claim it encodes is scoped to the engine,
+    not because any predicate was evaluated over an unrelated epoch.
+    """
+
+    soak, roles_old, _roles_engine_new = _role_world()
+    assistant_replaced = dict(roles_old, assistant=soak.ProcessIdentity(304, 6))
+    observer = _ObservingLauncher()
+    harness = _RecoveryHarness(
+        stream=[],
+        load_results=[(assistant_replaced, _snapshots_for(assistant_replaced))],
+        periodic_state={"health": {"status": "ready", "updated_at": 500.0}},
+    )
+    start_epoch = runner._BridgeEpoch(101, 1, 2, runner._ProcessIdentity(101, "linux:start=1"), 2, None)
+    epochs = {"launcher": 0, "engine": 0, "bridge": 0, "assistant": 0}
+
+    outcome = runner._PosixSoakRunner._fault_recovery(
+        harness,
+        event=soak.FaultEvent(target="assistant", at_s=6.0),
+        elapsed=8.0,
+        current=dict(roles_old),
+        last_health=100.0,
+        start=time.monotonic(),
+        next_sample=20.0,
+        data_dir=Path("unused"),
+        evidence=harness,
+        pipe=None,
+        retained=harness.retained,
+        nonce="a" * 64,
+        launcher_pid=100,
+        locked=observer,
+        guard=None,
+        broad=None,
+        launcher=soak.ProcessIdentity(100, 9),
+        bridge=soak.ProcessIdentity(101, 1),
+        epochs=epochs,
+        bridge_epoch=start_epoch,
+        bridge_sequence=2,
+    )
+
+    assert epochs == {"launcher": 0, "engine": 0, "bridge": 0, "assistant": 1}
+    assert outcome.current["assistant"] == soak.ProcessIdentity(304, 6)
+    assert outcome.bridge_epoch == start_epoch, "no bridge traffic means no epoch movement"
+    (record,) = harness.rows["faults.jsonl"]
+    assert record["target"] == "assistant"
+    assert record["bridge_data_resumed"] is True
+    assert record["newer_h3_health"] is True
 
 
 def test_a_turnover_must_carry_an_exact_integer_retired_identity() -> None:

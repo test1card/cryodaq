@@ -2702,6 +2702,26 @@ class _BridgeEpoch:
     # alive and never delivers another sample would be recorded as recovered. For a run
     # whose whole purpose is that no reading is lost, that is the wrong thing to believe.
     data_sequence: int
+    # The bridge identity that emitted the last DATA record. A turnover retains
+    # the retired identity until the replacement emits data of its own.
+    data_identity: _ProcessIdentity | None
+
+
+def _bridge_data_resumed_in_current_epoch(epoch: _BridgeEpoch, *, after_sequence: int) -> bool:
+    """Return whether the current bridge has emitted data after ``after_sequence``."""
+
+    return epoch.data_sequence > after_sequence and epoch.data_identity == epoch.identity
+
+
+@dataclass(frozen=True, slots=True)
+class _FaultRecoveryOutcome:
+    """The state ``_run_owned`` must adopt after one fault event has settled."""
+
+    current: dict[str, Any]
+    bridge_epoch: _BridgeEpoch
+    bridge_sequence: int
+    bridge: Any
+    next_sample: float
 
 
 def _role_identity_of(identity: _ProcessIdentity) -> Any:
@@ -2752,6 +2772,7 @@ def _consume_bridge_stream_record(
             record.sequence,
             identity,
             epoch.data_sequence,
+            epoch.data_identity,
         )
     if guard is not None:
         guard.observe(locked.identity_for_pid(record.bridge_pid), restart_count=record.restart_count)
@@ -2761,6 +2782,7 @@ def _consume_bridge_stream_record(
         record.sequence,
         epoch.identity,
         record.sequence,
+        epoch.identity,
     )
 
 
@@ -3004,9 +3026,7 @@ def _child_failure_message(exit_code: int, stdout: bytes, stderr: bytes) -> str:
             text[:_DIAGNOSTIC_HEAD_SHARE] + (_DIAGNOSTIC_TRUNCATION_MARKER % dropped) + text[len(text) - tail_share :]
         )
 
-    return "exit code %s; captured stdout:\n%s; " % (exit_code, bounded(stdout)) + "captured stderr:\n%s" % bounded(
-        stderr
-    )
+    return f"exit code {exit_code}; captured stdout:\n{bounded(stdout)}; captured stderr:\n{bounded(stderr)}"
 
 
 def _parse_exact_collection(
@@ -3926,6 +3946,151 @@ class _PosixSoakRunner:
             _apply_runner_subreaper(self._prior_subreaper)
             self._subreaper_restored = True
 
+    def _fault_recovery(
+        self,
+        *,
+        event: Any,
+        elapsed: float,
+        current: dict[str, Any],
+        last_health: float,
+        start: float,
+        next_sample: float,
+        data_dir: Path,
+        evidence: Any,
+        pipe: _BridgeHandshakePipe,
+        retained: bytearray,
+        nonce: str,
+        launcher_pid: int,
+        locked: object,
+        guard: _BridgeEpochGuard | None,
+        broad: object,
+        launcher: Any,
+        bridge: Any,
+        epochs: dict[str, int],
+        bridge_epoch: _BridgeEpoch,
+        bridge_sequence: int,
+    ) -> _FaultRecoveryOutcome:
+        """Signal one faulted role and wait for its replacement through real recovery.
+
+        The engine's replacement replaces the bridge on its way, so this drain also folds
+        the bridge stream: a turnover advances the epoch, but only a DATA record emitted by
+        the CURRENT bridge epoch counts as resumed flow. Every decision and every evidence
+        field below reads that one predicate.
+        """
+
+        from datetime import UTC, datetime
+
+        from scripts import soak_mock_stack as soak
+
+        old = current[event.target]
+        expected = locked.identity_for_pid(old.pid)
+        locked.signal_exact(expected, signal.SIGTERM)
+        recovery_start = elapsed
+        prior_bridge_sequence = bridge_sequence
+        prior_health = last_health
+        recovery_deadline = time.monotonic() + _RECOVERY_TIMEOUT_S
+        replacement_roles = None
+        replacement_tree = None
+        while time.monotonic() < recovery_deadline:
+            for raw in self._pipe_records(pipe, retained):
+                # An ENGINE fault reaches recovery only through a NEW
+                # data fact, and the engine's replacement replaces the
+                # bridge on its way. Without the turnover this drain
+                # quarantined the stream and the sequence could never
+                # advance again -- so the engine "never recovered".
+                _prior_bridge_identity = bridge_epoch.identity
+                bridge_epoch = _consume_bridge_stream_record(
+                    raw,
+                    nonce=nonce,
+                    launcher_pid=launcher_pid,
+                    epoch=bridge_epoch,
+                    locked=locked,
+                    guard=guard,
+                )
+                # Only a real reading counts as resumed data flow.
+                bridge_sequence = bridge_epoch.data_sequence
+                if bridge_epoch.identity != _prior_bridge_identity:
+                    epochs["bridge"] += 1
+                # The classifier below is handed this identity; a
+                # replaced bridge must be the one it looks for.
+                bridge = _role_identity_of(bridge_epoch.identity)
+            try:
+                candidate, candidate_tree = self._load_roles(broad, launcher, bridge)
+            except ValueError:
+                time.sleep(0.1)
+                continue
+            if candidate[event.target] != old:
+                if event.target == "engine" and not _bridge_data_resumed_in_current_epoch(
+                    bridge_epoch, after_sequence=prior_bridge_sequence
+                ):
+                    time.sleep(0.1)
+                    continue
+                if event.target == "assistant":
+                    health_state = self._periodic_cut(data_dir)
+                    if (
+                        health_state is None
+                        or health_state["health"]["status"] != "ready"
+                        or float(health_state["health"]["updated_at"]) <= prior_health
+                    ):
+                        time.sleep(0.1)
+                        continue
+                replacement_roles, replacement_tree = candidate, candidate_tree
+                break
+            time.sleep(0.1)
+        if replacement_roles is None or replacement_tree is None:
+            # Name WHICH child. The bare sentence leaves the reader to
+            # guess between three roles with three different meanings:
+            # a bridge that cannot recover is a defect, an engine that
+            # does not is a deliberate permanent HOLD, and an assistant
+            # is a third thing again. Guessing between them is exactly
+            # what a refusal should make unnecessary.
+            raise _RunnerFoundationError(f"faulted {event.target} did not recover within the reviewed ceiling")
+        epochs[event.target] += 1
+        current = replacement_roles
+        recovered_elapsed = time.monotonic() - start
+        role_rows = {role: (epochs[role], replacement_tree[identity]) for role, identity in current.items()}
+        evidence.append(
+            "samples.jsonl",
+            soak.stack_sample(
+                recovered_elapsed,
+                role_rows,
+                wall_time=datetime.now(UTC).isoformat(),
+            ),
+        )
+        new_state = self._periodic_cut(data_dir)
+        new_health = 0.0 if new_state is None else float(new_state["health"]["updated_at"])
+        replacement = current[event.target]
+        evidence.append(
+            "faults.jsonl",
+            {
+                "target": event.target,
+                "scheduled_s": float(event.at_s),
+                "observed_s": recovery_start,
+                "pre_pid": old.pid,
+                "pre_started_ns": old.started_ns,
+                "recheck_pid": expected.pid,
+                "recheck_started_ns": old.started_ns,
+                "replacement_pid": replacement.pid,
+                "replacement_started_ns": replacement.started_ns,
+                "ready": True,
+                "recovery_s": recovered_elapsed - recovery_start,
+                "bridge_data_resumed": (
+                    event.target != "engine"
+                    or _bridge_data_resumed_in_current_epoch(bridge_epoch, after_sequence=prior_bridge_sequence)
+                ),
+                "newer_h3_health": event.target != "assistant" or new_health > prior_health,
+                "signal": soak.FAULT_SIGNAL,
+                "injection_method": soak.FAULT_INJECTION_METHOD,
+            },
+        )
+        return _FaultRecoveryOutcome(
+            current=current,
+            bridge_epoch=bridge_epoch,
+            bridge_sequence=bridge_sequence,
+            bridge=bridge,
+            next_sample=max(next_sample, recovered_elapsed + 0.001),
+        )
+
     def _run_owned(self, evidence: Any, selected: Any) -> _OwnedRunResult:
         """Run, validate, seal, and publish one short-soak terminal result."""
 
@@ -4167,6 +4332,7 @@ class _PosixSoakRunner:
                                     0,
                                     bridge_identity,
                                     0,
+                                    None,
                                 )
                                 bridge = _role_identity_of(bridge_identity)
                             else:
@@ -4176,11 +4342,12 @@ class _PosixSoakRunner:
                                     launcher_pid=process.pid,
                                     epoch=bridge_epoch,
                                     locked=locked,
-                                    guard=None,
+                                    guard=bridge_guard,
                                 )
                                 # One meaning per name: bridge_sequence is the last DATA
                                 # record everywhere, so the handshake drain uses it too.
                                 bridge_sequence = bridge_epoch.data_sequence
+                                bridge = _role_identity_of(bridge_epoch.identity)
                         if bridge is not None:
                             try:
                                 roles, _tree = self._load_roles(broad, launcher, bridge)
@@ -4228,7 +4395,7 @@ class _PosixSoakRunner:
                         now = time.monotonic()
                         elapsed = now - start
                         for raw in self._pipe_records(bridge_pipe, bridge_buffer):
-                            _prior_bridge_pid = bridge_epoch.bridge_pid
+                            _prior_bridge_identity = bridge_epoch.identity
                             bridge_epoch = _consume_bridge_stream_record(
                                 raw,
                                 nonce=handshake.nonce,
@@ -4238,7 +4405,7 @@ class _PosixSoakRunner:
                                 guard=bridge_guard,
                             )
                             bridge_sequence = bridge_epoch.data_sequence
-                            if bridge_epoch.bridge_pid != _prior_bridge_pid:
+                            if bridge_epoch.identity != _prior_bridge_identity:
                                 # A sample row carries (epoch, identity) per role, and
                                 # validate_sample_series refuses a new identity inside the
                                 # same epoch. Without this every soak carrying an engine
@@ -4341,110 +4508,34 @@ class _PosixSoakRunner:
                                 if pre_assistant_fault_cut is None:
                                     raise _RunnerFoundationError("assistant fault lacks a durable pre-fault receipt")
                                 assistant_fault_injected = True
-                            old = current[event.target]
-                            expected = locked.identity_for_pid(old.pid)
-                            locked.signal_exact(expected, signal.SIGTERM)
-                            recovery_start = elapsed
-                            prior_bridge_sequence = bridge_sequence
-                            prior_health = last_health
-                            recovery_deadline = time.monotonic() + _RECOVERY_TIMEOUT_S
-                            replacement_roles = None
-                            replacement_tree = None
-                            while time.monotonic() < recovery_deadline:
-                                for raw in self._pipe_records(bridge_pipe, bridge_buffer):
-                                    # An ENGINE fault reaches recovery only through a NEW
-                                    # data fact, and the engine's replacement replaces the
-                                    # bridge on its way. Without the turnover this drain
-                                    # quarantined the stream and the sequence could never
-                                    # advance again -- so the engine "never recovered".
-                                    _prior_bridge_pid = bridge_epoch.bridge_pid
-                                    bridge_epoch = _consume_bridge_stream_record(
-                                        raw,
-                                        nonce=handshake.nonce,
-                                        launcher_pid=process.pid,
-                                        epoch=bridge_epoch,
-                                        locked=locked,
-                                        guard=bridge_guard,
-                                    )
-                                    # Only a real reading counts as resumed data flow.
-                                    bridge_sequence = bridge_epoch.data_sequence
-                                    if bridge_epoch.bridge_pid != _prior_bridge_pid:
-                                        epochs["bridge"] += 1
-                                    # The classifier below is handed this identity; a
-                                    # replaced bridge must be the one it looks for.
-                                    bridge = _role_identity_of(bridge_epoch.identity)
-                                try:
-                                    candidate, candidate_tree = self._load_roles(broad, launcher, bridge)
-                                except ValueError:
-                                    time.sleep(0.1)
-                                    continue
-                                if candidate[event.target] != old:
-                                    if event.target == "engine" and bridge_sequence <= prior_bridge_sequence:
-                                        time.sleep(0.1)
-                                        continue
-                                    if event.target == "assistant":
-                                        health_state = self._periodic_cut(data_dir)
-                                        if (
-                                            health_state is None
-                                            or health_state["health"]["status"] != "ready"
-                                            or float(health_state["health"]["updated_at"]) <= prior_health
-                                        ):
-                                            time.sleep(0.1)
-                                            continue
-                                    replacement_roles, replacement_tree = candidate, candidate_tree
-                                    break
-                                time.sleep(0.1)
-                            if replacement_roles is None or replacement_tree is None:
-                                # Name WHICH child. The bare sentence leaves the reader to
-                                # guess between three roles with three different meanings:
-                                # a bridge that cannot recover is a defect, an engine that
-                                # does not is a deliberate permanent HOLD, and an assistant
-                                # is a third thing again. Guessing between them is exactly
-                                # what a refusal should make unnecessary.
-                                raise _RunnerFoundationError(
-                                    f"faulted {event.target} did not recover within the reviewed ceiling"
-                                )
-                            epochs[event.target] += 1
-                            current = replacement_roles
-                            recovered_elapsed = time.monotonic() - start
-                            role_rows = {
-                                role: (epochs[role], replacement_tree[identity]) for role, identity in current.items()
-                            }
-                            evidence.append(
-                                "samples.jsonl",
-                                soak.stack_sample(
-                                    recovered_elapsed,
-                                    role_rows,
-                                    wall_time=datetime.now(UTC).isoformat(),
-                                ),
+                            outcome = self._fault_recovery(
+                                event=event,
+                                elapsed=elapsed,
+                                current=current,
+                                last_health=last_health,
+                                start=start,
+                                next_sample=next_sample,
+                                data_dir=data_dir,
+                                evidence=evidence,
+                                pipe=bridge_pipe,
+                                retained=bridge_buffer,
+                                nonce=handshake.nonce,
+                                launcher_pid=process.pid,
+                                locked=locked,
+                                guard=bridge_guard,
+                                broad=broad,
+                                launcher=launcher,
+                                bridge=bridge,
+                                epochs=epochs,
+                                bridge_epoch=bridge_epoch,
+                                bridge_sequence=bridge_sequence,
                             )
-                            new_state = self._periodic_cut(data_dir)
-                            new_health = 0.0 if new_state is None else float(new_state["health"]["updated_at"])
-                            replacement = current[event.target]
-                            evidence.append(
-                                "faults.jsonl",
-                                {
-                                    "target": event.target,
-                                    "scheduled_s": float(event.at_s),
-                                    "observed_s": recovery_start,
-                                    "pre_pid": old.pid,
-                                    "pre_started_ns": old.started_ns,
-                                    "recheck_pid": expected.pid,
-                                    "recheck_started_ns": old.started_ns,
-                                    "replacement_pid": replacement.pid,
-                                    "replacement_started_ns": replacement.started_ns,
-                                    "ready": True,
-                                    "recovery_s": recovered_elapsed - recovery_start,
-                                    "bridge_data_resumed": (
-                                        event.target != "engine" or bridge_sequence > prior_bridge_sequence
-                                    ),
-                                    "newer_h3_health": event.target != "assistant" or new_health > prior_health,
-                                    "signal": soak.FAULT_SIGNAL,
-                                    "injection_method": soak.FAULT_INJECTION_METHOD,
-                                },
-                            )
+                            current = outcome.current
+                            bridge_epoch = outcome.bridge_epoch
+                            bridge_sequence = outcome.bridge_sequence
+                            bridge = outcome.bridge
+                            next_sample = outcome.next_sample
                             event_index += 1
-                            next_sample = max(next_sample, recovered_elapsed + 0.001)
                         if elapsed >= selected.duration_s:
                             break
                         time.sleep(min(0.1, max(0.001, next_sample - (time.monotonic() - start))))
