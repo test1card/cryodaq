@@ -5005,13 +5005,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: USBTMC cancellation, close, handle ownership, recovery, and shutdown.
+    applies_to: USBTMC cancellation, close, handle ownership, recovery, shutdown, and VISA worker process lifetime relative to its engine parent.
     classification: retained_handle_loss
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Cancellation can clear ownership while an I/O or close operation remains live.
-    invariant: Incomplete close retains one bounded recovery owner and visible HOLD until the handle is exactly settled.
+    consequence: Cancellation can clear ownership while an I/O or close operation remains live, and an abruptly dead engine can leave a source-owning VISA worker alive past the OFF a replacement engine commands.
+    invariant: Incomplete close retains one bounded recovery owner and visible HOLD until the handle is exactly settled. The source-owning VISA worker binds its lifetime to the engine-captured parent -- Linux prctl PR_SET_PDEATHSIG carrying exactly SIGKILL with a post-call parent re-check and a refuse-unbound failure direction -- while platforms without an equivalent binding stay explicitly open gates that start no fake guarantee.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -5019,8 +5019,31 @@ records:
         ci_partition: remaining
       - node: tests/drivers/test_usbtmc_process_protocol.py::test_later_close_reconciles_same_owner_without_second_physical_close
         ci_partition: remaining
-    red_evidence: usbtmc_cancelled_close_lost_owner_pending_artifact_binding
-    green_evidence: pending
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_decides_whether_a_sleeping_child_outlives_its_killed_parent
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_decides_whether_a_gil_holding_native_child_outlives_its_killed_parent
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_requests_exactly_pr_set_pdeathsig_with_sigkill
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_refuses_rather_than_running_unbound
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_parent_changing_after_the_request_is_caught
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_expected_parent_is_the_engines_pid_not_one_the_child_reads
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_runs_before_any_handle_exists
+        ci_partition: remaining
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_on_windows_a_real_worker_starts_instead_of_being_killed
+        ci_partition: remaining
+        platform: windows
+    red_evidence: lane98_f3f1b45_prctl_sigterm_swap_failed_exact_args_and_sigterm_immune_children_survived_while_unstable_identity_refused_to_signal_2026_08_23_pending_immutable_capture
+    green_evidence: ubuntu_2204_python_31012_repeated_parent_death_lifecycle_green_and_windows_worker_start_probe_green_at_lane_head_pending_immutable_capture
   - id: GPIB-HANDLE-SETTLEMENT-001C
     status: open
     scope: product_contract

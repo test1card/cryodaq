@@ -448,6 +448,12 @@ def _blocking_close_handles(resource: Any, manager: Any) -> _HandleCloseOutcome:
 # parent dies, whatever the cause. It carries one classic race -- the parent can die between
 # the fork and this call, so the signal is requested against a parent that is already gone
 # -- which is why the parent identity is re-read afterwards and a mismatch exits at once.
+#
+# On every other platform there is no equivalent installed yet. There the worker starts
+# UNBOUND while the platform remains an explicitly OPEN gate -- never claimed proven -- until
+# a real binding (a Windows Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) plus a real
+# parent-death test exist. Exiting every non-Linux child instead was tried and was worse: it
+# made mock=False connections impossible rather than merely unproven.
 _PR_SET_PDEATHSIG = 1
 
 
@@ -462,16 +468,25 @@ def _bind_lifetime_to_parent(expected_parent: int) -> None:
     before. The soak runner IS such a subreaper, so this is not hypothetical.
     """
 
-    if not sys.platform.startswith("linux"):
-        # No equivalent process-tree binding is installed here. Daemonic cleanup covers
-        # only normal parent exits, so starting a source-owning VISA worker would permit
-        # an abruptly dead engine to leave an orphan behind.
-        os._exit(0)
     if type(expected_parent) is not int or expected_parent <= 1:
         os._exit(0)
     if os.getppid() != expected_parent:
         # Reparented before the first instruction: the engine is already gone.
         os._exit(0)
+    if not sys.platform.startswith("linux"):
+        # Explicitly OPEN gate, not support: this worker starts WITHOUT lifetime binding,
+        # so daemonic cleanup covers only normal parent exits and an abruptly dead engine
+        # can still orphan this source-owning child here. Refusing to start instead would
+        # make every mock=False connection impossible; running silently bound would claim
+        # a guarantee nobody built. Neither is acceptable; the honest state is a loud
+        # warning and an open physical/target-OS gate until Job Objects plus a real
+        # parent-death test land.
+        log.warning(
+            "USBTMC: платформа %s запускает VISA-воркер БЕЗ привязки к родителю — "
+            "при гибели движка осиротевший владелец источника возможен (открытый гейт)",
+            sys.platform,
+        )
+        return
     try:
         import ctypes
 

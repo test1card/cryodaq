@@ -28,12 +28,28 @@ re-imported, so the child died on a traceback before running a line. The control
 Measured properly, with the parent as a real FILE: a busy child DOES survive a SIGKILLed
 parent, in every shape tried -- sleeping, spinning in Python, and blocked in a native call
 that holds the GIL. So the hazard is real, and each test below carries its own control.
+
+TWO DISCIPLINES ADDED AFTER THE FIRST REVIEW ROUND, both paid for by findings.
+
+Every child below ignores SIGTERM outright. A binding quietly swapped from SIGKILL to
+SIGTERM would otherwise still green the lifecycle -- the child would die either way. With
+the immunity installed before the parent dies, and a direct SIGTERM probe proving it live,
+the child's later death can only be the kernel's SIGKILL parent-death delivery.
+
+Every poll and every signal goes through a pidfd opened BEFORE anything can die. A numeric
+pid read from READY can be reused after its owner exits; polling or killing that number can
+then touch an unrelated process. Where the kernel cannot provide pidfd plus
+pidfd_send_signal, the tests SKIP with that limitation named -- a skipped target-OS gate,
+never a bare-pid action and never a pass.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
+import json
 import os
+import platform
 import selectors
 import signal
 import subprocess
@@ -49,25 +65,69 @@ _LINUX_ONLY = pytest.mark.skipif(
     reason="PR_SET_PDEATHSIG is a Linux facility; the laboratory target is Ubuntu 22.04",
 )
 
+_WINDOWS_ONLY = pytest.mark.skipif(
+    not sys.platform.startswith("win32"),
+    reason="pins the explicitly OPEN Windows gate: the real worker must be allowed to start unbound",
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC = str(_REPO_ROOT / "src")
 
+# SYS_pidfd_send_signal under unified Linux syscall numbering. Architectures outside this
+# table (alpha, sparc, the MIPS families number differently) get no entry and therefore a
+# fail-closed skip, never a numeric-pid fallback.
+_PIDFD_SEND_SIGNAL_SYSCALL = {
+    "x86_64": 424,
+    "aarch64": 424,
+    "riscv64": 424,
+    "loongarch64": 424,
+    "ppc64le": 424,
+    "s390x": 424,
+}.get(platform.machine())
 
-def _alive(pid: int) -> bool:
-    """True while the pid names a process that is not a reaped zombie."""
 
+class _UnstableIdentity(RuntimeError):
+    """The kernel surface for stable process identity is unavailable here."""
+
+
+def _stable_identity(pid: int) -> int:
+    """Open a pidfd BEFORE anything can exit and its number be reused."""
+
+    if _PIDFD_SEND_SIGNAL_SYSCALL is None or not hasattr(os, "pidfd_open"):
+        raise _UnstableIdentity(f"no pidfd surface on {platform.machine()} / {sys.version_info[:3]}")
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except OSError:
-        return False
-    # "pid (comm) STATE ..." -- a zombie is gone for every purpose that matters here.
-    return state.rsplit(")", 1)[-1].split()[0] != "Z"
+        return os.pidfd_open(pid)
+    except OSError as exc:
+        raise _UnstableIdentity(str(exc)) from exc
+
+
+def _identity_exited(pidfd: int) -> bool:
+    """True once the exact process behind the pidfd has terminated (zombie counts)."""
+
+    with selectors.DefaultSelector() as selector:
+        selector.register(pidfd, selectors.EVENT_READ)
+        return bool(selector.select(0))
+
+
+def _signal_via_identity(pidfd: int, sig: int) -> None:
+    """Signal the EXACT process the pidfd names; ESRCH means it is already gone."""
+
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    status = libc.syscall(
+        ctypes.c_long(_PIDFD_SEND_SIGNAL_SYSCALL),
+        ctypes.c_int(pidfd),
+        ctypes.c_int(sig),
+        ctypes.c_void_p(None),
+        ctypes.c_uint(0),
+    )
+    if status == 0:
+        return
+    code = ctypes.get_errno()
+    if code == errno.ESRCH:
+        raise ProcessLookupError(code)
+    raise OSError(code, os.strerror(code))
 
 
 # The parent is written to a FILE, never passed with -c: `spawn` re-imports the main module
@@ -90,6 +150,11 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
             _os.dup2(_null, _fd)
         if _null > 2:
             _os.close(_null)
+        # IGNORE SIGTERM FROM NOW ON. A binding swapped from SIGKILL to SIGTERM must stop
+        # passing these tests: an immune child only dies to SIGKILL, so its death after the
+        # parent's death is the kernel's parent-death delivery and nothing else.
+        import signal as _signal
+        _signal.signal(_signal.SIGTERM, _signal.SIG_IGN)
 
         from cryodaq.drivers.transport.usbtmc import _bind_lifetime_to_parent
         {binding}
@@ -113,11 +178,6 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
         time.sleep(600)
     """
 )
-
-_BUSY_SHAPES = {
-    "sleeping": "time.sleep(600)",
-    "holding the GIL in a native call": "import ctypes; ctypes.PyDLL('libc.so.6').sleep(600)",
-}
 
 
 def _read_startup_line(stream, *, timeout: float) -> str:
@@ -163,19 +223,37 @@ def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool
         if marker != "READY" or not reported_pid.isdigit():
             raise AssertionError(_diagnose("no child pid reported"))
         child_pid = int(reported_pid)
+        # A numeric pid is only a name; after its owner exits the kernel can hand it to an
+        # unrelated process. Open the stable identity NOW, before anything is signalled or
+        # polled, and fail closed where the kernel cannot provide one.
+        try:
+            child_pidfd = _stable_identity(child_pid)
+        except _UnstableIdentity as exc:
+            pytest.skip(
+                "no stable process identity on this host: refusing to poll or signal a "
+                f"reusable numeric pid ({exc}). Parent-death evidence requires the "
+                "Ubuntu 22.04-class kernel (pidfd plus pidfd_send_signal, >= 5.3); this "
+                "limitation is the open target-OS gate, not a pass."
+            )
         # READY is sent by the child only after the binding (or its equivalent no-binding
         # control point). Killing the parent only after this marker makes the test prove
         # the parent-death guard rather than a late child's initial identity check.
-        if not _alive(child_pid):
+        if _identity_exited(child_pidfd):
             raise AssertionError(_diagnose("the child died before the parent was killed"))
+        # Prove the immunity live: a direct SIGTERM must leave the child running, so its
+        # death AFTER the parent's death can only be the kernel's SIGKILL delivery.
+        _signal_via_identity(child_pidfd, signal.SIGTERM)
+        time.sleep(0.2)
+        if _identity_exited(child_pidfd):
+            raise AssertionError(_diagnose("the child died of a bare SIGTERM; only SIGKILL may close it"))
 
         parent.kill()
         parent.wait(timeout=10)
 
         deadline = time.monotonic() + 6.0
-        while time.monotonic() < deadline and _alive(child_pid):
+        while time.monotonic() < deadline and not _identity_exited(child_pidfd):
             time.sleep(0.05)
-        survived = _alive(child_pid)
+        survived = not _identity_exited(child_pidfd)
     finally:
         if parent.poll() is None:
             parent.kill()
@@ -183,35 +261,122 @@ def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool
     if survived:
         # Reaping it is not optional either. It is no longer anyone's child, so nothing
         # will wait on it, and leaving it running is how one test's deliberate leak becomes
-        # the next test's environment.
-        with contextlib.suppress(OSError):
-            os.kill(child_pid, signal.SIGKILL)
+        # the next test's environment. The kill goes through the same stable identity as
+        # every other signal above.
+        with contextlib.suppress(ProcessLookupError):
+            _signal_via_identity(child_pidfd, signal.SIGKILL)
         gone_by = time.monotonic() + 10.0
-        while time.monotonic() < gone_by and _alive(child_pid):
+        while time.monotonic() < gone_by and not _identity_exited(child_pidfd):
             time.sleep(0.05)
-        assert not _alive(child_pid), f"the control's leaked child {child_pid} could not be killed"
+        assert _identity_exited(child_pidfd), (
+            f"the control's leaked child {child_pid} could not be killed through its pidfd"
+        )
     return survived
 
 
 @_LINUX_ONLY
-@pytest.mark.parametrize("shape", sorted(_BUSY_SHAPES), ids=lambda s: s.replace(" ", "-"))
-def test_the_binding_decides_whether_a_busy_child_outlives_its_killed_parent(tmp_path, shape: str) -> None:
+def test_the_binding_decides_whether_a_sleeping_child_outlives_its_killed_parent(tmp_path) -> None:
     """Control and guard in one test, so neither can drift away from the other.
 
     SIGKILL is the one signal a process cannot handle, and therefore the one case the
-    daemonic flag can never cover. Without the binding the child survives; with it the
-    kernel kills it. If the control ever stops reproducing the orphan, this fails too --
-    which is the point, because a guard whose hazard cannot be reproduced is a guard nobody
-    can trust.
+    daemonic flag can never cover -- and this child ignores SIGTERM outright, so swapping
+    the binding to SIGTERM cannot pass it either. Without the binding the child survives;
+    with it the kernel kills it. If the control ever stops reproducing the orphan, this
+    fails too -- which is the point, because a guard whose hazard cannot be reproduced is
+    a guard nobody can trust.
     """
 
-    busy = _BUSY_SHAPES[shape]
+    assert _child_survives_a_killed_parent(tmp_path, bound=False, busy="time.sleep(600)"), (
+        "the control must reproduce the orphan while sleeping, or the guard proves nothing"
+    )
+    assert not _child_survives_a_killed_parent(tmp_path, bound=True, busy="time.sleep(600)"), (
+        "the source-owning child outlived its killed parent while sleeping; it could still "
+        "finish a write after a replacement engine had commanded OFF"
+    )
+
+
+@_LINUX_ONLY
+def test_the_binding_decides_whether_a_gil_holding_native_child_outlives_its_killed_parent(tmp_path) -> None:
+    """The native-call shape: the child never returns to Python, bound or not."""
+
+    busy = "import ctypes; ctypes.PyDLL('libc.so.6').sleep(600)"
     assert _child_survives_a_killed_parent(tmp_path, bound=False, busy=busy), (
-        f"the control must reproduce the orphan while {shape}, or the guard proves nothing"
+        "the control must reproduce the orphan while holding the GIL in a native call, or the guard proves nothing"
     )
     assert not _child_survives_a_killed_parent(tmp_path, bound=True, busy=busy), (
-        f"the source-owning child outlived its killed parent while {shape}; it could still "
-        "finish a write after a replacement engine had commanded OFF"
+        "the source-owning child outlived its killed parent while holding the GIL in a "
+        "native call; it could still finish a write after a replacement engine had "
+        "commanded OFF"
+    )
+
+
+@_LINUX_ONLY
+def test_the_binding_requests_exactly_pr_set_pdeathsig_with_sigkill() -> None:
+    """The kernel contract is PR_SET_PDEATHSIG carrying SIGKILL -- arg for arg.
+
+    A prctl double that accepts anything leaves the real request unpinned: swapping SIGKILL
+    for a catchable signal still greens every marker. This pins the request itself, exactly,
+    while the immune-child lifecycle above pins the same fact through the process effect.
+    """
+
+    finished = _probe(
+        """
+        import ctypes, json, os
+        _expected = os.getppid()
+        usbtmc.os.getppid = lambda: _expected
+
+        class _Records:
+            def prctl(self, *args):
+                print("PRCTL ARGS " + json.dumps(list(args)), flush=True)
+                return 0
+
+        ctypes.CDLL = lambda *a, **k: _Records()
+        """
+    )
+    from cryodaq.drivers.transport import usbtmc
+
+    requested = [
+        json.loads(line.removeprefix(b"PRCTL ARGS ").decode("ascii"))
+        for line in finished.stdout.splitlines()
+        if line.startswith(b"PRCTL ARGS ")
+    ]
+    assert usbtmc._PR_SET_PDEATHSIG == 1, "PR_SET_PDEATHSIG is kernel ABI 1"
+    assert requested == [[1, int(signal.SIGKILL), 0, 0, 0]], (
+        f"the binding must ask the kernel exactly for (PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0), got {requested}"
+    )
+
+
+@_WINDOWS_ONLY
+def test_on_windows_a_real_worker_starts_instead_of_being_killed() -> None:
+    """Windows stays an OPEN gate -- not an impossibility, and not a guarantee.
+
+    The regression this pins: the binder once exited every non-Linux child outright, making
+    mock=False connections impossible. It must instead let the worker run WITHOUT parent-
+    death binding: no exit, and no pretended binding either.
+    """
+
+    finished = _probe(
+        """
+        import ctypes, os
+        _expected = os.getppid()
+
+        class _Spy:
+            def __init__(self, *a, **k):
+                pass
+
+            def prctl(self, *args):
+                print("PRCTL CALLED", flush=True)
+                return 0
+
+        ctypes.CDLL = _Spy
+        """
+    )
+    assert b"KEPT RUNNING" in finished.stdout, (
+        "a Windows worker must be allowed to start; killing every non-Linux child makes "
+        "mock=False connections impossible"
+    )
+    assert b"PRCTL CALLED" not in finished.stdout, (
+        "no parent-death binding may be pretended on Windows; support there is an open gate"
     )
 
 
@@ -284,17 +449,17 @@ def test_the_parent_changing_after_the_request_is_caught() -> None:
         import ctypes, os
         _expected = os.getppid()
         _reads = iter([_expected, _expected + 100_000])
-        _marker = os.environ.get("CRYODAQ_PRCTL_MARKER", "/dev/null")
         usbtmc.os.getppid = lambda: next(_reads, _expected + 100_000)
 
         class _Accepts:
             def prctl(self, *_args):
-                open(_marker, "w").write("prctl reached")
+                print("PRCTL REACHED", flush=True)
                 return 0
 
         ctypes.CDLL = lambda *a, **k: _Accepts()
         """
     )
+    assert b"PRCTL REACHED" in finished.stdout, "the race probe must invoke prctl before exiting"
     assert b"KEPT RUNNING" not in finished.stdout, (
         "a child whose parent changed after the request must exit; the signal will never come"
     )
