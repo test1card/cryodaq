@@ -16,6 +16,7 @@ import json
 import logging
 import tempfile
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from cryodaq.channels.descriptors import (
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader, BoundedReadIssueCode
-from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError
+from cryodaq.storage.channel_descriptors import ChannelDescriptorStorageError, LiveChannelDescriptorCatalog
 from cryodaq.storage.sqlite_writer import _MAX_REMEMBERED_UNBOUND_CHANNELS, SQLiteWriter
 
 TIMESTAMP = datetime(2026, 7, 12, 12, tzinfo=UTC)
@@ -230,7 +231,7 @@ async def test_an_unbound_row_is_reported_as_missing_identity_not_pre_catalog_hi
     # And the source is NOT marked failed. The collector quarantines every row from a
     # failed source, so reporting at this level would cost the whole day -- measured
     # 2026-08-21 against the real rotation service. The report belongs one layer up.
-    assert result.complete is True
+    assert result.complete is False
 
 
 async def test_a_database_written_without_a_catalog_is_still_read_as_legacy_history(
@@ -421,7 +422,45 @@ async def test_a_rotated_unbound_row_is_reported_too(tmp_path: Path) -> None:
     assert by_channel["sensor.rewired"].descriptor is None
     # The day is intact. Before this was measured, one unbound row emptied the whole
     # rotated day, because a source that reports a problem is quarantined WHOLE.
-    assert result.complete is True
+    assert result.complete is False
+
+
+async def test_live_unbound_admission_is_counted_after_the_commit(tmp_path: Path) -> None:
+    """The production receipt path records the persisted unbound row."""
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=LiveChannelDescriptorCatalog(ChannelCatalog([_descriptor()])))
+    try:
+        assert await writer.write_committed([_reading("sensor.rewired", 4.2)]) is not None
+        assert writer._unbound_channel_rows == 1
+    finally:
+        await writer.stop()
+
+
+async def test_full_live_roster_reserves_no_extra_discovered_channel(tmp_path: Path) -> None:
+    """An unbound live reading cannot take the 65th slot from a full production roster."""
+
+    catalog = ChannelCatalog(
+        [
+            replace(
+                _descriptor(),
+                channel_id=f"sensor.{index}",
+                source_key=f"input.{index}.temperature",
+                display_order=index,
+            )
+            for index in range(64)
+        ]
+    )
+    writer = SQLiteWriter(tmp_path, channel_catalog=LiveChannelDescriptorCatalog(catalog))
+    try:
+        assert await writer.write_committed([_reading("sensor.rewired", 4.2)]) is not None
+    finally:
+        await writer.stop()
+
+    unbound = unbound_channel_descriptor()
+    assert _rows(tmp_path) == [(unbound.channel_id, 4.2, unbound.descriptor_hash)]
+    result = _read_bounded(tmp_path, tmp_path / "archive")
+    assert result.discovered_channels == (unbound.channel_id,)
+    assert BoundedReadIssueCode.CHANNEL_LIMIT not in {issue.code for issue in result.issues}
 
 
 async def test_the_replay_layer_is_where_the_missing_identity_is_reported(tmp_path: Path) -> None:

@@ -368,6 +368,13 @@ class _BoundedReadingCollector:
         self.rows_dropped_by_caps = 0
         self.truncated = False
 
+        self.incomplete = False
+
+    def mark_incomplete(self) -> None:
+        """Retain a row while recording that its identity is unavailable."""
+
+        self.incomplete = True
+
     def _entry(self, row: _CollectedRow) -> tuple[tuple[int, str, str], int, tuple[int, str, str]]:
         return (row.rank, row.token, row.key)
 
@@ -486,6 +493,7 @@ class _BoundedReadingCollector:
         self.rows_examined += staged.rows_examined
         self.rows_dropped_by_caps += staged.rows_dropped_by_caps
         self.truncated = self.truncated or staged.truncated
+        self.incomplete = self.incomplete or staged.incomplete
         for row in sorted(staged._by_key.values(), key=lambda item: item.rank):
             self.offer(
                 timestamp_us=row.timestamp_us,
@@ -778,7 +786,7 @@ class ArchiveReader:
         return self._bounded_result(
             expected_index=index_snapshot.token,
             issues=issues,
-            complete=complete,
+            complete=complete and not collector.incomplete,
             rows=rows,
             truncated=collector.truncated,
             discovered_channels=discovered_channels,
@@ -1406,6 +1414,7 @@ class ArchiveReader:
                                     # withholds the reading while keeping the batch honest --
                                     # one layer up, where it costs the row and not the day.
                                     descriptor = None
+                                    collector.mark_incomplete()
                                 elif descriptor_hash is None:
                                     # A NULL means what it has always meant: PRE-CATALOG
                                     # HISTORY. An earlier version of this change re-read a
@@ -2152,6 +2161,7 @@ class ArchiveReader:
                                 # written at the hot path: a failed source is quarantined
                                 # whole, so reporting here costs the entire rotated day.
                                 descriptor = None
+                                collector.mark_incomplete()
                             elif descriptor_hash is None:
                                 descriptor = resolve_legacy_descriptor(instrument, channel, unit)
                             else:

@@ -95,10 +95,10 @@ _UNBOUND_NAMED_LINES_PER_INTERVAL = 8
 # valid described measurements vanished from the experiment snapshot along with the
 # undescribed ones. A fix for one loss of data must not create another.
 #
-# So beyond this bound the value, timestamp, unit and status are still stored, and the
-# label is replaced by the reserved channel identity. A bounded loss of one label is not
-# comparable to losing every reading in the day, and the aggregate log line says how many
-# distinct labels were seen.
+# So beyond the capacity left by the declared roster the value, timestamp, unit and status
+# are still stored, and the label is replaced by the reserved channel identity. A bounded
+# loss of one label is not comparable to losing every reading in the day, and the aggregate
+# log line says how many distinct labels were seen.
 _MAX_NAMED_UNBOUND_CHANNELS = 32
 _SQLITE_NATIVE_AUTHORITY_ACTIVATION_LOCK = threading.RLock()
 
@@ -7533,7 +7533,11 @@ class SQLiteWriter:
 
         if emitted in self._named_unbound_channels:
             return emitted
-        if len(self._named_unbound_channels) < _MAX_NAMED_UNBOUND_CHANNELS:
+        declared_channels = sum(
+            descriptor.channel_id != UNBOUND_CHANNEL_ID for descriptor in self._channel_catalog.descriptors
+        )
+        named_capacity = min(_MAX_NAMED_UNBOUND_CHANNELS, max(0, _HISTORY_MAX_CHANNELS - declared_channels))
+        if len(self._named_unbound_channels) < named_capacity:
             self._named_unbound_channels.add(emitted)
             return emitted
         # Past the bound the VALUE is still stored; only the label gives way. See
@@ -7610,6 +7614,14 @@ class SQLiteWriter:
                 # and the row would store a real identity while the commit receipt carries
                 # the reserved one. The row and its receipt must not disagree.
                 descriptor_hash = admitted_hashes[index]
+                assert self._unbound_descriptor is not None
+                if descriptor_hash == self._unbound_descriptor.descriptor_hash:
+                    unbound.append(
+                        (
+                            str(r.channel),
+                            ChannelNotDescribedError("live descriptor admission used the reserved unbound identity"),
+                        )
+                    )
             else:
                 descriptor_hash = self._descriptor_hash_or_none(r, unbound)
             rows.append(
