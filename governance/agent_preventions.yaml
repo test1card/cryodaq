@@ -582,7 +582,15 @@ false_green_pairs:
     runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
     guard: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_through_its_real_logging_setup
     ci_partition: remaining
-    red_evidence: the_no_scrub_test_used_a_shape_production_never_matched_and_the_builder_count_included_the_helpers_own_call_so_a_spawn_regressing_to_a_bare_environ_stayed_green_2026_08_20_pending_immutable_capture
+    red_evidence: the_no_scrub_test_used_a_shape_production_never_matched_so_the_real_logging_setup_stayed_green_when_token_redaction_regressed_2026_08_20_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-SPAWN-COVERAGE-FALSE-GREEN-502
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
+    guard: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
+    ci_partition: remaining
+    red_evidence: the_builder_count_included_the_helpers_own_call_so_a_production_spawn_regressing_to_a_bare_environ_stayed_green_2026_08_20_pending_immutable_capture
     green_evidence: pending
   - id: LAUNCHER-STDOUT-INHERIT-FALSE-GREEN-002
     status: open
