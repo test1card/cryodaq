@@ -133,6 +133,24 @@ def test_process_entry_requires_and_forwards_captured_parent(monkeypatch: pytest
         usbtmc._visa_process_main(connection)
 
 
+def test_windows_lifetime_binding_refuses_unprotected_visa_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows must not create a VISA owner without parent-death binding."""
+
+    exits: list[int] = []
+
+    def exit_child(status: int) -> None:
+        exits.append(status)
+        raise SystemExit(status)
+
+    monkeypatch.setattr(usbtmc.sys, "platform", "win32")
+    monkeypatch.setattr(usbtmc.os, "_exit", exit_child)
+
+    with pytest.raises(SystemExit, match="0"):
+        usbtmc._bind_lifetime_to_parent(321)
+
+    assert exits == [0]
+
+
 @pytest.mark.parametrize(
     "frame",
     [

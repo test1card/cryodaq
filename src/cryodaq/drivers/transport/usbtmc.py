@@ -452,7 +452,7 @@ _PR_SET_PDEATHSIG = 1
 
 
 def _bind_lifetime_to_parent(expected_parent: int) -> None:
-    """Ask the kernel to kill this process when its parent dies. Linux only.
+    """Bind the VISA worker lifetime to its engine or exit before opening VISA.
 
     The expected parent is CAPTURED BY THE ENGINE before the spawn, never read here. Reading
     it here looked equivalent and is not: if the engine dies before this child runs its first
@@ -463,9 +463,10 @@ def _bind_lifetime_to_parent(expected_parent: int) -> None:
     """
 
     if not sys.platform.startswith("linux"):
-        # Elsewhere the daemonic flag remains the only mechanism, and an abruptly dead
-        # parent can still leave this process behind. The laboratory target is Ubuntu.
-        return
+        # No equivalent process-tree binding is installed here. Daemonic cleanup covers
+        # only normal parent exits, so starting a source-owning VISA worker would permit
+        # an abruptly dead engine to leave an orphan behind.
+        os._exit(0)
     if type(expected_parent) is not int or expected_parent <= 1:
         os._exit(0)
     if os.getppid() != expected_parent:
