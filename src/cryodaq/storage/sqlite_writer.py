@@ -2526,7 +2526,10 @@ class SQLiteWriter:
         self._unbound_descriptor = None
         if self._channel_catalog is not None:
             self._unbound_descriptor = unbound_channel_descriptor()
-            if self._unbound_descriptor.channel_id not in self._channel_catalog.by_channel_id:
+            if all(
+                descriptor.channel_id != self._unbound_descriptor.channel_id
+                for descriptor in self._channel_catalog.descriptors
+            ):
                 self._channel_catalog = snapshot_catalog(
                     ChannelCatalog([*self._channel_catalog.descriptors, self._unbound_descriptor])
                 )

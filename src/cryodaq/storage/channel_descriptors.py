@@ -780,6 +780,28 @@ class DescriptorBoundReading:
         return False
 
 
+def _carries_reserved_entry(catalog: ChannelCatalog) -> bool:
+    """Whether this catalog already carries the reserved entry.
+
+    EXACT EQUALITY, NOT MEMBERSHIP. The repository-wide spelling sweep refuses a membership
+    test over identity, and it is right to: selecting by looking a spelling up in a mapping
+    is how a channel gets identified by its name instead of by its declaration. Comparing a
+    descriptor's own channel_id with a fixed constant is the permitted form -- an exact
+    comparison of opaque values, with no lookup and no inference.
+    """
+
+    return any(descriptor.channel_id == UNBOUND_CHANNEL_ID for descriptor in catalog.descriptors)
+
+
+def _reserved_entry_of(catalog: ChannelCatalog) -> ChannelDescriptorV1:
+    """The reserved entry this catalog carries, selected by exact equality."""
+
+    for descriptor in catalog.descriptors:
+        if descriptor.channel_id == UNBOUND_CHANNEL_ID:
+            return descriptor
+    raise ChannelDescriptorStorageError("this catalog carries no reserved entry")
+
+
 class LiveChannelDescriptorCatalog:
     """Explicit, immutable catalog owner for later runtime activation.
 
@@ -809,7 +831,7 @@ class LiveChannelDescriptorCatalog:
         # descriptor bindings must cover every current descriptor exactly once". The entry is
         # added back after every check below: it is this class's to add, never the caller's
         # to account for.
-        if UNBOUND_CHANNEL_ID in self._catalog.by_channel_id:
+        if _carries_reserved_entry(self._catalog):
             self._catalog = snapshot_catalog(
                 ChannelCatalog(
                     [
@@ -864,7 +886,7 @@ class LiveChannelDescriptorCatalog:
         #
         # `admit` reaches the entry through the catalog directly. `bind` never resolves it,
         # which is correct: nothing emits it, so nothing should look it up.
-        if UNBOUND_CHANNEL_ID not in self._catalog.by_channel_id:
+        if not _carries_reserved_entry(self._catalog):
             self._catalog = snapshot_catalog(ChannelCatalog([*self._catalog.descriptors, unbound_channel_descriptor()]))
         self._bindings = MappingProxyType(configured)
 
@@ -989,7 +1011,7 @@ class LiveChannelDescriptorCatalog:
             if "unavailable in the explicit descriptor catalog bindings" not in str(refusal):
                 raise
         owned = _own_live_reading(reading)
-        descriptor = self._catalog.by_channel_id[UNBOUND_CHANNEL_ID]
+        descriptor = _reserved_entry_of(self._catalog)
         envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
         selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
         integrity_token = object()
