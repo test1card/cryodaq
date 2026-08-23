@@ -286,6 +286,38 @@ def test_a_reason_after_logging_setup_is_not_replayed_by_later_reconfiguration(
     assert (log_dir / "theme-inventory-second.log").read_text(encoding="utf-8") == ""
 
 
+def test_a_reason_is_retained_when_an_active_log_handler_rejects_it(
+    themes_dir, tmp_path, monkeypatch, root_logging_restored
+) -> None:
+    """A handler that fails after setup must not discard a theme diagnostic."""
+
+    class FailingStream:
+        closed = False
+
+        def write(self, _message: str) -> None:
+            raise OSError("disk full")
+
+        def flush(self) -> None:
+            pass
+
+    (themes_dir / "broken.yaml").write_text("not: [a, valid, pack", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+    monkeypatch.setattr(logging, "raiseExceptions", False)
+
+    logging_setup.setup_logging("theme-active-handler", console=False, file=True)
+    [handler] = logging.getLogger().handlers
+    monkeypatch.setattr(handler, "stream", FailingStream())
+
+    assert _theme_loader.available_themes() == []
+    [(level, message, args)] = logging_setup._deferred_records
+    assert level == logging.WARNING
+    assert message == "theme: ignoring invalid pack %s: %s"
+    assert args[0].endswith("themes\\broken.yaml")
+    assert "could not be parsed" in args[1]
+
+
 def test_the_theme_menu_survives_a_directory_it_cannot_read(themes_dir, monkeypatch) -> None:
     """Surviving the import is not surviving startup.
 

@@ -170,7 +170,7 @@ def _validate_theme_id(name: object) -> str:
 
 
 def _say_and_defer(level: int, message: str, *args: object) -> None:
-    """Record a diagnostic, deferring it only until setup_logging has run.
+    """Record a diagnostic, retaining it until a handler accepts it.
 
     Theme resolution produces records during import, before an entry point configures logging.
     Inventory scans may instead happen after setup_logging, so queuing every record would replay
@@ -178,7 +178,7 @@ def _say_and_defer(level: int, message: str, *args: object) -> None:
     """
 
     logger.log(level, message, *args)
-    if not logging_setup.logging_is_configured():
+    if not logging_setup.last_emission_reached_handler():
         logging_setup.defer_record(level, message, *[str(arg) for arg in args])
 
 

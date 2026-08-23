@@ -126,6 +126,12 @@ def logging_is_configured() -> bool:
     return _logging_configured
 
 
+def last_emission_reached_handler() -> bool:
+    """Return whether the most recent root emission reached any handler."""
+
+    return any(getattr(handler, "_last_emission_succeeded", False) for handler in logging.getLogger().handlers)
+
+
 def defer_record(level: int, message: str, *args: object) -> None:
     """Hold one record until setup_logging has somewhere to put it."""
 

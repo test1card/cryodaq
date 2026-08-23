@@ -55,6 +55,14 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: THEME-DIAGNOSTIC-DEFERRAL-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: THEME-DIAGNOSTIC-DEFERRAL-001
+    guard: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_every_reason_this_module_gives_survives_to_the_log
+    ci_partition: gui
+    red_evidence: three_deterministic_theme_diagnostic_loss_variants_were_missed_one_at_a_time_by_passing_coverage_until_the_class_level_ast_guard_bound_every_reason_path_to_the_deferral_helper_2026_08_23_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -6747,6 +6755,10 @@ records:
       - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_a_deferred_reason_is_retained_when_there_is_no_console_stream
         ci_partition: gui
       - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_the_readiness_check_writes_nothing_of_its_own
+        ci_partition: gui
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_a_reason_is_retained_when_an_active_log_handler_rejects_it
+        ci_partition: gui
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_every_reason_this_module_gives_survives_to_the_log
         ci_partition: gui
     automation_limit: The evidence below is content-addressed and local. The three guards are in the gui partition, which the hosted remaining partition does not run, so a hosted run cannot be cited for them.
     red_evidence: with_only_production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_replaced_by_master_blob_30eda78ec923876f0a96dcb74970556af182fe94_all_three_guards_error_because_master_carries_no_deferral_mechanism_at_all_transcript_sha256_85c33e11b2d4cabd1ab3fa085f4030ca784a7e48c7681814081705e7f20de33a_and_the_two_narrow_controls_on_this_branch_each_reddened_exactly_the_guard_for_that_property_delay_true_transcript_sha256_3c952d42188db22bef278203db5248d33c2aa98e454307c9b81357676fddcdc8_and_console_check_removed_transcript_sha256_70c8922526e5f0b73ef1e50219a123ffc1264abaa93f948796d533b39b5e5a77
