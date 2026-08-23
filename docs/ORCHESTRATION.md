@@ -221,8 +221,24 @@ where that is made true; it is not advisory.
    ignored. The exact-checkout runner rejects a worktree with ANY untracked
    path — it reads `git status --porcelain=v1 --untracked-files=all` and
    requires it empty — so leaving them behind fails requalification for a
-   reason that has nothing to do with the change. Delete `docs/refactor/`
-   after the generator has reached its fixed point, and before step 3.
+   reason that has nothing to do with the change.
+
+   Remove **those three files by name**, after the generator has reached its
+   fixed point and before step 3, and remove the directory only if it is then
+   empty:
+
+   ```
+   rm -f docs/refactor/architecture-before-all-files.svg \
+         docs/refactor/architecture-montana-all-files.svg \
+         docs/refactor/architecture-before-important.svg
+   rmdir docs/refactor 2>/dev/null || true
+   ```
+
+   **Never delete the directory itself outright.** It is untracked, so anything
+   else living there is unrecoverable — somebody's working notes or evidence,
+   with no copy in git. `rmdir` refuses a directory that is not empty, which is
+   exactly the behaviour wanted: if something else is there, the merger sees it
+   and decides, rather than a procedure deciding for them.
 
    Run the generator until it reaches a fixed point — a second run must change
    nothing — then commit `docs/architecture-montana-important.svg` and
