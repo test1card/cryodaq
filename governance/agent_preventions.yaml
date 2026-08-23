@@ -4349,16 +4349,16 @@ records:
     red_evidence: gui_app_imported_generic_unlinking_release_for_both_exit_paths_2026_07_23_pending_artifact_binding
     green_evidence: pending
   - id: ENGINE-FORCE-PROCESS-IDENTITY-001
-    status: open
+    status: reopened
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Engine --force takeover, persistent lock diagnostics, and any attempted incumbent-process termination on every supported operating system.
+    applies_to: Engine --force takeover, persistent lock diagnostics, any attempted incumbent-process termination, and every qualification or soak fault-injection and cleanup process signal on every supported operating system.
     classification: arbitrary_process_termination
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A corrupt, hostile, stale, reused, group, current-process, replay, or unrelated PID can turn force mode into an arbitrary-process kill primitive.
-    invariant: Force mode proceeds only after acquiring the exact stable kernel lock itself; stale file contents are non-authoritative, while held, replaced, or unsafe locks fail closed without process lookup or termination.
+    consequence: A corrupt, hostile, stale, reused, group, current-process, replay, or unrelated PID can turn force mode into an arbitrary-process kill primitive; a signal resolved from a previously observed PID alone can terminate whichever unrelated process recycled that PID between authorization and delivery, and recheck evidence copied from the authorization instead of the fresh observation seals a false identity claim into sealed evidence.
+    invariant: Force mode proceeds only after acquiring the exact stable kernel lock itself; stale file contents are non-authoritative, while held, replaced, or unsafe locks fail closed without process lookup or termination. Every qualification process signal requires a freshly observed full identity -- PID plus platform start identity -- equal to the previously authorized identity, refused before any signal or evidence when it differs; only that exact rechecked identity may be signaled, and recheck evidence serializes the fresh observation, never the prior authorization.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -4371,7 +4371,11 @@ records:
         ci_partition: core
       - node: tests/core/test_engine_force_kill.py::test_force_mode_refuses_a_held_kernel_lock_without_process_inspection_or_kill
         ci_partition: core
-    red_evidence: pid_and_argv_based_force_kill_could_not_prove_that_the_target_owned_this_exact_kernel_lock_and_data_root_2026_07_23_pending_immutable_capture
+      - node: tests/scripts/test_soak_mock_stack_runner_bridge_handshake.py::test_recovery_refuses_to_signal_a_recycled_engine_pid_and_records_nothing
+        ci_partition: remaining
+      - node: tests/scripts/test_soak_mock_stack_runner_bridge_handshake.py::test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_records_it
+        ci_partition: remaining
+    red_evidence: pid_and_argv_based_force_kill_could_not_prove_that_the_target_owned_this_exact_kernel_lock_and_data_root_2026_07_23_pending_immutable_capture soak_fault_injection_resolved_identity_by_pid_only_so_a_recycled_pid_was_signaled_and_recheck_evidence_serialized_the_stale_authorized_start_2026_08_23_pending_immutable_capture
     green_evidence: pending
   - id: REPLAY-RUNTIME-SETTLEMENT-010
     status: open
