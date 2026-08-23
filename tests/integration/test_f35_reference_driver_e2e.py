@@ -75,7 +75,6 @@ from cryodaq.storage.broker_replay import (
     DescriptorReplayReading,
 )
 from cryodaq.storage.channel_descriptors import (
-    ChannelDescriptorStorageError,
     LiveChannelDescriptorCatalog,
 )
 from cryodaq.storage.sqlite_writer import SQLiteWriter
@@ -312,7 +311,12 @@ async def test_f35_full_chain_scheduler_drives_canonical_identity_through_d4(
         descriptor_rows = conn.execute(
             "SELECT channel_id, descriptor_hash, envelope_json FROM channel_descriptors"
         ).fetchall()
-        assert len(descriptor_rows) == 1
+        # Two: the described channel, and the reserved entry a reading gets when the
+        # catalog describes no channel for it. That entry must be installed or the
+        # readings foreign key refuses such a row, and storing it instead of
+        # destroying the batch is why it exists. The canonical identity this test is
+        # about is asserted on the described row below, and is unchanged.
+        assert len(descriptor_rows) == 2
         desc_channel_id, desc_hash, desc_envelope = descriptor_rows[0]
         assert desc_channel_id == CANONICAL_CHANNEL_ID
         assert desc_hash == descriptor.descriptor_hash
@@ -592,14 +596,28 @@ def test_f35_report_projection_uses_descriptor_quantity_not_naming_heuristic() -
 # ===================================================================
 
 
-async def test_unknown_raw_label_fails_closed_not_legacy_synthesis(
+async def test_unknown_raw_label_is_stored_without_canonical_identity(
     tmp_path: Path,
 ) -> None:
-    """An unbound raw label must raise ``ChannelDescriptorStorageError``,
-    NOT synthesize a ``legacy_unknown`` descriptor.
+    """An unbound raw label is STORED, and is granted no canonical identity.
 
-    This proves the bind step is exact — duck typing or unit/name matching
-    can never grant canonical identity to an unknown channel."""
+    RENAMED AND REVERSED DELIBERATELY, 2026-08-21. This test used to require the whole
+    commit to raise and nothing to be stored. Its stated purpose was that the bind step is
+    exact -- that duck typing, or matching on a unit or a name, can never grant canonical
+    identity to an unknown channel. **That purpose is preserved exactly and is asserted
+    below.** What changed is the cost of the refusal.
+
+    Measured on the real descriptor-authoritative path, with a control: a batch of two
+    readings, one of them on a channel the catalog does not describe, raised at admission
+    and left NO DATABASE FILE AT ALL. The described reading died with the undescribed one,
+    on every acquisition cycle, for as long as the catalog gap lasted. A re-wired sensor,
+    or one added mid-campaign, produces exactly that gap in an ordinary laboratory week.
+
+    So the reading is admitted against the RESERVED catalog entry, whose meaning is that
+    the channel is not described. Nothing infers it from a name or a unit; it is a fixed
+    identity that grants nothing. The row keeps the label the instrument emitted, because
+    with no canonical identity that label is the only truth left about where the value came
+    from."""
 
     from cryodaq.drivers.base import ChannelStatus, Reading
 
@@ -617,23 +635,31 @@ async def test_unknown_raw_label_fails_closed_not_legacy_synthesis(
         status=ChannelStatus.OK,
     )
 
-    with pytest.raises(
-        ChannelDescriptorStorageError,
-        match="unavailable in the explicit descriptor catalog bindings",
-    ):
-        await writer.write_committed([unknown_reading])
+    from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID, unbound_channel_descriptor
 
-    # no SQLite file should have been created
-    db = _db_path(tmp_path, ts)
-    if db.exists():
-        conn = sqlite3.connect(str(db))
-        try:
-            assert conn.execute("SELECT COUNT(*) FROM readings").fetchone()[0] == 0
-            assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone()[0] == 0
-        finally:
-            conn.close()
-
+    receipt = await writer.write_committed([unknown_reading])
+    assert receipt is not None, "the batch must survive a channel the catalog does not describe"
     await writer.stop()
+
+    conn = sqlite3.connect(str(_db_path(tmp_path, ts)))
+    try:
+        stored = conn.execute("SELECT channel, descriptor_hash FROM readings").fetchall()
+    finally:
+        conn.close()
+
+    assert len(stored) == 1
+    channel, descriptor_hash = stored[0]
+
+    # NO CANONICAL IDENTITY WAS GRANTED. The row references the reserved entry, whose whole
+    # meaning is that the channel is not described -- not a descriptor inferred from the
+    # label, the unit, or anything else about the reading.
+    assert descriptor_hash == unbound_channel_descriptor().descriptor_hash
+    assert descriptor_hash != _descriptor().descriptor_hash
+
+    # And the emitted label survives, because it is the only thing left that says where the
+    # value came from.
+    assert channel == "completely_unknown_channel"
+    assert channel != UNBOUND_CHANNEL_ID
 
 
 # ===================================================================

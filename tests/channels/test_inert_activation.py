@@ -225,6 +225,8 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
         ),
         "storage/channel_descriptors.py": _direct_imports(
             "cryodaq.channels.descriptors",
+            "UNBOUND_CHANNEL_ID",
+            "unbound_channel_descriptor",
             "MAX_CATALOG_DESCRIPTORS",
             "ChannelCatalog",
             "ChannelDescriptorError",
@@ -272,7 +274,18 @@ def test_only_approved_passive_adapters_import_channel_contract() -> None:
             "PersistedChannelEnvelopeError",
             "decode_persisted_channel_envelope",
         ),
-        "storage/sqlite_writer.py": _direct_imports("cryodaq.channels.descriptors", "ChannelCatalog")
+        # UNBOUND_CHANNEL_ID and unbound_channel_descriptor name the reserved catalog entry
+        # that a reading gets when the catalog describes no channel for it. The writer needs
+        # both: the identity to recognise such a binding, and the descriptor to install the
+        # entry beside the configured catalog. Neither carries control or source authority --
+        # the reserved entry describes the ABSENCE of a description -- so admitting them here
+        # does not widen what this file may do with the channel contract.
+        "storage/sqlite_writer.py": _direct_imports(
+            "cryodaq.channels.descriptors",
+            "ChannelCatalog",
+            "UNBOUND_CHANNEL_ID",
+            "unbound_channel_descriptor",
+        )
         | _direct_imports("cryodaq.channels.persistence", "PersistedChannelEnvelopeV1"),
     }
 

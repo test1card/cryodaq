@@ -24,12 +24,14 @@ import yaml
 from cryodaq._owned_yaml import OwnedSafeLoader
 from cryodaq.channels.descriptors import (
     MAX_CATALOG_DESCRIPTORS,
+    UNBOUND_CHANNEL_ID,
     ChannelCatalog,
     ChannelDescriptorError,
     ChannelDescriptorV1,
     ChannelQuantity,
     ChannelRole,
     ChannelSafetyClass,
+    unbound_channel_descriptor,
     validate_catalog_update,
 )
 from cryodaq.channels.persistence import (
@@ -175,6 +177,17 @@ CREATE TABLE readings (
     unit        TEXT    NOT NULL,
     status      TEXT    NOT NULL
 , descriptor_hash TEXT REFERENCES channel_descriptors(descriptor_hash))
+"""
+
+
+UNBOUND_DESCRIPTOR_HASH: Final[str] = unbound_channel_descriptor().descriptor_hash
+"""Identity a reading carries when the catalog describes no channel for it.
+
+Published from THIS module on purpose. The archive reader needs to recognise such a row,
+and importing the channel contract there would give a second file a dependency the inert-
+activation guard exists to keep narrow. This module already owns that dependency and is
+registered for it, so the identity travels through the adapter instead of widening the
+guard. Recognition is exact equality on an opaque value; nothing here interprets it.
 """
 
 
@@ -789,6 +802,23 @@ class LiveChannelDescriptorCatalog:
         bindings: Mapping[tuple[str, str], str] | None = None,
     ) -> None:
         self._catalog = snapshot_catalog(catalog)
+        # STRIP THE RESERVED ENTRY ON THE WAY IN. This catalog can arrive from another live
+        # catalog's snapshot, which already carries it, while the caller's bindings describe
+        # only the caller's own channels. Validating those bindings against a catalog holding
+        # an entry the caller never declared refused seven manifest tests with "live
+        # descriptor bindings must cover every current descriptor exactly once". The entry is
+        # added back after every check below: it is this class's to add, never the caller's
+        # to account for.
+        if UNBOUND_CHANNEL_ID in self._catalog.by_channel_id:
+            self._catalog = snapshot_catalog(
+                ChannelCatalog(
+                    [
+                        descriptor
+                        for descriptor in self._catalog.descriptors
+                        if descriptor.channel_id != UNBOUND_CHANNEL_ID
+                    ]
+                )
+            )
         self._owner_key = object()
         self._issued: WeakKeyDictionary[DescriptorBoundReading, _ReceiptIntegrity] = WeakKeyDictionary()
         if bindings is None:
@@ -814,6 +844,28 @@ class LiveChannelDescriptorCatalog:
                     raise ChannelDescriptorStorageError(
                         "live descriptor binding instrument_id disagrees with its descriptor"
                     )
+        # THE RESERVED ENTRY JOINS LAST, AND ON PURPOSE. `admit` binds an undescribed
+        # reading against it so one such reading costs its own identity and not the whole
+        # batch, and that binding must be owned by this catalog or the receipt path's
+        # ownership check refuses it.
+        #
+        # It is added AFTER every check above. An earlier version added it before, and the
+        # caller's own bindings then no longer covered the catalog: seven manifest tests
+        # refused with "live descriptor bindings must cover every current descriptor exactly
+        # once". The caller's bindings describe the CALLER's catalog; this entry is not the
+        # caller's and must not be measured against them.
+        # IT JOINS THE CATALOG, NOT THE BINDINGS, and the difference is the whole point.
+        # The bindings are what the tracked manifest DECLARES: which emitted label belongs to
+        # which channel of which instrument. The reserved entry declares nothing -- it exists
+        # so that a reading with no declaration has a real descriptor to reference, which the
+        # foreign key requires. Putting it in the bindings made the live catalog claim a
+        # channel the manifest never declared, and the manifest guards said so: the binding
+        # count moved by one and the declared set no longer matched.
+        #
+        # `admit` reaches the entry through the catalog directly. `bind` never resolves it,
+        # which is correct: nothing emits it, so nothing should look it up.
+        if UNBOUND_CHANNEL_ID not in self._catalog.by_channel_id:
+            self._catalog = snapshot_catalog(ChannelCatalog([*self._catalog.descriptors, unbound_channel_descriptor()]))
         self._bindings = MappingProxyType(configured)
 
     @property
@@ -822,7 +874,13 @@ class LiveChannelDescriptorCatalog:
 
     @property
     def instrument_ids(self) -> frozenset[str]:
-        """Configured instrument identities, detached from binding internals."""
+        """Configured instrument identities, detached from binding internals.
+
+        The reserved entry cannot appear here and needs no exclusion: it joins the catalog
+        and never the bindings, and this set is derived from the bindings. An earlier version
+        put it in both and had to filter it out again, after startup refused with
+        "instrument mismatch (missing=[], extra=['cryodaq'])".
+        """
 
         return frozenset(instrument_id for instrument_id, _ in self._bindings)
 
@@ -886,6 +944,52 @@ class LiveChannelDescriptorCatalog:
         if owned.channel != channel_id:
             owned = replace(owned, channel=channel_id)
         # Snapshot the selected descriptor independently of the catalog owner.
+        envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
+        selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
+        integrity_token = object()
+        issued = DescriptorBoundReading._issue(
+            owned,
+            selected,
+            owner_key=self._owner_key,
+            integrity_token=integrity_token,
+        )
+        self._issued[issued] = _ReceiptIntegrity(
+            payload=owned,
+            descriptor=selected,
+            payload_fingerprint=_owned_live_reading_fingerprint(owned),
+            descriptor_envelope=PersistedChannelEnvelopeV1.from_descriptor(selected).canonical_json,
+            token=integrity_token,
+        )
+        return issued
+
+    def admit(self, reading: object) -> DescriptorBoundReading:
+        """Bind a reading, or admit it against the reserved entry when nothing describes it.
+
+        `bind` is deliberately untouched and keeps its registered fail-closed behaviour for
+        every direct caller. This is what the WRITE PATH uses, and the difference is the
+        cost of a refusal.
+
+        Measured 2026-08-21 on the real path, with a control: a batch of two readings, one
+        on a channel the catalog does not describe, raised at admission and left NO DATABASE
+        FILE AT ALL -- the described reading died with the undescribed one, on every
+        acquisition cycle, for as long as the catalog gap lasted. A re-wired sensor or one
+        added mid-campaign produces exactly that gap in an ordinary laboratory week.
+
+        TWO CASES, AND ONLY ONE OF THEM CHANGES. A channel with no binding at all has no
+        identity to contradict: it is admitted against the reserved entry, which grants no
+        canonical identity and states that the channel is not described. A channel the
+        catalog DOES describe under another instrument still raises -- that reading may not
+        be the quantity the descriptor names, and storing it would put a wrong number under
+        a real identity.
+        """
+
+        try:
+            return self.bind(reading)
+        except ChannelDescriptorStorageError as refusal:
+            if "unavailable in the explicit descriptor catalog bindings" not in str(refusal):
+                raise
+        owned = _own_live_reading(reading)
+        descriptor = self._catalog.by_channel_id[UNBOUND_CHANNEL_ID]
         envelope = PersistedChannelEnvelopeV1.from_descriptor(descriptor)
         selected = decode_persisted_channel_envelope(envelope.canonical_json).descriptor
         integrity_token = object()

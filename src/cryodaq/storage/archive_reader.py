@@ -26,6 +26,7 @@ from urllib.parse import quote
 
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import (
+    UNBOUND_DESCRIPTOR_HASH,
     ChannelDescriptorStorageError,
     verify_descriptor_storage,
 )
@@ -43,6 +44,12 @@ from cryodaq.storage.sentinel import decode
 from cryodaq.storage.sqlite_writer import _parse_timestamp
 
 logger = logging.getLogger(__name__)
+
+# The identity a writer stores for a reading whose channel the catalog does not
+# describe. Recognised by EXACT EQUALITY on an opaque hash -- never by inspecting a
+# channel's spelling -- and recognised BEFORE the descriptor's fields are compared with
+# the row's, because the reserved entry deliberately describes no real channel.
+_UNBOUND_DESCRIPTOR_HASH = UNBOUND_DESCRIPTOR_HASH
 
 _MAX_DESCRIPTOR_REFERENCE_ROWS = 10_000_000
 
@@ -1269,11 +1276,6 @@ class ArchiveReader:
             reading_columns = {str(row[1]) for row in conn.execute("PRAGMA main.table_info(readings)")}
             has_descriptor_hash = "descriptor_hash" in reading_columns
             descriptor_map: dict[str, ResolvedStorageDescriptor] = {}
-            # Whether THIS database was written by a catalog-bearing writer. It cannot be
-            # read off descriptor_map: that map is filtered to the hashes the readings
-            # actually reference, so a day whose rows are all unbound would leave it empty
-            # in a database that does carry a catalog.
-            catalog_is_installed = False
             if has_descriptor_hash:
                 if (
                     conn.execute(
@@ -1286,9 +1288,6 @@ class ArchiveReader:
                     verify_descriptor_storage(conn)
                 except ChannelDescriptorStorageError as exc:
                     raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_INDEX_MISMATCH) from exc
-                catalog_is_installed = (
-                    conn.execute("SELECT 1 FROM main.channel_descriptors LIMIT 1").fetchone() is not None
-                )
                 descriptor_rows = conn.execute(
                     "SELECT DISTINCT descriptor_hash FROM readings WHERE descriptor_hash IS NOT NULL LIMIT ?",
                     (MAX_ARCHIVE_DESCRIPTORS + 1,),
@@ -1366,20 +1365,55 @@ class ArchiveReader:
                                 unit_text = _bounded_text(unit, minimum=0, maximum=64)
                                 status_text = _bounded_text(status_value, minimum=0, maximum=64)
                                 decoded = _bounded_value(value, status_text)
-                                if descriptor_hash is None:
-                                    if catalog_is_installed:
-                                        # NOT pre-catalog history. This database has a
-                                        # descriptor catalog, so a row without an identity
-                                        # is a row whose channel the catalog does not
-                                        # describe. Synthesising a legacy descriptor here
-                                        # would hand it a fabricated identity and mark the
-                                        # read complete, and descriptor reporting would then
-                                        # carry it as an ordinary described reading.
-                                        #
-                                        # A database written before catalogs existed reaches
-                                        # this line with catalog_is_installed False and is
-                                        # resolved as legacy exactly as before.
-                                        raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
+                                if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                                    # THE ROW SAYS SO ITSELF, and it is KEPT.
+                                    #
+                                    # The writer stored the reserved identity because the
+                                    # configured catalog did not describe this channel. The
+                                    # read is therefore not complete and no descriptor is
+                                    # invented -- but the row still carries its timestamp,
+                                    # value, unit and status, and those are not the archive's
+                                    # to discard.
+                                    #
+                                    # RAISING HERE WOULD COST THE WHOLE SOURCE. Measured
+                                    # 2026-08-21 against the real rotation service: a rotated
+                                    # day holding one unbound row returned NO rows at all,
+                                    # while the same day without it returned its rows and
+                                    # reported complete. That moves the data loss this change
+                                    # exists to remove from the write path to the read path.
+                                    #
+                                    # A row with descriptor None is the representation the
+                                    # replay layer already expects: DescriptorReplayReader
+                                    # reports DESCRIPTOR_HASH_MISSING for exactly that and
+                                    # withholds the reading while keeping the batch honest.
+                                    #
+                                    # Checked BEFORE the descriptor's fields are compared with
+                                    # the row's: the reserved entry deliberately describes no
+                                    # real channel, so that comparison would report an index
+                                    # mismatch instead of a missing identity.
+                                    # AND THE SOURCE IS NOT MARKED FAILED. Measured
+                                    # 2026-08-21 against the real rotation service: the
+                                    # collector QUARANTINES EVERY ROW FROM A FAILED SOURCE
+                                    # (`reject_unverified`), so adding an issue here cost the
+                                    # whole rotated day -- a day with one unbound row returned
+                                    # NO rows, while the same day without it returned its rows
+                                    # and reported complete. That moves the data loss this
+                                    # change exists to remove from the write path to the read
+                                    # path, which is not a trade worth making.
+                                    #
+                                    # `descriptor=None` IS the report. DescriptorReplayReader
+                                    # raises DESCRIPTOR_HASH_MISSING for exactly that row and
+                                    # withholds the reading while keeping the batch honest --
+                                    # one layer up, where it costs the row and not the day.
+                                    descriptor = None
+                                elif descriptor_hash is None:
+                                    # A NULL means what it has always meant: PRE-CATALOG
+                                    # HISTORY. An earlier version of this change re-read a
+                                    # NULL as "unbound" whenever the database carried a
+                                    # catalog, and that was wrong twice -- a database migrated
+                                    # in place holds genuine legacy NULLs beside an installed
+                                    # catalog, and a day whose readings are all unbound rotates
+                                    # with no catalog marker at all.
                                     descriptor = resolve_legacy_descriptor(
                                         instrument_text,
                                         channel_text,
@@ -1993,12 +2027,6 @@ class ArchiveReader:
                 max_arrow_batch_bytes=max_arrow_batch_bytes,
                 deadline_monotonic=deadline_monotonic,
             )
-            # The rotated index records how many descriptor rows travelled with this
-            # parquet. A positive count is the cold equivalent of an installed catalog,
-            # and it is read from the index rather than from descriptor_map for the same
-            # reason: that map names only the hashes the rows reference.
-            cold_catalog_rows = (source.index_entry or {}).get("channel_descriptors_rows")
-            cold_catalog_is_installed = type(cold_catalog_rows) is int and cold_catalog_rows > 0
             has_descriptor_hash = "descriptor_hash" in parquet.schema_arrow.names
             start_scalar = pa.scalar(
                 datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=start_us),
@@ -2115,12 +2143,16 @@ class ArchiveReader:
                             )
                             if time.monotonic() >= deadline_monotonic:
                                 raise _DescriptorReadError(BoundedReadIssueCode.DEADLINE)
-                            if descriptor_hash is None:
-                                if cold_catalog_is_installed:
-                                    # Same rule as the hot path: rotated data that carried a
-                                    # descriptor catalog cannot contain pre-catalog history,
-                                    # so a row without an identity is missing one.
-                                    raise _DescriptorReadError(BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING)
+                            if descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                                # Same rule as the hot path, and the row is KEPT for the same
+                                # reason. The reserved identity survives rotation for free --
+                                # it is a REFERENCED hash, so the sidecar carries it like any
+                                # other descriptor, with no rotation change at all.
+                                # And the source is NOT marked failed, for the reason
+                                # written at the hot path: a failed source is quarantined
+                                # whole, so reporting here costs the entire rotated day.
+                                descriptor = None
+                            elif descriptor_hash is None:
                                 descriptor = resolve_legacy_descriptor(instrument, channel, unit)
                             else:
                                 descriptor = descriptor_map.get(descriptor_hash)

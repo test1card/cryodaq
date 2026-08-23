@@ -155,7 +155,12 @@ async def test_migration_and_catalog_install_are_idempotent(tmp_path: Path) -> N
 
     conn = sqlite3.connect(str(_db_path(tmp_path)))
     try:
-        assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone() == (1,)
+        # The configured descriptor AND the reserved entry a reading gets when the catalog
+        # describes no channel for it. The count moved from one to two when that entry began
+        # travelling with every catalog. The property this line exists for -- that a repeated
+        # install does not ACCUMULATE rows -- is unchanged, and the repetition around it is
+        # what actually tests it.
+        assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone() == (2,)
         assert conn.execute("SELECT COUNT(*) FROM readings").fetchone() == (2,)
     finally:
         conn.close()
@@ -178,9 +183,13 @@ async def test_strictly_forward_revision_appends_and_old_reading_keeps_old_hash(
             (first.descriptor_hash,),
             (second.descriptor_hash,),
         ]
+        # Three rows now: the descriptor at revision one, its successor at revision two,
+        # and the reserved entry -- itself revision one -- that travels with every catalog.
+        # The property here is that a forward revision APPENDS rather than replacing, and
+        # the ordered one-then-two still shows it.
         assert conn.execute(
             "SELECT descriptor_revision FROM channel_descriptors ORDER BY descriptor_revision"
-        ).fetchall() == [(1,), (2,)]
+        ).fetchall() == [(1,), (1,), (2,)]
     finally:
         conn.close()
 

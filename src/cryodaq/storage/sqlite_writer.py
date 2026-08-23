@@ -28,7 +28,7 @@ from typing import Any
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
-from cryodaq.channels.descriptors import ChannelCatalog
+from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID, ChannelCatalog, unbound_channel_descriptor
 from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.core.alarm_ack_codec import (
     ALARM_ACK_COMMIT_KEYS,
@@ -2519,6 +2519,17 @@ class SQLiteWriter:
             self._channel_catalog = self._live_channel_catalog.storage_catalog_snapshot()
         else:
             self._channel_catalog = None if channel_catalog is None else snapshot_catalog(channel_catalog)
+        # THE RESERVED ENTRY TRAVELS WITH THE CATALOG, so a reading whose channel the
+        # catalog does not describe has a real descriptor to reference. Without it the
+        # foreign key refuses the row and the batch dies -- the defect this change
+        # exists to remove. See channels.descriptors.unbound_channel_descriptor.
+        self._unbound_descriptor = None
+        if self._channel_catalog is not None:
+            self._unbound_descriptor = unbound_channel_descriptor()
+            if self._unbound_descriptor.channel_id not in self._channel_catalog.by_channel_id:
+                self._channel_catalog = snapshot_catalog(
+                    ChannelCatalog([*self._channel_catalog.descriptors, self._unbound_descriptor])
+                )
         # When a reading names a channel the catalog does not describe, the row is
         # still written -- without a descriptor identity -- and the fact is said at a
         # bounded rate and counted. See _descriptor_hash_or_none.
@@ -6829,8 +6840,14 @@ class SQLiteWriter:
         if owner_catalog is None:
             raise RuntimeError("live channel catalog is unavailable")
         snapshot = tuple(readings)
-        bind = getattr(owner_catalog, "bind", None)
-        admitted = tuple(bind(reading) for reading in snapshot) if callable(bind) else snapshot
+        # ADMIT, DO NOT BIND. `bind` refuses a channel the catalog does not describe, and
+        # this comprehension covers the WHOLE batch -- so one such reading killed every
+        # reading acquired in the same cycle. Measured 2026-08-21 with a control: the batch
+        # left no database file at all. `admit` binds what it can and puts an undescribed
+        # reading against the reserved entry, which grants no canonical identity and says
+        # that the channel is not described. An instrument disagreement still raises.
+        admit = getattr(owner_catalog, "admit", None) or getattr(owner_catalog, "bind", None)
+        admitted = tuple(admit(reading) for reading in snapshot) if callable(admit) else snapshot
         settlement = CommittedBatchSettlement()
         owner = self._remember_owned_task(
             asyncio.create_task(self._commit_owner(admitted), name="sqlite_write_committed"),
@@ -7221,7 +7238,16 @@ class SQLiteWriter:
                 raise ValueError("descriptor-authoritative batch contains non-finite OK reading")
             if not nonfinite and is_sentinel(reading.value) and reading.status is ChannelStatus.OK:
                 raise ValueError("descriptor-authoritative batch contains sentinel OK reading")
-            stable = replace(reading, channel=item.descriptor.channel_id)
+            # The canonical channel_id replaces the emitted label for a DESCRIBED reading,
+            # which is what makes the persisted row, the receipt entry and the descriptor
+            # agree. For a reading admitted against the RESERVED entry there is no canonical
+            # identity to adopt, and the emitted label is the only truth left about which
+            # channel produced the value -- so it is kept.
+            stable = (
+                reading
+                if item.descriptor.channel_id == UNBOUND_CHANNEL_ID
+                else replace(reading, channel=item.descriptor.channel_id)
+            )
             timestamp = (
                 reading.timestamp.astimezone(UTC)
                 if reading.timestamp.tzinfo is not None
@@ -7392,7 +7418,12 @@ class SQLiteWriter:
             # number under a real identity. Those keep their registered fail-closed
             # refusal of the whole batch.
             unbound.append((str(reading.channel), absent))
-            return None
+            # THE RESERVED ENTRY, not a null. A null already means pre-catalog history,
+            # and the two cannot be told apart afterwards -- a migrated database holds
+            # both kinds in one file, and an all-unbound day rotates with no descriptor
+            # sidecar at all. This row carries its own provenance instead.
+            assert self._unbound_descriptor is not None
+            return self._unbound_descriptor.descriptor_hash
 
     def _record_unbound_channels(self, unbound: list[tuple[str, BaseException]]) -> None:
         """Count and say what was actually STORED, after the transaction committed.

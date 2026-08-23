@@ -187,7 +187,13 @@ async def test_commit_receipt_is_issued_only_after_exact_transaction_commit(tmp_
         assert conn.execute("SELECT channel, descriptor_hash FROM readings").fetchall() == [
             (descriptor.channel_id, descriptor.descriptor_hash)
         ]
-        assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone() == (1,)
+        # Two: the described channel, and the reserved entry that a reading gets when the
+        # catalog describes no channel for it. That entry MUST be installed -- the readings
+        # foreign key refuses a row whose descriptor is not in the table, and storing such a
+        # row instead of destroying the batch is the whole point of it. What this line is here
+        # for -- that the catalog is installed in the same transaction as its first readings,
+        # and only then -- is unchanged.
+        assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone() == (2,)
     finally:
         conn.close()
     await writer.stop()
@@ -268,10 +274,26 @@ async def test_receipt_constructors_cross_owner_and_mutation_are_rejected(tmp_pa
     await second.stop()
 
 
+# THE UNKNOWN-CHANNEL CASE IS DELIBERATELY NOT IN THIS LIST (2026-08-21). It used to be
+# first. Measured on the real descriptor-authoritative path with a control: a batch of two
+# readings, one on a channel the catalog does not describe, raised at admission and left NO
+# DATABASE FILE AT ALL -- the described reading died with the undescribed one, on every
+# acquisition cycle, for as long as the catalog gap lasted. A re-wired sensor, or one added
+# mid-campaign, produces exactly that gap in an ordinary laboratory week.
+#
+# The decision that an unknown label may never be granted a canonical identity is untouched
+# and is why the reserved catalog entry exists: it grants no identity and states that the
+# channel is not described. What changed is the COST of the refusal. Losing every reading
+# acquired in the same cycle is not required by that decision and is not survivable for a
+# week-long run.
+#
+# The two cases that REMAIN are the ones where refusing the batch is right. An instrument
+# that disagrees may mean the reading is not the quantity the descriptor names; a non-finite
+# value with an OK status is garbage the doctrine never produces. Both still roll everything
+# back, and this test still proves it.
 @pytest.mark.parametrize(
     "bad",
     [
-        _reading(channel="unknown"),
         _reading(instrument_id="other"),
         _reading(value=float("nan"), status=ChannelStatus.OK),
     ],
@@ -317,7 +339,13 @@ async def test_midnight_crossing_descriptor_batch_commits_each_day_before_one_re
         conn = sqlite3.connect(str(tmp_path / f"data_{day}.db"))
         try:
             assert conn.execute("SELECT COUNT(*) FROM readings").fetchone() == (1,)
-            assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone() == (1,)
+            # Two: the described channel, and the reserved entry that a reading gets when the
+            # catalog describes no channel for it. That entry MUST be installed -- the readings
+            # foreign key refuses a row whose descriptor is not in the table, and storing such a
+            # row instead of destroying the batch is the whole point of it. What this line is here
+            # for -- that the catalog is installed in the same transaction as its first readings,
+            # and only then -- is unchanged.
+            assert conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone() == (2,)
         finally:
             conn.close()
     assert len(writer._issued_commits) == 1

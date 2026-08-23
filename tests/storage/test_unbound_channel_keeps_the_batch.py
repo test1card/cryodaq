@@ -12,15 +12,12 @@ the truth about it, and the fact is said and counted.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from cryodaq.channels.descriptors import (
@@ -29,8 +26,8 @@ from cryodaq.channels.descriptors import (
     ChannelQuantity,
     ChannelRole,
     ChannelSafetyClass,
+    unbound_channel_descriptor,
 )
-from cryodaq.channels.persistence import PersistedChannelEnvelopeV1
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader, BoundedReadIssueCode
@@ -112,11 +109,12 @@ async def test_one_unbound_channel_does_not_take_the_other_readings_with_it(
     assert [row[0] for row in persisted] == ["sensor.main", "sensor.rewired", "sensor.main"]
     assert [row[1] for row in persisted] == [4.2, 4.3, 4.4]
 
-    # The described readings keep their identity; the unbound one is stored WITHOUT one,
-    # rather than being stored under a guessed or synthesised identity.
+    # The described readings keep their identity. The unbound one carries the RESERVED
+    # identity -- not a guess at what it might be, and not a null, which already means
+    # pre-catalog history and could not be told apart from it afterwards.
     assert persisted[0][2] == described.descriptor_hash
     assert persisted[2][2] == described.descriptor_hash
-    assert persisted[1][2] is None
+    assert persisted[1][2] == unbound_channel_descriptor().descriptor_hash
 
     # And the operator is told which channel to add to the catalog, by name.
     said = [record.getMessage() for record in caplog.records if "sensor.rewired" in record.getMessage()]
@@ -221,8 +219,17 @@ async def test_an_unbound_row_is_reported_as_missing_identity_not_pre_catalog_hi
 
     result = _read_bounded(tmp_path, tmp_path / "archive")
 
-    assert BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING in {issue.code for issue in result.issues}
-    assert result.complete is False, "a read that could not identify a row must not report completeness"
+    # BOTH rows come back, and the unbound one comes back WITHOUT an identity rather than
+    # under a fabricated pre-catalog one.
+    by_channel = {row.channel: row for row in result.rows}
+    assert set(by_channel) == {"sensor.main", "sensor.rewired"}, sorted(by_channel)
+    assert by_channel["sensor.main"].descriptor is not None
+    assert by_channel["sensor.rewired"].descriptor is None
+
+    # And the source is NOT marked failed. The collector quarantines every row from a
+    # failed source, so reporting at this level would cost the whole day -- measured
+    # 2026-08-21 against the real rotation service. The report belongs one layer up.
+    assert result.complete is True
 
 
 async def test_a_database_written_without_a_catalog_is_still_read_as_legacy_history(
@@ -346,80 +353,57 @@ async def test_a_batch_that_crosses_midnight_describes_both_days(tmp_path: Path)
             installed = conn.execute("SELECT COUNT(*) FROM channel_descriptors").fetchone()[0]
         finally:
             conn.close()
-        assert installed == 1, f"{name} carries no descriptor catalog"
+        # The configured descriptor plus the reserved entry that unbound rows reference.
+        assert installed == 2, f"{name} does not carry the catalog and its reserved entry"
 
 
 async def test_a_rotated_unbound_row_is_reported_too(tmp_path: Path) -> None:
-    """Cold data carries the same rule, and it is measured rather than assumed.
+    """Cold data carries the same rule, proved through the REAL rotation service.
 
-    Once a day is rotated to Parquet the hot database is gone, so a reader change that
-    only covered SQLite would hold for a day and then quietly stop holding. The cold
-    discriminator is the rotated index's descriptor-row count, which is the sidecar's
-    way of saying the same thing the installed catalog says in the hot file.
+    Once a day is rotated to Parquet the hot database is gone, so a change that only
+    covered SQLite would hold for a day and then quietly stop holding. This is also the
+    exact case an earlier attempt got wrong: it discriminated on whether the archive
+    carried a descriptor catalog, and a day whose readings are ALL unbound rotates with no
+    descriptor sidecar at all under that scheme -- the marker vanished precisely in the
+    worst case.
+
+    The reserved identity has no such hole, because it is a REFERENCED hash: rotation
+    carries it through the ordinary referenced-descriptor machinery, with no rotation
+    change at all. An earlier version of this test built the parquet and its sidecar by
+    hand, which proved only that my fixture agreed with itself.
     """
 
-    described = _descriptor()
-    envelope = PersistedChannelEnvelopeV1.from_descriptor(described)
+    import asyncio
+
+    from cryodaq.storage.cold_rotation import ColdRotationService
+
+    data = tmp_path / "data"
+    data.mkdir()
     archive = tmp_path / "archive"
-    relative = Path("year=2026") / "month=07" / "data_2026-07-12.parquet"
-    path = archive / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
 
-    pq.write_table(
-        pa.table(
-            {
-                "timestamp": pa.array([TIMESTAMP, TIMESTAMP], type=pa.timestamp("us", tz="UTC")),
-                "instrument_id": pa.array([INSTRUMENT, INSTRUMENT], type=pa.string()),
-                "channel": pa.array([described.channel_id, "sensor.rewired"], type=pa.string()),
-                "value": pa.array([4.2, 4.3], type=pa.float64()),
-                "unit": pa.array(["K", "K"], type=pa.string()),
-                "status": pa.array(["ok", "ok"], type=pa.string()),
-                # The rotated form of an unbound row: the value is kept, the identity is
-                # absent, exactly as the writer stored it.
-                "descriptor_hash": pa.array([described.descriptor_hash, None], type=pa.string()),
-            }
-        ),
-        path,
-    )
-    sidecar_rel = relative.with_name(relative.stem + ".channel_descriptors.parquet")
-    sidecar = archive / sidecar_rel
-    pq.write_table(
-        pa.table(
-            {
-                "descriptor_hash": pa.array([described.descriptor_hash], type=pa.string()),
-                "channel_id": pa.array([described.channel_id], type=pa.string()),
-                "instrument_id": pa.array([described.instrument_id], type=pa.string()),
-                "source_key": pa.array([described.source_key], type=pa.string()),
-                "descriptor_revision": pa.array([described.descriptor_revision], type=pa.int32()),
-                "envelope_json": pa.array([envelope.canonical_json], type=pa.binary()),
-            }
-        ),
-        sidecar,
-    )
-    (archive / "index.json").write_text(
-        json.dumps(
-            {
-                "files": [
-                    {
-                        "original_name": "data_2026-07-12.db",
-                        "archive_path": relative.as_posix(),
-                        "row_count": 2,
-                        "size_bytes_archive": path.stat().st_size,
-                        "checksum_md5": hashlib.md5(path.read_bytes()).hexdigest(),
-                        "channel_descriptors_path": sidecar_rel.as_posix(),
-                        "channel_descriptors_rows": 1,
-                        "channel_descriptors_checksum": hashlib.md5(sidecar.read_bytes()).hexdigest(),
-                        "channel_descriptors_size_bytes": sidecar.stat().st_size,
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    writer = SQLiteWriter(data, channel_catalog=ChannelCatalog([_descriptor()]))
+    assert await writer.write_immediate([_reading("sensor.main", 4.2), _reading("sensor.rewired", 4.3)]) is True
+    await writer.stop()
 
-    hot = tmp_path / "data"
-    hot.mkdir()
-    result = ArchiveReader(hot, archive).query_reading_rows_bounded(
+    results = await asyncio.to_thread(
+        lambda: asyncio.run(
+            ColdRotationService(
+                data_dir=data,
+                archive_dir=archive,
+                age_days=30,
+                enabled=True,
+            ).run_once(now=TIMESTAMP + timedelta(days=40))
+        )
+    )
+    assert len(results) == 1, results
+    assert results[0].rows == 2, results[0].rows
+
+    # Read the ARCHIVE alone. Rotation keeps the hot file when the platform will not let it
+    # be deleted -- Windows holds the SQLite handle -- and this test is about what the cold
+    # path makes of a rotated row, not about which source wins an overlap.
+    cold_only = tmp_path / "no-hot-data"
+    cold_only.mkdir()
+    result = ArchiveReader(cold_only, archive).query_reading_rows_bounded(
         start=TIMESTAMP - timedelta(hours=1),
         end=TIMESTAMP + timedelta(hours=1),
         channels=None,
@@ -430,5 +414,172 @@ async def test_a_rotated_unbound_row_is_reported_too(tmp_path: Path) -> None:
         deadline_monotonic=time.monotonic() + 30.0,
     )
 
-    assert BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING in {issue.code for issue in result.issues}
-    assert result.complete is False
+    by_channel = {row.channel: row for row in result.rows}
+    assert set(by_channel) == {"sensor.main", "sensor.rewired"}, sorted(by_channel)
+    assert by_channel["sensor.main"].descriptor is not None
+    assert by_channel["sensor.rewired"].descriptor is None
+    # The day is intact. Before this was measured, one unbound row emptied the whole
+    # rotated day, because a source that reports a problem is quarantined WHOLE.
+    assert result.complete is True
+
+
+async def test_the_replay_layer_is_where_the_missing_identity_is_reported(tmp_path: Path) -> None:
+    """The last link, measured rather than assumed.
+
+    The archive keeps an unbound row and does not fail its source, because a failed source
+    is quarantined whole and that would cost the day. The report therefore has to happen
+    one layer up, and it does: DescriptorReplayReader withholds a reading with no
+    descriptor, reports DESCRIPTOR_HASH_MISSING, and marks the batch incomplete.
+
+    This is asserted against the production function, not against a description of it.
+    """
+
+    from cryodaq.storage.broker_replay import DescriptorReplayReader
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=ChannelCatalog([_descriptor()]))
+    assert await writer.write_immediate([_reading("sensor.main", 4.2), _reading("sensor.rewired", 4.3)]) is True
+    await writer.stop()
+
+    batch = DescriptorReplayReader._from_query_result(_read_bounded(tmp_path, tmp_path / "archive"))
+
+    assert [reading.channel_id for reading in batch.readings] == ["sensor.main"], (
+        "a reading with no descriptor identity must not be handed on as if it had one"
+    )
+    assert batch.complete is False
+    assert BoundedReadIssueCode.DESCRIPTOR_HASH_MISSING in {issue.code for issue in batch.issues}
+
+
+def test_the_reserved_identity_is_pinned_to_an_exact_value() -> None:
+    """Its hash is computed FROM ITS FIELDS, so a field change orphans every stored row.
+
+    Rows already on disk reference this exact hash. If someone edits the reserved entry's
+    display name, unit or source key, the hash moves, the rows keep pointing at the old
+    one, and the reader stops recognising them -- silently, because nothing else would go
+    red. A changed value here is a migration, not an edit, and this test is the place that
+    says so.
+    """
+
+    assert unbound_channel_descriptor().descriptor_hash == (
+        "sha256:6ab4987de2e4c8b78cabade3c7d7ae938eac2a74847e243fa2a5b3f4f9c48691"
+    ), (
+        "the reserved identity changed; rows written before this change reference the old "
+        "hash and will no longer be recognised as unbound"
+    )
+
+
+def test_the_reserved_entry_is_not_a_forged_legacy_descriptor() -> None:
+    """The catalog refuses synthetic legacy descriptors on purpose, and it is right to.
+
+    The first attempt built the reserved entry with LEGACY_UNKNOWN quantity, role and
+    safety class, and `ChannelCatalog` refused it: "synthetic legacy descriptors cannot
+    enter the authoritative catalog". That refusal is the guard working. The reserved entry
+    is a REAL catalog entry whose meaning is "this channel is not described", not an
+    imitation of a pre-catalog one, and this test keeps it that way.
+    """
+
+    from cryodaq.channels.descriptors import ChannelRole, ChannelSafetyClass
+
+    reserved = unbound_channel_descriptor()
+    assert reserved.role is not ChannelRole.LEGACY_UNKNOWN
+    assert reserved.safety_class is not ChannelSafetyClass.LEGACY_UNKNOWN
+    # And it is admissible to the authoritative catalog, which is the whole point.
+    assert reserved.channel_id in ChannelCatalog([_descriptor(), reserved]).by_channel_id
+
+
+# ===================================================================
+# THE PRODUCTION PATH. The shipped engine gives the writer a LIVE catalog, so the scheduler
+# takes write_committed and admission happens before any row is built. Everything above this
+# line exercises the legacy API, which no shipped engine reaches.
+# ===================================================================
+
+
+def _live(*descriptors):
+    from cryodaq.storage.channel_descriptors import LiveChannelDescriptorCatalog
+
+    return LiveChannelDescriptorCatalog(ChannelCatalog(list(descriptors) or [_descriptor()]))
+
+
+async def test_the_live_path_keeps_the_batch_when_one_channel_is_undescribed(
+    tmp_path: Path,
+) -> None:
+    """The measurement this whole change exists for, with its control beside it.
+
+    Measured 2026-08-21 before the fix: a batch of two readings, one on a channel the
+    catalog does not describe, raised at admission and left NO DATABASE FILE AT ALL. The
+    scheduler catches that, counts an error and publishes nothing -- so a laboratory loses
+    every reading of every channel, on every acquisition cycle, until somebody notices.
+    """
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=_live())
+    assert writer.descriptor_authoritative is True, "this test is worthless on the legacy path"
+
+    receipt = await writer.write_committed([_reading("sensor.main", 4.2), _reading("sensor.rewired", 4.3)])
+    assert receipt is not None
+    await writer.stop()
+
+    persisted = _rows(tmp_path)
+    assert [row[0] for row in persisted] == ["sensor.main", "sensor.rewired"]
+    assert persisted[0][2] == _descriptor().descriptor_hash
+    assert persisted[1][2] == unbound_channel_descriptor().descriptor_hash
+
+
+async def test_the_live_path_keeps_the_label_the_instrument_emitted(tmp_path: Path) -> None:
+    """A described reading adopts the canonical channel id; an undescribed one cannot.
+
+    For a described reading the canonical id replaces the emitted label, and that is what
+    makes the row, the receipt entry and the descriptor agree. A reading admitted against
+    the reserved entry has no canonical identity to adopt, so the emitted label is the only
+    thing left that says where the value came from -- and it is kept.
+    """
+
+    from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=_live())
+    assert await writer.write_committed([_reading("sensor.rewired", 4.3)]) is not None
+    await writer.stop()
+
+    persisted = _rows(tmp_path)
+    assert [row[0] for row in persisted] == ["sensor.rewired"]
+    assert persisted[0][0] != UNBOUND_CHANNEL_ID, "the row must not be relabelled as the reserved entry"
+
+
+async def test_the_live_path_still_refuses_a_disagreeing_instrument(tmp_path: Path) -> None:
+    """The boundary, held on the production path as well as the legacy one.
+
+    A channel the catalog DOES describe, arriving under another instrument, may not be the
+    quantity the descriptor names. Admitting it would put a wrong number under a real
+    identity, so the batch is still refused whole. Only "no description at all" changed.
+    """
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=_live())
+    disagreeing = Reading(
+        timestamp=TIMESTAMP,
+        instrument_id="a-different-instrument",
+        channel="sensor.main",
+        value=4.2,
+        unit="K",
+        status=ChannelStatus.OK,
+    )
+    with pytest.raises(ChannelDescriptorStorageError):
+        await writer.write_committed([_reading("sensor.main", 4.2), disagreeing])
+    await writer.stop()
+
+
+def test_the_reserved_entry_is_in_the_catalog_and_not_in_the_bindings() -> None:
+    """The distinction that made the manifest guards agree again.
+
+    The bindings are what the tracked manifest DECLARES -- which emitted label belongs to
+    which channel of which instrument. The reserved entry declares nothing; it exists so a
+    reading with no declaration has a real descriptor to reference, which the foreign key
+    requires. An earlier version put it in both, and the live catalog then claimed a channel
+    the manifest never declared.
+    """
+
+    from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
+
+    owner = _live()
+    assert UNBOUND_CHANNEL_ID in owner.storage_catalog_snapshot().by_channel_id
+    assert UNBOUND_CHANNEL_ID not in set(owner._bindings.values())
+    # And therefore it cannot pollute the instruments a configuration must name.
+    assert unbound_channel_descriptor().instrument_id not in owner.instrument_ids
+    owner.require_exact_instruments((INSTRUMENT,))
