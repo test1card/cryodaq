@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -981,6 +982,65 @@ _ASSISTANT_LOG_REFUSED_MARKER: Final = (
     "regular file. The measured process can write that directory, so a symbolic link "
     "there would have copied an unrelated file into this bundle.>\n"
 )
+_ASSISTANT_LOG_NOT_REGULAR_MARKER: Final = (
+    "<the assistant log was refused: the name under the isolated state root exists but is "
+    "not a regular file -- a directory, reparse point, device, or fifo holds it. Nothing "
+    "read is published, because reading it could copy bytes the isolated root never wrote.>\n"
+)
+_ASSISTANT_LOG_HARD_LINKED_MARKER: Final = (
+    "<the assistant log was refused: it is a regular file carrying more than one link "
+    "(st_nlink != 1), so its bytes may also live under a path outside this isolated root. "
+    "Nothing read is published.>\n"
+)
+_ASSISTANT_LOG_REPLACED_OR_UNREADABLE_MARKER: Final = (
+    "<the assistant log was refused: during the walk the leaf could neither be measured nor "
+    "opened without following links -- it was removed, replaced, or made unreadable between "
+    "enumeration and open. Nothing read is published.>\n"
+)
+_ASSISTANT_LOG_OPENED_BUT_UNREADABLE_MARKER: Final = (
+    "<the assistant log was refused: it opened as a lone regular file but could not be "
+    "read to the retention bound. Nothing read is published, because a partial stream "
+    "from a failing file is worse than an honest refusal.>\n"
+)
+_ASSISTANT_LOG_RECORD_SPANS_BOUNDARY_MARKER: Final = (
+    "<part of the assistant log was withheld: its retained tail began inside one record "
+    "with no line break anywhere inside the retained window, so publishing it could carry "
+    "the undetectable half of a credential whose identifying prefix was already gone. That "
+    "record was discarded whole rather than guessed at.>\n"
+)
+_ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER: Final = (
+    "<the assistant log was refused: the logs directory under the isolated state root could "
+    "not be opened and proven to be a plain, unlinked directory -- missing, linked, "
+    "replaced, or unreadable. Nothing is published, because nothing inside it can be "
+    "trusted on that platform.>\n"
+)
+
+
+class _AssistantLogLeafRefusal(StrEnum):
+    """The closed set of reasons a no-follow regular-file read refuses.
+
+    Every member names a condition somebody actually observed. A single untyped
+    ``None`` here once made the publisher claim ``symbolic link`` for hard links,
+    open failures, races, and I/O errors alike -- a marker asserting a topology
+    nobody saw.
+    """
+
+    SYMBOLIC_LINK = "symbolic-link"
+    NOT_REGULAR_FILE = "not-regular-file"
+    HARD_LINKED = "hard-linked"
+    REPLACED_OR_UNREADABLE = "replaced-or-unreadable"
+    OPENED_BUT_UNREADABLE = "opened-but-unreadable"
+    RECORD_SPANS_RETENTION_BOUNDARY = "record-spans-retention-boundary"
+
+
+_ASSISTANT_LOG_LEAF_REFUSAL_MARKERS: Final[dict[_AssistantLogLeafRefusal, str]] = {
+    _AssistantLogLeafRefusal.SYMBOLIC_LINK: _ASSISTANT_LOG_REFUSED_MARKER,
+    _AssistantLogLeafRefusal.NOT_REGULAR_FILE: _ASSISTANT_LOG_NOT_REGULAR_MARKER,
+    _AssistantLogLeafRefusal.HARD_LINKED: _ASSISTANT_LOG_HARD_LINKED_MARKER,
+    _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE: _ASSISTANT_LOG_REPLACED_OR_UNREADABLE_MARKER,
+    _AssistantLogLeafRefusal.OPENED_BUT_UNREADABLE: _ASSISTANT_LOG_OPENED_BUT_UNREADABLE_MARKER,
+    _AssistantLogLeafRefusal.RECORD_SPANS_RETENTION_BOUNDARY: _ASSISTANT_LOG_RECORD_SPANS_BOUNDARY_MARKER,
+}
 
 
 def _assistant_log_uses_pathname_traversal(*, platform: str | None = None) -> bool:
@@ -991,7 +1051,7 @@ def _assistant_log_uses_pathname_traversal(*, platform: str | None = None) -> bo
 
 def _read_regular_file_no_follow(
     directory_descriptor: int | None, path: Path | str, *, maximum_bytes: int
-) -> tuple[bytes, int] | None:
+) -> tuple[bytes, int] | _AssistantLogLeafRefusal:
     """Read a file the MEASURED PROCESS can replace, without following a link.
 
     The isolated state root is writable by the very process this bundle describes. If it
@@ -1001,7 +1061,17 @@ def _read_regular_file_no_follow(
     read -- the check is on the DESCRIPTOR, not on the path, because a path can change
     between the check and the open.
 
-    Returns the bounded tail and full descriptor size when safe; otherwise ``None``.
+    The returned tail is RECORD-ALIGNED: a bounded slice that begins mid-record would
+    carry text whose identifying context stayed behind, and `redact_text` cannot
+    recognize a credential whose keyword it never sees. One byte before the cutoff is
+    read so alignment can PROVE whether the slice starts at a record boundary; a record
+    with no line break inside the window is refused whole instead of guessed at.
+
+    Returns the aligned bounded tail and full descriptor size when safe. Otherwise it
+    returns exactly which closed condition refused: a symbolic link, a non-regular file,
+    a hard link, a leaf replaced or unreadable during the walk, a file that opened but
+    could not be read, or a record spanning the whole retention window. It never returns
+    ``None`` -- silence here would force the publisher to invent why nothing was read.
     """
 
     # TWO CHECKS, because neither is enough alone. `O_NOFOLLOW` does not exist on
@@ -1012,25 +1082,60 @@ def _read_regular_file_no_follow(
     try:
         link_info = os.lstat(path, dir_fd=directory_descriptor)
     except OSError:
-        return None
+        return _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE
+    if stat.S_ISLNK(link_info.st_mode):
+        return _AssistantLogLeafRefusal.SYMBOLIC_LINK
     if not stat.S_ISREG(link_info.st_mode):
-        return None
+        return _AssistantLogLeafRefusal.NOT_REGULAR_FILE
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
         descriptor = os.open(path, flags, dir_fd=directory_descriptor)
-    except OSError:
-        return None
+    except OSError as error:
+        # ELOOP is `O_NOFOLLOW` refusing a link that raced in after the lstat above: name
+        # the link it is rather than folding it into "replaced or unreadable".
+        if error.errno == errno.ELOOP:
+            return _AssistantLogLeafRefusal.SYMBOLIC_LINK
+        return _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            return None
+        if stat.S_ISLNK(info.st_mode):
+            return _AssistantLogLeafRefusal.SYMBOLIC_LINK
+        if not stat.S_ISREG(info.st_mode):
+            return _AssistantLogLeafRefusal.NOT_REGULAR_FILE
+        if info.st_nlink != 1:
+            return _AssistantLogLeafRefusal.HARD_LINKED
         size = info.st_size
+        if maximum_bytes <= 0:
+            os.close(descriptor)
+            descriptor = -1
+            return b"", size
+
+        # ONE byte of context BEFORE the cutoff decides everything: if the byte at
+        # `size - maximum_bytes - 1` is a newline, the slice already begins at a record
+        # boundary; otherwise it begins inside one and must be trimmed forward to the
+        # next one. Without that byte, alignment would silently drop a whole record.
+        window = maximum_bytes + 1 if size > maximum_bytes else maximum_bytes
         if size > maximum_bytes:
-            os.lseek(descriptor, size - maximum_bytes, os.SEEK_SET)
+            os.lseek(descriptor, size - window, os.SEEK_SET)
         with os.fdopen(descriptor, "rb", closefd=True) as handle:
             descriptor = -1
-            return handle.read(maximum_bytes), size
+            raw = handle.read(window)
+        if size > maximum_bytes:
+            if raw[:1] == b"\n":
+                raw = raw[1:]
+            else:
+                newline = raw.find(b"\n")
+                if newline < 0:
+                    # No record boundary exists inside the retained window. Any prefix of
+                    # this record carries text whose identifying context -- possibly the
+                    # keyword of a credential -- was already cut off upstream, and no
+                    # detector can recognize the remainder. Discard the whole record.
+                    return _AssistantLogLeafRefusal.RECORD_SPANS_RETENTION_BOUNDARY
+                raw = raw[newline + 1 :]
+        return raw, size
+    except OSError:
+        return _AssistantLogLeafRefusal.OPENED_BUT_UNREADABLE
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1124,8 +1229,10 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     the bundle a week-long run leaves behind never held it.
 
     The artifact is ALWAYS written, and says so when the log is absent or when the path
-    is not a regular file, because a missing file is indistinguishable from a publisher
-    that silently did nothing.
+    is not readable as a lone regular file -- naming WHICH closed condition refused,
+    because a marker asserting an unobserved topology diagnoses nothing. Each retained
+    per-file tail is record-aligned before redaction, so the redactor never meets a
+    credential whose identifying prefix was already cut off by the size bound.
     """
 
     from scripts.soak_mock_stack import redact_text
@@ -1136,7 +1243,7 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
 
     selected = _assistant_log_files(state_root)
     if selected is None:
-        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_REFUSED_MARKER)
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER)
         return
     directory_descriptor, paths = selected
 
@@ -1147,7 +1254,7 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     collected: deque[bytes] = deque()
     retained_bytes = 0
     source_bytes = 0
-    refused = False
+    refusals: list[_AssistantLogLeafRefusal] = []
     try:
         for path in reversed(paths):
             # A missing leaf is absent; every existing leaf must pass the no-follow read.
@@ -1155,8 +1262,9 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
                 continue
             remaining = max(_MAX_LAUNCHER_LOG_BYTES - retained_bytes, 0)
             result = _read_regular_file_no_follow(directory_descriptor, path, maximum_bytes=remaining)
-            if result is None:
-                refused = True
+            if isinstance(result, _AssistantLogLeafRefusal):
+                if result not in refusals:
+                    refusals.append(result)
                 continue
             raw, size = result
             source_bytes += size
@@ -1176,12 +1284,14 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     if not collected:
         evidence.write_log(
             _ASSISTANT_LOG_EVIDENCE_NAME,
-            _ASSISTANT_LOG_REFUSED_MARKER if refused else _ASSISTANT_LOG_ABSENT_MARKER,
+            "".join(_ASSISTANT_LOG_LEAF_REFUSAL_MARKERS[refusal] for refusal in refusals)
+            if refusals
+            else _ASSISTANT_LOG_ABSENT_MARKER,
         )
         return
 
     payload = redact_text(b"".join(collected).decode("utf-8", errors="replace")).encode("utf-8")
-    refusal_notice = _ASSISTANT_LOG_REFUSED_MARKER.encode("utf-8") if refused else b""
+    refusal_notice = "".join(_ASSISTANT_LOG_LEAF_REFUSAL_MARKERS[refusal] for refusal in refusals).encode("utf-8")
     encoded = refusal_notice + payload
     if source_bytes > _MAX_LAUNCHER_LOG_BYTES or len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
         # Keep the END, across the rotated files as one stream: the bound protects the

@@ -13,6 +13,7 @@ logger would have stayed green through exactly this failure.
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -469,17 +470,41 @@ def test_an_unreadable_regular_file_is_reported_as_opened_but_unreadable(
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "UNREADABLE BUT REAL" not in published
     assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published
-    assert "could not be read" in published
+    # Bound to the marker CONSTANT, not to a hand-typed phrase from it. A substring test
+    # here says the wording is right; equality says the right marker was chosen, which is
+    # the property -- and it cannot drift out of step with the production text the way the
+    # phrase "could not be read" already had.
+    assert published == runner._ASSISTANT_LOG_OPENED_BUT_UNREADABLE_MARKER
 
 
 @pytest.mark.parametrize(
     ("case", "record", "needle"),
     [
-        ("bearer", b"Authorization: Bearer bearervalue009Zx\n", b"bearervalue009Zx"),
-        ("query", b"GET https://api.example.test/v1?token=queryvalue010Zk&x=1\n", b"queryvalue010Zk"),
-        ("assignment-equals", b"password = equalvalue011Zq\n", b"equalvalue011Zq"),
-        ("assignment-colon", b"api_key: colonvalue012Zw\n", b"colonvalue012Zw"),
-        ("bot-token", b"Bot token 123456789:AAHbotvalue013Zp sent\n", b"AAHbotvalue013Zp"),
+        (
+            "bearer",
+            b"Authorization: Bearer " + b"k" * 70 + b"leakme017Ab\n",
+            b"leakme017Ab",
+        ),
+        (
+            "query",
+            b"GET https://api.example.test/v1?token=" + b"k" * 70 + b"leakme018Cd&x=1\n",
+            b"leakme018Cd",
+        ),
+        (
+            "assignment-equals",
+            b"password = " + b"k" * 70 + b"leakme019Eg\n",
+            b"leakme019Eg",
+        ),
+        (
+            "assignment-colon",
+            b"api_key: " + b"k" * 70 + b"leakme020Fj\n",
+            b"leakme020Fj",
+        ),
+        (
+            "bot-token",
+            b"Bot token 123456789:AAH" + b"B" * 70 + b"leakme021Gk sent\n",
+            b"leakme021Gk",
+        ),
     ],
 )
 def test_a_tail_cutoff_inside_a_secret_cannot_publish_the_unidentifiable_half(
@@ -497,8 +522,12 @@ def test_a_tail_cutoff_inside_a_secret_cannot_publish_the_unidentifiable_half(
     del case  # only the record shape matters here
     bound = 2048
     monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", bound)
+    # The cutoff lands 70 bytes before the needle -- deep inside the value, far past the
+    # identifying prefix AND past the truncation marker's own re-trim of the slice front.
+    cutoff_gap = 70
+    suffix_kept = 1 + len(needle) + cutoff_gap  # newline + needle + the gap the leak needs
     (state_root / "logs" / "assistant.log").write_bytes(
-        _log_cut_inside_last_bytes(record, suffix_kept=len(needle), bound=bound)
+        _log_cut_inside_last_bytes(record, suffix_kept=suffix_kept, bound=bound)
     )
 
     evidence = _Evidence()
@@ -520,16 +549,16 @@ def test_a_rotated_file_cutoff_is_aligned_too(state_root: Path, monkeypatch: pyt
     monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", bound)
     active = b"NEWEST-ACTIVE\n"
     (state_root / "logs" / "assistant.log").write_bytes(active)
-    record = b"Authorization: Bearer rotatedvalue014Zn\n"
+    record = b"Authorization: Bearer " + b"k" * 70 + b"rotatedleak022Zm\n"
     (state_root / "logs" / "assistant.log.2026-08-14").write_bytes(
-        _log_cut_inside_last_bytes(record, suffix_kept=len(b"rotatedvalue014Zn"), bound=bound - len(active))
+        _log_cut_inside_last_bytes(record, suffix_kept=1 + len(b"rotatedleak022Zm") + 70, bound=bound - len(active))
     )
 
     evidence = _Evidence()
     runner._publish_assistant_log(evidence, state_root)
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
-    assert "rotatedvalue014Zn" not in published
+    assert "rotatedleak022Zm" not in published
     assert "NEWEST-ACTIVE" in published
     assert "END-MARKER" in published
 
@@ -561,13 +590,17 @@ def test_the_full_production_bound_also_aligns_before_redaction(state_root: Path
 
     bound = runner._MAX_LAUNCHER_LOG_BYTES
     (state_root / "logs" / "assistant.log").write_bytes(
-        _log_cut_inside_last_bytes(b"Authorization: Bearer fullsizevalue015Zh\n", suffix_kept=10, bound=bound)
+        _log_cut_inside_last_bytes(
+            b"Authorization: Bearer " + b"k" * 70 + b"fullsizeleak023Zn\n",
+            suffix_kept=1 + len(b"fullsizeleak023Zn") + 70,
+            bound=bound,
+        )
     )
 
     evidence = _Evidence()
     runner._publish_assistant_log(evidence, state_root)
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
-    assert "fullsizevalue015Zh" not in published
+    assert "fullsizeleak023Zn" not in published
     assert "END-MARKER" in published
     assert len(published.encode("utf-8")) <= bound
