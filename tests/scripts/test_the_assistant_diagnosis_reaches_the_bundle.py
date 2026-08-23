@@ -174,9 +174,11 @@ def test_rotated_log_reads_never_exceed_the_global_retained_tail(
     """Drive the publisher over two rotated files, observing its real descriptor reads."""
 
     logs = state_root / "logs"
-    (logs / "assistant.log.2026-08-14").write_bytes(b"OLDEST-" + b"x" * runner._MAX_LAUNCHER_LOG_BYTES)
+    oldest_line = b"OLDEST-" + b"x" * 100 + b"\n"
+    (logs / "assistant.log.2026-08-14").write_bytes(oldest_line * (runner._MAX_LAUNCHER_LOG_BYTES // len(oldest_line)))
+    newest_line = b"y" * 100 + b"\n"
     (logs / "assistant.log").write_bytes(
-        b"NEWEST-" + b"y" * runner._MAX_LAUNCHER_LOG_BYTES + b"NEWEST-ACTIVE-CONTENT\n"
+        newest_line * (runner._MAX_LAUNCHER_LOG_BYTES // len(newest_line)) + b"NEWEST-ACTIVE-CONTENT\n"
     )
     original = runner._read_regular_file_no_follow
     requested: list[int] = []
@@ -197,23 +199,33 @@ def test_rotated_log_reads_never_exceed_the_global_retained_tail(
 
 
 def test_a_refusal_notice_survives_active_log_truncation(state_root: Path, tmp_path: Path) -> None:
-    """A bounded payload must retain the warning that another enumerated log was refused."""
+    """A bounded payload must retain the warning that another enumerated log was refused.
+
+    The active filler is line-based, like a real assistant log, because a tail that
+    begins inside a record is discarded whole rather than published half-identified.
+    """
 
     import os
 
     secret = tmp_path / "not-for-the-bundle.txt"
     secret.write_bytes(b"HARD-LINKED SECRET\n")
     os.link(secret, state_root / "logs" / "assistant.log.2026-08-14")
-    (state_root / "logs" / "assistant.log").write_bytes(b"x" * runner._MAX_LAUNCHER_LOG_BYTES + b"ACTIVE LOG END\n")
+    filler = b"x" * 100 + b"\n"
+    (state_root / "logs" / "assistant.log").write_bytes(
+        filler * (runner._MAX_LAUNCHER_LOG_BYTES // len(filler)) + b"ACTIVE LOG END\n"
+    )
     evidence = _Evidence()
 
     runner._publish_assistant_log(evidence, state_root)
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
-    assert runner._ASSISTANT_LOG_REFUSED_MARKER in published
+    assert "HARD-LINKED SECRET" not in published
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published, (
+        "the hard link must be named by its own truthful reason, not the symlink text"
+    )
+    assert "st_nlink != 1" in published
     assert runner._TRUNCATED_LAUNCHER_LOG_MARKER.decode("utf-8") in published
     assert "ACTIVE LOG END" in published
-    assert "HARD-LINKED SECRET" not in published
 
 
 def test_a_symbolic_link_is_refused_rather_than_followed(state_root: Path, tmp_path: Path) -> None:
@@ -257,7 +269,10 @@ def test_a_hard_link_is_refused_rather_than_copied(state_root: Path, tmp_path: P
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "HARD-LINKED SECRET" not in published
-    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published, (
+        "a hard link is not a symbolic link; the generic symlink text would claim a condition nobody observed"
+    )
+    assert "st_nlink != 1" in published, "the refusal must name the hard-linked reason it actually hit"
 
 
 def test_a_linked_logs_directory_is_refused_rather_than_traversed(state_root: Path, tmp_path: Path) -> None:
@@ -280,7 +295,10 @@ def test_a_linked_logs_directory_is_refused_rather_than_traversed(state_root: Pa
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "OUTSIDE THE ISOLATED ROOT" not in published
-    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published, (
+        "the logs DIRECTORY was refused, not a log leaf; the symlink-leaf text would misname it"
+    )
+    assert "logs directory" in published
 
 
 def test_directory_open_failure_is_refused_without_pathname_fallback(
@@ -303,7 +321,8 @@ def test_directory_open_failure_is_refused_without_pathname_fallback(
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "MUST NOT BE READ AFTER OPEN FAILURE" not in published
-    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published, "an open failure is not an observed symbolic link"
+    assert "logs directory" in published
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
@@ -325,7 +344,8 @@ def test_a_junction_logs_directory_is_refused_rather_than_traversed(state_root: 
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "OUTSIDE THE ISOLATED ROOT THROUGH JUNCTION" not in published
-    assert published == runner._ASSISTANT_LOG_REFUSED_MARKER
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published
+    assert "logs directory" in published
 
 
 def test_pathname_log_traversal_selection_is_patchable_without_changing_os() -> None:
@@ -376,3 +396,178 @@ def test_an_unchanged_logs_directory_still_publishes(monkeypatch, tmp_path) -> N
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "lost authority" in published
     assert published != runner._ASSISTANT_LOG_REPLACED_MARKER
+
+
+def _log_cut_inside_last_bytes(record: bytes, *, suffix_kept: int, bound: int) -> bytes:
+    """A log whose retained-tail cutoff lands exactly ``suffix_kept`` bytes before the
+    record's end -- so the identifying prefix of any secret inside it is DISCARDED by the
+    bounded read before the redactor ever sees the bytes.
+
+    ``bound`` must be the publisher's byte budget for THIS file's read.
+    """
+
+    end = b"\nEND-MARKER\n"
+    padding = bound - suffix_kept - len(end)
+    assert padding >= 0, "bound too small for the requested split"
+    return b"f" * 64 + record + b"a" * padding + end
+
+
+def test_a_directory_holding_the_leaf_name_is_refused_as_not_regular(state_root: Path) -> None:
+    """A non-regular LEAF is its own condition and must not wear the symlink wording."""
+
+    (state_root / "logs" / "assistant.log").mkdir()
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published, (
+        "nothing observed here was a symbolic link; that text claims a condition nobody saw"
+    )
+    assert "directory, reparse point, device, or fifo" in published
+
+
+def test_a_leaf_that_vanishes_mid_walk_is_named_as_replaced_or_unreadable(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A topology race between existence and open is not an observed symbolic link."""
+
+    (state_root / "logs" / "assistant.log").write_bytes(b"GONE BEFORE THE OPEN\n")
+    real_open = os.open
+
+    def race_leaf_open(path: object, flags: int, **kwargs: object) -> int:
+        if str(path).endswith("assistant.log"):
+            raise OSError(errno.ENOENT, "raced away between lstat and open", str(path))
+        return real_open(path, flags, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner.os, "open", race_leaf_open)
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "GONE BEFORE THE OPEN" not in published
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published
+    assert "removed, replaced, or made unreadable" in published
+
+
+def test_an_unreadable_regular_file_is_reported_as_opened_but_unreadable(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An I/O failure AFTER a clean open is yet another truth, not the symlink text."""
+
+    (state_root / "logs" / "assistant.log").write_bytes(b"UNREADABLE BUT REAL\n")
+
+    def explode_fdopen(*_args: object, **_kwargs: object) -> int:
+        raise OSError("simulated read failure after open")
+
+    monkeypatch.setattr(runner.os, "fdopen", explode_fdopen)
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "UNREADABLE BUT REAL" not in published
+    assert runner._ASSISTANT_LOG_REFUSED_MARKER not in published
+    assert "could not be read" in published
+
+
+@pytest.mark.parametrize(
+    ("case", "record", "needle"),
+    [
+        ("bearer", b"Authorization: Bearer bearervalue009Zx\n", b"bearervalue009Zx"),
+        ("query", b"GET https://api.example.test/v1?token=queryvalue010Zk&x=1\n", b"queryvalue010Zk"),
+        ("assignment-equals", b"password = equalvalue011Zq\n", b"equalvalue011Zq"),
+        ("assignment-colon", b"api_key: colonvalue012Zw\n", b"colonvalue012Zw"),
+        ("bot-token", b"Bot token 123456789:AAHbotvalue013Zp sent\n", b"AAHbotvalue013Zp"),
+    ],
+)
+def test_a_tail_cutoff_inside_a_secret_cannot_publish_the_unidentifiable_half(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch, case: str, record: bytes, needle: bytes
+) -> None:
+    """The bounded read must never start mid-record.
+
+    The redactor can only recognize a secret whose identifying prefix it sees. A tail
+    slice beginning inside ``Authorization: Bearer ...`` leaves the bare credential in
+    the bundle while every detector stays green, because the keyword went over the
+    cutoff. So each truncated read is aligned to the next record boundary first, and a
+    record too long to align within the budget is discarded whole instead of guessed.
+    """
+
+    del case  # only the record shape matters here
+    bound = 2048
+    monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", bound)
+    (state_root / "logs" / "assistant.log").write_bytes(
+        _log_cut_inside_last_bytes(record, suffix_kept=len(needle), bound=bound)
+    )
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert needle.decode("ascii") not in published, (
+        "a secret suffix whose prefix was cut off sailed past the redactor into the bundle"
+    )
+    assert "END-MARKER" in published, "complete records after the cutoff must still be retained"
+    assert len(published.encode("utf-8")) <= bound
+    assert published.startswith(runner._TRUNCATED_LAUNCHER_LOG_MARKER.decode("utf-8"))
+
+
+def test_a_rotated_file_cutoff_is_aligned_too(state_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every per-file read boundary gets the same alignment, not just the active one."""
+
+    bound = 2048
+    monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", bound)
+    active = b"NEWEST-ACTIVE\n"
+    (state_root / "logs" / "assistant.log").write_bytes(active)
+    record = b"Authorization: Bearer rotatedvalue014Zn\n"
+    (state_root / "logs" / "assistant.log.2026-08-14").write_bytes(
+        _log_cut_inside_last_bytes(record, suffix_kept=len(b"rotatedvalue014Zn"), bound=bound - len(active))
+    )
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "rotatedvalue014Zn" not in published
+    assert "NEWEST-ACTIVE" in published
+    assert "END-MARKER" in published
+
+
+def test_a_record_longer_than_the_budget_is_discarded_whole_and_said(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When alignment cannot prove where the safe boundary is, nothing is guessed.
+
+    A tail with no line break anywhere inside it could carry the undetectable half of a
+    credential, so it is withheld -- audibly, not silently.
+    """
+
+    bound = 512
+    monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", bound)
+    (state_root / "logs" / "assistant.log").write_bytes(b"x" * 600)
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "xxxx" not in published, "an unalignable record must not ship half-cut"
+    assert "no line break" in published
+    assert published != runner._ASSISTANT_LOG_ABSENT_MARKER, "the log existed; absent would be a lie"
+
+
+def test_the_full_production_bound_also_aligns_before_redaction(state_root: Path) -> None:
+    """The same geometry at the REAL 8 MiB production bound, not a shrunk stand-in."""
+
+    bound = runner._MAX_LAUNCHER_LOG_BYTES
+    (state_root / "logs" / "assistant.log").write_bytes(
+        _log_cut_inside_last_bytes(b"Authorization: Bearer fullsizevalue015Zh\n", suffix_kept=10, bound=bound)
+    )
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "fullsizevalue015Zh" not in published
+    assert "END-MARKER" in published
+    assert len(published.encode("utf-8")) <= bound
