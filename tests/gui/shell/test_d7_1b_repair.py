@@ -550,7 +550,7 @@ def test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held
 
 
 def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown() -> None:
-    """A live shutdown worker owns the bridge until its next health-tick poll settles it."""
+    """A live shutdown worker owns the bridge until its scheduled settlement poll."""
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
@@ -561,7 +561,10 @@ def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
     launcher._data_timer = MagicMock()
     launcher._health_timer = MagicMock()
 
-    with patch("cryodaq.launcher.time.monotonic", return_value=10.0):
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
         deferred = LauncherWindow._recover_failed_engine_restart(
             launcher,
             phase="readiness",
@@ -575,13 +578,14 @@ def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
     assert launcher._engine_shutdown_worker is worker
     launcher._bridge.shutdown.assert_not_called()
     assert launcher._restart_giving_up is False
+    assert settlement_shot.call_args.args[0] == 200
 
     worker._finished = True
     with (
         patch("cryodaq.launcher.time.monotonic", return_value=11.0),
         patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
     ):
-        LauncherWindow._handle_engine_exit(launcher)
+        settlement_shot.call_args.args[1]()
 
     assert launcher._engine_shutdown_worker is None
     assert launcher._restart_attempts == 1

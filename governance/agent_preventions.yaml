@@ -4249,6 +4249,8 @@ records:
         ci_partition: gui
       - node: tests/gui/shell/test_d7_1b_repair.py::test_a_still_running_shutdown_worker_keeps_its_owner_and_holds
         ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
+        ci_partition: gui
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending
   - id: LAUNCHER-STARTUP-AUTHORITY-002

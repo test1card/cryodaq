@@ -3966,10 +3966,24 @@ class LauncherWindow(QMainWindow):
                 phase=phase,
             )
             if not settled:
-                # The retained worker is still executing its shutdown command on this
-                # bridge. Leave both intact; the next health tick re-enters the observed
-                # exit path and retires the owner only after the worker finishes.
+                # The retained worker is still executing its shutdown command on this bridge.
+                # Leave both intact and schedule a later settlement pass; manual restart has
+                # already stopped the health timer.
                 if getattr(self, "_engine_shutdown_worker", None) is not None:
+
+                    def _retry_replacement_settlement() -> None:
+                        if not LauncherWindow._runtime_callback_is_current(self):
+                            return
+                        LauncherWindow._recover_failed_engine_restart(
+                            self,
+                            phase=phase,
+                            failure=failure,
+                            child_start_attempted=child_start_attempted,
+                            settle_bridge=settle_bridge,
+                            raise_on_hold=raise_on_hold,
+                        )
+
+                    QTimer.singleShot(_ENGINE_SHUTDOWN_WORKER_GRACE_MS, _retry_replacement_settlement)
                     return False
                 settlement_errors["engine_child"] = settlement_error or RuntimeError(
                     "replacement engine child did not settle"
