@@ -786,7 +786,10 @@ class SequencedPeriodicLiveSources:
 
     @staticmethod
     def _call(callback: Callable[[Any], object], value: object) -> None:
-        result = callback(value)
+        try:
+            result = callback(value)
+        except Exception as exc:
+            raise _FrameRejected("a periodic live callback failed", "periodic callback failed") from exc
         if inspect.isawaitable(result):
             close = getattr(result, "close", None)
             if callable(close):

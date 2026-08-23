@@ -312,8 +312,13 @@ def test_directory_open_failure_is_refused_without_pathname_fallback(
     def refuse_directory_access(*_args: object, **_kwargs: object) -> int:
         raise OSError("simulated directory-open failure")
 
+    # Patch what production CALLS. The enumeration moved from `os.listdir` to
+    # `os.scandir` in this change, and this guard kept patching `listdir`: it intercepted
+    # nothing, the enumeration succeeded, and the log content was published even though
+    # the test believed it had simulated a directory-open failure. A guard that cannot
+    # reach the production call proves nothing.
     if os.name == "nt":
-        monkeypatch.setattr(runner.os, "listdir", refuse_directory_access)
+        monkeypatch.setattr(runner.os, "scandir", refuse_directory_access)
     else:
         monkeypatch.setattr(runner.os, "open", refuse_directory_access)
     evidence = _Evidence()
@@ -604,3 +609,44 @@ def test_the_full_production_bound_also_aligns_before_redaction(state_root: Path
     assert "fullsizeleak023Zn" not in published
     assert "END-MARKER" in published
     assert len(published.encode("utf-8")) <= bound
+
+
+def test_rotated_log_enumeration_streams_exact_dated_names_only(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child-created lookalike must not displace a genuine dated rotation."""
+
+    logs = state_root / "logs"
+    (logs / "assistant.log.2026-08-14").write_bytes(b"DATED BACKUP\n")
+    (logs / "assistant.log.zzzz").write_bytes(b"LOOKALIKE MUST NOT PUBLISH\n")
+    (logs / "assistant.log.2026-8-14").write_bytes(b"NONCANONICAL MUST NOT PUBLISH\n")
+    (logs / "assistant.log").write_bytes(b"ACTIVE\n")
+
+    def listdir_must_not_run(*_args: object, **_kwargs: object) -> list[str]:
+        raise AssertionError("rotated-log enumeration must stream with scandir")
+
+    monkeypatch.setattr(runner.os, "listdir", listdir_must_not_run)
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "DATED BACKUP" in published
+    assert "ACTIVE" in published
+    assert "LOOKALIKE MUST NOT PUBLISH" not in published
+    assert "NONCANONICAL MUST NOT PUBLISH" not in published
+
+
+def test_too_many_rotated_logs_refuse_the_child_writable_directory(state_root: Path) -> None:
+    """More rotations than the configured handler retains are not safe to enumerate."""
+
+    logs = state_root / "logs"
+    for day in range(1, runner._ASSISTANT_LOG_BACKUP_COUNT + 2):
+        (logs / f"assistant.log.2026-08-{day:02d}").write_bytes(b"MUST NOT PUBLISH\n")
+    (logs / "assistant.log").write_bytes(b"ACTIVE MUST NOT PUBLISH\n")
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert published == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER

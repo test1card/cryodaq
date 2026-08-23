@@ -372,3 +372,45 @@ def test_an_event_sequence_gap_names_the_global_stream_in_the_receive_loop() -> 
 
     assert "global stream sequence has a gap" in source._invalidation_reason
     assert "reading sequence" not in source._invalidation_reason
+
+
+@pytest.mark.parametrize("callback_error", [OSError("callback socket error"), ValueError("callback value error")])
+def test_a_callback_failure_is_not_mislabeled_as_a_frame_or_transport_failure(
+    callback_error: Exception,
+) -> None:
+    """A valid event through the receive loop must identify the subscriber callback."""
+
+    source = _fresh()
+    source._session_id = "0" * 32
+    source._last_sequence = 1
+    source._state_lock = asyncio.Lock()
+
+    def callback(_event: object) -> None:
+        raise callback_error
+
+    class _Socket:
+        async def recv_multipart(self):
+            return [
+                periodic_runtime.EVENTS_TOPIC,
+                json.dumps(
+                    {
+                        "event_type": "notice",
+                        "ts": 1.0,
+                        "payload": {},
+                        "experiment_id": None,
+                        "transport": {
+                            "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                            "session_id": "0" * 32,
+                            "sequence": 2,
+                            "persistence_authoritative": False,
+                        },
+                    }
+                ).encode(),
+            ]
+
+    source._on_event = callback
+    source._socket = _Socket()
+    asyncio.run(_SOURCE._receive_loop(source))
+
+    assert "a periodic live callback failed" in source._invalidation_reason
+    assert "subscriber transport failed" not in source._invalidation_reason

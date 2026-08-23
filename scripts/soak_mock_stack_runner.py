@@ -133,6 +133,8 @@ _SHORT_SOAK_THIRD_REPORT_FLOOR_S: Final = 1050
 _MAX_RECEIPT_LEDGER_BYTES: Final = 8 * 1024 * 1024
 _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 _MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
+_ASSISTANT_LOG_BACKUP_COUNT: Final = 14
+_ASSISTANT_LOG_ROTATION_RE: Final = re.compile(r"assistant\.log\.\d{4}-\d{2}-\d{2}\Z")
 _MAX_SOURCE_FIXTURE_FILE_BYTES: Final = 4 * 1024 * 1024
 _TRUNCATED_LAUNCHER_LOG_MARKER: Final = b"[launcher log truncated; bounded tail follows]\n"
 _LOCKED_PSUTIL_VERSION: Final = "7.2.2"
@@ -1171,6 +1173,20 @@ def _directory_identity(directory: Path) -> tuple[int, int] | None:
     return (info.st_dev, info.st_ino)
 
 
+def _rotated_assistant_log_names(directory: Path | int) -> list[str] | None:
+    """Return the bounded set of exact dated assistant-log rotations, oldest first."""
+
+    rotated: list[str] = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if _ASSISTANT_LOG_ROTATION_RE.fullmatch(entry.name) is None:
+                continue
+            rotated.append(entry.name)
+            if len(rotated) > _ASSISTANT_LOG_BACKUP_COUNT:
+                return None
+    return sorted(rotated)
+
+
 def _assistant_log_files(state_root: Path) -> tuple[int | None, list[Path | str]] | None:
     """The active log and every rotated backup, oldest first.
 
@@ -1192,7 +1208,9 @@ def _assistant_log_files(state_root: Path) -> tuple[int | None, list[Path | str]
             # The window this leaves open -- the directory replaced between here and the
             # leaf reads -- cannot be closed on this platform, so the publisher proves
             # afterwards that the directory did not change, and refuses if it did.
-            rotated = sorted(name for name in os.listdir(directory) if name.startswith("assistant.log."))
+            rotated = _rotated_assistant_log_names(directory)
+            if rotated is None:
+                return None
             return None, [*(directory / name for name in rotated), directory / active]
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         directory_descriptor = os.open(directory, directory_flags)
@@ -1207,7 +1225,9 @@ def _assistant_log_files(state_root: Path) -> tuple[int | None, list[Path | str]
             (opened_info.st_dev, opened_info.st_ino) != (directory_info.st_dev, directory_info.st_ino)
         ):
             return None
-        rotated = sorted(name for name in os.listdir(directory_descriptor) if name.startswith("assistant.log."))
+        rotated = _rotated_assistant_log_names(directory_descriptor)
+        if rotated is None:
+            return None
     except OSError:
         return None
     else:
