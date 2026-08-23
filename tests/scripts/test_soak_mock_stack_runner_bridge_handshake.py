@@ -205,6 +205,7 @@ def test_a_turnover_is_accepted_only_when_it_continues_the_accepted_epoch() -> N
         {"restart_count": 1},  # a repeat
         {"retired_restart_count": 2},  # retires a count that was never accepted
         {"retired_bridge_pid": 999},  # retires a bridge that was never accepted
+        {"launcher_pid": 100.0},  # numeric equality is not canonical identity evidence
         {"bridge_pid": 100},  # the launcher itself
         {"bridge_pid": -1},
         {"bridge_pid": True},
@@ -398,6 +399,15 @@ class _ObservingLauncher:
         self.signals.append((identity, signal_number))
 
 
+class _RecycledPidObserver(_ObservingLauncher):
+    """The faulted PID still resolves, but names a different process than authorized."""
+
+    def identity_for_pid(self, pid):
+        if pid == self.old_engine.pid:
+            return runner._ProcessIdentity(pid, "linux:start=999")
+        return super().identity_for_pid(pid)
+
+
 def _snapshots_for(roles):
     from scripts import soak_mock_stack as soak
 
@@ -494,14 +504,24 @@ def test_recovery_loop_refuses_an_engine_replacement_that_has_not_emitted_data(m
     assert "faults.jsonl" not in harness.rows, "no fault evidence may exist for a run that never recovered"
 
 
-def test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_records_it() -> None:
+def test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_records_it(monkeypatch) -> None:
     """Turnover then DATA from the new bridge: acceptance, epoch bookkeeping, evidence.
 
     This executes the recovery-loop call sites themselves: the drain folds the turnover
     (advancing the bridge epoch) and the first replacement reading, the decision predicate
     passes only then, and the written fault record carries the live predicate's verdict.
+
+    The clock is scripted because this boundary writes TIME into sealed evidence:
+    observed_s comes from the outer loop's elapsed while recovery_s is measured against
+    a real monotonic clock, so a fixture that mixes `elapsed=12.5` with a live
+    `time.monotonic()` start fabricates negative recoveries and unbracketed samples --
+    impossible rows a sealing validator must reject. Start 100.0, observed 12.5,
+    recovered at elapsed 112.75 keeps every written number mutually consistent.
     """
 
+    clock_values = iter((100.0, 100.1, 100.2))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock_values, 212.75))
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
     soak, roles_old, roles_replaced = _role_world()
     observer = _ObservingLauncher()
     harness = _RecoveryHarness(
@@ -524,7 +544,7 @@ def test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_
         elapsed=12.5,
         current=dict(roles_old),
         last_health=7.0,
-        start=time.monotonic(),
+        start=100.0,
         next_sample=20.0,
         data_dir=Path("unused"),
         evidence=harness,
@@ -542,6 +562,9 @@ def test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_
         bridge_sequence=2,
     )
 
+    assert observer.signals == [(runner._ProcessIdentity(301, "linux:start=3"), signal.SIGTERM)], (
+        "the fault is signaled exactly once, as the exact authorized pid+start identity"
+    )
     assert epochs == {"launcher": 0, "engine": 1, "bridge": 1, "assistant": 0}
     assert outcome.current["engine"] == soak.ProcessIdentity(302, 4)
     assert outcome.bridge_epoch.identity == runner._ProcessIdentity(202, "linux:start=2")
@@ -556,7 +579,20 @@ def test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_
     (record,) = harness.rows["faults.jsonl"]
     assert record["target"] == "engine"
     assert record["observed_s"] == 12.5, "observed_s is the outer loop's elapsed at signal time"
-    assert (record["pre_pid"], record["recheck_pid"], record["replacement_pid"]) == (301, 301, 302)
+    assert sample["elapsed_s"] == pytest.approx(112.75) and sample["elapsed_s"] > record["observed_s"], (
+        "the recovery sample postdates the fault it brackets"
+    )
+    assert record["recovery_s"] == pytest.approx(sample["elapsed_s"] - record["observed_s"]), (
+        "recovery_s is the consistent difference of the two written times"
+    )
+    assert record["recovery_s"] >= 0, "recovery_s is never negative"
+    assert (record["pre_pid"], record["pre_started_ns"], record["recheck_pid"], record["recheck_started_ns"]) == (
+        301,
+        3,
+        301,
+        3,
+    ), "the recheck serializes the freshly observed identity of the signaled process"
+    assert (record["replacement_pid"], record["replacement_started_ns"]) == (302, 4)
     assert record["ready"] is True
     assert record["bridge_data_resumed"] is True
     assert record["newer_h3_health"] is True, "an engine fault makes no health claim, so the field short-circuits"
@@ -565,6 +601,62 @@ def test_recovery_loop_accepts_the_engine_only_after_replacement_epoch_data_and_
     assert runner._bridge_data_resumed_in_current_epoch(outcome.bridge_epoch, after_sequence=2), (
         "the recorded verdict equals the live predicate over the returned epoch"
     )
+
+
+def test_recovery_refuses_to_signal_a_recycled_engine_pid_and_records_nothing(monkeypatch) -> None:
+    """A PID that resolves to a new process is not the authorized target.
+
+    Between the last accepted sample and the fault event the engine can die and Linux
+    can hand its PID to an unrelated process. Resolving the target by PID alone would
+    faithfully signal that stranger and then write recheck evidence copied from the
+    authorization, sealing a lie about which process was inspected and terminated.
+    The runner must resolve the fresh full identity, refuse on any mismatch with the
+    authorized (pid, started_ns) BEFORE signaling or writing any row, and signal only
+    the identity it actually rechecked.
+    """
+
+    clock_values = iter((100.0, 100.1, 100.2))
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(clock_values, 212.75))
+    monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+    soak, roles_old, roles_replaced = _role_world()
+    observer = _RecycledPidObserver()
+    harness = _RecoveryHarness(
+        stream=[
+            _encode(_turnover_record(sequence=3)),
+            _encode(_data_record(bridge_pid=202, restart_count=2, sequence=4)),
+        ],
+        load_results=[(roles_replaced, _snapshots_for(roles_replaced))],
+    )
+    guard = runner._BridgeEpochGuard(runner._ProcessIdentity(101, "linux:start=1"), 1)
+    start_epoch = runner._BridgeEpoch(101, 1, 2, runner._ProcessIdentity(101, "linux:start=1"), 2, None)
+
+    with pytest.raises(runner._RunnerFoundationError, match="authorized"):
+        runner._PosixSoakRunner._fault_recovery(
+            harness,
+            event=soak.FaultEvent(target="engine", at_s=5.0),
+            elapsed=12.5,
+            current=dict(roles_old),
+            last_health=7.0,
+            start=100.0,
+            next_sample=20.0,
+            data_dir=Path("unused"),
+            evidence=harness,
+            pipe=None,
+            retained=harness.retained,
+            nonce="a" * 64,
+            launcher_pid=100,
+            locked=observer,
+            guard=guard,
+            broad=None,
+            launcher=soak.ProcessIdentity(100, 9),
+            bridge=soak.ProcessIdentity(101, 1),
+            epochs={"launcher": 0, "engine": 0, "bridge": 0, "assistant": 0},
+            bridge_epoch=start_epoch,
+            bridge_sequence=2,
+        )
+
+    assert observer.signals == [], "a recycled PID must never be signaled"
+    assert harness.rows == {}, "no sample or fault row may exist for a refused injection"
 
 
 def test_an_assistant_recovery_records_resumed_data_truth_without_bridge_traffic() -> None:

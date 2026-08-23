@@ -2866,6 +2866,7 @@ def _parse_bridge_turnover(
         type(value["version"]) is not int
         or value["version"] != _BRIDGE_HANDSHAKE_VERSION
         or value["nonce"] != expected_nonce
+        or type(value["launcher_pid"]) is not int
         or value["launcher_pid"] != expected_launcher_pid
         or isinstance(value["retired_bridge_pid"], bool)
         or type(value["retired_bridge_pid"]) is not int
@@ -3983,7 +3984,22 @@ class _PosixSoakRunner:
         from scripts import soak_mock_stack as soak
 
         old = current[event.target]
+        # The authorization is the identity from the last accepted sample, not
+        # the PID. Resolving by PID alone would faithfully signal whichever
+        # process owns it NOW -- Linux recycles PIDs between the sample and
+        # this fault event -- so the freshly observed full identity must equal
+        # the authorized one before anything is signaled or recorded, and the
+        # recheck evidence below serializes that fresh observation, never the
+        # prior authorization. signal_exact rechecks the same identity once
+        # more against the OS at delivery time.
         expected = locked.identity_for_pid(old.pid)
+        rechecked = _role_identity_of(expected)
+        if rechecked != old:
+            raise _RunnerFoundationError(
+                f"faulted {event.target} PID {old.pid} no longer carries the authorized "
+                f"start identity: authorized start {old.started_ns}, observed "
+                f"{rechecked.started_ns}; refusing to signal an unauthorized process"
+            )
         locked.signal_exact(expected, signal.SIGTERM)
         recovery_start = elapsed
         prior_bridge_sequence = bridge_sequence
@@ -4068,8 +4084,8 @@ class _PosixSoakRunner:
                 "observed_s": recovery_start,
                 "pre_pid": old.pid,
                 "pre_started_ns": old.started_ns,
-                "recheck_pid": expected.pid,
-                "recheck_started_ns": old.started_ns,
+                "recheck_pid": rechecked.pid,
+                "recheck_started_ns": rechecked.started_ns,
                 "replacement_pid": replacement.pid,
                 "replacement_started_ns": replacement.started_ns,
                 "ready": True,
