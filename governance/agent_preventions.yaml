@@ -3435,6 +3435,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_97f8e7e14a54e9e74d0a8ccf792ac267ebbabc84_github_codex_finding_the_ready_file_was_written_in_place_so_a_launcher_polling_by_existence_could_read_a_partially_written_document_while_no_registered_guard_asserted_atomic_publish
     green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: PERIODIC-RUNTIME-REASON-FALSE-GREEN-055
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-RUNTIME-REASON-DURABLE-055
+    guard: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_the_production_failure_branches_persist_distinct_labels
+    ci_partition: agents
+    red_evidence: the_prior_guard inspected source and manually rendered text, so empty production branch labels and a bypassed writer remained green; the replacement invokes both supervisor branches and reloads their durable health records, pending immutable capture
+    green_evidence: pending
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6726,3 +6734,31 @@ records:
         ci_partition: remaining
     red_evidence: exact_e3caead2c783dce8f08c53ee8eebe75986a469c8_reports_sha256_6175cd634eaf14f06fb68485ab99abc630db7b1329d2e167d1c93c4c0ec01040_and_exact_973837b23117492bd96291dbaa74baef99d50efc_report_sha256_def8b260f02943c0e14f908d96bfa39bac268a951ce22fe594667989cb33c826_and_exact_ed3ae8ffbdc4c22d321c281683236cb9769eadda_report_sha256_cf118b5e02c1c5c64ab0f0c7eafa1af74285492d8e377b712a0f918481987754_and_exact_d003c2ad5b183d497e20e745d5d9689c6b05fdbe_github_codex_findings_3797898479_3797898486_with_both_registered_guards_red_against_that_immutable_candidate_and_exact_6f014809552f4e98d43331496ff575493722f4ec_github_codex_finding_3798708614_with_the_registered_heater_identity_guard_red_against_that_immutable_candidate_and_exact_48ba7d789e320e87b7d39d7e5ca2244694cf143a_github_codex_finding_3799066519_with_the_strengthened_full_instrument_and_subchannel_identity_guard_red_against_that_immutable_candidate_and_exact_6d79e2ad7f5bfddaf4359157a7ab8e99c47a2ee5_github_codex_finding_3796975361_with_the_registered_auxiliary_thermometer_identity_guard_red_against_that_immutable_candidate
     green_evidence: pending_final_registry_candidate_review_and_hosted_remaining_partition
+  - id: PERIODIC-RUNTIME-REASON-DURABLE-055
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: PeriodicPngSupervisor runtime-failure paths from configuration loading, coordinator construction, monitor shutdown, and the durable periodic health writer.
+    classification: runtime_reason_persistence
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: An unrenderable exception, unsafe branch context, indistinguishable runtime branch, overwritten monitor reason, or alternating failures can leave stale health, conceal the cause, or flood operator logs while ordinary tests remain green.
+    invariant: Every periodic runtime failure path persists a bounded, state-safe reason that names its branch; exception rendering falls back to its type; only the live-source monitor health is preserved; and each bounded failure signature is independently rate-limited on the production supervisor path.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_the_production_failure_branches_persist_distinct_labels
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_a_credential_bearing_exception_is_persisted_safely_by_the_production_writer
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_an_unrenderable_exception_still_replaces_stale_health
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_monitor_failure_orchestration_preserves_only_live_source_health
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_periodic_runtime_says_why.py::test_alternating_persisting_failures_are_limited_per_signature
+        ci_partition: agents
+    red_evidence: unrenderable_exception_propagated_from_bounded_reason_before_the_writer_replaced_starting_health_a_loader_path_containing_api_telegram_org_bot_was_rejected_by_periodic_state_and_alternating_failure_signatures_emitted_once_per_second_while_source_and_helper_tests_stayed_green_pending_immutable_capture
+    green_evidence: pending

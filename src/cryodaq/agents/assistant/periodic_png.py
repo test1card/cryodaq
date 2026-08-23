@@ -113,6 +113,15 @@ _RUNTIME_FAILED_LOG_INTERVAL_S = 60.0
 _PROHIBITED_LOCATOR = re.compile(r"\S*api\.telegram\.org/bot\S*", re.IGNORECASE)
 
 
+def _bounded_text(value: str) -> str:
+    """Return state-safe diagnostic text within the runtime health budget."""
+
+    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", _redact(value)).split())
+    if len(detail) > _RUNTIME_REASON_MAX_CHARS:
+        detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
+    return detail
+
+
 def _bounded_reason(cause: BaseException) -> str:
     """One line of the exception's own words, bounded, sanitised, never a traceback.
 
@@ -127,10 +136,11 @@ def _bounded_reason(cause: BaseException) -> str:
     it, because the writer's rule is what decides whether this reason survives.
     """
 
-    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", _redact(str(cause))).split())
-    if len(detail) > _RUNTIME_REASON_MAX_CHARS:
-        detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
-    return detail
+    try:
+        detail = str(cause)
+    except Exception:
+        detail = type(cause).__name__
+    return _bounded_text(detail)
 
 
 def _runtime_failed_text(cause: BaseException | None, because: str = "") -> str:
@@ -150,7 +160,7 @@ def _runtime_failed_text(cause: BaseException | None, because: str = "") -> str:
         detail = _bounded_reason(cause)
         if detail:
             parts.append(detail)
-    return ": ".join(parts)
+    return _bounded_text(": ".join(parts))
 
 
 def _known_render_outcome(error_code: str) -> bool:
@@ -1757,8 +1767,9 @@ class PeriodicPngSupervisor:
         self._coordinator: PeriodicPngCoordinator | None = None
         self._run_task: asyncio.Task[None] | None = None
         self._published_health_record: PeriodicStateDocument | None = None
-        # (reason signature, monotonic time) of the last runtime-failure line written.
-        self._last_runtime_failure_log: tuple[tuple[str, str], float] | None = None
+        # Last runtime-failure line written for each bounded signature. Alternating two
+        # persistent branches must not evade the per-minute limit.
+        self._last_runtime_failure_logs: dict[tuple[str, str], float] = {}
 
     async def run(self) -> None:
         if self._run_task is not None and self._run_task is not asyncio.current_task():
@@ -2009,15 +2020,16 @@ class PeriodicPngSupervisor:
         the flood this exists to stop, arriving by the other door.
         """
 
-        signature = (because, "none" if cause is None else type(cause).__name__)
+        bounded_because = _bounded_text(because)
+        signature = (bounded_because, "none" if cause is None else type(cause).__name__)
         now_monotonic = self._clock.monotonic()
-        last = self._last_runtime_failure_log
-        if last is not None and last[0] == signature and now_monotonic - last[1] < _RUNTIME_FAILED_LOG_INTERVAL_S:
+        last = self._last_runtime_failure_logs.get(signature)
+        if last is not None and now_monotonic - last < _RUNTIME_FAILED_LOG_INTERVAL_S:
             return
-        self._last_runtime_failure_log = (signature, now_monotonic)
+        self._last_runtime_failure_logs[signature] = now_monotonic
         _log.error(
             "periodic runtime is unavailable; because=%s type=%s detail=%s",
-            because or "unstated",
+            bounded_because or "unstated",
             signature[1],
             "" if cause is None else _bounded_reason(cause),
         )
