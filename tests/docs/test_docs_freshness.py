@@ -2772,6 +2772,61 @@ def test_montana_report_inventory_metrics_match_frozen_index_snapshot(tmp_path) 
         assert compact_aggregate_claim.search(compact_mutant)
 
 
+def test_montana_report_inventory_metrics_rejects_staged_corruption(tmp_path: Path) -> None:
+    """The false-green guard runs the production freshness node against a corrupted index."""
+
+    metrics_path = "docs/current_candidate_metrics.md"
+    corrupted_index = tmp_path / "corrupted-index"
+    env = dict(os.environ)
+    env["GIT_INDEX_FILE"] = str(corrupted_index)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    subprocess.run(("git", "read-tree", "HEAD"), cwd=REPO_ROOT, env=env, check=True)
+    original = subprocess.run(
+        ("git", "show", f":{metrics_path}"),
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        check=True,
+    ).stdout
+    blob = subprocess.run(
+        ("git", "hash-object", "-w", "--stdin"),
+        cwd=REPO_ROOT,
+        input=original + b"\n<!-- staged corruption -->\n",
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    mode = subprocess.run(
+        ("git", "ls-files", "-s", "--", metrics_path),
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split(maxsplit=1)[0]
+    subprocess.run(
+        ("git", "update-index", "--cacheinfo", f"{mode},{blob.decode('ascii')},{metrics_path}"),
+        cwd=REPO_ROOT,
+        env=env,
+        check=True,
+    )
+
+    result = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "tests/docs/test_docs_freshness.py::test_montana_report_inventory_metrics_match_frozen_index_snapshot",
+        ),
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "the derived pair is neither" in result.stdout + result.stderr
+
+
 def test_shipped_architecture_artifact_does_not_claim_removed_companions() -> None:
     # Enumerate every tracked architecture-SVG path, not only the ones this
     # guard already knows about: a companion re-checked-in at any natural

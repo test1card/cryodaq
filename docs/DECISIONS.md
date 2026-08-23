@@ -420,3 +420,13 @@ the four files that caused it. Prevention of a stale pair reaching the default
 branch belongs to the merge procedure, which regenerates as the last commit
 before the merging checks; the guard is the public detection half and reddens
 the default branch within one push if that procedure is ever bypassed.
+
+**Where that procedure is written:** `docs/ORCHESTRATION.md` §6.1, "Merging a
+branch into the default branch". It is not described only here. That section
+carries the generator command, the requirement that the generator reach a fixed
+point, the committed-not-merely-staged check
+(`git diff --name-only HEAD -- <both files>`, compared against `HEAD` because a
+bare diff cannot see the index), the requalification inputs — full required
+checks plus BOTH review receipts naming the exact commit — the owner, and the
+fail-closed outcome. Read it before merging anything; this entry states the
+decision, that section states the act.
