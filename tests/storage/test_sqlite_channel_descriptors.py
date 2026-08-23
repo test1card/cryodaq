@@ -9,17 +9,20 @@ import pytest
 
 from cryodaq.channels.descriptors import (
     MAX_CATALOG_DESCRIPTORS,
+    UNBOUND_CHANNEL_ID,
     ChannelCatalog,
     ChannelDescriptorV1,
     ChannelQuantity,
     ChannelRole,
     ChannelSafetyClass,
+    unbound_channel_descriptor,
 )
 from cryodaq.drivers.base import Reading
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import (
     _TRIGGERS,
     ChannelDescriptorStorageError,
+    LiveChannelDescriptorCatalog,
     initialize_descriptor_storage,
     install_catalog,
     read_sqlite_reading,
@@ -444,6 +447,91 @@ async def test_hot_reader_returns_unbound_row_without_fabricating_a_descriptor(t
         resolved = read_sqlite_reading(conn, 1)
         assert resolved.channel == "sensor.rewired"
         assert resolved.descriptor is None
+    finally:
+        conn.close()
+
+
+def test_live_catalog_refuses_a_foreign_reserved_namespace_collision() -> None:
+    """A configured descriptor claiming the reserved id is refused, never silently replaced.
+
+    Stripping exists for exactly one shape: a catalog arriving from another live
+    snapshot that already carries THE canonical reserved entry. A caller's own
+    descriptor with that channel_id but different fields is a configuration error --
+    silently deleting it made the public roster lose a declared channel and installed
+    the canonical forgery in its place. Startup must refuse instead.
+    """
+
+    impostor = _descriptor(
+        channel_id=UNBOUND_CHANNEL_ID,
+        source_key="input.9.temperature",
+        display_name="Самый настоящий канал",
+    )
+    with pytest.raises(ChannelDescriptorStorageError, match="reserved"):
+        LiveChannelDescriptorCatalog(ChannelCatalog([_descriptor(), impostor]))
+
+
+def test_live_catalog_accepts_the_canonical_reserved_entry_when_supplied() -> None:
+    """The control for the refusal above: equal to canonical means it IS ours.
+
+    The public snapshot hides the reserved entry on purpose
+    (test_the_reserved_entry_declares_nothing_and_is_visible_nowhere_public), so the
+    internal catalog is where acceptance is observed.
+    """
+
+    owner = LiveChannelDescriptorCatalog(ChannelCatalog([_descriptor(), unbound_channel_descriptor()]))
+    carried = [descriptor for descriptor in owner._catalog.descriptors if descriptor.channel_id == UNBOUND_CHANNEL_ID]
+    assert carried == [unbound_channel_descriptor()]
+    assert UNBOUND_CHANNEL_ID not in set(owner._bindings.values())
+
+
+def test_reserved_row_reader_verifies_descriptor_storage_before_the_shortcut(tmp_path: Path) -> None:
+    """The reserved shortcut must certify the same bytes the full verifier certifies.
+
+    Review mutated the stored reserved envelope while keeping its hash column:
+    `read_sqlite_reading` returned the row normally with descriptor=None while
+    `verify_descriptor_storage` rejected the very same database as corrupt. One public
+    reader certified data whose own authority layer called broken. The shortcut now
+    runs the storage verification first, so both readers answer together.
+    """
+
+    from cryodaq.storage.channel_descriptors import verify_descriptor_storage
+
+    path = _db_path(tmp_path)
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(SCHEMA_READINGS)
+        initialize_descriptor_storage(conn)
+        install_catalog(conn, ChannelCatalog([_descriptor(), unbound_channel_descriptor()]))
+        conn.execute(
+            "INSERT INTO readings (timestamp, instrument_id, channel, value, unit, status, descriptor_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                1.0,
+                "reference-thermometer",
+                "sensor.rewired",
+                4.2,
+                "K",
+                "ok",
+                unbound_channel_descriptor().descriptor_hash,
+            ),
+        )
+        conn.commit()
+        # Control: on an intact database the reserved row resolves through the shortcut.
+        resolved = read_sqlite_reading(conn, 1)
+        assert resolved.descriptor is None
+
+        conn.execute("DROP TRIGGER channel_descriptors_no_update")
+        conn.execute(
+            "UPDATE channel_descriptors SET envelope_json = X'0064' WHERE descriptor_hash = ?",
+            (unbound_channel_descriptor().descriptor_hash,),
+        )
+        conn.execute(_TRIGGERS["channel_descriptors_no_update"])
+        conn.commit()
+
+        with pytest.raises(ChannelDescriptorStorageError):
+            verify_descriptor_storage(conn)
+        with pytest.raises(ChannelDescriptorStorageError):
+            read_sqlite_reading(conn, 1)
     finally:
         conn.close()
 

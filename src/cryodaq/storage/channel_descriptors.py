@@ -824,14 +824,29 @@ class LiveChannelDescriptorCatalog:
         bindings: Mapping[tuple[str, str], str] | None = None,
     ) -> None:
         self._catalog = snapshot_catalog(catalog)
-        # STRIP THE RESERVED ENTRY ON THE WAY IN. This catalog can arrive from another live
-        # catalog's snapshot, which already carries it, while the caller's bindings describe
-        # only the caller's own channels. Validating those bindings against a catalog holding
-        # an entry the caller never declared refused seven manifest tests with "live
-        # descriptor bindings must cover every current descriptor exactly once". The entry is
-        # added back after every check below: it is this class's to add, never the caller's
-        # to account for.
+        # STRIP THE RESERVED ENTRY ON THE WAY IN -- but only OURS. This catalog can arrive
+        # from another live catalog's snapshot, which already carries it, while the caller's
+        # bindings describe only the caller's own channels. Validating those bindings against
+        # a catalog holding an entry the caller never declared refused seven manifest tests
+        # with "live descriptor bindings must cover every current descriptor exactly once".
+        # The entry is added back after every check below: it is this class's to add, never
+        # the caller's to account for.
+        #
+        # An earlier version stripped ANY descriptor carrying the reserved channel_id. A
+        # caller whose configured manifest legitimately declares a channel under that id had
+        # it silently deleted and replaced by the canonical entry -- a configuration mistake
+        # that looked accepted, with the declared channel gone from the public roster. So the
+        # strip accepts exactly the canonical reserved entry and refuses anything else.
+        # THE SOFTWARE NEVER REFUSES applies to operators facing a missing description, not
+        # to a namespace collision between two different declared channels.
         if _carries_reserved_entry(self._catalog):
+            supplied = _reserved_entry_of(self._catalog)
+            if supplied != unbound_channel_descriptor():
+                raise ChannelDescriptorStorageError(
+                    "reserved namespace collision -- a configured descriptor claims the reserved "
+                    f"channel_id ({UNBOUND_CHANNEL_ID!r}) with foreign fields; rename it or declare "
+                    "the canonical reserved entry exactly"
+                )
             self._catalog = snapshot_catalog(
                 ChannelCatalog(
                     [
@@ -1398,6 +1413,58 @@ def descriptor_hash_for_reading(
     return descriptor.descriptor_hash
 
 
+def _verify_present_descriptor_envelope(
+    conn: sqlite3.Connection,
+    descriptor_hash: object,
+) -> PersistedChannelEnvelopeV1:
+    """Verify one PRESENT descriptor reference down to its exact stored bytes.
+
+    Schema, catalog envelopes, triggers and foreign keys are all checked, then the
+    stored row must decode to canonical bytes whose indexes agree with the reference
+    hash. This is the integrity half of :func:`resolve_sqlite_descriptor`, shared with
+    the reserved-row shortcut in :func:`read_sqlite_reading` so that no reader can
+    certify a database the full verifier rejects.
+    """
+
+    if type(descriptor_hash) is not str:
+        raise ChannelDescriptorStorageError("present descriptor_hash is not an exact string")
+    _verify_schema(conn)
+    _load_envelopes(conn)
+    if conn.execute("PRAGMA main.foreign_key_check").fetchall():
+        raise ChannelDescriptorStorageError("present descriptor reference fails foreign-key integrity")
+    row = conn.execute(
+        "SELECT descriptor_hash, channel_id, instrument_id, source_key, "
+        "descriptor_revision, envelope_json FROM main.channel_descriptors WHERE descriptor_hash = ?",
+        (descriptor_hash,),
+    ).fetchone()
+    if row is None:
+        raise ChannelDescriptorStorageError("present descriptor_hash has no catalog row")
+    sql_hash, channel_id, instrument_id, source_key, revision, payload = row
+    if type(payload) is not bytes:
+        raise ChannelDescriptorStorageError("present descriptor envelope is not exact bytes")
+    try:
+        envelope = decode_persisted_channel_envelope(payload)
+    except (TypeError, PersistedChannelEnvelopeError) as exc:
+        raise ChannelDescriptorStorageError("present descriptor envelope is corrupt") from exc
+    if payload != envelope.canonical_json:
+        raise ChannelDescriptorStorageError("present descriptor envelope is not exact canonical bytes")
+    if (
+        sql_hash,
+        channel_id,
+        instrument_id,
+        source_key,
+        revision,
+    ) != (
+        envelope.descriptor_hash,
+        envelope.channel_id,
+        envelope.instrument_id,
+        envelope.source_key,
+        envelope.descriptor_revision,
+    ):
+        raise ChannelDescriptorStorageError("present descriptor indexes disagree with envelope")
+    return envelope
+
+
 def resolve_sqlite_descriptor(
     conn: sqlite3.Connection,
     descriptor_hash: object,
@@ -1424,36 +1491,7 @@ def resolve_sqlite_descriptor(
             legacy_channel=legacy_channel,
             legacy_unit=legacy_unit,
         )
-    if type(descriptor_hash) is not str:
-        raise ChannelDescriptorStorageError("present descriptor_hash is not an exact string")
-    _verify_schema(conn)
-    _load_envelopes(conn)
-    if conn.execute("PRAGMA main.foreign_key_check").fetchall():
-        raise ChannelDescriptorStorageError("present descriptor reference fails foreign-key integrity")
-    row = conn.execute(
-        "SELECT descriptor_hash, channel_id, instrument_id, source_key, "
-        "descriptor_revision, envelope_json FROM main.channel_descriptors WHERE descriptor_hash = ?",
-        (descriptor_hash,),
-    ).fetchone()
-    if row is None:
-        raise ChannelDescriptorStorageError("present descriptor_hash has no catalog row")
-    sql_hash, channel_id, instrument_id, source_key, revision, payload = row
-    if type(payload) is not bytes:
-        raise ChannelDescriptorStorageError("present descriptor envelope is not exact bytes")
-    try:
-        envelope = decode_persisted_channel_envelope(payload)
-    except (TypeError, PersistedChannelEnvelopeError) as exc:
-        raise ChannelDescriptorStorageError("present descriptor envelope is corrupt") from exc
-    if payload != envelope.canonical_json:
-        raise ChannelDescriptorStorageError("present descriptor envelope is not exact canonical bytes")
-    if (sql_hash, channel_id, instrument_id, source_key, revision) != (
-        envelope.descriptor_hash,
-        envelope.channel_id,
-        envelope.instrument_id,
-        envelope.source_key,
-        envelope.descriptor_revision,
-    ):
-        raise ChannelDescriptorStorageError("present descriptor indexes disagree with envelope")
+    envelope = _verify_present_descriptor_envelope(conn, descriptor_hash)
     if (
         envelope.instrument_id != legacy_instrument_id
         or envelope.channel_id != legacy_channel
@@ -1461,6 +1499,42 @@ def resolve_sqlite_descriptor(
     ):
         raise ChannelDescriptorStorageError("reading identity disagrees with present descriptor")
     return envelope.descriptor
+
+
+def _resolve_hot_row_descriptor(
+    conn: sqlite3.Connection,
+    descriptor_hash: object,
+    *,
+    instrument_id: str,
+    channel: str,
+    unit: str,
+) -> ChannelDescriptorV1 | None:
+    """Resolve one V1 hot row's descriptor, earning the reserved shortcut first.
+
+    The shortcut returns ``None`` for a row referencing the reserved entry -- that entry
+    deliberately describes no real channel, so the reading-identity comparison would
+    refuse exactly the rows it exists to keep. But the shortcut used to bypass the
+    storage verification entirely: review mutated the stored reserved envelope while
+    keeping its hash column and this reader returned the row normally while
+    :func:`verify_descriptor_storage` rejected the same database as corrupt. The
+    integrity check now runs FIRST and the stored envelope must be the canonical
+    reserved one, so no public reader certifies bytes the authority layer calls broken.
+    """
+
+    if descriptor_hash == UNBOUND_DESCRIPTOR_HASH:
+        envelope = _verify_present_descriptor_envelope(conn, descriptor_hash)
+        if envelope.descriptor != unbound_channel_descriptor():
+            raise ChannelDescriptorStorageError(
+                "reserved descriptor reference disagrees with the canonical reserved entry"
+            )
+        return None
+    return resolve_sqlite_descriptor(
+        conn,
+        descriptor_hash,
+        legacy_instrument_id=instrument_id,
+        legacy_channel=channel,
+        legacy_unit=unit,
+    )
 
 
 def read_sqlite_reading(conn: sqlite3.Connection, reading_id: object) -> ResolvedSQLiteReading:
@@ -1500,13 +1574,13 @@ def read_sqlite_reading(conn: sqlite3.Connection, reading_id: object) -> Resolve
         raise ChannelDescriptorStorageError("hot reading row has invalid SQLite value types")
     descriptor = (
         None
-        if reading_columns == _LEGACY_READING_COLUMNS or descriptor_hash == UNBOUND_DESCRIPTOR_HASH
-        else resolve_sqlite_descriptor(
+        if reading_columns == _LEGACY_READING_COLUMNS
+        else _resolve_hot_row_descriptor(
             conn,
             descriptor_hash,
-            legacy_instrument_id=instrument_id,
-            legacy_channel=channel,
-            legacy_unit=unit,
+            instrument_id=instrument_id,
+            channel=channel,
+            unit=unit,
         )
     )
     return ResolvedSQLiteReading(

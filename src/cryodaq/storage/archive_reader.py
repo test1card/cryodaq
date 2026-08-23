@@ -24,7 +24,6 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 from urllib.parse import quote
 
-from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.channel_descriptors import (
     UNBOUND_DESCRIPTOR_HASH,
@@ -49,8 +48,23 @@ logger = logging.getLogger(__name__)
 # The identity a writer stores for a reading whose channel the catalog does not
 # describe. Recognised by EXACT EQUALITY on an opaque hash -- never by inspecting a
 # channel's spelling -- and recognised BEFORE the descriptor's fields are compared with
-# the row's, because the reserved entry deliberately describes no real channel.
+# the row's, because the reserved entry deliberately describes no real channel. The
+# row keeps the label the instrument emitted; see
+# sqlite_writer._write_live_batch for why that label is durable and unbounded.
 _UNBOUND_DESCRIPTOR_HASH = UNBOUND_DESCRIPTOR_HASH
+
+# How many DISTINCT unbound labels one bounded query materialises as rows, beyond the
+# caller's `max_channels` described-channel budget.
+#
+# The durable identity of an undescribed reading is its emitted label, and every distinct
+# label is a CHANNEL to a reader: discovery feeds a per-channel fetch loop on the hot
+# path, so an unbounded roster would turn one query into thousands -- lag on a week run.
+# But hiding a committed row is data loss, and hiding it while reporting complete is
+# misrepresentation. So discovery remembers at most this many unbound labels (plus one
+# overflow marker) for materialisation; EVERY further unbound presence still marks the
+# result incomplete. A bounded read therefore never claims completeness over a stored
+# reading it did not return, and hot and cold discovery share exactly these semantics.
+_MAX_MATERIALIZED_UNBOUND_CHANNELS = 32
 
 _MAX_DESCRIPTOR_REFERENCE_ROWS = 10_000_000
 
@@ -690,8 +704,14 @@ class ArchiveReader:
             )
 
         selected = explicit_channels
+        unbound_any = False
         if selected is None:
             discovered: set[str] = set()
+            # Unbound rows are recognised by their reserved descriptor hash, never by
+            # spelling, and they NEVER consume the described-channel budget. They are
+            # remembered here (bounded) for materialisation and, merely by existing,
+            # hold completeness at False.
+            unbound_seen: set[str] = set()
             discovery_ok = True
             for source in sources:
                 if time.monotonic() >= deadline_monotonic:
@@ -699,6 +719,7 @@ class ArchiveReader:
                     discovery_ok = False
                     break
                 source_channels: set[str] = set()
+                source_unbound: set[str] = set()
                 if source.kind == "sqlite":
                     ok = self._discover_sqlite_channels(
                         source,
@@ -706,6 +727,7 @@ class ArchiveReader:
                         end_us=end_us,
                         max_channels=max_channels,
                         channels=source_channels,
+                        unbound_channels=source_unbound,
                         deadline_monotonic=deadline_monotonic,
                         batch_rows=batch_rows,
                         issues=issues,
@@ -717,6 +739,7 @@ class ArchiveReader:
                         end_us=end_us,
                         max_channels=max_channels,
                         channels=source_channels,
+                        unbound_channels=source_unbound,
                         deadline_monotonic=deadline_monotonic,
                         batch_rows=batch_rows,
                         max_arrow_batch_bytes=max_arrow_batch_bytes,
@@ -726,6 +749,7 @@ class ArchiveReader:
                     discovery_ok = False
                     break
                 discovered.update(source_channels)
+                unbound_seen.update(source_unbound)
                 if len(discovered) > max_channels:
                     issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)
                     discovery_ok = False
@@ -737,7 +761,13 @@ class ArchiveReader:
                     complete=False,
                     discovered_channels=tuple(sorted(discovered)[:max_channels]),
                 )
-            selected = tuple(sorted(discovered))
+            # Described channels own the caller's budget. Unbound labels materialise in a
+            # separate bounded allowance; the overflow marker (cap+1 entries remembered)
+            # changes nothing here because presence alone already forces incompleteness.
+            selected = tuple(
+                dict.fromkeys((*sorted(discovered), *sorted(unbound_seen)[:_MAX_MATERIALIZED_UNBOUND_CHANNELS]))
+            )
+            unbound_any = bool(unbound_seen)
         discovered_channels = tuple(selected)
         collector = _BoundedReadingCollector(
             max_points_per_channel=max_points_per_channel,
@@ -783,6 +813,11 @@ class ArchiveReader:
             else:
                 collector.reject_unverified(staged)
             complete = ok and complete
+        if unbound_any:
+            # Discovery met rows whose identity is the reserved one. Materialised or not
+            # (the materialised allowance is bounded), a stored reading without a usable
+            # descriptor identity means this result must never claim completeness.
+            collector.mark_incomplete()
         rows = collector.finish()
         return self._bounded_result(
             expected_index=index_snapshot.token,
@@ -1195,6 +1230,7 @@ class ArchiveReader:
         end_us: int,
         max_channels: int,
         channels: set[str],
+        unbound_channels: set[str],
         deadline_monotonic: float,
         batch_rows: int,
         issues: _IssueLedger,
@@ -1246,7 +1282,15 @@ class ArchiveReader:
                         count += 1
                         channel = _bounded_text(raw_channel, minimum=1, maximum=256)
                         descriptor_hash = row[2] if has_descriptor_hash else None
-                        if channel == UNBOUND_CHANNEL_ID and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                        if descriptor_hash is not None and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                            # THE ROW SAYS SO ITSELF. The label it keeps is the emitted one,
+                            # and it never competes for the described-channel budget: it is
+                            # remembered (bounded) for materialisation instead. Past the
+                            # bound new labels stop being remembered -- they are still kept
+                            # rows, and the non-empty set alone holds completeness at False
+                            # upstream, so this must NEVER fail the source.
+                            if len(unbound_channels) <= _MAX_MATERIALIZED_UNBOUND_CHANNELS:
+                                unbound_channels.add(channel)
                             continue
                         channels.add(channel)
                         if len(channels) > max_channels:
@@ -1883,6 +1927,7 @@ class ArchiveReader:
         end_us: int,
         max_channels: int,
         channels: set[str],
+        unbound_channels: set[str],
         deadline_monotonic: float,
         batch_rows: int,
         max_arrow_batch_bytes: int,
@@ -1923,12 +1968,14 @@ class ArchiveReader:
                 datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=end_us),
                 type=pa.timestamp("us", tz="UTC"),
             )
+            has_descriptor_hash = "descriptor_hash" in parquet.schema_arrow.names
             for group in groups:
+                discovery_columns = ["timestamp", "channel"] + (["descriptor_hash"] if has_descriptor_hash else [])
                 iterator = iter(
                     parquet.iter_batches(
                         batch_size=batch_rows,
                         row_groups=[group],
-                        columns=["timestamp", "channel"],
+                        columns=discovery_columns,
                         use_threads=False,
                     )
                 )
@@ -1971,6 +2018,15 @@ class ArchiveReader:
                         if time.monotonic() >= deadline_monotonic:
                             issues.add(BoundedReadIssueCode.DEADLINE, source.token)
                             return False
+                        descriptor_hash = filtered["descriptor_hash"][index].as_py() if has_descriptor_hash else None
+                        if descriptor_hash is not None and descriptor_hash == _UNBOUND_DESCRIPTOR_HASH:
+                            # Same rule as the hot discovery, and it must stay the same
+                            # rule: hot and cold discovery with different semantics is how
+                            # a day reads complete before rotation and disappears after.
+                            # Never fails the source; see the hot site for the bound.
+                            if len(unbound_channels) <= _MAX_MATERIALIZED_UNBOUND_CHANNELS:
+                                unbound_channels.add(channel)
+                            continue
                         channels.add(channel)
                         if len(channels) > max_channels:
                             issues.add(BoundedReadIssueCode.CHANNEL_LIMIT, source.token)

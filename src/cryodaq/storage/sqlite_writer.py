@@ -86,20 +86,6 @@ _MAX_REMEMBERED_UNBOUND_CHANNELS = 256
 # reading looks new and speaks. This is the hard ceiling that rotation cannot defeat --
 # at most this many NAMED lines per interval, plus one aggregate line.
 _UNBOUND_NAMED_LINES_PER_INTERVAL = 8
-# How many DISTINCT undescribed labels may be stored under their own name.
-#
-# Keeping the emitted label is what makes an unbound row still say where it came from,
-# but every distinct label is also a CHANNEL to a reader. `query_reading_rows_bounded`
-# declares a channel budget -- production uses 64 -- and refuses the WHOLE SOURCE with
-# CHANNEL_LIMIT when it is exceeded. Review reproduced that with 65 admitted labels: the
-# valid described measurements vanished from the experiment snapshot along with the
-# undescribed ones. A fix for one loss of data must not create another.
-#
-# So beyond the capacity left by the declared roster the value, timestamp, unit and status
-# are still stored, and the label is replaced by the reserved channel identity. A bounded
-# loss of one label is not comparable to losing every reading in the day, and the aggregate
-# log line says how many distinct labels were seen.
-_MAX_NAMED_UNBOUND_CHANNELS = 32
 _SQLITE_NATIVE_AUTHORITY_ACTIVATION_LOCK = threading.RLock()
 
 
@@ -2557,9 +2543,6 @@ class SQLiteWriter:
         self._unbound_window_channels: set[str] = set()
         self._unbound_window_channels_overflowed = False
         self._unbound_named_lines_in_window = 0
-        # Distinct undescribed labels stored under their own name; see
-        # _MAX_NAMED_UNBOUND_CHANNELS for why this is bounded.
-        self._named_unbound_channels: set[str] = set()
         self._commit_owner_key = object()
         self._commit_revision = 0
         self._issued_commits: WeakKeyDictionary[CommittedBatchReceipt, _CommitReceiptIntegrity] = WeakKeyDictionary()
@@ -7266,13 +7249,20 @@ class SQLiteWriter:
             # which is what makes the persisted row, the receipt entry and the descriptor
             # agree. For a reading admitted against the RESERVED entry there is no canonical
             # identity to adopt, and the emitted label is the only truth left about which
-            # channel produced the value -- so it is kept.
-            # ...and it is kept only up to a bounded number of DISTINCT labels. Every
-            # distinct label is a channel to a reader, and a bounded read refuses the whole
-            # source once its channel budget is exceeded -- see _MAX_NAMED_UNBOUND_CHANNELS.
+            # channel produced the value -- so it is kept, verbatim.
+            #
+            # THE LABEL IS NOT A BUDGET. An earlier version stored at most a bounded number
+            # of distinct labels under their own name and collapsed the rest to the reserved
+            # channel_id through a process-local set that a FAILED batch could consume
+            # before persistence and that a RESTART emptied -- review measured one physical
+            # channel stored as `cryodaq.unbound` before a restart and as its own name after
+            # it. Durable identity may never depend on process history: what an undescribed
+            # reading keeps is exactly the label the instrument emitted, on disk, for as
+            # long as the row exists. The reader side bounds how many such labels a bounded
+            # query materialises (see archive_reader._MAX_MATERIALIZED_UNBOUND_CHANNELS),
+            # which is where the roster bound belongs.
             if item.descriptor.channel_id == UNBOUND_CHANNEL_ID:
-                stored_channel = self._stored_channel_for_unbound(str(reading.channel))
-                stable = reading if stored_channel == reading.channel else replace(reading, channel=stored_channel)
+                stable = reading
             else:
                 stable = replace(reading, channel=item.descriptor.channel_id)
             timestamp = (
@@ -7536,22 +7526,6 @@ class SQLiteWriter:
             cause,
             self._unbound_channel_rows,
         )
-
-    def _stored_channel_for_unbound(self, emitted: str) -> str:
-        """The label an undescribed reading is stored under, bounded by distinct count."""
-
-        if emitted in self._named_unbound_channels:
-            return emitted
-        declared_channels = sum(
-            descriptor.channel_id != UNBOUND_CHANNEL_ID for descriptor in self._channel_catalog.descriptors
-        )
-        named_capacity = min(_MAX_NAMED_UNBOUND_CHANNELS, max(0, _HISTORY_MAX_CHANNELS - declared_channels))
-        if len(self._named_unbound_channels) < named_capacity:
-            self._named_unbound_channels.add(emitted)
-            return emitted
-        # Past the bound the VALUE is still stored; only the label gives way. See
-        # _MAX_NAMED_UNBOUND_CHANNELS: an unbounded roster empties a bounded read entirely.
-        return UNBOUND_CHANNEL_ID
 
     def _write_day_batch(
         self,

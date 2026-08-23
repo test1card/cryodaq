@@ -436,11 +436,100 @@ async def test_live_unbound_admission_is_counted_after_the_commit(tmp_path: Path
         await writer.stop()
 
 
-async def test_full_live_roster_reserves_no_extra_discovered_channel(
+def _roster_of(count: int) -> ChannelCatalog:
+    return ChannelCatalog(
+        [
+            replace(
+                _descriptor(),
+                channel_id=f"sensor.{index}",
+                source_key=f"input.{index}.temperature",
+                display_order=index,
+            )
+            for index in range(count)
+        ]
+    )
+
+
+async def test_a_failed_commit_does_not_spend_the_unknown_label_budget(tmp_path: Path) -> None:
+    """A batch that never reached disk must not decide another batch's identity.
+
+    Review measured this exactly: a no-receipt failed batch consumed the process-local
+    naming budget before persistence, and the next unknown sensor after recovery was
+    stored under the reserved identity instead of its own name -- a durable identity
+    chosen by a commit that never happened. The durable identity of an undescribed
+    reading is the emitted label itself; it cannot be spent by any failure.
+    """
+
+    writer = SQLiteWriter(tmp_path, channel_catalog=LiveChannelDescriptorCatalog(_roster_of(63)))
+    try:
+        doomed = _reading("ghost.a", 1.0)
+        with pytest.raises(ValueError):
+            await writer.write_committed([doomed, replace(doomed, value=float("nan"))])
+        db = tmp_path / "data_2026-07-12.db"
+        if db.exists():
+            assert _rows(tmp_path) == [], "the failed batch must not have persisted anything"
+
+        # Recovery: the next batch succeeds, and its own unknown label keeps its name.
+        assert await writer.write_committed([_reading("ghost.b", 2.0)]) is not None
+    finally:
+        await writer.stop()
+
+    stored_labels = [row[0] for row in _rows(tmp_path)]
+    assert "ghost.b" in stored_labels
+    assert "ghost.a" not in stored_labels
+    assert unbound_channel_descriptor().channel_id not in stored_labels
+
+
+async def test_an_unknown_sensor_keeps_one_identity_across_writer_restart(tmp_path: Path) -> None:
+    """The same unknown label must not change identity when the process does.
+
+    Review measured: across a restart the same sensor.target was stored first under the
+    reserved identity and then under its own name -- because durable identity depended on
+    how much of a volatile, in-process set the previous process had happened to fill.
+    One physical channel must not acquire different durable identities across failure
+    and restart.
+    """
+
+    catalog = _roster_of(63)
+    first = SQLiteWriter(tmp_path, channel_catalog=LiveChannelDescriptorCatalog(catalog))
+    try:
+        assert await first.write_committed([_reading("ghost.x", 1.0), _reading("ghost.y", 2.0)]) is not None
+    finally:
+        await first.stop()
+
+    second = SQLiteWriter(tmp_path, channel_catalog=LiveChannelDescriptorCatalog(catalog))
+    try:
+        assert await second.write_committed([_reading("ghost.y", 3.0)]) is not None
+    finally:
+        await second.stop()
+
+    rows = _rows(tmp_path)
+    by_value = {row[1]: row[0] for row in rows}
+    assert sorted(by_value) == [1.0, 2.0, 3.0]
+    assert by_value[2.0] == by_value[3.0], "a restart must not rename an unknown sensor"
+    assert by_value[3.0] == "ghost.y"
+    assert unbound_channel_descriptor().channel_id not in set(by_value.values())
+
+
+async def test_full_roster_unknown_label_survives_receipt_hot_rotation_and_cold(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A collapsed unbound row cannot hide a full production roster."""
+    """64 described channels plus one unknown: nothing disappears, nothing is relabelled.
+
+    Review reproduced three losses with one extra reading on a full production roster:
+    the commit receipt carried the emitted label while the row was stored under the
+    reserved identity, the hot query returned 64 rows and called them complete, and the
+    rotated day came back as zero rows with CHANNEL_LIMIT. This guard walks ONE unknown
+    reading through the whole production path -- receipt, persisted bytes, hot read,
+    REAL rotation service, cold read -- and holds every stage to one rule: the committed
+    reading is present under the label the instrument emitted, and no stage claims
+    completeness over a reading whose identity is missing.
+    """
+
+    import asyncio
+
+    from cryodaq.storage.cold_rotation import ColdRotationService
 
     catalog = ChannelCatalog(
         [
@@ -456,24 +545,64 @@ async def test_full_live_roster_reserves_no_extra_discovered_channel(
     writer = SQLiteWriter(tmp_path, channel_catalog=LiveChannelDescriptorCatalog(catalog))
     try:
         with caplog.at_level(logging.WARNING, logger="cryodaq.storage.sqlite_writer"):
-            assert (
-                await writer.write_committed(
-                    [_reading(f"sensor.{index}", float(index)) for index in range(64)]
-                    + [_reading("sensor.rewired", 64.0)]
-                )
-                is not None
+            receipt = await writer.write_committed(
+                [_reading(f"sensor.{index}", float(index)) for index in range(64)] + [_reading("sensor.rewired", 64.0)]
             )
+        assert receipt is not None
+        # The receipt's reading identity is what publication hands on. It must be the
+        # same label the row carries on disk.
+        assert [entry.reading.channel for entry in writer.entries_from_commit(receipt)][-1] == "sensor.rewired"
     finally:
         await writer.stop()
 
-    unbound = unbound_channel_descriptor()
+    reserved = unbound_channel_descriptor()
     persisted = _rows(tmp_path)
     assert len(persisted) == 65
-    assert (unbound.channel_id, 64.0, unbound.descriptor_hash) in persisted
-    result = _read_bounded(tmp_path, tmp_path / "archive")
-    assert result.discovered_channels == tuple(sorted(f"sensor.{index}" for index in range(64)))
-    assert BoundedReadIssueCode.CHANNEL_LIMIT not in {issue.code for issue in result.issues}
-    assert {row.channel for row in result.rows} == set(result.discovered_channels)
+    assert ("sensor.rewired", 64.0, reserved.descriptor_hash) in persisted, (
+        "the row must keep the emitted label durably, not a process-local substitute"
+    )
+
+    hot = _read_bounded(tmp_path, tmp_path / "archive")
+    assert BoundedReadIssueCode.CHANNEL_LIMIT not in {issue.code for issue in hot.issues}
+    hot_rows = {(row.channel, row.value) for row in hot.rows}
+    assert ("sensor.rewired", 64.0) in hot_rows
+    assert len(hot.rows) == 65, "a committed reading must never be hidden from the hot query"
+    rewired_hot = [row for row in hot.rows if row.channel == "sensor.rewired"]
+    assert len(rewired_hot) == 1
+    assert rewired_hot[0].descriptor is None
+    assert hot.complete is False, "a read that could not describe a stored row is not complete"
+
+    archive = tmp_path / "archive"
+    results = await asyncio.to_thread(
+        lambda: asyncio.run(
+            ColdRotationService(data_dir=tmp_path, archive_dir=archive, age_days=30, enabled=True).run_once(
+                now=TIMESTAMP + timedelta(days=40)
+            )
+        )
+    )
+    assert len(results) == 1, results
+    assert results[0].rows == 65, results[0].rows
+
+    cold_only = tmp_path / "no-hot-data"
+    cold_only.mkdir()
+    cold = ArchiveReader(cold_only, archive).query_reading_rows_bounded(
+        start=TIMESTAMP - timedelta(hours=1),
+        end=TIMESTAMP + timedelta(hours=1),
+        channels=None,
+        max_channels=64,
+        max_points_per_channel=1024,
+        max_total_points=4096,
+        max_retained_bytes=4 * 1024 * 1024,
+        deadline_monotonic=time.monotonic() + 30.0,
+    )
+    assert BoundedReadIssueCode.CHANNEL_LIMIT not in {issue.code for issue in cold.issues}
+    cold_rows = {(row.channel, row.value) for row in cold.rows}
+    assert cold_rows == hot_rows, "hot and cold discovery must have identical semantics"
+    assert len(cold.rows) == 65
+    rewired_cold = [row for row in cold.rows if row.channel == "sensor.rewired"]
+    assert len(rewired_cold) == 1
+    assert rewired_cold[0].descriptor is None
+    assert cold.complete is False
     assert any("sensor.rewired" in record.getMessage() for record in caplog.records)
 
 
@@ -657,21 +786,23 @@ def test_the_reserved_entry_declares_nothing_and_is_visible_nowhere_public() -> 
 async def test_a_flood_of_undescribed_labels_cannot_empty_a_bounded_read(tmp_path: Path) -> None:
     """A fix for one loss of data must not create another. This is the second one, pinned.
 
-    Every distinct label is a CHANNEL to a reader. `query_reading_rows_bounded` declares a
-    channel budget -- production uses 64 -- and refuses the WHOLE SOURCE with CHANNEL_LIMIT
-    when it is exceeded. Review reproduced exactly that with 65 admitted labels: the valid
-    described measurements disappeared from the experiment snapshot along with the
-    undescribed ones.
+    Every distinct label is a CHANNEL to a reader. `query_reading_rows_bounded` declares
+    a channel budget -- production uses 64 -- and refuses the WHOLE SOURCE with
+    CHANNEL_LIMIT when it is exceeded. Review reproduced exactly that with 65 admitted
+    labels: the valid described measurements disappeared from the experiment snapshot
+    along with the undescribed ones.
 
-    So the number of distinct labels stored under their own name is bounded. Past the bound
-    the value, timestamp, unit and status are still stored and only the label gives way --
-    a bounded loss of one label is not comparable to losing every reading in the day.
+    The durable identity of an undescribed reading is the label the instrument emitted,
+    so a flood cannot be answered by relabelling rows -- and it cannot be answered by
+    hiding them either. Discovery keeps described channels in their own budget, remembers
+    a bounded number of unbound labels for materialisation, and any unbound presence at
+    all holds completeness at False. Overflow readings that share one poll timestamp stay
+    distinct rows: distinct committed readings must never merge in a collector key.
     """
 
     from cryodaq.channels.descriptors import UNBOUND_CHANNEL_ID
-    from cryodaq.storage.sqlite_writer import _MAX_NAMED_UNBOUND_CHANNELS
 
-    flood = _MAX_NAMED_UNBOUND_CHANNELS + 40
+    flood = _MAX_REMEMBERED_UNBOUND_CHANNELS + 40
     writer = SQLiteWriter(tmp_path, channel_catalog=_live())
     batch = [_reading("sensor.main", 1.0)] + [
         _reading(f"sensor.flood.{index}", float(index + 2)) for index in range(flood)
@@ -682,12 +813,27 @@ async def test_a_flood_of_undescribed_labels_cannot_empty_a_bounded_read(tmp_pat
     persisted = _rows(tmp_path)
     assert len(persisted) == flood + 1, "every reading must still be stored"
 
-    distinct = {row[0] for row in persisted}
-    assert len(distinct) <= _MAX_NAMED_UNBOUND_CHANNELS + 2, sorted(distinct)[:5]
-    assert UNBOUND_CHANNEL_ID in distinct, "the excess labels give way to the reserved identity"
+    labels = {row[0] for row in persisted}
+    assert len(labels) == flood + 1, "each committed reading keeps its own emitted label"
+    assert UNBOUND_CHANNEL_ID not in labels, "no row may be relabelled into the reserved identity"
 
-    # And a bounded read with a production-sized channel budget still returns the described
-    # measurement, which is the whole point.
     result = _read_bounded(tmp_path, tmp_path / "archive")
     assert BoundedReadIssueCode.CHANNEL_LIMIT not in {issue.code for issue in result.issues}
-    assert any(row.channel == "sensor.main" for row in result.rows)
+    assert any(row.channel == "sensor.main" for row in result.rows), (
+        "the described measurement survives a flood of undescribed labels"
+    )
+    assert result.complete is False, "unbound presence holds completeness at False even when rows are materialised"
+
+    # The bounded read materialises a bounded number of unbound labels -- every one a
+    # DISTINCT committed reading sharing one poll timestamp, so nothing may have merged.
+    # WHICH labels fit the allowance is an implementation detail; that each returned row
+    # agrees with its own durable bytes is the contract.
+    from cryodaq.storage.archive_reader import _MAX_MATERIALIZED_UNBOUND_CHANNELS
+
+    flood_rows = {row.channel: row.value for row in result.rows if row.channel.startswith("sensor.flood.")}
+    assert len(flood_rows) == _MAX_MATERIALIZED_UNBOUND_CHANNELS
+    persisted_values = {row[0]: row[1] for row in persisted}
+    assert flood_rows == {label: persisted_values[label] for label in flood_rows}, (
+        "each overflow reading comes back with exactly the value that was committed for it"
+    )
+    assert len(result.rows) == len(flood_rows) + 1
