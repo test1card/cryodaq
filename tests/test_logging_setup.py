@@ -90,6 +90,53 @@ def test_setup_logging_idempotent(tmp_path, monkeypatch):
     assert n1 == n2
 
 
+def test_setup_logging_keeps_deferred_records_until_a_handler_exists(tmp_path, monkeypatch):
+    """A handlerless setup must not discard diagnostics that need a later log."""
+
+    from cryodaq import logging_setup
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    configured = logging_setup._logging_configured
+    deferred = list(logging_setup._deferred_records)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    try:
+        logging_setup._logging_configured = False
+        logging_setup._deferred_records.clear()
+        logging_setup.defer_record(logging.ERROR, "deferred startup failure")
+
+        logging_setup.setup_logging("without-handlers", console=False, file=False)
+        assert logging_setup._deferred_records
+
+        def fail_to_create_log_dir():
+            raise OSError("log directory unavailable")
+
+        monkeypatch.setattr(logging_setup, "get_logs_dir", fail_to_create_log_dir)
+        logging_setup.setup_logging("failed-file-handler", console=False, file=True)
+        assert logging_setup._deferred_records
+
+        monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+        logging_setup.setup_logging("durable-handler", console=False, file=True)
+        logging.shutdown()
+
+        written = (log_dir / "durable-handler.log").read_text(encoding="utf-8")
+        assert "deferred startup failure" in written
+        assert not logging_setup._deferred_records
+    finally:
+        for handler in list(root.handlers):
+            if handler not in handlers:
+                handler.close()
+                root.removeHandler(handler)
+        for handler in handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level)
+        logging_setup._logging_configured = configured
+        logging_setup._deferred_records[:] = deferred
+
+
 def test_bare_token_without_bot_prefix_redacted():
     """P1: bare token (no 'bot' URL prefix) must also be redacted.
 

@@ -189,10 +189,11 @@ def setup_logging(
         except Exception as exc:
             sys.stderr.write(f"WARNING: failed to set up file logging for {component}: {exc}\n")
 
-    # Now that handlers exist, say the things that could not be said before they did.
+    # Replay only after at least one handler exists.
     global _logging_configured
     _logging_configured = bool(root.handlers)
-    _replay_deferred_records()
+    if _logging_configured:
+        _replay_deferred_records()
 
 
 def read_debug_mode_from_qsettings() -> bool:
