@@ -3391,10 +3391,10 @@ class LauncherWindow(QMainWindow):
             LauncherWindow._reset_replay_readiness_authority(self)
             return True
         if not LauncherWindow._retire_observed_engine_incarnation(self):
-            self._show_engine_down_banner(
-                "HOLD: the engine shutdown worker is still running, so this incarnation "
-                "cannot be retired. Restart remains blocked."
-            )
+            # The reason is set by whichever check refused. A single generic sentence sent
+            # the operator to look at a worker that had already finished.
+            reason = getattr(self, "_engine_shutdown_hold_reason", None) or "this incarnation cannot be retired"
+            self._show_engine_down_banner(f"HOLD: {reason}. Restart remains blocked.")
             return False
         self._engine_proc = None
         return True
@@ -3425,7 +3425,61 @@ class LauncherWindow(QMainWindow):
             return False
         if not settled:
             logger.critical("Engine shutdown worker is still running; its owner cannot be retired")
+            self._engine_shutdown_hold_reason = (
+                "the engine shutdown worker is still running, so this incarnation cannot be retired"
+            )
             return False
+        receipt = getattr(worker, "result", None)
+        expected_unknown_keys = {
+            "ok",
+            "error",
+            "request_id",
+            "generation",
+            "dispatched",
+            "outcome_unknown",
+        }
+        if type(receipt) is dict and set(receipt) == expected_unknown_keys and receipt["outcome_unknown"] is True:
+            request_id = receipt["request_id"]
+            generation = receipt["generation"]
+            if not (
+                receipt["ok"] is False
+                and type(receipt["error"]) is str
+                and type(request_id) is str
+                and len(request_id) == 32
+                and all(character in "0123456789abcdef" for character in request_id)
+                and type(generation) is int
+                and generation >= 0
+                and receipt["dispatched"] is True
+            ):
+                logger.critical("Finished engine shutdown worker has malformed unknown-outcome evidence")
+                self._engine_shutdown_hold_reason = (
+                    "the finished shutdown worker left unknown-outcome evidence this launcher cannot read, "
+                    "so its identity is held rather than guessed at"
+                )
+                return False
+            self._engine_shutdown_transport_identity = (request_id, generation)
+            late_result = self._bridge.reconcile_late_result(request_id, generation=generation)
+            if late_result is None:
+                logger.critical("Finished engine shutdown worker still awaits exact transport reconciliation")
+                self._engine_shutdown_hold_reason = (
+                    "the shutdown worker has finished, but its command has not yet been reconciled on the "
+                    "transport, so this incarnation cannot be retired yet"
+                )
+                return False
+            if not (
+                type(late_result) is LateCommandResult
+                and late_result.request_id == request_id
+                and late_result.generation == generation
+                and type(late_result.reply) is dict
+            ):
+                logger.critical("Finished engine shutdown worker received mismatched late transport result")
+                self._engine_shutdown_hold_reason = (
+                    "the transport reconciled a different command than the one this shutdown worker sent, "
+                    "so this incarnation cannot be retired"
+                )
+                return False
+            self._engine_shutdown_transport_identity = None
+        self._engine_shutdown_hold_reason = None
         self._engine_shutdown_worker = None
         return True
 
@@ -3969,10 +4023,18 @@ class LauncherWindow(QMainWindow):
                 # The retained worker is still executing its shutdown command on this bridge.
                 # Leave both intact and schedule a later settlement pass; manual restart has
                 # already stopped the health timer.
-                if getattr(self, "_engine_shutdown_worker", None) is not None:
+                deadline = getattr(self, "_engine_shutdown_wait_deadline", None)
+                receipt = getattr(self, "_engine_shutdown_receipt", None)
+                receipt_waiting_for_exit = (
+                    type(receipt) is dict and type(deadline) in (int, float) and time.monotonic() < deadline
+                )
+                if getattr(self, "_engine_shutdown_worker", None) is not None or receipt_waiting_for_exit:
+                    settlement_generation = getattr(self, "_restart_generation", None)
 
                     def _retry_replacement_settlement() -> None:
                         if not LauncherWindow._runtime_callback_is_current(self):
+                            return
+                        if getattr(self, "_restart_generation", None) != settlement_generation:
                             return
                         LauncherWindow._recover_failed_engine_restart(
                             self,

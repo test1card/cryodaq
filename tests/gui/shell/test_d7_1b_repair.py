@@ -592,6 +592,75 @@ def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
     assert single_shot.call_args.args[0] == 3_000
 
 
+def test_verified_receipt_exit_wait_keeps_repolling_until_the_budget_spends() -> None:
+    """A verified shutdown receipt with exit budget left must keep settling, not HOLD.
+
+    When the replacement's shutdown command succeeded but the process needs more than the
+    first one-second exit slice, _stop_engine deliberately raises while retaining the
+    receipt and its 60-second deadline -- and the command worker has already been cleared.
+    Checking only for that worker left nothing to schedule the next settlement pass, so a
+    normally slow exit latched permanent HOLD and stopped unattended recovery. While the
+    receipt's deadline is open the settlement pass must be rescheduled; once the budget is
+    spent the ceiling must latch HOLD instead of repolling forever, without erasing the
+    retained evidence.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: None)
+    launcher._restart_pending = True
+    launcher._engine_shutdown_receipt = {"ok": True}
+    launcher._engine_shutdown_wait_deadline = 40.0
+
+    def _slow_exit_stop() -> None:
+        calls.append("stop_engine")
+        raise RuntimeError(
+            "engine process has not yet exited after a verified shutdown receipt; launcher "
+            "remains in HOLD pending exact process exit"
+        )
+
+    launcher._stop_engine = _slow_exit_stop
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+        assert "stop_engine" in calls
+        assert launcher._restart_giving_up is False
+        assert settlement_shot.call_args.args[0] == 200
+
+        # Still inside the exit-wait budget: the repoll must try again and keep both the
+        # reschedule loop and the retained evidence exactly as they were.
+        settlement_shot.call_args.args[1]()
+        assert calls.count("stop_engine") == 2
+        assert launcher._restart_giving_up is False
+        assert launcher._engine_shutdown_receipt == {"ok": True}
+        assert launcher._engine_shutdown_wait_deadline == 40.0
+        assert settlement_shot.call_count == 2
+
+        # The budget spends: the next pass must latch HOLD instead of scheduling forever.
+        with patch("cryodaq.launcher.time.monotonic", return_value=50.0):
+            settlement_shot.call_args.args[1]()
+        assert settlement_shot.call_count == 2, "a spent budget must not reschedule"
+        assert launcher._restart_giving_up is True
+        assert calls.count("banner") == 1, "the spent budget must surface its HOLD"
+
+    launcher._bridge.shutdown.assert_called_once()
+    assert launcher._engine_shutdown_receipt == {"ok": True}, "evidence survives the latch"
+    assert launcher._engine_unsettled_incarnation is None, "the operator's quit stays available"
+
+
 def test_a_replacement_that_exits_with_a_configuration_error_keeps_its_refusal() -> None:
     """One exit code must not be rescheduled, and the replacement path forgot that.
 
@@ -695,6 +764,122 @@ def test_a_shutdown_worker_that_finishes_is_settled_and_the_owner_retired() -> N
     assert settled is True
     assert launcher._engine_shutdown_worker is None
     assert launcher._engine_instance_id is None
+
+
+def _unknown_outcome_shutdown_worker(request_id: str, generation: int) -> _ShutdownWorker:
+    """A finished worker holding the exact evidence an unknown-outcome dispatch leaves."""
+
+    worker = _ShutdownWorker(settles=True)
+    worker.result = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after timeout",
+        "request_id": request_id,
+        "generation": generation,
+        "dispatched": True,
+        "outcome_unknown": True,
+    }
+    return worker
+
+
+def test_finished_shutdown_workers_unknown_outcome_is_reconciled_before_release() -> None:
+    """A finished worker's unknown-outcome receipt must hit the ledger before release.
+
+    Dropping the reference without reconciling stranded the old launcher_shutdown in the
+    bridge's outcome-unknown lane: recovery restarted the engine while that entry stayed
+    unresolved, so without a late reply it consumed the lane's sole active slot and
+    rejected the replacement's next shutdown, and with one it failed the terminal bridge
+    close. The exact transport reconciliation must run while the worker is still held.
+    """
+
+    from cryodaq.gui.zmq_client import LateCommandResult
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    bridge.reconcile_late_result.return_value = LateCommandResult(
+        request_id="c" * 32,
+        generation=5,
+        reply={"ok": True},
+    )
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    launcher._engine_shutdown_worker = worker
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is True
+    bridge.reconcile_late_result.assert_called_once_with("c" * 32, generation=5)
+    assert launcher._engine_shutdown_worker is None, "reconciled evidence may be released"
+    assert launcher._engine_shutdown_transport_identity is None
+    assert launcher._engine_instance_id is None, "the owner retires only after reconciliation"
+
+
+def test_unknown_outcome_without_its_late_reply_keeps_the_worker_and_retains_identity() -> None:
+    """No reconciled late result yet means no release and no identity loss."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    bridge.reconcile_late_result.return_value = None
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    launcher._engine_shutdown_worker = worker
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is False
+    bridge.reconcile_late_result.assert_called_once_with("c" * 32, generation=5)
+    assert launcher._engine_shutdown_worker is worker, "an unreconciled owner must be kept"
+    assert launcher._engine_shutdown_transport_identity == ("c" * 32, 5), (
+        "the exact reconciliation identity must stay published for a later pass"
+    )
+    assert launcher._engine_instance_id == "a" * 32
+    assert calls.count("banner") == 1
+
+
+@pytest.mark.parametrize(
+    "receipt_override",
+    [
+        {"generation": "five"},
+        {"dispatched": False},
+        {"ok": True},
+        pytest.param({"error": None}, id="non-string-error"),
+    ],
+)
+def test_malformed_unknown_outcome_evidence_is_refused_not_cleared(receipt_override: dict) -> None:
+    """A finished worker with malformed unknown-outcome evidence stays held verbatim."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    worker.result.update(receipt_override)
+    launcher._engine_shutdown_worker = worker
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is False
+    bridge.reconcile_late_result.assert_not_called()
+    assert launcher._engine_shutdown_worker is worker
+    assert getattr(launcher, "_engine_shutdown_transport_identity", None) is None
+    assert launcher._engine_instance_id == "a" * 32
+    assert calls.count("banner") == 1
 
 
 def test_a_lost_handle_keeps_its_authority_published() -> None:
@@ -966,3 +1151,121 @@ def test_current_malformed_annunciation_reply_cannot_infer_zero_alarms(
         assert launcher._last_alarm_count == 0
     else:
         assert launcher._last_alarm_count is None
+
+
+def test_stale_replacement_settlement_callback_cannot_stop_manual_restart() -> None:
+    """A queued settlement poll is owned by the restart generation that created it.
+
+    The retained worker can finish just before the 200 ms settlement poll fires, and the
+    still-enabled restart action then runs synchronously: _restart_engine advances the
+    restart generation, drains that worker, and starts a healthy engine. The queued poll
+    must go inert against that new incarnation instead of running _settle_replacement_
+    child on it and stopping it as though it were the failed replacement.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_shutdown_worker = _ShutdownWorker(settles=False)
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+        assert deferred is False
+        assert settlement_shot.call_args.args[0] == 200
+        callback = settlement_shot.call_args.args[1]
+
+        # The operator's manual restart wins the race: the generation advances, the old
+        # worker is drained, and a healthy replacement owns the process handle.
+        LauncherWindow._advance_restart_generation(launcher)
+        launcher._engine_shutdown_worker = None
+        healthy = SimpleNamespace(
+            poll=lambda: calls.append("new_poll") or None,
+            terminate=lambda: calls.append("terminate"),
+            kill=lambda: calls.append("kill"),
+            wait=lambda *_: calls.append("wait"),
+        )
+        launcher._engine_proc = healthy
+        callback()
+
+    assert launcher._engine_proc is healthy, "the healthy replacement must keep its handle"
+    assert "terminate" not in calls and "kill" not in calls and "wait" not in calls
+    assert launcher._restart_giving_up is False, "a stale poll must not latch HOLD"
+    launcher._bridge.shutdown.assert_not_called()
+    assert calls.count("banner") == 1, "only the original deferred settlement may have bannered"
+
+
+def _hold_reasons(launcher) -> list[str]:
+    """Capture the banner TEXT, which the shared helper deliberately discards."""
+
+    said: list[str] = []
+    launcher._show_engine_down_banner = said.append
+    return said
+
+
+def test_each_hold_banner_names_the_check_that_refused() -> None:
+    """One sentence for four different refusals sent the operator to the wrong place.
+
+    Three of these four HOLDs happen with the shutdown worker FINISHED, so telling the
+    operator it is still running is not a rounding of the truth -- it is the wrong
+    instruction. Whoever refuses says why, and the banner carries that sentence.
+    """
+
+    from cryodaq.gui.zmq_client import LateCommandResult
+
+    def _launcher(worker, late_result):
+        calls: list[str] = []
+        made = _exited_owned_launcher(calls, 9)
+        made._bridge = MagicMock()
+        made._bridge.reconcile_late_result.return_value = late_result
+        made._engine_shutdown_worker = worker
+        return made
+
+    still_running = _ShutdownWorker(settles=False)
+    malformed = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    malformed.result["dispatched"] = False
+    unreconciled = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    mismatched = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    other = LateCommandResult(request_id="d" * 32, generation=5, reply={"ok": True})
+
+    cases = [
+        (still_running, None, "still running"),
+        (malformed, None, "cannot read"),
+        (unreconciled, None, "not yet been reconciled"),
+        (mismatched, other, "a different command"),
+    ]
+    for worker, late_result, expected in cases:
+        launcher = _launcher(worker, late_result)
+        said = _hold_reasons(launcher)
+        settled = LauncherWindow._settle_observed_engine_exit(
+            launcher,
+            owner_id="a" * 32,
+            returncode=9,
+            phase="probe",
+        )
+        assert settled is False
+        assert len(said) == 1, said
+        assert said[0].startswith("HOLD: ") and said[0].endswith("Restart remains blocked.")
+        assert expected in said[0], (expected, said[0])
+        assert launcher._engine_instance_id == "a" * 32, "no identity is released on a HOLD"
+
+    # The four sentences must actually differ, or naming them changed nothing.
+    spoken = []
+    for worker, late_result, _ in cases:
+        launcher = _launcher(worker, late_result)
+        said = _hold_reasons(launcher)
+        LauncherWindow._settle_observed_engine_exit(launcher, owner_id="a" * 32, returncode=9, phase="probe")
+        spoken.append(said[0])
+    assert len(set(spoken)) == 4, spoken
