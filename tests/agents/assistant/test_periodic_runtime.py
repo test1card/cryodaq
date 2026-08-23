@@ -20,6 +20,7 @@ from cryodaq.agents.assistant.periodic_runtime import (
     SequencedPeriodicLiveSources,
 )
 from cryodaq.agents.assistant_main import _RemoteEngineStateCache
+from cryodaq.core.broker import PERSISTENCE_AUTHORITATIVE_METADATA_KEY, PublishedReading
 from cryodaq.core.zmq_bridge import (
     DEFAULT_TOPIC,
     EVENTS_TOPIC,
@@ -28,6 +29,7 @@ from cryodaq.core.zmq_bridge import (
     PERIODIC_QUERY_SCHEMA,
     PERIODIC_STREAM_SCHEMA,
     PROTOCOL_VERSION,
+    ZMQPublisher,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -1572,21 +1574,54 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
         await cache.stop()
 
 
-def _published_reading_bytes(*, descriptor_envelope: bytes | None) -> bytes:
-    """Build a reading frame with the PRODUCTION packer.
+class _CaptureSocket:
+    def __init__(self) -> None:
+        self.frames: list[list[bytes]] = []
 
-    Hand-building the payload is how producer and consumer drift apart without a test
-    noticing: the consumer's expectation gets written twice, once in production and once
-    in the test, and the producer is in neither. `_pack_reading` is what the engine
-    actually calls, so a rename or an omission there reddens this instead of reaching a
-    laboratory run.
+    async def send_multipart(self, frames: list[bytes]) -> None:
+        self.frames.append(frames)
+
+    def close(self, *, linger: int) -> None:
+        pass
+
+
+def _prime_publisher(socket: _CaptureSocket) -> ZMQPublisher:
+    publisher = ZMQPublisher()
+    publisher._socket = socket  # type: ignore[assignment]
+    publisher._running = True
+    publisher._session_id = SESSION
+    publisher._sequence = 0
+    publisher._publish_failure_count = 0
+    publisher._send_lock = asyncio.Lock()
+    return publisher
+
+
+async def _published_reading_bytes(*, descriptor_envelope: bytes | None) -> bytes:
+    """Return a reading frame emitted by the REAL queue-backed publisher path.
+
+    Calling `_pack_reading` directly measures only the encoder while bypassing
+    everything around it, so any producer regression that never touches the pack
+    function stays invisible to a direct call: `_publish_loop` stops forwarding the
+    PublishedReading pair, `_publish_reading` omits or reshapes the transport
+    envelope, a producer-only key appears, the encoder is swapped, or the send lands
+    on another topic -- and production frames become unacceptable to this consumer
+    while every direct-call assertion stays green. So this drives the production path
+    itself: a real `PublishedReading(reading=..., descriptor_envelope=...)` is put
+    onto an `asyncio.Queue`, the real `ZMQPublisher._publish_loop` drains it under its
+    own send lock, exactly one multipart send on DEFAULT_TOPIC is asserted, and the
+    emitted payload bytes are returned for the consumer-side assertions below. A None
+    envelope still travels through the PublishedReading branch (not the bare-Reading
+    fallback), so an omission of the forwarding itself is observable. The reading
+    carries the broker's persistence-authority marker, exactly as a persisted-
+    authoritative reading arrives from DataBroker, which is how
+    `persistence_authoritative=True` truthfully reaches the wire.
     """
 
-    from datetime import UTC, datetime
-
-    from cryodaq.core.zmq_bridge import _pack_reading
     from cryodaq.drivers.base import ChannelStatus, Reading
 
+    socket = _CaptureSocket()
+    publisher = _prime_publisher(socket)
+    queue: asyncio.Queue[PublishedReading] = asyncio.Queue()
     reading = Reading(
         timestamp=datetime.fromtimestamp(1_700_000_000.0, tz=UTC),
         instrument_id="ls",
@@ -1595,18 +1630,22 @@ def _published_reading_bytes(*, descriptor_envelope: bytes | None) -> bytes:
         unit="K",
         status=ChannelStatus.OK,
         raw=None,
-        metadata={},
+        metadata={PERSISTENCE_AUTHORITATIVE_METADATA_KEY: True},
     )
-    return _pack_reading(
-        reading,
-        transport={
-            "schema": "cryodaq.periodic.stream/v1",
-            "session_id": "1" * 32,
-            "sequence": 1,
-            "persistence_authoritative": True,
-        },
-        descriptor_envelope=descriptor_envelope,
-    )
+    await queue.put(PublishedReading(reading=reading, descriptor_envelope=descriptor_envelope))
+
+    loop_task = asyncio.create_task(publisher._publish_loop(queue))
+    try:
+        await asyncio.wait_for(queue.join(), timeout=2.0)
+    finally:
+        publisher._running = False
+        loop_task.cancel()
+        await asyncio.gather(loop_task, return_exceptions=True)
+
+    assert len(socket.frames) == 1, f"expected exactly one queue-backed send, saw {len(socket.frames)}"
+    topic, payload = socket.frames[0]
+    assert topic == DEFAULT_TOPIC
+    return payload
 
 
 async def test_a_reading_carrying_a_descriptor_envelope_is_accepted() -> None:
@@ -1623,7 +1662,7 @@ async def test_a_reading_carrying_a_descriptor_envelope_is_accepted() -> None:
 
     from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
 
-    frame = _published_reading_bytes(descriptor_envelope=b"an opaque descriptor envelope")
+    frame = await _published_reading_bytes(descriptor_envelope=b"an opaque descriptor envelope")
     transport, reading = SequencedPeriodicLiveSources._reading(frame)
 
     assert reading.channel == "T2"
@@ -1635,7 +1674,7 @@ async def test_a_reading_without_a_descriptor_is_still_accepted() -> None:
 
     from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
 
-    frame = _published_reading_bytes(descriptor_envelope=None)
+    frame = await _published_reading_bytes(descriptor_envelope=None)
     _transport, reading = SequencedPeriodicLiveSources._reading(frame)
 
     assert reading.channel == "T2"
@@ -1649,9 +1688,9 @@ async def test_a_reading_missing_a_required_field_is_still_refused() -> None:
 
     from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
 
-    # The production packer always writes the required keys, so this one is built by
-    # REMOVING a key from a real frame rather than by writing a payload from scratch.
-    frame = _published_reading_bytes(descriptor_envelope=None)
+    # The queue-backed publisher always writes the required keys, so this one is built
+    # by REMOVING a key from a real frame rather than by writing a payload from scratch.
+    frame = await _published_reading_bytes(descriptor_envelope=None)
     payload = msgpack.unpackb(frame, raw=False)
     del payload["transport"]
 
@@ -1667,7 +1706,7 @@ async def test_an_unknown_field_is_refused_and_not_echoed() -> None:
 
     from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
 
-    frame = _published_reading_bytes(descriptor_envelope=None)
+    frame = await _published_reading_bytes(descriptor_envelope=None)
     payload = msgpack.unpackb(frame, raw=False)
     payload["smuggled_secret_name"] = 1
 
@@ -1685,18 +1724,25 @@ async def test_every_key_the_publisher_writes_is_known_to_this_consumer() -> Non
     This is the drift itself: the publisher grew `desc` and the consumer refused whole
     frames. Comparing key sets with the consumer's private vocabulary cannot see a
     broken parser -- it stays green even when every `_reading` call fails. So both
-    production-packed variants, with and without the optional descriptor envelope, go
-    through `SequencedPeriodicLiveSources._reading` itself, and the returned transport
-    and reading are asserted for stable semantics. A key the packer adds, one it stops
-    writing, or a parser that mangles what it accepts reddens here rather than in a
-    laboratory run.
+    variants the queue-backed production publisher emits, with and without the optional
+    descriptor envelope, are driven through the real `ZMQPublisher._publish_loop` and
+    then through `SequencedPeriodicLiveSources._reading` itself, and the returned
+    transport and reading are asserted for stable semantics. A key `_publish_reading`
+    adds, one it stops writing, a loop that no longer forwards the PublishedReading
+    pair onto the wire, or a parser that mangles what it accepts reddens here rather
+    than in a laboratory run.
     """
 
     from cryodaq.drivers.base import ChannelStatus
 
     timestamp = datetime.fromtimestamp(1_700_000_000.0, tz=UTC)
     for envelope in (None, b"an opaque descriptor envelope"):
-        frame = _published_reading_bytes(descriptor_envelope=envelope)
+        frame = await _published_reading_bytes(descriptor_envelope=envelope)
+        payload = msgpack.unpackb(frame, raw=False)
+        if envelope is None:
+            assert "desc" not in payload
+        else:
+            assert payload["desc"] == envelope
         transport, reading = SequencedPeriodicLiveSources._reading(frame)
         assert transport.session_id == SESSION
         assert transport.sequence == 1
