@@ -2823,8 +2823,23 @@ def test_montana_report_inventory_metrics_rejects_staged_corruption(tmp_path: Pa
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "the derived pair is neither" in result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+
+    # The production node has TWO arms and the environment decides which one runs. The
+    # child inherits this process's environment, so on a push to the default branch it
+    # inherits GITHUB_REF=refs/heads/master, takes the master arm, and refuses the
+    # corrupted index at `assert is_regeneration` -- never reaching the branch-arm
+    # sentence. Requiring only the branch sentence made this regression fail on the
+    # default branch while the guard it exercises was working perfectly.
+    #
+    # Both arms are the node correctly refusing, so both are accepted -- but each by its
+    # OWN marker, never by the exit code alone. A bare "it exited non-zero" would also be
+    # satisfied by a collection error or an import failure, which is the false-green this
+    # regression exists to prevent.
+    refused_off_master = "the derived pair is neither" in output
+    refused_on_master = "assert is_regeneration" in output
+    assert refused_off_master or refused_on_master, output
 
 
 def test_shipped_architecture_artifact_does_not_claim_removed_companions() -> None:
