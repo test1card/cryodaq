@@ -71,6 +71,24 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: the_forced_watermark_jump_could_pass_a_still_pending_attempt_so_has_settled_answered_true_for_one_that_had_never_reported_and_its_genuine_first_outcome_was_discarded_the_earlier_boundary_node_missed_it_because_its_old_attempt_reported_BEFORE_the_later_admissions_2026_08_06_pending_immutable_capture
     green_evidence: pending
+  - id: USBTMC-PARENT-DEATH-PIPE-CONTROL-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_decides_whether_a_sleeping_child_outlives_its_killed_parent
+    ci_partition: remaining
+    platform: posix
+    red_evidence: the_pipe_reading_control_child_exited_on_parent_eof_so_the_lifecycle_test_stayed_green_without_reproducing_the_unbound_orphan_2026_08_23_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PARENT-DEATH-PROBE-IMPORT-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_on_windows_an_unbound_worker_is_refused
+    ci_partition: remaining
+    platform: windows
+    red_evidence: the_python_c_probe_child_died_during_import_so_an_absent_continuation_marker_looked_like_a_safe_refusal_without_exercising_the_binder_2026_08_23_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-RETIREMENT-EXEMPTION-UNBOUNDED-FALSE-GREEN-336
     status: open
     scope: product_contract
@@ -5039,7 +5057,7 @@ records:
         platform: posix
       - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_runs_before_any_handle_exists
         ci_partition: remaining
-      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_on_windows_a_real_worker_starts_instead_of_being_killed
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_on_windows_an_unbound_worker_is_refused
         ci_partition: remaining
         platform: windows
     red_evidence: lane98_f3f1b45_prctl_sigterm_swap_failed_exact_args_and_sigterm_immune_children_survived_while_unstable_identity_refused_to_signal_2026_08_23_pending_immutable_capture

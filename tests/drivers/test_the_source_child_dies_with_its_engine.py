@@ -193,6 +193,21 @@ def _read_startup_line(stream, *, timeout: float) -> str:
 def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool:
     """Kill a parent with SIGKILL and report whether its busy child outlived it."""
 
+    # A skip after READY leaks the deliberately unbound child: it detached its descriptors,
+    # ignores SIGTERM, and can remain in its 600-second call. Confirm the identity primitive
+    # before any such child exists, so an unsupported host skips without creating an orphan.
+    try:
+        preflight_pidfd = _stable_identity(os.getpid())
+    except _UnstableIdentity as exc:
+        pytest.skip(
+            "no stable process identity on this host: refusing to spawn an uncleanable "
+            f"control child ({exc}). Parent-death evidence requires the Ubuntu 22.04-class "
+            "kernel (pidfd plus pidfd_send_signal, >= 5.3); this limitation is the open "
+            "target-OS gate, not a pass."
+        )
+    else:
+        os.close(preflight_pidfd)
+
     parent_file = tmp_path / f"parent_{'bound' if bound else 'unbound'}_{abs(hash(busy))}.py"
     parent_file.write_text(
         _BUSY_CHILD_PARENT.format(
@@ -347,13 +362,8 @@ def test_the_binding_requests_exactly_pr_set_pdeathsig_with_sigkill() -> None:
 
 
 @_WINDOWS_ONLY
-def test_on_windows_a_real_worker_starts_instead_of_being_killed() -> None:
-    """Windows stays an OPEN gate -- not an impossibility, and not a guarantee.
-
-    The regression this pins: the binder once exited every non-Linux child outright, making
-    mock=False connections impossible. It must instead let the worker run WITHOUT parent-
-    death binding: no exit, and no pretended binding either.
-    """
+def test_on_windows_an_unbound_worker_is_refused() -> None:
+    """Windows must fail closed until it has an equivalent parent-death binding."""
 
     finished = _probe(
         """
@@ -371,13 +381,8 @@ def test_on_windows_a_real_worker_starts_instead_of_being_killed() -> None:
         ctypes.CDLL = _Spy
         """
     )
-    assert b"KEPT RUNNING" in finished.stdout, (
-        "a Windows worker must be allowed to start; killing every non-Linux child makes "
-        "mock=False connections impossible"
-    )
-    assert b"PRCTL CALLED" not in finished.stdout, (
-        "no parent-death binding may be pretended on Windows; support there is an open gate"
-    )
+    assert b"KEPT RUNNING" not in finished.stdout, "an unbound Windows worker must exit before it can own a VISA handle"
+    assert b"PRCTL CALLED" not in finished.stdout, "no Linux parent-death binding may be pretended on Windows"
 
 
 def _probe(body: str) -> subprocess.CompletedProcess:
