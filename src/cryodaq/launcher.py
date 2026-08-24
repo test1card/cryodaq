@@ -3503,7 +3503,13 @@ class LauncherWindow(QMainWindow):
         claims_unknown_outcome = type(receipt) is dict and receipt.get("outcome_unknown") is True
         unknown_identity = _parse_bridge_unknown_outcome_envelope(receipt)
         if claims_unknown_outcome and unknown_identity is None:
-            logger.critical("Finished engine shutdown worker has malformed unknown-outcome evidence")
+            # The finished result is immutable: it can never become readable. The
+            # diagnosis is latched to this exact worker so later polls of the same
+            # evidence stay silent, while a different worker's evidence is still
+            # diagnosed on its own first refusal.
+            if getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is not worker:
+                self._engine_shutdown_unreadable_evidence_worker = worker
+                logger.critical("Finished engine shutdown worker has malformed unknown-outcome evidence")
             self._engine_shutdown_hold_reason = (
                 "the finished shutdown worker left unknown-outcome evidence this launcher cannot read, "
                 "so its identity is held rather than guessed at"
@@ -4034,7 +4040,9 @@ class LauncherWindow(QMainWindow):
         owner means some other path already took responsibility and this one
         must stay inert; an unchanged owner continues settling regardless of
         how far the restart generation moved meanwhile. Returns False when no
-        settlement evidence is pending, so the caller keeps its plain latch.
+        settlement evidence is pending -- or when the only pending evidence is a
+        finished worker whose malformed result can never change -- so the caller
+        keeps its plain latch.
         """
 
         deadline = getattr(self, "_engine_shutdown_wait_deadline", None)
@@ -4051,6 +4059,26 @@ class LauncherWindow(QMainWindow):
         )
         if captured_owner[0] is None and captured_owner[4] is None and not receipt_waiting_for_exit:
             return False
+        worker = captured_owner[0]
+        if worker is not None:
+            try:
+                worker_finished = worker.isFinished() is True
+            except Exception:
+                worker_finished = False
+            if (
+                worker_finished
+                and captured_owner[4] is None
+                and getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+            ):
+                # This worker has FINISHED and its result was already classified as
+                # malformed unknown-outcome evidence: immutable, never becoming valid,
+                # with no reconcilable identity left to chase. Another 200 ms pass cannot
+                # change production state -- it would only repeat the same CRITICAL
+                # diagnosis forever -- so refuse, and let the caller latch the stable
+                # terminal HOLD with the evidence still visibly down. A running worker,
+                # or one whose parsed identity still awaits transport reconciliation,
+                # remains progress-capable and keeps its polling loop.
+                return False
 
         def _retry_owner_bound_settlement() -> None:
             if not LauncherWindow._runtime_callback_is_current(self):

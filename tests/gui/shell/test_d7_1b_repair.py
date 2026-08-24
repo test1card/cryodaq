@@ -1072,6 +1072,149 @@ def test_malformed_unknown_outcome_evidence_is_refused_not_cleared(receipt_overr
     assert calls.count("banner") == 1
 
 
+def test_finished_malformed_unknown_outcome_latches_terminal_hold_without_rescheduling() -> None:
+    """A finished malformed result can never change, so no 200 ms pass may chase it.
+
+    The defect: the retained FINISHED worker still made the owner-bound retry treat
+    its owner as progress-capable, so every recovery pass scheduled another 200 ms
+    settlement poll and each pass repeated the same CRITICAL diagnosis forever --
+    the immutable result could never become valid. Driving the REAL recovery entry
+    point with such a worker must refuse the reschedule outright and latch the
+    stable HOLD instead: evidence retained, identity never guessed, reconciliation
+    never attempted.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    worker.result.update({"generation": "five"})
+    launcher._engine_shutdown_worker = worker
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+    assert deferred is False
+    assert settlement_shot.call_count == 0, "an immutable finished result must not book another 200 ms settlement pass"
+    assert launcher._restart_giving_up is True, "the immutable evidence must reach a stable terminal HOLD"
+    assert launcher._engine_shutdown_worker is worker, "the evidence stays retained and visibly down"
+    assert getattr(launcher, "_engine_shutdown_transport_identity", None) is None, (
+        "an unreadable identity must never be guessed into reconciliation state"
+    )
+    assert launcher._engine_instance_id == "a" * 32, "no identity is released on this HOLD"
+    bridge.reconcile_late_result.assert_not_called()
+    assert any("cannot read" in banner for banner in banners), banners
+
+
+def test_finished_unreconciled_unknown_outcome_keeps_its_settlement_loop_alive() -> None:
+    """The refusal must stay narrow: a real pending identity can still change state.
+
+    A finished worker whose envelope PARSES but whose late reply has not landed yet
+    is genuinely reconcilable -- transport reconciliation can still change production
+    state -- so the 200 ms settlement loop keeps running across two passes here.
+    This is the contrast that proves the malformed refusal above is not an
+    over-broad shutdown of every finished-worker poll.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    bridge.reconcile_late_result.return_value = None
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    launcher._engine_shutdown_worker = worker
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+        assert deferred is False
+        assert settlement_shot.call_count == 1
+        assert settlement_shot.call_args.args[0] == 200
+        settlement_shot.call_args.args[1]()
+
+    assert settlement_shot.call_count == 2, "still-unreconciled evidence keeps polling"
+    assert settlement_shot.call_args.args[0] == 200
+    assert launcher._restart_giving_up is False, "an open reconciliation must not latch HOLD"
+    assert launcher._engine_shutdown_transport_identity == ("c" * 32, 5)
+    assert bridge.shutdown.call_count == 0, "the bridge survives while reconciliation is open"
+
+
+def test_malformed_unknown_outcome_diagnosis_logs_once_across_repeat_polls(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every health tick used to repeat the same CRITICAL line forever.
+
+    Two consecutive settlement passes over the SAME finished malformed evidence:
+    the diagnosis is spoken exactly once, the second poll stays silent, and both
+    passes still refuse and re-show the HOLD reason so the engine remains visibly
+    down throughout.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    worker.result.update({"generation": "five"})
+    launcher._engine_shutdown_worker = worker
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    with caplog.at_level("CRITICAL", logger="cryodaq.launcher"):
+        first = LauncherWindow._settle_observed_engine_exit(
+            launcher,
+            owner_id="a" * 32,
+            returncode=9,
+            phase="probe",
+        )
+        second = LauncherWindow._settle_observed_engine_exit(
+            launcher,
+            owner_id="a" * 32,
+            returncode=9,
+            phase="probe",
+        )
+
+    assert first is False and second is False, "both passes must keep refusing"
+    diagnoses = [
+        record.getMessage() for record in caplog.records if "malformed unknown-outcome evidence" in record.getMessage()
+    ]
+    assert len(diagnoses) == 1, diagnoses
+    assert len(banners) == 2, "each refused pass keeps the HOLD visible"
+    assert all("cannot read" in banner for banner in banners), banners
+    bridge.reconcile_late_result.assert_not_called()
+    assert launcher._engine_shutdown_worker is worker
+    assert launcher._engine_instance_id == "a" * 32
+
+
 def test_a_lost_handle_keeps_its_authority_published() -> None:
     """Retiring identity is for an exit we WATCHED, never for one we did not.
 
