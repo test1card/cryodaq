@@ -3543,6 +3543,30 @@ class LauncherWindow(QMainWindow):
         self._engine_shutdown_worker = None
         return True
 
+    def _refused_settlement_reaches_stable_hold(self) -> bool:
+        """True only when a refused settlement can never change by polling again.
+
+        Shared by both ``_handle_engine_exit`` refusal sites. A FINISHED worker whose
+        result was already classified as malformed unknown-outcome evidence is
+        immutable and has no reconcilable identity left to chase -- another poll
+        would only repeat the same diagnosis, so that alone reaches the stable
+        terminal HOLD. A running worker, or a parsed envelope still awaiting its
+        late transport reply, remains progress-capable and must keep being polled.
+        """
+
+        worker = getattr(self, "_engine_shutdown_worker", None)
+        if worker is None:
+            return False
+        try:
+            worker_finished = worker.isFinished() is True
+        except Exception:
+            return False
+        return (
+            worker_finished
+            and getattr(self, "_engine_shutdown_transport_identity", None) is None
+            and getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+        )
+
     def _retire_observed_engine_incarnation(self) -> bool:
         """Release the identity of an incarnation whose exit was observed.
 
@@ -6095,7 +6119,6 @@ class LauncherWindow(QMainWindow):
                 "Engine exited with CONFIG ERROR (code %d). NOT auto-restarting.",
                 returncode,
             )
-            self._restart_giving_up = True
             self._show_engine_down_banner(
                 "CONFIG ERROR: engine restart is disabled; settling crashed-child readers in HOLD."
             )
@@ -6108,13 +6131,21 @@ class LauncherWindow(QMainWindow):
                 owner_id = "<unknown>"
             # No restart is scheduled here, but the operator is told to fix the files and
             # press the restart button, and that button reaches the same spawn preflight.
+            # Settlement runs BEFORE the giving-up latch: the health callback re-enters
+            # this handler only while that latch is clear, so latching first made a
+            # refused settlement terminal -- a retained shutdown worker was never polled
+            # again and its owner stranded forever. A refused pass latches ONLY immutable
+            # finished malformed evidence, exactly as the retryable branch below does.
             if not LauncherWindow._settle_observed_engine_exit(
                 self,
                 owner_id=owner_id,
                 returncode=returncode,
                 phase="config-error",
             ):
+                if LauncherWindow._refused_settlement_reaches_stable_hold(self):
+                    self._restart_giving_up = True
                 return
+            self._restart_giving_up = True
             if not self._config_error_modal_shown:
                 self._config_error_modal_shown = True
             self._show_engine_down_banner(
@@ -6141,16 +6172,7 @@ class LauncherWindow(QMainWindow):
             returncode=returncode,
             phase="retryable-exit",
         ):
-            worker = getattr(self, "_engine_shutdown_worker", None)
-            try:
-                worker_finished = worker.isFinished() is True
-            except Exception:
-                worker_finished = False
-            if (
-                worker_finished
-                and getattr(self, "_engine_shutdown_transport_identity", None) is None
-                and getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is worker
-            ):
+            if LauncherWindow._refused_settlement_reaches_stable_hold(self):
                 self._restart_giving_up = True
             return
 

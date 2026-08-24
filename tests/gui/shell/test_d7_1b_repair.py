@@ -1365,6 +1365,136 @@ def test_owned_config_error_exit_records_the_reason_and_refuses_to_retry() -> No
     single_shot.assert_not_called()
 
 
+def test_config_error_health_handler_keeps_polling_a_running_shutdown_worker() -> None:
+    """The config-error refusal must not strand a still-running shutdown worker.
+
+    Latching ``_restart_giving_up`` BEFORE settlement made a refused pass terminal:
+    the health callback calls this handler only while the latch is clear, so a
+    retained ``launcher_shutdown`` worker was never polled again -- its owner, its
+    handle, and every piece of engine identity stayed published forever and the
+    spawn preflight refused any later manual restart. A RUNNING worker remains
+    progress-capable exactly as it is on the ordinary retryable-exit path.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, ENGINE_CONFIG_ERROR_EXIT_CODE)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._restart_giving_up is False, "a running worker remains progress-capable"
+    assert launcher._engine_shutdown_worker is worker, "the owner must be kept while it runs"
+    assert launcher._engine_proc is not None, "the terminal handle stays available for re-settlement"
+    assert launcher._engine_instance_id == "a" * 32, "identity retires only after settlement"
+    assert launcher._restart_attempts == 0, "a refused pass consumes no backoff slot"
+    assert single_shot.call_count == 0, "a configuration error never schedules a replacement"
+
+
+def test_config_error_health_handler_settles_once_the_retained_worker_finishes() -> None:
+    """The refused config-error pass must reach its stable refusal AFTER settlement.
+
+    First tick: the worker is still running, so the handler refuses without latching.
+    Later tick, worker finished: the incarnation retires and the reviewed config-error
+    refusal latches then -- with the handle released and the operator told which files
+    to fix. The refusal is preserved; only its ordering relative to settlement moved.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, ENGINE_CONFIG_ERROR_EXIT_CODE)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+        assert launcher._restart_giving_up is False, "the first pass must stay progress-capable"
+
+        worker._finished = True
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._restart_giving_up is True, "the settled config error keeps its reviewed refusal"
+    assert launcher._config_error_modal_shown is True
+    assert launcher._engine_proc is None
+    assert launcher._engine_shutdown_worker is None
+    assert launcher._engine_instance_id is None
+    assert launcher._engine_unsettled_incarnation is None, "the operator's quit stays available"
+    assert single_shot.call_count == 0
+
+
+def test_config_error_health_handler_keeps_an_open_reconciliation_progress_capable() -> None:
+    """A finished worker whose envelope PARSES still awaits transport reconciliation.
+
+    Its late reply can still land, so the config-error path must keep polling rather
+    than latch the terminal HOLD reserved for evidence that can never become readable.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, ENGINE_CONFIG_ERROR_EXIT_CODE)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    bridge.reconcile_late_result.return_value = None
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    launcher._engine_shutdown_worker = worker
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._restart_giving_up is False, "an open reconciliation must not latch HOLD"
+    assert launcher._engine_shutdown_transport_identity == ("c" * 32, 5), (
+        "the exact reconciliation identity must stay published for a later pass"
+    )
+    assert launcher._engine_shutdown_worker is worker
+    bridge.reconcile_late_result.assert_called_once_with("c" * 32, generation=5)
+    assert launcher._restart_attempts == 0
+    assert single_shot.call_count == 0
+
+
+def test_config_error_health_handler_latches_terminal_hold_for_immutable_shutdown_evidence() -> None:
+    """The narrow latch: immutable finished malformed evidence reaches stable HOLD at once.
+
+    This pins the corrected ordering against over-broadening: the config-error path may
+    only skip the immediate latch for evidence a later poll can change. A FINISHED
+    worker whose unknown-outcome result is malformed can never become readable, so the
+    very first refused pass latches -- evidence retained, identity never guessed,
+    reconciliation never attempted.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, ENGINE_CONFIG_ERROR_EXIT_CODE)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    worker.result.update({"generation": "five"})
+    launcher._engine_shutdown_worker = worker
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._restart_giving_up is True, "the immutable evidence must reach a stable terminal HOLD"
+    assert launcher._engine_shutdown_worker is worker, "the evidence stays retained and visibly down"
+    assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert getattr(launcher, "_engine_shutdown_transport_identity", None) is None, (
+        "an unreadable identity must never be guessed into reconciliation state"
+    )
+    assert launcher._engine_instance_id == "a" * 32, "no identity is released on this HOLD"
+    assert launcher._config_error_modal_shown is False, "settlement refused before the fix-files banner"
+    bridge.reconcile_late_result.assert_not_called()
+    assert single_shot.call_count == 0
+
+
 def test_lost_owned_engine_handle_preserves_hold_and_blocks_restart_and_quit() -> None:
     """No handle and no exit code is the case that must still HOLD.
 
