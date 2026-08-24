@@ -1277,3 +1277,106 @@ def test_forced_engine_death_after_receipt_remains_hold(monkeypatch: pytest.Monk
     assert host._engine_shutdown_receipt is not None
     assert host._engine_unsettled_incarnation == ("a" * 32, 0)
     host._close_engine_stderr_stream.assert_called_once_with()
+
+
+class _NonzeroExitProcess:
+    """A child whose exit was already observed with a nonzero code."""
+
+    pid = 9311
+
+    def __init__(self, code: int) -> None:
+        self.code = code
+
+    def poll(self) -> int:
+        return self.code
+
+
+def test_deferred_nonzero_exit_after_retained_receipt_stays_receipt_bound() -> None:
+    """The receipt-aware stop path owns the exit-code verdict on every pass.
+
+    A prior pass stored a verified shutdown receipt and raised the bounded
+    "not yet exited" HOLD; the child then exited nonzero before the next
+    settlement callback. Re-entry must reach the receipt's own exit-code
+    validation -- a HOLD that retains the receipt and the handle -- and must
+    never re-dispatch the command or release the owner.
+    """
+
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(1)
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    host._engine_shutdown_receipt = _shutdown_receipt("c" * 32)
+
+    with pytest.raises(RuntimeError, match="exited without a clean teardown receipt"):
+        LauncherWindow._stop_engine(host)
+
+    assert host._engine_shutdown_receipt == _shutdown_receipt("c" * 32)
+    assert host._engine_proc is process
+    assert host._engine_shutdown_transport_identity is None
+    assert getattr(host, "_engine_unsettled_incarnation", None) is None
+    bridge.send_command.assert_not_called()
+    host._close_engine_stderr_stream.assert_not_called()
+
+
+def test_terminal_child_with_published_identity_enters_owner_bound_reconciliation() -> None:
+    """Generic retirement must not discard the identity before reconciliation.
+
+    ``_stop_engine`` published the unknown-outcome transport identity and
+    released its worker; the child turned terminal before the next settlement
+    callback. The recovery callback must route that exit into ``_stop_engine``
+    -- which reconciles the exact ``(request_id, generation)`` on the bridge --
+    instead of the generic observed-exit retirement, which would clear the
+    identity unread and schedule a replacement over an unresolved command.
+    """
+
+    from cryodaq.gui.zmq_client import LateCommandResult
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(1)
+    bridge = MagicMock()
+    transport_request_id = "d" * 32
+    transport_generation = 7
+    semantic_request_id = "c" * 32
+    host = _live_engine_host(process, bridge)
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    host._engine_shutdown_request_id = semantic_request_id
+    host._engine_shutdown_transport_identity = (transport_request_id, transport_generation)
+
+    bridge.reconcile_late_result.return_value = None
+    settled, exit_code, error = LauncherWindow._settle_replacement_child(host, phase="probe")
+
+    assert settled is False
+    assert exit_code is None
+    assert isinstance(error, RuntimeError)
+    assert "remains unknown" in str(error)
+    bridge.reconcile_late_result.assert_called_once_with(
+        transport_request_id,
+        generation=transport_generation,
+    )
+    assert host._engine_shutdown_transport_identity == (transport_request_id, transport_generation), (
+        "an unreconciled identity must stay published"
+    )
+    assert host._engine_instance_id == "a" * 32
+    assert host._engine_proc is process
+    host._close_engine_stderr_stream.assert_not_called()
+
+    bridge.reconcile_late_result.return_value = LateCommandResult(
+        request_id=transport_request_id,
+        generation=transport_generation,
+        reply=_shutdown_receipt(semantic_request_id),
+    )
+    settled, exit_code, error = LauncherWindow._settle_replacement_child(host, phase="probe")
+
+    assert settled is False
+    assert exit_code is None
+    assert isinstance(error, RuntimeError)
+    assert "exited without a clean teardown receipt" in str(error)
+    assert host._engine_shutdown_receipt is not None, "validated late evidence is retained"
+    assert host._engine_shutdown_transport_identity is None, "consumed only by exact reconciliation"
+    assert host._engine_proc is process
+    host._close_engine_stderr_stream.assert_not_called()
+    bridge.send_command.assert_not_called()
+
+    assert host._engine_instance_id == "a" * 32

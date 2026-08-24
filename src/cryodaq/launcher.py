@@ -257,17 +257,19 @@ def _parse_bridge_unknown_outcome_envelope(receipt: object) -> tuple[str, int] |
     """Strictly parse one actual ``ZmqBridge.send_command`` unknown-outcome envelope.
 
     A dispatched non-read command whose outcome the bridge cannot prove comes
-    back as one envelope family: the post-dispatch timeout, post-dispatch
-    cancellation, and lifecycle-settlement paths carry ``delivery_state`` and
-    ``commit_state`` beside the core evidence
-    (``zmq_client._send_command_once`` / ``_settle_pending_for_lifecycle_locked``),
-    and the safe-transport failure paths additionally carry ``error_code`` and
-    ``retry_safe``. Returns that result's exact ``(request_id, generation)``
-    reconciliation identity, or None when the object is not from this family --
-    a settled reply, a definitely-unsent rejection, or unknown-outcome evidence
-    so malformed that its identity cannot be trusted. A caller that saw the
-    result claim ``outcome_unknown`` must treat None as HOLD evidence, never
-    as settled.
+    back as one of exactly two envelope families. The post-dispatch timeout,
+    post-dispatch cancellation, and lifecycle-settlement paths carry the core
+    evidence plus ``delivery_state="dispatched"`` and ``commit_state="unknown"``
+    (``zmq_client._send_command_once`` / ``_settle_pending_for_lifecycle_locked``);
+    the safe-transport failure paths instead carry ``delivery_state="unknown"``,
+    ``commit_state="unknown"``, ``error_code``, and ``retry_safe=False``. Any
+    other key set or value combination -- including a family's key set carrying
+    the other family's values -- is not from this family. Returns that result's
+    exact ``(request_id, generation)`` reconciliation identity, or None when the
+    object is not from this family -- a settled reply, a definitely-unsent
+    rejection, or unknown-outcome evidence so malformed that its identity cannot
+    be trusted. A caller that saw the result claim ``outcome_unknown`` must
+    treat None as HOLD evidence, never as settled.
     """
 
     if type(receipt) is not dict:
@@ -295,25 +297,26 @@ def _parse_bridge_unknown_outcome_envelope(receipt: object) -> tuple[str, int] |
     transport_keys = {"delivery_state", "commit_state"}
     safe_transport_keys = transport_keys | {"error_code", "retry_safe"}
     receipt_keys = set(receipt)
-    if receipt_keys not in {
-        _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | transport_keys,
-        _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | safe_transport_keys,
-    }:
-        return None
     delivery_state = receipt["delivery_state"]
     commit_state = receipt["commit_state"]
-    if (
-        type(delivery_state) is not str
-        or delivery_state not in {"dispatched", "unknown"}
-        or type(commit_state) is not str
-        or commit_state != "unknown"
-    ):
+    if type(delivery_state) is not str or type(commit_state) is not str:
         return None
-    if receipt_keys == _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | safe_transport_keys:
+    if receipt_keys == _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | transport_keys:
+        if delivery_state != "dispatched" or commit_state != "unknown":
+            return None
+    elif receipt_keys == _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS | safe_transport_keys:
         error_code = receipt["error_code"]
         retry_safe = receipt["retry_safe"]
-        if type(error_code) is not str or not error_code or type(retry_safe) is not bool:
+        if (
+            delivery_state != "unknown"
+            or commit_state != "unknown"
+            or type(error_code) is not str
+            or not error_code
+            or retry_safe is not False
+        ):
             return None
+    else:
+        return None
     return request_id, generation
 
 
@@ -4015,6 +4018,29 @@ class LauncherWindow(QMainWindow):
         replacement = getattr(self, "_engine_proc", None)
         observed = None if replacement is None else replacement.poll()
         if replacement is not None and observed is not None:
+            pending_identity = getattr(self, "_engine_shutdown_transport_identity", None)
+            pending_receipt = getattr(self, "_engine_shutdown_receipt", None)
+            if getattr(self, "_engine_shutdown_worker", None) is None and (
+                pending_identity is not None or pending_receipt is not None
+            ):
+                # A stop is still mid-settlement for this incarnation: a verified
+                # receipt awaits its exit-code validation, or an unknown-outcome
+                # transport identity awaits reconcile_late_result(). Generic
+                # observed-exit retirement would discard that evidence unread,
+                # so settlement continues through _stop_engine(), which owns
+                # both validations; a refusal keeps the evidence retained.
+                deferred_owner_id = getattr(self, "_engine_instance_id", None)
+                logger.error(
+                    "Engine exited during deferred shutdown settlement; phase=%s incarnation=%s code=%s.",
+                    phase,
+                    deferred_owner_id if type(deferred_owner_id) is str else "<unknown>",
+                    observed,
+                )
+                try:
+                    self._stop_engine()
+                except Exception as exc:
+                    return False, None, exc
+                return True, None, None
             replacement_id = getattr(self, "_engine_instance_id", None)
             logger.error(
                 "Engine replacement exited before readiness; phase=%s incarnation=%s code=%s.",
@@ -6017,6 +6043,32 @@ class LauncherWindow(QMainWindow):
                 "HOLD: engine shutdown settlement is incomplete. "
                 "The live replacement remains supervised while exact settlement continues."
             )
+            return
+        if (
+            process is not None
+            and returncode is not None
+            and getattr(self, "_replay_source", None) is None
+            and not getattr(self, "_engine_external", False)
+            and getattr(self, "_engine_shutdown_worker", None) is None
+            and LauncherWindow._engine_settlement_pending(self)
+        ):
+            # Same handoff race, terminal child: a verified shutdown receipt still
+            # owes its exit-code validation, or a published unknown-outcome transport
+            # identity still owes reconcile_late_result(). The generic observed-exit
+            # path below would retire that evidence unread and schedule a replacement
+            # over an unproven settlement, so the exit continues through the
+            # receipt-aware stop path instead; its refusal keeps the evidence
+            # retained and visibly down.
+            deferred_owner_id = getattr(self, "_engine_instance_id", None)
+            logger.error(
+                "Engine exit observed during deferred shutdown settlement; incarnation=%s code=%s.",
+                deferred_owner_id if type(deferred_owner_id) is str else "<unknown>",
+                returncode,
+            )
+            try:
+                self._stop_engine()
+            except Exception as exc:
+                self._show_engine_down_banner(f"HOLD: {exc}")
             return
         observed_owner_id = (
             getattr(self, "_replay_session_id", None)

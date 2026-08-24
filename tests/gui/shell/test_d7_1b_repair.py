@@ -2127,6 +2127,69 @@ def test_extended_unknown_envelopes_refuse_malformed_evidence() -> None:
             assert "cannot read" in said[0], (label, said[0])
 
 
+def test_cross_family_unknown_outcome_envelopes_stay_unresolved() -> None:
+    """Value combinations no send_command path emits must not manufacture identity.
+
+    Each real envelope family has exactly one value shape: the core family is
+    ``delivery_state="dispatched"`` / ``commit_state="unknown"``, and the
+    safe-transport family is ``delivery_state="unknown"`` /
+    ``commit_state="unknown"`` / ``retry_safe=False``. A key set from one
+    family carrying the other's values is malformed evidence: it stays
+    unresolved HOLD, is never reconciled, and never retires the incarnation.
+    """
+
+    core_family = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after timeout",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "dispatched": True,
+        "outcome_unknown": True,
+        "delivery_state": "dispatched",
+        "commit_state": "unknown",
+    }
+    safe_transport_family = {
+        "ok": False,
+        "error_code": "engine_unavailable",
+        "error": "Engine command transport is unavailable after dispatch.",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "delivery_state": "unknown",
+        "commit_state": "unknown",
+        "dispatched": True,
+        "outcome_unknown": True,
+        "retry_safe": False,
+    }
+    cross_family_cases = [
+        ("core-keys-with-unknown-delivery-value", {**core_family, "delivery_state": "unknown"}),
+        ("safe-keys-with-dispatched-delivery-value", {**safe_transport_family, "delivery_state": "dispatched"}),
+        ("safe-keys-with-retry-safe-true", {**safe_transport_family, "retry_safe": True}),
+    ]
+    for label, receipt in cross_family_cases:
+        calls: list[str] = []
+        launcher = _exited_owned_launcher(calls, 9)
+        settle_bridge = MagicMock()
+        launcher._bridge = settle_bridge
+        worker = _ShutdownWorker(settles=True)
+        worker.result = receipt
+        launcher._engine_shutdown_worker = worker
+        said: list[str] = []
+        launcher._show_engine_down_banner = said.append
+
+        settled = LauncherWindow._settle_observed_engine_exit(
+            launcher,
+            owner_id="a" * 32,
+            returncode=9,
+            phase="probe",
+        )
+
+        assert settled is False, label
+        settle_bridge.reconcile_late_result.assert_not_called()
+        assert launcher._engine_shutdown_worker is not None, label
+        assert launcher._engine_instance_id == "a" * 32, label
+        assert len(said) == 1 and "cannot read" in said[0], (label, said)
+
+
 # ---------------------------------------------------------------------------
 # P1-B: deferred settlement passes are bound to the captured pending OWNER --
 # exact worker thread, process handle, incarnation ids, retained transport
@@ -2280,3 +2343,143 @@ def test_interrupted_manual_restart_schedules_owner_bound_settlement_continuatio
         assert launcher._bridge.shutdown.call_count == 0, (
             "the bridge must survive while the old command's outcome is unresolved"
         )
+
+
+def test_verified_receipt_with_observed_nonzero_exit_keeps_owner_bound_settlement() -> None:
+    """A post-receipt nonzero exit is settled by the receipt-aware path, not retired.
+
+    A prior pass stored a verified shutdown receipt, raised the bounded
+    "not yet exited" HOLD, and cleared its command worker; the child then
+    exited nonzero before the next owner-bound settlement callback. The old
+    code read that exit as an ordinary crash: generic observed-exit retirement
+    erased the receipt and booked a replacement over an unproven settlement.
+    The recovery callback must route it into _stop_engine instead -- whose
+    exit-code verdict keeps the evidence retained in HOLD -- for as long as
+    the exit-wait budget stays open.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: 1)
+    launcher._restart_pending = True
+    launcher._engine_shutdown_receipt = {"ok": True}
+    launcher._engine_shutdown_wait_deadline = 40.0
+
+    def _stop_that_finds_the_exit_nonzero() -> None:
+        calls.append("stop_engine")
+        raise RuntimeError("engine exited without a clean teardown receipt; launcher remains in HOLD")
+
+    launcher._stop_engine = _stop_that_finds_the_exit_nonzero
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+        assert calls.count("stop_engine") == 1, "the terminal child goes to the stop path, not generic retirement"
+        assert settlement_shot.call_count == 1
+        assert settlement_shot.call_args.args[0] == 200
+        assert launcher._engine_shutdown_receipt == {"ok": True}, "the verified receipt must not be cleared"
+        assert launcher._restart_giving_up is False
+        launcher._bridge.shutdown.assert_not_called()
+
+        settlement_shot.call_args.args[1]()
+        assert calls.count("stop_engine") == 2
+        assert launcher._engine_shutdown_receipt == {"ok": True}
+        assert settlement_shot.call_count == 2
+
+        with patch("cryodaq.launcher.time.monotonic", return_value=50.0):
+            settlement_shot.call_args.args[1]()
+        assert settlement_shot.call_count == 2, "a spent budget must not reschedule"
+        assert launcher._restart_giving_up is True
+        assert launcher._engine_shutdown_receipt == {"ok": True}, "evidence survives the stable HOLD"
+
+    launcher._bridge.shutdown.assert_called_once()
+
+
+def test_health_tick_routes_a_post_receipt_exit_through_the_stop_path() -> None:
+    """The health tick must not convert a post-receipt exit into a replacement.
+
+    With the worker already released and a verified receipt retained, an
+    observed nonzero exit belongs to the receipt's own exit-code validation.
+    The tick re-enters the owner-bound stop path and surfaces its refusal;
+    no producer invalidation, no retirement, no backoff slot, no replacement.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: 1)
+    launcher._engine_shutdown_receipt = {"ok": True}
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    def _receipt_bound_stop() -> None:
+        calls.append("stop_engine")
+        raise RuntimeError("engine exited without a clean teardown receipt; launcher remains in HOLD")
+
+    launcher._stop_engine = _receipt_bound_stop
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert calls.count("stop_engine") == 1
+    assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
+    assert launcher._engine_shutdown_receipt == {"ok": True}, "the verified receipt must not be cleared"
+    assert launcher._engine_proc is not None
+    assert "invalidate" not in calls, "producer authority is untouched while settlement pends"
+    assert single_shot.call_count == 0, "the owner-bound stop path schedules no replacement"
+    assert launcher._restart_giving_up is False
+    assert launcher._restart_attempts == 0
+
+
+def test_health_tick_keeps_a_published_transport_identity_out_of_generic_retirement() -> None:
+    """The handoff race: identity published, worker released, child terminal.
+
+    Generic observed-exit retirement cleared the published identity without a
+    single reconcile_late_result call and scheduled a replacement. The tick
+    must enter the owner-bound stop path instead, whose refusal retains the
+    exact identity for reconciliation.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: 3)
+    launcher._engine_shutdown_transport_identity = ("e" * 32, 4)
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    def _identity_bound_stop() -> None:
+        calls.append("stop_engine")
+        raise RuntimeError(
+            "engine shutdown transport outcome remains unknown; launcher retains exact reconciliation identity in HOLD"
+        )
+
+    launcher._stop_engine = _identity_bound_stop
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert calls.count("stop_engine") == 1
+    assert launcher._engine_shutdown_transport_identity == ("e" * 32, 4), (
+        "the identity must survive for reconcile_late_result()"
+    )
+    assert launcher._engine_instance_id == "a" * 32
+    assert len(banners) == 1 and "HOLD" in banners[0], banners
+    assert single_shot.call_count == 0
+    assert launcher._restart_attempts == 0
