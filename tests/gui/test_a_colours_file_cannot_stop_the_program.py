@@ -314,7 +314,7 @@ def test_a_reason_is_retained_when_an_active_log_handler_rejects_it(
     [(level, message, args)] = logging_setup._deferred_records
     assert level == logging.WARNING
     assert message == "theme: ignoring invalid pack %s: %s"
-    assert args[0].endswith("themes\\broken.yaml")
+    assert pathlib.Path(args[0]) == themes_dir / "broken.yaml"
     assert "could not be parsed" in args[1]
 
 

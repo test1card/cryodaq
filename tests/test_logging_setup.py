@@ -7,6 +7,43 @@ import io
 import logging
 import sys
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def restore_root_logging():
+    """Leave root logging exactly as each test found it.
+
+    ``setup_logging()`` replaces every root handler, and several tests here
+    also reload this module (resetting its globals). Without restoration a
+    live handler -- and a claimed "configured" state -- leaked into every
+    later file in the session: when the GUI suite ran after this one, the
+    leaked handler answered "an emission reached a handler" for records that
+    reached nowhere durable, and six theme-deferral guards failed that pass
+    on their own.
+    """
+
+    from cryodaq import logging_setup
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    configured = logging_setup._logging_configured
+    deferred = list(logging_setup._deferred_records)
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            try:
+                handler.close()
+            except Exception:
+                pass
+            root.removeHandler(handler)
+    for handler in handlers:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(level)
+    logging_setup._logging_configured = configured
+    logging_setup._deferred_records[:] = deferred
+
 
 def test_setup_logging_creates_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CRYODAQ_ROOT", str(tmp_path))
@@ -221,6 +258,99 @@ def test_setup_logging_retains_deferred_records_after_file_write_failure(tmp_pat
         root.setLevel(level)
         logging_setup._logging_configured = configured
         logging_setup._deferred_records[:] = deferred
+
+
+def test_a_doubly_broken_console_does_not_stop_the_file_sink_or_startup(tmp_path, monkeypatch):
+    """emit() fails AND the standard error report fails on the same broken stderr.
+
+    StreamHandler re-raises RecursionError straight out of emit() (bpo-36272),
+    and Handler.handleError re-raises it too when the report cannot be written
+    to stderr. Neither may escape: the record must still reach the file sink
+    behind the console, and the caller must carry on as if nothing happened.
+    """
+
+    from cryodaq import logging_setup
+
+    class BrokenEverywhere:
+        closed = False
+
+        def write(self, _message):
+            raise RecursionError("even the error report cannot be written")
+
+        def flush(self):
+            pass
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(sys, "stderr", BrokenEverywhere())
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    logging_setup.setup_logging("doubly-broken", console=True, file=True)
+    logging.getLogger("probe.doubly_broken").error("must reach the file sink")
+
+    for handler in list(logging.getLogger().handlers):
+        handler.flush()
+
+    written = (log_dir / "doubly-broken.log").read_text(encoding="utf-8")
+    assert "must reach the file sink" in written
+
+
+def test_a_retained_record_replays_when_the_broken_sink_recovers(tmp_path, monkeypatch):
+    """Retention is not a parking lot: the first successful emission from a
+    previously failing sink proves recovery and replays the backlog, without
+    another setup_logging() call. While the sink stays broken, ordinary
+    emissions must not re-attempt the backlog.
+    """
+
+    from cryodaq import logging_setup
+
+    class FailingStream:
+        closed = False
+
+        def write(self, _message):
+            raise OSError("disk full")
+
+        def flush(self):
+            pass
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    logging_setup._logging_configured = False
+    logging_setup._deferred_records.clear()
+    logging_setup.defer_record(logging.ERROR, "held diagnostic")
+    monkeypatch.setattr(logging.FileHandler, "_open", lambda _handler: FailingStream())
+    logging_setup.setup_logging("recovering", console=False, file=True)
+
+    assert logging_setup._deferred_records == [(logging.ERROR, "held diagnostic", ())]
+
+    [file_handler] = logging.getLogger().handlers
+    emissions: list[str] = []
+    real_emit = file_handler.emit
+
+    def counting_emit(record):
+        emissions.append(record.getMessage())
+        real_emit(record)
+
+    monkeypatch.setattr(file_handler, "emit", counting_emit)
+
+    for index in range(3):
+        logging.getLogger("probe.recovery").error("while broken %d", index)
+
+    assert emissions == ["while broken 0", "while broken 1", "while broken 2"], (
+        "a permanently broken sink must not be handed the backlog back"
+    )
+
+    monkeypatch.setattr(file_handler, "stream", io.StringIO())
+    logging.getLogger("probe.recovery").info("recovery proven")
+
+    assert not logging_setup._deferred_records
+    assert "held diagnostic" in emissions
+    assert emissions.count("held diagnostic") == 1
+    written = file_handler.stream.getvalue()
+    assert "recovery proven" in written and "held diagnostic" in written
 
 
 def test_bare_token_without_bot_prefix_redacted():

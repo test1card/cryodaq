@@ -89,25 +89,62 @@ class _TokenRedactFilter(logging.Filter):
 # Anything in that position appends here instead, and setup_logging replays it the moment
 # there is somewhere for it to go. Bounded, because an unbounded list filled before logging
 # exists is a leak nothing would ever notice.
+#
+# A record every sink REJECTED is kept here too, and replayed the moment a sink that had
+# been failing accepts a real record -- recovery is proven by an emission, not by waiting
+# for the next setup_logging() call. The queue holds (level, message, args) values only:
+# no handler objects and no LogRecord, so a closed or replaced handler can never be pinned
+# to a record still owed to the operator.
 _MAX_DEFERRED_RECORDS = 64
 _deferred_records: list[tuple[int, str, tuple[object, ...]]] = []
 _logging_configured = False
+_replay_in_progress = False
 
 
 class _EmissionTrackingHandlerMixin:
-    """Remember whether the most recent handler emission reached its stream."""
+    """Remember whether the most recent handler emission reached its stream.
+
+    A sink can fail twice over: the standard handlers re-raise RecursionError
+    straight out of ``emit()`` (bpo-36272), and the standard ``handleError()``
+    report can itself raise while writing to the same broken stderr. Neither
+    failure may escape -- a theme diagnostic must not stop startup, and one
+    dead handler must not stop the handlers after it from receiving the record.
+    """
 
     _last_emission_succeeded = False
     _emission_failed = False
+    _had_emission_failure = False
 
     def emit(self, record: logging.LogRecord) -> None:
         self._emission_failed = False
-        super().emit(record)
-        self._last_emission_succeeded = not self._emission_failed
+        try:
+            super().emit(record)
+        except Exception:
+            if not self._emission_failed:
+                self._emission_failed = True
+                try:
+                    self.handleError(record)
+                except Exception:
+                    pass
+        succeeded = not self._emission_failed
+        recovered = self._had_emission_failure
+        self._last_emission_succeeded = succeeded
+        self._had_emission_failure = not succeeded
+        if succeeded and recovered and _deferred_records and not _replay_in_progress:
+            # This sink had been failing and just took a record: recovery is
+            # proven by a real emission, so retained records are replayed now
+            # instead of waiting for the next setup_logging() call. Successes
+            # from sinks that never failed stay silent, so a backlog is not
+            # re-attempted on every unrelated emission while one sink is down.
+            _replay_deferred_records()
 
     def handleError(self, record: logging.LogRecord) -> None:
         self._emission_failed = True
-        super().handleError(record)
+        self._had_emission_failure = True
+        try:
+            super().handleError(record)
+        except Exception:
+            pass
 
 
 class _EmissionTrackingStreamHandler(_EmissionTrackingHandlerMixin, logging.StreamHandler):
@@ -140,19 +177,34 @@ def defer_record(level: int, message: str, *args: object) -> None:
 
 
 def _replay_deferred_records() -> None:
-    """Emit everything held from before logging existed, oldest first, exactly once."""
+    """Emit everything held from before logging existed, oldest first, exactly once.
 
-    held, _deferred_records[:] = list(_deferred_records), []
-    logger = logging.getLogger("cryodaq.startup")
-    handlers = list(logging.getLogger().handlers)
-    retained: list[tuple[int, str, tuple[object, ...]]] = []
-    for level, message, args in held:
-        for handler in handlers:
-            handler._last_emission_succeeded = False
-        logger.log(level, message, *args)
-        if not any(getattr(handler, "_last_emission_succeeded", False) for handler in handlers):
-            retained.append((level, message, args))
-    _deferred_records[:0] = retained
+    Also runs when a previously failing sink proves its recovery (see the
+    emission-tracking mixin); the in-progress guard keeps a replay from
+    re-entering itself through emissions it triggers.
+    """
+
+    global _replay_in_progress
+    if _replay_in_progress:
+        return
+    _replay_in_progress = True
+    try:
+        held, _deferred_records[:] = list(_deferred_records), []
+        logger = logging.getLogger("cryodaq.startup")
+        handlers = list(logging.getLogger().handlers)
+        retained: list[tuple[int, str, tuple[object, ...]]] = []
+        for level, message, args in held:
+            for handler in handlers:
+                handler._last_emission_succeeded = False
+            try:
+                logger.log(level, message, *args)
+            except Exception:
+                pass
+            if not any(getattr(handler, "_last_emission_succeeded", False) for handler in handlers):
+                retained.append((level, message, args))
+        _deferred_records[:0] = retained
+    finally:
+        _replay_in_progress = False
 
 
 def _warn_file_logging_failure(component: str, exc: Exception) -> None:
