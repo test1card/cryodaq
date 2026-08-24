@@ -1122,6 +1122,107 @@ def test_finished_malformed_unknown_outcome_latches_terminal_hold_without_resche
     assert any("cannot read" in banner for banner in banners), banners
 
 
+def test_ordinary_health_handler_latches_terminal_hold_for_immutable_shutdown_evidence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ordinary crash path must reach the same stable HOLD the recovery path does.
+
+    The reviewed latch for a finished malformed result closed only the failed-replacement
+    entry point. An ordinary observed crash whose retained shutdown worker had already
+    finished with unreadable unknown-outcome evidence returned from _handle_engine_exit
+    WITHOUT latching, so every health tick re-entered it, re-settled the readers, and
+    refreshed the HOLD banner over evidence that can never become readable. Driving the
+    REAL health-handler path twice must latch ``_restart_giving_up``, keep the second
+    call inert -- nothing scheduled, no backoff consumed, diagnosis spoken once -- and
+    retain the worker, its owner identity, and the unreadable evidence verbatim.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    worker.result.update({"generation": "five"})
+    launcher._engine_shutdown_worker = worker
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    with (
+        caplog.at_level("CRITICAL", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._restart_giving_up is True, "the immutable evidence must reach a stable terminal HOLD"
+    assert launcher._restart_pending is False
+    assert single_shot.call_count == 0, "immutable evidence must never schedule a restart callback"
+    assert launcher._restart_attempts == 0, "a terminal HOLD must not consume a backoff slot"
+    assert launcher._engine_shutdown_worker is worker, "the evidence stays retained and visibly down"
+    assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert getattr(launcher, "_engine_shutdown_transport_identity", None) is None, (
+        "an unreadable identity must never be guessed into reconciliation state"
+    )
+    assert launcher._engine_instance_id == "a" * 32, "no identity is released on this HOLD"
+    bridge.reconcile_late_result.assert_not_called()
+    diagnoses = [
+        record.getMessage() for record in caplog.records if "malformed unknown-outcome evidence" in record.getMessage()
+    ]
+    assert len(diagnoses) == 1, diagnoses
+    assert any("cannot read" in banner for banner in banners), banners
+
+
+def test_ordinary_health_handler_keeps_polling_a_running_shutdown_worker() -> None:
+    """The latch must stay narrow: a running worker can still settle and progress."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._restart_giving_up is False, "a running worker remains progress-capable"
+    assert single_shot.call_count == 0
+    assert launcher._engine_shutdown_worker is worker, "the owner must be kept while it runs"
+    assert launcher._engine_instance_id == "a" * 32
+
+
+def test_ordinary_health_handler_keeps_an_open_reconciliation_progress_capable() -> None:
+    """A finished worker whose envelope PARSES still awaits real transport reconciliation.
+
+    Its late reply can still land, so the handler must keep polling rather than latch
+    the terminal HOLD reserved for evidence that can never become readable.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    bridge.reconcile_late_result.return_value = None
+    worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    launcher._engine_shutdown_worker = worker
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._restart_giving_up is False, "an open reconciliation must not latch HOLD"
+    assert single_shot.call_count == 0, "reconciliation polling must not schedule a replacement"
+    assert launcher._engine_shutdown_transport_identity == ("c" * 32, 5), (
+        "the exact reconciliation identity must stay published for a later pass"
+    )
+    assert launcher._engine_shutdown_worker is worker
+    bridge.reconcile_late_result.assert_called_once_with("c" * 32, generation=5)
+
+
 def test_finished_unreconciled_unknown_outcome_keeps_its_settlement_loop_alive() -> None:
     """The refusal must stay narrow: a real pending identity can still change state.
 

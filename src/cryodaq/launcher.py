@@ -6141,6 +6141,17 @@ class LauncherWindow(QMainWindow):
             returncode=returncode,
             phase="retryable-exit",
         ):
+            worker = getattr(self, "_engine_shutdown_worker", None)
+            try:
+                worker_finished = worker.isFinished() is True
+            except Exception:
+                worker_finished = False
+            if (
+                worker_finished
+                and getattr(self, "_engine_shutdown_transport_identity", None) is None
+                and getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+            ):
+                self._restart_giving_up = True
             return
 
         # Retry forever: backoff caps at the last slot (120s), no give-up.
