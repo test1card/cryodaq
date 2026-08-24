@@ -6,6 +6,7 @@ import errno
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -1092,6 +1093,10 @@ def test_exact_shutdown_receipt_and_clean_exit_release_engine_owner() -> None:
 
 
 def test_late_shutdown_reply_reconciles_exact_transport_identity_before_release() -> None:
+    """An unknown-outcome envelope from the closed dispatched family retains
+    the exact ``(request_id, generation)`` transport identity in HOLD, and
+    only a late reply reconciling that same identity releases the owner."""
+
     from cryodaq.gui.zmq_client import LateCommandResult
     from cryodaq.launcher import LauncherWindow
 
@@ -1111,13 +1116,33 @@ def test_late_shutdown_reply_reconciles_exact_transport_identity_before_release(
             "generation": transport_generation,
             "dispatched": True,
             "outcome_unknown": True,
+            "delivery_state": "dispatched",
+            "commit_state": "unknown",
         }
 
     bridge.send_command.side_effect = dispatch
     host = _live_engine_host(process, bridge)
 
-    with pytest.raises(RuntimeError, match="retains exact reconciliation identity"):
-        LauncherWindow._stop_engine(host)
+    # The dispatch runs on a real background worker with a 200 ms grace. On
+    # a loaded CI runner the worker can legitimately outlive that grace;
+    # production then answers with the bounded "awaiting its reply" HOLD and
+    # expects re-entry instead of one-shot completion. Drive exactly that
+    # production re-entry until the worker's reply lands and the identity is
+    # retained.
+    reentry_deadline = time.monotonic() + 30.0
+    while True:
+        if time.monotonic() >= reentry_deadline:
+            pytest.fail("background shutdown worker never settled within the bounded re-entry window")
+        try:
+            LauncherWindow._stop_engine(host)
+        except RuntimeError as exc:
+            if "awaiting its reply" in str(exc):
+                time.sleep(0.01)
+                continue
+            assert "retains exact reconciliation identity" in str(exc)
+            break
+        else:
+            pytest.fail("engine owner released before exact late-result reconciliation")
 
     assert semantic_request_id is not None
     assert host._engine_shutdown_transport_identity == (transport_request_id, transport_generation)
@@ -1152,13 +1177,14 @@ def test_forced_engine_death_after_receipt_remains_hold(monkeypatch: pytest.Monk
     ever touches the process, and never releasing it afterwards even if the
     process later looks clean.
 
-    ``_stop_engine`` polls the process exit in <=1s slices against a
-    wall-clock deadline rather than blocking in one
-    ``process.wait(timeout=60)`` (that would freeze the Qt main thread same
-    as the old synchronous ZMQ round-trip this same function no longer
-    does). A single scripted TimeoutExpired therefore no longer exhausts the
-    budget the way it used to; this fast-forwards a fake ``time.monotonic``
-    across two calls instead of sleeping for 60 real seconds.
+    ``_stop_engine`` polls the child with pure ``poll()`` while the exit-wait
+    budget is open -- it never blocks in ``wait()`` before the deadline --
+    answering each pre-deadline pass with a bounded HOLD for re-entry rather
+    than blocking in one ``process.wait(timeout=60)`` (or even a one-second
+    wait slice), which would freeze the Qt main thread same as the old
+    synchronous ZMQ round-trip this same function no longer does. This
+    fast-forwards a fake ``time.monotonic`` across two calls instead of
+    sleeping for 60 real seconds.
     """
 
     import cryodaq.launcher as module
@@ -1176,17 +1202,14 @@ def test_forced_engine_death_after_receipt_remains_hold(monkeypatch: pytest.Monk
     clock = _FakeClock(2_000_000.0)
     monkeypatch.setattr(module.time, "monotonic", clock.monotonic)
 
-    # Outcome budget for the new slice-based polling: one TimeoutExpired for
-    # the first _stop_engine call's <=1s poll slice (budget still open --
-    # this alone proves one TimeoutExpired no longer exhausts the 60s
-    # budget the way a single process.wait(timeout=60) used to), then the
-    # two _reap_unsettled_engine_process waits (terminate-then-timeout,
-    # kill-then-exit) once the budget is crossed. Exactly three outcomes are
-    # scripted and exactly three are consumed -- an extra wait() call here
+    # Outcome budget: production only polls while the exit-wait budget is
+    # open and never blocks in wait(), so both scripted outcomes belong to
+    # the deadline-expired _reap_unsettled_engine_process reaper alone
+    # (terminate-then-timeout, kill-then-exit). Exactly two outcomes are
+    # scripted and exactly two are consumed -- an extra wait() call here
     # would raise IndexError, which is itself the regression this pins.
     process = _ScriptedProcess(
         [
-            subprocess.TimeoutExpired("engine", 1),
             subprocess.TimeoutExpired("engine", 5),
             0,
         ]

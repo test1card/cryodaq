@@ -4124,15 +4124,16 @@ class LauncherWindow(QMainWindow):
                     raise_on_hold=raise_on_hold,
                 ):
                     # NOTE, and it is why nothing is latched here. Review is right that an
-                    # unready replacement can be read as recovered: `_is_engine_alive` tests
-                    # only `process.poll()`, so the next health tick can clear the operator's
-                    # banner mid-recovery. But `_restart_giving_up` is the WRONG instrument
-                    # for it -- setting it exactly where a settlement retry has just been
-                    # scheduled says "stop trying" and "try again shortly" in the same
-                    # breath, and it breaks three guards that exist to stop a stale
-                    # settlement from cancelling a manual restart that already succeeded.
-                    # The fix belongs in the liveness question itself, next to the replay
-                    # session check that already refuses a running-but-unverified source.
+                    # unready replacement must not be read as recovered mid-settlement.
+                    # `_restart_giving_up` is the WRONG instrument for it -- setting it
+                    # exactly where a settlement retry has just been scheduled says "stop
+                    # trying" and "try again shortly" in the same breath, and it breaks
+                    # three guards that exist to stop a stale settlement from cancelling
+                    # a manual restart that already succeeded. The refusal lives in the
+                    # liveness question itself (`_is_engine_alive` ->
+                    # `_engine_settlement_pending`), next to the replay session check
+                    # that already refuses a running-but-unverified source; while this
+                    # retry stays scheduled, its retained owner keeps that answer down.
                     return False
                 settlement_errors["engine_child"] = settlement_error or RuntimeError(
                     "replacement engine child did not settle"
@@ -4299,6 +4300,27 @@ class LauncherWindow(QMainWindow):
         self._data_timer.start()
         self._health_timer.start()
 
+    def _engine_settlement_pending(self) -> bool:
+        """True while a prior incarnation's shutdown evidence has not settled.
+
+        A retained shutdown worker, an unreconciled transport identity, or a verified
+        receipt whose exit was never observed each mean this launcher still owes a
+        settlement pass for the engine identity it holds. The process on hand can then
+        be an alive but unready replacement mid-recovery, and reading its bare poll()
+        as health let the next health tick clear the operator's down banner between
+        the failure and the scheduled owner-bound settlement. Every path that finishes
+        recovery releases these fields -- exact stop and retirement clear them, and a
+        successful spawn republishes them empty -- so this holds an answer down only
+        while recovery truly remains open, and a genuinely READY current engine always
+        finds them cleared.
+        """
+
+        if getattr(self, "_engine_shutdown_worker", None) is not None:
+            return True
+        if getattr(self, "_engine_shutdown_transport_identity", None) is not None:
+            return True
+        return getattr(self, "_engine_shutdown_receipt", None) is not None
+
     def _is_engine_alive(self) -> bool:
         """Проверить, жив ли engine."""
         if self._engine_external:
@@ -4313,6 +4335,12 @@ class LauncherWindow(QMainWindow):
             getattr(self, "_replay_source", None) is not None
             and vars(self).get("_replay_session_verified", False) is not True
         ):
+            return False
+        # Same family as the replay check above: a running process alone is not
+        # readiness. While this incarnation's settlement remains pending, the
+        # liveness question itself must answer "not healthy" so an unready
+        # replacement stays visibly down instead of being read as recovered.
+        if LauncherWindow._engine_settlement_pending(self):
             return False
         return self._engine_proc.poll() is None
 
@@ -5929,6 +5957,15 @@ class LauncherWindow(QMainWindow):
         process = self._engine_proc
         if process is not None:
             returncode = process.poll()
+        if process is not None and returncode is None and LauncherWindow._engine_settlement_pending(self):
+            # The health tick can arrive while the owner-bound settlement retry
+            # still owns a live replacement. No exit was observed, so this path
+            # must not consume crash backoff or retire exact settlement state.
+            self._show_engine_down_banner(
+                "HOLD: engine shutdown settlement is incomplete. "
+                "The live replacement remains supervised while exact settlement continues."
+            )
+            return
         observed_owner_id = (
             getattr(self, "_replay_session_id", None)
             if getattr(self, "_replay_source", None) is not None

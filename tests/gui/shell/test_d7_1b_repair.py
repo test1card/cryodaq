@@ -593,6 +593,154 @@ def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
     assert single_shot.call_args.args[0] == 3_000
 
 
+@pytest.mark.parametrize(
+    "pending_case",
+    ["retained-shutdown-worker", "unknown-transport-outcome", "verified-receipt-awaiting-exit"],
+)
+def test_an_unready_still_settling_replacement_is_not_reported_alive(pending_case: str) -> None:
+    """An alive unready replacement whose settlement pends must stay visibly down.
+
+    Review 3839110407: when readiness fails while settlement is still owed -- a retained
+    shutdown worker, an unknown transport outcome, or a verified receipt awaiting exit --
+    recovery schedules an owner-bound retry, clears ``_restart_pending``, and returns
+    WITHOUT latching ``_restart_giving_up``. Liveness answered from the bare process
+    poll, so the next health tick read the unready replacement as recovered and cleared
+    the operator's banner mid-recovery. This drives the REAL recovery entry point into
+    exactly that deferred state and then asks the REAL liveness question on it; no
+    private-field assertion substitutes for calling the production method.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_proc = SimpleNamespace(poll=lambda: None)
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+    launcher._stop_engine = lambda: (_ for _ in ()).throw(
+        RuntimeError(
+            "engine shutdown command is dispatched on a background worker awaiting its reply; launcher remains in HOLD"
+        )
+    )
+    pending_fields: dict[str, object] = {
+        "retained-shutdown-worker": {"_engine_shutdown_worker": worker},
+        "unknown-transport-outcome": {"_engine_shutdown_transport_identity": ("c" * 32, 3)},
+        "verified-receipt-awaiting-exit": {
+            "_engine_shutdown_receipt": {"ok": True},
+            "_engine_shutdown_wait_deadline": 40.0,
+        },
+    }[pending_case]
+    for name, value in pending_fields.items():
+        setattr(launcher, name, value)
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+    assert deferred is False, "the reviewed shape is the deferred-settlement return"
+    assert launcher._restart_pending is False
+    assert launcher._restart_giving_up is False, "no giving-up latch may carry this state"
+    assert settlement_shot.called, "a settlement callback must still be scheduled here"
+    assert LauncherWindow._is_engine_alive(launcher) is False, (
+        "an alive unready replacement with settlement pending must answer not healthy"
+    )
+
+    # An ordinary settled live incarnation has every settlement field released.
+    # Production starts the health timer only after readiness; this unit boundary
+    # establishes liveness after settlement, not readiness itself.
+    worker._finished = True
+    for name in pending_fields:
+        setattr(launcher, name, None)
+    assert LauncherWindow._is_engine_alive(launcher) is True
+
+
+@pytest.mark.parametrize(
+    "pending_case",
+    ["retained-shutdown-worker", "unknown-transport-outcome", "verified-receipt-awaiting-exit"],
+)
+def test_health_tick_keeps_the_down_banner_while_replacement_settlement_pends(
+    pending_case: str,
+) -> None:
+    """The health tick is where the reviewed failure actually surfaced.
+
+    With liveness answered from the bare poll, the first tick after a deferred
+    replacement settlement read "alive", took the healthy branch, and silenced the
+    alarm and hid the banner over an engine that had never reported ready. Driving the
+    REAL health tick against the REAL liveness question must keep a down surface up
+    while the owner-bound settlement callback pends, consume no backoff slot, and clear
+    the banner only after settlement is released for the ordinary live path.
+    """
+
+    calls: list[str] = []
+    banners: list[str] = []
+    host = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=False)
+    live_process = SimpleNamespace(poll=lambda: None)
+    host._engine_proc = live_process
+    pending_fields: dict[str, object] = {
+        "retained-shutdown-worker": {"_engine_shutdown_worker": worker},
+        "unknown-transport-outcome": {"_engine_shutdown_transport_identity": ("d" * 32, 4)},
+        "verified-receipt-awaiting-exit": {
+            "_engine_shutdown_receipt": {"ok": True},
+            "_engine_shutdown_wait_deadline": 40.0,
+        },
+    }[pending_case]
+    for name, value in pending_fields.items():
+        setattr(host, name, value)
+    host._assistant_enabled = False
+    host._bridge_restart_fault = False
+    host._bridge_restart_hold = False
+    host._tray_only = True
+    host._clear_engine_down_banner = MagicMock(name="clear_banner")
+    host._show_engine_down_banner = lambda text: banners.append(text)
+    host._invalidate_launcher_status_authority = MagicMock(name="invalidate_authority")
+    host._capture_launcher_status_authority = MagicMock(return_value=None, name="capture_authority")
+    host._last_safety_state = "ready"
+    host._last_alarm_count = 0
+    host._safety_status_generation = 11
+    host._annunciation_status_generation = 13
+    host._safety_worker = None
+    host._annunciation_worker = None
+    host._last_reading_time = 10.0
+    host._periodic_reporting_fault = False
+    host._tray_icon_green = "green"
+    host._tray_icon_yellow = "yellow"
+    host._tray_icon_red = "red"
+    host._tray = SimpleNamespace(setIcon=MagicMock(), setToolTip=MagicMock(), isVisible=lambda: False)
+    _bind_launcher_methods(host, "_is_engine_alive", "_handle_engine_exit")
+
+    with patch.object(LauncherWindow, "_settle_observed_engine_exit") as settle_exit:
+        LauncherWindow._check_engine_health(host)
+
+    settle_exit.assert_not_called()
+    host._clear_engine_down_banner.assert_not_called()
+    assert len(banners) == 1 and "HOLD" in banners[0], banners
+    assert host._restart_attempts == 0, "a pending settlement must not consume a backoff slot"
+    assert host._engine_proc is live_process, "a live supervised process handle must be retained"
+    for name, value in pending_fields.items():
+        assert getattr(host, name) is value, f"pending settlement evidence was retired: {name}"
+
+    # Once settlement fields are released, the ordinary live-incarnation path is
+    # healthy. Production starts this timer after readiness; the unit test does not
+    # claim to establish readiness by clearing private fields.
+    worker._finished = True
+    for name in pending_fields:
+        setattr(host, name, None)
+    host._engine_proc = SimpleNamespace(poll=lambda: None)
+    LauncherWindow._check_engine_health(host)
+
+    host._clear_engine_down_banner.assert_called_once_with()
+
+
 def test_failed_manual_restart_keeps_replacement_settlement_poll_live() -> None:
     """A failed manual stop must leave the retained worker's settlement poll current."""
 
