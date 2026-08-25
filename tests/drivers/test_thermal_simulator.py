@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
@@ -41,6 +42,21 @@ ROOT = Path(__file__).resolve().parents[2]
 
 #: The asyncio StreamReader limit every mock client inherits by default.
 _ASYNCIO_DEFAULT_READER_LIMIT_BYTES = 64 * 1024
+
+#: The simulator is strictly external: the specimen model, its process, and its
+#: ground-truth channel live outside CryoDAQ. Product code may speak the mock
+#: heater command (MOCK:POWER) and ordinary LS218 replies, but must never import
+#: the external tool or touch its truth payload; tests compare against truth.
+_EXTERNAL_SIMULATOR_BOUNDARY_FILE = ROOT / "tools" / "thermal_conductivity_simulator.py"
+_FORBIDDEN_PRODUCT_IMPORT_ROOTS = ("tools",)
+_FORBIDDEN_TRUTH_TOKENS = (
+    "MOCK:TRUTH",
+    "commanded_points",
+    "equilibrium_delta_t_k",
+    "expected_g_w_per_k",
+    "nonlinear_thermal_link_v1",
+    "thermal_conductivity_simulator",
+)
 
 
 @pytest.fixture
@@ -1285,3 +1301,41 @@ async def test_external_simulator_answers_invalid_channels_with_explicit_error(
     assert await external_simulator.query("RDGST? 8") == "0"
     krdg_channel_8 = float(await external_simulator.query("KRDG? 8"))
     assert krdg_channel_8 >= 0.0
+
+
+def _imported_roots(tree: ast.AST) -> set[str]:
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            roots.add((node.module or "").split(".")[0])
+    return roots
+
+
+def test_no_product_module_imports_the_external_simulator_or_its_truth_channel() -> None:
+    offenders: list[str] = []
+    for path in sorted((ROOT / "src" / "cryodaq").rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        relative = path.relative_to(ROOT).as_posix()
+        offenders.extend(
+            f"{relative}: imports the external 'tools' package"
+            for root in _imported_roots(ast.parse(source))
+            if root in _FORBIDDEN_PRODUCT_IMPORT_ROOTS
+        )
+        offenders.extend(
+            f"{relative}: references truth-channel token {token!r}"
+            for token in _FORBIDDEN_TRUTH_TOKENS
+            if token in source
+        )
+    assert not offenders, (
+        "CryoDAQ must consume only standard instrument replies; the simulator"
+        " and its truth stay outside the product tree:\n" + "\n".join(sorted(offenders))
+    )
+
+
+def test_external_simulator_stays_self_contained() -> None:
+    source = _EXTERNAL_SIMULATOR_BOUNDARY_FILE.read_text(encoding="utf-8")
+    assert "cryodaq" not in _imported_roots(ast.parse(source)), (
+        "the external simulator must run outside CryoDAQ and must not import it"
+    )
