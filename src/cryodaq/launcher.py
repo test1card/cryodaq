@@ -3703,9 +3703,14 @@ class LauncherWindow(QMainWindow):
         only then may the exactly-once marker latch. Reaping failure, a
         failed crashed-reader settlement, a raising poll, or any non-int
         poll verdict keeps the retry ladder alive instead of committing
-        the suppression. Construction rollback is separate: its visible
-        ``_LauncherConstructionHold`` retains the exact live child and its
-        poisoned startup owner before root shutdown has committed.
+        the suppression. Construction rollback owns no exemption either:
+        its visible ``_LauncherConstructionHold`` still retains the poisoned
+        startup owners, but a ``None`` poll beside a set
+        ``_construction_failure_phase`` suppresses nothing -- the rollback
+        child goes through the same bounded reaper, its forced death stays
+        an ``_engine_unsettled_incarnation`` HOLD, and a failed reap keeps
+        the ladder armed instead of stranding a live engine behind a HOLD
+        no pass ever revisits.
         """
 
         if self._shutdown_terminal_engine_readers_settled:
@@ -3721,8 +3726,6 @@ class LauncherWindow(QMainWindow):
                 type(exc).__name__,
             )
             return False
-        if returncode is None and getattr(self, "_construction_failure_phase", None) is not None:
-            return True
         owner_id = getattr(self, "_engine_instance_id", None)
         if type(owner_id) is not str:
             owner_id = "<unknown>"
