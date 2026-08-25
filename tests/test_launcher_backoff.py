@@ -305,8 +305,8 @@ def test_handle_engine_exit_schedules_backoff_timer_on_normal_crash():
     assert w._restart_attempts == 1
 
 
-def test_observed_exit_is_counted_only_after_its_shutdown_worker_settles():
-    """Repeated health polls must not consume backoff attempts before retirement is possible."""
+def test_observed_exit_without_worker_evidence_reaches_hold_without_backoff():
+    """Health polls must not consume backoff before missing worker evidence reaches HOLD."""
     from cryodaq.launcher import LauncherWindow
 
     class _PendingWorker:
@@ -322,6 +322,7 @@ def test_observed_exit_is_counted_only_after_its_shutdown_worker_settles():
     w._engine_shutdown_capability = "b" * 64
     worker = _PendingWorker()
     w._engine_shutdown_worker = worker
+    w._stop_engine = lambda: LauncherWindow._stop_engine(w)
 
     with (
         patch("cryodaq.launcher.QTimer") as mock_qtimer,
@@ -338,9 +339,12 @@ def test_observed_exit_is_counted_only_after_its_shutdown_worker_settles():
         worker.finished = True
         LauncherWindow._handle_engine_exit(w)
 
-    assert w._restart_attempts == 1
-    assert w._restart_pending is True
-    assert mock_qtimer.singleShot.call_args.args[0] == 3_000
+    assert w._restart_attempts == 0
+    assert w._restart_pending is False
+    assert w._restart_giving_up is True
+    assert w._engine_shutdown_worker is worker
+    assert getattr(w, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    mock_qtimer.singleShot.assert_not_called()
 
 
 def test_handle_engine_exit_restart_pending_guard_is_noop():

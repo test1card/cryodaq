@@ -3634,8 +3634,12 @@ class LauncherWindow(QMainWindow):
                 "the shutdown command was reconciled, but its receipt and process exit still require exact validation"
             )
             return False
-        self._engine_shutdown_hold_reason = None
-        self._engine_shutdown_worker = None
+        try:
+            LauncherWindow._stop_engine(self)
+        except Exception as exc:
+            if getattr(self, "_engine_shutdown_hold_reason", None) is None:
+                self._engine_shutdown_hold_reason = str(exc)
+            return False
         return True
 
     def _refused_settlement_reaches_stable_hold(self) -> bool:
@@ -3781,6 +3785,7 @@ class LauncherWindow(QMainWindow):
             if request_id is None:
                 request_id = uuid.uuid4().hex
                 self._engine_shutdown_request_id = request_id
+            worker = None
             receipt = getattr(self, "_engine_shutdown_receipt", None)
             transport_identity = getattr(self, "_engine_shutdown_transport_identity", None)
             if receipt is None and transport_identity is not None:
@@ -3864,18 +3869,38 @@ class LauncherWindow(QMainWindow):
                             "engine shutdown command is dispatched on a background worker awaiting its reply; "
                             "launcher remains in HOLD"
                         )
-                    receipt = worker.result
-                    self._engine_shutdown_worker = None
+                    receipt = getattr(worker, "result", None)
                     if receipt is None:
+                        if getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is not worker:
+                            self._engine_shutdown_unreadable_evidence_worker = worker
+                            logger.critical("Finished engine shutdown worker settled without readable evidence")
+                        self._engine_shutdown_hold_reason = (
+                            "the finished shutdown worker left no readable result, so its exact evidence remains held"
+                        )
                         raise RuntimeError("engine shutdown worker settled without a result; launcher remains in HOLD")
             if receipt is not None:
+                claims_unknown_outcome = type(receipt) is dict and receipt.get("outcome_unknown") is True
                 unknown_identity = _parse_bridge_unknown_outcome_envelope(receipt)
+                if claims_unknown_outcome and unknown_identity is None and worker is not None:
+                    if getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is not worker:
+                        self._engine_shutdown_unreadable_evidence_worker = worker
+                        logger.critical("Finished engine shutdown worker has malformed unknown-outcome evidence")
+                    self._engine_shutdown_hold_reason = (
+                        "the finished shutdown worker left unknown-outcome evidence this launcher cannot read, "
+                        "so its identity is held rather than guessed at"
+                    )
+                    raise RuntimeError(
+                        "engine shutdown worker left malformed unknown-outcome evidence this launcher cannot read; "
+                        "launcher remains in HOLD"
+                    )
                 if unknown_identity is not None:
                     unknown_request_id, unknown_generation = unknown_identity
                     self._engine_shutdown_transport_identity = (
                         unknown_request_id,
                         unknown_generation,
                     )
+                    if worker is not None:
+                        self._engine_shutdown_worker = None
                     raise RuntimeError(
                         "engine shutdown transport outcome remains unknown; launcher retains exact reconciliation "
                         "identity in HOLD"
@@ -3912,9 +3937,18 @@ class LauncherWindow(QMainWindow):
                     and type(receipt["proto"]) is int
                     and receipt["proto"] == CLIENT_PROTOCOL_VERSION
                 ):
+                    if worker is not None:
+                        if getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is not worker:
+                            self._engine_shutdown_unreadable_evidence_worker = worker
+                            logger.critical("Finished engine shutdown worker has an invalid concrete result")
+                        self._engine_shutdown_hold_reason = (
+                            "the finished shutdown worker left a concrete result that failed exact receipt validation"
+                        )
                     raise RuntimeError("engine shutdown receipt is missing or mismatched; launcher remains in HOLD")
                 self._engine_shutdown_receipt = dict(receipt)
                 self._engine_shutdown_transport_identity = None
+                if worker is not None:
+                    self._engine_shutdown_worker = None
             if self._engine_shutdown_receipt is None:
                 raise RuntimeError("engine child died without an exact shutdown receipt; launcher remains in HOLD")
             if process.poll() is None:
@@ -6218,7 +6252,6 @@ class LauncherWindow(QMainWindow):
             and returncode is not None
             and getattr(self, "_replay_source", None) is None
             and not getattr(self, "_engine_external", False)
-            and getattr(self, "_engine_shutdown_worker", None) is None
             and LauncherWindow._engine_settlement_pending(self)
         ):
             # Same handoff race, terminal child: a verified shutdown receipt still
@@ -6235,9 +6268,15 @@ class LauncherWindow(QMainWindow):
                 returncode,
             )
             try:
-                self._stop_engine()
+                stop_engine = getattr(self, "_stop_engine", None)
+                if callable(stop_engine):
+                    stop_engine()
+                else:
+                    LauncherWindow._stop_engine(self)
             except Exception as exc:
                 self._show_engine_down_banner(f"HOLD: {exc}")
+                if LauncherWindow._refused_settlement_reaches_stable_hold(self):
+                    self._restart_giving_up = True
             return
         observed_owner_id = (
             getattr(self, "_replay_session_id", None)

@@ -1523,6 +1523,29 @@ def test_terminal_missing_transport_key_worker_result_remains_retained() -> None
     host._close_engine_stderr_stream.assert_called_once_with()
 
 
+def test_direct_stop_retains_a_finished_worker_with_an_invalid_concrete_result() -> None:
+    """Normal quit must retain immutable evidence that receipt validation rejects."""
+
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(1)
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = {"ok": True}
+    host._engine_shutdown_worker = worker
+
+    with pytest.raises(RuntimeError, match="receipt is missing or mismatched"):
+        LauncherWindow._stop_engine(host)
+
+    assert host._engine_shutdown_worker is worker, "rejected evidence must remain attached to its exact worker"
+    assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert host._engine_shutdown_receipt is None, "invalid evidence must not be promoted into a verified receipt"
+    assert host._engine_proc is process
+    bridge.send_command.assert_not_called()
+
+
 def test_published_receipt_survives_the_blind_stop_handoff_catch() -> None:
     """A raising stop must not have its freshly published evidence retired generically.
 

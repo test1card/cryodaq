@@ -551,7 +551,7 @@ def test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held
 
 
 def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown() -> None:
-    """A live shutdown worker owns the bridge until its scheduled settlement poll."""
+    """A worker that finishes without a result reaches stable HOLD after its one live poll."""
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
@@ -588,9 +588,12 @@ def test_a_replacement_repolls_a_retained_shutdown_worker_before_bridge_teardown
     ):
         settlement_shot.call_args.args[1]()
 
-    assert launcher._engine_shutdown_worker is None
-    assert launcher._restart_attempts == 1
-    assert single_shot.call_args.args[0] == 3_000
+    assert launcher._engine_shutdown_worker is worker
+    assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert launcher._restart_attempts == 0
+    assert launcher._restart_giving_up is True
+    single_shot.assert_not_called()
+    launcher._bridge.shutdown.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -742,7 +745,7 @@ def test_health_tick_keeps_the_down_banner_while_replacement_settlement_pends(
 
 
 def test_failed_manual_restart_keeps_replacement_settlement_poll_live() -> None:
-    """A failed manual stop must leave the retained worker's settlement poll current."""
+    """A failed manual stop polls once, then keeps a result-less worker in stable HOLD."""
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
@@ -772,12 +775,15 @@ def test_failed_manual_restart_keeps_replacement_settlement_poll_live() -> None:
         assert launcher._restart_giving_up is True
         assert launcher._restart_generation == 0
 
+        scheduled_before_callback = settlement_shot.call_count
         worker._finished = True
         callback()
 
-    assert launcher._engine_shutdown_worker is None
-    assert launcher._restart_attempts == 1
-    assert launcher._restart_giving_up is False
+    assert launcher._engine_shutdown_worker is worker
+    assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert launcher._restart_attempts == 0
+    assert launcher._restart_giving_up is True
+    assert settlement_shot.call_count == scheduled_before_callback
 
 
 def test_verified_receipt_exit_wait_keeps_repolling_until_the_budget_spends() -> None:
@@ -935,8 +941,8 @@ def test_a_still_running_shutdown_worker_keeps_its_owner_and_holds() -> None:
     assert worker.waited == [], "the Qt health callback must poll rather than wait for the worker"
 
 
-def test_a_shutdown_worker_that_finishes_is_settled_and_the_owner_retired() -> None:
-    """The ordinary case: it finishes inside the bound and everything proceeds."""
+def test_a_shutdown_worker_without_a_result_is_retained_in_stable_hold() -> None:
+    """Finished is not settled when the worker supplies no receipt evidence."""
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
@@ -949,9 +955,11 @@ def test_a_shutdown_worker_that_finishes_is_settled_and_the_owner_retired() -> N
         phase="probe",
     )
 
-    assert settled is True
-    assert launcher._engine_shutdown_worker is None
-    assert launcher._engine_instance_id is None
+    assert settled is False
+    worker = launcher._engine_shutdown_worker
+    assert worker is not None
+    assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert launcher._engine_instance_id == "a" * 32
 
 
 def _unknown_outcome_shutdown_worker(request_id: str, generation: int) -> _ShutdownWorker:
@@ -1199,6 +1207,45 @@ def test_finished_malformed_unknown_outcome_latches_terminal_hold_without_resche
     assert any("cannot read" in banner for banner in banners), banners
 
 
+def test_finished_invalid_concrete_result_latches_terminal_hold_without_rescheduling() -> None:
+    """A finished concrete result rejected by receipt validation is immutable HOLD evidence."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    worker = _ShutdownWorker(settles=True)
+    worker.result = {"ok": True}
+    launcher._engine_shutdown_worker = worker
+    launcher._engine_shutdown_request_id = "c" * 32
+    launcher._stop_engine = MethodType(LauncherWindow._stop_engine, launcher)
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+    assert deferred is False
+    settlement_shot.assert_not_called()
+    assert launcher._restart_giving_up is True
+    assert launcher._engine_shutdown_worker is worker
+    assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert launcher._engine_shutdown_receipt is None
+    assert launcher._engine_instance_id == "a" * 32
+    launcher._bridge.shutdown.assert_called_once_with()
+
+
 def test_ordinary_health_handler_latches_terminal_hold_for_immutable_shutdown_evidence(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1290,13 +1337,14 @@ def test_ordinary_health_handler_keeps_an_open_reconciliation_progress_capable()
         patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
     ):
         LauncherWindow._handle_engine_exit(launcher)
+        LauncherWindow._handle_engine_exit(launcher)
 
     assert launcher._restart_giving_up is False, "an open reconciliation must not latch HOLD"
     assert single_shot.call_count == 0, "reconciliation polling must not schedule a replacement"
     assert launcher._engine_shutdown_transport_identity == ("c" * 32, 5), (
         "the exact reconciliation identity must stay published for a later pass"
     )
-    assert launcher._engine_shutdown_worker is worker
+    assert launcher._engine_shutdown_worker is None, "the exact transport identity now owns reconciliation"
     bridge.reconcile_late_result.assert_called_once_with("c" * 32, generation=5)
 
 
@@ -1472,13 +1520,12 @@ def test_config_error_health_handler_keeps_polling_a_running_shutdown_worker() -
     assert single_shot.call_count == 0, "a configuration error never schedules a replacement"
 
 
-def test_config_error_health_handler_settles_once_the_retained_worker_finishes() -> None:
-    """The refused config-error pass must reach its stable refusal AFTER settlement.
+def test_config_error_health_handler_holds_a_finished_worker_without_evidence() -> None:
+    """A config-error exit cannot retire a worker that finishes without a result.
 
-    First tick: the worker is still running, so the handler refuses without latching.
-    Later tick, worker finished: the incarnation retires and the reviewed config-error
-    refusal latches then -- with the handle released and the operator told which files
-    to fix. The refusal is preserved; only its ordering relative to settlement moved.
+    The first tick keeps polling while the worker can still progress. The second tick
+    sees immutable missing evidence and latches HOLD before it publishes the ordinary
+    configuration guidance. Exact shutdown ownership has priority over classification.
     """
 
     calls: list[str] = []
@@ -1496,13 +1543,14 @@ def test_config_error_health_handler_settles_once_the_retained_worker_finishes()
         worker._finished = True
         LauncherWindow._handle_engine_exit(launcher)
 
-    assert launcher._restart_giving_up is True, "the settled config error keeps its reviewed refusal"
-    assert launcher._config_error_modal_shown is True
-    assert launcher._engine_proc is None
-    assert launcher._engine_shutdown_worker is None
-    assert launcher._engine_instance_id is None
-    assert launcher._engine_unsettled_incarnation is None, "the operator's quit stays available"
-    assert single_shot.call_count == 0
+    assert launcher._restart_giving_up is True
+    assert launcher._config_error_modal_shown is False
+    assert launcher._engine_proc is not None
+    assert launcher._engine_shutdown_worker is worker
+    assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert launcher._engine_instance_id == "a" * 32
+    assert launcher._engine_unsettled_incarnation is None
+    single_shot.assert_not_called()
 
 
 def test_config_error_health_handler_keeps_an_open_reconciliation_progress_capable() -> None:
@@ -1525,12 +1573,13 @@ def test_config_error_health_handler_keeps_an_open_reconciliation_progress_capab
         patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
     ):
         LauncherWindow._handle_engine_exit(launcher)
+        LauncherWindow._handle_engine_exit(launcher)
 
     assert launcher._restart_giving_up is False, "an open reconciliation must not latch HOLD"
     assert launcher._engine_shutdown_transport_identity == ("c" * 32, 5), (
         "the exact reconciliation identity must stay published for a later pass"
     )
-    assert launcher._engine_shutdown_worker is worker
+    assert launcher._engine_shutdown_worker is None, "the exact transport identity now owns reconciliation"
     bridge.reconcile_late_result.assert_called_once_with("c" * 32, generation=5)
     assert launcher._restart_attempts == 0
     assert single_shot.call_count == 0
@@ -2318,13 +2367,13 @@ def test_manual_restart_generation_advance_keeps_the_old_owner_settlement_alive(
         worker._finished = True
         callback()
 
-        # The pass ran: the finished owner settled, giving_up cleared, and the
-        # bounded retry machinery booked the next attempt.
-        assert launcher._engine_shutdown_worker is None
-        assert launcher._restart_giving_up is False
-        assert launcher._restart_attempts == 1
-        assert settlement_shot.call_count == 2
-        assert settlement_shot.call_args.args[0] == 3_000
+        # The pass ran for the same owner. Missing immutable evidence reaches
+        # stable HOLD instead of booking a replacement over an unproven stop.
+        assert launcher._engine_shutdown_worker is worker
+        assert getattr(launcher, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+        assert launcher._restart_giving_up is True
+        assert launcher._restart_attempts == 0
+        assert settlement_shot.call_count == 1
 
 
 def test_settlement_callback_is_inert_when_a_new_engine_already_owns_the_slot() -> None:
@@ -2524,6 +2573,31 @@ def test_health_tick_routes_a_post_receipt_exit_through_the_stop_path() -> None:
     assert single_shot.call_count == 0, "the owner-bound stop path schedules no replacement"
     assert launcher._restart_giving_up is False
     assert launcher._restart_attempts == 0
+
+
+def test_health_tick_validates_a_finished_worker_receipt_before_retirement() -> None:
+    """A terminal child's finished worker must pass receipt-aware exit validation."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_shutdown_request_id = "c" * 32
+    worker = _ShutdownWorker(settles=True)
+    worker.result = _exact_shutdown_receipt("c" * 32)
+    launcher._engine_shutdown_worker = worker
+    launcher._stop_engine = MethodType(LauncherWindow._stop_engine, launcher)
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    with patch("cryodaq.launcher.QTimer.singleShot") as single_shot:
+        LauncherWindow._handle_engine_exit(launcher)
+
+    assert launcher._engine_shutdown_receipt == _exact_shutdown_receipt("c" * 32)
+    assert launcher._engine_shutdown_worker is None
+    assert launcher._engine_proc is not None, "nonzero exit remains bound to its validated receipt"
+    assert "invalidate" not in calls
+    assert launcher._restart_attempts == 0
+    single_shot.assert_not_called()
+    assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
 
 
 def test_health_tick_keeps_a_published_transport_identity_out_of_generic_retirement() -> None:
