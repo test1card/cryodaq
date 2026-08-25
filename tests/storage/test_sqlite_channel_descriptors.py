@@ -83,7 +83,9 @@ async def test_new_database_persists_exact_envelope_and_reading_reference(tmp_pa
         meta = conn.execute("SELECT singleton, schema_version FROM channel_descriptor_meta").fetchall()
         catalog = conn.execute(
             "SELECT descriptor_hash, channel_id, instrument_id, source_key, "
-            "descriptor_revision, envelope_json FROM channel_descriptors"
+            "descriptor_revision, envelope_json FROM channel_descriptors "
+            "WHERE channel_id = ?",
+            (descriptor.channel_id,),
         ).fetchone()
         reading = conn.execute("SELECT instrument_id, channel, unit, descriptor_hash FROM readings").fetchone()
         assert meta == [(1, 1)]

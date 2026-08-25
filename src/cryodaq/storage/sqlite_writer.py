@@ -7405,11 +7405,12 @@ class SQLiteWriter:
         ordinary case in a laboratory: re-wiring a sensor, adding one mid-campaign, or
         changing a unit produces a channel the descriptor catalog does not yet describe.
 
-        A row with no descriptor hash is an ANTICIPATED state, not a corrupt one: the
-        column is nullable and the archive reader carries ``DESCRIPTOR_HASH_MISSING`` as
-        a bounded-read issue. So the reading is stored with its timestamp, value, unit
-        and status, and it is stored WITHOUT a descriptor identity, which is the truth
-        about it.
+        An undescribed reading is an ANTICIPATED state, not a corrupt one. It is stored
+        with its timestamp, value, unit and status, under the RESERVED identity rather
+        than a null: NULL already means pre-catalog history, and the two cases could not
+        be told apart afterwards (see ``UNBOUND_DESCRIPTOR_HASH``). Read back, such a row
+        carries no descriptor at all, and the replay layer reports
+        ``DESCRIPTOR_HASH_MISSING`` for exactly that while keeping the batch honest.
 
         CORRECTION, and the reason the reader changed in the same slice. An earlier
         version of this docstring said the reader ALREADY reported that issue for a null
@@ -7417,11 +7418,13 @@ class SQLiteWriter:
         null through ``resolve_legacy_descriptor``, which handed the row a fabricated
         pre-catalog identity and left the read marked complete. A newly unbound row would
         then have been carried through descriptor reporting as ordinary described
-        history. The reader now reports the missing identity whenever the archive itself
-        carries a descriptor catalog, so the claim above is true because this change made
-        it true, not because it was already so. The descriptor-authoritative path (``write_committed``) is unaffected:
-        there every reading is bound by the live catalog owner before admission, and an
-        unbindable reading is still refused before it reaches storage.
+        history. The reader now recognises the reserved reference itself, keeps the row,
+        returns it without a descriptor and holds completeness at False; NULL keeps its
+        one meaning, pre-catalog history, everywhere. The descriptor-authoritative path
+        (``write_committed``) never reaches this resolver at all -- its readings are
+        admitted by the live catalog owner before any row is built, an undescribed one
+        against the reserved entry (see ``LiveChannelDescriptorCatalog.admit``), and only
+        a DISAGREEING instrument or unit is still refused whole there.
         """
 
         if self._channel_catalog is None:

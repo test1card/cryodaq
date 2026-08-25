@@ -317,7 +317,9 @@ async def test_f35_full_chain_scheduler_drives_canonical_identity_through_d4(
         # destroying the batch is why it exists. The canonical identity this test is
         # about is asserted on the described row below, and is unchanged.
         assert len(descriptor_rows) == 2
-        desc_channel_id, desc_hash, desc_envelope = descriptor_rows[0]
+        desc_channel_id, desc_hash, desc_envelope = next(
+            row for row in descriptor_rows if row[0] == CANONICAL_CHANNEL_ID
+        )
         assert desc_channel_id == CANONICAL_CHANNEL_ID
         assert desc_hash == descriptor.descriptor_hash
         assert desc_envelope == PersistedChannelEnvelopeV1.from_descriptor(descriptor).canonical_json
