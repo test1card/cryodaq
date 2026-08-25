@@ -535,6 +535,119 @@ def test_a_thread_deferring_inside_an_active_replay_cannot_lift_the_cap(tmp_path
     assert all(record[1].startswith("held ") for record in logging_setup._deferred_records)
 
 
+def test_replay_delivery_uses_the_target_records_probe():
+    """A foreign success must not erase a replay target rejected by every sink."""
+
+    import threading
+
+    from cryodaq import logging_setup
+
+    target = "replay target"
+    second_handler_entered = threading.Event()
+    foreign_reached_first_handler = threading.Event()
+
+    class FirstStream:
+        closed = False
+
+        def write(self, message):
+            if target in message:
+                raise OSError("first sink rejected target")
+            foreign_reached_first_handler.set()
+            return len(message)
+
+        def flush(self):
+            pass
+
+    class SecondStream:
+        closed = False
+
+        def write(self, message):
+            if target in message:
+                second_handler_entered.set()
+                assert foreign_reached_first_handler.wait(timeout=30)
+            raise OSError("second sink rejected record")
+
+        def flush(self):
+            pass
+
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.setLevel(logging.INFO)
+    root.addHandler(logging_setup._EmissionTrackingStreamHandler(FirstStream()))
+    root.addHandler(logging_setup._EmissionTrackingStreamHandler(SecondStream()))
+    logging_setup._deferred_records.clear()
+    logging_setup._replay_pending = False
+    logging_setup.defer_record(logging.ERROR, target)
+
+    def emit_foreign_record():
+        assert second_handler_entered.wait(timeout=30)
+        logging.getLogger("probe.foreign").error("foreign record")
+
+    foreign = threading.Thread(target=emit_foreign_record)
+    foreign.start()
+    logging_setup._replay_deferred_records()
+    foreign.join(timeout=30)
+
+    assert not foreign.is_alive()
+    assert logging_setup._deferred_records == [(logging.ERROR, target, ())]
+
+
+def test_record_deferred_during_replay_keeps_the_replay_trigger_armed(tmp_path, monkeypatch):
+    """A new arrival during replay must be delivered by the next proven success."""
+
+    from cryodaq import logging_setup
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+    logging_setup.setup_logging("defer-during-replay", console=False, file=True)
+    [file_handler] = logging.getLogger().handlers
+    stream = io.StringIO()
+    monkeypatch.setattr(file_handler, "stream", stream)
+    real_emit = file_handler.emit
+
+    def inject_arrival(record):
+        if record.getMessage() == "first held record":
+            logging_setup.defer_record(logging.ERROR, "arrived during replay")
+        real_emit(record)
+
+    monkeypatch.setattr(file_handler, "emit", inject_arrival)
+    logging_setup._deferred_records.clear()
+    logging_setup._replay_pending = False
+    logging_setup.defer_record(logging.ERROR, "first held record")
+
+    logging_setup._replay_deferred_records()
+
+    assert logging_setup._deferred_records == [(logging.ERROR, "arrived during replay", ())]
+    assert logging_setup._replay_pending
+
+    logging.getLogger("probe.pending").info("proven success")
+
+    assert not logging_setup._deferred_records
+    assert stream.getvalue().count("arrived during replay") == 1
+
+
+def test_replay_owner_lock_makes_contended_entry_nonblocking():
+    """A second replay caller must return without consuming the shared queue."""
+
+    import threading
+
+    from cryodaq import logging_setup
+
+    logging_setup._deferred_records.clear()
+    logging_setup.defer_record(logging.ERROR, "held behind replay owner")
+    assert logging_setup._replay_owner_lock.acquire(blocking=False)
+    worker = threading.Thread(target=logging_setup._replay_deferred_records)
+    try:
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert logging_setup._deferred_records == [(logging.ERROR, "held behind replay owner", ())]
+    finally:
+        logging_setup._replay_owner_lock.release()
+
+
 def test_bare_token_without_bot_prefix_redacted():
     """P1: bare token (no 'bot' URL prefix) must also be redacted.
 

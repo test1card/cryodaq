@@ -103,6 +103,9 @@ _deferred_records: list[tuple[int, str, tuple[object, ...]]] = []
 # held across an emission, so a handler can never block on it.
 _deferred_records_lock = threading.Lock()
 _logging_configured = False
+# Non-blocking ownership is the authority for replay. The companion boolean remains a
+# visibility hint for handlers, but it cannot make check-and-set atomic across threads.
+_replay_owner_lock = threading.Lock()
 _replay_in_progress = False
 # True while records retained by a completed replay are still owed to an operator.
 # Without it, a record that succeeds later in the same replay consumes every handler's
@@ -237,30 +240,29 @@ def _replay_deferred_records() -> None:
     """
 
     global _replay_in_progress, _replay_pending
-    if _replay_in_progress:
+    if not _replay_owner_lock.acquire(blocking=False):
         return
     _replay_in_progress = True
     try:
         with _deferred_records_lock:
             held, _deferred_records[:] = list(_deferred_records), []
         logger = logging.getLogger("cryodaq.startup")
-        handlers = list(logging.getLogger().handlers)
         retained: list[tuple[int, str, tuple[object, ...]]] = []
         for level, message, args in held:
-            for handler in handlers:
-                handler._last_emission_succeeded = False
+            probe = EmissionProbe()
             try:
-                logger.log(level, message, *args)
+                logger.log(level, message, *args, extra={DELIVERY_PROBE_ATTRIBUTE: probe})
             except Exception:
                 pass
-            if not any(getattr(handler, "_last_emission_succeeded", False) for handler in handlers):
+            if not probe.delivered():
                 retained.append((level, message, args))
         with _deferred_records_lock:
             merged = retained + _deferred_records
             _deferred_records[:] = merged[:_MAX_DEFERRED_RECORDS]
-        _replay_pending = bool(retained)
+            _replay_pending = bool(_deferred_records)
     finally:
         _replay_in_progress = False
+        _replay_owner_lock.release()
 
 
 def _warn_file_logging_failure(component: str, exc: Exception) -> None:
