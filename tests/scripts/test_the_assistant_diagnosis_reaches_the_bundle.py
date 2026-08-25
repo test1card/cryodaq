@@ -649,7 +649,8 @@ def test_too_many_rotated_logs_refuse_the_child_writable_directory(state_root: P
     runner._publish_assistant_log(evidence, state_root)
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
-    assert published == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+    assert "could not be opened" not in published
+    assert published == runner._ASSISTANT_LOG_ROTATION_CEILING_MARKER
 
 
 def test_more_nonmatching_entries_than_the_enumeration_ceiling_refuse_the_directory(
@@ -675,7 +676,8 @@ def test_more_nonmatching_entries_than_the_enumeration_ceiling_refuse_the_direct
     assert "MUST NOT PUBLISH" not in published, (
         "an over-ceiling directory was read anyway; enumeration still counted only matching names"
     )
-    assert published == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+    assert "could not be opened" not in published
+    assert published == runner._ASSISTANT_LOG_DIRECTORY_ENTRY_CEILING_MARKER
 
 
 def test_an_ordinary_logs_directory_with_noise_still_publishes(state_root: Path) -> None:

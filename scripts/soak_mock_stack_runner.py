@@ -1020,6 +1020,25 @@ _ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER: Final = (
     "replaced, or unreadable. Nothing is published, because nothing inside it can be "
     "trusted on that platform.>\n"
 )
+_ASSISTANT_LOG_DIRECTORY_ENTRY_CEILING_MARKER: Final = (
+    "<the assistant log was refused: more than "
+    f"{_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES} entries were observed in the logs "
+    "directory. Enumeration stopped at the fixed teardown-work ceiling, and no bytes "
+    "from the directory were published.>\n"
+)
+_ASSISTANT_LOG_ROTATION_CEILING_MARKER: Final = (
+    f"<the assistant log was refused: more than {_ASSISTANT_LOG_BACKUP_COUNT} exact dated rotations were observed, "
+    "which exceeds the configured retention contract. No bytes from the directory were "
+    "published.>\n"
+)
+
+
+class _AssistantLogDirectoryRefusal(StrEnum):
+    """The exact observed reason the assistant-log directory walk refused."""
+
+    UNTRUSTED_DIRECTORY = "untrusted-directory"
+    TOO_MANY_ENTRIES = "too-many-entries"
+    TOO_MANY_ROTATIONS = "too-many-rotations"
 
 
 class _AssistantLogLeafRefusal(StrEnum):
@@ -1177,7 +1196,9 @@ def _directory_identity(directory: Path) -> tuple[int, int] | None:
     return (info.st_dev, info.st_ino)
 
 
-def _rotated_assistant_log_names(directory: Path | int) -> list[str] | None:
+def _rotated_assistant_log_names(
+    directory: Path | int,
+) -> list[str] | _AssistantLogDirectoryRefusal:
     """Return the bounded set of exact dated assistant-log rotations, oldest first.
 
     The directory is child-writable, so EVERY entry it yields counts against
@@ -1193,16 +1214,18 @@ def _rotated_assistant_log_names(directory: Path | int) -> list[str] | None:
         for entry in entries:
             enumerated += 1
             if enumerated > _MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES:
-                return None
+                return _AssistantLogDirectoryRefusal.TOO_MANY_ENTRIES
             if _ASSISTANT_LOG_ROTATION_RE.fullmatch(entry.name) is None:
                 continue
             rotated.append(entry.name)
             if len(rotated) > _ASSISTANT_LOG_BACKUP_COUNT:
-                return None
+                return _AssistantLogDirectoryRefusal.TOO_MANY_ROTATIONS
     return sorted(rotated)
 
 
-def _assistant_log_files(state_root: Path) -> tuple[int | None, list[Path | str]] | None:
+def _assistant_log_files(
+    state_root: Path,
+) -> tuple[int | None, list[Path | str]] | _AssistantLogDirectoryRefusal:
     """The active log and every rotated backup, oldest first.
 
     `setup_logging` rotates the assistant log daily and keeps up to fourteen dated
@@ -1216,7 +1239,7 @@ def _assistant_log_files(state_root: Path) -> tuple[int | None, list[Path | str]
     try:
         directory_info = os.lstat(directory)
         if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
-            return None
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
         if _assistant_log_uses_pathname_traversal():
             # Windows lacks descriptor-relative `open`; explicitly reject reparse roots,
             # then use a non-globbing enumeration. Any directory access failure is refused.
@@ -1224,27 +1247,27 @@ def _assistant_log_files(state_root: Path) -> tuple[int | None, list[Path | str]
             # leaf reads -- cannot be closed on this platform, so the publisher proves
             # afterwards that the directory did not change, and refuses if it did.
             rotated = _rotated_assistant_log_names(directory)
-            if rotated is None:
-                return None
+            if isinstance(rotated, _AssistantLogDirectoryRefusal):
+                return rotated
             return None, [*(directory / name for name in rotated), directory / active]
         directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         directory_descriptor = os.open(directory, directory_flags)
     except OSError:
         # The measured process can replace `logs`, so a descriptor is the authority for
         # traversal. Do not fall back to pathname globbing when opening it fails.
-        return None
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
     keep_descriptor = False
     try:
         opened_info = os.fstat(directory_descriptor)
         if not stat.S_ISDIR(opened_info.st_mode) or (
             (opened_info.st_dev, opened_info.st_ino) != (directory_info.st_dev, directory_info.st_ino)
         ):
-            return None
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
         rotated = _rotated_assistant_log_names(directory_descriptor)
-        if rotated is None:
-            return None
+        if isinstance(rotated, _AssistantLogDirectoryRefusal):
+            return rotated
     except OSError:
-        return None
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
     else:
         keep_descriptor = True
         return directory_descriptor, [*rotated, active]
@@ -1277,8 +1300,13 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     identity_before = _directory_identity(logs_directory) if _assistant_log_uses_pathname_traversal() else None
 
     selected = _assistant_log_files(state_root)
-    if selected is None:
-        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER)
+    if isinstance(selected, _AssistantLogDirectoryRefusal):
+        marker = {
+            _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY: _ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER,
+            _AssistantLogDirectoryRefusal.TOO_MANY_ENTRIES: _ASSISTANT_LOG_DIRECTORY_ENTRY_CEILING_MARKER,
+            _AssistantLogDirectoryRefusal.TOO_MANY_ROTATIONS: _ASSISTANT_LOG_ROTATION_CEILING_MARKER,
+        }[selected]
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, marker)
         return
     directory_descriptor, paths = selected
 
