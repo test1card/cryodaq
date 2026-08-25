@@ -64,6 +64,49 @@ def test_engine_wiring_submodules_import_without_engine_reverse_cycle() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_engine_production_entry_chain_loads_sqlite_before_pyarrow() -> None:
+    # The submodule probe above binds only engine_wiring.runtime_tasks. The REAL
+    # production engine entry is `import cryodaq.engine`, whose dependency list
+    # reaches storage.cold_rotation through many earlier modules (core.broker,
+    # analytics.*, drivers.*, notifications.*). A new TOP-LEVEL `import pyarrow`
+    # — or lancedb, whose own import requests pyarrow — in any earlier engine
+    # dependency would restore the Ubuntu 22.04 conda startup death (pyarrow
+    # loads system libstdc++.so.6 first, then conda ICU dies on the missing
+    # CXXABI_1.3.15 symbol) while the submodule probe stays green.
+    #
+    # This probe therefore starts a fresh interpreter and imports the real
+    # production entry module, recording the first import-machinery request for
+    # each tracked name along the actual chain. pyarrow must be requested at
+    # all (cold_rotation imports it unconditionally at entry): if it ever goes
+    # missing this guard fails loudly instead of passing vacuously. lancedb is
+    # ordered when present but not required, since the engine chain does not
+    # import it today. The assertion fails on every platform where the order
+    # is wrong, not only where the ABI failure manifests.
+    snippet = (
+        "import sys\n"
+        "_order = []\n"
+        "class _OrderProbe:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname in ('pyarrow', 'lancedb', 'cryodaq.storage._sqlite') and fullname not in _order:\n"
+        "            _order.append(fullname)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _OrderProbe())\n"
+        "import cryodaq.engine\n"
+        "missing = {'pyarrow', 'cryodaq.storage._sqlite'} - set(_order)\n"
+        "assert not missing, f'production entry import never loaded: {sorted(missing)}'\n"
+        "_sqlite_at = _order.index('cryodaq.storage._sqlite')\n"
+        "_premature = [n for n in ('pyarrow', 'lancedb') if n in _order and _order.index(n) < _sqlite_at]\n"
+        "assert not _premature, f'owned SQLite binding must load before {_premature}, saw {_order}'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", snippet],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_runtime_helpers_remain_compatibly_importable_from_engine() -> None:
     expected = {
         "_AlarmRingBuffer",
