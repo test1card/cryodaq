@@ -39,6 +39,9 @@ from cryodaq.drivers.transport.mock_instrument import (
 
 ROOT = Path(__file__).resolve().parents[2]
 
+#: The asyncio StreamReader limit every mock client inherits by default.
+_ASYNCIO_DEFAULT_READER_LIMIT_BYTES = 64 * 1024
+
 
 @pytest.fixture
 def external_simulator(tmp_path: Path) -> Iterator[ExternalMockInstrumentClient]:
@@ -1086,3 +1089,162 @@ def test_simulator_clears_stale_ready_file_before_publishing(tmp_path: Path) -> 
     assert process.returncode != 0, "the invalid bath temperature must refuse the run"
     assert "bath temperature" in stderr
     assert not ready_path.exists(), "startup must clear the stale ready document before it can be polled"
+
+
+def _truth_plant():
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    return simulator_module.ThermalPlant(
+        bath_temperature_k=4.2,
+        conductance_w_per_k=0.1,
+        conductance_slope_w_per_k2=0.02,
+        time_constant_s=0.02,
+    )
+
+
+def test_truth_history_is_bounded_and_reports_dropped_points() -> None:
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    plant = _truth_plant()
+    total = simulator_module.TRUTH_HISTORY_MAX_POINTS + 25
+    for index in range(total):
+        plant.set_power(0.001 * (index + 1))
+
+    truth = plant.truth()
+
+    points = truth["commanded_points"]
+    assert len(points) == simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert truth["commanded_points_total"] == total
+    assert truth["commanded_points_dropped"] == total - simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert truth["commanded_points_total"] - truth["commanded_points_dropped"] == len(points)
+    assert points[0]["power_w"] == pytest.approx(0.001 * 26)
+    assert points[-1]["power_w"] == pytest.approx(0.001 * total)
+
+
+def test_truth_line_fits_client_reader_limit_far_past_the_old_unbounded_history() -> None:
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    plant = _truth_plant()
+    commands = 1600
+    for index in range(commands):
+        plant.set_power(0.01 + 0.001 * (index % 50))
+
+    server = simulator_module.SimulatorServer(("127.0.0.1", 0), plant)
+    try:
+        line = server.response_for("MOCK:TRUTH?")
+    finally:
+        server.server_close()
+
+    assert len(line.encode("ascii")) + 1 <= _ASYNCIO_DEFAULT_READER_LIMIT_BYTES
+    payload = json.loads(line)
+    assert len(payload["commanded_points"]) == simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert payload["commanded_points_total"] == commands
+    assert payload["commanded_points_dropped"] == commands - simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert payload["commanded_points_total"] - payload["commanded_points_dropped"] == len(payload["commanded_points"])
+    assert payload["commanded_points"][-1]["power_w"] == pytest.approx(0.01 + 0.001 * ((commands - 1) % 50))
+
+
+def test_truth_line_drops_oldest_points_and_reports_them_when_budget_is_tight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    plant = _truth_plant()
+    for index in range(simulator_module.TRUTH_HISTORY_MAX_POINTS):
+        plant.set_power(0.001 * (index + 1))
+    monkeypatch.setattr(simulator_module, "TRUTH_LINE_MAX_BYTES", 600)
+
+    line = simulator_module._truth_response_line(plant)
+
+    assert len(line.encode("ascii")) + 1 <= 600
+    payload = json.loads(line)
+    points = payload["commanded_points"]
+    assert 0 < len(points) < simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert payload["commanded_points_total"] == simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert payload["commanded_points_dropped"] == simulator_module.TRUTH_HISTORY_MAX_POINTS - len(points)
+    assert points[-1]["power_w"] == pytest.approx(0.001 * simulator_module.TRUTH_HISTORY_MAX_POINTS)
+
+
+def test_simulator_rejects_invalid_ls218_channel_operands() -> None:
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    invalid_commands = [
+        "KRDG? 0",
+        "KRDG? -1",
+        "KRDG? 9",
+        "KRDG? 100",
+        "KRDG? abc",
+        "KRDG? 1.5",
+        "KRDG? 1 2",
+        "SRDG? 0",
+        "SRDG? -1",
+        "SRDG? 9",
+        "SRDG? abc",
+        "RDGST? 0",
+        "RDGST? -1",
+        "RDGST? 9",
+        "RDGST? abc",
+        "RDGST? 1.5",
+        "RDGST? 1 2",
+    ]
+    server = simulator_module.SimulatorServer(("127.0.0.1", 0), _truth_plant())
+    try:
+        for command in invalid_commands:
+            with pytest.raises(ValueError, match="LS218 channel"):
+                server.response_for(command)
+    finally:
+        server.server_close()
+
+
+def test_simulator_accepts_ls218_channel_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    base = time.monotonic()
+    monkeypatch.setattr(simulator_module.time, "monotonic", lambda: base)
+    plant = _truth_plant()
+    plant.set_power(0.2)
+    monkeypatch.setattr(simulator_module.time, "monotonic", lambda: base + 1.0)
+    server = simulator_module.SimulatorServer(("127.0.0.1", 0), plant)
+    try:
+        krdg_batch = server.response_for("KRDG?").split(",")
+        srdg_batch = server.response_for("SRDG?").split(",")
+        assert len(krdg_batch) == 8
+        assert krdg_batch[0] != krdg_batch[1]
+        for channel in range(1, 9):
+            assert server.response_for(f"KRDG? {channel}") == krdg_batch[channel - 1]
+            assert server.response_for(f"SRDG? {channel}") == srdg_batch[channel - 1]
+            assert server.response_for(f"RDGST? {channel}") == "0"
+    finally:
+        server.server_close()
+
+
+async def test_external_simulator_truth_stays_readable_after_history_wrap(
+    external_simulator: ExternalMockInstrumentClient,
+) -> None:
+    from tools import thermal_conductivity_simulator as simulator_module
+
+    commands = simulator_module.TRUTH_HISTORY_MAX_POINTS + 12
+    powers = [round(0.05 + 0.001 * (index % 40), 3) for index in range(commands)]
+    for power in powers:
+        await external_simulator.set_power(power)
+
+    line = await external_simulator.query("MOCK:TRUTH?")
+
+    assert len(line.encode("ascii")) + 1 <= _ASYNCIO_DEFAULT_READER_LIMIT_BYTES
+    payload = json.loads(line)
+    assert len(payload["commanded_points"]) == simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert payload["commanded_points_total"] == commands
+    assert payload["commanded_points_dropped"] == commands - simulator_module.TRUTH_HISTORY_MAX_POINTS
+    assert payload["commanded_points"][-1]["power_w"] == pytest.approx(powers[-1])
+
+
+async def test_external_simulator_answers_invalid_channels_with_explicit_error(
+    external_simulator: ExternalMockInstrumentClient,
+) -> None:
+    for command in ("KRDG? 0", "KRDG? -1", "KRDG? 9", "KRDG? abc", "RDGST? 0", "RDGST? 9", "RDGST? abc"):
+        with pytest.raises(RuntimeError, match="LS218 channel"):
+            await external_simulator.query(command)
+
+    assert await external_simulator.query("RDGST? 8") == "0"
+    krdg_channel_8 = float(await external_simulator.query("KRDG? 8"))
+    assert krdg_channel_8 >= 0.0
