@@ -1656,6 +1656,92 @@ def test_normal_quit_path_retains_invalid_result_and_stops_scheduling_settlement
             ready_stream.close()
 
 
+def test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppression(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A live refused child must be bounded before suppression commits.
+
+    ``_shutdown_incomplete`` suppresses every retry once the quit refusal
+    reaches its reader-settled hold. A live child's ``None`` poll used to be
+    read as exactly that hold: the immutable malformed evidence suppressed
+    the retry ladder forever while the engine stayed alive, owning readers
+    no pass would ever revisit. The terminal decision now bounds the child
+    through the real reaper first -- terminate waits out its budget, kill
+    finishes it -- so the forced death stays an unsettled-incarnation HOLD
+    instead of clean settlement, while reaping failure keeps the ladder
+    alive rather than suppressing over a live engine.
+    """
+
+    import cryodaq.launcher as module
+    from cryodaq.launcher import LauncherWindow
+
+    process = _ScriptedProcess([subprocess.TimeoutExpired("engine", 5), 0])
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = {"ok": True}
+    host._engine_shutdown_worker = worker
+
+    main_window = MagicMock()
+    main_window.settle_owned_workers.return_value = True
+    host._main_window = main_window
+    host._stop_assistant = MagicMock()
+    host._alarm_timer = None
+    host._stop_engine_down_alarm = MethodType(LauncherWindow._stop_engine_down_alarm, host)
+    host._invalidate_launcher_status_authority = MagicMock()
+    host._reset_periodic_reporting_unknown = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    host._invalidate_engine_producer = MethodType(LauncherWindow._invalidate_engine_producer, host)
+    host._show_engine_down_banner = MagicMock()
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        assert module.LauncherWindow._do_shutdown(host) is False
+
+        assert process.terminate_calls == 1
+        assert process.kill_calls == 1
+        assert process.alive is False, "suppression may never commit over a live engine"
+        assert process.poll() == 0
+        assert host._engine_proc is None, "a successfully reaped child releases its handle"
+        assert host._close_engine_stderr_stream.call_count == 1, (
+            "the reaper settles the reaped child's readers before suppression"
+        )
+        assert host._engine_unsettled_incarnation == ("a" * 32, 0), (
+            "the forced death stays bound to its owner and terminal return code"
+        )
+        assert host._shutdown_terminal_engine_readers_settled is True
+        assert single_shot.call_count == 0, "no settlement callback may follow a successful bounded reap"
+        assert host._shutdown_retry_pending is False
+        assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
+        assert set(host._shutdown_last_errors) == {"engine"}
+        assert host._shutdown_hold_audible is True, "the forced-death quit stays visibly held"
+
+        assert host._engine_shutdown_worker is worker, "rejected evidence must remain attached to its exact worker"
+        assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+        assert host._engine_shutdown_receipt is None, "a forced death must never be reported as clean settlement"
+        assert host._engine_instance_id == "a" * 32
+        assert host._engine_shutdown_capability == "b" * 64
+        assert host._engine_shutdown_request_id == "c" * 32
+        bridge.send_command.assert_not_called()
+        host._show_engine_down_banner.assert_not_called()
+
+        assert module.LauncherWindow._do_shutdown(host) is False
+        assert single_shot.call_count == 0, "no pass may arm a callback over the reaped HOLD"
+        assert process.terminate_calls == 1 and process.kill_calls == 1, "the bounded reap happens exactly once"
+        assert host._engine_proc is None
+        assert host._engine_unsettled_incarnation == ("a" * 32, 0)
+
+    unsettled_lines = [record for record in caplog.records if "remains unsettled" in record.getMessage()]
+    reaping_failures = [
+        record for record in caplog.records if "reaping failed during the terminal quit" in record.getMessage()
+    ]
+    assert len(unsettled_lines) == 2, "each DRIVEN pass reports its own refusal, honestly"
+    assert reaping_failures == []
+
+
 def test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

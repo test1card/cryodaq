@@ -3693,9 +3693,19 @@ class LauncherWindow(QMainWindow):
         behind a HOLD that no pass ever revisits. The terminal decision
         therefore settles them first: exactly once per shutdown, only for an
         observed terminal exit, never while the child is alive or its handle
-        is gone (a live child keeps owning its readers; its evidence is
-        already immutable). Settlement itself failing keeps the retry ladder
-        alive instead of committing the suppression.
+        is gone. A live child keeps owning its readers and its refused
+        evidence is already immutable, yet treating its ``None`` poll as
+        suppressible left the engine alive behind a HOLD no pass ever
+        revisits -- so stable suppression first bounds the child through
+        ``_reap_unsettled_engine_process``: the forced death stays an
+        ``_engine_unsettled_incarnation`` HOLD (never clean settlement),
+        the reaper closes the child's readers and clears the handle, and
+        only then may the exactly-once marker latch. Reaping failure, a
+        failed crashed-reader settlement, a raising poll, or any non-int
+        poll verdict keeps the retry ladder alive instead of committing
+        the suppression. Construction rollback is separate: its visible
+        ``_LauncherConstructionHold`` retains the exact live child and its
+        poisoned startup owner before root shutdown has committed.
         """
 
         if self._shutdown_terminal_engine_readers_settled:
@@ -3705,13 +3715,32 @@ class LauncherWindow(QMainWindow):
             return True
         try:
             returncode = process.poll()
-        except Exception:
-            return True
-        if type(returncode) is not int:
+        except Exception as exc:
+            logger.error(
+                "Engine poll failed during the terminal quit decision; phase=normal-quit-refusal exception=%s",
+                type(exc).__name__,
+            )
+            return False
+        if returncode is None and getattr(self, "_construction_failure_phase", None) is not None:
             return True
         owner_id = getattr(self, "_engine_instance_id", None)
         if type(owner_id) is not str:
             owner_id = "<unknown>"
+        if returncode is None:
+            try:
+                LauncherWindow._reap_unsettled_engine_process(self, owner_id=owner_id)
+            except Exception as exc:
+                logger.error(
+                    "Engine process reaping failed during the terminal quit decision; "
+                    "phase=normal-quit-refusal owner=%s exception=%s",
+                    owner_id,
+                    type(exc).__name__,
+                )
+                return False
+            self._shutdown_terminal_engine_readers_settled = True
+            return True
+        if type(returncode) is not int:
+            return False
         try:
             settled = LauncherWindow._settle_crashed_engine_readers_or_hold(
                 self,

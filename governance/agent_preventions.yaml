@@ -267,7 +267,7 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
-    guard: tests/test_launcher_shutdown_ownership.py::test_direct_stop_retains_a_finished_worker_with_an_invalid_concrete_result
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_path_retains_invalid_result_and_stops_scheduling_settlement
     ci_partition: remaining
     red_evidence: normal_quit_cleared_the_finished_worker_before_strict_receipt_validation_rejected_its_concrete_result_3_new_regressions_failed_2026_08_25
     green_evidence: pending
@@ -278,6 +278,22 @@ false_green_pairs:
     guard: tests/gui/shell/test_d7_1b_repair.py::test_finished_invalid_concrete_result_latches_terminal_hold_without_rescheduling
     ci_partition: gui
     red_evidence: replacement_recovery_scheduled_another_200_ms_pass_for_a_finished_worker_whose_invalid_concrete_result_could_never_change_3_new_regressions_failed_2026_08_25
+    green_evidence: pending
+  - id: LAUNCHER-NORMAL-QUIT-READER-SETTLEMENT-FALSE-GREEN-349
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive
+    ci_partition: remaining
+    red_evidence: the_registry_named_a_deleted_normal_quit_guard_and_omitted_the_reader_settlement_failure_guard_2026_08_25
+    green_evidence: pending
+  - id: LAUNCHER-NORMAL-QUIT-LIVE-CHILD-REAP-FALSE-GREEN-350
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppression
+    ci_partition: remaining
+    red_evidence: exact_head_80e826fb_left_the_live_engine_unreaped_and_the_guard_failed_on_terminate_calls_zero_2026_08_25
     green_evidence: pending
   - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
     status: open
@@ -4331,7 +4347,11 @@ records:
         ci_partition: gui
       - node: tests/gui/shell/test_d7_1b_repair.py::test_health_tick_validates_a_finished_worker_receipt_before_retirement
         ci_partition: gui
-      - node: tests/test_launcher_shutdown_ownership.py::test_direct_stop_retains_a_finished_worker_with_an_invalid_concrete_result
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_path_retains_invalid_result_and_stops_scheduling_settlement
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppression
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive
         ci_partition: remaining
       - node: tests/gui/shell/test_d7_1b_repair.py::test_finished_malformed_unknown_outcome_latches_terminal_hold_without_rescheduling
         ci_partition: gui
