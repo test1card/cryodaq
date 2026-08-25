@@ -3678,7 +3678,11 @@ class LauncherWindow(QMainWindow):
         reconciliation into a concrete reply failed exact validation -- beside ANY
         observed terminal exit of the same child is equally immutable: with no
         worker or transport identity left, no later pass can produce a different
-        reply, so revalidating it forever only strands the terminal readers. An open
+        reply, so revalidating it forever only strands the terminal readers. A published
+        receipt beside an UNOBSERVABLE child -- one whose ``poll()`` raises -- is equally
+        immutable: polling cannot answer, so no later pass can read a different verdict,
+        and the refusal must stop being re-polled so the terminal quit decision can bound
+        the exact retained child through its owned reap machine instead. An open
         exit-wait budget, an unreconciled transport identity, or a VALIDATED receipt
         beside a clean exit (whose remaining failure is retryable reader cleanup)
         keeps its progress-capable polling loop.
@@ -3705,7 +3709,7 @@ class LauncherWindow(QMainWindow):
         try:
             returncode = process.poll()
         except Exception:
-            return False
+            return True
         if type(returncode) is not int:
             return False
         if returncode != 0:
