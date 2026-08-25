@@ -155,6 +155,7 @@ def root_logging_restored():
     root = logging.getLogger()
     handlers, level = list(root.handlers), root.level
     logging_configured = logging_setup._logging_configured
+    replay_pending = getattr(logging_setup, "_replay_pending", None)
     logging_setup._logging_configured = False
     logging_setup._deferred_records.clear()
     try:
@@ -173,6 +174,8 @@ def root_logging_restored():
         root.setLevel(level)
         logging_setup._logging_configured = logging_configured
         logging_setup._deferred_records.clear()
+        if replay_pending is not None:
+            logging_setup._replay_pending = replay_pending
 
 
 def test_the_reason_reaches_the_log_file_that_did_not_exist_yet(
@@ -583,3 +586,182 @@ def test_the_built_in_copy_cannot_be_corrupted_by_a_caller() -> None:
     first = _theme_loader.last_resort_pack()
     first["BACKGROUND"] = "#ffffff"
     assert _theme_loader.last_resort_pack()["BACKGROUND"] == "#1a1816"
+
+
+# ------------------------------------------------- delivery belongs to THIS record
+
+
+def _tracked_stream(stream) -> logging_setup._EmissionTrackingStreamHandler:
+    handler = logging_setup._EmissionTrackingStreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
+
+
+def test_a_delivered_theme_diagnostic_is_not_queued_by_a_concurrent_failed_emission(
+    monkeypatch, root_logging_restored
+) -> None:
+    """The deferral decision must belong to the theme record, not to whichever record ran last.
+
+    A healthy sink accepts the theme diagnostic; a concurrent thread's FAILED emission then
+    overwrites the handler-wide flags before the check runs. Reading those flags used to queue
+    an already-delivered record, which the next replay wrote twice.
+    """
+
+    import io
+
+    healthy = io.StringIO()
+    good_handler = _tracked_stream(healthy)
+
+    class Saboteur(logging_setup._EmissionTrackingStreamHandler):
+        """Delivers the record, then simulates a concurrent failed emission."""
+
+        def __init__(self) -> None:
+            super().__init__(io.StringIO())
+            self.setFormatter(logging.Formatter("%(message)s"))
+
+        def emit(self, record) -> None:
+            super().emit(record)
+            if "theme diagnostic" in record.getMessage():
+                self._last_emission_succeeded = False
+                good_handler._last_emission_succeeded = False
+
+    root = logging.getLogger()
+    root.handlers = [good_handler, Saboteur()]
+    root.setLevel(logging.INFO)
+
+    _theme_loader._say_and_defer(logging.ERROR, "theme diagnostic")
+
+    assert logging_setup._deferred_records == [], "a delivered diagnostic must not be queued again"
+
+    logging_setup._replay_deferred_records()
+
+    written = healthy.getvalue()
+    assert written.count("theme diagnostic") == 1, written
+
+
+def test_an_undelivered_theme_diagnostic_survives_a_concurrent_successful_emission(
+    monkeypatch, root_logging_restored
+) -> None:
+    """A foreign SUCCESS between dispatch and decision must not hide a failed emission.
+
+    Both sinks reject the theme diagnostic, but a concurrent thread's successful record
+    leaves ``_last_emission_succeeded`` true on every handler before the check runs.
+    Trusting those flags dropped an operator-visible reason entirely: it was in no sink
+    and in no queue. The probe bound to this record cannot be overwritten that way.
+    """
+
+    import io
+
+    class BrokenStream:
+        closed = False
+
+        def write(self, _message):
+            raise OSError("disk full")
+
+        def flush(self):
+            pass
+
+    broken_handler = logging_setup._EmissionTrackingStreamHandler(BrokenStream())
+    broken_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    class LyingHandler(logging_setup._EmissionTrackingStreamHandler):
+        """Rejects the record, then leaves a concurrent success's flags behind."""
+
+        def __init__(self) -> None:
+            super().__init__(BrokenStream())
+            self.setFormatter(logging.Formatter("%(message)s"))
+
+        def emit(self, record) -> None:
+            super().emit(record)
+            if "theme diagnostic" in record.getMessage():
+                self._last_emission_succeeded = True
+                broken_handler._last_emission_succeeded = True
+
+    root = logging.getLogger()
+    root.handlers = [broken_handler, LyingHandler()]
+    root.setLevel(logging.INFO)
+
+    _theme_loader._say_and_defer(logging.ERROR, "theme diagnostic")
+
+    assert logging_setup._deferred_records == [(logging.ERROR, "theme diagnostic", ())], (
+        "an undelivered diagnostic must be retained even when a foreign emission succeeded"
+    )
+
+    broken_handler.stream = io.StringIO()
+    lying_handler = root.handlers[1]
+    lying_handler.stream = io.StringIO()
+    logging_setup._replay_deferred_records()
+
+    assert not logging_setup._deferred_records
+    assert broken_handler.stream.getvalue().count("theme diagnostic") == 1
+
+
+def test_a_foreign_thread_between_dispatch_and_decision_cannot_hide_a_failed_theme_record(
+    monkeypatch, root_logging_restored
+) -> None:
+    """The real cross-thread interleaving, pinned with Events instead of timing.
+
+    The theme record first fails dispatch. Before ``_say_and_defer`` can decide whether
+    to retain it, another thread emits successfully through the same tracked handler.
+    The old handler-wide flag therefore described the FOREIGN record and dropped the
+    failed theme reason. The probe bound to the theme record cannot be overwritten.
+    """
+
+    import io
+    import threading
+
+    class SelectiveStream:
+        closed = False
+
+        def __init__(self) -> None:
+            self.written = io.StringIO()
+
+        def write(self, message):
+            if "theme diagnostic" in message:
+                raise OSError("disk full")
+            return self.written.write(message)
+
+        def flush(self):
+            pass
+
+    stream = SelectiveStream()
+    tracked = _tracked_stream(stream)
+
+    root = logging.getLogger()
+    root.handlers = [tracked]
+    root.setLevel(logging.INFO)
+
+    theme_dispatched = threading.Event()
+    foreign_done = threading.Event()
+    real_log = _theme_loader.logger.log
+
+    def pause_after_theme_dispatch(level, message, *args, **kwargs):
+        real_log(level, message, *args, **kwargs)
+        if message == "theme diagnostic":
+            theme_dispatched.set()
+            assert foreign_done.wait(timeout=30)
+
+    monkeypatch.setattr(_theme_loader.logger, "log", pause_after_theme_dispatch)
+
+    worker = threading.Thread(
+        target=_theme_loader._say_and_defer,
+        args=(logging.ERROR, "theme diagnostic"),
+    )
+    worker.start()
+    try:
+        assert theme_dispatched.wait(timeout=30)
+        logging.getLogger("foreign.emitter").info("unrelated concurrent success")
+    finally:
+        foreign_done.set()
+        worker.join(timeout=30)
+
+    assert not worker.is_alive()
+    assert logging_setup._deferred_records == [(logging.ERROR, "theme diagnostic", ())]
+    assert "theme diagnostic" not in stream.written.getvalue()
+    assert "unrelated concurrent success" in stream.written.getvalue()
+
+    tracked.stream = io.StringIO()
+    logging_setup._replay_deferred_records()
+
+    assert not logging_setup._deferred_records
+    assert tracked.stream.getvalue().count("theme diagnostic") == 1

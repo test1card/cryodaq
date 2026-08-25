@@ -175,10 +175,16 @@ def _say_and_defer(level: int, message: str, *args: object) -> None:
     Theme resolution produces records during import, before an entry point configures logging.
     Inventory scans may instead happen after setup_logging, so queuing every record would replay
     a diagnostic that was already written when a component later reconfigures logging.
+
+    Delivery is decided by a probe bound to THIS record, not by the handler-wide flags:
+    those describe whichever record each handler emitted last, so another thread's
+    emission landing between this one and the decision could lose an undelivered theme
+    diagnostic or queue a duplicate of one that was delivered.
     """
 
-    logger.log(level, message, *args)
-    if not logging_setup.last_emission_reached_handler():
+    probe = logging_setup.EmissionProbe()
+    logger.log(level, message, *args, extra={logging_setup.DELIVERY_PROBE_ATTRIBUTE: probe})
+    if not probe.delivered():
         logging_setup.defer_record(level, message, *[str(arg) for arg in args])
 
 

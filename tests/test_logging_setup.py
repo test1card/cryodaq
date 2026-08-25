@@ -29,6 +29,7 @@ def restore_root_logging():
     handlers, level = list(root.handlers), root.level
     configured = logging_setup._logging_configured
     deferred = list(logging_setup._deferred_records)
+    replay_pending = getattr(logging_setup, "_replay_pending", None)
     yield
     for handler in list(root.handlers):
         if handler not in handlers:
@@ -43,6 +44,8 @@ def restore_root_logging():
     root.setLevel(level)
     logging_setup._logging_configured = configured
     logging_setup._deferred_records[:] = deferred
+    if replay_pending is not None:
+        logging_setup._replay_pending = replay_pending
 
 
 def test_setup_logging_creates_file(tmp_path, monkeypatch):
@@ -351,6 +354,185 @@ def test_a_retained_record_replays_when_the_broken_sink_recovers(tmp_path, monke
     assert emissions.count("held diagnostic") == 1
     written = file_handler.stream.getvalue()
     assert "recovery proven" in written and "held diagnostic" in written
+
+
+def test_a_partially_successful_replay_does_not_strand_the_retained_prefix(tmp_path, monkeypatch):
+    """An early record can fail while a later one succeeds inside the SAME replay.
+
+    The later success used to reset every handler's recovery transition before the earlier
+    failure was restored, so the retained prefix had no trigger left and sat in the queue
+    until the next setup_logging() call. Retention must arm an explicit pending condition
+    instead, and the very next successful emission must deliver what was owed.
+    """
+
+    from cryodaq import logging_setup
+
+    class FlakyOnceStream:
+        closed = False
+
+        def __init__(self) -> None:
+            self.failures_left = 1
+            self.written = io.StringIO()
+
+        def write(self, message):
+            if self.failures_left > 0:
+                self.failures_left -= 1
+                raise OSError("disk full")
+            self.written.write(message)
+            return len(message)
+
+        def flush(self):
+            pass
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    stream = FlakyOnceStream()
+    monkeypatch.setattr(logging.FileHandler, "_open", lambda _handler: stream)
+
+    logging_setup._logging_configured = False
+    logging_setup._deferred_records.clear()
+    logging_setup.defer_record(logging.ERROR, "early diagnostic %d", 1)
+    logging_setup.defer_record(logging.ERROR, "later diagnostic")
+
+    # setup_logging replays immediately: "early" fails on the broken sink, "later"
+    # succeeds once that failure has consumed the stream's only fault.
+    logging_setup.setup_logging("partial-replay", console=False, file=True)
+
+    assert logging_setup._deferred_records == [(logging.ERROR, "early diagnostic %d", (1,))]
+    assert "later diagnostic" in stream.written.getvalue()
+    assert "early diagnostic" not in stream.written.getvalue()
+
+    logging.getLogger("probe.partial").error("post-recovery emission")
+
+    assert not logging_setup._deferred_records, "a retained record must not be stranded"
+    written = stream.written.getvalue()
+    assert written.count("early diagnostic 1") == 1
+    assert written.count("later diagnostic") == 1
+    assert written.count("post-recovery emission") == 1
+
+
+def test_arrivals_during_a_failing_replay_merge_under_the_hard_cap(tmp_path, monkeypatch):
+    """Records deferred while a replay is running must not lift the bound.
+
+    The replay hands the queue over, runs, then re-merges whatever every sink rejected.
+    Defers landing inside that window used to be prepended back without any cap, so
+    repeated recovery cycles ratcheted the list past _MAX_DEFERRED_RECORDS. The merge
+    keeps retention first (oldest, proven undelivered so far), then arrival order, and
+    drops the newest overflow -- asserted here as an exact expected survivor list.
+    """
+
+    from cryodaq import logging_setup
+
+    class FailingThenWorkingStream:
+        closed = False
+
+        def __init__(self, failures_left: int) -> None:
+            self.failures_left = failures_left
+            self.written = io.StringIO()
+
+        def write(self, message):
+            if self.failures_left > 0:
+                self.failures_left -= 1
+                raise OSError("disk full")
+            self.written.write(message)
+            return len(message)
+
+        def flush(self):
+            pass
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    logging_setup.setup_logging("cap-merge", console=False, file=True)
+    [file_handler] = logging.getLogger().handlers
+
+    # The first 60 replayed records fail; the last 4 succeed. While record "held 61" is
+    # being emitted -- squarely inside the snapshot/merge window -- eight new records
+    # are deferred, reproducing the concurrent-defer interleaving deterministically.
+    monkeypatch.setattr(file_handler, "stream", FailingThenWorkingStream(failures_left=60))
+    real_emit = file_handler.emit
+
+    def injecting_emit(record):
+        if record.getMessage() == "held 61":
+            for index in range(8):
+                logging_setup.defer_record(logging.ERROR, f"arrival {index}")
+        real_emit(record)
+
+    monkeypatch.setattr(file_handler, "emit", injecting_emit)
+
+    for index in range(logging_setup._MAX_DEFERRED_RECORDS):
+        logging_setup.defer_record(logging.ERROR, f"held {index}")
+    logging_setup._replay_deferred_records()
+
+    survivors = [(logging.ERROR, f"held {index}", ()) for index in range(60)] + [
+        (logging.ERROR, f"arrival {index}", ()) for index in range(4)
+    ]
+    assert len(logging_setup._deferred_records) == logging_setup._MAX_DEFERRED_RECORDS
+    assert logging_setup._deferred_records == survivors
+
+
+def test_a_thread_deferring_inside_an_active_replay_cannot_lift_the_cap(tmp_path, monkeypatch):
+    """The same hard bound, proven against a genuinely concurrent defer_record caller.
+
+    The replay's window is pinned with Events: the first replayed emission holds the
+    window open while another thread lands five records, so the merge always observes
+    them -- no sleeps, no timing assumptions.
+    """
+
+    import threading
+
+    from cryodaq import logging_setup
+
+    class AlwaysFailingStream:
+        closed = False
+
+        def write(self, _message):
+            raise OSError("disk full")
+
+        def flush(self):
+            pass
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    monkeypatch.setattr(logging_setup, "get_logs_dir", lambda: log_dir)
+
+    logging_setup.setup_logging("thread-cap", console=False, file=True)
+    [file_handler] = logging.getLogger().handlers
+    monkeypatch.setattr(file_handler, "stream", AlwaysFailingStream())
+
+    window_open = threading.Event()
+    arrivals_done = threading.Event()
+    real_emit = file_handler.emit
+
+    def window_emit(record):
+        if not window_open.is_set():
+            window_open.set()
+            assert arrivals_done.wait(timeout=30)
+        real_emit(record)
+
+    monkeypatch.setattr(file_handler, "emit", window_emit)
+
+    def arrive():
+        assert window_open.wait(timeout=30)
+        for index in range(5):
+            logging_setup.defer_record(logging.ERROR, f"thread arrival {index}")
+        arrivals_done.set()
+
+    for index in range(logging_setup._MAX_DEFERRED_RECORDS):
+        logging_setup.defer_record(logging.ERROR, f"held {index}")
+
+    worker = threading.Thread(target=arrive)
+    worker.start()
+    try:
+        logging_setup._replay_deferred_records()
+    finally:
+        worker.join(timeout=30)
+
+    assert len(logging_setup._deferred_records) == logging_setup._MAX_DEFERRED_RECORDS
+    assert all(record[1].startswith("held ") for record in logging_setup._deferred_records)
 
 
 def test_bare_token_without_bot_prefix_redacted():

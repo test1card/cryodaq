@@ -24,6 +24,7 @@ import logging.handlers
 import os
 import re
 import sys
+import threading
 
 from cryodaq.paths import get_logs_dir
 
@@ -97,8 +98,48 @@ class _TokenRedactFilter(logging.Filter):
 # to a record still owed to the operator.
 _MAX_DEFERRED_RECORDS = 64
 _deferred_records: list[tuple[int, str, tuple[object, ...]]] = []
+# Every mutation of the queue takes this lock: defer_record's bound check, replay's
+# snapshot, and replay's merge all race with each other across threads. It is never
+# held across an emission, so a handler can never block on it.
+_deferred_records_lock = threading.Lock()
 _logging_configured = False
 _replay_in_progress = False
+# True while records retained by a completed replay are still owed to an operator.
+# Without it, a record that succeeds later in the same replay consumes every handler's
+# failure transition, and the retained prefix finds no future trigger (it would sit in
+# the queue until the next setup_logging() call).
+_replay_pending = False
+
+# Attribute through which a caller binds an EmissionProbe to one specific LogRecord.
+DELIVERY_PROBE_ATTRIBUTE = "_cryodaq_delivery_probe"
+
+
+class EmissionProbe:
+    """Per-record delivery witness, immune to handler-wide flag overwrites.
+
+    ``_last_emission_succeeded`` describes whichever record each handler emitted LAST, so
+    a decision read after ``logger.log()`` returns can be overwritten by another thread's
+    emission in between -- losing an undelivered diagnostic or duplicating a delivered
+    one. A probe belongs to one specific LogRecord: tracked handlers report into it while
+    THAT record is being dispatched, so the decision observes only its own emission.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._succeeded = False
+
+    def observe(self, succeeded: bool) -> None:
+        """Record one tracked handler's outcome for the probed record."""
+
+        if succeeded:
+            with self._lock:
+                self._succeeded = True
+
+    def delivered(self) -> bool:
+        """Return whether any tracked handler accepted the probed record."""
+
+        with self._lock:
+            return self._succeeded
 
 
 class _EmissionTrackingHandlerMixin:
@@ -128,14 +169,18 @@ class _EmissionTrackingHandlerMixin:
                     pass
         succeeded = not self._emission_failed
         recovered = self._had_emission_failure
+        probe = getattr(record, DELIVERY_PROBE_ATTRIBUTE, None)
+        if probe is not None:
+            probe.observe(succeeded)
         self._last_emission_succeeded = succeeded
         self._had_emission_failure = not succeeded
-        if succeeded and recovered and _deferred_records and not _replay_in_progress:
-            # This sink had been failing and just took a record: recovery is
-            # proven by a real emission, so retained records are replayed now
-            # instead of waiting for the next setup_logging() call. Successes
-            # from sinks that never failed stay silent, so a backlog is not
-            # re-attempted on every unrelated emission while one sink is down.
+        if succeeded and (recovered or _replay_pending) and _deferred_records and not _replay_in_progress:
+            # This sink had been failing and just took a record (or a previous replay had
+            # to retain records against these same handlers): recovery is proven by a real
+            # emission, so retained records are replayed now instead of waiting for the
+            # next setup_logging() call. Successes from sinks that never failed stay
+            # silent, so a backlog is not re-attempted on every unrelated emission while
+            # one sink is down.
             _replay_deferred_records()
 
     def handleError(self, record: logging.LogRecord) -> None:
@@ -172,8 +217,9 @@ def last_emission_reached_handler() -> bool:
 def defer_record(level: int, message: str, *args: object) -> None:
     """Hold one record until setup_logging has somewhere to put it."""
 
-    if len(_deferred_records) < _MAX_DEFERRED_RECORDS:
-        _deferred_records.append((level, message, args))
+    with _deferred_records_lock:
+        if len(_deferred_records) < _MAX_DEFERRED_RECORDS:
+            _deferred_records.append((level, message, args))
 
 
 def _replay_deferred_records() -> None:
@@ -182,14 +228,21 @@ def _replay_deferred_records() -> None:
     Also runs when a previously failing sink proves its recovery (see the
     emission-tracking mixin); the in-progress guard keeps a replay from
     re-entering itself through emissions it triggers.
+
+    Records every sink rejects are kept back and re-merged under the same hard bound as
+    defer_record: retention keeps priority (those are oldest and proven undelivered so
+    far), then arrival order decides among records deferred while this replay ran, and
+    the newest overflow is dropped. Retention also arms ``_replay_pending`` -- see the
+    mixin's trigger for why a partial success inside one replay must not strand it.
     """
 
-    global _replay_in_progress
+    global _replay_in_progress, _replay_pending
     if _replay_in_progress:
         return
     _replay_in_progress = True
     try:
-        held, _deferred_records[:] = list(_deferred_records), []
+        with _deferred_records_lock:
+            held, _deferred_records[:] = list(_deferred_records), []
         logger = logging.getLogger("cryodaq.startup")
         handlers = list(logging.getLogger().handlers)
         retained: list[tuple[int, str, tuple[object, ...]]] = []
@@ -202,7 +255,10 @@ def _replay_deferred_records() -> None:
                 pass
             if not any(getattr(handler, "_last_emission_succeeded", False) for handler in handlers):
                 retained.append((level, message, args))
-        _deferred_records[:0] = retained
+        with _deferred_records_lock:
+            merged = retained + _deferred_records
+            _deferred_records[:] = merged[:_MAX_DEFERRED_RECORDS]
+        _replay_pending = bool(retained)
     finally:
         _replay_in_progress = False
 
@@ -318,8 +374,10 @@ def setup_logging(
         except Exception as exc:
             _warn_file_logging_failure(component, exc)
 
-    # Replay only after a handler that can actually take a record exists.
-    global _logging_configured
+    # Replay only after a handler that can actually take a record exists. The pending
+    # flag describes retention against THESE handlers; a reconfiguration starts over.
+    global _logging_configured, _replay_pending
+    _replay_pending = False
     _logging_configured = bool(root.handlers)
     if _logging_configured:
         _replay_deferred_records()
