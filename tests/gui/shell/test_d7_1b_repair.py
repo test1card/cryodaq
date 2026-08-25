@@ -515,6 +515,11 @@ def test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold() -> No
     the REAL manual-restart entry point must convert the polling failure into
     retained settlement state -- the stable HOLD stays owned, both supervision
     timers are re-armed, and the unobservable handle stays available for reaping.
+    The Codex round-2 finding pins one more property: with no worker, receipt, or
+    transport identity pending, the plain latch alone strands the retained child,
+    so a PROCESS-BOUND supervision callback must be armed beside the latch --
+    bound to this exact handle, not to the health timer whose poll is the one
+    that raises.
     """
 
     calls: list[str] = []
@@ -545,17 +550,587 @@ def test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold() -> No
     ):
         LauncherWindow._restart_engine(launcher)
 
-    assert "start_engine" in calls, "the replacement attempt must have been made"
-    assert launcher._restart_giving_up is True, "the polling failure must latch the owned stable HOLD"
-    assert launcher._restart_pending is False
-    assert launcher._data_timer.start.called and launcher._health_timer.start.called, (
-        "supervision must be re-armed over the possibly live child"
+        assert "start_engine" in calls, "the replacement attempt must have been made"
+        assert launcher._restart_giving_up is True, "the polling failure must latch the owned stable HOLD"
+        assert launcher._restart_pending is False
+        assert launcher._data_timer.start.called and launcher._health_timer.start.called, (
+            "supervision must be re-armed over the possibly live child"
+        )
+        assert "banner" in calls, "the operator must see the latched HOLD"
+        assert launcher._engine_proc is unobservable_handle, (
+            "the unobservable handle stays retained for later supervision/reaping"
+        )
+        assert single_shot.call_count == 1, "one process-bound supervision callback guards the latched HOLD"
+        assert single_shot.call_args.args[0] == 200, "supervision polls within its 200ms bound"
+
+        # The watch belongs to THIS handle: while observation stays unavailable it
+        # re-arms itself and never touches anything else; a different handle makes
+        # it inert instead of supervising a foreign incarnation.
+        single_shot.call_args.args[1]()
+        assert single_shot.call_count == 2, "a still-unobservable poll keeps the process-bound chain alive"
+        assert launcher._restart_giving_up is True
+        assert launcher._engine_proc is unobservable_handle
+
+        replaced = SimpleNamespace(poll=lambda: None)
+        launcher._engine_proc = replaced
+        single_shot.call_args.args[1]()
+        assert single_shot.call_count == 2, "a swapped-in handle makes the stale watch inert"
+        assert launcher._engine_proc is replaced
+
+
+class _ScriptedPollHandle:
+    """One stable handle object whose poll() script mutates between drives."""
+
+    pid = 9511
+
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.index = 0
+
+    def poll(self) -> int | None:
+        outcome = self.outcomes[min(self.index, len(self.outcomes) - 1)]
+        self.index += 1
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def test_process_bound_supervision_settles_the_same_owned_child_once_observed() -> None:
+    """The latched HOLD must not strand the retained child forever.
+
+    The Codex round-2 P1 finding at ``launcher.py``'s raising-poll return: when
+    the replacement ``poll()`` raised with no worker, receipt, or transport
+    identity pending, recovery latched ``_restart_giving_up`` and the retained
+    possibly-live process had no callback capable of reaching bounded reaping --
+    the latch disables the health timer, and the health timer's own poll is the
+    one that raises. Driving the REAL recovery entry point must arm a callback
+    bound to the exact handle; while polls keep failing it re-arms silently; and
+    on the first readable verdict the SAME owned process must reach terminal
+    settlement through the ordinary recovery path -- readers settled, incarnation
+    retired, giving-up latch released, bounded restart scheduled. No permanent
+    giving-up latch may strand it.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    handle = _ScriptedPollHandle(
+        [
+            RuntimeError("injected poll failure"),
+            RuntimeError("injected poll failure"),
+            1,
+        ]
     )
-    assert "banner" in calls, "the operator must see the latched HOLD"
-    assert launcher._engine_proc is unobservable_handle, (
-        "the unobservable handle stays retained for later supervision/reaping"
+    launcher._engine_proc = handle
+    launcher._restart_pending = True
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+        assert deferred is False
+        assert launcher._restart_giving_up is True, "the HOLD still shows the operator the truth"
+        assert launcher._engine_proc is handle, "the possibly live child stays retained"
+        assert single_shot.call_count == 1 and single_shot.call_args.args[0] == 200
+
+        single_shot.call_args.args[1]()
+        assert launcher._engine_proc is handle, "still unobservable: the same child stays owned"
+        assert launcher._restart_giving_up is True
+        assert single_shot.call_count == 2 and single_shot.call_args.args[0] == 200
+
+        single_shot.call_args.args[1]()
+
+    assert launcher._engine_proc is None, "an observed terminal exit settles exactly once"
+    assert launcher._engine_instance_id is None, "the retired incarnation cannot spawn a twin"
+    assert launcher._engine_shutdown_capability is None
+    assert launcher._restart_giving_up is False, "settled ownership releases the giving-up latch"
+    assert launcher._restart_pending is True, "recovery continues into its bounded restart"
+    assert launcher._restart_attempts == 1
+    assert "close_stream" in calls, "the terminal child's readers were settled"
+    assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None, (
+        "the hand-off retires the watch marker"
     )
-    assert single_shot.call_count == 0, "with no pending evidence the plain HOLD latch owns the state"
+    assert single_shot.call_count == 3, "two supervision passes plus one bounded restart shot"
+    assert single_shot.call_args_list[-1].args[0] == 3 * 1000, "the crash backoff owns the next attempt"
+
+
+def test_process_bound_supervision_hands_a_live_child_to_the_owned_stop_path() -> None:
+    """An observably ALIVE watched child goes to the stop ladder, not a kill.
+
+    When observation becomes available and the child answers alive, the watch
+    must hand the same owned process to the ordinary recovery path -- whose
+    live-child branch asks it to stop through ``_stop_engine`` and retains
+    whatever exact settlement evidence that dispatch leaves behind. It must not
+    terminate, kill, or latch over a progress-capable owner.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    handle = _ScriptedPollHandle([RuntimeError("injected poll failure"), None])
+    launcher._engine_proc = handle
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+    worker = _ShutdownWorker(settles=False)
+
+    def _stop_that_leaves_a_running_owner() -> None:
+        calls.append("stop_engine")
+        launcher._engine_shutdown_worker = worker
+        raise RuntimeError(
+            "engine shutdown command is dispatched on a background worker awaiting its reply; launcher remains in HOLD"
+        )
+
+    launcher._stop_engine = _stop_that_leaves_a_running_owner
+
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+        assert deferred is False
+        assert single_shot.call_count == 1 and single_shot.call_args.args[0] == 200
+        single_shot.call_args.args[1]()
+
+    assert "stop_engine" in calls, "the observable live child was asked to stop"
+    assert "terminate" not in calls and "kill" not in calls
+    assert launcher._engine_shutdown_worker is worker, "the dispatched owner stays retained"
+    assert launcher._restart_giving_up is True, (
+        "the first pass's visible HOLD stands while the retained owner keeps settling"
+    )
+    assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None, (
+        "the watch handed off exactly once and did not double-drive the child"
+    )
+    assert single_shot.call_count == 2, "owner-bound settlement continues the pass cadence"
+    assert single_shot.call_args_list[-1].args[0] == 200
+    assert launcher._bridge.shutdown.call_count == 1, (
+        "the first pass settled its own bridge turnover; the hand-off pass keeps the bridge alive"
+    )
+
+
+class _UnobservableChildHandle:
+    """A retained child whose poll() raises until observability is restored.
+
+    ``wait()`` and ``communicate()`` record their calling stacks: a single
+    recorded frame proves something blocked the Qt call stack, which is exactly
+    what the owned reap ladder must never do.
+    """
+
+    pid = 9621
+
+    def __init__(self) -> None:
+        self.readable = False
+        self.readable_code: int | None = None
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_frames: list[list[str]] = []
+        self.communicate_frames: list[list[str]] = []
+
+    def poll(self) -> int | None:
+        if not self.readable:
+            raise RuntimeError("injected poll failure")
+        return self.readable_code
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+
+    def wait(self, timeout: float | None = None) -> int:
+        import inspect
+
+        self.wait_frames.append([frame.function for frame in inspect.stack()])
+        self.readable = True
+        self.readable_code = 0
+        return 0
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        import inspect
+
+        self.communicate_frames.append([frame.function for frame in inspect.stack()])
+        return b"", b""
+
+
+class _SupervisionClock:
+    """A controllable monotonic clock so the watch deadline and the shared
+    five-second stage budgets can be crossed deterministically, without any
+    real sleep."""
+
+    def __init__(self, start: float = 5_000_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _drive_next_supervision_tick(single_shot: MagicMock, cursor: list[int], clock: _SupervisionClock) -> bool:
+    """Invoke the next not-yet-driven 200ms callback -- the watch/ladder cadence.
+
+    Crash-backoff restart shots use multi-second delays, so the interval
+    discriminates the process-bound chains from the bounded-restart shot in
+    these drives.
+    """
+
+    calls = single_shot.call_args_list
+    while cursor[0] < len(calls):
+        invocation = calls[cursor[0]]
+        cursor[0] += 1
+        if invocation.args[0] == 200:
+            clock.advance(invocation.args[0] / 1000.0)
+            invocation.args[1]()
+            return True
+    return False
+
+
+def _unobservable_child_host(calls: list[str], handle: _UnobservableChildHandle) -> SimpleNamespace:
+    """A launcher-owned replacement child that cannot be observed at all."""
+
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_proc = handle
+    launcher._restart_pending = True
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+    return launcher
+
+
+def test_supervision_deadline_spent_escalates_to_owned_reap_ladder_until_explicit_failure(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poll() that raises FOREVER may not be merely watched forever either.
+
+    The P1 follow-up to the process-bound supervision: the watch re-armed its
+    200ms callback on every failing observation, so a permanently raising
+    ``poll()`` kept the possibly live child watched -- never terminated, never
+    killed, never explicitly failed -- for as long as the launcher lived.
+    Driving the REAL recovery entry point must show the watch spending its
+    FINITE monotonic budget and then handing the SAME exact process into the
+    owned non-blocking reap ladder, which escalates terminate -> kill under the
+    shared five-second stage budgets and ends in an EXPLICIT bounded failure
+    with ownership retained. No second watch or ladder may drive the same child
+    while the machine is active.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    launcher = _unobservable_child_host(calls, handle)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+        assert deferred is False
+        assert launcher._restart_giving_up is True, "the HOLD still shows the operator the truth"
+        assert launcher._engine_proc is handle, "the possibly live child stays retained"
+        assert single_shot.call_count == 1 and single_shot.call_args.args[0] == 200
+        assert handle.terminate_calls == 0 and handle.kill_calls == 0, "watching never escalates early"
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "failing ticks keep re-arming"
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert handle.terminate_calls == 0, "before the deadline the watch stays a watch"
+        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None
+        assert single_shot.call_count == 3
+
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "the first failing tick past the deadline escalates"
+        )
+        machine = getattr(launcher, "_engine_unobservable_reap_state", None)
+        assert type(machine) is dict and machine["process"] is handle and machine["stage"] == "terminate", (
+            "the spent watch hands the SAME exact process into the owned reap ladder"
+        )
+        assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None, (
+            "the watch marker retires when the ladder takes ownership"
+        )
+
+        shots_before = single_shot.call_count
+        assert (
+            LauncherWindow._schedule_unowned_process_supervision(
+                launcher,
+                phase="readiness",
+                failure=RuntimeError("replacement never reported ready"),
+                child_start_attempted=True,
+                settle_bridge=False,
+                raise_on_hold=False,
+            )
+            is True
+        )
+        assert single_shot.call_count == shots_before, "a ladder already driving this child refuses a second watch"
+
+        assert (
+            LauncherWindow._begin_unobservable_bounded_reap(
+                launcher,
+                phase="readiness",
+                owner_id="a" * 32,
+                process=handle,
+                failure=RuntimeError("replacement never reported ready"),
+                child_start_attempted=True,
+                settle_bridge=False,
+                raise_on_hold=False,
+            )
+            is True
+        ), "re-arming over the same process changes nothing"
+
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the first ladder tick terminates"
+        assert handle.terminate_calls == 1 and handle.kill_calls == 0
+
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the spent terminate budget escalates to kill"
+        assert handle.kill_calls == 1
+
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "the spent kill budget reaches the explicit bounded failure"
+        )
+        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None, "the failed bound clears its machine"
+        assert launcher._engine_proc is handle, "an explicit bounded failure RETAINS exact ownership"
+        assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None
+        assert _drive_next_supervision_tick(single_shot, cursor, clock) is False, (
+            "no process-bound callback survives the explicit bounded failure"
+        )
+
+    assert handle.wait_frames == [] and handle.communicate_frames == [], (
+        "the whole bound advanced without ever blocking on wait()/communicate()"
+    )
+    escalation_lines = [record for record in caplog.records if "budget spent" in record.getMessage()]
+    assert len(escalation_lines) == 1, "the escalation reports itself exactly once"
+    failures = [
+        record
+        for record in caplog.records
+        if "Bounded reaping of the unobservable engine child failed" in record.getMessage()
+    ]
+    assert len(failures) == 1, "the explicit bounded failure reports itself exactly once"
+
+
+def test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observability returning mid-ladder settles through recovery exactly once.
+
+    When the child's ``poll()`` becomes readable while the owned reap ladder
+    holds it -- terminal code included -- the machine must clear FIRST and hand
+    the SAME owned process back to the ordinary recovery path, whose observed-
+    exit route owns reader settlement, incarnation retirement, giving-up
+    release, and the bounded restart. No queued stale tick may settle anything
+    a second time afterwards.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    launcher = _unobservable_child_host(calls, handle)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the spent deadline arms the ladder"
+        assert type(getattr(launcher, "_engine_unobservable_reap_state", None)) is dict
+
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "terminate fires without readable polls"
+        assert handle.terminate_calls == 1
+
+        handle.readable = True
+        handle.readable_code = 9
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "the next tick observes the terminal code and hands off"
+        )
+
+        assert launcher._engine_proc is None, "an observed terminal exit settles exactly once"
+        assert launcher._engine_instance_id is None, "the retired incarnation cannot spawn a twin"
+        assert launcher._engine_shutdown_capability is None
+        assert launcher._restart_giving_up is False, "settled ownership releases the giving-up latch"
+        assert launcher._restart_pending is True, "recovery continues into its bounded restart"
+        assert launcher._restart_attempts == 1
+        assert "close_stream" in calls, "the terminal child's readers were settled"
+        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None, (
+            "the hand-off cleared the machine before recovery ran"
+        )
+        assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None
+        assert _drive_next_supervision_tick(single_shot, cursor, clock) is False, (
+            "no 200ms callback remains after the single settlement"
+        )
+        assert launcher._engine_proc is None and launcher._restart_attempts == 1, (
+            "stale ticks cannot double-settle or double-restart the retired child"
+        )
+        assert single_shot.call_args_list[-1].args[0] == 3 * 1000, "the crash backoff owns the next attempt"
+
+    assert handle.wait_frames == [] and handle.communicate_frames == []
+    handoff_lines = [
+        record for record in caplog.records if "became observable during bounded reaping" in record.getMessage()
+    ]
+    assert len(handoff_lines) == 1, "the readable hand-off reports itself exactly once"
+
+
+def test_stale_ladder_tick_for_a_replaced_process_is_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replaced handle makes the armed ladder inert instead of foreign.
+
+    The machine is bound to the exact process object. If ``_engine_proc``
+    moves to another incarnation while a ladder tick is still queued, the
+    stale tick must clear its machine, leave the new handle untouched, and end
+    the chain rather than terminate/kill a process it was never armed over.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    launcher = _unobservable_child_host(calls, handle)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with patch("cryodaq.launcher.QTimer.singleShot") as single_shot:
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "terminate fired on the original child"
+        assert handle.terminate_calls == 1
+
+        replaced = _UnobservableChildHandle()
+        launcher._engine_proc = replaced
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "one stale tick remains queued"
+        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None, (
+            "the identity gate clears the machine instead of driving a foreign incarnation"
+        )
+        assert replaced.terminate_calls == 0 and replaced.kill_calls == 0, (
+            "the stale tick never touches the replacement handle"
+        )
+        assert launcher._engine_proc is replaced
+        assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None
+        assert _drive_next_supervision_tick(single_shot, cursor, clock) is False, "the chain ended for good"
+
+
+def test_owned_reap_ladder_never_blocks_or_waits_on_the_qt_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unobservable-child bound runs entirely through non-blocking ticks.
+
+    The escalation exists because a raising poll() used to leave the child
+    merely watched forever; the cure must not reintroduce the sibling defect of
+    blocking the Qt thread. The scripted child records the calling stack at
+    every wait()/communicate(): driving the REAL arming, the deadline spend,
+    terminate, kill, and the explicit bounded failure must complete with zero
+    recorded frames anywhere.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    launcher = _unobservable_child_host(calls, handle)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with patch("cryodaq.launcher.QTimer.singleShot") as single_shot:
+        assert (
+            LauncherWindow._recover_failed_engine_restart(
+                launcher,
+                phase="readiness",
+                failure=RuntimeError("replacement never reported ready"),
+                child_start_attempted=True,
+                settle_bridge=False,
+                raise_on_hold=False,
+            )
+            is False
+        )
+        assert handle.wait_frames == [] and handle.communicate_frames == [], "arming blocks nothing"
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert handle.wait_frames == [] and handle.communicate_frames == [], "watching blocks nothing"
+
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert handle.wait_frames == [] and handle.communicate_frames == [], "escalation arms without blocking"
+
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert handle.terminate_calls == 1
+        assert handle.wait_frames == [] and handle.communicate_frames == []
+
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert handle.kill_calls == 1
+        assert handle.wait_frames == [], "kill escalated through callbacks, never through wait()"
+        assert handle.communicate_frames == []
+
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None
+        assert launcher._engine_proc is handle
+        assert handle.wait_frames == [] and handle.communicate_frames == []
 
 
 def test_a_raising_poll_beside_a_pending_owner_keeps_the_bounded_callback() -> None:
