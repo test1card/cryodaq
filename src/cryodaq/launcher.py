@@ -601,9 +601,13 @@ _SOAK_ARTIFACT_FD_ENV = "CRYODAQ_SOAK_ARTIFACT_FD"
 _SOAK_ARTIFACT_NONCE_ENV = "CRYODAQ_SOAK_ARTIFACT_NONCE"
 _SOAK_ASSISTANT_GENERATION_ENV = "CRYODAQ_SOAK_ASSISTANT_GENERATION"
 _SOAK_BRIDGE_SCHEMA = "cryodaq.soak.bridge-identity"
-_SOAK_BRIDGE_VERSION = 1
+# Version 2 adds the turnover record. Both ends ship in one commit -- the runner refuses a
+# drifted worktree -- so there is no compatibility shim; the bump exists so a stale reader
+# refuses loudly instead of misreading a stream it does not understand.
+_SOAK_BRIDGE_VERSION = 2
 _SOAK_BRIDGE_MAX_BYTES = 512
 _SOAK_BRIDGE_DATA_SCHEMA = "cryodaq.soak.bridge-data"
+_SOAK_BRIDGE_TURNOVER_SCHEMA = "cryodaq.soak.bridge-turnover"
 _SOAK_BRIDGE_DATA_MIN_INTERVAL_S = 1.0
 _SOAK_BRIDGE_AT_FORK_REGISTERED = False
 
@@ -905,6 +909,18 @@ class _SoakBridgeHandshake:
     _emitted: bool = False
     _data_sequence: int = 0
     _last_data_emit: float = 0.0
+    # The CURRENT accepted bridge epoch. It began pinned to the literal first
+    # incarnation, which was right while an owned engine could never restart. It can now,
+    # and every engine restart replaces the bridge on purpose -- a new child must not
+    # inherit an old transport -- so a pin to the first incarnation quarantined this
+    # stream on the first legitimate replacement and every later fact was lost.
+    #
+    # The pin is not loosened. The epoch ADVANCES, and only across a turnover record that
+    # names the retired identity and a restart count exactly one higher. Anything else
+    # still quarantines, because evidence that cannot be attributed to one exact process
+    # is not evidence.
+    _bridge_pid: int | None = None
+    _restart_count: int = 0
     _fd_owner: _OwnedFileDescriptor | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -965,6 +981,67 @@ class _SoakBridgeHandshake:
             self._quarantine_after_failure(primary_failure)
             raise primary_failure
         self._emitted = True
+        self._bridge_pid = bridge_pid
+        self._restart_count = restart_count
+
+    def note_bridge_turnover(self, *, bridge_pid: int | None, restart_count: int) -> None:
+        """Advance the accepted epoch across one legitimate bridge replacement.
+
+        Continuity, never tolerance. The replacement must carry a restart count exactly one
+        above the accepted one and a live PID of its own; a gap, a repeat, or a PID that is
+        this process quarantines the stream exactly as an unexplained change always did.
+        """
+
+        if self._closed or not self._emitted:
+            raise RuntimeError("soak bridge turnover has no accepted epoch to advance")
+        assert self._fd_owner is not None
+        owner = _require_open_owned_fd(self._fd_owner, label="soak bridge turnover")
+        retired_pid = self._bridge_pid
+        retired_restart_count = self._restart_count
+        if (
+            not isinstance(bridge_pid, int)
+            or isinstance(bridge_pid, bool)
+            or bridge_pid <= 0
+            or bridge_pid == os.getpid()
+            or type(restart_count) is not int
+            or type(retired_pid) is not int
+            or restart_count != retired_restart_count + 1
+        ):
+            primary_failure = RuntimeError("bridge turnover does not continue the accepted epoch")
+            self._quarantine_after_failure(primary_failure)
+            raise primary_failure
+        sequence = self._data_sequence + 1
+        record = {
+            "schema": _SOAK_BRIDGE_TURNOVER_SCHEMA,
+            "version": _SOAK_BRIDGE_VERSION,
+            "nonce": self.nonce,
+            "launcher_pid": os.getpid(),
+            "retired_bridge_pid": retired_pid,
+            "retired_restart_count": retired_restart_count,
+            "bridge_pid": bridge_pid,
+            "restart_count": restart_count,
+            "sequence": sequence,
+        }
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+        if len(payload) > _SOAK_BRIDGE_MAX_BYTES:
+            primary_failure = RuntimeError("soak bridge turnover record exceeds its bound")
+            self._quarantine_after_failure(primary_failure)
+            raise primary_failure
+        try:
+            written = os.write(owner, payload)
+        except BaseException as primary_failure:
+            # A turnover is NOT advisory. Losing it to backpressure would leave the reader
+            # pinned to a retired identity, so the next data fact would quarantine anyway,
+            # with no record of why. Fail here, where the reason is still known.
+            self._quarantine_after_failure(primary_failure)
+            raise
+        if written != len(payload):
+            primary_failure = RuntimeError("soak bridge turnover write did not complete atomically")
+            self._quarantine_after_failure(primary_failure)
+            raise primary_failure
+        self._data_sequence = sequence
+        self._bridge_pid = bridge_pid
+        self._restart_count = restart_count
 
     def emit_data_observed(self, *, bridge_pid: int | None, restart_count: int) -> bool:
         """Best-effort bounded fact that the launcher consumed bridge data.
@@ -987,7 +1064,8 @@ class _SoakBridgeHandshake:
             or bridge_pid <= 0
             or bridge_pid == os.getpid()
             or type(restart_count) is not int
-            or restart_count != 1
+            or bridge_pid != self._bridge_pid
+            or restart_count != self._restart_count
         ):
             primary_failure = RuntimeError("bridge identity changed after positive handshake")
             self._quarantine_after_failure(primary_failure)
@@ -4432,6 +4510,7 @@ class LauncherWindow(QMainWindow):
             return
         try:
             self._bridge.start()
+            LauncherWindow._announce_soak_bridge_turnover(self)
             LauncherWindow._publish_replay_ui_authority(self)
         except Exception as exc:
             LauncherWindow._recover_failed_engine_restart(
@@ -5307,6 +5386,23 @@ class LauncherWindow(QMainWindow):
             unsettled=("bridge",),
         )
 
+    def _announce_soak_bridge_turnover(self) -> None:
+        """Tell the evidence stream that this launcher replaced its bridge on purpose.
+
+        Every site that shuts a bridge down and starts another must call this, or the
+        stream quarantines on the next reading and the run loses every later fact. There
+        are three: the watchdog, the operator's manual restart, and the scheduled engine
+        replacement. Outside an isolated soak there is no handshake and this does nothing.
+        """
+
+        soak_bridge = getattr(self, "_soak_bridge_handshake", None)
+        if soak_bridge is None:
+            return
+        soak_bridge.note_bridge_turnover(
+            bridge_pid=self._bridge.process_pid(),
+            restart_count=self._bridge.restart_count(),
+        )
+
     def _replace_bridge_from_watchdog(self, *, reason: str) -> bool:
         """Replace one exact bridge generation or fail visible and closed."""
 
@@ -5369,6 +5465,9 @@ class LauncherWindow(QMainWindow):
                 or replacement_pid <= 0
             ):
                 raise RuntimeError("replacement bridge failed exact generation validation")
+            # After the replacement passes its own generation validation, and before any
+            # reading can be observed against it.
+            LauncherWindow._announce_soak_bridge_turnover(self)
             LauncherWindow._publish_replay_ui_authority(self)
         except Exception as exc:
             start_error = exc
@@ -6370,6 +6469,7 @@ class LauncherWindow(QMainWindow):
                 self._start_engine()
                 phase = "bridge-attach"
                 self._bridge.start()
+                LauncherWindow._announce_soak_bridge_turnover(self)
                 phase = "ui-authority-bind"
                 LauncherWindow._publish_replay_ui_authority(self)
             except Exception as restart_error:
