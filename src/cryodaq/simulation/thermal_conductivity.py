@@ -43,13 +43,17 @@ _MIN_CONDUCTANCE_W_PER_K = 1e-12
 _RELAXATION_FRACTION = 0.25
 
 #: The internal grid `advance` integrates on. Fixed, so that the way a CALLER slices time
-#: cannot change the answer: one call of four thousand seconds and four thousand calls of
-#: one second take the identical sequence of substeps. Measured before this was fixed: the
-#: two paths disagreed by six millikelvin, which in a soak reads as instrument drift.
+#: changes the answer only where adding the slices up in binary floating point itself
+#: rounds: durations that sum exactly -- one call of four thousand seconds, four thousand
+#: calls of one second, four calls of a quarter -- take the identical sequence of substeps,
+#: while slices that accumulate rounding error, ten calls of 0.1, can cross a grid boundary
+#: one substep early or late. Measured before this was fixed: the coarse and fine paths
+#: disagreed by six millikelvin, which in a soak reads as instrument drift.
 _FINE_STEP_S = 0.5
 
 #: A ceiling on substeps per advance so a pathological call cannot spin for minutes. When
-#: it binds, the step taken is reported, so a caller can see it happened.
+#: it binds, the unconsumed time stays queued in ``_pending_s`` and the returned state
+#: carries ``substep_limited=True``, so a caller can see the horizon was not reached.
 _MAX_SUBSTEPS = 100_000
 
 
@@ -293,11 +297,15 @@ class ThermalConductivitySpecimen:
             mean_temperature = 0.5 * (self._temperatures[index] + self._temperatures[index + 1])
             conductivity = self._conductivity(mean_temperature)
             conductance = conductivity * segment.area_m2 / segment.length_m
-            self._conductances[index] = max(conductance, _MIN_CONDUCTANCE_W_PER_K)
+            if not math.isfinite(conductance) or conductance < _MIN_CONDUCTANCE_W_PER_K:
+                conductance = _MIN_CONDUCTANCE_W_PER_K
+            self._conductances[index] = conductance
 
     def _heat_capacity_j_per_k(self, index: int) -> float:
         capacity = self._nodes[index].mass_kg * self._specific_heat(self._temperatures[index])
-        return max(capacity, _MIN_CONDUCTANCE_W_PER_K)
+        if not math.isfinite(capacity) or capacity < _MIN_CONDUCTANCE_W_PER_K:
+            return _MIN_CONDUCTANCE_W_PER_K
+        return capacity
 
     def _accuracy_step_s(self) -> float:
         """A step over which no node relaxes more than ``_RELAXATION_FRACTION`` of the way."""

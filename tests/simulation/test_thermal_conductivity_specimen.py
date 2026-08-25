@@ -282,3 +282,62 @@ def test_an_impossible_step_is_refused_rather_than_integrated(duration_s, power_
     specimen = _constant_specimen()
     with pytest.raises(ValueError):
         specimen.advance(duration_s, heater_power_w=power_w, sink_temperature_k=sink_k)
+
+
+def test_sliced_time_that_accumulates_exactly_lands_bit_for_bit_on_whole_time() -> None:
+    """The internal grid owes the caller identical arithmetic for exactly-summing slices.
+
+    Four quarters of a second sum exactly in binary floating point, so the pending budget
+    crosses every grid boundary on the same substep as one whole-second call, and the two
+    runs must agree bit for bit -- not merely to a tolerance.
+    """
+
+    sliced = _constant_specimen()
+    for _ in range(4):
+        sliced.advance(0.25, heater_power_w=0.02, sink_temperature_k=75.0)
+    whole = _constant_specimen().advance(1.0, heater_power_w=0.02, sink_temperature_k=75.0)
+
+    assert dict(sliced.state().temperatures_k) == dict(whole.temperatures_k)
+    assert sliced.state().elapsed_s == whole.elapsed_s
+
+
+def test_a_nan_conductivity_floors_instead_of_cascading_into_nan_readings() -> None:
+    """A property curve that answers NaN must not fabricate NaN thermometer readings.
+
+    Every other bad number is already floored -- negative conductivity, zero mass share --
+    and the floor rather than a NaN cascade three layers away is this module's stated
+    failure shape. Before the floor covered it, ``max(nan, floor)`` kept the NaN, every
+    interior temperature turned into NaN, and every panel quotient read nan from then on.
+    """
+
+    specimen = ThermalConductivitySpecimen(
+        [SpecimenNode(channel="hot", mass_kg=0.02), SpecimenNode(channel="cold", mass_kg=0.02)],
+        [SpecimenSegment(length_m=_LENGTH, area_m2=_AREA)],
+        initial_temperature_k=50.0,
+        conductivity_w_per_m_k=lambda _t: math.nan,
+        specific_heat_j_per_kg_k=lambda _t: _CP,
+    )
+    state = specimen.advance(1.0, heater_power_w=0.01, sink_temperature_k=50.0)
+
+    assert all(math.isfinite(value) for value in state.temperatures_k.values())
+
+
+def test_an_infinite_specific_heat_floors_instead_of_freezing_the_specimen() -> None:
+    """An infinite heat capacity would otherwise freeze every thermometer in place.
+
+    ``max(capacity, floor)`` let infinity through, the relaxation factor became exactly
+    one forever, and a soak would read a stuck specimen as a settled one. Floored, the
+    specimen still answers the heater.
+    """
+
+    specimen = ThermalConductivitySpecimen(
+        [SpecimenNode(channel="hot", mass_kg=0.02), SpecimenNode(channel="cold", mass_kg=0.02)],
+        [SpecimenSegment(length_m=_LENGTH, area_m2=_AREA)],
+        initial_temperature_k=50.0,
+        conductivity_w_per_m_k=lambda _t: _K,
+        specific_heat_j_per_kg_k=lambda _t: math.inf,
+    )
+    state = specimen.advance(1.0, heater_power_w=0.01, sink_temperature_k=50.0)
+
+    assert all(math.isfinite(value) for value in state.temperatures_k.values())
+    assert state.temperatures_k["hot"] > state.temperatures_k["cold"], "a floored specimen must still answer"
