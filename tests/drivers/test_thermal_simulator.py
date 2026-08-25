@@ -1063,6 +1063,43 @@ def test_simulator_removes_ready_file_on_shutdown(tmp_path: Path) -> None:
     assert truth_path.is_file()
 
 
+def test_ready_file_removed_even_when_truth_write_fails_at_shutdown(tmp_path: Path) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a regular file, so truth.json cannot be created", encoding="utf-8")
+    ready_path = tmp_path / "ready.json"
+    truth_path = blocker / "truth.json"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(ROOT / "tools/thermal_conductivity_simulator.py"),
+            "--ready-file",
+            str(ready_path),
+            "--truth-output",
+            str(truth_path),
+            "--time-constant-s",
+            "0.02",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 5.0
+    while not ready_path.is_file() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready_path.is_file(), "simulator did not become ready"
+    ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    with socket.create_connection((ready["host"], ready["port"]), timeout=1.0) as connection:
+        connection.sendall(b"MOCK:SHUTDOWN\n")
+        assert connection.makefile("rb").readline() == b"OK\n"
+    process.wait(timeout=5.0)
+    stdout, stderr = process.communicate()
+    assert process.returncode != 0, f"stdout={stdout!r}; stderr={stderr!r}"
+    assert "FileExistsError" in stderr, "the failing truth write must stay visible on stderr"
+    assert not truth_path.exists(), "premise violated: the shutdown truth write did not fail"
+    assert not ready_path.exists(), "readiness revocation must not depend on truth-write success"
+
+
 def test_simulator_clears_stale_ready_file_before_publishing(tmp_path: Path) -> None:
     ready_path = tmp_path / "ready.json"
     truth_path = tmp_path / "truth.json"

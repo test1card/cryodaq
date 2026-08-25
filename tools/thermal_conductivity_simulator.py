@@ -264,9 +264,9 @@ def main() -> int:
         server.serve_forever(poll_interval=0.05)
     finally:
         server.server_close()
-        _write_json(args.truth_output, plant.truth())
         if args.ready_file.is_file():
             args.ready_file.unlink()
+        _write_json(args.truth_output, plant.truth())
     return 0
 
 
