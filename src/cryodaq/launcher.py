@@ -2987,6 +2987,7 @@ class LauncherWindow(QMainWindow):
             self._engine_shutdown_request_id = None
             self._engine_shutdown_transport_identity = None
             self._engine_shutdown_receipt = None
+            self._engine_shutdown_receipt_rejected = False
             self._engine_unsettled_incarnation = None
             self._engine_shutdown_worker = None
             self._engine_shutdown_wait_deadline = None
@@ -3006,6 +3007,7 @@ class LauncherWindow(QMainWindow):
         self._engine_shutdown_request_id = None
         self._engine_shutdown_transport_identity = None
         self._engine_shutdown_receipt = None
+        self._engine_shutdown_receipt_rejected = False
         self._engine_unsettled_incarnation = None
         self._engine_shutdown_worker = None
         self._engine_shutdown_wait_deadline = None
@@ -3654,8 +3656,14 @@ class LauncherWindow(QMainWindow):
         A validated receipt left published by a worker the stop path already drained,
         held beside an observed nonzero exit of the same child, is equally immutable:
         the reply can never be re-sent and the exit code can never change, so polling
-        again would only repeat the same refusal. An open exit-wait budget or an
-        unreconciled transport identity keeps its progress-capable polling loop.
+        again would only repeat the same refusal. A REJECTED receipt -- one whose
+        reconciliation into a concrete reply failed exact validation -- beside ANY
+        observed terminal exit of the same child is equally immutable: with no
+        worker or transport identity left, no later pass can produce a different
+        reply, so revalidating it forever only strands the terminal readers. An open
+        exit-wait budget, an unreconciled transport identity, or a VALIDATED receipt
+        beside a clean exit (whose remaining failure is retryable reader cleanup)
+        keeps its progress-capable polling loop.
         """
 
         worker = getattr(self, "_engine_shutdown_worker", None)
@@ -3680,7 +3688,11 @@ class LauncherWindow(QMainWindow):
             returncode = process.poll()
         except Exception:
             return False
-        return type(returncode) is int and returncode != 0
+        if type(returncode) is not int:
+            return False
+        if returncode != 0:
+            return True
+        return getattr(self, "_engine_shutdown_receipt_rejected", False) is True
 
     def _refused_quit_reaches_reader_settled_hold(self) -> bool:
         """Gate the terminal quit HOLD behind exactly-once reader settlement.
@@ -3793,6 +3805,7 @@ class LauncherWindow(QMainWindow):
         self._engine_shutdown_request_id = None
         self._engine_shutdown_transport_identity = None
         self._engine_shutdown_receipt = None
+        self._engine_shutdown_receipt_rejected = False
         self._engine_shutdown_wait_deadline = None
         self._engine_ready_nonce = None
         if not isinstance(getattr(self, "_engine_ready", None), threading.Event):
@@ -4042,8 +4055,14 @@ class LauncherWindow(QMainWindow):
                         self._engine_shutdown_hold_reason = (
                             "the finished shutdown worker left a concrete result that failed exact receipt validation"
                         )
+                    # A reply that failed exact validation can never become valid:
+                    # record the rejection so the immutability question can tell
+                    # this rejected receipt apart from a VALIDATED receipt whose
+                    # remaining failure is merely retryable reader cleanup.
+                    self._engine_shutdown_receipt_rejected = True
                     raise RuntimeError("engine shutdown receipt is missing or mismatched; launcher remains in HOLD")
                 self._engine_shutdown_receipt = dict(receipt)
+                self._engine_shutdown_receipt_rejected = False
                 self._engine_shutdown_transport_identity = None
                 if worker is not None:
                     self._engine_shutdown_worker = None
@@ -4094,6 +4113,7 @@ class LauncherWindow(QMainWindow):
             self._engine_shutdown_request_id = None
             self._engine_shutdown_transport_identity = None
             self._engine_shutdown_receipt = None
+            self._engine_shutdown_receipt_rejected = False
             self._engine_unsettled_incarnation = None
             self._engine_shutdown_worker = None
             self._engine_shutdown_wait_deadline = None
@@ -4255,7 +4275,17 @@ class LauncherWindow(QMainWindow):
             return False, returncode, RuntimeError("replacement engine readers did not settle")
 
         replacement = getattr(self, "_engine_proc", None)
-        observed = None if replacement is None else replacement.poll()
+        try:
+            observed = None if replacement is None else replacement.poll()
+        except Exception as exc:
+            # A poll that cannot be observed is not an exit. Manual restart has
+            # already stopped both timers, so an escaping raise here reaches the
+            # caller before any owner-bound retry or HOLD can be scheduled and
+            # leaves a possibly live child with zero callbacks. Convert it into
+            # retained settlement state instead: the caller either schedules its
+            # bounded owner-bound retry or latches the stable HOLD with both
+            # supervision timers re-armed.
+            return False, None, exc
         if replacement is not None and observed is not None:
             pending_identity = getattr(self, "_engine_shutdown_transport_identity", None)
             pending_receipt = getattr(self, "_engine_shutdown_receipt", None)
@@ -4336,7 +4366,17 @@ class LauncherWindow(QMainWindow):
                 pending_identity is not None or pending_receipt is not None or retained_worker is not None
             )
             late = getattr(self, "_engine_proc", None)
-            late_code = None if late is None else late.poll()
+            try:
+                late_code = None if late is None else late.poll()
+            except Exception:
+                # Same retained-state rule as the first poll: this catch already
+                # holds the stop failure as settlement state, so an unobservable
+                # re-poll must fall through to it rather than escape recovery.
+                logger.error(
+                    "Engine poll failed during replacement settlement; phase=%s exception-observation=unavailable",
+                    phase,
+                )
+                late_code = None
             if late is not None and late_code is not None and not deferred_after_handoff:
                 replacement_id = getattr(self, "_engine_instance_id", None)
                 logger.error(
@@ -6048,9 +6088,20 @@ class LauncherWindow(QMainWindow):
                 type(error).__name__,
             )
         LauncherWindow._set_shutdown_tray_state(self, failed=True)
-        if set(retained_errors) != {"engine"} or not LauncherWindow._refused_settlement_reaches_stable_hold(self):
-            LauncherWindow._schedule_shutdown_retry(self)
-        elif not LauncherWindow._refused_quit_reaches_reader_settled_hold(self):
+        engine_refusal_immutable = (
+            "engine" in retained_errors and LauncherWindow._refused_settlement_reaches_stable_hold(self)
+        )
+        other_owner_errors = set(retained_errors) - {"engine"}
+        readers_settled = False
+        if engine_refusal_immutable:
+            # The terminal decision owns the last bounded reap of a possibly live
+            # engine and the exactly-once settlement of its terminal readers, so
+            # it must run whenever the refusal is immutable -- including beside
+            # another failing owner. Skipping it there let a live engine survive
+            # indefinitely behind retries that only ever re-read immutable
+            # evidence.
+            readers_settled = LauncherWindow._refused_quit_reaches_reader_settled_hold(self)
+        if other_owner_errors or not readers_settled:
             LauncherWindow._schedule_shutdown_retry(self)
         return False
 

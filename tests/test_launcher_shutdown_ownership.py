@@ -1686,6 +1686,180 @@ def test_normal_quit_path_retains_invalid_result_and_stops_scheduling_settlement
             ready_stream.close()
 
 
+def test_reconciled_malformed_reply_on_a_clean_exit_reaches_reader_settled_hold(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A REJECTED reconciled receipt beside a clean exit is still immutable.
+
+    An unknown-outcome worker reconciled into a concrete-but-malformed shutdown
+    reply while the child exited 0. ``_stop_engine`` retains the invalid reply and
+    refuses, but the immutability question treated only NONZERO post-receipt exits
+    as terminal: with no worker or transport identity left, every health tick and
+    quit retry revalidated the same malformed reply forever, and the terminal
+    readers never settled behind that loop. Driving the REAL reconciliation into
+    exactly that stranded state, then the REAL quit ladder over it, must reach
+    the reader-settled stable HOLD exactly once -- with the invalid reply still
+    retained, never promoted into a verified receipt.
+    """
+
+    import cryodaq.launcher as module
+    from cryodaq.gui.zmq_client import LateCommandResult
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(0)
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after timeout",
+        "request_id": "d" * 32,
+        "generation": 5,
+        "dispatched": True,
+        "outcome_unknown": True,
+        "delivery_state": "dispatched",
+        "commit_state": "unknown",
+    }
+    host._engine_shutdown_worker = worker
+    bridge.reconcile_late_result.return_value = LateCommandResult(
+        request_id="d" * 32,
+        generation=5,
+        reply={"ok": True},
+    )
+
+    # The production reconciliation publishes the unvalidated reply and releases
+    # both the drained worker and its transport identity: the exact stranded shape.
+    assert LauncherWindow._settle_engine_shutdown_worker(host) is False
+    assert host._engine_shutdown_receipt == {"ok": True}
+    assert host._engine_shutdown_worker is None
+    assert host._engine_shutdown_transport_identity is None
+
+    main_window = MagicMock()
+    main_window.settle_owned_workers.return_value = True
+    host._main_window = main_window
+    host._stop_assistant = MagicMock()
+    host._alarm_timer = None
+    host._stop_engine_down_alarm = MethodType(LauncherWindow._stop_engine_down_alarm, host)
+    host._invalidate_launcher_status_authority = MagicMock()
+    host._reset_periodic_reporting_unknown = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    host._invalidate_engine_producer = MethodType(LauncherWindow._invalidate_engine_producer, host)
+    host._show_engine_down_banner = MagicMock()
+
+    ready_read_fd, ready_child_write_fd = os.pipe()
+    ready_stream = os.fdopen(ready_read_fd, "rb", buffering=0)
+    ready_owner = module._ChildReadyStreamOwner(ready_stream)
+    host._child_ready_write_fd_owner = None
+    host._child_ready_stream_owner = ready_owner
+    host._engine_ready_thread = None
+    host._replay_ready_thread = None
+    host._engine_stderr_thread = None
+    host._engine_stderr_acquisition_owner = None
+    host._engine_stderr_stream_owner = None
+    host._engine_stderr_logger = None
+    host._engine_stderr_handler = None
+
+    settlement_events: list[str] = []
+    real_close_stream = LauncherWindow._close_engine_stderr_stream
+
+    def spying_close_stream(bound_host: SimpleNamespace) -> None:
+        settlement_events.append("readers_settled")
+        real_close_stream(bound_host)
+
+    host._close_engine_stderr_stream = MethodType(spying_close_stream, host)
+
+    try:
+        with (
+            caplog.at_level("ERROR", logger="cryodaq.launcher"),
+            patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+        ):
+            assert module.LauncherWindow._do_shutdown(host) is False
+
+            assert host._shutdown_terminal_engine_readers_settled is True, (
+                "the rejected reconciled receipt reaches the stable terminal HOLD despite exit code 0"
+            )
+            assert settlement_events == ["readers_settled"], (
+                "the terminal decision settles the crashed-child readers exactly once"
+            )
+            assert ready_owner.closed is True
+            assert ready_stream.closed is True
+            assert single_shot.call_count == 0, "immutable rejected evidence arms no further settlement callbacks"
+            assert set(host._shutdown_last_errors) == {"engine"}
+            assert host._shutdown_hold_audible is True
+
+            assert host._engine_shutdown_receipt == {"ok": True}, (
+                "the invalid reply stays retained, never promoted into a verified receipt"
+            )
+            assert getattr(host, "_engine_shutdown_receipt_rejected", False) is True
+            assert host._engine_proc is process
+            assert host._engine_instance_id == "a" * 32
+            bridge.send_command.assert_not_called()
+    finally:
+        try:
+            os.close(ready_child_write_fd)
+        except OSError:
+            pass
+        if not ready_stream.closed:
+            ready_stream.close()
+
+
+def test_validated_receipt_with_retryable_reader_failure_keeps_its_polling_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A VALID receipt beside a clean exit stays progress-capable.
+
+    The rejection classification must not swallow this neighbouring case: a fully
+    validated receipt whose remaining failure is retryable reader cleanup may yet
+    settle on a later pass, so it must keep the retry ladder armed instead of
+    being misclassified as immutable by the new clean-exit rule.
+    """
+
+    import cryodaq.launcher as module
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(0)
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    host._engine_shutdown_receipt = _shutdown_receipt("c" * 32)
+
+    main_window = MagicMock()
+    main_window.settle_owned_workers.return_value = True
+    host._main_window = main_window
+    host._stop_assistant = MagicMock()
+    host._alarm_timer = None
+    host._stop_engine_down_alarm = MethodType(LauncherWindow._stop_engine_down_alarm, host)
+    host._invalidate_launcher_status_authority = MagicMock()
+    host._reset_periodic_reporting_unknown = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    host._invalidate_engine_producer = MethodType(LauncherWindow._invalidate_engine_producer, host)
+    host._show_engine_down_banner = MagicMock()
+    host._close_engine_stderr_stream = MagicMock(side_effect=RuntimeError("injected reader cleanup failure"))
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        assert module.LauncherWindow._do_shutdown(host) is False
+
+        assert single_shot.call_count == 1, "retryable reader cleanup keeps the ladder armed"
+        assert host._shutdown_retry_pending is True
+        assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False, (
+            "a progress-capable state never latches the exactly-once marker"
+        )
+        assert getattr(host, "_engine_shutdown_receipt_rejected", False) is False, (
+            "a validated receipt is never classified as rejected"
+        )
+        assert host._engine_shutdown_receipt == _shutdown_receipt("c" * 32), "validated evidence stays published"
+        assert host._engine_proc is process
+        assert host._engine_instance_id == "a" * 32
+        bridge.send_command.assert_not_called()
+
+    unsettled_lines = [record for record in caplog.records if "remains unsettled" in record.getMessage()]
+    assert len(unsettled_lines) == 1
+
+
 def test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppression(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1770,6 +1944,64 @@ def test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppre
     ]
     assert len(unsettled_lines) == 2, "each DRIVEN pass reports its own refusal, honestly"
     assert reaping_failures == []
+
+
+def test_second_failing_owner_keeps_the_ladder_while_the_terminal_decision_reaps(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The reaper gate must run even beside another failing shutdown owner.
+
+    ``_shutdown_incomplete`` ran the terminal quit decision only when the error
+    set was EXACTLY ``{"engine"}``. An immutable engine refusal appearing next to
+    a second persistent failure -- a stuck assistant, a failing HOLD alarm --
+    skipped that gate forever: every retry just re-read the same immutable
+    refusal, so a LIVE engine survived indefinitely behind an armed ladder that
+    could never settle anything else either. Driving the REAL ``_do_shutdown``
+    with a live refused child plus a persistently failing assistant must bound
+    the child through the existing reaper on the first pass while keeping the
+    ladder armed and the other owner's error unsuppressed.
+    """
+
+    import cryodaq.launcher as module
+
+    process = _ScriptedProcess([subprocess.TimeoutExpired("engine", 5), 0])
+    host, bridge = _refused_normal_quit_host(process)
+    host._stop_assistant = MagicMock(side_effect=RuntimeError("assistant remains alive"))
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        assert module.LauncherWindow._do_shutdown(host) is False
+
+        assert process.terminate_calls == 1 and process.kill_calls == 1, (
+            "the live engine goes through the existing bounded reaper despite the second failure"
+        )
+        assert process.alive is False, "suppression-grade immutability may never leave the child alive"
+        assert host._engine_proc is None, "the successfully reaped child releases its handle"
+        assert host._close_engine_stderr_stream.call_count == 1
+        assert host._engine_unsettled_incarnation == ("a" * 32, 0)
+        assert host._shutdown_terminal_engine_readers_settled is True
+
+        assert single_shot.call_count == 1, "the failing assistant keeps the retry ladder armed"
+        assert host._shutdown_retry_pending is True
+        assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
+        assert set(host._shutdown_last_errors) == {"engine", "assistant"}, (
+            "the second owner's error stays unsuppressed beside the engine refusal"
+        )
+
+        first_retry_callback = single_shot.call_args.args[1]
+        first_retry_callback()
+        assert single_shot.call_count == 2, "every pass over the failing assistant re-arms the ladder"
+        assert process.terminate_calls == 1 and process.kill_calls == 1, "the bounded reap happens exactly once"
+        assert host._shutdown_terminal_engine_readers_settled is True
+
+    unsettled_labels = {
+        record.getMessage().split("remains unsettled: ", 1)[1].split(" ")[0]
+        for record in caplog.records
+        if "remains unsettled" in record.getMessage()
+    }
+    assert unsettled_labels == {"engine", "assistant"}, "both owners are reported honestly on every pass"
 
 
 def test_construction_rollback_never_suppresses_over_a_live_engine(

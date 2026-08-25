@@ -311,6 +311,30 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: restoring_the_construction_failure_exemption_left_the_spawned_child_alive_and_failed_the_guard_2026_08_25
     green_evidence: focused_guard_1_passed_shutdown_ownership_44_passed_and_adjacent_launcher_set_67_passed_2026_08_25
+  - id: LAUNCHER-REPLACEMENT-POLL-OWNER-ESCAPE-FALSE-GREEN-353
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/gui/shell/test_d7_1b_repair.py::test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold
+    ci_partition: gui
+    red_evidence: reverting_launcher_py_at_b6eb7a9_let_the_replacement_poll_exception_escape_before_any_owner_bound_callback_or_owned_hold_latch_and_two_guards_failed_2026_08_25
+    green_evidence: exact_ubuntu_22_04_candidate_five_focused_guards_passed_2026_08_25
+  - id: LAUNCHER-MULTI-OWNER-REAPER-BYPASS-FALSE-GREEN-354
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_second_failing_owner_keeps_the_ladder_while_the_terminal_decision_reaps
+    ci_partition: remaining
+    red_evidence: live_engine_unreaped_when_assistant_and_engine_failed_together_2026_08_25
+    green_evidence: exact_ubuntu_22_04_candidate_five_focused_guards_passed_2026_08_25
+  - id: LAUNCHER-REJECTED-RECEIPT-CLEAN-EXIT-LIVELOCK-FALSE-GREEN-355
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_reconciled_malformed_reply_on_a_clean_exit_reaches_reader_settled_hold
+    ci_partition: remaining
+    red_evidence: the_same_rejected_receipt_was_repolled_and_terminal_readers_never_settled_2026_08_25
+    green_evidence: exact_ubuntu_22_04_candidate_five_focused_guards_passed_2026_08_25
   - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
     status: open
     scope: product_contract
@@ -4404,6 +4428,16 @@ records:
       - node: tests/test_launcher_shutdown_ownership.py::test_published_receipt_survives_the_blind_stop_handoff_catch
         ci_partition: remaining
       - node: tests/test_launcher_backoff.py::test_observed_exit_without_worker_evidence_reaches_hold_without_backoff
+        ci_partition: remaining
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_a_raising_poll_beside_a_pending_owner_keeps_the_bounded_callback
+        ci_partition: gui
+      - node: tests/test_launcher_shutdown_ownership.py::test_second_failing_owner_keeps_the_ladder_while_the_terminal_decision_reaps
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_reconciled_malformed_reply_on_a_clean_exit_reaches_reader_settled_hold
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_validated_receipt_with_retryable_reader_failure_keeps_its_polling_loop
         ci_partition: remaining
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending

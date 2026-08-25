@@ -504,6 +504,104 @@ def test_a_replacement_still_alive_is_asked_to_stop_as_before() -> None:
     assert "stop_engine" in calls, "a live child must still be asked to stop"
 
 
+def test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold() -> None:
+    """A poll that cannot be observed must never escape replacement recovery.
+
+    Manual restart stops both timers before spawning the replacement. If readiness
+    then fails AND the new child's ``poll()`` itself raises, that exception used to
+    escape ``_settle_replacement_child`` and ``_recover_failed_engine_restart``
+    before any owner-bound retry or HOLD could be scheduled: a possibly live
+    engine stayed behind with zero callbacks and no supervision at all. Driving
+    the REAL manual-restart entry point must convert the polling failure into
+    retained settlement state -- the stable HOLD stays owned, both supervision
+    timers are re-armed, and the unobservable handle stays available for reaping.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+
+    def _raising_poll() -> None:
+        calls.append("poll")
+        raise RuntimeError("injected poll failure")
+
+    unobservable_handle = SimpleNamespace(poll=_raising_poll)
+    launcher._engine_proc = unobservable_handle
+    launcher._restart_pending = True
+    launcher._stop_engine = lambda: calls.append("stop_engine")
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    def _failing_start() -> None:
+        calls.append("start_engine")
+        raise RuntimeError("replacement never reported ready")
+
+    launcher._start_engine = _failing_start
+
+    with (
+        patch("cryodaq.launcher.time.sleep"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._restart_engine(launcher)
+
+    assert "start_engine" in calls, "the replacement attempt must have been made"
+    assert launcher._restart_giving_up is True, "the polling failure must latch the owned stable HOLD"
+    assert launcher._restart_pending is False
+    assert launcher._data_timer.start.called and launcher._health_timer.start.called, (
+        "supervision must be re-armed over the possibly live child"
+    )
+    assert "banner" in calls, "the operator must see the latched HOLD"
+    assert launcher._engine_proc is unobservable_handle, (
+        "the unobservable handle stays retained for later supervision/reaping"
+    )
+    assert single_shot.call_count == 0, "with no pending evidence the plain HOLD latch owns the state"
+
+
+def test_a_raising_poll_beside_a_pending_owner_keeps_the_bounded_callback() -> None:
+    """A pending settlement owner plus an unobservable poll stays callback-bound.
+
+    The other half of the same defect: when a retained shutdown worker still owns
+    the pending command, the recovery path must schedule its bounded owner-bound
+    settlement pass even though ``poll()`` itself raises -- not escape, and not
+    latch over a progress-capable owner either.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+
+    def _raising_poll() -> None:
+        calls.append("poll")
+        raise RuntimeError("injected poll failure")
+
+    launcher._engine_proc = SimpleNamespace(poll=_raising_poll)
+    worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_worker = worker
+    launcher._restart_pending = True
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.sleep"),
+        patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+
+    assert deferred is False, "the deferred-settlement shape is kept"
+    assert settlement_shot.call_args.args[0] == 200, "the owner-bound retry stays within its 200ms bound"
+    assert launcher._engine_shutdown_worker is worker, "the pending owner stays retained"
+    assert launcher._restart_giving_up is False, "no stable HOLD may be latched over a progress-capable owner"
+    launcher._bridge.shutdown.assert_not_called()
+
+
 def test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held() -> None:
     """The window between the poll and the dispatch was still a permanent HOLD.
 
