@@ -135,6 +135,10 @@ _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 _MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
 _ASSISTANT_LOG_BACKUP_COUNT: Final = 14
 _ASSISTANT_LOG_ROTATION_RE: Final = re.compile(r"assistant\.log\.\d{4}-\d{2}-\d{2}\Z")
+# The logs directory is writable by the measured process, so enumeration cost is
+# bounded by TOTAL entries: the fixed ceiling leaves headroom for normal component
+# rotations while keeping a hostile directory's enumeration finite.
+_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES: Final = 256
 _MAX_SOURCE_FIXTURE_FILE_BYTES: Final = 4 * 1024 * 1024
 _TRUNCATED_LAUNCHER_LOG_MARKER: Final = b"[launcher log truncated; bounded tail follows]\n"
 _LOCKED_PSUTIL_VERSION: Final = "7.2.2"
@@ -1174,11 +1178,22 @@ def _directory_identity(directory: Path) -> tuple[int, int] | None:
 
 
 def _rotated_assistant_log_names(directory: Path | int) -> list[str] | None:
-    """Return the bounded set of exact dated assistant-log rotations, oldest first."""
+    """Return the bounded set of exact dated assistant-log rotations, oldest first.
+
+    The directory is child-writable, so EVERY entry it yields counts against
+    ``_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES`` -- not only regex-matching names --
+    and the scan fails closed the moment that ceiling is exceeded. Counting only
+    matching candidates would let any number of unrelated names make teardown
+    traverse the directory without a total-work bound.
+    """
 
     rotated: list[str] = []
+    enumerated = 0
     with os.scandir(directory) as entries:
         for entry in entries:
+            enumerated += 1
+            if enumerated > _MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES:
+                return None
             if _ASSISTANT_LOG_ROTATION_RE.fullmatch(entry.name) is None:
                 continue
             rotated.append(entry.name)

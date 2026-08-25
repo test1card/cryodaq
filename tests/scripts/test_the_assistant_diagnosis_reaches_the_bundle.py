@@ -650,3 +650,75 @@ def test_too_many_rotated_logs_refuse_the_child_writable_directory(state_root: P
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert published == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+
+
+def test_more_nonmatching_entries_than_the_enumeration_ceiling_refuse_the_directory(
+    state_root: Path,
+) -> None:
+    """Unrelated names alone must exhaust the total enumeration ceiling.
+
+    The child-writable logs directory can hold arbitrarily many entries the rotation
+    regex never matches. An enumeration that counts only MATCHING candidates walks all
+    of them without a total-work bound and delays retention of log-assistant.txt behind
+    that traversal, so the ceiling must count every entry and refuse closed.
+    """
+
+    logs = state_root / "logs"
+    for index in range(257):
+        (logs / f"unrelated-noise-{index:04d}.bin").write_bytes(b"MUST NOT PUBLISH\n")
+    (logs / "assistant.log").write_bytes(b"ACTIVE MUST NOT PUBLISH\n")
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "MUST NOT PUBLISH" not in published, (
+        "an over-ceiling directory was read anyway; enumeration still counted only matching names"
+    )
+    assert published == runner._ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER
+
+
+def test_an_ordinary_logs_directory_with_noise_still_publishes(state_root: Path) -> None:
+    """Bounded rotations beside unrelated names remain publishable."""
+
+    logs = state_root / "logs"
+    (logs / "assistant.log.2026-08-14").write_bytes(b"THE CAUSE, written on day one\n")
+    (logs / "engine.stderr.log").write_bytes(b"a differently named run artifact\n")
+    (logs / "unrelated-noise.bin").write_bytes(b"NOISE\n")
+    (logs / "assistant.log").write_bytes(b"the last day\n")
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "THE CAUSE, written on day one" in published
+    assert "the last day" in published
+    assert published.index("THE CAUSE") < published.index("the last day")
+
+
+def test_a_directory_at_exactly_the_enumeration_ceiling_still_publishes(
+    state_root: Path,
+) -> None:
+    """Fail-closed fires when the ceiling is EXCEEDED, not when it is reached.
+
+    Filling the directory to exactly ``_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES`` mixed
+    entries pins the boundary from the safe side: an implementation that refuses at
+    equality would break ordinary retention without any hostile directory present.
+    """
+
+    assert runner._MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES == 256
+
+    logs = state_root / "logs"
+    for index in range(runner._MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES - 2):
+        (logs / f"unrelated-noise-{index:04d}.bin").write_bytes(b"NOISE\n")
+    (logs / "assistant.log.2026-08-14").write_bytes(b"THE CAUSE, written on day one\n")
+    (logs / "assistant.log").write_bytes(b"the last day\n")
+    total_entries = len(list(logs.iterdir()))
+    assert total_entries == runner._MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "THE CAUSE, written on day one" in published
+    assert "the last day" in published
