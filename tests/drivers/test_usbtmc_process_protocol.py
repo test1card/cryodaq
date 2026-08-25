@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from collections import deque
 from typing import Any
 
@@ -133,8 +135,18 @@ def test_process_entry_requires_and_forwards_captured_parent(monkeypatch: pytest
         usbtmc._visa_process_main(connection)
 
 
-def test_windows_lifetime_binding_refuses_unprotected_visa_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Windows must not create a VISA owner without parent-death binding."""
+def test_windows_lifetime_binding_refuses_unprotected_visa_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Windows must not create a VISA owner without parent-death binding.
+
+    The parent identity check is satisfied legitimately -- the expected pid is this
+    process and getppid answers with it -- so the exit can only come from the platform
+    refusal branch under test, and its logged operator text is pinned exactly. Passing
+    an unrelated expected pid would exit through the reparented-child branch instead,
+    leaving this branch unexecuted while the test stayed green.
+    """
 
     exits: list[int] = []
 
@@ -142,13 +154,22 @@ def test_windows_lifetime_binding_refuses_unprotected_visa_worker(monkeypatch: p
         exits.append(status)
         raise SystemExit(status)
 
+    expected_parent = os.getpid()
+    monkeypatch.setattr(usbtmc.os, "getppid", lambda: expected_parent)
     monkeypatch.setattr(usbtmc.sys, "platform", "win32")
     monkeypatch.setattr(usbtmc.os, "_exit", exit_child)
 
-    with pytest.raises(SystemExit, match="0"):
-        usbtmc._bind_lifetime_to_parent(321)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(SystemExit, match="0"):
+            usbtmc._bind_lifetime_to_parent(expected_parent)
 
     assert exits == [0]
+    refusals = [record for record in caplog.records if record.name == usbtmc.log.name]
+    assert len(refusals) == 1, f"the unbound-worker refusal must be logged exactly once before exit, got {refusals!r}"
+    assert refusals[0].levelno == logging.WARNING
+    assert refusals[0].getMessage() == (
+        "USBTMC: платформа win32 без привязки VISA-процесса к родителю — воркер не стартует (открытый шлюз)"
+    ), refusals[0].getMessage()
 
 
 @pytest.mark.parametrize(

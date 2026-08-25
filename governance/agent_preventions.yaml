@@ -89,6 +89,15 @@ false_green_pairs:
     platform: windows
     red_evidence: the_python_c_probe_child_died_during_import_so_an_absent_continuation_marker_looked_like_a_safe_refusal_without_exercising_the_binder_2026_08_23_pending_immutable_capture
     green_evidence: pending
+  - id: USBTMC-WINDOWS-BRANCH-VACUITY-FALSE-GREEN-005
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_usbtmc_process_protocol.py::test_windows_lifetime_binding_refuses_unprotected_visa_worker
+    ci_partition: remaining
+    platform: windows
+    red_evidence: the_protocol_test_supplied_an_unrelated_parent_pid_so_the_reparented_child_exit_ran_before_the_windows_refusal_branch_and_the_test_stayed_green_without_observing_the_warning_or_refusal_replacing_the_real_non_linux_exit_with_return_made_the_strengthened_node_fail_2026_08_25_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-RETIREMENT-EXEMPTION-UNBOUNDED-FALSE-GREEN-336
     status: open
     scope: product_contract
@@ -5058,6 +5067,9 @@ records:
       - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_the_binding_runs_before_any_handle_exists
         ci_partition: remaining
       - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_on_windows_an_unbound_worker_is_refused
+        ci_partition: remaining
+        platform: windows
+      - node: tests/drivers/test_usbtmc_process_protocol.py::test_windows_lifetime_binding_refuses_unprotected_visa_worker
         ci_partition: remaining
         platform: windows
     red_evidence: lane98_f3f1b45_prctl_sigterm_swap_failed_exact_args_and_sigterm_immune_children_survived_while_unstable_identity_refused_to_signal_2026_08_23_pending_immutable_capture

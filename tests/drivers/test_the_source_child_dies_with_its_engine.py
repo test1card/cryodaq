@@ -67,7 +67,7 @@ _LINUX_ONLY = pytest.mark.skipif(
 
 _WINDOWS_ONLY = pytest.mark.skipif(
     not sys.platform.startswith("win32"),
-    reason="pins the explicitly OPEN Windows gate: the real worker must be allowed to start unbound",
+    reason="pins the OPEN Windows gate: the unbound source worker refuses to start until a real binding exists",
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
