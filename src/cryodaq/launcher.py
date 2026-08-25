@@ -4017,6 +4017,7 @@ class LauncherWindow(QMainWindow):
             owner = "<unknown>"
 
         def _settle(returncode: int) -> tuple[bool, int | None, Exception | None]:
+            receipt_before = getattr(self, "_engine_shutdown_receipt", None)
             try:
                 if LauncherWindow._settle_observed_engine_exit(
                     self,
@@ -4024,6 +4025,20 @@ class LauncherWindow(QMainWindow):
                     returncode=returncode,
                     phase=f"{phase}-replacement-exit",
                 ):
+                    return True, returncode, None
+                receipt_after = getattr(self, "_engine_shutdown_receipt", None)
+                if (
+                    receipt_before is None
+                    and type(receipt_after) is dict
+                    and getattr(self, "_engine_shutdown_worker", None) is None
+                    and getattr(self, "_engine_shutdown_transport_identity", None) is None
+                ):
+                    # This settlement pass reconciled an unknown-outcome command
+                    # into a concrete receipt. Validate that receipt and the
+                    # already-observed exit now, through the ordinary stop path.
+                    # Deferring here loses the continuation because no worker,
+                    # transport identity, or exit-wait deadline remains to bind it.
+                    self._stop_engine()
                     return True, returncode, None
             except Exception as exc:
                 return False, returncode, exc

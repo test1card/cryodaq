@@ -1032,14 +1032,15 @@ def test_finished_shutdown_workers_unknown_outcome_is_reconciled_before_release(
 
 
 @pytest.mark.parametrize(("returncode", "settles"), [(0, True), (9, False)])
-def test_reconciled_late_shutdown_receipt_is_validated_with_terminal_exit(
+def test_recovery_validates_reconciled_late_shutdown_receipt_with_terminal_exit(
     returncode: int,
     settles: bool,
 ) -> None:
-    """A matching late reply still owes full receipt and exit-code validation."""
+    """The real failed-restart path validates the late receipt and terminal exit."""
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, returncode)
+    _bind_launcher_methods(launcher, "_stop_engine")
     launcher._engine_shutdown_request_id = "c" * 32
     bridge = MagicMock()
     launcher._bridge = bridge
@@ -1050,31 +1051,39 @@ def test_reconciled_late_shutdown_receipt_is_validated_with_terminal_exit(
         reply=dict(receipt),
     )
     launcher._engine_shutdown_worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
 
-    first_pass = LauncherWindow._settle_observed_engine_exit(
-        launcher,
-        owner_id="a" * 32,
-        returncode=returncode,
-        phase="probe",
-    )
-
-    assert first_pass is False, "transport reconciliation alone must never retire the owner"
-    assert launcher._engine_shutdown_worker is None
-    assert launcher._engine_shutdown_transport_identity is None
-    assert launcher._engine_shutdown_receipt == receipt
-    assert launcher._engine_instance_id == "a" * 32
+    with (
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        recovered = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
 
     if settles:
-        LauncherWindow._stop_engine(launcher)
+        assert recovered is True, "exact settlement must continue into bounded restart"
         assert launcher._engine_proc is None
         assert launcher._engine_instance_id is None
         assert launcher._engine_shutdown_receipt is None
+        assert launcher._restart_giving_up is False
+        assert launcher._restart_pending is True
+        single_shot.assert_called_once()
     else:
-        with pytest.raises(RuntimeError, match="exited without a clean teardown receipt"):
-            LauncherWindow._stop_engine(launcher)
+        assert recovered is False
         assert launcher._engine_proc is not None
         assert launcher._engine_instance_id == "a" * 32
         assert launcher._engine_shutdown_receipt == receipt
+        assert launcher._restart_giving_up is True
+        assert launcher._restart_pending is False
+        single_shot.assert_not_called()
 
 
 def test_unknown_outcome_without_its_late_reply_keeps_the_worker_and_retains_identity() -> None:

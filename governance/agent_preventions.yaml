@@ -4317,7 +4317,7 @@ records:
         ci_partition: gui
       - node: tests/gui/shell/test_d7_1b_repair.py::test_missing_transport_key_is_hold_evidence_not_keyerror
         ci_partition: gui
-      - node: tests/gui/shell/test_d7_1b_repair.py::test_reconciled_late_shutdown_receipt_is_validated_with_terminal_exit
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_recovery_validates_reconciled_late_shutdown_receipt_with_terminal_exit
         ci_partition: gui
       - node: tests/test_launcher_shutdown_ownership.py::test_terminal_replacement_with_a_finished_valid_receipt_settles_through_the_stop_path
         ci_partition: remaining
