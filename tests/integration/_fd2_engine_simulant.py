@@ -14,6 +14,13 @@ runs the exact production chain a launcher-owned POSIX engine child runs:
    real worker process) against the fake pyvisa stub backend, plus a real
    ``multiprocessing.Lock()`` so the REAL ResourceTracker descendant exists.
 
+Measured on native Ubuntu 22.04: both natural descendants exit promptly once
+the engine dies (the USBTMC worker sees command-pipe EOF in
+``usbtmc._visa_process_main``; the ResourceTracker sees its own command-pipe
+EOF), so each mutation control adds exactly ONE explicit preserving
+descendant — a real separate ``subprocess`` child holding a duplicate of the
+leaked descriptor. No test claims a natural descendant outlives the engine.
+
 It never fakes multiprocessing, ResourceTracker, descriptors, pipes, or the
 launcher pump. Test-only switches arrive via environment variables.
 """
@@ -25,9 +32,9 @@ import json
 import logging
 import multiprocessing
 import os
+import subprocess
 import sys
 import time
-from multiprocessing import util as multiprocessing_util
 
 INSTALL_ISOLATION_ENV = "CRYODAQ_FD2_TEST_INSTALL_ISOLATION"
 EXPOSE_PRIVATE_FILENO_ENV = "CRYODAQ_FD2_TEST_EXPOSE_PRIVATE_FILENO"
@@ -59,6 +66,31 @@ def _tracker_pid() -> int | None:
     return None
 
 
+def _spawn_preserving_holder(source_fd: int) -> int:
+    """Start one real separate process that preserves a duplicate of source_fd.
+
+    The duplicate is taken before spawning so the child's copy never collides
+    with the std-stream redirections subprocess applies, and the parent-side
+    duplicate is closed immediately after spawn; only the child's descriptor
+    keeps the underlying open file description alive. This models exactly the
+    measured leak shape: a consumer that received an exported descriptor and
+    preserves it after the engine dies.
+    """
+    duplicated = os.dup(source_fd)
+    try:
+        os.set_inheritable(duplicated, True)
+        holder = subprocess.Popen(
+            [sys.executable, "-c", f"import time; time.sleep({SLEEP_AFTER_MARKER_S})"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            pass_fds=(duplicated,),
+        )
+    finally:
+        os.close(duplicated)
+    return int(holder.pid)
+
+
 def main() -> None:
     from cryodaq.engine import _consume_engine_launch_authority, _requires_launcher_fd2_isolation
 
@@ -66,20 +98,16 @@ def main() -> None:
     isolation_applied = False
     holder_pid: int | None = None
     if _requires_launcher_fd2_isolation(instance_id, capability, nonce, channel_fd):
-        if os.environ.get(INSTALL_ISOLATION_ENV) == "1":
+        if os.environ.get(INSTALL_ISOLATION_ENV) == "0":
+            holder_pid = _spawn_preserving_holder(2)
+        elif os.environ.get(INSTALL_ISOLATION_ENV) == "1":
             from cryodaq._fd2_bootstrap import isolate_launcher_stderr_fd2
 
             receipt = isolate_launcher_stderr_fd2()
             isolation_applied = True
             if os.environ.get(EXPOSE_PRIVATE_FILENO_ENV) == "1":
                 sys.stderr.fileno = lambda: receipt.private_fd
-                holder_pid = int(
-                    multiprocessing_util.spawnv_passfds(
-                        sys.executable,
-                        [sys.executable, "-c", f"import time; time.sleep({SLEEP_AFTER_MARKER_S})"],
-                        [receipt.private_fd],
-                    )
-                )
+                holder_pid = _spawn_preserving_holder(receipt.private_fd)
     from cryodaq.logging_setup import setup_logging
 
     setup_logging("engine")

@@ -16,6 +16,19 @@ production stderr path, and is then SIGKILLed while its descendants stay alive.
 Two independent falsifying controls prove the harness detects each mutation:
 leaving OS fd 2 attached must fail, and exposing the private duplicate through
 ``fileno()`` must fail.
+
+Measured on native Ubuntu 22.04 at commit
+007d71ace28b7432f6d6d233552f61b490472fb3: both NATURAL descendants exit
+promptly once the engine dies (the USBTMC worker sees command-pipe EOF in
+``usbtmc._visa_process_main``; the ResourceTracker sees its own command-pipe
+EOF), so each control adds exactly ONE explicit preserving descendant — a real
+separate subprocess holding a duplicate of the leaked descriptor. No assertion
+claims a natural descendant outlives the engine. The launcher pump settles
+only its ``_EngineStderrStreamOwner``; production settles the raw
+``_EngineStderrAcquisitionOwner`` separately after joining that pump
+(launcher.``_close_engine_stderr_stream``), and this harness mirrors exactly
+that teardown order. Any simulant failure before its marker is SIGKILLed,
+reaped, and reported with bounded child stderr diagnostics.
 """
 
 from __future__ import annotations
@@ -25,6 +38,7 @@ import logging
 import os
 import re
 import secrets
+import selectors
 import signal
 import subprocess
 import sys
@@ -158,6 +172,67 @@ def _wait_for_marker(lines: Queue[Any]) -> dict[str, Any]:
             if isinstance(document, dict) and type(document.get("pid")) is int:
                 return document
     raise AssertionError(f"engine simulant marker did not arrive; stdout so far: {seen!r}")
+
+
+def _bounded_child_stderr(
+    process: subprocess.Popen[bytes],
+    limit: int = 4096,
+    window_s: float = 1.0,
+) -> str:
+    """Drain at most ``limit`` bytes of already-written child stderr within ``window_s``."""
+    stream = process.stderr
+    if stream is None:
+        return ""
+    try:
+        descriptor = stream.fileno()
+    except Exception:
+        return ""
+    chunks: list[str] = []
+    total = 0
+    deadline = time.monotonic() + window_s
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(descriptor, selectors.EVENT_READ)
+            while total < limit and time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    break
+                chunk = os.read(descriptor, min(4096, limit - total))
+                if not chunk:
+                    break
+                chunks.append(chunk.decode("utf-8", "replace"))
+                total += len(chunk)
+    except Exception:
+        return "".join(chunks)[:limit]
+    return "".join(chunks)[:limit]
+
+
+def _terminate_exact_child(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        _kill_exact(process.pid)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _await_marker_or_fail_child(
+    marker_lines: Queue[Any],
+    process: subprocess.Popen[bytes],
+) -> dict[str, Any]:
+    """Await the simulant marker; on any failure kill and reap the exact child
+    first, then surface bounded child stderr diagnostics alongside the error."""
+    try:
+        return _wait_for_marker(marker_lines)
+    except BaseException as exc:
+        diagnostics = _bounded_child_stderr(process)
+        _terminate_exact_child(process)
+        if diagnostics:
+            raise AssertionError(
+                f"engine simulant failed before emitting its marker; bounded child stderr: {diagnostics!r}"
+            ) from exc
+        raise
 
 
 def _attach_pump(run_process: subprocess.Popen[bytes]) -> tuple[_SimulantRun, logging.Logger]:
@@ -299,13 +374,17 @@ def _run_blocker_scenario(
     marker_lines, _reader_thread = _start_line_reader(process.stdout)
     run, pump_logger = _attach_pump(process)
     try:
-        run.marker = _wait_for_marker(marker_lines)
+        run.marker = _await_marker_or_fail_child(marker_lines, process)
         if _LINUX:
             run.launch_pipe_inode = os.fstat(process.stderr.fileno()).st_ino
         run.pump_thread.start()
     except BaseException:
         _kill_exact(run.marker.get("pid") or run.process.pid)
-        run.process.wait(timeout=5)
+        try:
+            run.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            run.process.kill()
+            run.process.wait(timeout=5)
         _detach_pump(run, pump_logger)
         raise
     return run, pump_logger
@@ -386,9 +465,14 @@ def test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds
         assert not run.pump_thread.is_alive(), "launcher pump never reached EOF after engine SIGKILL"
         assert elapsed <= _EOF_BUDGET_S + 0.25, f"pump termination took {elapsed:.3f}s (budget {_EOF_BUDGET_S}s)"
         assert run.stream_owner.settlement_state is _OwnerSettlementState.SETTLED
-        assert run.acquisition_owner.settlement_state is _OwnerSettlementState.SETTLED
         assert run.stream_owner.pump_failure is None
         assert run.stream_owner.close_failure is None
+        # The launcher pump settles only the exact stream owner; production
+        # settles the raw acquisition owner separately, after joining that
+        # settled pump thread (_close_engine_stderr_stream). Mirror that exact
+        # teardown here instead of expecting the pump to have done it.
+        run.acquisition_owner.settle()
+        assert run.acquisition_owner.settlement_state is _OwnerSettlementState.SETTLED
         post_kill_violations: dict[str, list[int]] = {}
         if _proc_exists(tracker_pid):
             post_kill_violations["tracker"] = _pipe_inode_descriptors(tracker_pid, run.launch_pipe_inode)
@@ -424,6 +508,13 @@ def test_control_leaving_fd2_attached_must_fail_detected_as_leak(tmp_path: Path)
             "detector failed: without the bootstrap no descendant shows "
             "the inherited launch pipe while the engine lives"
         )
+        holder_pid = marker.get("holder_pid")
+        assert type(holder_pid) is int and holder_pid > 0 and _proc_exists(holder_pid), (
+            f"detector failed: explicit preserving descendant missing or dead pre-kill: {holder_pid!r}"
+        )
+        assert _pipe_inode_descriptors(holder_pid, run.launch_pipe_inode), (
+            f"detector failed: preserving descendant {holder_pid} does not hold the inherited launch pipe"
+        )
         assert _kill_exact(int(marker["pid"])) is True
         run.process.wait(timeout=5)
         assert run.process.returncode == -signal.SIGKILL
@@ -431,11 +522,12 @@ def test_control_leaving_fd2_attached_must_fail_detected_as_leak(tmp_path: Path)
         assert run.pump_thread.is_alive(), (
             "control expectation violated: without the bootstrap the pump must remain blocked past the budget"
         )
-        if _proc_exists(tracker_pid):
-            held_by_tracker_post_kill = _pipe_inode_descriptors(tracker_pid, run.launch_pipe_inode)
-            assert held_by_tracker_post_kill, (
-                "detector failed: surviving resource tracker no longer preserves the inherited launch pipe"
-            )
+        # Natural descendants exit once the engine dies (worker command-pipe
+        # EOF; ResourceTracker command-pipe EOF), so the surviving leak is
+        # observed on the one explicit preserving descendant instead.
+        assert _proc_exists(holder_pid) and _pipe_inode_descriptors(holder_pid, run.launch_pipe_inode), (
+            f"detector failed: preserving descendant {holder_pid} no longer holds the leaked launch pipe"
+        )
     finally:
         _cleanup_descendants(run)
         run.pump_thread.join(_SETTLEMENT_TIMEOUT_S)
@@ -481,7 +573,7 @@ def test_direct_cli_engine_child_keeps_stderr_attached_to_launch_pipe(tmp_path: 
     marker_lines, _reader_thread = _start_line_reader(process.stdout)
     run, pump_logger = _attach_pump(process)
     try:
-        run.marker = _wait_for_marker(marker_lines)
+        run.marker = _await_marker_or_fail_child(marker_lines, process)
         run.pump_thread.start()
         marker = run.marker
         assert marker["isolation_applied"] is False
@@ -519,7 +611,7 @@ def test_windows_launcher_owned_engine_child_remains_unisolated(tmp_path: Path) 
     marker_lines, _reader_thread = _start_line_reader(process.stdout)
     run, pump_logger = _attach_pump(process)
     try:
-        run.marker = _wait_for_marker(marker_lines)
+        run.marker = _await_marker_or_fail_child(marker_lines, process)
         run.pump_thread.start()
         marker = run.marker
         assert marker["isolation_applied"] is False
