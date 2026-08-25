@@ -335,6 +335,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: the_same_rejected_receipt_was_repolled_and_terminal_readers_never_settled_2026_08_25
     green_evidence: exact_ubuntu_22_04_candidate_five_focused_guards_passed_2026_08_25
+  - id: LAUNCHER-PUBLISHED-RECEIPT-RAISING-POLL-FALSE-GREEN-356
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_published_receipt_with_raising_poll_is_bounded_not_polled_forever
+    ci_partition: remaining
+    red_evidence: exact_pre_fix_7ab833f8_left_terminal_quit_reap_state_absent_after_a_validated_receipt_and_persistent_poll_exception_2026_08_25
+    green_evidence: exact_candidate_34da3848_passed_154_focused_tests_on_windows_and_ubuntu_22_04_2026_08_25
   - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
     status: open
     scope: product_contract
@@ -4394,6 +4402,8 @@ records:
       - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive
         ci_partition: remaining
       - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_published_receipt_with_raising_poll_is_bounded_not_polled_forever
         ci_partition: remaining
       - node: tests/gui/shell/test_d7_1b_repair.py::test_finished_malformed_unknown_outcome_latches_terminal_hold_without_rescheduling
         ci_partition: gui
