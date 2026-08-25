@@ -579,13 +579,27 @@ def test_a_raising_poll_after_a_failed_replacement_latches_an_owned_hold() -> No
 
 
 class _ScriptedPollHandle:
-    """One stable handle object whose poll() script mutates between drives."""
+    """One stable handle object whose poll() script mutates between drives.
+
+    ``terminate()``/``kill()`` carry the smallest real escalation behaviour
+    the owned reap ladder exercises: they count their calls and change nothing
+    else -- in particular they never manufacture a terminal result, so a
+    readable exit code can only come from a scripted poll() outcome, which is
+    exactly what keeps the pre-escalation and post-escalation stages
+    distinguishable. An exhausted script keeps repeating its last outcome, so
+    a handle whose script ends on a raised poll stays observably broken for
+    as long as the ladder keeps polling.
+    """
 
     pid = 9511
 
     def __init__(self, outcomes: list[object]) -> None:
         self.outcomes = list(outcomes)
         self.index = 0
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_frames: list[list[str]] = []
+        self.communicate_frames: list[list[str]] = []
 
     def poll(self) -> int | None:
         outcome = self.outcomes[min(self.index, len(self.outcomes) - 1)]
@@ -593,6 +607,24 @@ class _ScriptedPollHandle:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+
+    def wait(self, timeout: float | None = None) -> int:
+        import inspect
+
+        self.wait_frames.append([frame.function for frame in inspect.stack()])
+        return 0
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        import inspect
+
+        self.communicate_frames.append([frame.function for frame in inspect.stack()])
+        return b"", b""
 
 
 def test_process_bound_supervision_settles_the_same_owned_child_once_observed() -> None:
@@ -805,6 +837,40 @@ def _drive_next_supervision_tick(single_shot: MagicMock, cursor: list[int], cloc
     return False
 
 
+def _drive_reader_settlement_to_completion(
+    single_shot: MagicMock,
+    cursor: list[int],
+    clock: _SupervisionClock,
+    launcher: SimpleNamespace,
+) -> None:
+    """Drive 200ms callbacks until the deferred reader settlement lands.
+
+    The forced-death finishers run the exact settlement inside a daemon
+    worker and observe it only through non-blocking ticks. The settlement
+    state carries the worker's completion event, so each iteration first
+    waits -- HERE, on this test thread, never inside any Qt callback -- for
+    that worker to actually finish before driving its delivering tick:
+    without that synchronization the synthetic clock outruns real thread
+    scheduling and the whole drive can complete before the worker receives
+    any CPU time at all. The bound keeps a broken machine a failed assertion
+    instead of a hung test.
+    """
+
+    for _ in range(25):
+        state = getattr(launcher, "_engine_reader_settlement_state", None)
+        if state is None:
+            return
+        if type(state) is dict:
+            done = state.get("done")
+            if isinstance(done, threading.Event) and not done.wait(timeout=5.0):
+                break
+        if not _drive_next_supervision_tick(single_shot, cursor, clock):
+            break
+    assert getattr(launcher, "_engine_reader_settlement_state", None) is None, (
+        "the deferred reader settlement never completed within its driven bound"
+    )
+
+
 def _unobservable_child_host(calls: list[str], handle: _UnobservableChildHandle) -> SimpleNamespace:
     """A launcher-owned replacement child that cannot be observed at all."""
 
@@ -941,18 +1007,20 @@ def test_supervision_deadline_spent_escalates_to_owned_reap_ladder_until_explici
     assert len(failures) == 1, "the explicit bounded failure reports itself exactly once"
 
 
-def test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once(
+def test_post_termination_readable_exit_is_a_forced_death_hold_not_another_engine(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Observability returning mid-ladder settles through recovery exactly once.
+    """After terminate()/kill(), a readable exit is OURS, never a crash.
 
-    When the child's ``poll()`` becomes readable while the owned reap ladder
-    holds it -- terminal code included -- the machine must clear FIRST and hand
-    the SAME owned process back to the ordinary recovery path, whose observed-
-    exit route owns reader settlement, incarnation retirement, giving-up
-    release, and the bounded restart. No queued stale tick may settle anything
-    a second time afterwards.
+    The Codex P1 finding: once the replacement reap ladder had issued
+    ``terminate()``, a later readable exit code was routed through ordinary
+    failed-replacement recovery -- which retired the incarnation, released the
+    giving-up latch and scheduled ANOTHER engine over a launcher-forced kill.
+    A launcher-forced death must remain an unsettled forced-death HOLD: latch
+    owner+code first, settle the readers off the Qt callback, release the
+    handle only from the settled callback -- and never schedule a replacement,
+    never retire the identity evidence, never report clean settlement.
     """
 
     import cryodaq.launcher as module
@@ -986,37 +1054,404 @@ def test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once
 
         assert _drive_next_supervision_tick(single_shot, cursor, clock), "terminate fires without readable polls"
         assert handle.terminate_calls == 1
+        assert handle.kill_calls == 0
 
         handle.readable = True
         handle.readable_code = 9
         assert _drive_next_supervision_tick(single_shot, cursor, clock), (
-            "the next tick observes the terminal code and hands off"
+            "the post-termination exit settles inside the ladder as a forced death"
         )
 
-        assert launcher._engine_proc is None, "an observed terminal exit settles exactly once"
-        assert launcher._engine_instance_id is None, "the retired incarnation cannot spawn a twin"
-        assert launcher._engine_shutdown_capability is None
-        assert launcher._restart_giving_up is False, "settled ownership releases the giving-up latch"
-        assert launcher._restart_pending is True, "recovery continues into its bounded restart"
-        assert launcher._restart_attempts == 1
-        assert "close_stream" in calls, "the terminal child's readers were settled"
-        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None, (
-            "the hand-off cleared the machine before recovery ran"
+        assert launcher._engine_unsettled_incarnation == ("a" * 32, 9), (
+            "the forced death stays bound to its owner and terminal return code"
         )
+        assert type(getattr(launcher, "_engine_reader_settlement_state", None)) is dict
+        assert launcher._restart_giving_up is True, "a forced death never releases the giving-up latch"
+        assert launcher._restart_pending is False, "no replacement engine may be scheduled over a forced kill"
+        assert launcher._restart_attempts == 0
+        assert launcher._engine_instance_id == "a" * 32, "identity evidence stays published beside the HOLD"
+        assert launcher._engine_shutdown_capability == "b" * 64
+        assert launcher._engine_proc is handle, "no handle release before reader ownership settles"
+        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None
         assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None
-        assert _drive_next_supervision_tick(single_shot, cursor, clock) is False, (
-            "no 200ms callback remains after the single settlement"
+
+        _drive_reader_settlement_to_completion(single_shot, cursor, clock, launcher)
+
+        assert launcher._engine_proc is None, "the handle releases only after readers settled"
+        assert "close_stream" in calls, "the forced death's readers were settled exactly once"
+        assert launcher._restart_giving_up is True
+        assert launcher._restart_attempts == 0
+        remaining_intervals = [
+            invocation.args[0] for invocation in single_shot.call_args_list[cursor[0] :] if invocation.args[0] != 200
+        ]
+        assert all(interval != 3 * 1000 for interval in remaining_intervals), (
+            "no crash-backoff restart may be scheduled over a launcher-forced death"
         )
-        assert launcher._engine_proc is None and launcher._restart_attempts == 1, (
-            "stale ticks cannot double-settle or double-restart the retired child"
-        )
-        assert single_shot.call_args_list[-1].args[0] == 3 * 1000, "the crash backoff owns the next attempt"
 
     assert handle.wait_frames == [] and handle.communicate_frames == []
-    handoff_lines = [
+    forced_lines = [record for record in caplog.records if "Launcher-forced engine death" in record.getMessage()]
+    assert len(forced_lines) == 1, "the forced death reports itself exactly once"
+    handed_off = [
         record for record in caplog.records if "became observable during bounded reaping" in record.getMessage()
     ]
-    assert len(handoff_lines) == 1, "the readable hand-off reports itself exactly once"
+    assert handed_off == [], "an escalated death may never be logged as an ordinary recovery hand-off"
+
+
+def test_ladder_natural_exit_before_escalation_still_hands_back_to_recovery(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the same distinction, so it stays a distinction.
+
+    A readable exit code observed BEFORE any terminate()/kill() is a natural
+    death we merely could not observe earlier: ordinary recovery still owns
+    it -- readers settled, incarnation retired, giving-up released, bounded
+    restart scheduled. Only an ISSUED terminate/kill turns a later exit into
+    a forced-death HOLD.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    launcher = _unobservable_child_host(calls, handle)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the spent deadline arms the ladder"
+
+        handle.readable = True
+        handle.readable_code = 7
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "the natural exit hands back to ordinary recovery before any escalate"
+        )
+
+        assert handle.terminate_calls == 0 and handle.kill_calls == 0, (
+            "a natural death is never terminated retroactively"
+        )
+        assert launcher._engine_proc is None, "an observed natural exit settles exactly once"
+        assert launcher._engine_instance_id is None, "ordinary retirement owns a natural exit"
+        assert launcher._restart_giving_up is False, "settled ownership releases the giving-up latch"
+        assert launcher._restart_pending is True, "recovery continues into its bounded restart"
+        assert launcher._engine_unsettled_incarnation is None, (
+            "a natural exit is never latched as a launcher-forced death"
+        )
+
+    handed_off = [
+        record for record in caplog.records if "became observable during bounded reaping" in record.getMessage()
+    ]
+    assert len(handed_off) == 1, "the natural hand-off reports itself exactly once"
+
+
+def test_readable_alive_poll_keeps_the_same_reap_ladder_until_progress(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A readable ALIVE poll stays inside the ladder instead of resetting it.
+
+    The Codex P2 finding: one readable-alive poll cleared
+    ``_engine_unobservable_reap_state`` and handed the child back to recovery,
+    whose re-armed watch minted a brand-new ten-second supervision deadline --
+    so an intermittently raising handle could reset the absolute bound forever.
+    Inside the ladder a readable alive answer is just "still alive": the same
+    machine keeps its monotonic stage budgets, kill still fires once its
+    budget spends, and no second watch or stop pass is spawned beside it.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    launcher = _unobservable_child_host(calls, handle)
+    launcher._stop_engine = lambda: calls.append("stop_engine")
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock)
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the spent deadline arms the ladder"
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "terminate fires"
+        assert handle.terminate_calls == 1
+
+        # The child becomes READABLE but answers ALIVE, over and over.
+        handle.readable = True
+        handle.readable_code = None
+
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the alive poll keeps the tick cadence"
+        machine = getattr(launcher, "_engine_unobservable_reap_state", None)
+        assert type(machine) is dict and machine["process"] is handle and machine["stage"] == "terminate-wait", (
+            "a readable-alive poll must not clear the replacement reap state"
+        )
+        assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None, (
+            "no second watch is armed beside the ladder"
+        )
+        assert "stop_engine" not in calls, "the ladder owns the child; no parallel stop pass may start"
+        assert launcher._restart_giving_up is True
+
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "kill fires on schedule even while polls answer readable-alive"
+        )
+        assert handle.kill_calls == 1
+
+        handle.readable_code = 9
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the forced death settles in-ladder"
+        assert launcher._engine_unsettled_incarnation == ("a" * 32, 9)
+
+        _drive_reader_settlement_to_completion(single_shot, cursor, clock, launcher)
+        assert launcher._engine_proc is None, "handle released only after reader ownership settled"
+
+    assert handle.wait_frames == [] and handle.communicate_frames == []
+    handed_alive = [
+        record for record in caplog.records if "became observable during bounded reaping" in record.getMessage()
+    ]
+    assert handed_alive == [], "a readable-alive answer must not be reported as an ordinary hand-off"
+
+
+def test_alternating_poll_outcomes_cannot_refresh_the_supervision_deadline(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One absolute supervision bound per child; alternation cannot renew it.
+
+    The Codex P2 finding's other half: every watch re-arm minted a fresh
+    ten-second deadline, so a handle whose poll() alternated between raising
+    and readable outcomes reset that bound forever and never reached the owned
+    reap ladder. The bound is issued ONCE for the exact process object and
+    reused -- unrefreshed -- across every re-arm, so escalation lands even when
+    recent observations kept answering.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _ScriptedPollHandle(
+        [
+            RuntimeError("injected poll failure"),
+            None,
+            RuntimeError("injected poll failure"),
+            None,
+            RuntimeError("injected poll failure"),
+        ]
+    )
+    launcher = _unobservable_child_host(calls, handle)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=True,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+        bound = vars(launcher)["_engine_unobservable_supervision_bound"]
+        assert bound["process"] is handle
+        absolute_deadline = bound["deadline"]
+
+        cursor = [0]
+        for expected_round in range(4):
+            assert _drive_next_supervision_tick(single_shot, cursor, clock), f"round {expected_round} re-arms"
+            current = vars(launcher)["_engine_unobservable_supervision_bound"]
+            assert current["process"] is handle
+            assert current["deadline"] == absolute_deadline, (
+                "re-arming the watch must reuse the ONE absolute deadline, never mint a new one"
+            )
+
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "with the single bound spent, the next failing tick escalates despite earlier readable rounds"
+        )
+        machine = getattr(launcher, "_engine_unobservable_reap_state", None)
+        assert type(machine) is dict and machine["process"] is handle and machine["stage"] == "terminate", (
+            "escalation hands the SAME exact process into the owned reap ladder"
+        )
+
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "terminate fires"
+        assert handle.terminate_calls == 1, (
+            "alternating poll outcomes must not be able to keep the child merely watched forever"
+        )
+
+    assert handle.wait_frames == [] and handle.communicate_frames == []
+
+
+def test_validated_receipt_beside_unobservable_poll_admits_bounded_supervision(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validated receipt with no exit-wait deadline must not strand the child.
+
+    The Codex P1 finding: a failed replacement can hold a VALIDATED shutdown
+    receipt while ``poll()`` raises before ``_engine_shutdown_wait_deadline``
+    was ever armed. The owner-bound retry declines (nothing progress-capable
+    to bind) and the old receipt refusal excluded process-bound supervision,
+    so the possibly live child sat retained forever without any bounded
+    terminate/kill callback. This exact state must be admitted to the watch:
+    the receipt evidence stays published untouched, and escalation into the
+    owned reap ladder remains reachable.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _ScriptedPollHandle([RuntimeError("injected poll failure"), RuntimeError("injected poll failure")])
+    launcher = _unobservable_child_host(calls, handle)
+    validated_receipt = {"ok": True, "validated": "evidence"}
+    launcher._engine_shutdown_receipt = validated_receipt
+    launcher._engine_shutdown_wait_deadline = None
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+        assert deferred is False
+        assert launcher._restart_giving_up is True, "the HOLD still shows the operator the truth"
+        assert launcher._engine_proc is handle, "the possibly live child stays retained"
+        assert single_shot.call_count == 1 and single_shot.call_args.args[0] == 200, (
+            "the declined owner-bound retry must admit this state to the process-bound watch"
+        )
+        assert launcher._engine_shutdown_receipt == validated_receipt, "the receipt evidence stays published"
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "still unobservable: the chain re-arms"
+        assert launcher._engine_shutdown_receipt == validated_receipt
+
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "the spent single bound escalates the receipt-bearing child into owned reaping"
+        )
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "terminate fires"
+        assert handle.terminate_calls == 1, "bounded terminate/kill must be reachable in this exact state"
+        assert launcher._engine_shutdown_receipt == validated_receipt, "even escalation preserves the receipt evidence"
+
+    assert handle.wait_frames == [] and handle.communicate_frames == []
+
+
+def test_manual_restart_stop_failure_arms_process_bound_supervision_for_the_old_engine(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The manual-restart stop path needs its own process-bound supervisor.
+
+    The Codex P1 finding: manual restart's ``_stop_engine()`` can see its very
+    first ``poll()`` raise before any worker, transport identity, receipt, or
+    exit-wait deadline exists. The restart latches giving-up, the owner-bound
+    retry necessarily declines -- and nothing else armed, leaving the possibly
+    live OLD engine with zero callbacks. When the scheduler declines, the
+    bounded process supervisor must be armed for that exact old handle: it
+    re-arms while polls fail and hands the handle to ordinary recovery on the
+    first readable verdict.
+
+    Falsification: removing the ``_schedule_unowned_process_supervision`` arm
+    from ``_restart_engine``'s stop-failure catch leaves ``single_shot``
+    empty -- the first assertion below fails by count, not by import error.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    handle = _ScriptedPollHandle([RuntimeError("first poll raised"), 0])
+    launcher._engine_proc = handle
+
+    def _failing_stop() -> None:
+        calls.append("stop_engine")
+        raise RuntimeError("engine shutdown authority unavailable; first poll already failed")
+
+    launcher._stop_engine = _failing_stop
+    launcher._start_engine_down_alarm = lambda: calls.append("alarm")
+    launcher._engine_down_banner = MagicMock()
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with (
+        patch("cryodaq.launcher.time.sleep"),
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._restart_engine(launcher)
+
+        assert "start_engine" not in calls, "a failed old-engine settlement must not reach the replacement spawn"
+        assert "stop_engine" in calls
+        assert launcher._restart_giving_up is True, "the polling failure latches the owned stable HOLD"
+        assert "banner" in calls
+        assert launcher._engine_proc is handle, "the possibly live old engine stays retained"
+        assert single_shot.call_count == 1 and single_shot.call_args.args[0] == 200, (
+            "when the owner-bound retry declines, the bounded process supervisor must be armed"
+        )
+
+        cursor = [0]
+
+        def _drive_next_watch_tick() -> bool:
+            shot_calls = single_shot.call_args_list
+            while cursor[0] < len(shot_calls):
+                invocation = shot_calls[cursor[0]]
+                cursor[0] += 1
+                if invocation.args[0] == 200:
+                    invocation.args[1]()
+                    return True
+            return False
+
+        assert _drive_next_watch_tick(), "the watch drives while polls keep raising"
+        assert launcher._engine_proc is handle
+        assert single_shot.call_count == 2, "a still-raising poll re-arms the same process-bound chain"
+
+        assert _drive_next_watch_tick(), "the readable verdict hands the old engine to ordinary recovery"
+
+    assert launcher._engine_proc is None, "an observed terminal exit settles exactly once"
+    assert launcher._engine_instance_id is None, "the retired incarnation cannot spawn a twin"
+    assert launcher._restart_giving_up is False, "settled ownership releases the giving-up latch"
+    assert launcher._restart_pending is True, "recovery continues into its bounded restart"
+    assert "close_stream" in calls, "the settled child's readers were closed"
+    assert single_shot.call_args_list[-1].args[0] == 3 * 1000, "the crash backoff owns the next attempt"
 
 
 def test_stale_ladder_tick_for_a_replaced_process_is_inert(

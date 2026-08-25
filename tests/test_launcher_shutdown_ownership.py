@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -776,10 +776,13 @@ def test_real_construction_rollback_holds_live_child_after_poisoned_writer(
             monkeypatch.setattr(module.time, "monotonic", clock)
             assert _drive_next_reap_tick(single_shot, cursor, clock), "the first callback terminates the rollback child"
             assert _drive_next_reap_tick(single_shot, cursor, clock), (
-                "the terminal child completes the bound without a second terminate"
+                "the terminal child latches its forced death without a second terminate"
             )
             assert process.poll() == 0, "the rollback HOLD bounds its live child through the real reap escalation"
             assert process.terminate_calls == 1
+            # The poisoned readiness-writer settlement now runs inside the
+            # deferred worker; drive until it reports its explicit failure.
+            _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
             assert host._engine_proc is process, (
                 "the reaper's poisoned readiness-writer settlement aborts mid-reap before any handle "
                 "release: the now-terminal child stays owned fail-closed beside its unsettled incarnation"
@@ -1907,6 +1910,40 @@ def _drive_next_reap_tick(single_shot: MagicMock, cursor: list[int], clock: _Qui
     return False
 
 
+def _drive_reader_settlement_to_completion(
+    single_shot: MagicMock,
+    cursor: list[int],
+    clock: _QuitReapClock,
+    host: SimpleNamespace,
+) -> None:
+    """Drive 200ms callbacks until the deferred reader settlement lands.
+
+    The forced-death finishers run the exact settlement inside a daemon
+    worker and observe it only through non-blocking ticks. The settlement
+    state carries the worker's completion event, so each iteration first
+    waits -- HERE, on this test thread, never inside any Qt callback -- for
+    that worker to actually finish before driving its delivering tick:
+    without that synchronization the synthetic clock outruns real thread
+    scheduling and the whole drive can complete before the worker receives
+    any CPU time at all. The bound keeps a broken machine a failed assertion
+    instead of a hung test.
+    """
+
+    for _ in range(25):
+        state = getattr(host, "_engine_reader_settlement_state", None)
+        if state is None:
+            return
+        if type(state) is dict:
+            done = state.get("done")
+            if isinstance(done, threading.Event) and not done.wait(timeout=5.0):
+                break
+        if not _drive_next_reap_tick(single_shot, cursor, clock):
+            break
+    assert getattr(host, "_engine_reader_settlement_state", None) is None, (
+        "the deferred reader settlement never completed within its driven bound"
+    )
+
+
 class _TerminalQuitChild:
     """A live refused child scripted for the non-blocking quit-reap guards.
 
@@ -2022,7 +2059,9 @@ def test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppre
         assert _drive_next_reap_tick(single_shot, cursor, clock), "the spent terminate budget escalates to kill"
         assert process.terminate_calls == 1 and process.kill_calls == 1
 
-        assert _drive_next_reap_tick(single_shot, cursor, clock), "the observed death completes the bound"
+        assert _drive_next_reap_tick(single_shot, cursor, clock), "the observed death latches the forced death"
+        assert host._engine_proc is process, "the handle releases only after the deferred reader settlement lands"
+        _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
 
         assert process.alive is False, "suppression may never commit over a live engine"
         assert process.poll() == 0
@@ -2067,6 +2106,112 @@ def test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppre
     assert reaping_failures == []
 
 
+def test_terminal_quit_reader_settlement_never_blocks_the_qt_callback(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The forced-death finisher must settle readers OFF the Qt timer callback.
+
+    The Codex P2 finding: ``_step_terminal_quit_reap`` ran on a Qt timer
+    callback and called ``_close_engine_stderr_stream`` directly, whose reader
+    joins (and synchronous close/flush) can hold the callback for roughly four
+    seconds -- exactly while the HOLD alarm, tray and repaint must stay
+    responsive. Driving the REAL quit ladder over a child whose settlement
+    BLOCKS until released must show: the death tick returns without settling,
+    a second unrelated due callback executes while settlement is unfinished,
+    the actual close runs on a NON-main thread, and the handle plus the
+    exactly-once marker land only after the close completes.
+
+    Falsification: reverting ``_finish_settled`` to its inline
+    ``self._close_engine_stderr_stream()`` runs the gated close on the main
+    thread -- it blocks this drive for the gate timeout and records the main
+    thread name, failing both the responsiveness sentinel and the thread-name
+    assertion.
+    """
+
+    import cryodaq.launcher as module
+
+    process = _TerminalQuitChild(die_on="kill")
+    host, bridge = _refused_normal_quit_host(process)
+    settlement_started = threading.Event()
+    settlement_gate = threading.Event()
+    settlement_threads: list[str] = []
+    order: list[str] = []
+    main_thread_name = threading.current_thread().name
+
+    def gated_close() -> None:
+        settlement_threads.append(threading.current_thread().name)
+        order.append("readers_close_started")
+        settlement_started.set()
+        assert settlement_gate.wait(timeout=10.0), "reader settlement worker stalled"
+        order.append("readers_close_finished")
+
+    host._close_engine_stderr_stream = gated_close
+
+    clock = _QuitReapClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    sentinel_calls: list[str] = []
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        assert module.LauncherWindow._do_shutdown(host) is False
+
+        cursor = [0]
+        assert _drive_next_reap_tick(single_shot, cursor, clock), "the first tick issues terminate"
+        clock.advance(5.2)
+        assert _drive_next_reap_tick(single_shot, cursor, clock), "the spent terminate budget escalates to kill"
+        assert _drive_next_reap_tick(single_shot, cursor, clock), (
+            "the observed death latches the forced death and arms the DEFERRED settlement"
+        )
+
+        state = getattr(host, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "the settlement is owned by its own machine, not this call stack"
+        assert host._engine_proc is process, "nothing releases while readers are unsettled"
+        assert host._shutdown_terminal_engine_readers_settled is False
+        assert settlement_started.wait(timeout=5.0), "the deferred worker never started its close"
+        assert order == ["readers_close_started"], "the close started but has not been waited on here"
+
+        # Event-loop responsiveness DURING settlement: another due callback on
+        # the same loop executes now, not behind any join or flush. The
+        # settlement machine's own tick was queued ahead of the sentinel, so
+        # one drive would only service the settlement machine; serve due
+        # callbacks strictly in queue order -- one event-loop turn each --
+        # until the unrelated sentinel has had ITS turn. The settlement tick
+        # interleaving ahead of it is exactly the ordering proof: the loop
+        # kept serving other due work while the gated close was still blocked.
+        single_shot.call_args_list.append(call(200, lambda: sentinel_calls.append("sentinel")))
+        served_turns = 0
+        while not sentinel_calls and served_turns < 25:
+            assert _drive_next_reap_tick(single_shot, cursor, clock), (
+                "the event loop stayed responsive: a due callback was available"
+            )
+            served_turns += 1
+        assert sentinel_calls == ["sentinel"], "an unrelated due callback ran while settlement was unfinished"
+        assert served_turns >= 2, (
+            "the settlement's own tick ran before the sentinel: two genuine event-loop turns interleaved"
+        )
+        assert type(getattr(host, "_engine_reader_settlement_state", None)) is dict, (
+            "the sentinel executed while the deferred settlement was still in flight"
+        )
+        assert order == ["readers_close_started"], "the gated close stayed blocked across every interleaved turn"
+        assert host._engine_proc is process, "still nothing released while readers are unsettled"
+
+        settlement_gate.set()
+        _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
+
+        assert order == ["readers_close_started", "readers_close_finished"]
+        assert host._engine_proc is None, "the handle releases only after the close completed"
+        assert host._shutdown_terminal_engine_readers_settled is True
+        assert process.wait_frames == [], "no wait() ever entered the settlement path"
+
+    assert all(name != main_thread_name for name in settlement_threads), (
+        "the joins/close/flush of reader settlement must run off the Qt callback thread"
+    )
+
+
 def test_second_failing_owner_keeps_the_ladder_while_the_terminal_decision_reaps(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -2108,7 +2253,8 @@ def test_second_failing_owner_keeps_the_ladder_while_the_terminal_decision_reaps
         assert _drive_next_reap_tick(single_shot, cursor, clock)
         assert process.kill_calls == 1
 
-        assert _drive_next_reap_tick(single_shot, cursor, clock), "the observed death completes the bound"
+        assert _drive_next_reap_tick(single_shot, cursor, clock), "the observed death latches the forced death"
+        _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
 
         assert process.alive is False, "suppression-grade immutability may never leave the child alive"
         assert host._engine_proc is None, "the successfully reaped child releases its handle"
@@ -2176,7 +2322,8 @@ def test_construction_rollback_never_suppresses_over_a_live_engine(
             assert _drive_next_reap_tick(single_shot, cursor, clock)
             clock.advance(5.2)
             assert _drive_next_reap_tick(single_shot, cursor, clock)
-            assert _drive_next_reap_tick(single_shot, cursor, clock)
+            assert _drive_next_reap_tick(single_shot, cursor, clock), "the observed death latches the forced death"
+            _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
 
             assert reapable.alive is False, "suppression may never commit over a live engine"
             assert reapable.poll() == 0
@@ -2728,7 +2875,12 @@ def test_normal_quit_bounded_reap_never_blocks_or_waits_on_the_qt_thread(
         clock.advance(5.2)
         assert _drive_next_reap_tick(single_shot, cursor, clock)
         assert process.wait_frames == [], "escalation advanced through callbacks, never through wait()"
-        assert _drive_next_reap_tick(single_shot, cursor, clock)
+        assert _drive_next_reap_tick(single_shot, cursor, clock), (
+            "the observed death latches the forced death and arms the DEFERRED settlement"
+        )
+
+        assert host._engine_proc is process, "the handle stays retained until the deferred reader settlement lands"
+        _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
 
         assert process.alive is False
         assert host._engine_proc is None

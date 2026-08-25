@@ -115,6 +115,20 @@ _ENGINE_UNOBSERVABLE_SUPERVISION_DEADLINE_S = 10.0
 # machines enforce the same bound.
 _TERMINAL_QUIT_REAP_TICK_MS = 200
 _TERMINAL_QUIT_REAP_STAGE_BUDGET_S = 5.0
+# Reader settlement for a terminal child must never run inside a Qt timer
+# callback: _close_engine_stderr_stream joins each reader thread with a
+# two-second bound and then flushes/closes the stderr handler, so an alive
+# reader held the alarm/tray/repaint thread for roughly four seconds. The
+# forced-death finishers hand that exact settlement to this machine instead:
+# one daemon worker performs it off the Qt thread and publishes its completion
+# through a threading.Event; the Qt-side ticks observe that event with
+# non-blocking checks -- no wait(), no join, no handler flush on the loop.
+_ENGINE_READER_SETTLEMENT_TICK_MS = 200
+# Absolute monotonic bound for one deferred reader-settlement worker. The
+# synchronous path it replaced joined up to three readers at two seconds each;
+# this covers the whole worker -- every join plus the stream/handler closes --
+# with slack, and its expiry is fail-closed (owners retained, explicit failure).
+_ENGINE_READER_SETTLEMENT_BOUND_S = 8.0
 _ENGINE_READY_NONCE_ENV = "CRYODAQ_ENGINE_READY_NONCE"
 _CHILD_READY_CHANNEL_ENV = "CRYODAQ_CHILD_READY_CHANNEL"
 _ENGINE_READY_SCHEMA = "cryodaq.engine_ready.v2"
@@ -3351,6 +3365,117 @@ class LauncherWindow(QMainWindow):
             return False
         return True
 
+    def _begin_deferred_engine_reader_settlement(
+        self,
+        *,
+        phase: str,
+        owner_id: str,
+        on_settled: Callable[[], None],
+        on_failed: Callable[[Exception], None],
+    ) -> bool:
+        """Settle a terminal child's readers off the Qt event loop.
+
+        ``_close_engine_stderr_stream`` is the exact settlement, but run
+        directly inside a Qt timer callback -- exactly where the forced-death
+        finishers execute -- its bounded reader joins can hold that callback
+        for roughly four seconds while the HOLD alarm, tray and repaint lag.
+        This machine runs the same exact settlement EXACTLY once inside a
+        daemon worker thread and observes it from the Qt side only through a
+        non-blocking completion-event check on this tick cadence: no
+        wait(), no join, no handler flush ever runs on the event loop.
+        Completion (or an explicit bounded failure) is delivered through
+        exactly one callback; callers release the process handle ONLY from
+        ``on_settled``, so reader ownership always settles before a handle
+        can drop. A second arm while a settlement is still in flight is
+        refused -- one settlement owner at a time. An unresolvable worker
+        start reports failure synchronously and returns True; False means a
+        settlement was already active and this arm changed nothing.
+        """
+
+        existing = getattr(self, "_engine_reader_settlement_state", None)
+        if type(existing) is dict:
+            return False
+        bound_close = getattr(self, "_close_engine_stderr_stream", None)
+        if not callable(bound_close):
+            return False
+        state: dict[str, Any] = {
+            "phase": phase,
+            "owner_id": owner_id,
+            "worker": None,
+            "done": threading.Event(),
+            "error": None,
+            "deadline": time.monotonic() + _ENGINE_READER_SETTLEMENT_BOUND_S,
+        }
+        self._engine_reader_settlement_state = state
+
+        def _work() -> None:
+            try:
+                bound_close()
+            except BaseException as exc:
+                # The failure IS the result here: capture it for the Qt-side
+                # delivery instead of letting the worker die silently.
+                state["error"] = exc
+            finally:
+                # Completion is published through the event, not through the
+                # thread's liveness: the flag sets even when close raises a
+                # BaseException, and its release after the error write above
+                # makes the tick-side read see that write without any lock.
+                state["done"].set()
+
+        def _advance() -> None:
+            if getattr(self, "_engine_reader_settlement_state", None) is not state:
+                return
+            done = state.get("done")
+            try:
+                finished = isinstance(done, threading.Event) and done.is_set()
+            except Exception:
+                finished = False
+            if not finished:
+                if time.monotonic() < state["deadline"]:
+                    QTimer.singleShot(_ENGINE_READER_SETTLEMENT_TICK_MS, _advance)
+                    return
+                self._engine_reader_settlement_state = None
+                logger.critical(
+                    "Deferred engine reader settlement exceeded its bound; "
+                    "phase=%s owner=%s -- stream owners stay retained fail-closed",
+                    phase,
+                    owner_id,
+                )
+                on_failed(RuntimeError("deferred engine reader settlement exceeded its bound"))
+                return
+            failure = state.get("error")
+            self._engine_reader_settlement_state = None
+            if failure is not None:
+                if isinstance(failure, Exception):
+                    on_failed(failure)
+                else:
+                    wrapped = RuntimeError("engine reader settlement raised a base exception")
+                    wrapped.__cause__ = failure
+                    on_failed(wrapped)
+                return
+            on_settled()
+
+        try:
+            worker = threading.Thread(
+                target=_work,
+                name="engine-reader-settlement",
+                daemon=True,
+            )
+            state["worker"] = worker
+            worker.start()
+        except Exception as exc:
+            self._engine_reader_settlement_state = None
+            logger.critical(
+                "Deferred engine reader settlement could not start; phase=%s owner=%s exception=%s",
+                phase,
+                owner_id,
+                type(exc).__name__,
+            )
+            on_failed(exc)
+            return True
+        QTimer.singleShot(_ENGINE_READER_SETTLEMENT_TICK_MS, _advance)
+        return True
+
     def _probe_exact_live_engine_session(self) -> bool:
         """Bind the private child receipt to one exact REP incarnation."""
 
@@ -3756,6 +3881,15 @@ class LauncherWindow(QMainWindow):
 
         if self._shutdown_terminal_engine_readers_settled:
             return True
+        if type(getattr(self, "_engine_reader_settlement_state", None)) is dict:
+            # A deferred reader settlement for this exact child is still in
+            # flight (its finisher latched the forced death and released the
+            # reap machine already). Re-entering now would either re-arm the
+            # reap machine over the already-dying child or start a second
+            # concurrent settlement of the same readers; one tick later the
+            # flight either latches the exactly-once marker or reports its
+            # failure. Keep the retry ladder armed until then.
+            return False
         process = getattr(self, "_engine_proc", None)
         if process is None:
             return True
@@ -4298,27 +4432,41 @@ class LauncherWindow(QMainWindow):
             # Same ordering as _reap_unsettled_engine_process: latch the forced
             # death before any fallible step; a reader failure aborts with the
             # incarnation and handle retained for the crashed-reader branch.
+            # The settlement itself no longer runs HERE: this function executes
+            # on a Qt timer callback, and _close_engine_stderr_stream joins its
+            # readers (then flushes/closes the stderr handler), so an alive
+            # reader held alarm, tray and repaint for up to four seconds. The
+            # exact same settlement runs once inside the deferred worker; the
+            # handle releases only from its settled callback, so reader
+            # ownership always settles before the handle can drop.
             self._engine_unsettled_incarnation = (owner_id, returncode)
-            try:
-                self._close_engine_stderr_stream()
-            except Exception as exc:
-                self._terminal_quit_reap_state = None
+            self._terminal_quit_reap_state = None
+
+            def _release_after_readers() -> None:
+                self._engine_proc = None
+                self._shutdown_terminal_engine_readers_settled = True
+                logger.error(
+                    "Live refused engine was terminally reaped during the normal-quit decision; "
+                    "phase=normal-quit-refusal owner=%s code=%s (the forced death remains an "
+                    "unsettled incarnation, never clean settlement)",
+                    owner_id,
+                    returncode,
+                )
+
+            def _on_reader_failure(exc: Exception) -> None:
                 logger.critical(
                     "Engine process reaping failed during the terminal quit decision; "
                     "phase=normal-quit-refusal owner=%s exception=%s",
                     owner_id,
                     type(exc).__name__,
                 )
-                return True
-            self._engine_proc = None
-            self._terminal_quit_reap_state = None
-            self._shutdown_terminal_engine_readers_settled = True
-            logger.error(
-                "Live refused engine was terminally reaped during the normal-quit decision; "
-                "phase=normal-quit-refusal owner=%s code=%s (the forced death remains an "
-                "unsettled incarnation, never clean settlement)",
-                owner_id,
-                returncode,
+
+            LauncherWindow._begin_deferred_engine_reader_settlement(
+                self,
+                phase="normal-quit-refusal",
+                owner_id=owner_id,
+                on_settled=_release_after_readers,
+                on_failed=_on_reader_failure,
             )
             return True
 
@@ -4665,8 +4813,21 @@ class LauncherWindow(QMainWindow):
 
         Armed exactly where recovery is about to latch ``_restart_giving_up``
         while a possibly live engine handle is still owned and nothing else is
-        pending: no shutdown worker, no transport identity, no receipt awaiting
-        exit, no exit-wait deadline. The latch is the honest operator surface,
+        pending: no shutdown worker, no transport identity, no exit-wait
+        deadline. A VALIDATED receipt is admitted only where its settlement
+        owners are gone: no exit-wait budget was ever armed beside a poll()
+        that is still raising or answering alive, or a spent budget beside a
+        poll() that now raises -- the owner-bound retry declines for
+        those exact shapes, so refusing the watch here stranded the possibly
+        live child forever with zero terminate/kill callbacks. A child whose
+        poll() already answers a terminal integer is NOT admitted anywhere:
+        it has been observed terminal, it is not possibly live, and minting a
+        fresh process-bound watch over it would spend supervision and
+        terminate/kill callbacks on nothing -- the exact retained receipt
+        beside that observed exit stays a plain HOLD instead. The receipt
+        evidence itself stays published untouched, and the readable-verdict
+        hand-off settles THROUGH the receipt-aware stop path instead of
+        discarding it. The latch is the honest operator surface,
         but it only silences the health timer -- and the health timer's own
         ``poll()`` is the one that raised -- so without this watch the retained
         child would have zero remaining routes to terminal settlement or bounded
@@ -4695,11 +4856,50 @@ class LauncherWindow(QMainWindow):
             return False
         if getattr(self, "_engine_shutdown_transport_identity", None) is not None:
             return False
-        if getattr(self, "_engine_shutdown_receipt", None) is not None:
-            return False
         process = getattr(self, "_engine_proc", None)
         if process is None:
             return False
+        receipt = getattr(self, "_engine_shutdown_receipt", None)
+        if receipt is not None:
+            # A validated receipt normally keeps its own settlement owners. It
+            # is admitted to this watch ONLY where no progress-capable owner
+            # remains AND the child is not already observed terminal: a dict
+            # receipt with NO exit-wait budget ever armed beside a poll() that
+            # raises or answers alive (the Codex finding: owner-bound retry
+            # declines because there is no deadline to bind, and the old
+            # blanket refusal left the possibly live child with zero
+            # terminate/kill callbacks), or a SPENT budget beside a poll()
+            # that now RAISES (the retry declines on expiry and observation is
+            # gone). An open budget keeps its owner-bound retry; a spent
+            # budget beside a READABLE child keeps the reviewed stop-path
+            # ceiling instead of re-entering here; an observed-terminal child
+            # is refused below -- it is not possibly live.
+            if type(receipt) is not dict:
+                return False
+            deadline = getattr(self, "_engine_shutdown_wait_deadline", None)
+            if type(deadline) in (int, float):
+                if time.monotonic() < deadline:
+                    return False
+                try:
+                    process.poll()
+                except Exception:
+                    pass
+                else:
+                    return False
+            else:
+                # No exit-wait budget was ever armed. Even then this watch is
+                # only for an UNOBSERVABLE or POSSIBLY LIVE child: a poll()
+                # that already answers a terminal integer has proven the child
+                # is gone, so the exact retained receipt beside that observed
+                # nonzero exit stays a plain HOLD -- never a fresh 10-second
+                # process-bound watch over a provably dead child.
+                try:
+                    observed = process.poll()
+                except Exception:
+                    pass
+                else:
+                    if type(observed) is int:
+                        return False
         reap_state = vars(self).get("_engine_unobservable_reap_state", None)
         if type(reap_state) is dict and reap_state.get("process") is process:
             return True
@@ -4712,7 +4912,26 @@ class LauncherWindow(QMainWindow):
         )
         if type(owner_id) is not str:
             owner_id = "<unknown>"
-        supervision_deadline = time.monotonic() + _ENGINE_UNOBSERVABLE_SUPERVISION_DEADLINE_S
+        # ONE absolute deadline per exact child. Re-arming this watch used to
+        # mint a brand-new ten-second budget every time, so a handle whose
+        # poll() alternates between raising and readable-alive could reset the
+        # bound forever and never reach the owned reap ladder. The bound is
+        # issued once for THIS process object and reused -- never refreshed --
+        # while that same object remains the owned child; a different handle
+        # (a new incarnation) gets a fresh bound of its own.
+        prior_bound = vars(self).get("_engine_unobservable_supervision_bound", None)
+        if (
+            type(prior_bound) is dict
+            and prior_bound.get("process") is process
+            and type(prior_bound.get("deadline")) in (int, float)
+        ):
+            supervision_deadline = prior_bound["deadline"]
+        else:
+            supervision_deadline = time.monotonic() + _ENGINE_UNOBSERVABLE_SUPERVISION_DEADLINE_S
+        vars(self)["_engine_unobservable_supervision_bound"] = {
+            "process": process,
+            "deadline": supervision_deadline,
+        }
 
         def _supervise_unobservable_process() -> None:
             if not LauncherWindow._runtime_callback_is_current(self):
@@ -4761,7 +4980,7 @@ class LauncherWindow(QMainWindow):
             phase,
             owner_id,
             type(failure).__name__,
-            _ENGINE_UNOBSERVABLE_SUPERVISION_DEADLINE_S,
+            max(0.0, supervision_deadline - time.monotonic()),
         )
         QTimer.singleShot(_ENGINE_REPLACEMENT_SUPERVISION_TICK_MS, _supervise_unobservable_process)
         return True
@@ -4785,14 +5004,17 @@ class LauncherWindow(QMainWindow):
         (the same budgets the normal-quit machine enforces), kill, one more
         stage budget, then an explicit bounded failure. It never waits on the
         Qt thread and never needs ``poll()`` to become readable -- a raising
-        poll only delays observation, never escalation. The first readable
-        verdict (terminal code or observably alive) hands the SAME owned
-        process back to the ordinary recovery path, which owns reader
-        settlement, incarnation retirement, and the restart decision exactly
-        once; the machine clears BEFORE that hand-off so no queued stale tick
-        can double-drive the child. A failed stage retains the exact process
-        handle beside the HOLD and reports the bounded failure honestly.
-        Re-arming over a process that already has a ladder is refused.
+        poll only delays observation, never escalation. A readable verdict
+        before any terminate()/kill() hands the SAME owned process back to the
+        ordinary recovery path, which owns reader settlement, incarnation
+        retirement, and the restart decision exactly once; a readable exit
+        code after escalation began is a launcher-forced death and settles as
+        an unsettled forced-death HOLD (never another scheduled engine); a
+        readable alive answer stays inside the ladder. The machine clears
+        BEFORE that hand-off so no queued stale tick can double-drive the
+        child. A failed stage retains the exact process handle beside the HOLD
+        and reports the bounded failure honestly. Re-arming over a process
+        that already has a ladder is refused.
         """
 
         state = vars(self).get("_engine_unobservable_reap_state", None)
@@ -4804,6 +5026,11 @@ class LauncherWindow(QMainWindow):
             "process": process,
             "stage": "terminate",
             "stage_deadline": None,
+            # Once THIS ladder issues terminate() or kill(), any later readable
+            # exit code is a launcher-forced death: it must settle as an
+            # unsettled forced-death HOLD, never as an ordinary crash whose
+            # recovery schedules another engine.
+            "escalated": False,
         }
         logger.error(
             "Unobservable-poll supervision budget spent; phase=%s incarnation=%s -- "
@@ -4849,7 +5076,12 @@ class LauncherWindow(QMainWindow):
         or explicitly failed -- and False to keep polling on the next tick.
         Every observation is a non-blocking ``poll()``; escalation is exactly
         terminate then kill; each stage's five-second budget is checked against
-        ``time.monotonic()``, never by waiting on the Qt thread.
+        ``time.monotonic()``, never by waiting on the Qt thread. A readable
+        verdict BEFORE any terminate/kill is a natural exit and hands the same
+        owned process back to ordinary recovery; a readable exit code AFTER
+        escalation began is a launcher-forced death and settles as an
+        unsettled forced-death HOLD instead; a readable ALIVE answer stays
+        inside this same ladder so its stage budgets keep progressing.
         """
 
         state = vars(self).get("_engine_unobservable_reap_state", None)
@@ -4873,7 +5105,7 @@ class LauncherWindow(QMainWindow):
                 return None
             return code if type(code) is int else None
 
-        def _hand_off_readable(observed: int | None) -> bool:
+        def _hand_off_readable(observed: int) -> bool:
             # Clearing first keeps every queued stale tick inert: the ordinary
             # recovery path becomes the single settlement owner from here.
             self._engine_unobservable_reap_state = None
@@ -4882,7 +5114,7 @@ class LauncherWindow(QMainWindow):
                 "phase=%s incarnation=%s observed=%s -- handing the same owned process back to recovery",
                 phase,
                 owner_id,
-                observed if type(observed) is int else "alive",
+                observed,
             )
             LauncherWindow._recover_failed_engine_restart(
                 self,
@@ -4893,6 +5125,62 @@ class LauncherWindow(QMainWindow):
                 raise_on_hold=raise_on_hold,
             )
             return True
+
+        def _finish_forced_death(returncode: int) -> bool:
+            # This death was ISSUED by this ladder's terminate()/kill(): it can
+            # never be reported as clean shutdown, and routing it through the
+            # ordinary failed-replacement recovery would schedule another
+            # engine over a launcher-forced kill. Latch the forced death
+            # exactly like the terminal-quit machine -- before any fallible
+            # step -- settle the readers off the Qt callback, and release the
+            # handle only from the settled callback. The evidence fields and
+            # the giving-up HOLD stay published untouched.
+            self._engine_unobservable_reap_state = None
+            self._engine_unsettled_incarnation = (owner_id, returncode)
+            logger.error(
+                "Launcher-forced engine death observed during bounded reaping; "
+                "phase=%s incarnation=%s code=%s -- the forced death remains an "
+                "unsettled HOLD, never ordinary crash recovery",
+                phase,
+                owner_id,
+                returncode,
+            )
+
+            def _release_after_readers() -> None:
+                self._engine_proc = None
+                logger.error(
+                    "Forced-death engine readers settled; phase=%s incarnation=%s -- "
+                    "the exact handle is released with reader ownership settled first",
+                    phase,
+                    owner_id,
+                )
+
+            def _on_reader_failure(exc: Exception) -> None:
+                logger.critical(
+                    "Forced-death engine reader settlement failed; phase=%s incarnation=%s "
+                    "exception=%s -- the terminal handle stays retained beside the HOLD",
+                    phase,
+                    owner_id,
+                    type(exc).__name__,
+                )
+
+            LauncherWindow._begin_deferred_engine_reader_settlement(
+                self,
+                phase=phase,
+                owner_id=owner_id,
+                on_settled=_release_after_readers,
+                on_failed=_on_reader_failure,
+            )
+            return True
+
+        def _settle_readable(observed: int | None) -> bool:
+            if type(observed) is not int:
+                return False
+            if state.get("escalated") is True:
+                return _finish_forced_death(observed)
+            # No terminate/kill was ever issued: this is a natural exit we
+            # merely could not observe before, so ordinary recovery still owns it.
+            return _hand_off_readable(observed)
 
         def _finish_failed(exc: Exception) -> bool:
             self._engine_unobservable_reap_state = None
@@ -4905,12 +5193,24 @@ class LauncherWindow(QMainWindow):
             )
             return True
 
+        readable_verdict_settled = False
         try:
             observed = process.poll()
         except Exception:
             pass
         else:
-            return _hand_off_readable(observed)
+            readable_verdict_settled = _settle_readable(observed)
+            if not readable_verdict_settled:
+                # A readable ALIVE poll falls through into the very same stage
+                # machine instead of clearing it: handing it back to recovery used
+                # to clear the reap state and let a fresh watch arm a brand-new
+                # supervision deadline, so an intermittently raising handle could
+                # reset the absolute bound forever. Inside the ladder a readable
+                # alive answer is just "still alive": the monotonic stage budgets
+                # keep their progression toward kill.
+                pass
+        if readable_verdict_settled:
+            return True
 
         stage = state.get("stage")
         if stage == "terminate":
@@ -4920,7 +5220,8 @@ class LauncherWindow(QMainWindow):
                 code = _observed_code()
                 if code is None:
                     return _finish_failed(exc)
-                return _hand_off_readable(code)
+                return _settle_readable(code)
+            state["escalated"] = True
             state["stage"] = "terminate-wait"
             state["stage_deadline"] = time.monotonic() + _TERMINAL_QUIT_REAP_STAGE_BUDGET_S
             return False
@@ -4937,7 +5238,8 @@ class LauncherWindow(QMainWindow):
                 code = _observed_code()
                 if code is None:
                     return _finish_failed(exc)
-                return _hand_off_readable(code)
+                return _settle_readable(code)
+            state["escalated"] = True
             state["stage"] = "kill-wait"
             state["stage_deadline"] = time.monotonic() + _TERMINAL_QUIT_REAP_STAGE_BUDGET_S
             return False
@@ -5124,14 +5426,31 @@ class LauncherWindow(QMainWindow):
             # owner-bound retry keeps settling that exact owner; without it the
             # latched giving_up flag blocks every other settlement path and the
             # pending command strands with zero further callbacks.
-            LauncherWindow._schedule_owner_bound_settlement_retry(
+            if not LauncherWindow._schedule_owner_bound_settlement_retry(
                 self,
                 phase="old-engine-settlement",
                 failure=exc,
                 child_start_attempted=True,
                 settle_bridge=True,
                 raise_on_hold=False,
-            )
+            ):
+                # The retry declines exactly when nothing progress-capable is
+                # pending: a first poll() that raised before any worker,
+                # transport identity, receipt, or exit-wait deadline existed.
+                # The latch alone would then leave the possibly live OLD engine
+                # with zero callbacks, so arm the same bounded process-bound
+                # supervision used for an unobservable replacement: it re-arms
+                # while polls keep failing and hands this exact old handle to
+                # ordinary recovery (or bounded reaping) on the first readable
+                # verdict.
+                LauncherWindow._schedule_unowned_process_supervision(
+                    self,
+                    phase="old-engine-settlement",
+                    failure=exc,
+                    child_start_attempted=True,
+                    settle_bridge=True,
+                    raise_on_hold=False,
+                )
             return
         LauncherWindow._advance_restart_generation(self)
         try:
