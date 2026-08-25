@@ -1161,6 +1161,105 @@ def test_ladder_natural_exit_before_escalation_still_hands_back_to_recovery(
     assert len(handed_off) == 1, "the natural hand-off reports itself exactly once"
 
 
+def test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One readable TERMINAL code inside the ladder settles that child once.
+
+    This is the registered ladder guard for LAUNCHER-SHUTDOWN-RECEIPT-001's
+    unobservable-child family: a readable terminal exit code observed by the
+    reap ladder BEFORE any terminate()/kill() was issued belongs to ordinary
+    recovery, which owns the ONE settlement of THAT SAME owned child -- the
+    machine consumes itself, the exact incarnation is retired, and no queued
+    tick may re-settle or escalate afterwards.
+
+    Falsifying controls. Production-path mutation: routing the
+    pre-escalation readable verdict through ``_finish_forced_death`` (or
+    dropping the readable check so ``terminate()`` fires first) leaves
+    ``terminate_calls`` >= 1, keeps ``_restart_giving_up`` latched, and never
+    books the 3000 ms bounded restart -- each asserted below goes red.
+    Double-drive mutation: leaving the machine armed across the hand-off, or
+    letting a queued stale tick re-enter recovery, breaks the drive-exhaustion
+    and single-restart-booking assertions without any import-time error.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    launcher = _unobservable_child_host(calls, handle)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        deferred = LauncherWindow._recover_failed_engine_restart(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+        assert deferred is False
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the failing watch re-arms"
+        clock.advance(10.0)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the spent deadline arms the ladder"
+        machine = getattr(launcher, "_engine_unobservable_reap_state", None)
+        assert type(machine) is dict and machine["process"] is handle and machine["stage"] == "terminate", (
+            "the ladder is bound to THIS exact owned child"
+        )
+        assert launcher._engine_proc is handle, "the same owned child stays held going into settlement"
+
+        handle.readable = True
+        handle.readable_code = 7
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the readable terminal code settles"
+
+        assert handle.terminate_calls == 0 and handle.kill_calls == 0, (
+            "a readable terminal code before escalation never escalates"
+        )
+        assert getattr(launcher, "_engine_unobservable_reap_state", None) is None, (
+            "the ladder consumed itself at the settlement"
+        )
+        assert getattr(launcher, "_engine_unobservable_poll_supervision_process", None) is None, (
+            "no watch survives beside the completed hand-off"
+        )
+        assert _drive_next_supervision_tick(single_shot, cursor, clock) is False, (
+            "exactly once: no queued 200ms tick may re-settle or escalate the same child"
+        )
+
+        assert launcher._engine_proc is None, "that same owned child released exactly once"
+        assert launcher._engine_instance_id is None and launcher._engine_shutdown_capability is None, (
+            "the exact incarnation retired once"
+        )
+        assert launcher._engine_unsettled_incarnation is None, (
+            "a natural exit is never latched as a launcher-forced death"
+        )
+        assert launcher._restart_giving_up is False, "settled ownership releases the giving-up latch"
+        assert launcher._restart_pending is True and launcher._restart_attempts == 1, (
+            "one settlement books exactly one bounded restart"
+        )
+        assert single_shot.call_args_list[-1].args[0] == 3 * 1000, "the crash backoff owns the next attempt"
+        assert "close_stream" in calls, "the terminal child's readers were settled through the real cleanup"
+
+    assert handle.wait_frames == [] and handle.communicate_frames == [], (
+        "the whole bound advanced without ever blocking on wait()/communicate()"
+    )
+    handed_off = [
+        record for record in caplog.records if "became observable during bounded reaping" in record.getMessage()
+    ]
+    assert len(handed_off) == 1, "the readable hand-off reports itself exactly once"
+    forced_lines = [record for record in caplog.records if "Launcher-forced engine death" in record.getMessage()]
+    assert forced_lines == [], "a natural exit must never be reported as a launcher-forced death"
+    escalations = [record for record in caplog.records if "budget spent" in record.getMessage()]
+    assert len(escalations) == 1, "the deadline spend reports itself exactly once"
+
+
 def test_readable_alive_poll_keeps_the_same_reap_ladder_until_progress(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
