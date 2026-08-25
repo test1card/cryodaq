@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1523,9 +1523,26 @@ def test_terminal_missing_transport_key_worker_result_remains_retained() -> None
     host._close_engine_stderr_stream.assert_called_once_with()
 
 
-def test_direct_stop_retains_a_finished_worker_with_an_invalid_concrete_result() -> None:
-    """Normal quit must retain immutable evidence that receipt validation rejects."""
+def test_normal_quit_path_retains_invalid_result_and_stops_scheduling_settlement(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal quit must retain immutable evidence, settle readers once, then hold.
 
+    Normal quit reaches ``_stop_engine`` through ``_do_shutdown``, whose
+    ``_shutdown_incomplete`` ladder used to reschedule itself unconditionally: the
+    invalid result is immutable, so every scheduled retry re-entered the same
+    refusal and repeated the unsettled-owner error forever. Driving the REAL quit
+    path must retain the rejected worker, never promote the invalid result into a
+    verified receipt, and -- once this exact worker is latched unreadable --
+    schedule no further settlement callback. Suppression alone used to strand the
+    terminal child's readiness/stderr readers behind that HOLD: the terminal
+    decision must first settle them exactly once, through the real reader
+    settlement, and a driven re-entry repeats neither that cleanup nor the
+    underlying evidence diagnosis.
+    """
+
+    import cryodaq.launcher as module
     from cryodaq.launcher import LauncherWindow
 
     process = _NonzeroExitProcess(1)
@@ -1536,14 +1553,177 @@ def test_direct_stop_retains_a_finished_worker_with_an_invalid_concrete_result()
     worker.result = {"ok": True}
     host._engine_shutdown_worker = worker
 
-    with pytest.raises(RuntimeError, match="receipt is missing or mismatched"):
-        LauncherWindow._stop_engine(host)
+    main_window = MagicMock()
+    main_window.settle_owned_workers.return_value = True
+    host._main_window = main_window
+    host._stop_assistant = MagicMock()
+    host._alarm_timer = None
+    host._stop_engine_down_alarm = MethodType(LauncherWindow._stop_engine_down_alarm, host)
+    host._invalidate_launcher_status_authority = MagicMock()
+    host._reset_periodic_reporting_unknown = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    host._invalidate_engine_producer = MethodType(LauncherWindow._invalidate_engine_producer, host)
+    host._show_engine_down_banner = MagicMock()
 
-    assert host._engine_shutdown_worker is worker, "rejected evidence must remain attached to its exact worker"
-    assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
-    assert host._engine_shutdown_receipt is None, "invalid evidence must not be promoted into a verified receipt"
-    assert host._engine_proc is process
-    bridge.send_command.assert_not_called()
+    ready_read_fd, ready_child_write_fd = os.pipe()
+    ready_stream = os.fdopen(ready_read_fd, "rb", buffering=0)
+    ready_owner = module._ChildReadyStreamOwner(ready_stream)
+    host._child_ready_write_fd_owner = None
+    host._child_ready_stream_owner = ready_owner
+    host._engine_ready_thread = None
+    host._replay_ready_thread = None
+    host._engine_stderr_thread = None
+    host._engine_stderr_acquisition_owner = None
+    host._engine_stderr_stream_owner = None
+    host._engine_stderr_logger = None
+    host._engine_stderr_handler = None
+
+    cleanup_events: list[str] = []
+    real_close_stream = LauncherWindow._close_engine_stderr_stream
+
+    def spying_close_stream(bound_host: SimpleNamespace) -> None:
+        cleanup_events.append("readers_settled")
+        real_close_stream(bound_host)
+
+    host._close_engine_stderr_stream = MethodType(spying_close_stream, host)
+
+    decision_events: list[str] = []
+    real_refused = LauncherWindow._refused_settlement_reaches_stable_hold
+
+    def spying_refused(bound_host: SimpleNamespace) -> bool:
+        decision_events.append("stable_hold_evaluated")
+        return real_refused(bound_host)
+
+    monkeypatch.setattr(LauncherWindow, "_refused_settlement_reaches_stable_hold", spying_refused)
+
+    try:
+        with (
+            caplog.at_level("ERROR", logger="cryodaq.launcher"),
+            patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+        ):
+            assert module.LauncherWindow._do_shutdown(host) is False
+
+            assert decision_events == ["stable_hold_evaluated"]
+            assert cleanup_events == ["readers_settled"], (
+                "the terminal no-retry decision settles the crashed-child readers exactly once"
+            )
+            assert ready_owner.closed is True, "the retained readiness stream owner reached exact settlement"
+            assert ready_stream.closed is True
+            assert host._child_ready_stream_owner is None
+            assert host._shutdown_terminal_engine_readers_settled is True
+            host._show_engine_down_banner.assert_not_called()
+
+            assert single_shot.call_count == 0, "an immutably refused engine must not arm another settlement callback"
+            assert host._shutdown_retry_pending is False
+            assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
+            assert set(host._shutdown_last_errors) == {"engine"}
+            assert host._shutdown_hold_audible is True, "the refused quit stays visibly held"
+
+            assert host._engine_shutdown_worker is worker, "rejected evidence must remain attached to its exact worker"
+            assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+            assert host._engine_shutdown_receipt is None, (
+                "invalid evidence must not be promoted into a verified receipt"
+            )
+            assert host._engine_proc is process
+            assert host._engine_instance_id == "a" * 32
+            assert host._engine_shutdown_capability == "b" * 64
+            assert host._engine_shutdown_request_id == "c" * 32
+            bridge.send_command.assert_not_called()
+
+            driven_reentries = 2
+            for _ in range(driven_reentries - 1):
+                assert module.LauncherWindow._do_shutdown(host) is False
+                assert single_shot.call_count == 0, "no pass may arm a callback over immutable evidence"
+
+            assert len(decision_events) == driven_reentries
+            assert cleanup_events == ["readers_settled"], "a driven pass never repeats the reader settlement"
+            assert ready_owner.closed is True
+            assert ready_stream.closed is True
+
+        unsettled_lines = [record for record in caplog.records if "remains unsettled" in record.getMessage()]
+        diagnoses = [record for record in caplog.records if "invalid concrete result" in record.getMessage()]
+        assert len(unsettled_lines) == driven_reentries, "each DRIVEN pass reports its own refusal, honestly"
+        assert len(diagnoses) == 1, f"the immutable diagnosis is spoken exactly once, got {len(diagnoses)}"
+
+        assert host._engine_shutdown_worker is worker
+        assert host._engine_proc is process
+    finally:
+        try:
+            os.close(ready_child_write_fd)
+        except OSError:
+            pass
+        if not ready_stream.closed:
+            ready_stream.close()
+
+
+def test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fail closed when the terminal quit HOLD cannot settle its readers.
+
+    An immutable engine-only refusal suppresses retries only after the terminal
+    child's readiness/stderr readers are settled. If that settlement itself
+    fails, committing the suppression would strand the stream owners behind a
+    HOLD no pass ever revisits: the ladder must stay armed instead, with the
+    failure visible as an operator-facing HOLD while every piece of refused
+    evidence stays retained.
+    """
+
+    import cryodaq.launcher as module
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(1)
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = {"ok": True}
+    host._engine_shutdown_worker = worker
+
+    main_window = MagicMock()
+    main_window.settle_owned_workers.return_value = True
+    host._main_window = main_window
+    host._stop_assistant = MagicMock()
+    host._alarm_timer = None
+    host._stop_engine_down_alarm = MethodType(LauncherWindow._stop_engine_down_alarm, host)
+    host._invalidate_launcher_status_authority = MagicMock()
+    host._reset_periodic_reporting_unknown = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    host._invalidate_engine_producer = MethodType(LauncherWindow._invalidate_engine_producer, host)
+    host._show_engine_down_banner = MagicMock()
+    host._close_engine_stderr_stream = MagicMock(side_effect=RuntimeError("injected reader settlement failure"))
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        assert module.LauncherWindow._do_shutdown(host) is False
+
+        assert single_shot.call_count == 1, "failed reader settlement keeps the retry ladder alive"
+        assert host._shutdown_retry_pending is True
+        assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
+        assert set(host._shutdown_last_errors) == {"engine"}
+        assert host._shutdown_hold_audible is True
+
+        assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False, (
+            "a failed settlement never latches the exactly-once marker"
+        )
+        assert host._engine_unsettled_incarnation == ("a" * 32, 1)
+        assert host._restart_giving_up is True
+        banner_text = host._show_engine_down_banner.call_args[0][0]
+        assert "readiness/stderr readers remain unsettled" in banner_text
+
+        assert host._engine_shutdown_worker is worker
+        assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+        assert host._engine_proc is process
+        assert host._engine_instance_id == "a" * 32
+        assert host._engine_shutdown_capability == "b" * 64
+        assert host._engine_shutdown_request_id == "c" * 32
+        assert host._engine_shutdown_receipt is None
+        bridge.send_command.assert_not_called()
+
+    unsettled_lines = [record for record in caplog.records if "remains unsettled" in record.getMessage()]
+    assert len(unsettled_lines) == 1
 
 
 def test_published_receipt_survives_the_blind_stop_handoff_catch() -> None:

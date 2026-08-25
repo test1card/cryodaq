@@ -3651,20 +3651,86 @@ class LauncherWindow(QMainWindow):
         would only repeat the same diagnosis, so that alone reaches the stable
         terminal HOLD. A running worker, or a parsed envelope still awaiting its
         late transport reply, remains progress-capable and must keep being polled.
+        A validated receipt left published by a worker the stop path already drained,
+        held beside an observed nonzero exit of the same child, is equally immutable:
+        the reply can never be re-sent and the exit code can never change, so polling
+        again would only repeat the same refusal. An open exit-wait budget or an
+        unreconciled transport identity keeps its progress-capable polling loop.
         """
 
         worker = getattr(self, "_engine_shutdown_worker", None)
-        if worker is None:
+        if worker is not None:
+            try:
+                worker_finished = worker.isFinished() is True
+            except Exception:
+                return False
+            return (
+                worker_finished
+                and getattr(self, "_engine_shutdown_transport_identity", None) is None
+                and getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+            )
+        if getattr(self, "_engine_shutdown_transport_identity", None) is not None:
+            return False
+        if getattr(self, "_engine_shutdown_receipt", None) is None:
+            return False
+        process = getattr(self, "_engine_proc", None)
+        if process is None:
             return False
         try:
-            worker_finished = worker.isFinished() is True
+            returncode = process.poll()
         except Exception:
             return False
-        return (
-            worker_finished
-            and getattr(self, "_engine_shutdown_transport_identity", None) is None
-            and getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is worker
-        )
+        return type(returncode) is int and returncode != 0
+
+    def _refused_quit_reaches_reader_settled_hold(self) -> bool:
+        """Gate the terminal quit HOLD behind exactly-once reader settlement.
+
+        ``_shutdown_incomplete`` suppresses retries only for an immutable
+        engine-only refusal. Unlike ``_handle_engine_exit``, whose refusal
+        sites settle the terminal crashed-child readers, the normal quit
+        ladder owned no other settlement call -- suppressing the last retry
+        without settling first stranded the readiness/stderr stream owners
+        behind a HOLD that no pass ever revisits. The terminal decision
+        therefore settles them first: exactly once per shutdown, only for an
+        observed terminal exit, never while the child is alive or its handle
+        is gone (a live child keeps owning its readers; its evidence is
+        already immutable). Settlement itself failing keeps the retry ladder
+        alive instead of committing the suppression.
+        """
+
+        if self._shutdown_terminal_engine_readers_settled:
+            return True
+        process = getattr(self, "_engine_proc", None)
+        if process is None:
+            return True
+        try:
+            returncode = process.poll()
+        except Exception:
+            return True
+        if type(returncode) is not int:
+            return True
+        owner_id = getattr(self, "_engine_instance_id", None)
+        if type(owner_id) is not str:
+            owner_id = "<unknown>"
+        try:
+            settled = LauncherWindow._settle_crashed_engine_readers_or_hold(
+                self,
+                owner_id=owner_id,
+                returncode=returncode,
+                phase="normal-quit-refusal",
+            )
+        except Exception as exc:
+            logger.error(
+                "Engine reader settlement raised during the terminal quit decision; "
+                "phase=normal-quit-refusal owner=%s exception=%s",
+                owner_id,
+                type(exc).__name__,
+            )
+            settled = False
+        if not settled:
+            return False
+        self._shutdown_terminal_engine_readers_settled = True
+        return True
 
     def _retire_observed_engine_incarnation(self) -> bool:
         """Release the identity of an incarnation whose exit was observed.
@@ -5844,6 +5910,8 @@ class LauncherWindow(QMainWindow):
                 setattr(self, name, default)
         if not hasattr(self, "_shutdown_hold_timer"):
             self._shutdown_hold_timer = None
+        if not isinstance(getattr(self, "_shutdown_terminal_engine_readers_settled", None), bool):
+            self._shutdown_terminal_engine_readers_settled = False
 
     def _beep_shutdown_hold_alarm(self) -> None:
         """Sound independently of the revoked runtime callback epoch."""
@@ -5948,7 +6016,10 @@ class LauncherWindow(QMainWindow):
                 type(error).__name__,
             )
         LauncherWindow._set_shutdown_tray_state(self, failed=True)
-        LauncherWindow._schedule_shutdown_retry(self)
+        if set(retained_errors) != {"engine"} or not LauncherWindow._refused_settlement_reaches_stable_hold(self):
+            LauncherWindow._schedule_shutdown_retry(self)
+        elif not LauncherWindow._refused_quit_reaches_reader_settled_hold(self):
+            LauncherWindow._schedule_shutdown_retry(self)
         return False
 
     def _quiesce_for_shutdown(self) -> dict[str, Exception]:
@@ -6276,7 +6347,17 @@ class LauncherWindow(QMainWindow):
             except Exception as exc:
                 self._show_engine_down_banner(f"HOLD: {exc}")
                 if LauncherWindow._refused_settlement_reaches_stable_hold(self):
-                    self._restart_giving_up = True
+                    owner_id = getattr(self, "_engine_instance_id", None)
+                    if type(owner_id) is not str:
+                        owner_id = "<unknown>"
+                    readers_settled = LauncherWindow._settle_crashed_engine_readers_or_hold(
+                        self,
+                        owner_id=owner_id,
+                        returncode=returncode,
+                        phase="deferred-shutdown-refusal",
+                    )
+                    if readers_settled:
+                        self._restart_giving_up = True
             return
         observed_owner_id = (
             getattr(self, "_replay_session_id", None)

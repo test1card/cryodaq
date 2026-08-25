@@ -1621,6 +1621,154 @@ def test_config_error_health_handler_latches_terminal_hold_for_immutable_shutdow
     assert single_shot.call_count == 0
 
 
+def _health_tick_launcher(calls: list[str]) -> SimpleNamespace:
+    """An exited owned launcher dressed for driving the REAL ``_check_engine_health``."""
+
+    host = _exited_owned_launcher(calls, 9)
+    host._assistant_enabled = False
+    host._bridge_restart_fault = False
+    host._bridge_restart_hold = False
+    host._tray_only = True
+    host._clear_engine_down_banner = MagicMock(name="clear_banner")
+    host._invalidate_launcher_status_authority = MagicMock(name="invalidate_authority")
+    host._capture_launcher_status_authority = MagicMock(return_value=None, name="capture_authority")
+    host._last_safety_state = "ready"
+    host._last_alarm_count = 0
+    host._safety_status_generation = 11
+    host._annunciation_status_generation = 13
+    host._safety_worker = None
+    host._annunciation_worker = None
+    host._periodic_reporting_fault = False
+    host._last_reading_time = 10.0
+    host._tray_icon_green = "green"
+    host._tray_icon_yellow = "yellow"
+    host._tray_icon_red = "red"
+    host._tray = SimpleNamespace(setIcon=MagicMock(), setToolTip=MagicMock(), isVisible=lambda: False)
+    return _bind_launcher_methods(host, "_is_engine_alive", "_handle_engine_exit")
+
+
+@pytest.mark.parametrize(
+    "evidence_case",
+    ["absent-result", "malformed-unknown-outcome", "invalid-concrete-result"],
+)
+def test_deferred_refusal_settles_crashed_child_readers_before_the_immutable_latch(
+    evidence_case: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A terminal stable HOLD must not strand the crashed child's readers.
+
+    When a finished shutdown worker's result is absent, malformed, or invalid,
+    ``_stop_engine`` refuses and the deferred-settlement catch latched the stable
+    terminal HOLD WITHOUT settling anything. The latch stops every later health
+    tick from re-entering this handler, so the readiness/stderr reader settlement,
+    stream owners, and stderr log handler were stranded behind a HOLD the launcher
+    itself had made permanent. Driving the REAL health tick twice must settle the
+    readers exactly once -- before the latch, with the rejected worker and its
+    authority evidence retained verbatim -- keep the second tick completely inert,
+    and schedule no replacement.
+    """
+
+    calls: list[str] = []
+    host = _health_tick_launcher(calls)
+    if evidence_case == "absent-result":
+        worker = _ShutdownWorker(settles=True)
+    elif evidence_case == "malformed-unknown-outcome":
+        worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+        worker.result.update({"generation": "five"})
+    else:
+        worker = _ShutdownWorker(settles=True)
+        worker.result = {"ok": True}
+    host._engine_shutdown_worker = worker
+    host._engine_shutdown_request_id = "c" * 32
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._check_engine_health(host)
+
+        assert host._restart_giving_up is True, "the immutable result must latch on its first refused pass"
+        assert calls.count("close_stream") == 1, "the crashed child's readers settle before that latch"
+        assert calls.index("banner") < calls.index("close_stream")
+        assert host._engine_shutdown_worker is worker
+        assert host._engine_proc is not None
+
+        LauncherWindow._check_engine_health(host)
+
+    deferred_exit_errors = [
+        record for record in caplog.records if "deferred shutdown settlement" in record.getMessage()
+    ]
+    assert len(deferred_exit_errors) == 1, f"the latched HOLD must not re-enter the handler: {deferred_exit_errors}"
+    assert calls.count("close_stream") == 1, "a second tick must find nothing left to strand or repeat"
+    assert calls.count("banner") == 1, "and must not refresh the HOLD banner"
+    single_shot.assert_not_called()
+    assert host._restart_giving_up is True
+    assert host._engine_shutdown_worker is worker, "the rejected worker stays retained and visibly down"
+    assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+    assert host._engine_shutdown_receipt is None, "invalid evidence is never promoted into a verified receipt"
+    assert host._engine_instance_id == "a" * 32, "no authority evidence is released on this HOLD"
+    assert host._engine_proc is not None, "the observed terminal handle stays available"
+    host._bridge.reconcile_late_result.assert_not_called()
+
+
+def test_drained_verified_receipt_with_nonzero_exit_latches_the_terminal_hold_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A published exact receipt plus a nonzero observed exit refuse terminally.
+
+    ``_stop_engine`` validates the finished worker's exact receipt, publishes it,
+    drains the worker, then rejects the nonzero exit code. The stable-hold
+    predicate used to demand the (now drained) worker, so every health tick
+    revalidated the same immutable receipt/exit pair, repeated the exit error and
+    the HOLD banner, and never latched ``_restart_giving_up``. Treating the
+    retained verified receipt plus the observed nonzero exit as terminal
+    settlement refusal makes the first tick settle the crashed child's readers and
+    latch exactly once, after which every tick is inert -- receipt, drained-worker
+    slot, and incarnation identity retained verbatim.
+    """
+
+    calls: list[str] = []
+    host = _health_tick_launcher(calls)
+    receipt = _exact_shutdown_receipt("c" * 32)
+    worker = _ShutdownWorker(settles=True)
+    worker.result = dict(receipt)
+    host._engine_shutdown_worker = worker
+    host._engine_shutdown_request_id = "c" * 32
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.time.monotonic", return_value=10.0),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._check_engine_health(host)
+
+        assert host._restart_giving_up is True, "receipt plus nonzero exit is a terminal settlement refusal"
+        assert host._engine_shutdown_receipt == receipt, "the verified receipt stays published"
+        assert host._engine_shutdown_worker is None, "the drained worker slot stays empty"
+        assert calls.count("close_stream") == 1, "reader cleanup precedes the latch"
+        assert calls.index("banner") < calls.index("close_stream")
+
+        LauncherWindow._check_engine_health(host)
+
+    deferred_exit_errors = [
+        record for record in caplog.records if "deferred shutdown settlement" in record.getMessage()
+    ]
+    assert len(deferred_exit_errors) == 1, f"no tick may repeat the immutable refusal: {deferred_exit_errors}"
+    assert host._restart_giving_up is True
+    assert calls.count("close_stream") == 1, "later ticks stay inert"
+    assert calls.count("banner") == 1, "and do not repeat the HOLD banner"
+    assert host._engine_shutdown_receipt == receipt
+    assert host._engine_shutdown_worker is None
+    assert host._engine_instance_id == "a" * 32, "identity stays published so the spawn preflight keeps refusing"
+    assert host._engine_shutdown_capability == "b" * 64
+    assert host._engine_proc is not None, "the terminal handle stays available for exact re-settlement"
+    single_shot.assert_not_called()
+    host._bridge.reconcile_late_result.assert_not_called()
+
+
 def test_lost_owned_engine_handle_preserves_hold_and_blocks_restart_and_quit() -> None:
     """No handle and no exit code is the case that must still HOLD.
 
@@ -2537,42 +2685,72 @@ def test_verified_receipt_with_observed_nonzero_exit_keeps_owner_bound_settlemen
     launcher._bridge.shutdown.assert_called_once()
 
 
-def test_health_tick_routes_a_post_receipt_exit_through_the_stop_path() -> None:
-    """The health tick must not convert a post-receipt exit into a replacement.
+def test_health_tick_routes_a_post_receipt_exit_through_the_stop_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A retained verified receipt beside an observed nonzero exit latches HOLD once.
 
-    With the worker already released and a verified receipt retained, an
-    observed nonzero exit belongs to the receipt's own exit-code validation.
-    The tick re-enters the owner-bound stop path and surfaces its refusal;
-    no producer invalidation, no retirement, no backoff slot, no replacement.
+    With the worker already released and a verified receipt retained, an observed
+    nonzero exit can never change by polling again: the reply cannot be re-sent and
+    the exit code is final (Codex finding P2). The tick routes it through the
+    owner-bound stop path, whose refusal settles the crashed child's readers BEFORE
+    the stable-hold latch -- observed directly at the cleanup call, while the latch
+    is still clear -- then latches ``_restart_giving_up`` exactly once. A second real
+    health tick is inert: no repeated banner, diagnosis error, cleanup, stop-path
+    re-entry, or scheduled callback, and no loss of receipt, terminal process handle,
+    incarnation identity, or shutdown capability.
     """
 
     calls: list[str] = []
-    launcher = _exited_owned_launcher(calls, 9)
-    launcher._engine_proc = SimpleNamespace(poll=lambda: 1)
-    launcher._engine_shutdown_receipt = {"ok": True}
+    host = _health_tick_launcher(calls)
+    host._engine_proc = SimpleNamespace(poll=lambda: 1)
+    terminal_handle = host._engine_proc
+    host._engine_shutdown_receipt = {"ok": True}
     banners: list[str] = []
-    launcher._show_engine_down_banner = banners.append
+    host._show_engine_down_banner = banners.append
+    latch_at_cleanup: list[bool] = []
+
+    def _cleanup_observing_latch() -> None:
+        calls.append("close_stream")
+        latch_at_cleanup.append(host._restart_giving_up)
 
     def _receipt_bound_stop() -> None:
         calls.append("stop_engine")
         raise RuntimeError("engine exited without a clean teardown receipt; launcher remains in HOLD")
 
-    launcher._stop_engine = _receipt_bound_stop
+    host._close_engine_stderr_stream = _cleanup_observing_latch
+    host._stop_engine = _receipt_bound_stop
 
     with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
         patch("cryodaq.launcher.time.monotonic", return_value=10.0),
         patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
     ):
-        LauncherWindow._handle_engine_exit(launcher)
+        LauncherWindow._check_engine_health(host)
 
-    assert calls.count("stop_engine") == 1
-    assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
-    assert launcher._engine_shutdown_receipt == {"ok": True}, "the verified receipt must not be cleared"
-    assert launcher._engine_proc is not None
+        assert host._restart_giving_up is True, "the immutable receipt/exit pair must reach a stable terminal refusal"
+        assert latch_at_cleanup == [False], "reader cleanup ran before the terminal latch"
+        assert calls.count("close_stream") == 1
+        assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
+
+        LauncherWindow._check_engine_health(host)
+
+    deferred_exit_errors = [
+        record for record in caplog.records if "deferred shutdown settlement" in record.getMessage()
+    ]
+    assert len(deferred_exit_errors) == 1, f"a second tick must not repeat the refusal: {deferred_exit_errors}"
+    assert host._restart_giving_up is True
+    assert calls.count("stop_engine") == 1, "the latched HOLD must not re-enter the owner-bound stop path"
+    assert calls.count("close_stream") == 1, "a second tick must find nothing left to clean"
+    assert len(banners) == 1, "and must not refresh the HOLD banner"
+    assert host._engine_shutdown_receipt == {"ok": True}, "the verified receipt must not be cleared"
+    assert host._engine_proc is terminal_handle, "the terminal handle stays available and is never replaced"
+    assert host._engine_instance_id == "a" * 32, "identity stays published so the spawn preflight keeps refusing"
+    assert host._engine_shutdown_capability == "b" * 64
     assert "invalidate" not in calls, "producer authority is untouched while settlement pends"
     assert single_shot.call_count == 0, "the owner-bound stop path schedules no replacement"
-    assert launcher._restart_giving_up is False
-    assert launcher._restart_attempts == 0
+    assert host._restart_attempts == 0
+    host._bridge.reconcile_late_result.assert_not_called()
 
 
 def test_health_tick_validates_a_finished_worker_receipt_before_retirement() -> None:
