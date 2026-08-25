@@ -295,6 +295,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_head_80e826fb_left_the_live_engine_unreaped_and_the_guard_failed_on_terminate_calls_zero_2026_08_25
     green_evidence: pending
+  - id: LAUNCHER-NORMAL-QUIT-RAISING-DECISION-FALSE-GREEN-351
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_shutdown_ownership.py::test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive
+    ci_partition: remaining
+    red_evidence: poll_and_reaper_exception_mutations_each_suppressed_the_retry_callback_and_failed_the_guard_2026_08_25
+    green_evidence: focused_guard_1_passed_shutdown_ownership_43_passed_and_governance_297_passed_2026_08_25
   - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
     status: open
     scope: product_contract
@@ -4352,6 +4360,8 @@ records:
       - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_live_child_is_boundedly_reaped_before_reader_settled_suppression
         ci_partition: remaining
       - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive
         ci_partition: remaining
       - node: tests/gui/shell/test_d7_1b_repair.py::test_finished_malformed_unknown_outcome_latches_terminal_hold_without_rescheduling
         ci_partition: gui

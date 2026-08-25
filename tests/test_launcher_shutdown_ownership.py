@@ -1812,6 +1812,126 @@ def test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive(
     assert len(unsettled_lines) == 1
 
 
+class _PollRaisingProcess:
+    """A child whose poll() fails; the launcher cannot observe its liveness."""
+
+    pid = 9313
+
+    def poll(self) -> int | None:
+        raise RuntimeError("injected poll failure")
+
+
+class _UnreapableLiveProcess:
+    """A live child whose bounded reaping fails inside terminate()."""
+
+    pid = 9314
+
+    def __init__(self) -> None:
+        self.alive = True
+        self.terminate_calls = 0
+
+    def poll(self) -> int | None:
+        return None
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        raise RuntimeError("injected terminate failure")
+
+
+def _refused_normal_quit_host(process: object) -> tuple[SimpleNamespace, MagicMock]:
+    """Build a host whose engine-only quit refusal is immutable and unreadable."""
+
+    from cryodaq.launcher import LauncherWindow
+
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = {"ok": True}
+    host._engine_shutdown_worker = worker
+
+    main_window = MagicMock()
+    main_window.settle_owned_workers.return_value = True
+    host._main_window = main_window
+    host._stop_assistant = MagicMock()
+    host._alarm_timer = None
+    host._stop_engine_down_alarm = MethodType(LauncherWindow._stop_engine_down_alarm, host)
+    host._invalidate_launcher_status_authority = MagicMock()
+    host._reset_periodic_reporting_unknown = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    host._invalidate_engine_producer = MethodType(LauncherWindow._invalidate_engine_producer, host)
+    host._show_engine_down_banner = MagicMock()
+    return host, bridge
+
+
+def test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A raising poll or a failing reaper must keep scheduling quit retries.
+
+    ``_refused_quit_reaches_reader_settled_hold`` returns False when the terminal
+    quit decision cannot observe the child: ``poll()`` itself raises, or the
+    bounded reaper fails while the child is still alive. Both False branches keep
+    ``_shutdown_incomplete`` arming retries; no other registered node drives either
+    one -- the live-child node reaps successfully and the reader-failure node starts
+    with an already-terminal child -- so flipping either branch to suppress retries
+    would strand a live engine behind a HOLD that nothing revisits while staying
+    green. This drives the real ``_do_shutdown`` path through both injections and
+    requires the retry callback to be armed again after every failed pass.
+    """
+
+    import cryodaq.launcher as module
+
+    def drive_and_require_rearm(process: object, branch_log_line: str) -> SimpleNamespace:
+        host, bridge = _refused_normal_quit_host(process)
+        with (
+            caplog.at_level("ERROR", logger="cryodaq.launcher"),
+            patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+        ):
+            assert module.LauncherWindow._do_shutdown(host) is False
+
+            assert single_shot.call_count == 1, "a failed decision must arm the retry callback"
+            assert host._shutdown_retry_pending is True
+            assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
+            assert set(host._shutdown_last_errors) == {"engine"}
+            assert host._shutdown_hold_audible is True
+            assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False, (
+                "an unobservable child never latches the exactly-once suppression marker"
+            )
+            assert getattr(host, "_engine_unsettled_incarnation", None) is None
+            host._close_engine_stderr_stream.assert_not_called()
+            host._show_engine_down_banner.assert_not_called()
+
+            assert host._engine_shutdown_worker.result == {"ok": True}
+            assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is host._engine_shutdown_worker
+            assert host._engine_shutdown_receipt is None
+            assert host._engine_proc is process
+            assert host._engine_instance_id == "a" * 32
+            assert host._engine_shutdown_capability == "b" * 64
+            assert host._engine_shutdown_request_id == "c" * 32
+            bridge.send_command.assert_not_called()
+
+            # The real retry timer fires before re-entry; apply exactly its first effect.
+            host._shutdown_retry_pending = False
+            assert module.LauncherWindow._do_shutdown(host) is False
+            assert single_shot.call_count == 2, "every failed pass must re-arm the retry callback"
+            assert host._shutdown_retry_pending is True
+            assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False
+            assert host._engine_proc is process
+
+        branch_lines = [record for record in caplog.records if branch_log_line in record.getMessage()]
+        assert len(branch_lines) == 2, "each driven pass reports its own unobservable-child failure"
+        return host
+
+    drive_and_require_rearm(_PollRaisingProcess(), "poll failed during the terminal quit decision")
+
+    reap_process = _UnreapableLiveProcess()
+    reap_host = drive_and_require_rearm(reap_process, "reaping failed during the terminal quit")
+    assert reap_process.alive is True, "the failing child stays alive across both passes"
+    assert reap_process.terminate_calls == 2, "the real reaper runs once per pass"
+    assert reap_host._engine_proc is reap_process, "a failed reap never releases the handle"
+
+
 def test_published_receipt_survives_the_blind_stop_handoff_catch() -> None:
     """A raising stop must not have its freshly published evidence retired generically.
 
