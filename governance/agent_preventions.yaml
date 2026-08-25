@@ -6744,7 +6744,7 @@ records:
     guard_owner: reviewer
     disposition_owner: reviewer
     consequence: The process believes logging exists, replays every held startup diagnostic into a sink that fails on all of them, and the failures are swallowed by logging's own error handling -- so the operator is left with an empty log and no reason for degraded presentation.
-    invariant: A diagnostic held from before logging existed is replayed only into a handler that has proved it can take a record -- the file handler by opening its file when it is built, the console handler by having a stream that is present and open.
+    invariant: A diagnostic held from before logging existed is replayed only into a handler that has proved it can take that record. Delivery state belongs to the exact record, retained records remain eligible after a partial recovery, and concurrent replay or deferral cannot exceed the bounded queue.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - AGENTS.md#architecture-and-extension-rules
@@ -6760,6 +6760,18 @@ records:
         ci_partition: gui
       - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_every_reason_this_module_gives_survives_to_the_log
         ci_partition: gui
-    automation_limit: The evidence below is content-addressed and local. The three guards are in the gui partition, which the hosted remaining partition does not run, so a hosted run cannot be cited for them.
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_a_delivered_theme_diagnostic_is_not_queued_by_a_concurrent_failed_emission
+        ci_partition: gui
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_an_undelivered_theme_diagnostic_survives_a_concurrent_successful_emission
+        ci_partition: gui
+      - node: tests/gui/test_a_colours_file_cannot_stop_the_program.py::test_a_foreign_thread_between_dispatch_and_decision_cannot_hide_a_failed_theme_record
+        ci_partition: gui
+      - node: tests/test_logging_setup.py::test_a_partially_successful_replay_does_not_strand_the_retained_prefix
+        ci_partition: remaining
+      - node: tests/test_logging_setup.py::test_arrivals_during_a_failing_replay_merge_under_the_hard_cap
+        ci_partition: remaining
+      - node: tests/test_logging_setup.py::test_a_thread_deferring_inside_an_active_replay_cannot_lift_the_cap
+        ci_partition: remaining
+    automation_limit: The evidence below is content-addressed and local. The theme guards run in the gui partition, and the queue guards run in the remaining partition. A hosted result is pending for the corrected exact head.
     red_evidence: with_only_production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_replaced_by_master_blob_30eda78ec923876f0a96dcb74970556af182fe94_all_three_guards_error_because_master_carries_no_deferral_mechanism_at_all_transcript_sha256_85c33e11b2d4cabd1ab3fa085f4030ca784a7e48c7681814081705e7f20de33a_and_the_two_narrow_controls_on_this_branch_each_reddened_exactly_the_guard_for_that_property_delay_true_transcript_sha256_3c952d42188db22bef278203db5248d33c2aa98e454307c9b81357676fddcdc8_and_console_check_removed_transcript_sha256_70c8922526e5f0b73ef1e50219a123ffc1264abaa93f948796d533b39b5e5a77
-    green_evidence: production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_with_guard_blob_2def5032dff4521689f0b3bb8106fba7b565642c_28_passed_transcript_sha256_66cf5d92b91282dadbf9ad9fd20b0cde436d85089f6ec1c64b5836d3952445cc
+    green_evidence: production_blob_5543f5308ec3ca82be581ec05ab0f24f55469172_with_guard_blob_2def5032dff4521689f0b3bb8106fba7b565642c_28_passed_transcript_sha256_66cf5d92b91282dadbf9ad9fd20b0cde436d85089f6ec1c64b5836d3952445cc_and_exact_dfc949a38436215957d81fff4c56be4fe9eb111c_53_focused_tests_passed_after_all_six_new_guards_failed_by_behavior_against_exact_e388bba1f961797f3de78319fe67d4dc9f64747e_production_bytes
