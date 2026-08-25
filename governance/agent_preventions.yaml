@@ -303,6 +303,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: poll_and_reaper_exception_mutations_each_suppressed_the_retry_callback_and_failed_the_guard_2026_08_25
     green_evidence: focused_guard_1_passed_shutdown_ownership_43_passed_and_governance_297_passed_2026_08_25
+  - id: LAUNCHER-CONSTRUCTION-LIVE-CHILD-REAP-FALSE-GREEN-352
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STARTUP-AUTHORITY-002
+    guard: tests/test_launcher_shutdown_ownership.py::test_construction_rollback_never_suppresses_over_a_live_engine
+    ci_partition: remaining
+    red_evidence: restoring_the_construction_failure_exemption_left_the_spawned_child_alive_and_failed_the_guard_2026_08_25
+    green_evidence: focused_guard_1_passed_shutdown_ownership_44_passed_and_adjacent_launcher_set_67_passed_2026_08_25
   - id: NARRATION-GUARD-LATE-DELIVERY-RESETS-SOURCE-CLOCK-FALSE-GREEN-340
     status: open
     scope: product_contract
@@ -4403,13 +4411,13 @@ records:
     status: open
     scope: product_contract
     authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
-    applies_to: Launcher child construction, live and replay readiness, refusal of unauthenticated external adoption, and assistant post-spawn ownership.
+    applies_to: Launcher child construction and rollback, live and replay readiness, refusal of unauthenticated external adoption, and assistant post-spawn ownership.
     classification: false_startup_success
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A foreign listener can be adopted as CryoDAQ, a descendant can retain a shared readiness stream, a loose replay status or protocol-missing mock can false-green startup, a failed pre-spawn step can publish phantom shutdown authority, or a post-spawn failure can abandon a live child handle.
-    invariant: Ports are observations only; unauthenticated external engines are never adopted; readiness uses one direct-child-only private pipe that descendants cannot retain plus a strict full-tuple REP challenge carrying the real protocol version; identities publish only after successful spawn; and every spawned process remains owned through terminal stop.
+    consequence: A foreign listener can be adopted as CryoDAQ, a descendant can retain a shared readiness stream, a loose replay status or protocol-missing mock can false-green startup, a failed pre-spawn step can publish phantom shutdown authority, or a construction rollback can suppress while its live child remains owned.
+    invariant: Ports are observations only; unauthenticated external engines are never adopted; readiness uses one direct-child-only private pipe that descendants cannot retain plus a strict full-tuple REP challenge carrying the real protocol version; identities publish only after successful spawn; and every spawned process remains owned through terminal stop, including construction rollback.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -4457,6 +4465,8 @@ records:
       - node: tests/test_launcher_engine_stderr.py::test_pre_spawn_logger_failure_cannot_publish_phantom_engine_authority
         ci_partition: remaining
       - node: tests/test_launcher_shutdown_ownership.py::test_assistant_post_spawn_failure_retains_process_until_exact_stop
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_construction_rollback_never_suppresses_over_a_live_engine
         ci_partition: remaining
       - node: tests/core/test_engine_launch_authority.py::test_complete_or_absent_launch_envelope_is_consumed_exactly_once
         ci_partition: core
