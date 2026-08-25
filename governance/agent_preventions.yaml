@@ -4439,6 +4439,24 @@ records:
         ci_partition: remaining
       - node: tests/test_launcher_shutdown_ownership.py::test_validated_receipt_with_retryable_reader_failure_keeps_its_polling_loop
         ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_normal_quit_bounded_reap_never_blocks_or_waits_on_the_qt_thread
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_terminal_quit_reap_failure_injections_keep_the_ladder_and_ownership
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_running_shutdown_worker_keeps_the_quit_ladder_without_starting_the_reap_machine
+        ci_partition: remaining
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_process_bound_supervision_settles_the_same_owned_child_once_observed
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_process_bound_supervision_hands_a_live_child_to_the_owned_stop_path
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_supervision_deadline_spent_escalates_to_owned_reap_ladder_until_explicit_failure
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_stale_ladder_tick_for_a_replaced_process_is_inert
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_owned_reap_ladder_never_blocks_or_waits_on_the_qt_thread
+        ci_partition: gui
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding
     green_evidence: pending
   - id: LAUNCHER-STARTUP-AUTHORITY-002
