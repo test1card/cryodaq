@@ -971,8 +971,28 @@ def _unknown_outcome_shutdown_worker(request_id: str, generation: int) -> _Shutd
     return worker
 
 
+def _exact_shutdown_receipt(request_id: str) -> dict[str, object]:
+    """The full receipt shape that only ``_stop_engine`` may validate."""
+
+    return {
+        "ok": True,
+        "schema": "cryodaq.engine_shutdown.v2",
+        "engine_instance_id": "a" * 32,
+        "request_id": request_id,
+        "off_evidence": {
+            "off_tier": "verified_off",
+            "channel_off_results": {"smua": "device_reported_off", "smub": "device_reported_off"},
+            "verified_off": True,
+        },
+        "teardown_requested": True,
+        "delivery_state": "dispatched",
+        "commit_state": "committed",
+        "proto": CLIENT_PROTOCOL_VERSION,
+    }
+
+
 def test_finished_shutdown_workers_unknown_outcome_is_reconciled_before_release() -> None:
-    """A finished worker's unknown-outcome receipt must hit the ledger before release.
+    """A finished worker's late reply must be validated before owner release.
 
     Dropping the reference without reconciling stranded the old launcher_shutdown in the
     bridge's outcome-unknown lane: recovery restarted the engine while that entry stayed
@@ -1002,11 +1022,59 @@ def test_finished_shutdown_workers_unknown_outcome_is_reconciled_before_release(
         phase="probe",
     )
 
-    assert settled is True
+    assert settled is False
     bridge.reconcile_late_result.assert_called_once_with("c" * 32, generation=5)
-    assert launcher._engine_shutdown_worker is None, "reconciled evidence may be released"
+    assert launcher._engine_shutdown_worker is None, "the drained worker may be released"
     assert launcher._engine_shutdown_transport_identity is None
-    assert launcher._engine_instance_id is None, "the owner retires only after reconciliation"
+    assert launcher._engine_shutdown_receipt == {"ok": True}, "the late reply must survive for validation"
+    assert launcher._engine_instance_id == "a" * 32, "reconciliation alone cannot retire the owner"
+    assert "exact validation" in launcher._engine_shutdown_hold_reason
+
+
+@pytest.mark.parametrize(("returncode", "settles"), [(0, True), (9, False)])
+def test_reconciled_late_shutdown_receipt_is_validated_with_terminal_exit(
+    returncode: int,
+    settles: bool,
+) -> None:
+    """A matching late reply still owes full receipt and exit-code validation."""
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, returncode)
+    launcher._engine_shutdown_request_id = "c" * 32
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    receipt = _exact_shutdown_receipt("c" * 32)
+    bridge.reconcile_late_result.return_value = LateCommandResult(
+        request_id="c" * 32,
+        generation=5,
+        reply=dict(receipt),
+    )
+    launcher._engine_shutdown_worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+
+    first_pass = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=returncode,
+        phase="probe",
+    )
+
+    assert first_pass is False, "transport reconciliation alone must never retire the owner"
+    assert launcher._engine_shutdown_worker is None
+    assert launcher._engine_shutdown_transport_identity is None
+    assert launcher._engine_shutdown_receipt == receipt
+    assert launcher._engine_instance_id == "a" * 32
+
+    if settles:
+        LauncherWindow._stop_engine(launcher)
+        assert launcher._engine_proc is None
+        assert launcher._engine_instance_id is None
+        assert launcher._engine_shutdown_receipt is None
+    else:
+        with pytest.raises(RuntimeError, match="exited without a clean teardown receipt"):
+            LauncherWindow._stop_engine(launcher)
+        assert launcher._engine_proc is not None
+        assert launcher._engine_instance_id == "a" * 32
+        assert launcher._engine_shutdown_receipt == receipt
 
 
 def test_unknown_outcome_without_its_late_reply_keeps_the_worker_and_retains_identity() -> None:
@@ -1881,11 +1949,12 @@ def _drain_bridge_unknown_owner(bridge: object, result: dict) -> None:
     assert bridge.reconcile_late_result(request_id, generation=result["generation"]) is not None
 
 
-def _settle_real_envelope_through_retirement(result: dict) -> tuple[object, SimpleNamespace]:
-    """Feed a real send_command envelope through the retirement settlement path.
+def _settle_real_envelope_through_receipt_handoff(result: dict) -> tuple[object, SimpleNamespace]:
+    """Feed a real send_command envelope through the receipt handoff path.
 
     Returns (reconcile-mock-carrying bridge, launcher). Asserts the launcher
-    reconciled the exact transport identity BEFORE releasing its owner.
+    reconciled the exact transport identity without releasing its owner on an
+    unvalidated late reply.
     """
 
     calls: list[str] = []
@@ -1908,14 +1977,15 @@ def _settle_real_envelope_through_retirement(result: dict) -> tuple[object, Simp
         phase="probe",
     )
 
-    assert settled is True
+    assert settled is False
     settle_bridge.reconcile_late_result.assert_called_once_with(
         result["request_id"],
         generation=result["generation"],
     )
-    assert launcher._engine_shutdown_worker is None, "reconciled evidence may be released"
+    assert launcher._engine_shutdown_worker is None, "the drained worker may be released"
     assert launcher._engine_shutdown_transport_identity is None
-    assert launcher._engine_instance_id is None, "the owner retires only after reconciliation"
+    assert launcher._engine_shutdown_receipt == {"ok": True}
+    assert launcher._engine_instance_id == "a" * 32, "the owner awaits exact receipt validation"
     return settle_bridge, launcher
 
 
@@ -1965,7 +2035,7 @@ def test_real_bridge_cancellation_unknown_envelope_is_reconciled_before_release(
     assert result["request_id"] in bridge._outcome_unknown
 
     try:
-        _settle_real_envelope_through_retirement(result)
+        _settle_real_envelope_through_receipt_handoff(result)
     finally:
         _drain_bridge_unknown_owner(bridge, result)
 
@@ -1992,7 +2062,7 @@ def test_real_bridge_timeout_unknown_envelope_is_reconciled_before_release(
     assert result["request_id"] in bridge._outcome_unknown
 
     try:
-        _settle_real_envelope_through_retirement(result)
+        _settle_real_envelope_through_receipt_handoff(result)
     finally:
         monkeypatch.undo()
         _drain_bridge_unknown_owner(bridge, result)
@@ -2028,7 +2098,7 @@ def test_real_bridge_safe_transport_failure_envelope_is_reconciled_before_releas
     assert result["request_id"] in bridge._outcome_unknown
 
     try:
-        _settle_real_envelope_through_retirement(result)
+        _settle_real_envelope_through_receipt_handoff(result)
     finally:
         request_id = result["request_id"]
         with bridge._pending_lock:
@@ -2091,12 +2161,14 @@ def test_extended_unknown_envelopes_refuse_malformed_evidence() -> None:
             returncode=9,
             phase="probe",
         )
-        assert settled is True, label
+        assert settled is False, label
         settle_bridge.reconcile_late_result.assert_called_once_with(
             receipt["request_id"],
             generation=receipt["generation"],
         )
         assert launcher._engine_shutdown_worker is None, label
+        assert launcher._engine_shutdown_receipt == {"ok": True}, label
+        assert launcher._engine_instance_id == "a" * 32, label
 
     malformed_overrides = [
         ("bad-delivery-state-type", {"delivery_state": 42}),

@@ -4313,6 +4313,20 @@ records:
         ci_partition: gui
       - node: tests/gui/shell/test_d7_1b_repair.py::test_interrupted_manual_restart_schedules_owner_bound_settlement_continuation
         ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_foreign_error_codes_in_safe_transport_envelopes_stay_hold_evidence
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_missing_transport_key_is_hold_evidence_not_keyerror
+        ci_partition: gui
+      - node: tests/gui/shell/test_d7_1b_repair.py::test_reconciled_late_shutdown_receipt_is_validated_with_terminal_exit
+        ci_partition: gui
+      - node: tests/test_launcher_shutdown_ownership.py::test_terminal_replacement_with_a_finished_valid_receipt_settles_through_the_stop_path
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_finished_receipt_on_a_nonzero_terminal_exit_keeps_its_receipt_bound_settlement
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_terminal_missing_transport_key_worker_result_remains_retained
+        ci_partition: remaining
+      - node: tests/test_launcher_shutdown_ownership.py::test_published_receipt_survives_the_blind_stop_handoff_catch
+        ci_partition: remaining
       - node: tests/test_launcher_backoff.py::test_observed_exit_is_counted_only_after_its_shutdown_worker_settles
         ci_partition: remaining
     red_evidence: windows_terminate_cleanup_bypass_and_hold_latch_process_reaper_short_circuit_pending_artifact_binding

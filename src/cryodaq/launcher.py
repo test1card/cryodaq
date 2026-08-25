@@ -3544,7 +3544,18 @@ class LauncherWindow(QMainWindow):
                     "so this incarnation cannot be retired"
                 )
                 return False
+            # Reconciliation proves which transport request replied. It does not
+            # prove that the reply is a valid engine-shutdown receipt or that the
+            # child exited cleanly. Preserve the reply, release only the drained
+            # worker/transport slot, and let the normal receipt-aware stop path
+            # validate both properties on the next settlement pass.
+            self._engine_shutdown_receipt = dict(late_result.reply)
             self._engine_shutdown_transport_identity = None
+            self._engine_shutdown_worker = None
+            self._engine_shutdown_hold_reason = (
+                "the shutdown command was reconciled, but its receipt and process exit still require exact validation"
+            )
+            return False
         self._engine_shutdown_hold_reason = None
         self._engine_shutdown_worker = None
         return True
