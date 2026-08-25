@@ -47,6 +47,29 @@ from scripts import soak_mock_stack_runner as runner  # noqa: E402
 _POSIX_EVIDENCE = pytest.mark.skipif(os.name != "posix", reason="evidence capability is POSIX-only")
 
 
+class _ManifestBoundaryEvidence:
+    """The minimal observable boundary past the profile refusals.
+
+    Production touches evidence exactly once before the soak starts: it writes the
+    manifest naming the profile that ran (`_run_owned` -> `write_manifest`). This
+    stand-in records that call and THEN raises the controlled foundation error, so a
+    caught `_RunnerFoundationError` proves real production crossed BOTH refusal
+    predicates and reached `write_manifest`. The `object()` this test used to pass
+    made the outcome machine-dependent: hosts that cannot activate the runner stopped
+    early and proved nothing, while the exact worktree died on `AttributeError` at
+    the very boundary this test exists to observe.
+    """
+
+    __slots__ = ("manifest",)
+
+    def __init__(self) -> None:
+        self.manifest: dict[str, object] | None = None
+
+    def write_manifest(self, payload: dict[str, object]) -> None:
+        self.manifest = payload
+        raise runner._RunnerFoundationError("deterministic manifest boundary stop")
+
+
 def _runner_at_the_selection_boundary(monkeypatch):
     """A real `_PosixSoakRunner`, called at the boundary the profile check lives on.
 
@@ -137,27 +160,41 @@ def test_a_long_profile_is_refused_by_the_runner_for_the_contract_reason(monkeyp
             instance._run_owned(object(), soak.profile(name))
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the reviewed short path activates only on POSIX")
 def test_the_short_profile_passes_the_selection_boundary(monkeypatch) -> None:
     """The refusals must not swallow the profile that IS allowed.
 
-    A file that only proves refusals would pass with a runner that refuses everything. The
-    short profile therefore has to get PAST this boundary; it fails later, on the evidence
-    object this test deliberately does not build.
+    A file that only proves refusals would pass with a runner that refuses everything.
+    The short profile therefore has to get PAST both refusal predicates and reach the
+    manifest boundary, and the recorded manifest proves it happened on THIS host.
+
+    A host outside the reviewed activation path (missing exact `.venv` interpreter,
+    locked-psutil mismatch, ...) stops production at a documented
+    `_RunnerActivationDisabled` gate before the boundary; that outcome proves nothing
+    about the refusals, so it is named and skipped rather than scored as a pass. Any
+    foundation refusal BEFORE the boundary -- including a future third predicate
+    swallowing the short profile -- fails the `manifest is not None` assertion below,
+    which is exactly what this file exists to catch.
     """
 
     instance = _runner_at_the_selection_boundary(monkeypatch)
+    evidence = _ManifestBoundaryEvidence()
 
-    # WHICH later failure arrives depends on the machine, so it must not be pinned. On this
-    # host the next check to speak is the process start identity; on the hosted runner the
-    # exported candidate tree is not a Git worktree and that check speaks first. Pinning the
-    # first message I happened to see turned a green test here into a red one there.
-    #
-    # What this test is FOR is that the short profile passes the two refusals, so it names
-    # the exception CLASS -- specific, as the registered guard requires -- and then asserts
-    # the message is neither refusal.
-    with pytest.raises(runner._RunnerFoundationError) as caught:
-        instance._run_owned(object(), soak.profile("short"))
-    message = str(caught.value)
+    blocked_by: runner._RunnerActivationDisabled | None = None
+    refused_by: runner._RunnerFoundationError | None = None
+    try:
+        instance._run_owned(evidence, soak.profile("short"))
+    except runner._RunnerActivationDisabled as exc:
+        blocked_by = exc
+    except runner._RunnerFoundationError as exc:
+        refused_by = exc
+
+    if blocked_by is not None:
+        pytest.skip(f"this host cannot activate the reviewed short path: {blocked_by}")
+    assert evidence.manifest is not None, f"production stopped before the evidence boundary: {refused_by!r}"
+    assert evidence.manifest.get("profile") == "short", evidence.manifest
+    assert refused_by is not None
+    message = str(refused_by)
     assert "not one of the reviewed profiles" not in message, message
     assert "never seal" not in message, message
 
