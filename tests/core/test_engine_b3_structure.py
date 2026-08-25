@@ -30,11 +30,30 @@ def test_run_engine_contains_no_nested_defs_or_lambdas() -> None:
 
 
 def test_engine_wiring_submodules_import_without_engine_reverse_cycle() -> None:
+    # The probe records, in order, the first import-machinery request for each
+    # tracked name while the REAL production entry chain runs in a fresh
+    # interpreter. The owned SQLite binding must be requested before pyarrow:
+    # on Ubuntu 22.04 conda Python the reverse order loads system libstdc++
+    # first and the fresh engine import dies with a missing CXXABI_1.3.15
+    # symbol. This assertion fails on every platform if that order is
+    # reversed again, not only where the ABI failure manifests.
     snippet = (
         "import sys\n"
+        "_order = []\n"
+        "class _OrderProbe:\n"
+        "    def find_spec(self, fullname, path=None, target=None):\n"
+        "        if fullname in ('pyarrow', 'cryodaq.storage._sqlite') and fullname not in _order:\n"
+        "            _order.append(fullname)\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, _OrderProbe())\n"
         "import cryodaq.engine_wiring.runtime_tasks\n"
         "import cryodaq.engine_wiring.supervision\n"
         "assert 'cryodaq.engine' not in sys.modules\n"
+        "missing = {'pyarrow', 'cryodaq.storage._sqlite'} - set(_order)\n"
+        "assert not missing, f'production import never loaded: {sorted(missing)}'\n"
+        "assert _order.index('cryodaq.storage._sqlite') < _order.index('pyarrow'), (\n"
+        "    f'owned SQLite binding must load before pyarrow, saw {_order}'\n"
+        ")\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", snippet],

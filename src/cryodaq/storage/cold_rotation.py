@@ -23,11 +23,19 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+# Owned-SQLite-first ABI order (load-bearing): on Ubuntu 22.04 conda Python,
+# importing pyarrow first loads the system libstdc++.so.6, and every library
+# loaded afterwards that needs conda ICU then dies with `CXXABI_1.3.15 not
+# found`. A fresh engine startup imports this module, so the order below is
+# what keeps the process alive; tests/core/test_engine_b3_structure.py fails
+# if it is reversed.
+# isort: off
+from cryodaq.storage._sqlite import sqlite3
 import pyarrow as pa
 import pyarrow.parquet as pq
+# isort: on
 
 from cryodaq.core.atomic_write import atomic_write_text
-from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import validate_archive_index_authority
 from cryodaq.storage.descriptor_archive import (
     MAX_ARCHIVE_DESCRIPTORS,
