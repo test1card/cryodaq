@@ -1380,3 +1380,181 @@ def test_terminal_child_with_published_identity_enters_owner_bound_reconciliatio
     bridge.send_command.assert_not_called()
 
     assert host._engine_instance_id == "a" * 32
+
+
+class _SequencePollProcess:
+    """A child whose poll() answers from a fixed script, then repeats the last."""
+
+    pid = 9312
+
+    def __init__(self, outcomes: list[int | None]) -> None:
+        self._outcomes = list(outcomes)
+        self._index = 0
+
+    def poll(self) -> int | None:
+        outcome = self._outcomes[min(self._index, len(self._outcomes) - 1)]
+        self._index += 1
+        return outcome
+
+
+class _FinishedShutdownWorker:
+    """Stand-in for a drained ``_EngineShutdownWorker``: finished, result attached."""
+
+    def isFinished(self) -> bool:  # noqa: N802 -- Qt's spelling
+        return True
+
+
+def _host_with_finished_receipt_worker(request_id: str) -> tuple[object, MagicMock, object]:
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(1)
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = request_id
+    worker = _FinishedShutdownWorker()
+    worker.result = _shutdown_receipt(request_id)
+    host._engine_shutdown_worker = worker
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    return host, bridge, process
+
+
+def test_terminal_replacement_with_a_finished_valid_receipt_settles_through_the_stop_path() -> None:
+    """A finished retained worker is receipt evidence, so the stop path owns it.
+
+    The replacement turned terminal while its retained shutdown worker had just
+    finished with a valid receipt that nothing had consumed yet. Because the
+    deferred-settlement condition required an EMPTY worker slot, generic
+    observed-exit retirement drained that worker through
+    ``_settle_engine_shutdown_worker`` -- which never checks the receipt against
+    the engine identity or the exit code -- and released the incarnation on
+    unvalidated evidence. The finished-worker state must route through
+    ``_stop_engine`` instead, whose full receipt validation and exit-code verdict
+    settle the incarnation together.
+    """
+
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(0)
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = _shutdown_receipt("c" * 32)
+    host._engine_shutdown_worker = worker
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+
+    settled, exit_code, error = LauncherWindow._settle_replacement_child(host, phase="probe")
+
+    assert (settled, exit_code, error) == (True, None, None)
+    assert host._engine_proc is None, "a validated receipt with a clean exit releases the handle"
+    for name in (
+        "_engine_instance_id",
+        "_engine_shutdown_capability",
+        "_engine_shutdown_request_id",
+        "_engine_shutdown_transport_identity",
+        "_engine_shutdown_receipt",
+    ):
+        assert getattr(host, name) is None, name
+    bridge.send_command.assert_not_called()
+
+
+def test_finished_receipt_on_a_nonzero_terminal_exit_keeps_its_receipt_bound_settlement() -> None:
+    """The finished worker's receipt and the exit code are validated together.
+
+    A verified shutdown receipt sitting unread in a just-finished worker used to
+    be discarded by generic observed-exit retirement when the replacement was
+    already terminal: no schema/identity/verified-OFF check ever ran and the
+    nonzero code was absorbed as an ordinary crash. Routing the state through
+    ``_stop_engine`` makes the same pass refuse: the receipt is republished and
+    the handle retained because a teardown that committed must still answer for
+    its exit code.
+    """
+
+    from cryodaq.launcher import LauncherWindow
+
+    host, bridge, process = _host_with_finished_receipt_worker("c" * 32)
+
+    settled, exit_code, error = LauncherWindow._settle_replacement_child(host, phase="probe")
+
+    assert settled is False
+    assert exit_code is None
+    assert isinstance(error, RuntimeError)
+    assert "exited without a clean teardown receipt" in str(error)
+    assert host._engine_shutdown_receipt == _shutdown_receipt("c" * 32), "the validated receipt stays published"
+    assert host._engine_shutdown_transport_identity is None
+    assert host._engine_proc is process, "the terminal handle stays available for exact re-settlement"
+    assert host._engine_shutdown_worker is None, "the stop path consumed the drained worker"
+    bridge.send_command.assert_not_called()
+    host._close_engine_stderr_stream.assert_not_called()
+
+
+def test_terminal_missing_transport_key_worker_result_remains_retained() -> None:
+    """A failed stop handoff keeps malformed unknown-outcome evidence across later passes."""
+
+    from cryodaq.launcher import LauncherWindow
+
+    process = _SequencePollProcess([None, 1])
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after timeout",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "dispatched": True,
+        "outcome_unknown": True,
+        "delivery_state": "dispatched",
+    }
+    host._engine_shutdown_worker = worker
+    host._show_engine_down_banner = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+
+    first = LauncherWindow._settle_replacement_child(host, phase="probe")
+    second = LauncherWindow._settle_replacement_child(host, phase="probe-again")
+
+    assert first[0] is False and first[1] is None and isinstance(first[2], RuntimeError)
+    assert second[0] is False and second[1] == 1 and isinstance(second[2], RuntimeError)
+    assert host._engine_shutdown_worker is worker, "the immutable result must survive every refusal"
+    assert host._engine_proc is process, "generic retirement must never consume the terminal child"
+    assert host._engine_instance_id == "a" * 32
+    bridge.send_command.assert_not_called()
+    host._close_engine_stderr_stream.assert_called_once_with()
+
+
+def test_published_receipt_survives_the_blind_stop_handoff_catch() -> None:
+    """A raising stop must not have its freshly published evidence retired generically.
+
+    ``_stop_engine`` consumed the finished worker, validated and published the
+    receipt, then raised the bounded not-yet-exited HOLD. The catch used to
+    re-read the child, see it terminal, and hand the exit to generic observed-exit
+    retirement -- erasing the receipt ``_stop_engine`` had just published and
+    booking the loss as an ordinary crash settlement. When deferred settlement
+    state exists after the handoff, the catch must stay on the owner-bound stop
+    path and surface the error instead.
+    """
+
+    from cryodaq.launcher import LauncherWindow
+
+    process = _SequencePollProcess([None, None, None, 1])
+    bridge = MagicMock()
+    host = _live_engine_host(process, bridge)
+    host._engine_shutdown_request_id = "c" * 32
+    worker = _FinishedShutdownWorker()
+    worker.result = _shutdown_receipt("c" * 32)
+    host._engine_shutdown_worker = worker
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+
+    settled, exit_code, error = LauncherWindow._settle_replacement_child(host, phase="probe")
+
+    assert settled is False
+    assert exit_code is None
+    assert isinstance(error, RuntimeError)
+    assert "not yet exited" in str(error), "the bounded exit wait owns this exit, not generic retirement"
+    assert host._engine_shutdown_receipt == _shutdown_receipt("c" * 32), "published evidence survives the catch"
+    assert host._engine_shutdown_transport_identity is None
+    assert host._engine_proc is process
+    assert host._engine_shutdown_wait_deadline is not None, "the bounded exit budget stays latched"
+    bridge.send_command.assert_not_called()
+    host._close_engine_stderr_stream.assert_not_called()

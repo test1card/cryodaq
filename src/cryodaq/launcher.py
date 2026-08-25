@@ -251,6 +251,7 @@ _UNKNOWN_OUTCOME_ENVELOPE_CORE_KEYS = frozenset(
     {"ok", "error", "request_id", "generation", "dispatched", "outcome_unknown"}
 )
 _UNKNOWN_OUTCOME_ENVELOPE_TRANSPORT_KEYS = frozenset({"delivery_state", "commit_state", "error_code", "retry_safe"})
+_UNKNOWN_OUTCOME_ENVELOPE_ERROR_CODES = frozenset({"safe_command_transport_failed", "engine_unavailable"})
 
 
 def _parse_bridge_unknown_outcome_envelope(receipt: object) -> tuple[str, int] | None:
@@ -297,6 +298,8 @@ def _parse_bridge_unknown_outcome_envelope(receipt: object) -> tuple[str, int] |
     transport_keys = {"delivery_state", "commit_state"}
     safe_transport_keys = transport_keys | {"error_code", "retry_safe"}
     receipt_keys = set(receipt)
+    if not transport_keys.issubset(receipt_keys):
+        return None
     delivery_state = receipt["delivery_state"]
     commit_state = receipt["commit_state"]
     if type(delivery_state) is not str or type(commit_state) is not str:
@@ -311,7 +314,7 @@ def _parse_bridge_unknown_outcome_envelope(receipt: object) -> tuple[str, int] |
             delivery_state != "unknown"
             or commit_state != "unknown"
             or type(error_code) is not str
-            or not error_code
+            or error_code not in _UNKNOWN_OUTCOME_ENVELOPE_ERROR_CODES
             or retry_safe is not False
         ):
             return None
@@ -4020,8 +4023,23 @@ class LauncherWindow(QMainWindow):
         if replacement is not None and observed is not None:
             pending_identity = getattr(self, "_engine_shutdown_transport_identity", None)
             pending_receipt = getattr(self, "_engine_shutdown_receipt", None)
-            if getattr(self, "_engine_shutdown_worker", None) is None and (
-                pending_identity is not None or pending_receipt is not None
+            retained_worker = getattr(self, "_engine_shutdown_worker", None)
+            retained_worker_finished = False
+            retained_result = None
+            if retained_worker is not None:
+                retained_result = getattr(retained_worker, "result", None)
+                try:
+                    retained_worker_finished = retained_worker.isFinished() is True
+                except Exception:
+                    retained_worker_finished = False
+            if (retained_worker is None or retained_worker_finished) and (
+                pending_identity is not None
+                or pending_receipt is not None
+                or (
+                    retained_worker_finished
+                    and type(retained_result) is dict
+                    and retained_result.get("outcome_unknown") is not True
+                )
             ):
                 # A stop is still mid-settlement for this incarnation: a verified
                 # receipt awaits its exit-code validation, or an unknown-outcome
@@ -4039,6 +4057,13 @@ class LauncherWindow(QMainWindow):
                 try:
                     self._stop_engine()
                 except Exception as exc:
+                    if (
+                        retained_worker is not None
+                        and getattr(self, "_engine_shutdown_worker", None) is None
+                        and getattr(self, "_engine_shutdown_transport_identity", None) is None
+                        and getattr(self, "_engine_shutdown_receipt", None) is None
+                    ):
+                        self._engine_shutdown_worker = retained_worker
                     return False, None, exc
                 return True, None, None
             replacement_id = getattr(self, "_engine_instance_id", None)
@@ -4050,14 +4075,33 @@ class LauncherWindow(QMainWindow):
             )
             return _settle(observed)
 
+        handoff_worker = getattr(self, "_engine_shutdown_worker", None)
         try:
             self._stop_engine()
         except Exception as exc:
             # It may have died during the handoff. Re-read before deciding: a child that is
             # terminal NOW is an observed exit, whatever it was a moment ago.
+            pending_identity = getattr(self, "_engine_shutdown_transport_identity", None)
+            pending_receipt = getattr(self, "_engine_shutdown_receipt", None)
+            retained_worker = getattr(self, "_engine_shutdown_worker", None)
+            if (
+                handoff_worker is not None
+                and retained_worker is None
+                and pending_identity is None
+                and pending_receipt is None
+            ):
+                # _stop_engine() transfers a finished worker's result into local
+                # receipt validation. If that validation refuses, keep the exact
+                # immutable result attached to its worker. Otherwise the next
+                # pass sees only a terminal child and can retire it generically.
+                self._engine_shutdown_worker = handoff_worker
+                retained_worker = handoff_worker
+            deferred_after_handoff = (
+                pending_identity is not None or pending_receipt is not None or retained_worker is not None
+            )
             late = getattr(self, "_engine_proc", None)
             late_code = None if late is None else late.poll()
-            if late is not None and late_code is not None:
+            if late is not None and late_code is not None and not deferred_after_handoff:
                 replacement_id = getattr(self, "_engine_instance_id", None)
                 logger.error(
                     "Engine replacement exited before readiness; phase=%s incarnation=%s code=%s.",

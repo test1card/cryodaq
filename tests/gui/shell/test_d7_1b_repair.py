@@ -2483,3 +2483,123 @@ def test_health_tick_keeps_a_published_transport_identity_out_of_generic_retirem
     assert len(banners) == 1 and "HOLD" in banners[0], banners
     assert single_shot.call_count == 0
     assert launcher._restart_attempts == 0
+
+
+def _safe_transport_unknown_envelope(error_code: str) -> dict[str, object]:
+    """Exact key-for-key safe-transport family shape with a substitutable code."""
+
+    return {
+        "ok": False,
+        "error_code": error_code,
+        "error": "Engine command transport is unavailable after dispatch.",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "delivery_state": "unknown",
+        "commit_state": "unknown",
+        "dispatched": True,
+        "outcome_unknown": True,
+        "retry_safe": False,
+    }
+
+
+def test_foreign_error_codes_in_safe_transport_envelopes_stay_hold_evidence() -> None:
+    """A nonempty error_code no production path emits must not manufacture identity.
+
+    The extended family used to accept every nonempty error_code, so any caller
+    (or future transport change) coining a new code could push a fabricated
+    envelope through reconciliation and retire the incarnation on evidence the
+    production emitters never produce. Production emits only
+    ``safe_command_transport_failed`` and ``engine_unavailable``; everything else
+    is unreadable HOLD evidence: never reconciled, never released.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    bridge.reconcile_late_result.return_value = LateCommandResult(
+        request_id="c" * 32,
+        generation=5,
+        reply={"ok": True},
+    )
+    worker = _ShutdownWorker(settles=True)
+    worker.result = _safe_transport_unknown_envelope("transport_handoff_gone")
+    launcher._engine_shutdown_worker = worker
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is False
+    bridge.reconcile_late_result.assert_not_called()
+    assert launcher._engine_shutdown_worker is worker, "unreadable evidence stays retained"
+    assert getattr(launcher, "_engine_shutdown_transport_identity", None) is None
+    assert launcher._engine_instance_id == "a" * 32
+    assert len(banners) == 1 and "cannot read" in banners[0], banners
+
+
+def test_missing_transport_key_is_hold_evidence_not_keyerror() -> None:
+    """An envelope missing a required transport key is HOLD evidence, not a crash.
+
+    The key-set check only rejected EXTRA keys, so a result claiming an unknown
+    outcome while omitting ``delivery_state`` or ``commit_state`` reached the
+    bare subscript and raised KeyError out of settlement -- after ``_stop_engine``
+    had already cleared its retained worker, losing the exact evidence the HOLD
+    contract exists to keep. A missing required key must read as malformed
+    unknown-outcome evidence instead.
+    """
+
+    missing_commit_state = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after timeout",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "dispatched": True,
+        "outcome_unknown": True,
+        "delivery_state": "dispatched",
+    }
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    worker = _ShutdownWorker(settles=True)
+    worker.result = dict(missing_commit_state)
+    launcher._engine_shutdown_worker = worker
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    settled = LauncherWindow._settle_observed_engine_exit(
+        launcher,
+        owner_id="a" * 32,
+        returncode=9,
+        phase="probe",
+    )
+
+    assert settled is False
+    bridge.reconcile_late_result.assert_not_called()
+    assert launcher._engine_shutdown_worker is worker, "the evidence stays retained and visibly down"
+    assert getattr(launcher, "_engine_shutdown_transport_identity", None) is None
+    assert launcher._engine_instance_id == "a" * 32
+    assert len(banners) == 1 and "cannot read" in banners[0], banners
+
+    from cryodaq.launcher import _parse_bridge_unknown_outcome_envelope
+
+    assert _parse_bridge_unknown_outcome_envelope(dict(missing_commit_state)) is None
+    missing_delivery_state = {
+        "ok": False,
+        "error": "ZMQ command outcome unknown after timeout",
+        "request_id": "c" * 32,
+        "generation": 5,
+        "dispatched": True,
+        "outcome_unknown": True,
+        "commit_state": "unknown",
+    }
+    assert _parse_bridge_unknown_outcome_envelope(missing_delivery_state) is None
+    complete = {**missing_commit_state, "commit_state": "unknown"}
+    parsed = _parse_bridge_unknown_outcome_envelope(complete)
+    assert parsed == ("c" * 32, 5), "the complete core family must still parse exactly"
