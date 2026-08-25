@@ -279,7 +279,9 @@ def _resolve_tracker_pid(run: _SimulantRun) -> int | None:
     return None
 
 
-def _run_blocker_scenario(tmp_path: Path, *, install_isolation: bool, expose_fileno: bool) -> _SimulantRun:
+def _run_blocker_scenario(
+    tmp_path: Path, *, install_isolation: bool, expose_fileno: bool
+) -> tuple[_SimulantRun, logging.Logger]:
     env = _simulant_base_env(tmp_path)
     authority, ready_read_fd, ready_write_fd = _launcher_authority_env()
     env.update(authority)
@@ -302,10 +304,11 @@ def _run_blocker_scenario(tmp_path: Path, *, install_isolation: bool, expose_fil
             run.launch_pipe_inode = os.fstat(process.stderr.fileno()).st_ino
         run.pump_thread.start()
     except BaseException:
-        _kill_exact(run.marker.get("pid"))
+        _kill_exact(run.marker.get("pid") or run.process.pid)
+        run.process.wait(timeout=5)
         _detach_pump(run, pump_logger)
         raise
-    return run
+    return run, pump_logger
 
 
 def _settle_scenario_after_kill(run: _SimulantRun, pump_logger: logging.Logger) -> float:

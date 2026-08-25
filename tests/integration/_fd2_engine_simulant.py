@@ -27,6 +27,7 @@ import multiprocessing
 import os
 import sys
 import time
+from multiprocessing import util as multiprocessing_util
 
 INSTALL_ISOLATION_ENV = "CRYODAQ_FD2_TEST_INSTALL_ISOLATION"
 EXPOSE_PRIVATE_FILENO_ENV = "CRYODAQ_FD2_TEST_EXPOSE_PRIVATE_FILENO"
@@ -73,7 +74,7 @@ def main() -> None:
             if os.environ.get(EXPOSE_PRIVATE_FILENO_ENV) == "1":
                 sys.stderr.fileno = lambda: receipt.private_fd
                 holder_pid = int(
-                    multiprocessing.util.spawnv_passfds(
+                    multiprocessing_util.spawnv_passfds(
                         sys.executable,
                         [sys.executable, "-c", f"import time; time.sleep({SLEEP_AFTER_MARKER_S})"],
                         [receipt.private_fd],
