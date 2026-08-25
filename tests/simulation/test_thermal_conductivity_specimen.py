@@ -209,6 +209,37 @@ def test_settle_says_when_it_ran_out_of_time_instead_of_settling() -> None:
 
 
 @pytest.mark.parametrize(
+    ("power_w", "sink_k", "max_seconds"),
+    [
+        (math.nan, 80.0, 1e6),
+        (math.inf, 80.0, 1e6),
+        (-math.inf, 80.0, 1e6),
+        (0.01, 0.0, 1e6),
+        (0.01, -40.0, 1e6),
+        (0.01, math.nan, 1e6),
+        (0.01, math.inf, 1e6),
+        (0.01, 80.0, 0.0),
+        (0.01, 80.0, -1.0),
+        (0.01, 80.0, math.inf),
+        (0.01, 80.0, math.nan),
+    ],
+)
+def test_an_impossible_settle_is_refused_without_touching_the_specimen(power_w, sink_k, max_seconds) -> None:
+    """``settle`` integrates exactly like ``advance``, so it must refuse like ``advance``.
+
+    A NaN or infinite drive accepted here would poison every thermometer downstream of the
+    step -- the same cascade ``advance`` is tested against -- and a non-positive or
+    non-finite budget would either spin forever or come back as a fabricated timeout.
+    """
+
+    specimen = _constant_specimen()
+    before = dict(specimen.state().temperatures_k)
+    with pytest.raises(ValueError):
+        specimen.settle(heater_power_w=power_w, sink_temperature_k=sink_k, max_seconds=max_seconds)
+    assert dict(specimen.state().temperatures_k) == before, "a refused settle must not mutate state"
+
+
+@pytest.mark.parametrize(
     ("nodes", "segments", "message"),
     [
         ([SpecimenNode(channel="only", mass_kg=1.0)], [], "at least two"),

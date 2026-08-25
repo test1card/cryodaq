@@ -250,6 +250,12 @@ class ThermalConductivitySpecimen:
 
         if not (math.isfinite(tolerance_k) and tolerance_k > 0.0):
             raise ValueError(f"the tolerance must be positive and finite, got {tolerance_k!r}")
+        if not math.isfinite(heater_power_w):
+            raise ValueError(f"the heater power must be finite, got {heater_power_w!r}")
+        if not (math.isfinite(sink_temperature_k) and sink_temperature_k > 0.0):
+            raise ValueError(f"the sink temperature must be positive and finite, got {sink_temperature_k!r}")
+        if not (math.isfinite(max_seconds) and max_seconds > 0.0):
+            raise ValueError(f"the settle budget must be positive and finite, got {max_seconds!r}")
         self._temperatures[-1] = float(sink_temperature_k)
         elapsed = 0.0
         while elapsed < max_seconds:
