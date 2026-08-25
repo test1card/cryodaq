@@ -2310,12 +2310,42 @@ def test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive(
 
 
 class _PollRaisingProcess:
-    """A child whose poll() fails; the launcher cannot observe its liveness."""
+    """A child whose poll() fails; the launcher cannot observe its liveness.
+
+    ``wait()``/``communicate()`` record their calling stacks: any recorded
+    frame inside the quit decision or its owned reap callbacks proves
+    something blocked the Qt thread, which the bound must never do even for
+    this unobservable child shape.
+    """
 
     pid = 9313
 
+    def __init__(self) -> None:
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.wait_frames: list[list[str]] = []
+        self.communicate_frames: list[list[str]] = []
+
     def poll(self) -> int | None:
         raise RuntimeError("injected poll failure")
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def kill(self) -> None:
+        self.kill_calls += 1
+
+    def wait(self, timeout: float | None = None) -> int:
+        import inspect
+
+        self.wait_frames.append([frame.function for frame in inspect.stack()])
+        return 0
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        import inspect
+
+        self.communicate_frames.append([frame.function for frame in inspect.stack()])
+        return b"", b""
 
 
 def _refused_normal_quit_host(process: object) -> tuple[SimpleNamespace, MagicMock]:
@@ -2348,7 +2378,7 @@ def test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A raising poll or a failing reaper must keep scheduling quit retries.
+    """A raising poll or a failing reaper keeps scheduling quit retries -- and escalates.
 
     ``_refused_quit_reaches_reader_settled_hold`` returns False when the terminal
     quit decision cannot observe the child: ``poll()`` itself raises, or the
@@ -2357,54 +2387,120 @@ def test_normal_quit_poll_and_reaping_failures_keep_the_retry_ladder_alive(
     one -- the live-child node reaps successfully and the reader-failure node starts
     with an already-terminal child -- so flipping either branch to suppress retries
     would strand a live engine behind a HOLD that nothing revisits while staying
-    green. This drives the real ``_do_shutdown`` path through both injections and
-    requires the retry callback to be armed again after every failed pass.
+    green. A raising poll used to do worse than repeat: it returned False without
+    ever arming the reap machine, so every retry re-read the same exception and the
+    retained possibly-live engine received zero terminate or kill attempts forever,
+    while quit-time runtime callbacks stay revoked so no replacement-side machine
+    could bound it either. This drives the real ``_do_shutdown`` chain through both
+    injections and requires the raising-poll case to hand the SAME exact retained
+    child into the owned non-blocking reap machine -- terminate, then kill once the
+    monotonic stage budget spends, ending in an explicit bounded failure with the
+    handle retained -- while every failed pass still arms the retry callback again.
     """
 
     import cryodaq.launcher as module
 
-    def drive_and_require_rearm(process: object, branch_log_line: str) -> SimpleNamespace:
-        host, bridge = _refused_normal_quit_host(process)
-        with (
-            caplog.at_level("ERROR", logger="cryodaq.launcher"),
-            patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
-        ):
-            assert module.LauncherWindow._do_shutdown(host) is False
+    process = _PollRaisingProcess()
+    host, bridge = _refused_normal_quit_host(process)
+    clock = _QuitReapClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        assert module.LauncherWindow._do_shutdown(host) is False
 
-            assert single_shot.call_count == 1, "a failed decision must arm the retry callback"
-            assert host._shutdown_retry_pending is True
-            assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
-            assert set(host._shutdown_last_errors) == {"engine"}
-            assert host._shutdown_hold_audible is True
-            assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False, (
-                "an unobservable child never latches the exactly-once suppression marker"
-            )
-            assert getattr(host, "_engine_unsettled_incarnation", None) is None
-            host._close_engine_stderr_stream.assert_not_called()
-            host._show_engine_down_banner.assert_not_called()
+        assert process.terminate_calls == 0 and process.kill_calls == 0, (
+            "the decision returns promptly: nothing is bounded on this Qt call stack"
+        )
+        machine = getattr(host, "_terminal_quit_reap_state", None)
+        assert type(machine) is dict and machine["process"] is process and machine["stage"] == "terminate", (
+            "the raising poll hands the SAME exact retained child into the owned reap machine"
+        )
+        assert host._shutdown_retry_pending is True, "and the retry callback stays armed beside the bound"
+        assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
+        assert set(host._shutdown_last_errors) == {"engine"}
+        assert host._shutdown_hold_audible is True
+        assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False, (
+            "an unobservable child never latches the exactly-once suppression marker"
+        )
+        assert getattr(host, "_engine_unsettled_incarnation", None) is None
+        host._close_engine_stderr_stream.assert_not_called()
+        host._show_engine_down_banner.assert_not_called()
 
-            assert host._engine_shutdown_worker.result == {"ok": True}
-            assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is host._engine_shutdown_worker
-            assert host._engine_shutdown_receipt is None
-            assert host._engine_proc is process
-            assert host._engine_instance_id == "a" * 32
-            assert host._engine_shutdown_capability == "b" * 64
-            assert host._engine_shutdown_request_id == "c" * 32
-            bridge.send_command.assert_not_called()
+        assert host._engine_shutdown_worker.result == {"ok": True}
+        assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is host._engine_shutdown_worker
+        assert host._engine_shutdown_receipt is None
+        assert host._engine_proc is process
+        assert host._engine_instance_id == "a" * 32
+        assert host._engine_shutdown_capability == "b" * 64
+        assert host._engine_shutdown_request_id == "c" * 32
+        bridge.send_command.assert_not_called()
 
-            # The real retry timer fires before re-entry; apply exactly its first effect.
-            host._shutdown_retry_pending = False
-            assert module.LauncherWindow._do_shutdown(host) is False
-            assert single_shot.call_count == 2, "every failed pass must re-arm the retry callback"
-            assert host._shutdown_retry_pending is True
-            assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False
-            assert host._engine_proc is process
+        cursor = [0]
+        assert _drive_next_reap_tick(single_shot, cursor, clock), "the first owned tick issues terminate"
+        assert process.terminate_calls == 1 and process.kill_calls == 0
 
-        branch_lines = [record for record in caplog.records if branch_log_line in record.getMessage()]
-        assert len(branch_lines) == 2, "each driven pass reports its own unobservable-child failure"
-        return host
+        clock.advance(5.2)
+        assert _drive_next_reap_tick(single_shot, cursor, clock), (
+            "kill fires only after the monotonic terminate stage budget spends"
+        )
+        assert process.terminate_calls == 1 and process.kill_calls == 1
 
-    drive_and_require_rearm(_PollRaisingProcess(), "poll failed during the terminal quit decision")
+        clock.advance(5.2)
+        assert _drive_next_reap_tick(single_shot, cursor, clock), (
+            "poll() never became readable, so the spent kill budget ends the bound explicitly"
+        )
+        assert getattr(host, "_terminal_quit_reap_state", None) is None, "the failed bound clears its machine"
+        assert host._engine_proc is process, "an explicit bounded failure RETAINS the exact handle"
+        assert getattr(host, "_shutdown_terminal_engine_readers_settled", False) is False, (
+            "an unobservable death can never claim clean settlement"
+        )
+        assert getattr(host, "_engine_unsettled_incarnation", None) is None, (
+            "no exit code was observable, so none may be invented"
+        )
+        assert process.wait_frames == [] and process.communicate_frames == [], (
+            "the whole bound advanced without blocking or waiting on the Qt thread"
+        )
+
+        # The real retry timer fires before re-entry; apply exactly its first effect.
+        host._shutdown_retry_pending = False
+        assert module.LauncherWindow._do_shutdown(host) is False
+        fresh_state = getattr(host, "_terminal_quit_reap_state", None)
+        assert (
+            type(fresh_state) is dict and fresh_state["process"] is process and fresh_state["stage"] == "terminate"
+        ), "every failed pass re-arms a fresh bound over the same owned child"
+        assert host._shutdown_retry_pending is True, "every failed pass must also re-arm the retry callback"
+
+        assert _drive_next_reap_tick(single_shot, cursor, clock)
+        assert process.terminate_calls == 2, "the real reaper bound runs once per pass"
+
+        clock.advance(5.2)
+        assert _drive_next_reap_tick(single_shot, cursor, clock), "the second bound escalates to kill on schedule"
+        assert process.kill_calls == 2
+
+        clock.advance(5.2)
+        assert _drive_next_reap_tick(single_shot, cursor, clock), (
+            "and it ends in its own explicit bounded failure -- poll() never became readable"
+        )
+        assert getattr(host, "_terminal_quit_reap_state", None) is None
+        assert host._engine_proc is process, "the repeated bound never releases the handle either"
+        assert host._shutdown_terminal_engine_readers_settled is False, (
+            "two failed bounds still never commit suppression"
+        )
+
+    poll_failure_lines = [
+        record for record in caplog.records if "poll failed during the terminal quit decision" in record.getMessage()
+    ]
+    assert len(poll_failure_lines) == 2, "each driven pass reports its own unobservable-child failure"
+    bounded_failures = [
+        record for record in caplog.records if "reaping failed during the terminal quit decision" in record.getMessage()
+    ]
+    assert len(bounded_failures) == 2, "each completed failing bound reports itself exactly once"
+
+    # Scope the captured records to the second injection: the raising-poll bound
+    # above already logged its own completed reaping failures.
+    caplog.clear()
 
     process = _TerminalQuitChild(die_on="never")
     process.terminate_error = RuntimeError("injected terminate failure")

@@ -3731,11 +3731,18 @@ class LauncherWindow(QMainWindow):
         an ``_engine_unsettled_incarnation`` HOLD (never clean settlement),
         the reaping callbacks close the child's readers and clear the
         handle, and only then may the exactly-once marker latch. Reaping
-        failure, a failed crashed-reader settlement, a raising poll, or any
-        non-int poll verdict keeps the retry ladder alive instead of committing
-        the suppression. Construction rollback owns no exemption either:
-        its visible ``_LauncherConstructionHold`` still retains the poisoned
-        startup owners, but a ``None`` poll beside a set
+        failure, a failed crashed-reader settlement, or any non-int poll
+        verdict keeps the retry ladder alive instead of committing the
+        suppression. A poll() that RAISES is just as non-settling -- but it
+        used to mean zero escalation forever: the ladder repeated while the
+        possibly live child was never terminated or killed, and quit-time
+        runtime callbacks are revoked so the replacement-side machines could
+        not bound it either. It now hands the same exact retained child into
+        ``_begin_terminal_quit_bounded_reap`` as well; that machine never
+        needs ``poll()`` to answer first, so one exception costs a bounded
+        terminate/kill attempt instead of none. Construction rollback owns no
+        exemption either: its visible ``_LauncherConstructionHold`` still retains
+        the poisoned startup owners, but a ``None`` poll beside a set
         ``_construction_failure_phase`` suppresses nothing -- the rollback
         child goes through the same bounded reap machine, its forced death
         stays an ``_engine_unsettled_incarnation`` HOLD, and a failed reap
@@ -3748,17 +3755,29 @@ class LauncherWindow(QMainWindow):
         process = getattr(self, "_engine_proc", None)
         if process is None:
             return True
-        try:
-            returncode = process.poll()
-        except Exception as exc:
-            logger.error(
-                "Engine poll failed during the terminal quit decision; phase=normal-quit-refusal exception=%s",
-                type(exc).__name__,
-            )
-            return False
         owner_id = getattr(self, "_engine_instance_id", None)
         if type(owner_id) is not str:
             owner_id = "<unknown>"
+        try:
+            returncode = process.poll()
+        except Exception as exc:
+            # An unobservable poll is NOT evidence the child is gone. Returning
+            # False alone let the retry ladder repeat forever with zero
+            # terminate/kill attempts behind it, and the quit-time callback
+            # epoch keeps the replacement-side supervision machines inert -- so
+            # this terminal decision must bound the child itself. The reap
+            # machine below never needs poll() to answer first: it escalates
+            # terminate -> kill under monotonic stage budgets and ends in
+            # either a settled forced-death HOLD or an explicit bounded
+            # failure with the exact handle retained. Arming here cannot
+            # double-drive: an active machine over the same process refuses a
+            # second owner.
+            logger.error(
+                "Engine poll failed during the terminal quit decision; phase=normal-quit-refusal owner=%s exception=%s",
+                owner_id,
+                type(exc).__name__,
+            )
+            return LauncherWindow._begin_terminal_quit_bounded_reap(self, owner_id=owner_id)
         if returncode is None:
             # The bound runs through owned timer callbacks (_begin_terminal_
             # quit_bounded_reap), never inline: the old synchronous reaper
