@@ -954,9 +954,43 @@ def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_
 
 
 _ENGINE_STDERR_EVIDENCE_NAME: Final = "log-engine-stderr.txt"
+_ENGINE_STDERR_BASENAME: Final = "engine.stderr.log"
+_ENGINE_STDERR_REDACTION_CONTEXT_BYTES: Final = 64 * 1024
 _ENGINE_STDERR_ABSENT_MARKER: Final = (
     "<no engine stderr log was written under the isolated state root; the engine either "
     "never started or never opened its stderr log>\n"
+)
+_ENGINE_STDERR_REPLACED_MARKER: Final = (
+    "<the engine stderr log was refused: the log directory changed during the read on a "
+    "platform without descriptor-relative traversal. Nothing read is published.>\n"
+)
+_ENGINE_STDERR_REFUSED_MARKER: Final = (
+    "<the engine stderr log was refused: the leaf is a symbolic link. The measured process "
+    "can write that name, so following it could publish an unrelated file.>\n"
+)
+_ENGINE_STDERR_NOT_REGULAR_MARKER: Final = (
+    "<the engine stderr log was refused: the leaf is not a regular file -- a directory, "
+    "reparse point, device, or fifo holds it. Nothing was opened or read.>\n"
+)
+_ENGINE_STDERR_HARD_LINKED_MARKER: Final = (
+    "<the engine stderr log was refused: it is a regular file carrying more than one link "
+    "(st_nlink != 1), so its bytes may also live outside this isolated root.>\n"
+)
+_ENGINE_STDERR_REPLACED_OR_UNREADABLE_MARKER: Final = (
+    "<the engine stderr log was refused: the leaf was removed, replaced, or made unreadable "
+    "between validation and descriptor open. Nothing was read.>\n"
+)
+_ENGINE_STDERR_OPENED_BUT_UNREADABLE_MARKER: Final = (
+    "<the engine stderr log was refused: its descriptor opened as a lone regular file but "
+    "could not be read to the retention bound. No partial stream was published.>\n"
+)
+_ENGINE_STDERR_RECORD_SPANS_BOUNDARY_MARKER: Final = (
+    "<the engine stderr log was refused: its retained tail began inside one record and held "
+    "no complete following record. The partial record was not published.>\n"
+)
+_ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER: Final = (
+    "<the engine stderr log was refused: the child-writable logs directory could not be "
+    "opened and bound to a plain unlinked directory. Nothing was read.>\n"
 )
 _UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER: Final = (
     "<the child-writable logs were refused: the launcher session and its descendants "
@@ -966,32 +1000,58 @@ _UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER: Final = (
 
 
 def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
-    """Publish the engine's own stderr, so a dead engine can say why it died.
-
-    Without this the run reports a CONDITION without its SUBJECT. The launcher forwards
-    engine stderr to a rotating log under the writable state root, which for this run is
-    the runner's own temporary directory and is deleted with it, so
-    ``Launcher construction failed; phase=engine exception=RuntimeError`` arrived with no
-    way to see the engine's traceback. Measured 2026-08-19 on Ubuntu 22.04.5: the evidence
-    bundle held six files and none of them was that log.
-
-    The artifact is ALWAYS written, and says so when the log is absent, because a missing
-    file is indistinguishable from a publisher that silently did nothing.
-    """
+    """Publish a descriptor-bound, bounded tail of the engine's own stderr."""
 
     from scripts.soak_mock_stack import redact_text
 
-    path = Path(state_root) / "logs" / "engine.stderr.log"
+    logs_directory = Path(state_root) / "logs"
     try:
-        raw = path.read_bytes()
-    except OSError:
+        os.lstat(logs_directory)
+    except FileNotFoundError:
         evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
         return
+    identity_before = _directory_identity(logs_directory) if _assistant_log_uses_pathname_traversal() else None
+    selected = _engine_stderr_file(state_root)
+    if isinstance(selected, _AssistantLogDirectoryRefusal):
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER)
+        return
+    directory_descriptor, path = selected
+    try:
+        if _assistant_log_path_is_absent(directory_descriptor, path):
+            result: tuple[bytes, int] | _AssistantLogLeafRefusal | None = None
+        else:
+            result = _read_regular_file_no_follow(
+                directory_descriptor,
+                path,
+                maximum_bytes=_MAX_LAUNCHER_LOG_BYTES + _ENGINE_STDERR_REDACTION_CONTEXT_BYTES,
+            )
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
 
+    if _assistant_log_uses_pathname_traversal() and (
+        identity_before is None or _directory_identity(logs_directory) != identity_before
+    ):
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_REPLACED_MARKER)
+        return
+    if result is None:
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
+        return
+    if isinstance(result, _AssistantLogLeafRefusal):
+        marker = {
+            _AssistantLogLeafRefusal.SYMBOLIC_LINK: _ENGINE_STDERR_REFUSED_MARKER,
+            _AssistantLogLeafRefusal.NOT_REGULAR_FILE: _ENGINE_STDERR_NOT_REGULAR_MARKER,
+            _AssistantLogLeafRefusal.HARD_LINKED: _ENGINE_STDERR_HARD_LINKED_MARKER,
+            _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE: _ENGINE_STDERR_REPLACED_OR_UNREADABLE_MARKER,
+            _AssistantLogLeafRefusal.OPENED_BUT_UNREADABLE: _ENGINE_STDERR_OPENED_BUT_UNREADABLE_MARKER,
+            _AssistantLogLeafRefusal.RECORD_SPANS_RETENTION_BOUNDARY: _ENGINE_STDERR_RECORD_SPANS_BOUNDARY_MARKER,
+        }[result]
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, marker)
+        return
+
+    raw, source_bytes = result
     encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
-    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
-        # Keep the END: a traceback's cause is written last, and the bound exists to
-        # protect the bundle's size, not to choose which half of the failure survives.
+    if source_bytes > _MAX_LAUNCHER_LOG_BYTES or len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
         tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
         tail = encoded[-tail_bytes:]
         while tail and tail[0] & 0xC0 == 0x80:
@@ -1177,7 +1237,7 @@ def _read_regular_file_no_follow(
         with os.fdopen(descriptor, "rb", closefd=True) as handle:
             descriptor = -1
             raw = handle.read(window)
-        if size > maximum_bytes:
+        if size > maximum_bytes:  # align the truncated descriptor tail before redaction
             if raw[:1] == b"\n":
                 raw = raw[1:]
             else:
@@ -1226,6 +1286,37 @@ def _directory_identity(directory: Path) -> tuple[int, int] | None:
     if not stat.S_ISDIR(info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
         return None
     return (info.st_dev, info.st_ino)
+
+
+def _engine_stderr_file(
+    state_root: Path,
+) -> tuple[int | None, Path | str] | _AssistantLogDirectoryRefusal:
+    """Bind the exact engine stderr leaf to its child-writable logs directory."""
+
+    directory = Path(state_root) / "logs"
+    try:
+        directory_info = os.lstat(directory)
+        if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        if _assistant_log_uses_pathname_traversal():
+            return None, directory / _ENGINE_STDERR_BASENAME
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_descriptor = os.open(directory, directory_flags)
+    except OSError:
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    keep_descriptor = False
+    try:
+        opened_info = os.fstat(directory_descriptor)
+        if not stat.S_ISDIR(opened_info.st_mode) or not os.path.samestat(directory_info, opened_info):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    except OSError:
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    else:
+        keep_descriptor = True
+        return directory_descriptor, _ENGINE_STDERR_BASENAME
+    finally:
+        if not keep_descriptor:
+            os.close(directory_descriptor)
 
 
 def _rotated_assistant_log_names(
@@ -5037,45 +5128,58 @@ class _PosixSoakRunner:
                     ):
                         raise _RunnerFoundationError("passive source fixture changed during execution")
         finally:
+            primary_info = sys.exc_info()
             primary = sys.exception()
-            with _block_termination_signals():
+            cleanup_failure: BaseException | None = None
+
+            def attempt_cleanup(subject: str, action: Callable[[], object]) -> bool:
+                nonlocal cleanup_failure
                 try:
-                    if process is not None and launcher_identity is not None and not launcher_settled:
-                        try:
-                            if process.returncode is None:
-                                _force_settle_owned_session(
-                                    process,
-                                    observer=locked,
-                                    expected=launcher_identity,
-                                    owner=owner_identity,
-                                )
-                            else:
-                                _settle_adopted_owner_descendants(
-                                    observer=locked,
-                                    owner=owner_identity,
-                                    deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
-                                )
-                        except BaseException as settlement_error:  # noqa: BLE001 - preserve the run failure
-                            if primary is None:
-                                raise
-                            _add_sanitized_cleanup_note(primary, "final launcher settlement failed", settlement_error)
+                    action()
+                except BaseException as cleanup_error:  # noqa: BLE001 - cleanup is attempt-all
+                    if primary is not None:
+                        _add_sanitized_cleanup_note(primary, subject, cleanup_error)
+                    elif cleanup_failure is None:
+                        cleanup_failure = cleanup_error
+                    else:
+                        _add_sanitized_cleanup_note(cleanup_failure, subject, cleanup_error)
+                    return False
+                return True
+
+            with _block_termination_signals():
+                if process is not None and launcher_identity is not None and not launcher_settled:
+
+                    def settle_launcher() -> None:
+                        if process.returncode is None:
+                            _force_settle_owned_session(
+                                process,
+                                observer=locked,
+                                expected=launcher_identity,
+                                owner=owner_identity,
+                            )
                         else:
-                            launcher_settled = True
-                    if sink is not None:
-                        sink.close()
-                    if artifact_pair is not None:
-                        artifact_pair.close()
-                    if bridge_pipe is not None:
-                        bridge_pipe.close()
-                    if source_temporary is not None and (process is None or launcher_settled):
-                        try:
-                            source_temporary.cleanup()
-                        except BaseException as cleanup_error:  # noqa: BLE001 - preserve the run failure
-                            if primary is None:
-                                raise
-                            _add_sanitized_cleanup_note(primary, "source temporary cleanup failed", cleanup_error)
-                finally:
-                    source_snapshot_context.__exit__(*sys.exc_info())
+                            _settle_adopted_owner_descendants(
+                                observer=locked,
+                                owner=owner_identity,
+                                deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
+                            )
+
+                    if attempt_cleanup("final launcher settlement failed", settle_launcher):
+                        launcher_settled = True
+                if sink is not None:
+                    attempt_cleanup("artifact receipt sink cleanup failed", sink.close)
+                if artifact_pair is not None:
+                    attempt_cleanup("artifact capability pair cleanup failed", artifact_pair.close)
+                if bridge_pipe is not None:
+                    attempt_cleanup("bridge handshake pipe cleanup failed", bridge_pipe.close)
+                if source_temporary is not None and (process is None or launcher_settled):
+                    attempt_cleanup("source temporary cleanup failed", source_temporary.cleanup)
+                attempt_cleanup(
+                    "source snapshot cleanup failed",
+                    lambda: source_snapshot_context.__exit__(*primary_info),
+                )
+                if primary is None and cleanup_failure is not None:
+                    raise cleanup_failure
 
         collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
         survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import errno
 import os
+import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -140,6 +141,115 @@ def test_the_FAILURE_path_publishes_it(tmp_path: Path, state_root: Path) -> None
         "a failing soak published no assistant log, which is the run that needed it"
     )
     assert "receive loop ended" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+
+
+@pytest.mark.parametrize("topology", ("hard-link", "symbolic-link", "fifo"))
+def test_launcher_capture_refuses_unowned_engine_stderr_topology(tmp_path: Path, topology: str) -> None:
+    """The real capture path never publishes bytes supplied by an external owner."""
+
+    state_root = tmp_path / "state"
+    logs = state_root / "logs"
+    logs.mkdir(parents=True)
+    external = tmp_path / "outside-state-root.log"
+    secret = f"EXTERNAL {topology.upper()} ENGINE STDERR MUST NOT PUBLISH\n".encode()
+    external.write_bytes(secret)
+    engine_log = logs / "engine.stderr.log"
+    writer: threading.Thread | None = None
+
+    if topology == "hard-link":
+        os.link(external, engine_log)
+        expected_marker_name = "_ENGINE_STDERR_HARD_LINKED_MARKER"
+    elif topology == "symbolic-link":
+        try:
+            os.symlink(external, engine_log)
+        except (OSError, NotImplementedError):  # pragma: no cover - unprivileged Windows
+            pytest.skip("this platform does not allow creating a symbolic link here")
+        expected_marker_name = "_ENGINE_STDERR_REFUSED_MARKER"
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("this platform cannot create a filesystem fifo")
+        os.mkfifo(engine_log)
+        expected_marker_name = "_ENGINE_STDERR_NOT_REGULAR_MARKER"
+
+        def offer_external_bytes() -> None:
+            deadline = runner.time.monotonic() + 1.0
+            while runner.time.monotonic() < deadline:
+                try:
+                    descriptor = os.open(engine_log, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError as error:
+                    if error.errno != errno.ENXIO:
+                        raise
+                    runner.time.sleep(0.01)
+                    continue
+                try:
+                    os.write(descriptor, secret)
+                finally:
+                    os.close(descriptor)
+                return
+
+        writer = threading.Thread(target=offer_external_bytes, daemon=True)
+        writer.start()
+
+    evidence = _Evidence()
+    with runner._launcher_log_capture(
+        evidence,
+        tmp_path / f"launcher-engine-{topology}.txt",
+        state_root=state_root,
+    ) as launcher_writer:
+        launcher_writer.write(b"launcher output\n")
+
+    if writer is not None:
+        writer.join(timeout=2)
+        assert not writer.is_alive(), "the fifo control writer did not reach a terminal state"
+    published = evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME]
+    assert secret.decode().strip() not in published
+    assert published == getattr(runner, expected_marker_name)
+
+
+def test_launcher_capture_reads_only_the_bounded_engine_stderr_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine log is bounded at descriptor read time, not after a whole-file read."""
+
+    state_root = tmp_path / "state"
+    logs = state_root / "logs"
+    logs.mkdir(parents=True)
+    engine_log = logs / "engine.stderr.log"
+    line = b"x" * 100 + b"\n"
+    redaction_context_bytes = 64 * 1024
+    read_bound = runner._MAX_LAUNCHER_LOG_BYTES + redaction_context_bytes
+    engine_log.write_bytes(line * (read_bound // len(line) + 100) + b"ENGINE STDERR END\n")
+    real_read_bytes = Path.read_bytes
+    real_bounded_read = runner._read_regular_file_no_follow
+    requested_bounds: list[int] = []
+
+    def forbid_engine_whole_file_read(path: Path) -> bytes:
+        if path == engine_log:
+            raise AssertionError("engine stderr was read before applying the retention bound")
+        return real_read_bytes(path)
+
+    def observe_bounded_read(directory_descriptor: int | None, path: Path | str, *, maximum_bytes: int):
+        if str(path).endswith("engine.stderr.log"):
+            requested_bounds.append(maximum_bytes)
+        return real_bounded_read(directory_descriptor, path, maximum_bytes=maximum_bytes)
+
+    monkeypatch.setattr(Path, "read_bytes", forbid_engine_whole_file_read)
+    monkeypatch.setattr(runner, "_read_regular_file_no_follow", observe_bounded_read)
+    evidence = _Evidence()
+
+    with runner._launcher_log_capture(
+        evidence,
+        tmp_path / "launcher-bounded-engine-stderr.txt",
+        state_root=state_root,
+    ) as launcher_writer:
+        launcher_writer.write(b"launcher output\n")
+
+    published = evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME]
+    assert runner._ENGINE_STDERR_REDACTION_CONTEXT_BYTES == redaction_context_bytes
+    assert requested_bounds == [read_bound], "the descriptor read must remain explicitly bounded"
+    assert "ENGINE STDERR END" in published
+    assert published.startswith(runner._TRUNCATED_LAUNCHER_LOG_MARKER.decode())
+    assert len(published.encode()) <= runner._MAX_LAUNCHER_LOG_BYTES
 
 
 def test_unsettled_writer_refuses_child_writable_logs_without_traversal(
@@ -386,9 +496,19 @@ def test_post_settlement_baseexception_cannot_replace_primary(
         assert evidence.logs[successful_name] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
 
 
-@pytest.mark.parametrize("final_settlement_fails", (False, True))
+@pytest.mark.parametrize(
+    ("cleanup_boundary", "final_settlement_fails"),
+    (
+        pytest.param("source-root", False, id="source-root"),
+        pytest.param("final-settlement", True, id="final-settlement"),
+        pytest.param("sink", False, id="sink"),
+        pytest.param("artifact-pair", False, id="artifact-pair"),
+        pytest.param("bridge-pipe", False, id="bridge-pipe"),
+        pytest.param("snapshot-exit", False, id="snapshot-exit"),
+    ),
+)
 def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_primary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_settlement_fails: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_boundary: str, final_settlement_fails: bool
 ) -> None:
     """The real owner lifecycle must not tear down a root while its child can write."""
 
@@ -406,6 +526,8 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
     child_writer = {"fd": None, "live": False}
     cleanup_saw_live_writer: list[bool] = []
     source_temporaries: list[ObservedTemporaryDirectory] = []
+    cleanup_calls: list[str] = []
+    snapshot_creations = 0
     settlement_calls: list[int] = []
     real_temporary_directory = runner.tempfile.TemporaryDirectory
 
@@ -436,9 +558,10 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
 
         def cleanup(self) -> None:
             if self._source:
+                cleanup_calls.append("source_root")
                 cleanup_saw_live_writer.append(child_writer["live"])
             self._inner.cleanup()
-            if self._source:
+            if self._source and cleanup_boundary == "source-root":
                 raise CleanupInterrupted("MUST NOT LEAK TEMP CLEANUP DETAIL")
 
     class StillSnapshot:
@@ -446,11 +569,20 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
         interpreter = Path(runner.sys.executable)
         environment: dict[str, str] = {}
 
+        def __init__(self) -> None:
+            nonlocal snapshot_creations
+            snapshot_creations += 1
+            self._source = snapshot_creations == 2
+
         def __enter__(self) -> StillSnapshot:
             self.root.mkdir(exist_ok=True)
             return self
 
         def __exit__(self, *_exc: object) -> bool:
+            if self._source:
+                cleanup_calls.append("snapshot_exit")
+                if cleanup_boundary == "snapshot-exit":
+                    raise CleanupInterrupted("MUST NOT LEAK SNAPSHOT EXIT DETAIL")
             return False
 
     @contextmanager
@@ -533,7 +665,9 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
             raise PrimaryFailure("primary production failure")
 
         def close(self) -> None:
-            pass
+            cleanup_calls.append("bridge_pipe")
+            if cleanup_boundary == "bridge-pipe":
+                raise CleanupInterrupted("MUST NOT LEAK BRIDGE CLOSE DETAIL")
 
     class ArtifactPair:
         runner = object()
@@ -553,14 +687,18 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
             pass
 
         def close(self) -> None:
-            pass
+            cleanup_calls.append("artifact_pair")
+            if cleanup_boundary == "artifact-pair":
+                raise CleanupInterrupted("MUST NOT LEAK ARTIFACT CLOSE DETAIL")
 
     class Sink:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             pass
 
         def close(self) -> None:
-            pass
+            cleanup_calls.append("sink")
+            if cleanup_boundary == "sink":
+                raise CleanupInterrupted("MUST NOT LEAK SINK CLOSE DETAIL")
 
     process = SimpleNamespace(pid=424242, returncode=None)
     identity = SimpleNamespace(start_identity="pid=424242")
@@ -622,14 +760,28 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
     assert cleanup_saw_live_writer == expected_cleanup_observations, (
         "state-root cleanup ran before the retained writer settled"
     )
+    expected_cleanup_calls = ["sink", "artifact_pair", "bridge_pipe"]
+    if not final_settlement_fails:
+        expected_cleanup_calls.append("source_root")
+    expected_cleanup_calls.append("snapshot_exit")
+    assert cleanup_calls == expected_cleanup_calls, "every eligible owner must receive one close attempt"
     assert settlement_calls == [1, 2]
     notes = tuple(getattr(caught, "__notes__", ()))
     assert "launcher writer settlement failed: SettlementInterrupted" in notes
     if final_settlement_fails:
         assert "final launcher settlement failed: SettlementInterrupted" in notes
         assert not any(note.startswith("source temporary cleanup failed:") for note in notes)
-    else:
+    elif cleanup_boundary == "source-root":
         assert "source temporary cleanup failed: CleanupInterrupted" in notes
+    else:
+        expected_subject = {
+            "sink": "artifact receipt sink cleanup failed",
+            "artifact-pair": "artifact capability pair cleanup failed",
+            "bridge-pipe": "bridge handshake pipe cleanup failed",
+            "snapshot-exit": "source snapshot cleanup failed",
+        }[cleanup_boundary]
+        assert f"{expected_subject}: CleanupInterrupted" in notes
+        assert not any(note.startswith("source temporary cleanup failed:") for note in notes)
     assert "MUST NOT LEAK" not in "\n".join(notes)
 
 

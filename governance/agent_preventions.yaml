@@ -3505,8 +3505,24 @@ false_green_pairs:
     runtime_prevention_id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
     guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_run_owned_settles_session_before_state_root_cleanup_and_preserves_primary
     ci_partition: remaining
-    red_evidence: exact_fa9ad1846063fd178177175651fa4cabae12e8f0_tree_692452d616740efc10cc674b7a7865e04c402b2d_with_guard_blob_50d3ff6234b3defd31fcd897abbe91e90c85d829_python_3_14_3_Windows_exact_one_node_selected_two_failed_one_saw_TemporaryDirectory_cleanup_while_the_retained_child_style_writer_was_live_and_CleanupInterrupted_replaced_PrimaryFailure_and_the_other_saw_final_SettlementInterrupted_replace_PrimaryFailure
-    green_evidence: local_corrected_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_guard_blob_50d3ff6234b3defd31fcd897abbe91e90c85d829_python_3_14_3_Windows_exact_one_node_selected_two_passed_and_python_3_14_6_Ubuntu_22_04_full_module_42_passed_3_skipped_pending_corrected_candidate_and_hosted_remaining_partition
+    red_evidence: exact_starting_commit_fe0c3abba15ce0476cb6e580cdbcc102295b6a6c_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_final_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_exact_sink_artifact_pair_bridge_pipe_and_source_snapshot_exit_parameters_failed_on_the_old_production_each_replaced_PrimaryFailure_with_CleanupInterrupted_and_early_close_failures_skipped_later_owners_plus_prior_registered_red_evidence_covers_final_settlement_and_source_root
+    green_evidence: local_corrected_production_blob_03dfcbecbd178851dd0457d110d5ca31b64365c1_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_exact_six_parameter_owner_matrix_passed_pending_hosted_remaining_partition
+  - id: SOAK-ENGINE-STDERR-LEAF-AUTHORITY-FALSE-GREEN-007
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_capture_refuses_unowned_engine_stderr_topology
+    ci_partition: remaining
+    red_evidence: exact_starting_commit_fe0c3abba15ce0476cb6e580cdbcc102295b6a6c_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_final_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_exact_hard_link_parameter_failed_after_the_real_launcher_capture_published_EXTERNAL_HARD_LINK_ENGINE_STDERR_MUST_NOT_PUBLISH
+    green_evidence: local_corrected_production_blob_03dfcbecbd178851dd0457d110d5ca31b64365c1_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_focused_topology_matrix_one_passed_two_platform_skipped_pending_posix_fifo_and_symlink_execution_and_hosted_remaining_partition
+  - id: SOAK-ENGINE-STDERR-BOUNDED-READ-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_capture_reads_only_the_bounded_engine_stderr_tail
+    ci_partition: remaining
+    red_evidence: exact_starting_commit_fe0c3abba15ce0476cb6e580cdbcc102295b6a6c_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_final_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_exact_node_failed_when_the_real_launcher_capture_called_Path_read_bytes_before_the_retention_bound
+    green_evidence: local_corrected_production_blob_03dfcbecbd178851dd0457d110d5ca31b64365c1_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_exact_node_passed_pending_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6899,8 +6915,49 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A launcher session whose process and descendants were not proven settled can replace the child-writable logs directory or one of its leaves while failure evidence is captured. On Windows it can junction-swap the directory to an external location, restore the original directory before the pathname after-check, or redirect the leaf between lstat and open. Unrelated bytes can then enter the retained week-run evidence bundle and disclose another run's log while appearing to belong to this run. A cleanup interruption deriving directly from BaseException can also replace the original run failure and skip both truthful refusal artifacts. A guard with no retained child-style pipe writer falsely claimed the drain settled immediately, while later BaseException exits from drain settlement, launcher-log publication, or either refusal-artifact write repeated the same primary-replacement class one cleanup step later. The real owner then exited TemporaryDirectory before its outer settlement retry, so recursive root teardown ran while a child duplicate remained live and a teardown BaseException replaced the preserved run failure.
-    invariant: If launcher-session settlement raises any BaseException, failure capture retains the original primary exception, closes its local launcher-log writer without claiming EOF while a child-style duplicate remains, performs no pathname measurement, enumeration, open, or read under the child-writable state root, and attempts a bounded truthful refusal artifact for both engine stderr and assistant log. Drain ownership remains pending until the outer session lifecycle actually settles the retained writer, after which the real drain thread reaches terminal state. No BaseException from drain finish, launcher-log publication, or either refusal-artifact write replaces the primary; cleanup notes disclose only the exception type. On every admitted assistant-log leaf, the file identity measured before open must match the identity of the opened descriptor before any bytes are read; a mismatch is an explicit replaced-or-unreadable refusal. A before/after directory identity comparison is not authority against ABA and is never the only control while the writer may still be live. The real owner performs final authoritative process and descendant settlement before any temporary-root traversal or teardown; an unsettled root is retained rather than traversed, and BaseException from final settlement or later root cleanup cannot replace the primary run failure.
+    consequence: >-
+      A launcher session whose process and descendants were not proven settled can replace
+      the child-writable logs directory or one of its leaves while failure evidence is
+      captured. On Windows it can junction-swap the directory to an external location,
+      restore the original directory before the pathname after-check, or redirect the leaf
+      between lstat and open. Unrelated bytes can then enter the retained week-run evidence
+      bundle and disclose another run's log while appearing to belong to this run. A cleanup
+      interruption deriving directly from BaseException can replace the original run failure
+      and skip both truthful refusal artifacts. A guard with no retained child-style pipe
+      writer falsely claimed the drain settled immediately, while later BaseException exits
+      from drain settlement, launcher-log publication, or either refusal-artifact write
+      repeated the same primary-replacement class one cleanup step later. The real owner then
+      exited TemporaryDirectory before its outer settlement retry, so recursive root teardown
+      ran while a child duplicate remained live and a teardown BaseException replaced the
+      preserved run failure. The old engine-stderr publisher also followed symbolic and hard
+      links, accepted special files, and read the whole file before limiting it, so it could
+      disclose an external stream or block forever on a fifo. Cleanup failures from the
+      receipt sink, artifact capability pair, bridge pipe, temporary root, or snapshot exit
+      could replace the active run failure and skip every later owner, leaving descriptors
+      and roots live.
+    invariant: >-
+      If launcher-session settlement raises any BaseException, failure capture retains the
+      original primary exception, closes its local launcher-log writer without claiming EOF
+      while a child-style duplicate remains, performs no pathname measurement, enumeration,
+      open, or read under the child-writable state root, and attempts a bounded truthful
+      refusal artifact for both engine stderr and assistant log. Drain ownership remains
+      pending until the outer session lifecycle actually settles the retained writer, after
+      which the real drain thread reaches terminal state. No BaseException from drain finish,
+      launcher-log publication, or either refusal-artifact write replaces the primary;
+      cleanup notes disclose only the exception type. On every admitted log leaf, the file
+      identity measured before open must match the identity of the opened descriptor before
+      any bytes are read; a mismatch is an explicit replaced-or-unreadable refusal. A
+      before/after directory identity comparison is not authority against ABA and is never
+      the only control while the writer may still be live. Every admitted engine-stderr or
+      assistant-log leaf is opened no-follow beneath a descriptor-bound child-writable logs
+      directory where the platform supports it, only a lone regular file is admitted, and no
+      more than the bounded tail is read. The real owner performs final authoritative process
+      and descendant settlement before any temporary-root traversal or teardown; an unsettled
+      root is retained rather than traversed. It then attempts sink close, artifact-pair close,
+      bridge-pipe close, every eligible root cleanup, and source-snapshot exit in dependency
+      order even after any BaseException. The active primary exception is preserved and each
+      cleanup failure contributes only a sanitized type-only note; without an active primary,
+      the first cleanup failure is retained while later failures add sanitized type-only notes.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -6917,6 +6974,10 @@ records:
         ci_partition: remaining
       - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_run_owned_settles_session_before_state_root_cleanup_and_preserves_primary
         ci_partition: remaining
-    automation_limit: The six production-path guard nodes pass locally on Windows, including a real junction ABA, a retained child-style pipe writer, four independent post-settlement BaseException controls, and the real owner lifecycle with final-settlement and root-cleanup interruption, but the default hosted remaining partition has not yet sealed the corrected candidate.
-    red_evidence: exact_9733238a5abe60d69536495e716e7a6e908559cb_tree_e04ae1aabd598d64b7a5acec217f20f23af2d09f_python_3_14_3_Windows_exact_three_new_nodes_selected_three_failed_the_unsettled_path_attempted_read_bytes_and_lstat_the_real_junction_ABA_published_EXTERNAL_JUNCTION_ABA_STREAM_MUST_NOT_PUBLISH_and_the_leaf_identity_ABA_published_EXTERNAL_LEAF_ABA_STREAM_MUST_NOT_PUBLISH_and_local_guard_blob_47daf990ba6a7ccd1f8374ab4110a4a3d73e52ea_with_only_production_reverted_to_exact_69d2e95f85d0850d91524879c98d5b64c261a7ca_blob_e79e159966ff7b9a92aa9a88807e6ed711ec75d5_python_3_14_3_Windows_exact_five_failed_the_retained_writer_control_added_a_false_drain_timeout_note_and_four_post_settlement_BaseException_controls_replaced_the_primary_plus_exact_fa9ad1846063fd178177175651fa4cabae12e8f0_tree_692452d616740efc10cc674b7a7865e04c402b2d_with_guard_blob_50d3ff6234b3defd31fcd897abbe91e90c85d829_exact_run_owned_node_two_failed_before_outer_settlement
-    green_evidence: local_corrected_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_guard_blob_50d3ff6234b3defd31fcd897abbe91e90c85d829_python_3_14_3_Windows_full_module_43_passed_2_skipped_and_python_3_14_6_Ubuntu_22_04_full_module_42_passed_3_skipped_pending_corrected_candidate_and_hosted_remaining_partition
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_capture_refuses_unowned_engine_stderr_topology
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_capture_reads_only_the_bounded_engine_stderr_tail
+        ci_partition: remaining
+    automation_limit: The eight registered production-path guard nodes pass locally on Windows. Real symlink creation and filesystem fifo execution are platform-gated here and remain pending a POSIX hosted remaining partition; the corrected candidate itself is not yet sealed by hosted CI.
+    red_evidence: exact_starting_commit_fe0c3abba15ce0476cb6e580cdbcc102295b6a6c_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_final_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_six_exact_red_on_revert_parameters_failed_external_hard_link_bytes_were_published_Path_read_bytes_was_called_before_the_bound_and_sink_artifact_pair_bridge_pipe_and_source_snapshot_exit_each_replaced_PrimaryFailure_with_CleanupInterrupted_plus_prior_registered_red_evidence_remains_in_false_green_records_001_002_003_005_006
+    green_evidence: local_corrected_production_blob_03dfcbecbd178851dd0457d110d5ca31b64365c1_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_full_guard_module_49_passed_four_platform_skipped_and_full_scripts_directory_224_passed_100_platform_skipped_pending_posix_fifo_symlink_and_hosted_remaining_partition
