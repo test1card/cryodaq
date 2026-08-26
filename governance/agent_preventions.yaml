@@ -3579,6 +3579,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_ff4c4909440ef81d216e60314fca51b94c9d7a5a_with_only_the_six_new_guard_nodes_applied_left_the_launcher_production_blob_0c012dbf2eaa9157e3cb3404285517c6f0d51e91_and_failed_four_nodes_live_observed_exit_hold_ambiguous_missing_handle_hold_stale_timer_hold_and_gui_production_path_hold_while_explicit_mock_restart_and_shutdown_owned_clean_exit_passed_4_failed_2_passed_2026_08_26
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: LAUNCHER-LIVE-INVALIDATION-MANUAL-RESTART-FALSE-GREEN-361
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-SHUTDOWN-RECEIPT-001
+    guard: tests/test_launcher_backoff.py::test_live_invalidation_failure_cannot_be_cleared_by_manual_restart
+    ci_partition: remaining
+    red_evidence: exact_bd6422c86311a608e6440ae3fe6f0974293a3849_tree_2fbdd6f613bec6549419a175b05e651f8a26079d_cold_review_counterexample_and_exact_guard_red_before_showed_a_live_exit_whose_producer_invalidation_failed_left_engine_unsettled_incarnation_None_so_manual_restart_cleared_restart_giving_up_and_started_a_replacement_1_failed_2026_08_26
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -4378,6 +4386,8 @@ records:
       - node: tests/gui/shell/test_d7_1b_repair.py::test_observed_owned_live_engine_exit_latches_hold_before_reaping
         ci_partition: gui
       - node: tests/test_launcher_backoff.py::test_owned_live_observed_exit_latches_permanent_hold_before_reaping
+        ci_partition: remaining
+      - node: tests/test_launcher_backoff.py::test_live_invalidation_failure_cannot_be_cleared_by_manual_restart
         ci_partition: remaining
       - node: tests/test_launcher_backoff.py::test_ambiguous_live_missing_handle_never_authorizes_replacement
         ci_partition: remaining

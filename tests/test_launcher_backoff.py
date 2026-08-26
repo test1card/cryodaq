@@ -259,6 +259,27 @@ def test_retryable_exit_invalidation_failure_latches_audible_hold_before_reader_
     mock_qtimer.singleShot.assert_not_called()
 
 
+def test_live_invalidation_failure_cannot_be_cleared_by_manual_restart() -> None:
+    """A failed live-source invalidation keeps manual replacement impossible."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=9)
+    w._replay_source = None
+    w._engine_instance_id = "a" * 32
+    w._engine_shutdown_capability = "b" * 64
+    w._invalidate_engine_producer.side_effect = RuntimeError("producer authority remained live")
+
+    LauncherWindow._handle_engine_exit(w)
+
+    assert w._engine_unsettled_incarnation == ("a" * 32, 9)
+    with pytest.raises(RuntimeError, match="manual restart remains in HOLD"):
+        LauncherWindow._restart_engine(w)
+
+    w._start_engine.assert_not_called()
+    w._bridge.start.assert_not_called()
+    assert w._invalidate_engine_producer.call_count == 1
+
+
 def test_retryable_exit_reader_settlement_failure_retains_owner_and_blocks_restart() -> None:
     """Reader settlement runs after visible HOLD and cannot become an optimistic retry."""
     from cryodaq.launcher import LauncherWindow

@@ -7840,6 +7840,9 @@ class LauncherWindow(QMainWindow):
         try:
             self._invalidate_engine_producer()
         except Exception as exc:
+            if actuation_capable_or_ambiguous:
+                # A failed invalidation leaves the old live producer authoritative.
+                self._engine_unsettled_incarnation = (observed_owner_id, returncode)
             LauncherWindow._latch_engine_restart_hold(
                 self,
                 phase="producer-invalidation",
