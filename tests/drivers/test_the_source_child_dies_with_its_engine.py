@@ -45,7 +45,6 @@ never a bare-pid action and never a pass.
 
 from __future__ import annotations
 
-import contextlib
 import errno
 import json
 import os
@@ -84,6 +83,8 @@ _PIDFD_SEND_SIGNAL_SYSCALL = {
     "ppc64le": 424,
     "s390x": 424,
 }.get(platform.machine())
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
 
 
 class _UnstableIdentity(RuntimeError):
@@ -130,6 +131,37 @@ def _signal_via_identity(pidfd: int, sig: int) -> None:
     raise OSError(code, os.strerror(code))
 
 
+def _set_child_subreaper(enabled: bool) -> bool:
+    """Set this pytest process as the nearest orphan adopter; return prior state."""
+
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    if libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(previous), 0, 0, 0) != 0:
+        code = ctypes.get_errno()
+        raise _UnstableIdentity(f"PR_GET_CHILD_SUBREAPER failed: {os.strerror(code)}")
+    previous_enabled = previous.value == 1
+    if previous_enabled != enabled and libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
+        code = ctypes.get_errno()
+        raise _UnstableIdentity(f"PR_SET_CHILD_SUBREAPER failed: {os.strerror(code)}")
+    return previous_enabled
+
+
+def _reap_adopted_child(child_pid: int) -> None:
+    """Wait for the exact orphan adopted after its deliberately killed parent."""
+
+    try:
+        reaped_pid, _status = os.waitpid(child_pid, 0)
+    except ChildProcessError as exc:
+        raise AssertionError(f"spawned child {child_pid} was not adopted for exact reap") from exc
+    assert reaped_pid == child_pid, f"waitpid reaped {reaped_pid}, expected exact child {child_pid}"
+
+
+def _restore_child_subreaper(previous: bool) -> None:
+    _set_child_subreaper(previous)
+
+
 # The parent is written to a FILE, never passed with -c: `spawn` re-imports the main module
 # to rebuild the target, and a `-c` main module cannot be re-imported.
 _BUSY_CHILD_PARENT = textwrap.dedent(
@@ -168,14 +200,96 @@ _BUSY_CHILD_PARENT = textwrap.dedent(
         context = multiprocessing.get_context("spawn")
         parent_connection, child_connection = context.Pipe(duplex=True)
         process = context.Process(target=_busy, args=(child_connection, os.getpid()), daemon=True)
-        process.start()
-        child_connection.close()
-        if not parent_connection.poll(10):
-            raise RuntimeError("child did not report readiness after binding")
-        if parent_connection.recv() != "READY":
-            raise RuntimeError("child reported an invalid readiness marker")
-        print(f"READY {{process.pid}}", flush=True)
-        time.sleep(600)
+        try:
+            process.start()
+            child_connection.close()
+            # Publish the exact child identity before waiting for its binder. The harness
+            # opens a pidfd from this line, so every later startup error still has an exact
+            # cleanup authority rather than an already-reusable numeric pid.
+            print(f"SPAWNED {{process.pid}}", flush=True)
+            if not parent_connection.poll(10):
+                raise RuntimeError("child did not report readiness after binding")
+            if parent_connection.recv() != "READY":
+                raise RuntimeError("child reported an invalid readiness marker")
+            print(f"READY {{process.pid}}", flush=True)
+            if sys.stdin.buffer.readline().strip() != b"CLEANUP":
+                raise RuntimeError("parent received an invalid harness command")
+        finally:
+            if process.pid is not None:
+                if process.is_alive():
+                    process.kill()
+                process.join(10)
+                if process.is_alive():
+                    raise RuntimeError("busy child did not settle during parent cleanup")
+    """
+)
+
+
+# This parent reaches the production constructor rather than a test-only worker seam:
+# USBTMCTransport._settle_process_open creates multiprocessing.Process with
+# target=_visa_process_main. The synthetic pyvisa module is installed by the FILE's top
+# level, so spawn re-imports it in the real child. Its write then enters a native call that
+# holds the GIL and ignores SIGTERM, matching the unsafe in-flight transaction shape.
+_PRODUCTION_PROCESS_PARENT = textwrap.dedent(
+    """
+    import asyncio, ctypes, os, signal, sys, types
+    from pathlib import Path
+    sys.path.insert(0, {src!r})
+
+    _entered = Path({entered!r})
+
+    class _Resource:
+        timeout = 0
+
+        def write(self, _command):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            _entered.write_bytes(b"ENTERED")
+            ctypes.PyDLL("libc.so.6").sleep(600)
+
+        def close(self):
+            pass
+
+    class _Manager:
+        def open_resource(self, _resource):
+            return _Resource()
+
+        def close(self):
+            pass
+
+    _pyvisa = types.ModuleType("pyvisa")
+    _pyvisa.ResourceManager = _Manager
+    sys.modules["pyvisa"] = _pyvisa
+
+    async def _main():
+        from cryodaq.drivers.transport.usbtmc import USBTMCTransport
+
+        transport = USBTMCTransport(mock=False)
+        try:
+            await transport._settle_process_open("USB0::PRODUCTION-SPAWN-PROBE")
+            owner = transport._process_owner
+            if owner is None or owner.process.pid is None:
+                raise RuntimeError("production spawn returned no exact process owner")
+            print(f"SPAWNED {{owner.process.pid}}", flush=True)
+            operation = asyncio.create_task(transport.write("production-spawn-boundary"))
+            deadline = asyncio.get_running_loop().time() + 10.0
+            while not _entered.is_file():
+                if operation.done():
+                    await operation
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise RuntimeError("production VISA worker never entered the native write")
+                await asyncio.sleep(0.01)
+            print(f"READY {{owner.process.pid}}", flush=True)
+            if (await asyncio.to_thread(sys.stdin.buffer.readline)).strip() != b"CLEANUP":
+                raise RuntimeError("parent received an invalid harness command")
+        finally:
+            owner = transport._process_owner
+            if owner is not None:
+                if not transport._terminate_process_owner(owner):
+                    raise RuntimeError("production VISA worker did not settle during parent cleanup")
+                transport._release_stopped_owner(owner)
+
+    if __name__ == "__main__":
+        asyncio.run(_main())
     """
 )
 
@@ -190,23 +304,159 @@ def _read_startup_line(stream, *, timeout: float) -> str:
     return stream.readline().decode().strip()
 
 
-def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool:
-    """Kill a parent with SIGKILL and report whether its busy child outlived it."""
+def _preflight_stable_identity_surface() -> None:
+    """Skip only before spawning, after proving every pidfd operation we use."""
 
-    # A skip after READY leaks the deliberately unbound child: it detached its descriptors,
-    # ignores SIGTERM, and can remain in its 600-second call. Confirm the identity primitive
-    # before any such child exists, so an unsupported host skips without creating an orphan.
+    pidfd: int | None = None
     try:
-        preflight_pidfd = _stable_identity(os.getpid())
-    except _UnstableIdentity as exc:
+        pidfd = _stable_identity(os.getpid())
+        if _identity_exited(pidfd):
+            raise _UnstableIdentity("the current process pidfd was already readable")
+        _signal_via_identity(pidfd, 0)
+    except (_UnstableIdentity, OSError, ValueError) as exc:
         pytest.skip(
             "no stable process identity on this host: refusing to spawn an uncleanable "
             f"control child ({exc}). Parent-death evidence requires the Ubuntu 22.04-class "
             "kernel (pidfd plus pidfd_send_signal, >= 5.3); this limitation is the open "
             "target-OS gate, not a pass."
         )
-    else:
-        os.close(preflight_pidfd)
+    finally:
+        if pidfd is not None:
+            os.close(pidfd)
+
+
+def _wait_for_identity_exit(pidfd: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _identity_exited(pidfd):
+            return True
+        time.sleep(0.05)
+    return _identity_exited(pidfd)
+
+
+def _reported_child_identity(parent: subprocess.Popen[bytes], *, marker: str, timeout: float) -> int:
+    assert parent.stdout is not None
+    line = _read_startup_line(parent.stdout, timeout=timeout)
+    reported_marker, _, reported_pid = line.partition(" ")
+    if reported_marker != marker or not reported_pid.isdigit():
+        raise AssertionError(f"parent did not report {marker}; got {line!r}")
+    return int(reported_pid)
+
+
+def _request_exact_parent_cleanup(parent: subprocess.Popen[bytes]) -> None:
+    """Let the still-live parent kill and join its exact Process child."""
+
+    if parent.poll() is None:
+        assert parent.stdin is not None
+        try:
+            parent.stdin.write(b"CLEANUP\n")
+            parent.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+    parent.wait(timeout=15)
+
+
+def _close_parent_streams(parent: subprocess.Popen[bytes]) -> None:
+    for stream in (parent.stdin, parent.stdout, parent.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def _spawned_child_survives_killed_parent(parent_file: Path) -> bool:
+    """Run one parent FILE and settle parent, child, pipes, and pidfd on every exit."""
+
+    _preflight_stable_identity_surface()
+    try:
+        previous_subreaper = _set_child_subreaper(True)
+    except _UnstableIdentity as exc:
+        pytest.skip(
+            f"this Linux host cannot make the lifecycle harness the exact orphan reaper; refusing to spawn ({exc})"
+        )
+    try:
+        parent = subprocess.Popen(
+            [sys.executable, "-B", str(parent_file)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except BaseException:
+        _restore_child_subreaper(previous_subreaper)
+        raise
+    child_pid: int | None = None
+    child_pidfd: int | None = None
+    parent_was_killed = False
+    try:
+        child_pid = _reported_child_identity(parent, marker="SPAWNED", timeout=10.0)
+        # From this point onward the exact child is pinned before READY, polling, or any
+        # signal. A setup failure is an error, never a post-spawn skip; the live parent
+        # still owns the multiprocessing.Process and the finally block asks it to reap it.
+        child_pidfd = _stable_identity(child_pid)
+        ready_pid = _reported_child_identity(parent, marker="READY", timeout=10.0)
+        if ready_pid != child_pid:
+            raise AssertionError(f"READY changed child identity from {child_pid} to {ready_pid}")
+        if _identity_exited(child_pidfd):
+            raise AssertionError("the child died before the parent was killed")
+
+        # Prove the immunity live: a direct SIGTERM must leave the child running, so its
+        # death AFTER the parent's death can only be the kernel's SIGKILL delivery.
+        _signal_via_identity(child_pidfd, signal.SIGTERM)
+        time.sleep(0.2)
+        if _identity_exited(child_pidfd):
+            raise AssertionError("the child died of a bare SIGTERM; only SIGKILL may close it")
+
+        parent.kill()
+        parent.wait(timeout=10)
+        parent_was_killed = True
+        return not _wait_for_identity_exit(child_pidfd, timeout=6.0)
+    finally:
+        cleanup_errors: list[BaseException] = []
+        # If pidfd setup succeeded, kill through that exact identity first. The parent then
+        # either observes EOF and runs its Process.join, or is already the deliberate
+        # SIGKILL victim. If setup failed, the still-live parent remains the exact owner and
+        # handles the cleanup command itself.
+        if child_pidfd is not None:
+            try:
+                if not _identity_exited(child_pidfd):
+                    try:
+                        _signal_via_identity(child_pidfd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if not _wait_for_identity_exit(child_pidfd, timeout=10.0):
+                    raise AssertionError(f"spawned child {child_pid} did not reach exact pidfd settlement")
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        if not parent_was_killed:
+            try:
+                _request_exact_parent_cleanup(parent)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        else:
+            try:
+                parent.wait(timeout=10)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        if parent_was_killed and child_pid is not None:
+            try:
+                _reap_adopted_child(child_pid)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        if child_pidfd is not None:
+            try:
+                os.close(child_pidfd)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        _close_parent_streams(parent)
+        try:
+            _restore_child_subreaper(previous_subreaper)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        if cleanup_errors:
+            details = "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors)
+            raise AssertionError(f"lifecycle harness cleanup failed: {details}") from cleanup_errors[0]
+
+
+def _child_survives_a_killed_parent(tmp_path: Path, *, bound: bool, busy: str) -> bool:
+    """Kill a parent with SIGKILL and report whether its busy child outlived it."""
 
     parent_file = tmp_path / f"parent_{'bound' if bound else 'unbound'}_{abs(hash(busy))}.py"
     parent_file.write_text(
@@ -217,76 +467,120 @@ def _child_survives_a_killed_parent(tmp_path, *, bound: bool, busy: str) -> bool
         ),
         encoding="utf-8",
     )
-    parent = subprocess.Popen([sys.executable, "-B", str(parent_file)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return _spawned_child_survives_killed_parent(parent_file)
 
-    def _diagnose(reason: str) -> str:
-        """Kill the parent FIRST, then read its stderr.
 
-        The parent sleeps for ten minutes and owns the write end of that pipe, so reading
-        it while the parent lives blocks until the sleep ends -- turning a clear startup
-        failure into a ten-minute hang with no message.
-        """
+def _assert_proof_pidfd_exited(pidfd: int, identity_exited) -> None:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and not identity_exited(pidfd):
+        time.sleep(0.05)
+    assert identity_exited(pidfd), "the separately pinned child identity remained live after harness cleanup"
 
-        parent.kill()
-        parent.wait(timeout=10)
-        return f"{reason}; parent stderr={parent.stderr.read()[:600]!r}"
 
+def _close_proof_pidfd(pidfd: int) -> None:
     try:
-        assert parent.stdout is not None
-        line = _read_startup_line(parent.stdout, timeout=10.0)
-        marker, _, reported_pid = line.partition(" ")
-        if marker != "READY" or not reported_pid.isdigit():
-            raise AssertionError(_diagnose("no child pid reported"))
-        child_pid = int(reported_pid)
-        # A numeric pid is only a name; after its owner exits the kernel can hand it to an
-        # unrelated process. Open the stable identity NOW, before anything is signalled or
-        # polled, and fail closed where the kernel cannot provide one.
-        try:
-            child_pidfd = _stable_identity(child_pid)
-        except _UnstableIdentity as exc:
-            pytest.skip(
-                "no stable process identity on this host: refusing to poll or signal a "
-                f"reusable numeric pid ({exc}). Parent-death evidence requires the "
-                "Ubuntu 22.04-class kernel (pidfd plus pidfd_send_signal, >= 5.3); this "
-                "limitation is the open target-OS gate, not a pass."
-            )
-        # READY is sent by the child only after the binding (or its equivalent no-binding
-        # control point). Killing the parent only after this marker makes the test prove
-        # the parent-death guard rather than a late child's initial identity check.
-        if _identity_exited(child_pidfd):
-            raise AssertionError(_diagnose("the child died before the parent was killed"))
-        # Prove the immunity live: a direct SIGTERM must leave the child running, so its
-        # death AFTER the parent's death can only be the kernel's SIGKILL delivery.
-        _signal_via_identity(child_pidfd, signal.SIGTERM)
-        time.sleep(0.2)
-        if _identity_exited(child_pidfd):
-            raise AssertionError(_diagnose("the child died of a bare SIGTERM; only SIGKILL may close it"))
+        os.close(pidfd)
+    except OSError as exc:
+        if exc.errno != errno.EBADF:
+            raise
 
-        parent.kill()
-        parent.wait(timeout=10)
 
-        deadline = time.monotonic() + 6.0
-        while time.monotonic() < deadline and not _identity_exited(child_pidfd):
-            time.sleep(0.05)
-        survived = not _identity_exited(child_pidfd)
+@_LINUX_ONLY
+def test_lifecycle_harness_closes_preflight_and_child_pidfds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_stable_identity = _stable_identity
+    opened: list[int] = []
+
+    def recording_stable_identity(pid: int) -> int:
+        pidfd = real_stable_identity(pid)
+        opened.append(pidfd)
+        return pidfd
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_stable_identity)
+    try:
+        assert not _child_survives_a_killed_parent(tmp_path, bound=True, busy="time.sleep(600)")
+        assert len(opened) == 2, "the harness must preflight once and pin the one spawned child once"
+        for pidfd in set(opened):
+            with pytest.raises(OSError) as raised:
+                os.fstat(pidfd)
+            assert raised.value.errno == errno.EBADF
     finally:
-        if parent.poll() is None:
-            parent.kill()
-        parent.wait(timeout=10)
-    if survived:
-        # Reaping it is not optional either. It is no longer anyone's child, so nothing
-        # will wait on it, and leaving it running is how one test's deliberate leak becomes
-        # the next test's environment. The kill goes through the same stable identity as
-        # every other signal above.
-        with contextlib.suppress(ProcessLookupError):
-            _signal_via_identity(child_pidfd, signal.SIGKILL)
-        gone_by = time.monotonic() + 10.0
-        while time.monotonic() < gone_by and not _identity_exited(child_pidfd):
-            time.sleep(0.05)
-        assert _identity_exited(child_pidfd), (
-            f"the control's leaked child {child_pid} could not be killed through its pidfd"
-        )
-    return survived
+        for pidfd in set(opened):
+            _close_proof_pidfd(pidfd)
+
+
+@_LINUX_ONLY
+def test_lifecycle_harness_reaps_exact_child_when_pidfd_setup_fails_after_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_stable_identity = _stable_identity
+    real_identity_exited = _identity_exited
+    proof_pidfds: list[int] = []
+
+    def failing_child_identity(pid: int) -> int:
+        if pid == os.getpid():
+            return real_stable_identity(pid)
+        child_pidfd = real_stable_identity(pid)
+        proof_pidfds.append(os.dup(child_pidfd))
+        os.close(child_pidfd)
+        raise _UnstableIdentity("injected pidfd setup failure after SPAWNED")
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", failing_child_identity)
+    try:
+        with pytest.raises(_UnstableIdentity, match="injected pidfd setup failure"):
+            _child_survives_a_killed_parent(tmp_path, bound=False, busy="time.sleep(600)")
+        assert len(proof_pidfds) == 1
+        _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+    finally:
+        for pidfd in proof_pidfds:
+            if not real_identity_exited(pidfd):
+                _signal_via_identity(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+            _close_proof_pidfd(pidfd)
+
+
+@_LINUX_ONLY
+def test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_after_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_stable_identity = _stable_identity
+    real_identity_exited = _identity_exited
+    child_pidfds: list[int] = []
+    proof_pidfds: list[int] = []
+    injected = False
+
+    def recording_child_identity(pid: int) -> int:
+        pidfd = real_stable_identity(pid)
+        if pid != os.getpid():
+            child_pidfds.append(pidfd)
+            proof_pidfds.append(os.dup(pidfd))
+        return pidfd
+
+    def fail_first_child_poll(pidfd: int) -> bool:
+        nonlocal injected
+        if child_pidfds and pidfd == child_pidfds[-1] and not injected:
+            injected = True
+            raise OSError(errno.EIO, "injected pidfd poll failure after READY")
+        return real_identity_exited(pidfd)
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_identity_exited", fail_first_child_poll)
+    try:
+        with pytest.raises(OSError, match="injected pidfd poll failure"):
+            _child_survives_a_killed_parent(tmp_path, bound=False, busy="time.sleep(600)")
+        assert injected is True
+        assert len(proof_pidfds) == 1
+        _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+    finally:
+        for pidfd in proof_pidfds:
+            if not real_identity_exited(pidfd):
+                _signal_via_identity(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+            _close_proof_pidfd(pidfd)
 
 
 @_LINUX_ONLY
@@ -322,6 +616,30 @@ def test_the_binding_decides_whether_a_gil_holding_native_child_outlives_its_kil
         "the source-owning child outlived its killed parent while holding the GIL in a "
         "native call; it could still finish a write after a replacement engine had "
         "commanded OFF"
+    )
+
+
+@_LINUX_ONLY
+def test_production_settle_process_open_worker_cannot_survive_killed_parent(tmp_path: Path) -> None:
+    """Exercise the real Process(target=_visa_process_main) construction boundary.
+
+    The fake is only pyvisa's native resource. Process construction, the entry point,
+    lifetime binder, framed open request, and transport write path are all production.
+    This is process-lifetime evidence only; it does not prove the killed USB transaction
+    settled, was cancelled, or left the source OFF.
+    READY is emitted only after the spawned VISA worker is inside the SIGTERM-immune native
+    write, so parent death cannot be mistaken for ordinary pipe EOF settlement.
+    """
+
+    entered = tmp_path / "production_visa_write_entered"
+    parent_file = tmp_path / "production_settle_process_open_parent.py"
+    parent_file.write_text(
+        _PRODUCTION_PROCESS_PARENT.format(src=_SRC, entered=str(entered)),
+        encoding="utf-8",
+    )
+
+    assert not _spawned_child_survives_killed_parent(parent_file), (
+        "the production-spawned VISA worker survived its killed engine parent"
     )
 
 

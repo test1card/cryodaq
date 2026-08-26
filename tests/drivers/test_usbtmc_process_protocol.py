@@ -135,6 +135,10 @@ def test_process_entry_requires_and_forwards_captured_parent(monkeypatch: pytest
         usbtmc._visa_process_main(connection)
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="pins the OPEN Windows gate: the unbound source worker refuses to start until a real binding exists",
+)
 def test_windows_lifetime_binding_refuses_unprotected_visa_worker(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
