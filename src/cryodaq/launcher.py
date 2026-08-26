@@ -3412,7 +3412,9 @@ class LauncherWindow(QMainWindow):
         the shared stream/handler fields, the already-reported timeout is
         never upgraded to success, and neither callback ever delivers twice;
         when the overdue worker finally terminates, only that exact
-        registration clears.
+        registration clears. The successor observation tick always queues
+        BEFORE any deadline callback dispatch, so even a raising
+        ``on_failed`` cannot strand this overdue flight unobserved.
         """
 
         existing = getattr(self, "_engine_reader_settlement_state", None)
@@ -3454,6 +3456,13 @@ class LauncherWindow(QMainWindow):
             except Exception:
                 finished = False
             if not finished:
+                # The successor observation tick queues BEFORE any deadline
+                # reporting or callback dispatch: a raising delivery callback
+                # must never strand this flight's observation chain. A
+                # stranded chain would keep this exact registration published
+                # as the sole settlement owner forever, holding every later
+                # restart/quit gate even after the overdue worker terminates.
+                QTimer.singleShot(_ENGINE_READER_SETTLEMENT_TICK_MS, _advance)
                 if not state.get("timeout_reported") and time.monotonic() >= state["deadline"]:
                     # The bound is spent, but the close worker may still be
                     # running. Report the exceeded bound EXACTLY once while
@@ -3463,7 +3472,10 @@ class LauncherWindow(QMainWindow):
                     # overlapping close over the same shared stream/handler
                     # fields, whose bounded joins could block the Qt thread
                     # again. The operation therefore stays non-re-armable for
-                    # as long as this overdue worker lives.
+                    # as long as this overdue worker lives. Exactly-once
+                    # semantics are unchanged: ``timeout_reported`` latches
+                    # before dispatch, so neither the CRITICAL diagnosis nor
+                    # the failure callback can ever run twice.
                     state["timeout_reported"] = True
                     logger.critical(
                         "Deferred engine reader settlement exceeded its bound; "
@@ -3473,10 +3485,6 @@ class LauncherWindow(QMainWindow):
                         owner_id,
                     )
                     on_failed(RuntimeError("deferred engine reader settlement exceeded its bound"))
-                # Keep observing the SAME worker and completion event
-                # non-blockingly: when the overdue close finally terminates,
-                # the completion tick below clears only this exact flight.
-                QTimer.singleShot(_ENGINE_READER_SETTLEMENT_TICK_MS, _advance)
                 return
             failure = state.get("error")
             self._engine_reader_settlement_state = None
@@ -3488,9 +3496,11 @@ class LauncherWindow(QMainWindow):
                 # or delivering either callback a second time.
                 logger.error(
                     "Overdue deferred engine reader settlement worker terminated; "
-                    "phase=%s owner=%s -- deferred ownership released, late result discarded",
+                    "phase=%s owner=%s late_close_exception=%s -- deferred ownership "
+                    "released, late result discarded",
                     phase,
                     owner_id,
+                    type(failure).__name__ if failure is not None else "none",
                 )
                 return
             if failure is not None:

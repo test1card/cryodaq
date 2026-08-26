@@ -3844,3 +3844,163 @@ def test_deferred_settlement_timeout_keeps_ownership_until_the_worker_terminates
     assert all(name != main_thread_name for name in close_threads), (
         "the bounded close always ran off the arming (Qt-side) thread"
     )
+
+
+def test_deferred_settlement_survives_a_raising_deadline_callback_until_termination(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising deadline delivery callback strands neither observation nor ownership.
+
+    The cold-review finding against ``_begin_deferred_engine_reader_settlement``:
+    its overdue deadline branch used to dispatch ``on_failed`` BEFORE queueing
+    the successor tick. A callback that raises left the observation chain
+    stranded -- no further tick existed to observe the worker's eventual
+    termination, the exact settlement registration stayed published forever as
+    the sole owner, and every later restart/quit gate stayed in HOLD even
+    after the worker terminated.
+
+    The corrected machine must survive the raising callback end to end on the
+    real method path: at the deadline, the successor observation tick is
+    ALREADY queued when ``on_failed`` raises; the timeout verdict is still
+    delivered exactly once with exactly one CRITICAL diagnosis; a second arm
+    during the overdue interval is still refused with no second overlapping
+    close; and when the overdue worker finally terminates (here, WITH an
+    underlying late close error), one more queued tick clears only that exact
+    registration -- the late result is discarded without upgrading the verdict
+    to success or repeating either callback, and its underlying exception is
+    preserved in the overdue-terminated diagnostic.
+
+    Falsification: reverting the deadline branch to dispatching ``on_failed``
+    before queueing the successor tick fails immediately -- the raise escapes
+    before any new shot exists, the post-raise drive finds no queued tick, and
+    the overdue registration can never clear.
+    """
+
+    import cryodaq.launcher as module
+    from cryodaq.launcher import LauncherWindow
+
+    close_started = threading.Event()
+    close_gate = threading.Event()
+    close_threads: list[str] = []
+
+    def gated_close() -> None:
+        close_threads.append(threading.current_thread().name)
+        close_started.set()
+        assert close_gate.wait(timeout=10.0), "deferred settlement worker stalled"
+        host._close_completions.append(1)
+        raise OSError("late close exploded while finishing")
+
+    host = SimpleNamespace(_close_engine_stderr_stream=gated_close, _close_completions=[])
+    settled_results: list[str] = []
+    failed_results: list[BaseException] = []
+
+    def flaky_on_failed(exc: Exception) -> None:
+        failed_results.append(exc)
+        if len(failed_results) == 1:
+            raise RuntimeError("deadline delivery exploded")
+
+    def arm(*, phase: str) -> bool:
+        return LauncherWindow._begin_deferred_engine_reader_settlement(
+            host,
+            phase=phase,
+            owner_id="a" * 32,
+            on_settled=lambda: settled_results.append(phase),
+            on_failed=flaky_on_failed,
+        )
+
+    clock = _QuitReapClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    try:
+        with (
+            caplog.at_level("ERROR", logger="cryodaq.launcher"),
+            patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+        ):
+            assert arm(phase="raising-deadline-callback") is True
+
+            state = getattr(host, "_engine_reader_settlement_state", None)
+            assert type(state) is dict, "the flight publishes its ownership as soon as it arms"
+            worker = state.get("worker")
+            assert isinstance(worker, threading.Thread), "the close runs in a registered worker"
+            assert close_started.wait(timeout=5.0), "the real bound-close callback never started"
+
+            cursor = [0]
+            assert _drive_next_reap_tick(single_shot, cursor, clock), (
+                "the machine observes non-blockingly before the deadline"
+            )
+            assert getattr(host, "_engine_reader_settlement_state", None) is state
+
+            # Cross the eight-second bound with the worker still blocked, then
+            # drive the deadline tick. The delivery callback raises HERE --
+            # exactly the production defect shape.
+            clock.advance(module._ENGINE_READER_SETTLEMENT_BOUND_S + 1.0)
+            shots_before_deadline_tick = len(single_shot.call_args_list)
+            with pytest.raises(RuntimeError, match="deadline delivery exploded"):
+                assert _drive_next_reap_tick(single_shot, cursor, clock)
+
+            # The decisive regression assertion: despite the raise, the
+            # successor observation tick was ALREADY queued when the callback
+            # dispatched -- the observation chain survived the raising
+            # callback.
+            assert len(single_shot.call_args_list) == shots_before_deadline_tick + 1, (
+                "the successor observation tick must already be queued while the deadline delivery callback raises"
+            )
+
+            # Exactly-once semantics held through the raise: the failure was
+            # delivered exactly once with exactly one CRITICAL diagnosis...
+            assert len(failed_results) == 1 and isinstance(failed_results[0], RuntimeError), failed_results
+            assert "exceeded its bound" in str(failed_results[0])
+            critical_lines = [
+                record
+                for record in caplog.records
+                if record.levelname == "CRITICAL" and "exceeded its bound" in record.getMessage()
+            ]
+            assert len(critical_lines) == 1, "the timeout diagnosis reports itself exactly once"
+
+            # ...while ownership stayed fail-closed: the exact registration
+            # remains published, the worker lives, and re-arming is refused
+            # with no second overlapping close over the shared fields.
+            assert getattr(host, "_engine_reader_settlement_state", None) is state, (
+                "the overdue flight stays the registered settlement owner after the raise"
+            )
+            assert worker.is_alive(), "the blocked close worker really is still running"
+            assert arm(phase="second-arm") is False, "not re-armable against the live worker"
+            assert len(close_threads) == 1, "no second close started beside the raising delivery"
+            assert settled_results == [], "no success verdict beside the reported timeout"
+
+            # Terminate the overdue worker -- it finishes WITH an underlying
+            # late close error -- then drive only ALREADY-QUEUED ticks: the
+            # surviving chain must clear the exact registration by itself.
+            close_gate.set()
+            worker.join(timeout=5.0)
+            assert not worker.is_alive(), "the overdue worker actually terminated"
+            _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
+
+            assert getattr(host, "_engine_reader_settlement_state", None) is None, (
+                "the surviving observation chain clears the overdue registration after termination"
+            )
+            assert len(failed_results) == 1 and settled_results == [], (
+                "the timeout verdict stays final: never upgraded to success, never repeated"
+            )
+            assert host._close_completions == [1], "the exact settlement completed exactly once"
+            overdue_lines = [
+                record
+                for record in caplog.records
+                if "Overdue deferred engine reader settlement" in record.getMessage()
+            ]
+            assert len(overdue_lines) == 1, "the late termination reports itself exactly once"
+            assert "late_close_exception=OSError" in overdue_lines[0].getMessage(), (
+                "the underlying late close exception is preserved in the diagnostic"
+            )
+
+            # With the owner released, a fresh retry may arm again: the gates
+            # are recoverable, not stuck in HOLD.
+            assert arm(phase="post-recovery-retry") is True
+            retry_state = getattr(host, "_engine_reader_settlement_state", None)
+            assert type(retry_state) is dict and retry_state.get("worker") is not worker
+    finally:
+        close_gate.set()
+        late_worker = (getattr(host, "_engine_reader_settlement_state", None) or {}).get("worker")
+        if isinstance(late_worker, threading.Thread):
+            late_worker.join(timeout=5.0)
