@@ -20,12 +20,11 @@ def _make_launcher_mock(
     w = MagicMock()
     w._restart_pending = False
     w._shutdown_requested = False
-    # Backoff is exercised through a launcher-owned replay process. A live
-    # acquisition process now takes the same path whenever its exit was
-    # OBSERVED -- handle still held, code already read -- and holds only when
-    # the handle itself is lost. See the sibling assertions in
-    # tests/gui/shell/test_d7_1b_repair.py.
+    # Backoff is exercised through an explicit non-actuating replay process.
+    # Removing that explicit mode makes this fixture fail closed as live or
+    # ambiguous acquisition authority.
     w._engine_external = False
+    w._mock = False
     w._engine_unsettled_incarnation = None
     # A MagicMock answers every attribute, so this one has to be said out loud: a launcher
     # that has not dispatched a shutdown has NO worker, and leaving it auto-vivified made
@@ -123,19 +122,59 @@ def test_owned_config_error_exit_refuses_restart_without_latching_an_unsettled_i
     assert w._restart_attempts == 0
 
 
-def test_owned_observed_exit_retries_forever_like_every_other_child():
-    """The live acquisition child gets the never-give-up backoff it was denied.
-
-    ``test_handle_engine_exit_retries_forever_never_gives_up`` below has always
-    said what this project wants -- "a silently dead overnight acquisition is
-    the hazard being designed out" -- but it proved it against a REPLAY child.
-    The live child was held instead, so the retry-forever path was unreachable
-    for the one process a week-long run depends on.
-    """
+def test_owned_live_observed_exit_latches_permanent_hold_before_reaping():
+    """Process death is not a receipt that descendant or USB I/O settled."""
     from cryodaq.launcher import LauncherWindow
 
     w = _make_launcher_mock(returncode=1, restart_attempts=50)
     w._replay_source = None
+    w._engine_instance_id = "a" * 32
+    w._engine_shutdown_capability = "b" * 64
+
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+        with patch("cryodaq.launcher.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            LauncherWindow._handle_engine_exit(w)
+
+    assert w._engine_unsettled_incarnation == ("a" * 32, 1)
+    assert w._restart_giving_up is True
+    assert w._restart_pending is False
+    assert w._restart_attempts == 50
+    assert w._engine_proc is None
+    mock_qtimer.singleShot.assert_not_called()
+    w._start_engine.assert_not_called()
+
+
+def test_ambiguous_live_missing_handle_never_authorizes_replacement():
+    """Missing process and authority fields make a live-mode loss less knowable, not safer."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=None, restart_attempts=7)
+    w._replay_source = None
+    w._engine_proc = None
+    w._engine_instance_id = None
+    w._engine_shutdown_capability = None
+
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+        with patch("cryodaq.launcher.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            LauncherWindow._handle_engine_exit(w)
+
+    assert w._engine_unsettled_incarnation == ("<unknown>", None)
+    assert w._restart_giving_up is True
+    assert w._restart_pending is False
+    assert w._restart_attempts == 7
+    mock_qtimer.singleShot.assert_not_called()
+    w._start_engine.assert_not_called()
+
+
+def test_explicit_mock_observed_exit_keeps_bounded_restart_backoff():
+    """Explicit mock is non-actuating, so unattended recovery remains useful."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=1, restart_attempts=50)
+    w._replay_source = None
+    w._mock = True
     w._engine_instance_id = "a" * 32
     w._engine_shutdown_capability = "b" * 64
 
@@ -362,6 +401,29 @@ def test_handle_engine_exit_restart_pending_guard_is_noop():
     assert w._restart_attempts == 0
 
 
+def test_stale_restart_shot_cannot_clear_a_later_live_source_hold():
+    """A replay timer admitted earlier has no authority over a later HOLD."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=1)
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+        with patch("cryodaq.launcher.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            LauncherWindow._handle_engine_exit(w)
+
+    scheduled = mock_qtimer.singleShot.call_args.args[1]
+    w._replay_source = None
+    w._engine_unsettled_incarnation = ("live-owner", 17)
+    w._restart_giving_up = True
+    scheduled()
+
+    w._start_engine.assert_not_called()
+    w._bridge.shutdown.assert_not_called()
+    assert w._engine_unsettled_incarnation == ("live-owner", 17)
+    assert w._restart_giving_up is True
+    assert w._restart_pending is True
+
+
 def test_stale_restart_shot_noops_after_manual_restart():
     """F2 (Phase A gate, HIGH): if the operator manually restarts (which
     resets _restart_pending=False) before the scheduled singleShot fires, the
@@ -473,6 +535,25 @@ def test_stale_assistant_restart_generation_cannot_consume_new_slot() -> None:
     assert w._assistant_restart_pending is False
 
 
+def test_shutdown_owned_clean_exit_stays_with_exact_shutdown_path():
+    """The health callback never reclassifies an exit during exact shutdown."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=0)
+    w._replay_source = None
+    w._engine_instance_id = "a" * 32
+    w._engine_shutdown_capability = "b" * 64
+    w._shutdown_requested = True
+
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+        LauncherWindow._handle_engine_exit(w)
+
+    assert w._engine_unsettled_incarnation is None
+    assert w._engine_proc is not None
+    assert w._restart_giving_up is False
+    mock_qtimer.singleShot.assert_not_called()
+
+
 def test_shutdown_invalidates_scheduled_assistant_restart_callback() -> None:
     """A callback retained by Qt cannot resurrect the assistant after quiesce."""
     from cryodaq.launcher import LauncherWindow
@@ -576,6 +657,9 @@ def test_manual_live_restart_startup_failure_settles_new_child_before_backoff() 
 
     w = _make_launcher_mock(returncode=None)
     w._replay_source = None
+    # This registered historical node exercises cleanup/backoff, not live-source
+    # restart authority. Keep its replacement explicitly non-actuating.
+    w._mock = True
     live_child = MagicMock()
     live_child.poll.return_value = None
     stop_calls = 0

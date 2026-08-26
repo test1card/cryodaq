@@ -4087,6 +4087,7 @@ def test_stale_owner_bound_retry_rebinds_to_the_current_recorded_owner(
     host = SimpleNamespace(
         _engine_proc=process,
         _engine_external=False,
+        _mock=True,
         _replay_source=None,
         _replay_session_id=None,
         _engine_instance_id="a" * 32,

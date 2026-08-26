@@ -7580,35 +7580,25 @@ class LauncherWindow(QMainWindow):
 
     @Slot()
     def _handle_engine_exit(self) -> None:
-        """Restart after an observed exit; HOLD only when the handle is lost.
+        """Latch unsafe live-source loss; retry only explicit non-actuating modes.
 
-        Two different things were treated as one. An engine that EXITED, whose
-        handle we still hold and whose exit code we have just read, is provably
-        gone: nothing of that incarnation can still be writing. An engine whose
-        handle is LOST, with shutdown authority published, is not provably gone
-        at all -- a second engine started beside it would write the same
-        database, which is the data loss this whole path exists to prevent.
+        Process death proves only that the engine process is terminal. It does
+        not prove that a descendant VISA/USBTMC actor, or an in-flight USB
+        transfer already accepted by the host stack, is settled. Starting a new
+        live engine from that observation can therefore overlap old source
+        authority and issue a late write after the replacement has commanded
+        OFF. A launcher-owned live or ambiguous acquisition exit consequently
+        latches permanent HOLD before any reaping and cannot consume backoff.
 
-        Only the second case holds. The first settles its readers and takes the
-        reviewed crash path below: the code is logged, and the restart backs off
-        and retries forever, exactly as it already does for replay and unowned
-        children.
+        Replay and explicit mock mode are non-actuating and may retain bounded
+        restart backoff. A configuration-error exit is a separately classified
+        startup refusal: it settles the child and waits for an explicit operator
+        correction instead of retrying identical invalid files.
 
-        This matters for the safe state of the hardware as well as for uptime.
-        The launcher cannot command the source off; only an engine can. A HOLD
-        therefore leaves a possibly live heater with no authority able to reach
-        it, while a restart re-establishes one: the SMU driver commands OFF on
-        every channel inside connect() before anything else (see
-        ``drivers/instruments/keithley_2604b.py``, ``_attempt_owned_off(...,
-        context="connect")``).
-
-        Owner direction, 2026-08-20, on what a week-long unattended run must do
-        when the engine falls over: "программа ВЕРНЕТСЯ и просто сохранит в
-        логе что упала и почему".
-
-        A configuration-error exit still refuses to restart -- retrying into the
-        identical failure is a busy loop, not a recovery -- and still records
-        the reason and tells the operator which files to fix.
+        The HOLD is intentionally not cleared by process death, elapsed time,
+        free ports, READY, or a stale timer. Only a separately authoritative
+        recovery procedure may establish that the old live-source authority is
+        gone; this launcher has no such receipt today.
         """
         if not LauncherWindow._runtime_callback_is_current(self):
             return
@@ -7835,9 +7825,10 @@ class LauncherWindow(QMainWindow):
         if getattr(self, "_replay_source", None) is not None and (process is None or returncode is not None):
             self._replay_session_verified = False
 
-        owned_acquisition = getattr(self, "_replay_source", None) is None and not getattr(
-            self, "_engine_external", False
+        explicit_non_actuating_mode = (
+            getattr(self, "_replay_source", None) is not None or getattr(self, "_mock", None) is True
         )
+        actuation_capable_or_ambiguous = not explicit_non_actuating_mode
         authority_evidence = (
             getattr(self, "_engine_instance_id", None),
             getattr(self, "_engine_shutdown_capability", None),
@@ -7845,50 +7836,6 @@ class LauncherWindow(QMainWindow):
             getattr(self, "_engine_shutdown_transport_identity", None),
             getattr(self, "_engine_shutdown_receipt", None),
         )
-
-        # Latch ownership before invalidation can raise and before any restart
-        # can be scheduled. A lost handle is not settlement evidence; an
-        # observed exit code, read from a handle we still hold, is.
-        if owned_acquisition and process is None and any(value is not None for value in authority_evidence):
-            instance_id = authority_evidence[0]
-            preserved_id = instance_id if type(instance_id) is str else "<unknown>"
-            self._engine_unsettled_incarnation = (preserved_id, returncode)
-            self._restart_giving_up = True
-            try:
-                self._invalidate_engine_producer()
-            except Exception as exc:
-                logger.error(
-                    "Engine producer invalidation failed; phase=restart_hold exception=%s",
-                    type(exc).__name__,
-                )
-            logger.critical(
-                "Engine incarnation %s lost exact shutdown settlement "
-                "(code=%s, handle_present=%s); restart and launcher exit remain in HOLD.",
-                preserved_id,
-                returncode,
-                process is not None,
-            )
-            self._show_engine_down_banner(
-                "HOLD: engine ownership cannot be proven settled. "
-                "Automatic restart and launcher exit are blocked pending separate recovery proof."
-            )
-            if process is not None:
-                try:
-                    LauncherWindow._reap_unsettled_engine_process(
-                        self,
-                        owner_id=preserved_id,
-                    )
-                except Exception as exc:
-                    logger.critical(
-                        "Engine process reaping failed in HOLD; phase=owned-exit owner=%s exception=%s",
-                        preserved_id,
-                        type(exc).__name__,
-                    )
-                    self._show_engine_down_banner(
-                        "HOLD: engine ownership is unsafe and its process/readers remain unsettled. "
-                        "Restart and launcher exit are blocked."
-                    )
-            return
 
         try:
             self._invalidate_engine_producer()
@@ -7987,6 +7934,50 @@ class LauncherWindow(QMainWindow):
                 self._restart_giving_up = True
             return
 
+        # A shutdown worker or late-result identity must first preserve and
+        # classify its exact evidence through the machinery above. Once that
+        # progress-capable owner has settled, neither its completion nor the
+        # already observed process death is an independent receipt that any
+        # descendant VISA/USBTMC or host-side USB operation is gone. Latch the
+        # live/ambiguous source before any retained process reaping and before
+        # the backoff slot below can be consumed.
+        unsafe_live_loss = process is None or (
+            process is not None and returncode is not None and returncode != ENGINE_CONFIG_ERROR_EXIT_CODE
+        )
+        if actuation_capable_or_ambiguous and unsafe_live_loss:
+            instance_id = authority_evidence[0]
+            preserved_id = instance_id if type(instance_id) is str else owner_id
+            self._engine_unsettled_incarnation = (preserved_id, returncode)
+            self._restart_giving_up = True
+            logger.critical(
+                "Engine incarnation %s lacks live-source I/O settlement "
+                "(code=%s, handle_present=%s); restart and launcher exit remain in HOLD.",
+                preserved_id,
+                returncode,
+                process is not None,
+            )
+            self._show_engine_down_banner(
+                "HOLD: live-source I/O settlement cannot be proven. Automatic and manual restart "
+                "remain blocked pending independent recovery proof."
+            )
+            if getattr(self, "_engine_proc", None) is not None:
+                try:
+                    LauncherWindow._reap_unsettled_engine_process(
+                        self,
+                        owner_id=preserved_id,
+                    )
+                except Exception as exc:
+                    logger.critical(
+                        "Engine process reaping failed in HOLD; phase=owned-exit owner=%s exception=%s",
+                        preserved_id,
+                        type(exc).__name__,
+                    )
+                    self._show_engine_down_banner(
+                        "HOLD: engine ownership is unsafe and its process/readers remain unsettled. "
+                        "Restart and launcher exit are blocked."
+                    )
+            return
+
         # Retry forever: backoff caps at the last slot (120s), no give-up.
         backoff_idx = min(self._restart_attempts, len(self._restart_backoff_s) - 1)
         delay_s = self._restart_backoff_s[backoff_idx]
@@ -8056,6 +8047,13 @@ class LauncherWindow(QMainWindow):
             if vars(self).get("_restart_generation", 0) != restart_generation:
                 return
             if self._restart_pending is not True:
+                return
+            # A callback admitted in replay/mock mode cannot outlive a later
+            # live-source HOLD and clear it by reaching READY. Permanent HOLD
+            # is monotonic until a separately authoritative recovery exists.
+            if getattr(self, "_engine_unsettled_incarnation", None) is not None:
+                return
+            if vars(self).get("_restart_giving_up", False) is True:
                 return
             if not LauncherWindow._runtime_callback_is_current(self, restart_epoch):
                 self._restart_pending = False

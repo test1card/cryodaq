@@ -225,6 +225,7 @@ def _exited_owned_launcher(calls: list[str], returncode: int) -> SimpleNamespace
         _shutdown_requested=False,
         _engine_proc=SimpleNamespace(poll=lambda: calls.append("poll") or returncode),
         _engine_external=False,
+        _mock=False,
         _replay_source=None,
         _engine_instance_id="a" * 32,
         _engine_shutdown_capability="b" * 64,
@@ -249,18 +250,8 @@ def _exited_owned_launcher(calls: list[str], returncode: int) -> SimpleNamespace
     )
 
 
-def test_observed_owned_engine_exit_settles_readers_and_restarts_forever() -> None:
-    """An engine we WATCHED exit is provably gone, so the launcher comes back.
-
-    The handle is still held and ``poll()`` has just returned the exit code:
-    nothing of that incarnation can still be writing, which is the only thing
-    the HOLD was ever protecting. Holding here also left the heater with no
-    authority able to command it off -- only an engine can do that, and its SMU
-    driver commands OFF on every channel inside connect().
-
-    Owner direction, 2026-08-20: "программа ВЕРНЕТСЯ и просто сохранит в логе
-    что упала и почему."
-    """
+def test_observed_owned_live_engine_exit_latches_hold_before_reaping() -> None:
+    """The production handler refuses replacement without an I/O-settlement receipt."""
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
@@ -271,22 +262,16 @@ def test_observed_owned_engine_exit_settles_readers_and_restarts_forever() -> No
     ):
         LauncherWindow._handle_engine_exit(launcher)
 
-    # The exit observation still comes first, and authority is still invalidated
-    # before anything is scheduled -- only the verdict after it has changed.
+    # Exit observation and authority invalidation precede reaping, but process
+    # death never authorizes replacement of the live source.
     assert calls[:2] == ["poll", "invalidate"]
-    assert launcher._engine_unsettled_incarnation is None
-    assert launcher._restart_giving_up is False
-    assert launcher._restart_pending is True
-    assert launcher._restart_attempts == 1
+    assert launcher._engine_unsettled_incarnation == ("a" * 32, 9)
+    assert launcher._restart_giving_up is True
+    assert launcher._restart_pending is False
+    assert launcher._restart_attempts == 0
     assert launcher._engine_proc is None
     assert calls.count("close_stream") == 1
-    single_shot.assert_called_once()
-    assert single_shot.call_args[0][0] == 3 * 1000
-
-    # The unsettled latch being clear is exactly what unblocks the operator:
-    # both refusals -- manual restart and launcher exit -- test that one
-    # attribute, and the lost-handle test below proves they still fire when it
-    # is set.
+    single_shot.assert_not_called()
 
 
 def test_observed_owned_engine_exit_names_the_incarnation_and_code_in_the_log(
@@ -364,6 +349,7 @@ def test_the_scheduled_restart_actually_reaches_the_spawn() -> None:
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
+    launcher._mock = True
     assert any(value is not None for value in _authority_of(launcher).values()), (
         "the fixture must start with published authority, or this proves nothing"
     )
@@ -408,6 +394,7 @@ def test_a_replacement_that_dies_before_readiness_schedules_another_try() -> Non
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
+    launcher._mock = True
     # The state after a failed replacement: a new handle, already terminal.
     launcher._engine_proc = SimpleNamespace(poll=lambda: calls.append("poll") or 1)
     launcher._restart_pending = True
@@ -445,6 +432,7 @@ def test_a_failed_replacement_logs_its_observed_incarnation_and_exit_code(
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
+    launcher._mock = True
     launcher._engine_proc = SimpleNamespace(poll=lambda: 17)
     launcher._restart_pending = True
     launcher._start_engine_down_alarm = lambda: calls.append("alarm")
@@ -645,6 +633,7 @@ def test_process_bound_supervision_settles_the_same_owned_child_once_observed() 
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
+    launcher._mock = True
     handle = _ScriptedPollHandle(
         [
             RuntimeError("injected poll failure"),
@@ -1118,6 +1107,7 @@ def test_ladder_natural_exit_before_escalation_still_hands_back_to_recovery(
     calls: list[str] = []
     handle = _UnobservableChildHandle()
     launcher = _unobservable_child_host(calls, handle)
+    launcher._mock = True
     clock = _SupervisionClock()
     monkeypatch.setattr(module.time, "monotonic", clock)
 
@@ -1192,6 +1182,7 @@ def test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once
     calls: list[str] = []
     handle = _UnobservableChildHandle()
     launcher = _unobservable_child_host(calls, handle)
+    launcher._mock = True
     clock = _SupervisionClock()
     monkeypatch.setattr(module.time, "monotonic", clock)
 
@@ -1504,6 +1495,7 @@ def test_manual_restart_stop_failure_arms_process_bound_supervision_for_the_old_
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
+    launcher._mock = True
     handle = _ScriptedPollHandle([RuntimeError("first poll raised"), 0])
     launcher._engine_proc = handle
 
@@ -1729,6 +1721,7 @@ def test_a_replacement_that_dies_during_the_shutdown_handoff_is_settled_not_held
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
+    launcher._mock = True
     polls = iter([None, 1, 1, 1, 1, 1])
     launcher._engine_proc = SimpleNamespace(poll=lambda: next(polls, 1))
     launcher._restart_pending = True
@@ -2264,6 +2257,7 @@ def test_recovery_validates_reconciled_late_shutdown_receipt_with_terminal_exit(
 
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, returncode)
+    launcher._mock = True
     _bind_launcher_methods(launcher, "_stop_engine")
     launcher._engine_shutdown_request_id = "c" * 32
     bridge = MagicMock()
