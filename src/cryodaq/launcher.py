@@ -7422,11 +7422,26 @@ class LauncherWindow(QMainWindow):
             f"Engine остановлен — перезапуск через {delay_s} с "
             f"(попытка {self._restart_attempts}). Запись данных приостановлена."
         )
-        if not shutdown_worker_pending and not LauncherWindow._settle_observed_engine_exit(
-            self,
-            owner_id=owner_id,
-            returncode=returncode,
-            phase="retryable-exit",
+        # Reader settlement belongs to whoever observes the exit on a handle
+        # still held. Every path that releases ``_engine_proc`` settles the
+        # readers BEFORE the release (_settle_observed_engine_exit,
+        # _stop_engine's four exits, _reap_unsettled_engine_process, the
+        # deferred forced-death finisher), so arriving here with no handle and
+        # no observed code means one of those owners already settled this
+        # exact child earlier in the same synchronous pass -- typically
+        # _recover_failed_engine_restart after the reap ladder's readable
+        # hand-off. Settling again would drive _close_engine_stderr_stream a
+        # second time over readers that are already settled.
+        if (
+            not shutdown_worker_pending
+            and process is not None
+            and returncode is not None
+            and not LauncherWindow._settle_observed_engine_exit(
+                self,
+                owner_id=owner_id,
+                returncode=returncode,
+                phase="retryable-exit",
+            )
         ):
             return
 

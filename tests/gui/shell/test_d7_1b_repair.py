@@ -1245,7 +1245,10 @@ def test_ladder_readable_terminal_code_settles_the_same_owned_child_exactly_once
             "one settlement books exactly one bounded restart"
         )
         assert single_shot.call_args_list[-1].args[0] == 3 * 1000, "the crash backoff owns the next attempt"
-        assert "close_stream" in calls, "the terminal child's readers were settled through the real cleanup"
+        assert calls.count("close_stream") == 1, (
+            "exactly once: the terminal child's readers were settled through the real cleanup "
+            "a second time in the same synchronous recovery pass"
+        )
 
     assert handle.wait_frames == [] and handle.communicate_frames == [], (
         "the whole bound advanced without ever blocking on wait()/communicate()"
