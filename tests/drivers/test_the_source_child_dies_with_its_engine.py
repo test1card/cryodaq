@@ -3,9 +3,9 @@
 WHY THIS MODULE EXISTS. ``USBTMCTransport`` is the Keithley's transport, and the Keithley
 drives the heater. It puts the native VISA session in a separate ``multiprocessing`` child
 so a blocking native call cannot stall the engine's event loop. That child is created with
-``daemon=True``, and a daemonic child is terminated from an ``atexit`` handler -- which runs
-only when the parent exits NORMALLY. An engine that is killed, or that crashes, never runs
-it.
+``daemon=True``, and a daemonic child is terminated from an ``atexit`` handler. Ordinary
+interpreter shutdown, including an unhandled Python exception, runs that handler; abrupt
+termination such as SIGKILL, ``os._exit``, or a native fatal exit bypasses it.
 
 The survivor is not merely untidy. The launcher restarts a dead engine; the replacement
 connects and commands OFF on every channel; and the orphan's pending write can land AFTER
@@ -57,6 +57,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -238,6 +239,7 @@ _PRODUCTION_PROCESS_PARENT = textwrap.dedent(
     from pathlib import Path
     sys.path.insert(0, {src!r})
 
+
     _entered = Path({entered!r})
 
     class _Resource:
@@ -284,6 +286,110 @@ _PRODUCTION_PROCESS_PARENT = textwrap.dedent(
             if (await asyncio.to_thread(sys.stdin.buffer.readline)).strip() != b"CLEANUP":
                 raise RuntimeError("parent received an invalid harness command")
         finally:
+            owner = transport._process_owner
+            if owner is not None:
+                if not transport._terminate_process_owner(owner):
+                    raise RuntimeError("production VISA worker did not settle during parent cleanup")
+                transport._release_stopped_owner(owner)
+
+    if __name__ == "__main__":
+        asyncio.run(_main())
+    """
+)
+
+
+# This parent uses the production process constructor and framed open request, but holds the
+# child immediately before the real _visa_process_main entry. The harness kills the engine
+# while the request is already buffered, then releases the child after Linux has reparented it
+# to the exact subreaper. A stale engine PID must make the first binder check exit before the
+# fake pyvisa ResourceManager records any external effect.
+_PREBINDER_REPARENT_PARENT = textwrap.dedent(
+    """
+    import asyncio, sys, time, types
+    from pathlib import Path
+    sys.path.insert(0, {src!r})
+
+    _blocked = Path({blocked!r})
+    _pinned = Path({pinned!r})
+    _release = Path({release!r})
+    _request_sent = Path({request_sent!r})
+    _visa_effect = Path({visa_effect!r})
+
+    class _Resource:
+        timeout = 0
+
+        def close(self):
+            pass
+
+    class _Manager:
+        def __init__(self):
+            _visa_effect.write_bytes(b"PYVISA_RESOURCE_MANAGER")
+
+        def open_resource(self, _resource):
+            _visa_effect.write_bytes(b"PYVISA_OPEN_RESOURCE")
+            return _Resource()
+
+        def close(self):
+            pass
+
+    _pyvisa = types.ModuleType("pyvisa")
+    _pyvisa.ResourceManager = _Manager
+    sys.modules["pyvisa"] = _pyvisa
+
+    from cryodaq.drivers.transport import usbtmc as _usbtmc
+
+    _production_visa_process_main = _usbtmc._visa_process_main
+    _production_send_process_request = _usbtmc.USBTMCTransport._send_process_request
+
+    def _blocked_visa_process_main(connection, expected_parent):
+        _blocked.write_bytes(b"BLOCKED_BEFORE_BINDER")
+        while not _release.is_file():
+            time.sleep(0.01)
+        _production_visa_process_main(connection, expected_parent)
+
+    def _recording_send_process_request(self, owner, operation, payload):
+        sequence = _production_send_process_request(self, owner, operation, payload)
+        _request_sent.write_bytes(b"OPEN_REQUEST_SENT")
+        return sequence
+
+    _usbtmc._visa_process_main = _blocked_visa_process_main
+    _usbtmc.USBTMCTransport._send_process_request = _recording_send_process_request
+
+    async def _main():
+        transport = _usbtmc.USBTMCTransport(mock=False)
+        operation = asyncio.create_task(
+            transport._settle_process_open("USB0::PREBINDER-REPARENT-PROBE")
+        )
+        try:
+            deadline = asyncio.get_running_loop().time() + 10.0
+            spawn_reported = False
+            while True:
+                owner = transport._process_owner
+                if operation.done():
+                    await operation
+                if owner is not None and owner.process.pid is not None and not spawn_reported:
+                    print(f"SPAWNED {{owner.process.pid}}", flush=True)
+                    spawn_reported = True
+                if (
+                    spawn_reported
+                    and _blocked.is_file()
+                    and _pinned.is_file()
+                    and _request_sent.is_file()
+                ):
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise RuntimeError("production VISA worker did not block before its binder")
+                await asyncio.sleep(0.01)
+            print(f"READY {{owner.process.pid}}", flush=True)
+            if (await asyncio.to_thread(sys.stdin.buffer.readline)).strip() != b"CLEANUP":
+                raise RuntimeError("parent received an invalid harness command")
+        finally:
+            if not operation.done():
+                operation.cancel()
+            try:
+                await operation
+            except BaseException:
+                pass
             owner = transport._process_owner
             if owner is not None:
                 if not transport._terminate_process_owner(owner):
@@ -364,7 +470,13 @@ def _close_parent_streams(parent: subprocess.Popen[bytes]) -> None:
             stream.close()
 
 
-def _spawned_child_survives_killed_parent(parent_file: Path) -> bool:
+def _spawned_child_survives_killed_parent(
+    parent_file: Path,
+    *,
+    after_child_pin: Callable[[], None] | None = None,
+    after_parent_kill: Callable[[], None] | None = None,
+    require_sigterm_immunity: bool = True,
+) -> bool:
     """Run one parent FILE and settle parent, child, pipes, and pidfd on every exit."""
 
     _preflight_stable_identity_surface()
@@ -393,22 +505,27 @@ def _spawned_child_survives_killed_parent(parent_file: Path) -> bool:
         # signal. A setup failure is an error, never a post-spawn skip; the live parent
         # still owns the multiprocessing.Process and the finally block asks it to reap it.
         child_pidfd = _stable_identity(child_pid)
+        if after_child_pin is not None:
+            after_child_pin()
         ready_pid = _reported_child_identity(parent, marker="READY", timeout=10.0)
         if ready_pid != child_pid:
             raise AssertionError(f"READY changed child identity from {child_pid} to {ready_pid}")
         if _identity_exited(child_pidfd):
             raise AssertionError("the child died before the parent was killed")
 
-        # Prove the immunity live: a direct SIGTERM must leave the child running, so its
-        # death AFTER the parent's death can only be the kernel's SIGKILL delivery.
-        _signal_via_identity(child_pidfd, signal.SIGTERM)
-        time.sleep(0.2)
-        if _identity_exited(child_pidfd):
-            raise AssertionError("the child died of a bare SIGTERM; only SIGKILL may close it")
+        if require_sigterm_immunity:
+            # Prove the immunity live: a direct SIGTERM must leave the child running, so its
+            # death AFTER the parent's death can only be the kernel's SIGKILL delivery.
+            _signal_via_identity(child_pidfd, signal.SIGTERM)
+            time.sleep(0.2)
+            if _identity_exited(child_pidfd):
+                raise AssertionError("the child died of a bare SIGTERM; only SIGKILL may close it")
 
         parent.kill()
         parent.wait(timeout=10)
         parent_was_killed = True
+        if after_parent_kill is not None:
+            after_parent_kill()
         return not _wait_for_identity_exit(child_pidfd, timeout=6.0)
     finally:
         cleanup_errors: list[BaseException] = []
@@ -642,6 +759,57 @@ def test_production_settle_process_open_worker_cannot_survive_killed_parent(tmp_
 
     assert not _spawned_child_survives_killed_parent(parent_file), (
         "the production-spawned VISA worker survived its killed engine parent"
+    )
+
+
+@_LINUX_ONLY
+def test_reparented_worker_exits_before_pyvisa_open_after_prebinder_release(tmp_path: Path) -> None:
+    """Exercise the initial parent mismatch through its production external effect.
+
+    The exact production open request is buffered while the VISA child is blocked before
+    ``_visa_process_main``. The harness is the nearest Linux subreaper: it kills the engine,
+    waits for that death, then releases the adopted child. A binder that replaces the
+    engine-captured PID with its new ``getppid()`` will continue into ResourceManager and
+    create the marker. The correct binder exits first. This proves only process-lifetime
+    fail-closed ordering, not USB transaction settlement, physical OFF, or restart authority.
+    """
+
+    blocked = tmp_path / "prebinder_blocked"
+    pinned = tmp_path / "exact_pidfd_pinned"
+    release = tmp_path / "release_after_engine_death"
+    request_sent = tmp_path / "production_open_request_sent"
+    visa_effect = tmp_path / "pyvisa_open_external_effect"
+    parent_file = tmp_path / "production_prebinder_reparent_parent.py"
+    parent_file.write_text(
+        _PREBINDER_REPARENT_PARENT.format(
+            src=_SRC,
+            blocked=str(blocked),
+            pinned=str(pinned),
+            release=str(release),
+            request_sent=str(request_sent),
+            visa_effect=str(visa_effect),
+        ),
+        encoding="utf-8",
+    )
+
+    def release_after_engine_death() -> None:
+        assert blocked.read_bytes() == b"BLOCKED_BEFORE_BINDER"
+        assert request_sent.read_bytes() == b"OPEN_REQUEST_SENT"
+        assert not visa_effect.exists(), "pyvisa ran while the child was still blocked before its binder"
+        release.write_bytes(b"RELEASE")
+
+    def publish_exact_child_pin() -> None:
+        pinned.write_bytes(b"PIDFD_PINNED")
+
+    assert not _spawned_child_survives_killed_parent(
+        parent_file,
+        after_child_pin=publish_exact_child_pin,
+        after_parent_kill=release_after_engine_death,
+        require_sigterm_immunity=False,
+    ), "the reparented production VISA worker remained live after its pre-binder release"
+    assert not visa_effect.exists(), (
+        "the reparented worker reached pyvisa/open after its engine died; the initial parent "
+        "mismatch did not fail closed"
     )
 
 

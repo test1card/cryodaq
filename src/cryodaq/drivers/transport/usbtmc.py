@@ -435,8 +435,9 @@ def _blocking_close_handles(resource: Any, manager: Any) -> _HandleCloseOutcome:
 #
 # This process owns the native VISA session for the Keithley -- the instrument that drives
 # the heater. `daemon=True` is not enough: multiprocessing terminates a daemonic child from
-# an atexit handler, which runs only when the parent exits NORMALLY. An engine that is
-# killed, or that crashes, never runs it, and the child survives its parent.
+# an atexit handler. Ordinary interpreter shutdown, including an unhandled Python exception,
+# runs that handler; abrupt termination such as SIGKILL, os._exit, or a native fatal exit
+# bypasses it and can leave the child alive past its parent.
 #
 # That survivor is not merely untidy. It can still be inside, or about to finish, a write to
 # the source. The launcher restarts a dead engine, the replacement connects and commands OFF

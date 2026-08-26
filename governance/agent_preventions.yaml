@@ -116,6 +116,15 @@ false_green_pairs:
     platform: posix
     red_evidence: after_READY_a_pidfd_poll_error_left_the_pinned_child_live_until_the_control_observed_that_side_effect_directly_2026_08_26_pending_immutable_capture
     green_evidence: pending
+  - id: USBTMC-PREBINDER-REPARENT-EXTERNAL-EFFECT-FALSE-GREEN-008
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-PREBINDER-REPARENT-FAIL-CLOSED-001C
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_reparented_worker_exits_before_pyvisa_open_after_prebinder_release
+    ci_partition: remaining
+    platform: posix
+    red_evidence: replacing_the_initial_parent_mismatch_exit_with_expected_parent_os_getppid_let_the_adopted_worker_bind_to_the_subreaper_and_reach_the_real_worker_open_path_while_spacing_dependent_source_inspection_could_remain_green_2026_08_26_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-RETIREMENT-EXEMPTION-UNBOUNDED-FALSE-GREEN-336
     status: open
     scope: product_contract
@@ -5104,6 +5113,25 @@ records:
         platform: windows
     red_evidence: lane98_f3f1b45_prctl_sigterm_swap_failed_exact_args_and_sigterm_immune_children_survived_while_unstable_identity_refused_to_signal_2026_08_23_pending_immutable_capture
     green_evidence: ubuntu_2204_python_31012_repeated_parent_death_lifecycle_green_and_windows_worker_start_probe_green_at_lane_head_pending_immutable_capture
+  - id: USBTMC-PREBINDER-REPARENT-FAIL-CLOSED-001C
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Linux USBTMC VISA worker startup through USBTMCTransport._settle_process_open, _visa_process_main, and the initial _bind_lifetime_to_parent parent-identity check before pyvisa or a VISA handle can open.
+    classification: stale_parent_rebinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A worker first scheduled after its engine dies can mistake the surviving child subreaper for its owner, open VISA from an already-buffered request, and create a second source-owning process.
+    invariant: The engine-captured parent PID remains authoritative. Under the exact Linux subreaper topology, a worker released after engine death exits on the initial mismatch before any pyvisa ResourceManager or open_resource external effect. This is process-lifetime and pre-open ordering evidence only; it does not prove USB transaction settlement, physical OFF, or restart authority.
+    rule_refs:
+      - AGENTS.md#architecture-and-extension-rules
+    guards:
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_reparented_worker_exits_before_pyvisa_open_after_prebinder_release
+        ci_partition: remaining
+        platform: posix
+    red_evidence: initial_mismatch_exit_replaced_by_expected_parent_os_getppid_reached_fake_pyvisa_resource_manager_through_the_real_settle_process_open_constructor_and_framed_open_request_2026_08_26_pending_immutable_capture
+    green_evidence: pending
   - id: GPIB-HANDLE-SETTLEMENT-001C
     status: open
     scope: product_contract
