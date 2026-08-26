@@ -251,37 +251,57 @@ def test_a_named_barrier_failure_survives_to_the_watcher() -> None:
 
 def test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The protocol seam must close an arbitrary provider value before recording it."""
+    """The real query parser must close an arbitrary wire value before recording it."""
 
     untrusted = "operator-token-and-address-" + "x" * 4096
-
-    class _Reply:
-        ok = False
-        error_code = untrusted
-
-    class _Query:
-        async def barrier(self, _nonce: str) -> object:
-            return _Reply()
+    raw = json.dumps(
+        {
+            "ok": False,
+            "proto": periodic_runtime.PROTOCOL_VERSION,
+            "schema": periodic_runtime.PERIODIC_BARRIER_SCHEMA,
+            "error_code": untrusted,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    assert len(raw) < periodic_runtime.PERIODIC_QUERY_MAX_BYTES
 
     async def _drive() -> None:
-        source = _SOURCE(_Query())
+        query = periodic_runtime.PeriodicEngineQuery()
+
+        async def _request(payload: object) -> bytes:
+            assert isinstance(payload, dict)
+            assert payload["cmd"] == "periodic_subscription_barrier"
+            assert payload["schema"] == periodic_runtime.PERIODIC_QUERY_SCHEMA
+            assert isinstance(payload["nonce"], str) and len(payload["nonce"]) == 32
+            return raw
+
+        monkeypatch.setattr(query, "_request", _request)
+        normalized = await query.barrier("a" * 32)
+        assert normalized == periodic_runtime.BarrierQueryResult(False, None, None, "response_invalid")
+
+        source = _SOURCE(query)
         source._running = True
         source._failure = asyncio.get_running_loop().create_future()
         source._connected = asyncio.Event()
         source._connected.set()
 
-        periodic_runtime._last_discontinuity_log.clear()
-        with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
-            with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
-                await source.ready()
+        try:
+            periodic_runtime._last_discontinuity_log.clear()
+            with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+                with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+                    await source.ready()
 
-        expected = "the engine barrier query returned an unsupported failure code"
-        assert raised.value.reason == expected
-        assert source._invalidation_reason == expected
-        assert set(periodic_runtime._last_discontinuity_log) == {expected}
-        assert untrusted not in "\n".join(record.getMessage() for record in caplog.records)
-        await source.stop()
+            expected = "the engine barrier response was invalid"
+            assert raised.value.reason == expected
+            assert source._invalidation_reason == expected
+            assert set(periodic_runtime._last_discontinuity_log) == {expected}
+            assert untrusted not in "\n".join(record.getMessage() for record in caplog.records)
+        finally:
+            await source.stop()
+            await query.close()
 
     asyncio.run(_drive())
 
