@@ -772,12 +772,14 @@ class _UnobservableChildHandle:
     def __init__(self) -> None:
         self.readable = False
         self.readable_code: int | None = None
+        self.poll_calls = 0
         self.terminate_calls = 0
         self.kill_calls = 0
         self.wait_frames: list[list[str]] = []
         self.communicate_frames: list[list[str]] = []
 
     def poll(self) -> int | None:
+        self.poll_calls += 1
         if not self.readable:
             raise RuntimeError("injected poll failure")
         return self.readable_code
@@ -2875,9 +2877,12 @@ def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
     """Rejected immutable worker evidence must not strand a possibly-live child.
 
     The worker and its absent, malformed, or invalid result remain exact HOLD
-    evidence. It cannot remain a reason to refuse every process supervisor:
-    drive the real failed-restart route for both readable-alive and poll-raising
-    handles, then drive its callback machine through terminate, kill, and the
+    evidence. It cannot remain a reason to refuse every process supervisor.
+    First arm the real process watch, then introduce each immutable evidence
+    shape and re-enter the real failed-restart route for both readable-alive and
+    poll-raising handles. Ownership must transfer atomically into one reap
+    machine: the already-queued watch tick goes inert without polling or
+    re-arming, and the sole survivor drives terminate, kill, and the
     final bounded reap outcome. This direct immutable-evidence route has spent
     no observation budget, so its log must say why it actually entered.
     """
@@ -2890,19 +2895,6 @@ def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
         handle.readable = True
         handle.readable_code = None
     host = _unobservable_child_host(calls, handle)
-    if evidence_case == "absent-result":
-        worker = _ShutdownWorker(settles=True)
-    elif evidence_case == "malformed-unknown-outcome":
-        worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
-        worker.result.update({"generation": "five"})
-    else:
-        worker = _ShutdownWorker(settles=True)
-        worker.result = {"ok": True}
-    original_result = getattr(worker, "result", None)
-    host._engine_shutdown_worker = worker
-    host._engine_shutdown_request_id = "c" * 32
-    if poll_shape == "unobservable":
-        host._engine_shutdown_unreadable_evidence_worker = worker
     host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
     clock = _SupervisionClock()
     monkeypatch.setattr(module.time, "monotonic", clock)
@@ -2911,6 +2903,36 @@ def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
         caplog.at_level("ERROR", logger="cryodaq.launcher"),
         patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
     ):
+        assert (
+            LauncherWindow._schedule_unowned_process_supervision(
+                host,
+                phase="readiness",
+                failure=RuntimeError("replacement never reported ready"),
+                child_start_attempted=True,
+                settle_bridge=False,
+                raise_on_hold=False,
+            )
+            is True
+        )
+        assert single_shot.call_count == 1, "the process watch owns the only callback before evidence changes"
+        assert getattr(host, "_engine_unobservable_poll_supervision_process", None) is handle
+
+        # The immutable result arrives after the observation-only watch was
+        # already queued. Re-entering production recovery must transfer this
+        # same child rather than leaving both callback machines live.
+        if evidence_case == "absent-result":
+            worker = _ShutdownWorker(settles=True)
+        elif evidence_case == "malformed-unknown-outcome":
+            worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+            worker.result.update({"generation": "five"})
+        else:
+            worker = _ShutdownWorker(settles=True)
+            worker.result = {"ok": True}
+        original_result = getattr(worker, "result", None)
+        host._engine_shutdown_worker = worker
+        host._engine_shutdown_request_id = "c" * 32
+        if poll_shape == "unobservable":
+            host._engine_shutdown_unreadable_evidence_worker = worker
         recovered = LauncherWindow._recover_failed_engine_restart(
             host,
             phase="readiness",
@@ -2926,8 +2948,19 @@ def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
         assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
         machine = getattr(host, "_engine_unobservable_reap_state", None)
         assert type(machine) is dict and machine["process"] is handle and machine["stage"] == "terminate"
+        assert getattr(host, "_engine_unobservable_poll_supervision_process", None) is None, (
+            "the immutable fast path transfers the child out of the existing watch"
+        )
+        assert single_shot.call_count == 2, "one stale watch tick and one live reap tick are queued"
+        poll_calls_before_stale = handle.poll_calls
 
         cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the already-queued watch tick is delivered"
+        assert single_shot.call_count == 2, "the stale watch is registration-gated and never re-arms"
+        assert handle.poll_calls == poll_calls_before_stale, "the stale watch never polls after ownership transfer"
+        assert getattr(host, "_engine_unobservable_reap_state", None) is machine
+        assert handle.terminate_calls == 0 and handle.kill_calls == 0
+
         assert _drive_next_supervision_tick(single_shot, cursor, clock), "the first bounded tick terminates"
         assert handle.terminate_calls == 1 and handle.kill_calls == 0
         clock.advance(5.2)
@@ -2951,6 +2984,12 @@ def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
     assert len(entry_lines) == 1
     assert "reason=immutable shutdown evidence retained beside a possibly live child" in entry_lines[0]
     assert "supervision budget spent" not in entry_lines[0].lower()
+    watch_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "Engine replacement poll is unobservable" in record.getMessage()
+    ]
+    assert len(watch_lines) == 1, "the log retains the truthful watch-to-reap ownership history"
 
 
 @pytest.mark.parametrize(

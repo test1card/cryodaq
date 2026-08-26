@@ -5315,12 +5315,23 @@ class LauncherWindow(QMainWindow):
             "deadline": supervision_deadline,
         }
 
+        watch_registration = object()
+
+        def _retire_unobservable_watch() -> bool:
+            if vars(self).get("_engine_unobservable_poll_supervision_registration", None) is not watch_registration:
+                return False
+            vars(self)["_engine_unobservable_poll_supervision_process"] = None
+            vars(self)["_engine_unobservable_poll_supervision_registration"] = None
+            return True
+
         def _supervise_unobservable_process() -> None:
+            if vars(self).get("_engine_unobservable_poll_supervision_registration", None) is not watch_registration:
+                return
             if not LauncherWindow._runtime_callback_is_current(self):
-                vars(self)["_engine_unobservable_poll_supervision_process"] = None
+                _retire_unobservable_watch()
                 return
             if getattr(self, "_engine_proc", None) is not process:
-                vars(self)["_engine_unobservable_poll_supervision_process"] = None
+                _retire_unobservable_watch()
                 return
             try:
                 process.poll()
@@ -5332,7 +5343,7 @@ class LauncherWindow(QMainWindow):
                 # this exact retained child into the owned reap ladder, which
                 # escalates terminate -> kill under monotonic stage budgets
                 # without ever needing poll() to answer first.
-                vars(self)["_engine_unobservable_poll_supervision_process"] = None
+                _retire_unobservable_watch()
                 LauncherWindow._begin_unobservable_bounded_reap(
                     self,
                     phase=phase,
@@ -5345,7 +5356,7 @@ class LauncherWindow(QMainWindow):
                     raise_on_hold=raise_on_hold,
                 )
                 return
-            vars(self)["_engine_unobservable_poll_supervision_process"] = None
+            _retire_unobservable_watch()
             LauncherWindow._recover_failed_engine_restart(
                 self,
                 phase=phase,
@@ -5355,6 +5366,7 @@ class LauncherWindow(QMainWindow):
                 raise_on_hold=raise_on_hold,
             )
 
+        vars(self)["_engine_unobservable_poll_supervision_registration"] = watch_registration
         vars(self)["_engine_unobservable_poll_supervision_process"] = process
         logger.error(
             "Engine replacement poll is unobservable; phase=%s incarnation=%s failure=%s -- "
@@ -5405,9 +5417,18 @@ class LauncherWindow(QMainWindow):
 
         state = vars(self).get("_engine_unobservable_reap_state", None)
         if type(state) is dict and state.get("process") is process:
+            if vars(self).get("_engine_unobservable_poll_supervision_process", None) is process:
+                vars(self)["_engine_unobservable_poll_supervision_process"] = None
+                vars(self)["_engine_unobservable_poll_supervision_registration"] = None
             return True
         if getattr(self, "_engine_proc", None) is not process:
             return False
+        if vars(self).get("_engine_unobservable_poll_supervision_process", None) is process:
+            # Transfer ownership before the reap callback is queued. The old
+            # watch tick remains queued but its unique registration is retired,
+            # so it cannot poll, recover, or re-arm beside this ladder.
+            vars(self)["_engine_unobservable_poll_supervision_process"] = None
+            vars(self)["_engine_unobservable_poll_supervision_registration"] = None
         vars(self)["_engine_unobservable_reap_state"] = {
             "process": process,
             "stage": "terminate",
