@@ -4004,3 +4004,216 @@ def test_deferred_settlement_survives_a_raising_deadline_callback_until_terminat
         late_worker = (getattr(host, "_engine_reader_settlement_state", None) or {}).get("worker")
         if isinstance(late_worker, threading.Thread):
             late_worker.join(timeout=5.0)
+
+
+class _SettlementScriptProcess:
+    """A cleanly exited child that records any blocking ``wait`` on its stack."""
+
+    pid = 9511
+
+    def __init__(self) -> None:
+        self.exit_code: int | None = 0
+        self.wait_frames: list[list[str]] = []
+
+    def poll(self) -> int | None:
+        return self.exit_code
+
+    def terminate(self) -> None:
+        self.exit_code = 0
+
+    def kill(self) -> None:
+        self.exit_code = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        import inspect
+
+        self.wait_frames.append([frame.function for frame in inspect.stack()])
+        self.exit_code = 0
+        return 0
+
+
+class _RunningShutdownWorker:
+    """A shutdown worker still inside its command: a progress-capable owner."""
+
+    def isFinished(self) -> bool:  # noqa: N802 -- Qt's spelling
+        return False
+
+
+def test_stale_owner_bound_retry_rebinds_to_the_current_recorded_owner(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A fired settlement callback whose owner moved must rebind, not vanish.
+
+    The cold-review finding against ``_schedule_owner_bound_settlement_retry``:
+    its queued callback compared the live owner tuple with its captured one and
+    returned SILENTLY on any change. The health tick's stop path legitimately
+    changes the owner mid-flight -- a finished worker is transferred into its
+    published ``(request_id, generation)`` transport identity and the worker
+    slot retires -- precisely so that late reconciliation stays owned by these
+    settlement ladders. After that transfer the stale callback quiet-returned,
+    no successor was ever scheduled for the new identity-only shape, and the
+    recorded transaction could wait for its reply forever while
+    ``_engine_settlement_pending`` blocked every restart.
+
+    The corrected machine must run the REAL queued callback over exactly that
+    production shape and show: the stale pass settles nothing and takes no
+    clean-exit or restart action; exactly one progress-capable successor lands,
+    registered to the CURRENT owner; a repeat schedule for that same owner
+    neither duplicates the flight nor arms a parallel mechanism; the successor
+    paces reconciliation through the real stop path while the reply is absent;
+    and when the late reply arrives, the next pass settles the whole owner
+    exactly once -- receipt validated against the recorded request id and the
+    observed exit, readers closed before release, handle retired -- with no
+    re-dispatched command, no blocking wait/join on any callback stack, and
+    only the ordinary post-release backoff shot queued by the exit handler.
+
+    Falsification: reverting the callback to its silent ``return`` on an owner
+    mismatch leaves the drive with zero further shots (the successor assertion
+    fails immediately), the identity never reconciles, and the final exact
+    release can never be reached.
+    """
+
+    import cryodaq.launcher as module
+    from cryodaq.gui.zmq_client import LateCommandResult
+    from cryodaq.launcher import LauncherWindow
+
+    process = _SettlementScriptProcess()
+    bridge = MagicMock()
+    transport_identity = ("e" * 32, 4)
+    host = SimpleNamespace(
+        _engine_proc=process,
+        _engine_external=False,
+        _replay_source=None,
+        _replay_session_id=None,
+        _engine_instance_id="a" * 32,
+        _engine_shutdown_capability="b" * 64,
+        _engine_shutdown_request_id="c" * 32,
+        _engine_shutdown_transport_identity=None,
+        _engine_shutdown_receipt=None,
+        _engine_shutdown_wait_deadline=None,
+        _engine_shutdown_worker=None,
+        _engine_shutdown_unreadable_evidence_worker=None,
+        _restart_pending=True,
+        _shutdown_requested=False,
+        _runtime_callbacks_open=True,
+        _runtime_callback_epoch=1,
+        _restart_giving_up=False,
+        _restart_attempts=0,
+        _restart_backoff_s=[1.0, 2.0, 5.0],
+        _bridge=bridge,
+    )
+    for name in ("_settle_replacement_child", "_stop_engine"):
+        setattr(host, name, MethodType(getattr(LauncherWindow, name), host))
+    host._close_engine_stderr_stream = MagicMock()
+    host._show_engine_down_banner = MagicMock()
+    host._invalidate_engine_producer = MagicMock()
+
+    worker = _RunningShutdownWorker()
+    host._engine_shutdown_worker = worker
+    failure = RuntimeError("engine shutdown command is dispatched on a background worker awaiting its reply")
+
+    def schedule() -> bool:
+        return LauncherWindow._schedule_owner_bound_settlement_retry(
+            host,
+            phase="old-engine-settlement",
+            failure=failure,
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+    grace_ms = module._ENGINE_SHUTDOWN_WORKER_GRACE_MS
+    cursor = [0]
+
+    def drive_next_retry() -> bool:
+        calls = single_shot.call_args_list
+        while cursor[0] < len(calls):
+            invocation = calls[cursor[0]]
+            cursor[0] += 1
+            if invocation.args[0] == grace_ms:
+                invocation.args[1]()
+                return True
+        return False
+
+    with (
+        caplog.at_level("WARNING", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        assert schedule() is True, "a running worker owns progress-capable evidence"
+        assert len(single_shot.call_args_list) == 1
+        assert single_shot.call_args_list[0].args[0] == grace_ms
+
+        # The health tick's stop path transfers the finished worker into its
+        # published transport identity BEFORE the queued callback fires.
+        host._engine_shutdown_worker = None
+        host._engine_shutdown_transport_identity = transport_identity
+
+        assert drive_next_retry() is True
+
+        # The stale pass settled nothing, retired nothing, restarted nothing...
+        assert bridge.reconcile_late_result.call_count == 0, "a stale capture must not reconcile"
+        assert bridge.send_command.call_count == 0, "no command is re-dispatched or duplicated"
+        assert host._engine_proc is process, "nothing releases behind a stale capture"
+        assert host._engine_instance_id == "a" * 32, "no wrong incarnation is retired"
+        assert host._engine_shutdown_transport_identity == transport_identity, "evidence stays retained verbatim"
+        assert host._restart_giving_up is False and host._restart_attempts == 0
+        assert host._show_engine_down_banner.call_count == 0
+
+        # ...but exactly one progress-capable successor exists for the CURRENT owner.
+        assert len(single_shot.call_args_list) == 2, (
+            "the fired callback must leave one progress-capable callback bound to the current owner"
+        )
+        assert single_shot.call_args_list[1].args[0] == grace_ms
+        live_owner = (None, process, None, "a" * 32, transport_identity)
+        assert getattr(host, "_engine_owner_settlement_retry_owner", None) == live_owner
+        rebinding_lines = [record for record in caplog.records if "outlived its captured owner" in record.getMessage()]
+        assert len(rebinding_lines) == 1, "the ownership hop reports itself exactly once"
+
+        # A repeat schedule for the same current owner neither duplicates the
+        # flight nor flips to a second mechanism beside it.
+        assert schedule() is True
+        assert len(single_shot.call_args_list) == 2
+        assert getattr(host, "_engine_owner_settlement_retry_owner", None) == live_owner
+
+        # First successor pass: the late reply has not landed yet. The real
+        # stop path reconciles against the EXACT current identity, keeps it
+        # published, and paces itself instead of discarding the evidence.
+        bridge.reconcile_late_result.return_value = None
+        assert drive_next_retry() is True
+        assert bridge.reconcile_late_result.call_count == 1
+        assert bridge.reconcile_late_result.call_args == call("e" * 32, generation=4)
+        assert host._engine_proc is process
+        assert host._engine_shutdown_transport_identity == transport_identity
+        assert len(single_shot.call_args_list) == 3, "the ladder continues for the unchanged current owner"
+
+        # Second successor pass: the reply landed. The same owner-bound ladder
+        # reconciles the transaction through the full receipt validation and
+        # observed-exit verdict, then releases the whole owner exactly once.
+        bridge.reconcile_late_result.return_value = LateCommandResult(
+            request_id="e" * 32,
+            generation=4,
+            reply=_shutdown_receipt("c" * 32),
+        )
+        assert drive_next_retry() is True
+        assert bridge.reconcile_late_result.call_count == 2
+        assert bridge.send_command.call_count == 0, "settlement never repeats the underlying command"
+        assert host._close_engine_stderr_stream.call_count == 1, "readers settle before the handle drops"
+        assert host._engine_proc is None
+        for name in (
+            "_engine_instance_id",
+            "_engine_shutdown_capability",
+            "_engine_shutdown_request_id",
+            "_engine_shutdown_transport_identity",
+            "_engine_shutdown_receipt",
+        ):
+            assert getattr(host, name) is None, name
+
+        # The replacement decision belongs to the ordinary exit handler, not to
+        # any stale fire: every settlement shot ran at the grace cadence and
+        # exactly ONE backoff restart shot was queued -- and left undriven.
+        delays = [invocation.args[0] for invocation in single_shot.call_args_list]
+        assert delays[:3] == [grace_ms] * 3
+        assert delays[3] == 1.0 * 1000
+        assert host._restart_giving_up is False
+        assert host._restart_pending is True
+        assert process.wait_frames == [], "no wait or join ever blocked a settlement callback stack"

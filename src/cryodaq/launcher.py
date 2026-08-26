@@ -4979,12 +4979,23 @@ class LauncherWindow(QMainWindow):
         Ownership of the pending command -- the exact worker thread, the exact
         process handle, both incarnation ids, and the retained transport
         identity -- is what decides whether this pass may still run. A changed
-        owner means some other path already took responsibility and this one
-        must stay inert; an unchanged owner continues settling regardless of
-        how far the restart generation moved meanwhile. Returns False when no
-        settlement evidence is pending -- or when the only pending evidence is a
-        finished worker whose malformed result can never change -- so the caller
-        keeps its plain latch.
+        owner means this pass must not settle a wrong incarnation -- but it
+        does not always mean the question is closed: the health tick's stop
+        path transfers a finished worker into its published transport identity
+        (retiring the worker slot) precisely so that late reconciliation stays
+        owned by these settlement ladders. A fired callback whose captured
+        owner no longer matches therefore re-binds the SAME scheduling
+        parameters to the CURRENT owner instead of quiet-returning -- which
+        used to strand the new recorded shape with zero callbacks and block
+        every later restart. The re-bind is deduplicated: exactly one
+        progress-capable callback is queued per owner at any time, a fired
+        callback releases its own registration before any branch, and a
+        declined re-bind falls back to the bounded process-bound supervision.
+        An unchanged owner continues settling regardless of how far the restart
+        generation moved meanwhile. Returns False when no settlement evidence
+        is pending -- or when the only pending evidence is a finished worker
+        whose malformed result can never change -- so the caller keeps its
+        plain latch.
         """
 
         deadline = getattr(self, "_engine_shutdown_wait_deadline", None)
@@ -5021,8 +5032,16 @@ class LauncherWindow(QMainWindow):
                 # or one whose parsed identity still awaits transport reconciliation,
                 # remains progress-capable and keeps its polling loop.
                 return False
+        if getattr(self, "_engine_owner_settlement_retry_owner", None) == captured_owner:
+            # One progress-capable callback for this exact owner is already
+            # queued; queueing another would overlap two settlement flights
+            # over the same owner. Report success so the caller neither
+            # duplicates the flight nor arms a second mechanism beside it.
+            return True
 
         def _retry_owner_bound_settlement() -> None:
+            if getattr(self, "_engine_owner_settlement_retry_owner", None) == captured_owner:
+                self._engine_owner_settlement_retry_owner = None
             if not LauncherWindow._runtime_callback_is_current(self):
                 return
             live_owner = (
@@ -5033,6 +5052,39 @@ class LauncherWindow(QMainWindow):
                 getattr(self, "_engine_shutdown_transport_identity", None),
             )
             if live_owner != captured_owner:
+                # Ownership MOVED between capture and fire -- most often the
+                # health tick's stop transferring a finished worker into its
+                # published transport identity. Settling here would drive a
+                # wrong incarnation with a stale failure context, but merely
+                # returning stranded the new recorded shape: an identity-only
+                # owner reconciles through these ladders alone, and the health
+                # tick deliberately defers to them. Rebind the same parameters
+                # to the current owner so exactly one progress-capable
+                # callback always remains; when even the current owner holds
+                # no progress-capable evidence, fall back to the bounded
+                # process-bound supervision for a possibly live bare handle.
+                logger.warning(
+                    "Owner-bound settlement callback outlived its captured owner; "
+                    "phase=%s rebinding to the current recorded owner",
+                    phase,
+                )
+                if LauncherWindow._schedule_owner_bound_settlement_retry(
+                    self,
+                    phase=phase,
+                    failure=failure,
+                    child_start_attempted=child_start_attempted,
+                    settle_bridge=settle_bridge,
+                    raise_on_hold=raise_on_hold,
+                ):
+                    return
+                LauncherWindow._schedule_unowned_process_supervision(
+                    self,
+                    phase=phase,
+                    failure=failure,
+                    child_start_attempted=child_start_attempted,
+                    settle_bridge=settle_bridge,
+                    raise_on_hold=raise_on_hold,
+                )
                 return
             LauncherWindow._recover_failed_engine_restart(
                 self,
@@ -5043,6 +5095,7 @@ class LauncherWindow(QMainWindow):
                 raise_on_hold=raise_on_hold,
             )
 
+        self._engine_owner_settlement_retry_owner = captured_owner
         QTimer.singleShot(_ENGINE_SHUTDOWN_WORKER_GRACE_MS, _retry_owner_bound_settlement)
         return True
 
