@@ -10,8 +10,10 @@ it.
 The survivor is not merely untidy. The launcher restarts a dead engine; the replacement
 connects and commands OFF on every channel; and the orphan's pending write can land AFTER
 that, leaving the instrument sourcing while the software believes it is off. Two owners of
-one source is the exact hazard the ownership design exists to prevent, and it is the reason
-an engine crash may be answered with a restart at all.
+one source is the exact hazard the ownership design exists to prevent. These tests prove only
+that the source-owning child cannot outlive its engine. They do not prove USB transaction
+settlement, physical OFF, or restart authority. A launcher restart still requires those
+independent properties.
 
 WHICH CHILD IS AT RISK, and TWO measurement mistakes made on the way to knowing it.
 
