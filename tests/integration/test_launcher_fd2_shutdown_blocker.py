@@ -28,6 +28,14 @@ and creates the same real spawn-context descendant pair the measured leak used
 so a hook removed or moved below that boundary fails deterministically instead
 of passing until an abrupt death.
 
+The installer's own post-redirect failure surface (cold-review F1) is guarded
+directly too: one POSIX child injects a deterministic facade-construction
+failure into the real production bootstrap after the devnull redirect, and the
+parent requires both fail-closed escape and bounded diagnostic bytes on the
+real launch pipe; a sibling control silences the production emitter and
+requires the same pipe to stay byte-empty, so the guard depends on that
+emission path alone.
+
 Measured on native Ubuntu 22.04 at commit
 007d71ace28b7432f6d6d233552f61b490472fb3: both NATURAL descendants exit
 promptly once the engine dies (the USBTMC worker sees command-pipe EOF in
@@ -746,6 +754,106 @@ def test_install_is_idempotent_denies_fileno_and_keeps_logging_reaching_the_pipe
     assert type(document["first_private_fd"]) is int and document["first_private_fd"] > 2
     assert b"LOGGED-PROBE" in stderr_bytes
     assert b"POST-INSTALL-PROBE\n" in stderr_bytes
+
+
+_FD2_FAILURE_MARKER = b"[cryodaq-fd2-bootstrap]"
+
+_FD2_FAILURE_INJECTION_SCRIPT = textwrap.dedent(
+    """
+    import sys
+    import cryodaq._fd2_bootstrap as bootstrap
+
+    class _InjectedFacadeFailure(Exception):
+        pass
+
+    class _ExplodingTextFacade(bootstrap._PrivateStderrText):
+        def __init__(self, *args, **kwargs):
+            raise _InjectedFacadeFailure("injected post-dup2 facade construction failure")
+
+    bootstrap._PrivateStderrText = _ExplodingTextFacade
+    bootstrap.isolate_launcher_stderr_fd2()
+    sys.stdout.write("INSTALLATION-MUST-NOT-SUCCEED\\n")
+    """
+)
+
+_FD2_FAILURE_CONTROL_SCRIPT = textwrap.dedent(
+    """
+    import sys
+    import cryodaq._fd2_bootstrap as bootstrap
+
+    class _InjectedFacadeFailure(Exception):
+        pass
+
+    class _ExplodingTextFacade(bootstrap._PrivateStderrText):
+        def __init__(self, *args, **kwargs):
+            raise _InjectedFacadeFailure("injected post-dup2 facade construction failure")
+
+    bootstrap._PrivateStderrText = _ExplodingTextFacade
+
+    def _silence(*args, **kwargs):
+        return None
+
+    bootstrap._emit_post_dup2_failure_diagnostic = _silence
+    bootstrap.isolate_launcher_stderr_fd2()
+    """
+)
+
+
+@pytest.mark.skipif(not _POSIX, reason="post-dup2 failure diagnostic requires POSIX fd semantics")
+def test_post_dup2_installation_failure_fails_closed_and_reports_on_launch_pipe(tmp_path: Path) -> None:
+    """Cold-review F1 regression through the real production bootstrap.
+
+    The injected failure fires strictly after ``os.dup2(devnull_fd, 2)`` (at
+    facade construction), so on unfixed production bytes the interpreter
+    traceback dies inside /dev/null and the launch pipe stays empty. The fixed
+    bytes must instead carry one bounded diagnostic line through the private
+    duplicate while the exception still escapes fail-closed and fd 2 remains
+    redirected.
+    """
+    env = _simulant_base_env(tmp_path)
+    process = subprocess.Popen(
+        [sys.executable, "-c", _FD2_FAILURE_INJECTION_SCRIPT],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = process.communicate(timeout=60)
+    assert process.returncode != 0, "injected post-dup2 failure must escape unchanged (fail-closed)"
+    assert b"INSTALLATION-MUST-NOT-SUCCEED" not in stdout_bytes
+    assert stderr_bytes.startswith(_FD2_FAILURE_MARKER), (
+        f"no bounded installation diagnostic reached the real launch pipe: {stderr_bytes[:256]!r}"
+    )
+    assert b"_InjectedFacadeFailure" in stderr_bytes, (
+        f"diagnostic does not identify the actual injected failure: {stderr_bytes[:256]!r}"
+    )
+    assert b"Traceback (most recent call last)" not in stderr_bytes, (
+        "interpreter traceback crossed the launch pipe: OS fd 2 was restored to the pipe"
+    )
+    assert len(stderr_bytes) <= 512, f"installation diagnostic exceeded its bound: {len(stderr_bytes)} bytes"
+
+
+@pytest.mark.skipif(not _POSIX, reason="mutation control requires POSIX fd semantics")
+def test_control_silencing_the_failure_emitter_must_leave_launch_pipe_byte_empty(tmp_path: Path) -> None:
+    """Falsifies the F1 detector's dependence on the fixed emission path.
+
+    Same post-dup2 injection as the regression above, but with the production
+    emitter patched out in the child. Because fd 2 is already on devnull and
+    nothing may restore it, the launch pipe must be byte-empty; any byte here
+    would mean the guard passes for a reason other than the corrected emitter
+    (or that fd 2 was illicitly restored).
+    """
+    env = _simulant_base_env(tmp_path)
+    process = subprocess.Popen(
+        [sys.executable, "-c", _FD2_FAILURE_CONTROL_SCRIPT],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = process.communicate(timeout=60)
+    assert process.returncode != 0
+    assert stderr_bytes == b"", (
+        f"detector falsified: launch pipe carried {stderr_bytes[:128]!r} without the production emitter"
+    )
 
 
 _REPLAY_WIRING_SCRIPT = textwrap.dedent(

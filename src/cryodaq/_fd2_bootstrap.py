@@ -20,7 +20,11 @@ child. It:
    :class:`io.UnsupportedOperation` (the binary facade exposed via
    ``.buffer`` likewise exposes no usable descriptor);
 5. retains the original stderr object and every wrapper so the redirected
-   descriptor is never garbage-collected closed.
+   descriptor is never garbage-collected closed;
+6. on any failure raised after step 3's redirect, emits one bounded
+   diagnostic line through the private duplicate before closing it and
+   re-raising unchanged, because the interpreter's own traceback for such a
+   failure would be written through OS fd 2 and lost inside ``/dev/null``.
 
 Encoding, errors mode, ``isatty()``, ``write()``, ``flush()`` and normal
 Python logging through :class:`logging.StreamHandler` are preserved. Direct
@@ -42,6 +46,8 @@ except ImportError:
     fcntl = None
 
 _PRIVATE_FD_FLOOR = 1000
+_FAILURE_DIAGNOSTIC_MAX_BYTES = 512
+_FAILURE_DIAGNOSTIC_MAX_WRITES = 8
 
 _install_lock = threading.Lock()
 _installed_receipt: Fd2IsolationReceipt | None = None
@@ -216,17 +222,20 @@ def isolate_launcher_stderr_fd2() -> Fd2IsolationReceipt:
             os.dup2(devnull_fd, 2)
         finally:
             _close_quietly(devnull_fd)
-        devnull_stat = os.stat(os.devnull)
-        redirected = os.fstat(2)
-        if not (
-            stat.S_ISCHR(redirected.st_mode)
-            and redirected.st_dev == devnull_stat.st_dev
-            and redirected.st_rdev == devnull_stat.st_rdev
-        ):
-            raise RuntimeError("OS fd 2 did not settle onto the null device")
         committed = False
         raw: io.FileIO | None = None
+        buffered: io.BufferedWriter | None = None
+        binary: _PrivateStderrBinary | None = None
+        text: _PrivateStderrText | None = None
         try:
+            devnull_stat = os.stat(os.devnull)
+            redirected = os.fstat(2)
+            if not (
+                stat.S_ISCHR(redirected.st_mode)
+                and redirected.st_dev == devnull_stat.st_dev
+                and redirected.st_rdev == devnull_stat.st_rdev
+            ):
+                raise RuntimeError("OS fd 2 did not settle onto the null device")
             raw = io.FileIO(private_fd, "w", closefd=False)
             buffered = io.BufferedWriter(raw)
             binary = _PrivateStderrBinary(buffered)
@@ -239,10 +248,17 @@ def isolate_launcher_stderr_fd2() -> Fd2IsolationReceipt:
             )
             sys.stderr = text
             committed = True
-        finally:
+        except BaseException as failure:
             if not committed:
+                _emit_post_dup2_failure_diagnostic(private_fd, failure)
+                if raw is not None:
+                    try:
+                        raw.close()
+                    except Exception:
+                        pass
                 _close_quietly(private_fd)
-        assert raw is not None
+            raise
+        assert raw is not None and buffered is not None and binary is not None and text is not None
         _retained = (original, raw, buffered, binary, text, private_fd)
         _installed_receipt = Fd2IsolationReceipt(
             private_fd=int(private_fd),
@@ -268,3 +284,29 @@ def _close_quietly(descriptor: int) -> None:
         os.close(descriptor)
     except OSError:
         pass
+
+
+def _emit_post_dup2_failure_diagnostic(private_fd: int, failure: BaseException) -> None:
+    """Best-effort bounded note over the private duplicate; never masks ``failure``.
+
+    Reachable only once OS fd 2 already points at the null device, where an
+    interpreter traceback for ``failure`` could never reach the launcher. At
+    most one bounded line crosses the still-open non-inheritable duplicate;
+    every write fault is swallowed so the original exception escapes intact.
+    """
+    summary = str(failure)[:200]
+    message = (
+        f"[cryodaq-fd2-bootstrap] installation failed after redirecting OS fd 2 "
+        f"to {os.devnull}: {type(failure).__qualname__}: {summary}\n"
+    )
+    chunk = memoryview(message.encode("utf-8", "backslashreplace")[:_FAILURE_DIAGNOSTIC_MAX_BYTES])
+    try:
+        for _ in range(_FAILURE_DIAGNOSTIC_MAX_WRITES):
+            written = os.write(private_fd, chunk)
+            if written <= 0:
+                return
+            chunk = chunk[written:]
+            if not chunk:
+                return
+    except OSError:
+        return

@@ -6808,5 +6808,23 @@ records:
       - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_control_exposing_private_fileno_must_fail_detected_as_leak
         ci_partition: remaining
         platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_replay_production_entry_installs_fd2_isolation_before_runtime_spawn_boundary
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_install_is_idempotent_denies_fileno_and_keeps_logging_reaching_the_pipe
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_post_dup2_installation_failure_fails_closed_and_reports_on_launch_pipe
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_control_silencing_the_failure_emitter_must_leave_launch_pipe_byte_empty
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_replay_entry_installs_isolation_only_for_launcher_authority
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_windows_launcher_owned_engine_child_remains_unisolated
+        ci_partition: remaining
+        platform: windows
     red_evidence: measured_on_native_ubuntu_22_04_at_commit_007d71ace28b7432f6d6d233552f61b490472fb3_where_an_abruptly_killed_launcher_engine_kept_the_stderr_pipe_open_until_descendants_were_killed_and_each_falsifying_control_adds_exactly_one_explicit_preserving_descendant_holding_a_duplicate_of_the_leaked_descriptor_so_leaving_os_fd_2_attached_or_exposing_the_private_fileno_turns_this_harness_red_no_immutable_red_or_green_receipt_is_bound_yet_2026_08_26_pending_immutable_capture
     green_evidence: pending
