@@ -1422,15 +1422,13 @@ def _launcher_log_capture(
         if settle_writer is not None:
             try:
                 settle_writer()
-            except Exception as settle_error:  # noqa: BLE001 - retain the primary failure
+            except BaseException as settle_error:  # noqa: BLE001 - retain the primary failure
                 settled = False
-                primary.add_note(f"launcher writer settlement failed: {settle_error}")
+                primary.add_note(f"launcher writer settlement failed: {type(settle_error).__name__}")
         try:
+            raw, total_bytes = drain.finish()
             if settled:
-                raw, total_bytes = drain.finish()
                 _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=True)
-            elif not drain.writer.closed:
-                drain.writer.close()
         except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
             primary.add_note(f"launcher diagnostic capture failed: {capture_error}")
         if state_root is not None and not settled:

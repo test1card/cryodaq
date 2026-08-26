@@ -182,6 +182,109 @@ def test_unsettled_writer_refuses_child_writable_logs_without_traversal(
     assert any("launcher writer settlement failed" in note for note in (raised.value.__notes__ or ()))
 
 
+def test_settlement_baseexception_preserves_primary_closes_drain_and_refuses_root(
+    tmp_path: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup interruption cannot mask the run failure or leave evidence ownership live."""
+
+    (state_root / "logs" / "engine.stderr.log").write_bytes(b"MUST NOT READ ENGINE STDERR\n")
+    (state_root / "logs" / "assistant.log").write_bytes(b"MUST NOT READ ASSISTANT LOG\n")
+    traversals: list[str] = []
+
+    def under_state_root(value: object) -> bool:
+        return isinstance(value, (str, os.PathLike)) and Path(value).is_relative_to(state_root)
+
+    real_read_bytes = Path.read_bytes
+    real_lstat = runner.os.lstat
+    real_stat = runner.os.stat
+    real_open = runner.os.open
+    real_scandir = runner.os.scandir
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if under_state_root(path):
+            traversals.append(f"read_bytes:{path}")
+            raise AssertionError("the unsettled child-writable root was read")
+        return real_read_bytes(path)
+
+    def guarded_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if under_state_root(path):
+            traversals.append(f"lstat:{path}")
+            raise AssertionError("the unsettled child-writable root was measured")
+        return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    def guarded_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if under_state_root(path):
+            traversals.append(f"stat:{path}")
+            raise AssertionError("the unsettled child-writable root was measured")
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    def guarded_open(path: object, *args: object, **kwargs: object) -> int:
+        if under_state_root(path):
+            traversals.append(f"open:{path}")
+            raise AssertionError("the unsettled child-writable root was opened")
+        return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    def guarded_scandir(path: object):
+        if under_state_root(path):
+            traversals.append(f"scandir:{path}")
+            raise AssertionError("the unsettled child-writable root was enumerated")
+        return real_scandir(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    monkeypatch.setattr(runner.os, "lstat", guarded_lstat)
+    monkeypatch.setattr(runner.os, "stat", guarded_stat)
+    monkeypatch.setattr(runner.os, "open", guarded_open)
+    monkeypatch.setattr(runner.os, "scandir", guarded_scandir)
+
+    created_drains: list[runner._BoundedLauncherLogDrain] = []
+
+    class ObservedDrain(runner._BoundedLauncherLogDrain):
+        def __init__(self) -> None:
+            super().__init__()
+            created_drains.append(self)
+
+    class SettlementInterrupted(BaseException):
+        pass
+
+    monkeypatch.setattr(runner, "_BoundedLauncherLogDrain", ObservedDrain)
+    evidence = _Evidence()
+    writer = None
+    caught: BaseException | None = None
+
+    def interrupt_settlement() -> None:
+        raise SettlementInterrupted("MUST NOT LEAK SETTLEMENT DETAIL")
+
+    try:
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "launcher-baseexception.txt",
+            settle_writer=interrupt_settlement,
+            state_root=state_root,
+        ) as writer:
+            writer.write(b"launcher output\n")
+            raise ValueError("primary run failure")
+    except BaseException as error:
+        caught = error
+
+    production_closed_writer = writer is not None and writer.closed
+    production_settled_drain = len(created_drains) == 1 and not created_drains[0]._thread.is_alive()
+    if writer is not None and not writer.closed:
+        writer.close()
+    for drain in created_drains:
+        drain._thread.join(timeout=1)
+
+    assert type(caught) is ValueError and str(caught) == "primary run failure"
+    notes = tuple(getattr(caught, "__notes__", ()))
+    assert any("launcher writer settlement failed: SettlementInterrupted" in note for note in notes)
+    assert "MUST NOT LEAK SETTLEMENT DETAIL" not in "\n".join(notes)
+    assert production_closed_writer, "production left the parent write end open after cleanup interruption"
+    assert production_settled_drain, "production left the launcher-log drain thread alive"
+    assert traversals == [], "no syscall may enter a root whose writer settlement was interrupted"
+    assert evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
+    assert evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
+    assert "MUST NOT READ" not in "".join(evidence.logs.values())
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction ABA contract")
 def test_unsettled_writer_cannot_publish_a_junction_aba_stream(
     tmp_path: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch

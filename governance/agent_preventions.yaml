@@ -3483,6 +3483,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_9733238a5abe60d69536495e716e7a6e908559cb_tree_e04ae1aabd598d64b7a5acec217f20f23af2d09f_the_production_no_follow_reader_lstat_the_internal_leaf_then_opened_a_different_external_regular_file_and_published_EXTERNAL_LEAF_ABA_STREAM_MUST_NOT_PUBLISH_because_no_pre_open_to_descriptor_identity_check_existed_on_Windows
     green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: SOAK-SETTLEMENT-BASEEXCEPTION-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_settlement_baseexception_preserves_primary_closes_drain_and_refuses_root
+    ci_partition: remaining
+    red_evidence: exact_592ad81d1bcc9c32285215e46e686f87d049083d_tree_f904b711a5d97ad90891c8ae2cd39d60a94856a4_production_blob_33d4ac6d9beb7c77c2dc9554134ee765d20b1c0d_guard_blob_605e7f0f74fe09fa3f98fad84d3b3891b95df9d4_python_3_14_3_Windows_exact_one_node_selected_one_failed_the_settlement_BaseException_replaced_the_primary_ValueError_no_refusal_artifacts_were_written_and_the_parent_writer_remained_open
+    green_evidence: local_corrected_production_blob_e79e159966ff7b9a92aa9a88807e6ed711ec75d5_guard_blob_605e7f0f74fe09fa3f98fad84d3b3891b95df9d4_python_3_14_3_Windows_exact_one_node_selected_one_passed_pending_corrected_candidate_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6875,8 +6883,8 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A launcher session whose process and descendants were not proven settled can replace the child-writable logs directory or one of its leaves while failure evidence is captured. On Windows it can junction-swap the directory to an external location, restore the original directory before the pathname after-check, or redirect the leaf between lstat and open. Unrelated bytes can then enter the retained week-run evidence bundle and disclose another run's log while appearing to belong to this run.
-    invariant: If launcher-session settlement raises, failure capture performs no pathname measurement, enumeration, open, or read under the child-writable state root and instead writes a bounded truthful refusal artifact for both engine stderr and assistant log. On every admitted assistant-log leaf, the file identity measured before open must match the identity of the opened descriptor before any bytes are read; a mismatch is an explicit replaced-or-unreadable refusal. A before/after directory identity comparison is not authority against ABA and is never the only control while the writer may still be live.
+    consequence: A launcher session whose process and descendants were not proven settled can replace the child-writable logs directory or one of its leaves while failure evidence is captured. On Windows it can junction-swap the directory to an external location, restore the original directory before the pathname after-check, or redirect the leaf between lstat and open. Unrelated bytes can then enter the retained week-run evidence bundle and disclose another run's log while appearing to belong to this run. A cleanup interruption deriving directly from BaseException can also replace the original run failure, skip both truthful refusal artifacts, and leave the launcher-log drain writer and thread unsettled.
+    invariant: If launcher-session settlement raises any BaseException, failure capture retains the original primary exception, closes and boundedly settles its launcher-log drain, performs no pathname measurement, enumeration, open, or read under the child-writable state root, and writes a bounded truthful refusal artifact for both engine stderr and assistant log. On every admitted assistant-log leaf, the file identity measured before open must match the identity of the opened descriptor before any bytes are read; a mismatch is an explicit replaced-or-unreadable refusal. A before/after directory identity comparison is not authority against ABA and is never the only control while the writer may still be live.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -6887,6 +6895,8 @@ records:
         ci_partition: remaining
       - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_windows_leaf_open_must_match_the_enumerated_file
         ci_partition: remaining
-    automation_limit: The three production-path guards pass locally on Windows, including a real junction ABA, but the default hosted remaining partition has not yet sealed the corrected candidate.
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_settlement_baseexception_preserves_primary_closes_drain_and_refuses_root
+        ci_partition: remaining
+    automation_limit: The four production-path guards pass locally on Windows, including a real junction ABA and an interrupted-cleanup side-effect control, but the default hosted remaining partition has not yet sealed the corrected candidate.
     red_evidence: exact_9733238a5abe60d69536495e716e7a6e908559cb_tree_e04ae1aabd598d64b7a5acec217f20f23af2d09f_python_3_14_3_Windows_exact_three_new_nodes_selected_three_failed_the_unsettled_path_attempted_read_bytes_and_lstat_the_real_junction_ABA_published_EXTERNAL_JUNCTION_ABA_STREAM_MUST_NOT_PUBLISH_and_the_leaf_identity_ABA_published_EXTERNAL_LEAF_ABA_STREAM_MUST_NOT_PUBLISH
     green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
