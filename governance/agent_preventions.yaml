@@ -3443,6 +3443,14 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
     green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: PERIODIC-LIVE-BARRIER-DIAGNOSTIC-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-LIVE-DIAGNOSTIC-VOCABULARY-002
+    guard: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter
+    ci_partition: agents
+    red_evidence: exact_predecessor_3e704bbc622f0e12a89f58525f2a1c9da9982ba1_allowed_an_arbitrary_provider_error_code_to_reach_the_exception_log_invalidation_reason_and_limiter_key_while_the_prior_suite_had_no_guard_for_this_boundary
+    green_evidence: pending_corrected_candidate_2bb330e9ef23440a4660a7792169097190802c19_and_hosted_agents_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6784,3 +6792,25 @@ records:
     automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
     red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
     green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: PERIODIC-LIVE-DIAGNOSTIC-VOCABULARY-002
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every _FrameRejected.category and PeriodicLiveDiscontinuity.reason that can reach _invalidation_reason, a _last_discontinuity_log key, or log text in src/cryodaq/agents/assistant/periodic_runtime.py.
+    classification: diagnostic_vocabulary_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: Distinct periodic-live faults can become indistinguishable when separate rejection sites accidentally share one category, while a provider-controlled or otherwise unbounded barrier error code can escape into the exception, invalidation reason, limiter key, and log text and grow the limiter vocabulary without bound.
+    invariant: Every diagnostic that reaches invalidation state, a limiter key, or log text belongs to a finite local vocabulary. Distinct fault conditions have distinct categories unless an explicit reviewed alias and count documents the intended sharing, and every unsupported provider value collapses to one fixed local category before it reaches the exception, invalidation reason, limiter, or log.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - AGENTS.md#architecture-and-extension-rules
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_no_two_rejection_sites_share_a_category_by_accident
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter
+        ci_partition: agents
+    red_evidence: exact_predecessor_3e704bbc622f0e12a89f58525f2a1c9da9982ba1_had_two_accidental_duplicate_category_pairs_and_the_category_guard_was_already_red_while_the_new_barrier_guard_was_red_because_an_arbitrary_provider_error_code_reached_exception_log_invalidation_and_limiter_state
+    green_evidence: pending_corrected_candidate_2bb330e9ef23440a4660a7792169097190802c19_and_hosted_agents_partition
