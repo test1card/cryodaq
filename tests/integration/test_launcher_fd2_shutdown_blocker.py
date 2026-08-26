@@ -17,6 +17,17 @@ Two independent falsifying controls prove the harness detects each mutation:
 leaving OS fd 2 attached must fail, and exposing the private duplicate through
 ``fileno()`` must fail.
 
+The replay production entry is guarded separately: one POSIX subprocess invokes
+the real ``cryodaq.replay_engine.__main__.main()`` under a complete launcher
+replay authority envelope (real nonce/session/readiness-channel consumption,
+real bootstrap install, real logging init, real argparse, real ZMQ startup and
+readiness receipt). A thin probe wrapped around the real ``ReplayEngine``
+constructor records OS fd 2 synchronously at the runtime-construction boundary
+and creates the same real spawn-context descendant pair the measured leak used
+(a spawn worker plus the ResourceTracker via a real ``multiprocessing.Lock``),
+so a hook removed or moved below that boundary fails deterministically instead
+of passing until an abrupt death.
+
 Measured on native Ubuntu 22.04 at commit
 007d71ace28b7432f6d6d233552f61b490472fb3: both NATURAL descendants exit
 promptly once the engine dies (the USBTMC worker sees command-pipe EOF in
@@ -40,6 +51,7 @@ import re
 import secrets
 import selectors
 import signal
+import socket
 import subprocess
 import sys
 import textwrap
@@ -774,3 +786,246 @@ def test_replay_entry_installs_isolation_only_for_launcher_authority(tmp_path: P
     assert document["fileno_denied"] is True
     assert type(document["private_fd"]) is int and document["private_fd"] > 2
     assert document["windows_gate"] is False
+
+
+_REPLAY_MAIN_ORDER_SCRIPT = textwrap.dedent(
+    """
+    import json, multiprocessing, os, sys, time
+    from cryodaq.replay_engine import __main__ as replay_entry
+
+    # Thin observation probe around the REAL constructor. It records OS truth
+    # (never a simulated ordering) at the first reachable runtime-construction
+    # boundary of production main(), then creates the exact real spawn-context
+    # descendant pair the measured leak used, then delegates to the real
+    # ReplayEngine so startup proceeds exactly as the launcher's child runs it.
+    class _Fd2BoundaryProbeEngine(replay_entry.ReplayEngine):
+        def __init__(self, *args, **kwargs):
+            witness = {"pid": os.getpid()}
+            witness["boundary_fd2"] = os.readlink("/proc/self/fd/2")
+            try:
+                sys.stderr.fileno()
+                witness["stderr_fileno_denied"] = False
+            except Exception:
+                witness["stderr_fileno_denied"] = True
+            context = multiprocessing.get_context("spawn")
+            context.Lock()
+            worker = context.Process(target=time.sleep, args=(120.0,), daemon=True)
+            worker.start()
+            witness["worker_pid"] = worker.pid
+            from multiprocessing import resource_tracker
+
+            singleton = getattr(resource_tracker, "_resource_tracker", None)
+            tracker_pid = getattr(singleton, "_pid", None)
+            if type(tracker_pid) is not int or tracker_pid <= 0:
+                legacy = getattr(resource_tracker, "_pid", None)
+                tracker_pid = legacy if type(legacy) is int and legacy > 0 else None
+            witness["tracker_pid"] = tracker_pid
+            sys.stdout.write(json.dumps(witness, sort_keys=True) + "\\n")
+            sys.stdout.flush()
+            super().__init__(*args, **kwargs)
+
+    replay_entry.ReplayEngine = _Fd2BoundaryProbeEngine
+    replay_entry.main()
+    """
+)
+
+
+def _three_free_loopback_tcp_ports() -> tuple[int, int, int]:
+    sockets = [socket.socket(socket.AF_INET, socket.SOCK_STREAM) for _ in range(3)]
+    try:
+        for sock in sockets:
+            sock.bind(("127.0.0.1", 0))
+        ports = tuple(int(sock.getsockname()[1]) for sock in sockets)
+    finally:
+        for sock in sockets:
+            sock.close()
+    if len(set(ports)) != 3:
+        raise AssertionError(f"loopback port probe returned duplicates: {ports!r}")
+    return ports
+
+
+def _read_ready_receipt_frame(read_fd: int, timeout_s: float) -> bytes:
+    deadline = time.monotonic() + timeout_s
+    chunks: list[bytes] = []
+    total = 0
+    with selectors.DefaultSelector() as selector:
+        selector.register(read_fd, selectors.EVENT_READ)
+        while time.monotonic() < deadline and total <= 8192:
+            remaining = deadline - time.monotonic()
+            if not selector.select(max(remaining, 0.01)):
+                break
+            chunk = os.read(read_fd, 4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if b"\n" in chunk:
+                break
+    return b"".join(chunks)
+
+
+def _spawn_replay_main_child(
+    tmp_path: Path, curve_path: Path, env: dict[str, str]
+) -> tuple[subprocess.Popen[bytes], int]:
+    """Run the real ``cryodaq.replay_engine.__main__.main()`` in a subprocess.
+
+    The driver script differs from ``python -m cryodaq.replay_engine`` only by
+    installing the observation probe around the real constructor before calling
+    the very same ``main()`` callable with real argv; every production stage
+    (authority consumption, bootstrap, logging init, argparse, engine lock,
+    ZMQ startup, readiness receipt) executes unmodified. Returns the child and
+    its readiness-channel read descriptor; the parent's write end is closed
+    here because only the child may hold it from now on.
+    """
+    pub_port, cmd_port, safe_port = _three_free_loopback_tcp_ports()
+    command = [
+        sys.executable,
+        "-c",
+        _REPLAY_MAIN_ORDER_SCRIPT,
+        "--source",
+        str(curve_path),
+        "--speed",
+        "10",
+        "--pub-addr",
+        f"tcp://127.0.0.1:{pub_port}",
+        "--cmd-addr",
+        f"tcp://127.0.0.1:{cmd_port}",
+        "--safe-cmd-addr",
+        f"tcp://127.0.0.1:{safe_port}",
+        "--loop",
+    ]
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(write_fd, True)
+    env["CRYODAQ_CHILD_READY_CHANNEL"] = f"fd:{write_fd}"
+    try:
+        process = subprocess.Popen(
+            command,
+            env=env,
+            cwd=str(tmp_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            pass_fds=(write_fd,),
+        )
+    except BaseException:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise
+    os.close(write_fd)
+    return process, read_fd
+
+
+@pytest.mark.skipif(not _POSIX, reason="replay production-entry guard requires POSIX fd semantics")
+def test_replay_production_entry_installs_fd2_isolation_before_runtime_spawn_boundary(tmp_path: Path) -> None:
+    _require_linux_proc_guard_runtime()
+    from cryodaq.replay_engine.__main__ import (
+        _REPLAY_READY_PREFIX,
+        _REPLAY_READY_SCHEMA,
+    )
+
+    curve_path = tmp_path / "fd2_replay_curve.json"
+    curve_path.write_text(
+        json.dumps({"t_hours": [0.0, 1.0], "T_cold": [4.2, 300.0], "T_warm": [300.0, 4.2]}),
+        encoding="utf-8",
+    )
+    nonce = secrets.token_hex(32)
+    session_id = secrets.token_hex(16)
+    env = _simulant_base_env(tmp_path)
+    env["CRYODAQ_REPLAY_READY_NONCE"] = nonce
+    env["CRYODAQ_REPLAY_SESSION_ID"] = session_id
+    process, ready_read_fd = _spawn_replay_main_child(tmp_path, curve_path, env)
+    marker_lines, marker_reader = _start_line_reader(process.stdout)
+    run, pump_logger = _attach_pump(process)
+    run.reader_thread = marker_reader
+    try:
+        run.marker = _await_marker_or_fail_child(marker_lines, process)
+        marker = run.marker
+        assert type(marker.get("worker_pid")) is int and marker["worker_pid"] > 0
+        worker_pid = int(marker["worker_pid"])
+        tracker_pid = _resolve_tracker_pid(run)
+        assert isinstance(tracker_pid, int) and tracker_pid > 0
+        # OS truth recorded synchronously at the runtime-construction boundary:
+        # the hook must already have redirected fd 2 onto the null device and
+        # revoked the exportable stderr descriptor before this point.
+        assert marker["boundary_fd2"] == os.devnull, (
+            f"replay main() reached runtime construction with fd 2 -> {marker['boundary_fd2']!r}"
+        )
+        assert marker["stderr_fileno_denied"] is True
+        assert _proc_exists(worker_pid) and b"spawn_main" in _pid_cmdline(worker_pid)
+        assert _proc_exists(tracker_pid) and b"resource_tracker" in _pid_cmdline(tracker_pid)
+
+        launch_pipe_inode = os.fstat(process.stderr.fileno()).st_ino
+        run.launch_pipe_inode = launch_pipe_inode
+        engine_pipe_fds = _pipe_inode_descriptors(int(marker["pid"]), launch_pipe_inode)
+        assert all(descriptor > 2 for descriptor in engine_pipe_fds), (
+            f"engine child holds the launch pipe on standard descriptors: {engine_pipe_fds}"
+        )
+        # Only descendants are scanned here: the engine itself legitimately
+        # keeps the private duplicate (>2) of the launch pipe alive by design.
+        pre_kill_violations = {
+            "worker": _pipe_inode_descriptors(worker_pid, launch_pipe_inode),
+            "tracker": _pipe_inode_descriptors(tracker_pid, launch_pipe_inode),
+        }
+        engine_fd2_target = os.readlink(f"/proc/{marker['pid']}/fd/2")
+        assert engine_fd2_target == os.devnull, (
+            f"replay child OS fd 2 did not settle onto the null device: {engine_fd2_target!r}"
+        )
+        assert not any(pre_kill_violations.values()), (
+            f"while the replay child lived, someone already inherited the launch pipe: {pre_kill_violations}"
+        )
+
+        # Complete launcher authority envelope end to end: the real readiness
+        # receipt proves main() consumed the channel, started the real runtime
+        # and emitted the strict launcher receipt through the private pipe.
+        run.pump_thread.start()
+        frame = _read_ready_receipt_frame(ready_read_fd, _MARKER_TIMEOUT_S)
+        if not frame.startswith(_REPLAY_READY_PREFIX):
+            diagnostics = _bounded_child_stderr(process)
+            _terminate_exact_child(process)
+            raise AssertionError(
+                f"replay readiness frame malformed: {frame[:64]!r} bounded child stderr: {diagnostics!r}"
+            )
+        payload = json.loads(frame[len(_REPLAY_READY_PREFIX) :].decode("ascii"))
+        assert payload["schema"] == _REPLAY_READY_SCHEMA
+        assert payload["nonce"] == nonce
+        assert payload["session_id"] == session_id
+        assert payload["mode"] == "replay"
+        assert payload["pid"] == int(marker["pid"])
+
+        _assert_probe_reached_launcher_pipe(run)
+        assert process.poll() is None, "replay child exited before the abrupt-death phase"
+        assert _kill_exact(int(marker["pid"])) is True
+        process.wait(timeout=5)
+        assert process.returncode == -signal.SIGKILL
+        # Both descendants are still alive by construction (120 s sleep), yet
+        # neither preserves the launch pipe: the pump must reach EOF in budget.
+        elapsed = _settle_scenario_after_kill(run, pump_logger)
+        assert not run.pump_thread.is_alive(), "launcher pump never reached EOF after replay SIGKILL"
+        assert elapsed <= _EOF_BUDGET_S + 0.25, f"pump termination took {elapsed:.3f}s (budget {_EOF_BUDGET_S}s)"
+        assert run.stream_owner.settlement_state is _OwnerSettlementState.SETTLED
+        assert run.stream_owner.pump_failure is None
+        assert run.stream_owner.close_failure is None
+        assert _proc_exists(worker_pid), "spawn descendant died early; EOF proof lost its live-descendant topology"
+        post_kill_violations: dict[str, list[int]] = {}
+        if _proc_exists(tracker_pid):
+            post_kill_violations["tracker"] = _pipe_inode_descriptors(tracker_pid, launch_pipe_inode)
+        post_kill_violations["worker"] = _pipe_inode_descriptors(worker_pid, launch_pipe_inode)
+        assert not any(post_kill_violations.values()), (
+            f"surviving replay descendants hold the launch pipe after engine death: {post_kill_violations}"
+        )
+    finally:
+        _cleanup_descendants(run)
+        if process.poll() is None:
+            _kill_exact(process.pid)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if run.pump_thread.ident is not None:
+            run.pump_thread.join(_SETTLEMENT_TIMEOUT_S)
+        _detach_pump(run, pump_logger)
+        try:
+            os.close(ready_read_fd)
+        except OSError:
+            pass
+        _settle_exact_pipes(run)
