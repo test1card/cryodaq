@@ -2338,6 +2338,11 @@ class LauncherWindow(QMainWindow):
         self._engine_shutdown_capability: str | None = None
         self._engine_shutdown_request_id: str | None = None
         self._engine_shutdown_transport_identity: tuple[str, int] | None = None
+        # The exact identity whose late transport reply was already awaited once
+        # during this shutdown transaction. It only ever gates pacing (never
+        # settlement truth) and is only honoured while it still equals the
+        # currently published identity.
+        self._engine_shutdown_transport_identity_awaited: tuple[str, int] | None = None
         self._engine_shutdown_receipt: dict[str, Any] | None = None
         self._engine_unsettled_incarnation: tuple[str, int | None] | None = None
         self._engine_stderr_handler: logging.Handler | None = None
@@ -3018,6 +3023,7 @@ class LauncherWindow(QMainWindow):
             self._engine_shutdown_capability = None
             self._engine_shutdown_request_id = None
             self._engine_shutdown_transport_identity = None
+            self._engine_shutdown_transport_identity_awaited = None
             self._engine_shutdown_receipt = None
             self._engine_shutdown_receipt_rejected = False
             self._engine_unsettled_incarnation = None
@@ -3038,6 +3044,7 @@ class LauncherWindow(QMainWindow):
         self._engine_shutdown_capability = engine_shutdown_capability
         self._engine_shutdown_request_id = None
         self._engine_shutdown_transport_identity = None
+        self._engine_shutdown_transport_identity_awaited = None
         self._engine_shutdown_receipt = None
         self._engine_shutdown_receipt_rejected = False
         self._engine_unsettled_incarnation = None
@@ -3372,6 +3379,7 @@ class LauncherWindow(QMainWindow):
         owner_id: str,
         on_settled: Callable[[], None],
         on_failed: Callable[[Exception], None],
+        carry_failure: BaseException | None = None,
     ) -> bool:
         """Settle a terminal child's readers off the Qt event loop.
 
@@ -3390,6 +3398,12 @@ class LauncherWindow(QMainWindow):
         refused -- one settlement owner at a time. An unresolvable worker
         start reports failure synchronously and returns True; False means a
         settlement was already active and this arm changed nothing.
+        ``carry_failure`` delivers an ALREADY-PRODUCED result instead of
+        starting a worker: an inline attempt ran the exact settlement once
+        and failed, so re-running it could double-drive half-settled readers.
+        The failure travels through this machine's ordinary single delivering
+        tick -- same state shape, same exactly-once reporting, fail-closed
+        owners retained -- without a second close ever starting.
         """
 
         existing = getattr(self, "_engine_reader_settlement_state", None)
@@ -3454,6 +3468,15 @@ class LauncherWindow(QMainWindow):
                     on_failed(wrapped)
                 return
             on_settled()
+
+        if carry_failure is not None:
+            # No second close starts: the inline attempt already produced this
+            # exact result. Publish it through the machine's ordinary
+            # delivering tick so observers see one flight, one callback.
+            state["error"] = carry_failure
+            state["done"].set()
+            QTimer.singleShot(_ENGINE_READER_SETTLEMENT_TICK_MS, _advance)
+            return True
 
         try:
             worker = threading.Thread(
@@ -3749,6 +3772,10 @@ class LauncherWindow(QMainWindow):
             self._engine_shutdown_transport_identity = (request_id, generation)
             late_result = self._bridge.reconcile_late_result(request_id, generation=generation)
             if late_result is None:
+                # Record that this exact identity's reply was already awaited
+                # once on this bridge. The record paces later health ticks only;
+                # it is honoured solely while it equals the published identity.
+                self._engine_shutdown_transport_identity_awaited = (request_id, generation)
                 logger.critical("Finished engine shutdown worker still awaits exact transport reconciliation")
                 self._engine_shutdown_hold_reason = (
                     "the shutdown worker has finished, but its command has not yet been reconciled on the "
@@ -3774,6 +3801,7 @@ class LauncherWindow(QMainWindow):
             # validate both properties on the next settlement pass.
             self._engine_shutdown_receipt = dict(late_result.reply)
             self._engine_shutdown_transport_identity = None
+            self._engine_shutdown_transport_identity_awaited = None
             self._engine_shutdown_worker = None
             self._engine_shutdown_hold_reason = (
                 "the shutdown command was reconciled, but its receipt and process exit still require exact validation"
@@ -3786,6 +3814,42 @@ class LauncherWindow(QMainWindow):
                 self._engine_shutdown_hold_reason = str(exc)
             return False
         return True
+
+    def _transfer_finished_shutdown_worker_to_transport_identity(self) -> None:
+        """Retire a finished worker whose parsed identity now solely owns reconciliation.
+
+        A finished shutdown worker whose unknown-outcome envelope parses has
+        already distilled its whole evidence into the published
+        ``(request_id, generation)`` transport identity: the identity is what a
+        later ``reconcile_late_result()`` reads, and keeping the drained worker
+        slot published beside it makes every refused pass re-run the worker's
+        settlement -- repeating the same bridge round trip and the same CRITICAL
+        line forever, while the state that actually owns open late
+        reconciliation stays hidden behind a finished thread object.
+
+        This transfers ownership exactly once the transfer is real: the worker
+        is FINISHED (a running one must never be dropped -- Qt destroys live
+        threads), the envelope still parses to the currently published identity
+        verbatim, and no receipt has landed. Anything else -- malformed
+        evidence, a mismatched identity, an unconsumed receipt -- leaves the
+        retained evidence untouched: this helper only ever retires a redundant
+        owner, never evidence itself.
+        """
+
+        worker = getattr(self, "_engine_shutdown_worker", None)
+        if worker is None:
+            return
+        try:
+            if worker.isFinished() is not True:
+                return
+        except Exception:
+            return
+        identity = getattr(self, "_engine_shutdown_transport_identity", None)
+        if identity is None or getattr(self, "_engine_shutdown_receipt", None) is not None:
+            return
+        if _parse_bridge_unknown_outcome_envelope(getattr(worker, "result", None)) != identity:
+            return
+        self._engine_shutdown_worker = None
 
     def _refused_settlement_reaches_stable_hold(self) -> bool:
         """True only when a refused settlement can never change by polling again.
@@ -3841,6 +3905,27 @@ class LauncherWindow(QMainWindow):
             return True
         return getattr(self, "_engine_shutdown_receipt_rejected", False) is True
 
+    def _engine_reader_threads_are_alive(self) -> bool:
+        """True while any engine reader thread could still block a bounded join.
+
+        The terminal quit decision may settle its child's readers inline ONLY
+        when this answers False: an alive readiness or stderr pump thread is
+        exactly what ``_close_engine_stderr_stream``'s two-second joins would
+        block on, and those joins may never run on a Qt callback stack. An
+        unobservable thread fails closed to the deferred worker machine.
+        """
+
+        for attribute in ("_engine_ready_thread", "_replay_ready_thread", "_engine_stderr_thread"):
+            thread = getattr(self, attribute, None)
+            if thread is None:
+                continue
+            try:
+                if thread.is_alive() is True:
+                    return True
+            except Exception:
+                return True
+        return False
+
     def _refused_quit_reaches_reader_settled_hold(self) -> bool:
         """Gate the terminal quit HOLD behind exactly-once reader settlement.
 
@@ -3850,9 +3935,19 @@ class LauncherWindow(QMainWindow):
         ladder owned no other settlement call -- suppressing the last retry
         without settling first stranded the readiness/stderr stream owners
         behind a HOLD that no pass ever revisits. The terminal decision
-        therefore settles them first: exactly once per shutdown, only for an
+        therefore settles them first -- exactly once per shutdown, only for an
         observed terminal exit, never while the child is alive or its handle
-        is gone. A live child keeps owning its readers and its refused
+        is gone -- and it delivers the result into whichever owner holds the
+        decision. When this pass still solely owns the child (no armed
+        terminal-quit reap machine overlaps it) and no reader thread is alive
+        whose bounded join could block, the settlement runs inline here so
+        the exactly-once marker latches before this pass returns; otherwise
+        -- an armed reap machine overlapping the child, or an alive or
+        unobservable reader thread whose joins may never run on this Qt
+        callback stack -- the same settlement is handed to the deferred worker
+        machine, the marker latches from that flight's settled callback, and
+        a failed flight keeps the retry ladder armed.
+        A live child keeps owning its readers and its refused
         evidence is already immutable, yet treating its ``None`` poll as
         suppressible left the engine alive behind a HOLD no pass ever
         revisits -- so stable suppression first bounds the child through
@@ -3924,25 +4019,80 @@ class LauncherWindow(QMainWindow):
             return LauncherWindow._begin_terminal_quit_bounded_reap(self, owner_id=owner_id)
         if type(returncode) is not int:
             return False
-        try:
-            settled = LauncherWindow._settle_crashed_engine_readers_or_hold(
-                self,
-                owner_id=owner_id,
-                returncode=returncode,
-                phase="normal-quit-refusal",
-            )
-        except Exception as exc:
-            logger.error(
-                "Engine reader settlement raised during the terminal quit decision; "
-                "phase=normal-quit-refusal owner=%s exception=%s",
+
+        def _on_readers_settled() -> None:
+            self._shutdown_terminal_engine_readers_settled = True
+
+        def _on_reader_failure(exc: Exception) -> None:
+            self._engine_unsettled_incarnation = (owner_id, returncode)
+            self._restart_giving_up = True
+            logger.critical(
+                "Engine reader settlement failed in HOLD; phase=%s owner=%s exception=%s",
+                "normal-quit-refusal",
                 owner_id,
                 type(exc).__name__,
             )
-            settled = False
-        if not settled:
-            return False
-        self._shutdown_terminal_engine_readers_settled = True
-        return True
+            self._show_engine_down_banner(
+                "HOLD: engine process ended but its readiness/stderr readers remain unsettled. "
+                "Restart and launcher exit are blocked."
+            )
+
+        # Exact-owner delivery for the observed-terminal branch. When THIS
+        # decision still solely owns the child -- no armed terminal-quit reap
+        # machine overlaps it -- and no reader thread is alive whose bounded
+        # join could block, the exact settlement runs right here so its
+        # completion is delivered INTO the decision that owns it instead of
+        # being stranded behind a queued tick: success latches the exactly-once
+        # marker on this stack and commits suppression with no further
+        # callback armed. An alive or unobservable reader thread keeps the
+        # finding-2 rule -- joins never run on this Qt callback stack -- so
+        # the same settlement is handed to the deferred worker and this pass
+        # stays unfinished. An inline failure is never re-run: the exact close
+        # already executed once, and its result is carried into the deferred
+        # machine as an already-produced failure delivered through that
+        # machine's ordinary single tick, so reporting stays exactly-once and
+        # fail-closed while this pass returns False and keeps the ladder
+        # armed.
+        reap_state = getattr(self, "_terminal_quit_reap_state", None)
+        machine_owns_child = type(reap_state) is dict and reap_state.get("process") is process
+        if not machine_owns_child and not LauncherWindow._engine_reader_threads_are_alive(self):
+            try:
+                self._close_engine_stderr_stream()
+            except Exception as exc:
+                LauncherWindow._begin_deferred_engine_reader_settlement(
+                    self,
+                    phase="normal-quit-refusal",
+                    owner_id=owner_id,
+                    on_settled=_on_readers_settled,
+                    on_failed=_on_reader_failure,
+                    carry_failure=exc,
+                )
+                return False
+            _on_readers_settled()
+            return True
+
+        # The observed-terminal settlement used to run
+        # _close_engine_stderr_stream synchronously on this Qt callback stack:
+        # its bounded reader joins, then the stderr flush/close, can hold the
+        # callback for several seconds while the HOLD alarm, tray and repaint
+        # lag. When the decision does not solely own the child (an armed
+        # terminal-quit reap machine overlaps it) or a reader thread is alive,
+        # the exact same settlement runs through the existing deferred
+        # machine instead: same owner, same phase, exactly-once marker latched
+        # only from its settled callback; a failed flight keeps the incarnation,
+        # the giving-up HOLD and the operator banner fail-closed. This pass
+        # returns False so the retry ladder stays armed until the flight
+        # reports; while it is in flight the decision's own in-flight guard
+        # above keeps later passes from re-entering.
+
+        LauncherWindow._begin_deferred_engine_reader_settlement(
+            self,
+            phase="normal-quit-refusal",
+            owner_id=owner_id,
+            on_settled=_on_readers_settled,
+            on_failed=_on_reader_failure,
+        )
+        return False
 
     def _retire_observed_engine_incarnation(self) -> bool:
         """Release the identity of an incarnation whose exit was observed.
@@ -3972,6 +4122,7 @@ class LauncherWindow(QMainWindow):
         self._engine_shutdown_capability = None
         self._engine_shutdown_request_id = None
         self._engine_shutdown_transport_identity = None
+        self._engine_shutdown_transport_identity_awaited = None
         self._engine_shutdown_receipt = None
         self._engine_shutdown_receipt_rejected = False
         self._engine_shutdown_wait_deadline = None
@@ -4232,6 +4383,7 @@ class LauncherWindow(QMainWindow):
                 self._engine_shutdown_receipt = dict(receipt)
                 self._engine_shutdown_receipt_rejected = False
                 self._engine_shutdown_transport_identity = None
+                self._engine_shutdown_transport_identity_awaited = None
                 if worker is not None:
                     self._engine_shutdown_worker = None
             if self._engine_shutdown_receipt is None:
@@ -4280,6 +4432,7 @@ class LauncherWindow(QMainWindow):
             self._engine_shutdown_capability = None
             self._engine_shutdown_request_id = None
             self._engine_shutdown_transport_identity = None
+            self._engine_shutdown_transport_identity_awaited = None
             self._engine_shutdown_receipt = None
             self._engine_shutdown_receipt_rejected = False
             self._engine_unsettled_incarnation = None
@@ -4400,15 +4553,45 @@ class LauncherWindow(QMainWindow):
     def _step_terminal_quit_reap(self, *, owner_id: str, process: Any) -> bool:
         """Advance one stage of the terminal-quit bounded reap.
 
-        Returns True when the machine finished -- settled or failed -- and False
-        to keep polling on the next tick. Every observation is a non-blocking
-        ``poll()``; escalation is exactly terminate then kill; and each stage's
-        five-second budget is checked against ``time.monotonic()``, never by
-        waiting on the Qt thread.
+        Returns True when the machine finished -- settled, gone inert, or
+        failed -- and False to keep polling on the next tick. Every observation
+        is a non-blocking ``poll()``; escalation is exactly terminate then kill;
+        and each stage's five-second budget is checked against
+        ``time.monotonic()``, never by waiting on the Qt thread. A queued tick
+        whose terminal decision another pass already took over -- readers
+        settled or their settlement in flight elsewhere, an unsettled
+        incarnation already latched, or a replaced/released handle -- clears
+        the machine and finishes without acting.
         """
 
         state = getattr(self, "_terminal_quit_reap_state", None)
         if type(state) is not dict:
+            return True
+        # Stale-tick ownership gate -- this shutdown-owned machine's analog of
+        # _step_unobservable_bounded_reap's runtime-epoch check. Quit-time
+        # runtime callbacks are revoked by design (the shutdown ladder owns
+        # the child), so "does my owning context still hold" is answered by
+        # the terminal decision itself: once another real pass has settled
+        # this child's readers (the exactly-once marker), handed that exact
+        # settlement to the deferred worker (an in-flight settlement state),
+        # or latched an unsettled incarnation, a queued 200ms tick from an
+        # earlier pass owns nothing and must go inert. Without this gate the
+        # stale tick read the same terminal poll as ITS OWN forced death: it
+        # latched a false _engine_unsettled_incarnation, re-ran reader
+        # settlement over already settled readers, and logged a terminal
+        # reaping that never happened.
+        if (
+            getattr(self, "_shutdown_terminal_engine_readers_settled", False) is True
+            or type(getattr(self, "_engine_reader_settlement_state", None)) is dict
+            or getattr(self, "_engine_unsettled_incarnation", None) is not None
+        ):
+            self._terminal_quit_reap_state = None
+            return True
+        # Exact process identity, as in _step_unobservable_bounded_reap: a
+        # replaced or released handle makes this chain inert instead of
+        # driving a foreign incarnation.
+        if getattr(self, "_engine_proc", None) is not process:
+            self._terminal_quit_reap_state = None
             return True
 
         def _observed_code() -> int | None:
@@ -5518,6 +5701,32 @@ class LauncherWindow(QMainWindow):
         if getattr(self, "_engine_shutdown_transport_identity", None) is not None:
             return True
         return getattr(self, "_engine_shutdown_receipt", None) is not None
+
+    def _engine_deferred_shutdown_transaction_open(self) -> bool:
+        """True while THIS launcher owns a shutdown transaction owed a verdict.
+
+        Scoped tighter than ``_engine_settlement_pending`` for the deferred
+        settlement branch: that branch may only continue a command this
+        launcher actually dispatched (its recorded request id beside the
+        worker), a receipt still owing exit validation, or an adopted hand-off
+        identity that carries no recorded request id yet. Two pending-looking
+        states are deliberately NOT open transactions here. A retained worker
+        whose dispatch left no recorded request id has no verdict of ours to
+        read again -- its evidence is classified, refused, and latched by the
+        ordinary observed-exit path instead of deferring the stable HOLD
+        behind a queued tick. And a fully recorded transaction already reduced
+        to its published transport identity has its late-reply reconciliation
+        paced by the owner-bound settlement ladders, not by every health tick.
+        """
+
+        worker = getattr(self, "_engine_shutdown_worker", None)
+        if worker is not None:
+            return getattr(self, "_engine_shutdown_request_id", None) is not None
+        if getattr(self, "_engine_shutdown_receipt", None) is not None:
+            return True
+        if getattr(self, "_engine_shutdown_transport_identity", None) is not None:
+            return getattr(self, "_engine_shutdown_request_id", None) is None
+        return False
 
     def _is_engine_alive(self) -> bool:
         """Проверить, жив ли engine."""
@@ -7182,6 +7391,13 @@ class LauncherWindow(QMainWindow):
             return
         if self._shutdown_requested:
             return
+        if type(getattr(self, "_engine_reader_settlement_state", None)) is dict:
+            # A deferred reader settlement owns this terminal child's readers
+            # right now; its settled callback finishes this refusal's latch.
+            # Re-entering before that would repeat the HOLD banner beside an
+            # active settlement owner -- the exact repetition the giving-up
+            # latch prevents once the flight has reported.
+            return
         if getattr(self, "_engine_unsettled_incarnation", None) is not None:
             return
 
@@ -7205,7 +7421,69 @@ class LauncherWindow(QMainWindow):
             and returncode is not None
             and getattr(self, "_replay_source", None) is None
             and not getattr(self, "_engine_external", False)
-            and LauncherWindow._engine_settlement_pending(self)
+            and getattr(self, "_engine_shutdown_worker", None) is None
+            and getattr(self, "_engine_shutdown_receipt", None) is None
+            and getattr(self, "_engine_shutdown_transport_identity", None) is not None
+            and getattr(self, "_engine_shutdown_request_id", None) is not None
+        ):
+            # A fully recorded transaction whose worker was drained and whose
+            # receipt never landed: only the published transport identity
+            # remains, awaiting a late reply. Reconcile-or-refuse is paced by
+            # the owner-bound settlement ladders that captured this exact
+            # identity; re-entering the stop path from every health tick would
+            # only repeat the same round trip (and re-consume the bridge's
+            # reconciliation lane) without being able to hurry the reply. The
+            # HOLD stays visibly down; the evidence stays retained verbatim.
+            deferred_owner_id = getattr(self, "_engine_instance_id", None)
+            logger.error(
+                "Engine exit observed beside a fully recorded shutdown transaction still awaiting "
+                "its late transport reply; incarnation=%s identity=%s -- reconciliation stays owned "
+                "by its settlement ladder, not the health tick.",
+                deferred_owner_id if type(deferred_owner_id) is str else "<unknown>",
+                getattr(self, "_engine_shutdown_transport_identity", None),
+            )
+            return
+        if (
+            process is not None
+            and returncode is not None
+            and getattr(self, "_replay_source", None) is None
+            and not getattr(self, "_engine_external", False)
+            and getattr(self, "_engine_shutdown_worker", None) is None
+            and getattr(self, "_engine_shutdown_receipt", None) is None
+            and getattr(self, "_engine_shutdown_request_id", None) is None
+        ):
+            transferred_identity = getattr(self, "_engine_shutdown_transport_identity", None)
+            awaited_identity = getattr(self, "_engine_shutdown_transport_identity_awaited", None)
+            if transferred_identity is not None and awaited_identity == transferred_identity:
+                # A finished shutdown worker whose envelope parsed has already
+                # transferred ownership of open late reconciliation to this
+                # exact published identity (and retired), and this launcher's
+                # settlement pass has already awaited that reply once on this
+                # bridge. This quietness is legitimate ONLY in this
+                # post-transfer, transport-only shape: the worker slot is empty,
+                # no receipt landed, no recorded request id exists, and the
+                # awaited record still equals the published identity. Re-entering
+                # the stop path from every health tick would only repeat the
+                # same reconciliation round trip without being able to hurry the
+                # reply; the transaction stays OPEN -- nothing latches, nothing
+                # restarts, the evidence and its identity stay retained verbatim
+                # -- and every other owner (settlement ladders, quit and manual
+                # paths through _stop_engine) keeps reconciling it unchanged.
+                deferred_owner_id = getattr(self, "_engine_instance_id", None)
+                logger.error(
+                    "Engine exit observed beside a transferred shutdown transaction whose late transport reply "
+                    "was already awaited once; incarnation=%s identity=%s -- reconciliation stays owned by the "
+                    "exact published identity, not the health tick.",
+                    deferred_owner_id if type(deferred_owner_id) is str else "<unknown>",
+                    transferred_identity,
+                )
+                return
+        if (
+            process is not None
+            and returncode is not None
+            and getattr(self, "_replay_source", None) is None
+            and not getattr(self, "_engine_external", False)
+            and LauncherWindow._engine_deferred_shutdown_transaction_open(self)
         ):
             # Same handoff race, terminal child: a verified shutdown receipt still
             # owes its exit-code validation, or a published unknown-outcome transport
@@ -7214,6 +7492,16 @@ class LauncherWindow(QMainWindow):
             # over an unproven settlement, so the exit continues through the
             # receipt-aware stop path instead; its refusal keeps the evidence
             # retained and visibly down.
+            # Exact-owner scope: this branch CONTINUES A TRANSACTION THIS
+            # LAUNCHER DISPATCHED. It admits a shutdown command with its
+            # recorded request id beside the worker that ran it, a receipt
+            # still owing exit-code validation, or an adopted hand-off
+            # identity carrying no recorded request id yet. A retained worker
+            # WITHOUT a recorded request id is not a transaction of ours to
+            # continue: its evidence belongs to the ordinary observed-exit
+            # path below, which classifies it, refuses visibly, settles the
+            # crashed-child readers, and latches the stable HOLD synchronously
+            # instead of deferring the latch behind a queued tick.
             deferred_owner_id = getattr(self, "_engine_instance_id", None)
             logger.error(
                 "Engine exit observed during deferred shutdown settlement; incarnation=%s code=%s.",
@@ -7232,14 +7520,41 @@ class LauncherWindow(QMainWindow):
                     owner_id = getattr(self, "_engine_instance_id", None)
                     if type(owner_id) is not str:
                         owner_id = "<unknown>"
-                    readers_settled = LauncherWindow._settle_crashed_engine_readers_or_hold(
-                        self,
-                        owner_id=owner_id,
-                        returncode=returncode,
-                        phase="deferred-shutdown-refusal",
-                    )
-                    if readers_settled:
+
+                    # This health-tick callback used to settle the terminal
+                    # child's readers inline: _close_engine_stderr_stream's
+                    # bounded joins plus the stderr flush/close held the Qt
+                    # callback stack for seconds during exactly the recovery
+                    # window the HOLD alarm must stay responsive. The same
+                    # settlement, owner and phase run through the deferred
+                    # machine; the giving-up latch lands only from its settled
+                    # callback, and a failed flight keeps the incarnation,
+                    # giving-up HOLD and operator banner fail-closed. Nothing
+                    # here schedules a restart or claims a clean exit.
+                    def _on_readers_settled() -> None:
                         self._restart_giving_up = True
+
+                    def _on_reader_failure(reader_exc: Exception) -> None:
+                        self._engine_unsettled_incarnation = (owner_id, returncode)
+                        self._restart_giving_up = True
+                        logger.critical(
+                            "Engine reader settlement failed in HOLD; phase=%s owner=%s exception=%s",
+                            "deferred-shutdown-refusal",
+                            owner_id,
+                            type(reader_exc).__name__,
+                        )
+                        self._show_engine_down_banner(
+                            "HOLD: engine process ended but its readiness/stderr readers remain unsettled. "
+                            "Restart and launcher exit are blocked."
+                        )
+
+                    LauncherWindow._begin_deferred_engine_reader_settlement(
+                        self,
+                        phase="deferred-shutdown-refusal",
+                        owner_id=owner_id,
+                        on_settled=_on_readers_settled,
+                        on_failed=_on_reader_failure,
+                    )
             return
         observed_owner_id = (
             getattr(self, "_replay_session_id", None)
@@ -7365,6 +7680,12 @@ class LauncherWindow(QMainWindow):
                 returncode=returncode,
                 phase="config-error",
             ):
+                # A finished worker whose parsed identity now solely owns the
+                # open late reconciliation retires here; the exact transport
+                # identity stays published and is what keeps polling
+                # progress-capable. Immutable or running evidence never
+                # transfers.
+                LauncherWindow._transfer_finished_shutdown_worker_to_transport_identity(self)
                 if LauncherWindow._refused_settlement_reaches_stable_hold(self):
                     self._restart_giving_up = True
                 return
@@ -7395,6 +7716,10 @@ class LauncherWindow(QMainWindow):
             returncode=returncode,
             phase="retryable-exit",
         ):
+            # Same transfer as the config-error refusal above: a finished worker
+            # whose parsed identity solely owns open late reconciliation retires;
+            # the exact transport identity stays published for a later pass.
+            LauncherWindow._transfer_finished_shutdown_worker_to_transport_identity(self)
             if LauncherWindow._refused_settlement_reaches_stable_hold(self):
                 self._restart_giving_up = True
             return

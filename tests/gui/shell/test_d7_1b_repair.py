@@ -2899,7 +2899,22 @@ def test_deferred_refusal_settles_crashed_child_readers_before_the_immutable_lat
     ):
         LauncherWindow._check_engine_health(host)
 
-        assert host._restart_giving_up is True, "the immutable result must latch on its first refused pass"
+        # The refusal now DEFERS the reader settlement: the handler returns
+        # with the flight owning the terminal readers and the latch still
+        # clear. The banner is already up; the close and the latch land from
+        # the flight -- the close inside its worker, the latch from its
+        # settled callback.
+        state = getattr(host, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "the deferred machine owns this settlement"
+        assert host._restart_giving_up is False, "no latch lands on the health-tick call stack"
+        assert calls.count("banner") == 1, "the refusal HOLD is already operator-visible"
+        assert host._engine_shutdown_worker is worker
+        assert host._engine_proc is not None
+
+        cursor = [0]
+        _drive_reader_settlement_to_completion(single_shot, cursor, _SupervisionClock(), host)
+
+        assert host._restart_giving_up is True, "the immutable result must latch once the flight reports"
         assert calls.count("close_stream") == 1, "the crashed child's readers settle before that latch"
         assert calls.index("banner") < calls.index("close_stream")
         assert host._engine_shutdown_worker is worker
@@ -2913,7 +2928,7 @@ def test_deferred_refusal_settles_crashed_child_readers_before_the_immutable_lat
     assert len(deferred_exit_errors) == 1, f"the latched HOLD must not re-enter the handler: {deferred_exit_errors}"
     assert calls.count("close_stream") == 1, "a second tick must find nothing left to strand or repeat"
     assert calls.count("banner") == 1, "and must not refresh the HOLD banner"
-    single_shot.assert_not_called()
+    assert single_shot.call_count == 1, "only the settlement delivery tick was scheduled -- no replacement, no retry"
     assert host._restart_giving_up is True
     assert host._engine_shutdown_worker is worker, "the rejected worker stays retained and visibly down"
     assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
@@ -2955,9 +2970,18 @@ def test_drained_verified_receipt_with_nonzero_exit_latches_the_terminal_hold_on
     ):
         LauncherWindow._check_engine_health(host)
 
-        assert host._restart_giving_up is True, "receipt plus nonzero exit is a terminal settlement refusal"
+        # The refusal now DEFERS the reader settlement off the health-tick
+        # stack; the latch lands only from the flight's settled callback.
+        state = getattr(host, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "the deferred machine owns this settlement"
+        assert host._restart_giving_up is False, "no latch lands on the health-tick call stack"
         assert host._engine_shutdown_receipt == receipt, "the verified receipt stays published"
         assert host._engine_shutdown_worker is None, "the drained worker slot stays empty"
+
+        cursor = [0]
+        _drive_reader_settlement_to_completion(single_shot, cursor, _SupervisionClock(), host)
+
+        assert host._restart_giving_up is True, "receipt plus nonzero exit is a terminal settlement refusal"
         assert calls.count("close_stream") == 1, "reader cleanup precedes the latch"
         assert calls.index("banner") < calls.index("close_stream")
 
@@ -2975,7 +2999,7 @@ def test_drained_verified_receipt_with_nonzero_exit_latches_the_terminal_hold_on
     assert host._engine_instance_id == "a" * 32, "identity stays published so the spawn preflight keeps refusing"
     assert host._engine_shutdown_capability == "b" * 64
     assert host._engine_proc is not None, "the terminal handle stays available for exact re-settlement"
-    single_shot.assert_not_called()
+    assert single_shot.call_count == 1, "only the settlement delivery tick was scheduled -- no replacement, no retry"
     host._bridge.reconcile_late_result.assert_not_called()
 
 
@@ -3938,10 +3962,19 @@ def test_health_tick_routes_a_post_receipt_exit_through_the_stop_path(
     ):
         LauncherWindow._check_engine_health(host)
 
+        # The refusal now DEFERS the reader settlement off the health-tick
+        # stack; the latch lands only from the flight's settled callback.
+        state = getattr(host, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "the deferred machine owns this settlement"
+        assert host._restart_giving_up is False, "no latch lands on the health-tick call stack"
+        assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
+
+        cursor = [0]
+        _drive_reader_settlement_to_completion(single_shot, cursor, _SupervisionClock(), host)
+
         assert host._restart_giving_up is True, "the immutable receipt/exit pair must reach a stable terminal refusal"
         assert latch_at_cleanup == [False], "reader cleanup ran before the terminal latch"
         assert calls.count("close_stream") == 1
-        assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
 
         LauncherWindow._check_engine_health(host)
 
@@ -3958,7 +3991,9 @@ def test_health_tick_routes_a_post_receipt_exit_through_the_stop_path(
     assert host._engine_instance_id == "a" * 32, "identity stays published so the spawn preflight keeps refusing"
     assert host._engine_shutdown_capability == "b" * 64
     assert "invalidate" not in calls, "producer authority is untouched while settlement pends"
-    assert single_shot.call_count == 0, "the owner-bound stop path schedules no replacement"
+    assert single_shot.call_count == 1, (
+        "only the settlement delivery tick was scheduled -- the stop path schedules no replacement"
+    )
     assert host._restart_attempts == 0
     host._bridge.reconcile_late_result.assert_not_called()
 
@@ -3979,12 +4014,17 @@ def test_health_tick_validates_a_finished_worker_receipt_before_retirement() -> 
     with patch("cryodaq.launcher.QTimer.singleShot") as single_shot:
         LauncherWindow._handle_engine_exit(launcher)
 
+        # The refusal defers the reader settlement; drive its delivery tick.
+        state = getattr(launcher, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "the deferred machine owns this settlement"
+        _drive_reader_settlement_to_completion(single_shot, [0], _SupervisionClock(), launcher)
+
     assert launcher._engine_shutdown_receipt == _exact_shutdown_receipt("c" * 32)
     assert launcher._engine_shutdown_worker is None
     assert launcher._engine_proc is not None, "nonzero exit remains bound to its validated receipt"
     assert "invalidate" not in calls
     assert launcher._restart_attempts == 0
-    single_shot.assert_not_called()
+    assert single_shot.call_count == 1, "only the settlement delivery tick was scheduled -- no replacement, no retry"
     assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
 
 

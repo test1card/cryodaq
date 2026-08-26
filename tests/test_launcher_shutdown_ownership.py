@@ -2429,8 +2429,27 @@ def test_normal_quit_reader_settlement_failure_keeps_the_retry_ladder_alive(
     ):
         assert module.LauncherWindow._do_shutdown(host) is False
 
-        assert single_shot.call_count == 1, "failed reader settlement keeps the retry ladder alive"
-        assert host._shutdown_retry_pending is True
+        # The terminal decision now DEFERS the reader settlement: the failing
+        # close runs once inside the settlement worker, off the Qt stack, and
+        # its failure is delivered through the machine's own 200ms tick. Wait
+        # for the worker HERE -- on this test thread, never inside any Qt
+        # callback -- then drive exactly that delivery tick.
+        state = getattr(host, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "the failed settlement is owned by the deferred machine"
+        done = state.get("done")
+        assert isinstance(done, threading.Event) and done.wait(timeout=5.0), (
+            "the settlement worker never finished its injected failure"
+        )
+        settlement_ticks = [invocation for invocation in single_shot.call_args_list if invocation.args[0] == 200]
+        assert len(settlement_ticks) == 1, "exactly one deferred-settlement delivery tick is armed"
+        settlement_ticks[0].args[1]()
+        assert getattr(host, "_engine_reader_settlement_state", None) is None, "the flight reports exactly once"
+        assert host._close_engine_stderr_stream.call_count == 1, "the exact settlement ran once, in the worker"
+
+        assert host._shutdown_retry_pending is True, "failed reader settlement keeps the retry ladder alive"
+        assert any(invocation.args[0] != 200 for invocation in single_shot.call_args_list), (
+            "the retry callback itself stays armed beside the settlement tick"
+        )
         assert host._shutdown_phase is module._ShutdownPhase.RETRY_WAIT
         assert set(host._shutdown_last_errors) == {"engine"}
         assert host._shutdown_hold_audible is True
@@ -3047,3 +3066,242 @@ def test_published_receipt_survives_the_blind_stop_handoff_catch() -> None:
     assert host._engine_shutdown_wait_deadline is not None, "the bounded exit budget stays latched"
     bridge.send_command.assert_not_called()
     host._close_engine_stderr_stream.assert_not_called()
+
+
+def test_stale_terminal_quit_tick_over_an_inline_settled_child_stays_inert(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued reap tick must not re-settle a child another pass settled.
+
+    Production ordering: pass one arms the bounded reap machine over a live
+    refused child and queues its first 200ms tick; before that tick fires, a
+    later quit pass observes the same child terminal and takes over its
+    settlement through the deferred reader-settlement machine; only THEN does
+    the stale tick fire. Without the stale-tick ownership/identity gates in
+    ``_step_terminal_quit_reap`` (the analogs of
+    ``_step_unobservable_bounded_reap``'s runtime-epoch and exact-process
+    gates), the tick read the child's terminal poll as ITS OWN forced death:
+    it latched a false ``_engine_unsettled_incarnation``, started a second
+    reader settlement over already settled readers, released the retained
+    handle, and logged a terminal reaping that never happened.
+
+    Falsification: reverting the gate block at the top of
+    ``_step_terminal_quit_reap`` makes this exact drive latch
+    ``("a" * 32, 0)``, run a second close, release the handle early, and emit
+    the false "terminally reaped" line -- failing the incarnation,
+    exactly-once, handle, and log assertions below.
+    """
+
+    import cryodaq.launcher as module
+
+    process = _TerminalQuitChild(die_on="never")
+    host, _bridge = _refused_normal_quit_host(process)
+    clock = _QuitReapClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        # Pass one: live refused child -- the bound is armed over it and its
+        # first owned tick is queued. That tick is left UNFIRED here.
+        assert module.LauncherWindow._do_shutdown(host) is False
+        armed = getattr(host, "_terminal_quit_reap_state", None)
+        assert type(armed) is dict and armed["process"] is process and armed["stage"] == "terminate"
+        assert process.terminate_calls == 0 and process.kill_calls == 0, (
+            "the bound owns the escalation, not this Qt call stack"
+        )
+
+        # Before that tick fires, the child dies on its own and a real second
+        # quit pass observes it terminal: the observed-terminal branch hands
+        # the reader settlement to the deferred machine, whose completion
+        # latches the exactly-once marker.
+        process.exit_code = 0
+        host._shutdown_retry_pending = False
+        assert module.LauncherWindow._do_shutdown(host) is False
+        flight = getattr(host, "_engine_reader_settlement_state", None)
+        assert type(flight) is dict, "the second pass owns the settlement through the deferred machine"
+        done = flight.get("done")
+        assert isinstance(done, threading.Event) and done.wait(timeout=5.0), "the settlement worker never finished"
+
+        # Drive ONLY the second pass's delivery tick: the stale pass-one tick
+        # sits earlier in the queue, so select the ticks by index here.
+        queued = single_shot.call_args_list
+        reap_ticks = [index for index in range(len(queued)) if queued[index].args[0] == 200]
+        assert len(reap_ticks) >= 2, "both the stale tick and the delivery tick are queued"
+        queued[reap_ticks[1]].args[1]()
+        assert getattr(host, "_engine_reader_settlement_state", None) is None, "the flight reports exactly once"
+        assert host._shutdown_terminal_engine_readers_settled is True
+        assert host._close_engine_stderr_stream.call_count == 1, "the settlement ran exactly once"
+        assert getattr(host, "_engine_unsettled_incarnation", None) is None, (
+            "a naturally settled refusal never becomes a forced death"
+        )
+
+        # NOW the stale pass-one tick fires over the already settled child.
+        stale_invocation = queued[reap_ticks[0]]
+        clock.advance(stale_invocation.args[0] / 1000.0)
+        stale_invocation.args[1]()
+
+        assert getattr(host, "_terminal_quit_reap_state", None) is None, "the stale tick stands the machine down"
+        assert getattr(host, "_engine_unsettled_incarnation", None) is None, (
+            "the stale tick must not latch a forced death"
+        )
+        assert host._close_engine_stderr_stream.call_count == 1, "no second settlement may start"
+        assert getattr(host, "_engine_reader_settlement_state", None) is None, "and no new settlement flight either"
+        assert process.terminate_calls == 0 and process.kill_calls == 0, (
+            "no escalation may run over an already settled child"
+        )
+        assert host._engine_proc is process, "the retained handle stays exactly as the terminal decision left it"
+        assert host._shutdown_terminal_engine_readers_settled is True, "the exactly-once marker survives the tick"
+        assert process.wait_frames == [], "nothing ever blocked anywhere on the way to inertness"
+
+        # Suppression still commits exactly once: a third pass re-reads only
+        # the marker and arms nothing.
+        shots_before_third_pass = single_shot.call_count
+        host._shutdown_retry_pending = False
+        assert module.LauncherWindow._do_shutdown(host) is False
+        assert single_shot.call_count == shots_before_third_pass, "no pass arms anything over the settled HOLD"
+        assert host._shutdown_terminal_engine_readers_settled is True
+        assert host._shutdown_retry_pending is False, "the reader-settled HOLD suppresses further retries"
+
+    reaping_failures = [
+        record for record in caplog.records if "reaping failed during the terminal quit" in record.getMessage()
+    ]
+    assert reaping_failures == [], "an inert stale tick emits no reaping failure"
+    false_reapings = [
+        record
+        for record in caplog.records
+        if "was terminally reaped during the normal-quit decision" in record.getMessage()
+    ]
+    assert false_reapings == [], "and claims no terminal reaping of a child this machine never reaped"
+
+
+def test_deferred_refusal_reader_settlement_never_blocks_the_engine_exit_callback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The exit-handler refusal sibling must defer reader settlement off-stack.
+
+    ``_handle_engine_exit``'s deferred-refusal sibling used to call
+    ``_settle_crashed_engine_readers_or_hold`` synchronously on the Qt
+    health-tick callback stack: ``_close_engine_stderr_stream`` joins up to
+    three reader threads (two seconds each) and then flushes/closes the
+    stderr handler, holding the callback for seconds during exactly the
+    window where the HOLD banner and alarm must stay responsive. Driving the
+    REAL handler over a terminal refused child whose settlement BLOCKS until
+    released must show: the handler returns with the settlement owned by the
+    deferred machine (never run on this stack), an unrelated due callback
+    executes while the gated close is still unfinished, the actual close runs
+    on a NON-main thread exactly once, and the giving-up latch lands only
+    from the flight's settled callback -- same owner, same phase, no restart,
+    no clean-exit claim.
+
+    Falsification: reverting the sibling to the synchronous
+    ``_settle_crashed_engine_readers_or_hold`` call runs the gated close on
+    the main thread inside the handler itself -- the handler blocks until the
+    gate timeout, records the main thread name, and fails both the
+    responsiveness sentinel and the thread-name assertion.
+    """
+
+    from cryodaq.launcher import LauncherWindow
+
+    process = _NonzeroExitProcess(1)
+    bridge = MagicMock()
+    host = SimpleNamespace(
+        _engine_proc=process,
+        _engine_external=False,
+        _replay_source=None,
+        _engine_instance_id="a" * 32,
+        _engine_shutdown_capability="b" * 64,
+        _engine_shutdown_request_id="c" * 32,
+        _engine_shutdown_transport_identity=None,
+        _engine_shutdown_receipt=_shutdown_receipt("c" * 32),
+        _engine_shutdown_worker=None,
+        _engine_unsettled_incarnation=None,
+        _restart_pending=False,
+        _shutdown_requested=False,
+        _bridge=bridge,
+    )
+
+    settlement_started = threading.Event()
+    settlement_gate = threading.Event()
+    settlement_threads: list[str] = []
+    order: list[str] = []
+    main_thread_name = threading.current_thread().name
+
+    def gated_close() -> None:
+        settlement_threads.append(threading.current_thread().name)
+        order.append("readers_close_started")
+        settlement_started.set()
+        assert settlement_gate.wait(timeout=10.0), "reader settlement worker stalled"
+        order.append("readers_close_finished")
+
+    host._close_engine_stderr_stream = gated_close
+    host._show_engine_down_banner = MagicMock()
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+
+    sentinel_calls: list[str] = []
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(host)
+
+        # Observe the side effect, not an exit code: the handler returned
+        # WITHOUT settling the readers on its own callback stack.
+        state = getattr(host, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "settlement is owned by the deferred machine, not this call stack"
+        assert settlement_started.wait(timeout=5.0), "the deferred worker never started its close"
+        assert order == ["readers_close_started"], "the close started but has not been waited on here"
+        assert host._engine_proc is process, "nothing releases while readers are unsettled"
+        assert getattr(host, "_restart_giving_up", None) is not True, "no latch lands on the callback stack"
+        assert host._show_engine_down_banner.call_count == 1
+        assert host._show_engine_down_banner.call_args[0][0].startswith("HOLD:"), (
+            "the refusal HOLD stays operator-visible beside the deferral"
+        )
+        assert host._engine_shutdown_receipt == _shutdown_receipt("c" * 32), "refused evidence stays retained"
+        assert getattr(host, "_engine_unsettled_incarnation", None) is None, "no forced death was invented here"
+
+        # Event-loop responsiveness DURING settlement: another due callback on
+        # the same loop executes now, not behind any join or flush. The
+        # appended sentinel lands strictly behind the settlement machine's own
+        # tick, so reaching it at all proves the loop kept serving other due
+        # work while the gated close was still blocked.
+        single_shot.call_args_list.append(call(200, lambda: sentinel_calls.append("sentinel")))
+        cursor = [0]
+        clock = _QuitReapClock()
+        served_turns = 0
+        while not sentinel_calls and served_turns < 25:
+            assert _drive_next_reap_tick(single_shot, cursor, clock), (
+                "the event loop stayed responsive: a due callback was available"
+            )
+            served_turns += 1
+        assert sentinel_calls == ["sentinel"], "an unrelated due callback ran while settlement was unfinished"
+        assert served_turns >= 2, (
+            "the settlement's own tick ran before the sentinel: two genuine event-loop turns interleaved"
+        )
+        assert type(getattr(host, "_engine_reader_settlement_state", None)) is dict, (
+            "the sentinel executed while the deferred settlement was still in flight"
+        )
+        assert order == ["readers_close_started"], "the gated close stayed blocked across every interleaved turn"
+        assert host._engine_proc is process, "still nothing released while readers are unsettled"
+
+        settlement_gate.set()
+        _drive_reader_settlement_to_completion(single_shot, cursor, clock, host)
+
+        assert order == ["readers_close_started", "readers_close_finished"]
+        assert len(settlement_threads) == 1, "the exact settlement ran exactly once"
+        assert host._restart_giving_up is True, "the giving-up latch lands from the settled callback only"
+        assert getattr(host, "_engine_unsettled_incarnation", None) is None, (
+            "a delivered settlement never latches a forced death"
+        )
+        assert host._engine_proc is process, "this refusal path retains the handle exactly as before"
+        assert host._show_engine_down_banner.call_count == 1, "the HOLD stays single and honest"
+        assert getattr(host, "_engine_reader_settlement_state", None) is None
+
+    assert all(name != main_thread_name for name in settlement_threads), (
+        "the joins/close/flush of reader settlement must run off the Qt callback thread"
+    )
+    critical_lines = [record for record in caplog.records if record.levelname == "CRITICAL"]
+    assert critical_lines == [], "a delivered settlement emits no failure diagnosis"
