@@ -19,6 +19,12 @@ from pathlib import Path
 
 import pytest
 
+# The retention bound comes from the AUTHORITATIVE rotating-log contract in
+# cryodaq.logging_setup -- the module whose TimedRotatingFileHandler produces
+# these rotations -- not from the runner's re-export of it, so this guard
+# cannot stay green while production retention and the refusal boundary drift
+# apart (PR #102 cold review F1).
+from cryodaq.logging_setup import ASSISTANT_LOG_BACKUP_COUNT
 from scripts import soak_mock_stack_runner as runner
 
 
@@ -641,7 +647,7 @@ def test_too_many_rotated_logs_refuse_the_child_writable_directory(state_root: P
     """More rotations than the configured handler retains are not safe to enumerate."""
 
     logs = state_root / "logs"
-    for day in range(1, runner._ASSISTANT_LOG_BACKUP_COUNT + 2):
+    for day in range(1, ASSISTANT_LOG_BACKUP_COUNT + 2):
         (logs / f"assistant.log.2026-08-{day:02d}").write_bytes(b"MUST NOT PUBLISH\n")
     (logs / "assistant.log").write_bytes(b"ACTIVE MUST NOT PUBLISH\n")
     evidence = _Evidence()

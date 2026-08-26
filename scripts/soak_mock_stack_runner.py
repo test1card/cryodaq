@@ -33,6 +33,15 @@ from typing import Any, Final, Protocol
 
 import yaml
 
+# The authoritative retention/naming contract for the rotating logs this
+# publisher reads at teardown. Consumed, never restated: see the constants at
+# the top of cryodaq.logging_setup and their cross-binding guard.
+from cryodaq.logging_setup import (
+    ASSISTANT_LOG_BACKUP_COUNT,
+    ASSISTANT_LOG_BASENAME,
+    rotated_log_name_pattern,
+)
+
 _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 _TEST_FILE: Final = "tests/integration/test_periodic_png_multiprocess.py"
 _EXACT_NODE_IDS: Final = (
@@ -133,8 +142,16 @@ _SHORT_SOAK_THIRD_REPORT_FLOOR_S: Final = 1050
 _MAX_RECEIPT_LEDGER_BYTES: Final = 8 * 1024 * 1024
 _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 _MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
-_ASSISTANT_LOG_BACKUP_COUNT: Final = 14
-_ASSISTANT_LOG_ROTATION_RE: Final = re.compile(r"assistant\.log\.\d{4}-\d{2}-\d{2}\Z")
+# Retention and naming are NOT restated here. These names re-export the one
+# authoritative contract from cryodaq.logging_setup -- the module whose
+# TimedRotatingFileHandler PRODUCES the assistant log and its dated rotations.
+# A copied-by-value count once drifted from that handler: teardown refused the
+# days it validly retained, replaced the diagnosis with a false rotation-
+# ceiling marker, and lost the artifact this publisher exists to preserve
+# (PR #102 cold review F1).
+_ASSISTANT_LOG_BACKUP_COUNT: Final = ASSISTANT_LOG_BACKUP_COUNT
+_ASSISTANT_LOG_ACTIVE_NAME: Final[str] = ASSISTANT_LOG_BASENAME
+_ASSISTANT_LOG_ROTATION_RE: Final = rotated_log_name_pattern(ASSISTANT_LOG_BASENAME)
 # The logs directory is writable by the measured process, so enumeration cost is
 # bounded by TOTAL entries: the fixed ceiling leaves headroom for normal component
 # rotations while keeping a hostile directory's enumeration finite.
@@ -1228,14 +1245,16 @@ def _assistant_log_files(
 ) -> tuple[int | None, list[Path | str]] | _AssistantLogDirectoryRefusal:
     """The active log and every rotated backup, oldest first.
 
-    `setup_logging` rotates the assistant log daily and keeps up to fourteen dated
-    backups. On a multi-day run the decisive line is often written on the day it happened
-    and never repeats, so reading only the active file retains the last day and deletes
-    the cause -- the exact evidence loss this publisher exists to stop.
+    `setup_logging` rotates the assistant log daily and keeps up to
+    ``ASSISTANT_LOG_BACKUP_COUNT`` dated backups -- the authoritative contract
+    imported from ``cryodaq.logging_setup``, not a local copy of it. On a
+    multi-day run the decisive line is often written on the day it happened
+    and never repeats, so reading only the active file retains the last day and
+    deletes the cause -- the exact evidence loss this publisher exists to stop.
     """
 
     directory = Path(state_root) / "logs"
-    active = "assistant.log"
+    active = _ASSISTANT_LOG_ACTIVE_NAME
     try:
         directory_info = os.lstat(directory)
         if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
