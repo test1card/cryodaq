@@ -592,8 +592,28 @@ def test_a_record_longer_than_the_budget_is_discarded_whole_and_said(
 
     published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
     assert "xxxx" not in published, "an unalignable record must not ship half-cut"
-    assert "no line break" in published
+    assert "no complete following record" in published
     assert published != runner._ASSISTANT_LOG_ABSENT_MARKER, "the log existed; absent would be a lie"
+
+
+def test_an_oversized_newline_terminated_record_is_not_absent_at_the_production_bound(
+    state_root: Path,
+) -> None:
+    """A final newline is not evidence that a complete retained record exists after it."""
+
+    bound = runner._MAX_LAUNCHER_LOG_BYTES
+    record_prefix = b"OVERSIZED-RECORD-MUST-NOT-PUBLISH:"
+    source = state_root / "logs" / "assistant.log"
+    source.write_bytes(record_prefix + b"x" * (bound - len(record_prefix)) + b"\n")
+    assert source.stat().st_size == bound + 1
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert published == runner._ASSISTANT_LOG_RECORD_SPANS_BOUNDARY_MARKER
+    assert record_prefix.decode("ascii") not in published
+    assert published != runner._ASSISTANT_LOG_ABSENT_MARKER
 
 
 def test_the_full_production_bound_also_aligns_before_redaction(state_root: Path) -> None:

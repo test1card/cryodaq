@@ -1030,7 +1030,7 @@ _ASSISTANT_LOG_OPENED_BUT_UNREADABLE_MARKER: Final = (
 )
 _ASSISTANT_LOG_RECORD_SPANS_BOUNDARY_MARKER: Final = (
     "<part of the assistant log was withheld: its retained tail began inside one record "
-    "with no line break anywhere inside the retained window, so publishing it could carry "
+    "and contained no complete following record, so publishing it could carry "
     "the undetectable half of a credential whose identifying prefix was already gone. That "
     "record was discarded whole rather than guessed at.>\n"
 )
@@ -1171,11 +1171,12 @@ def _read_regular_file_no_follow(
                 raw = raw[1:]
             else:
                 newline = raw.find(b"\n")
-                if newline < 0:
+                if newline < 0 or newline == len(raw) - 1:
                     # No record boundary exists inside the retained window. Any prefix of
                     # this record carries text whose identifying context -- possibly the
-                    # keyword of a credential -- was already cut off upstream, and no
-                    # detector can recognize the remainder. Discard the whole record.
+                    # keyword of a credential -- was already cut off upstream. A newline
+                    # at the final byte leaves no complete following record to retain.
+                    # Discard the whole record rather than reporting a successful empty read.
                     return _AssistantLogLeafRefusal.RECORD_SPANS_RETENTION_BOUNDARY
                 raw = raw[newline + 1 :]
         return raw, size
