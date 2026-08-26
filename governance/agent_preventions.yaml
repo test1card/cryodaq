@@ -580,9 +580,9 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
-    guard: tests/launcher/test_engine_stderr_is_kept.py::test_the_engine_end_replaces_a_token_through_its_real_logging_setup
+    guard: tests/launcher/test_engine_stderr_is_kept.py::test_the_pump_adds_and_removes_nothing_even_for_a_real_token_shape
     ci_partition: remaining
-    red_evidence: the_no_scrub_test_used_a_shape_production_never_matched_so_the_real_logging_setup_stayed_green_when_token_redaction_regressed_2026_08_20_pending_immutable_capture
+    red_evidence: the_pump_test_used_a_shape_production_never_matched_so_selective_token_redaction_in_the_pump_stayed_green_2026_08_20_pending_immutable_capture
     green_evidence: pending
   - id: LAUNCHER-SPAWN-COVERAGE-FALSE-GREEN-502
     status: open
@@ -607,6 +607,23 @@ false_green_pairs:
     guard: tests/launcher/test_engine_stderr_is_kept.py::test_a_bounded_final_stderr_fragment_is_forwarded_at_eof
     ci_partition: remaining
     red_evidence: over_long_line_tests_stayed_green_while_a_bounded_final_non_newline_diagnostic_was_discarded_at_eof_2026_08_20_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-STDERR-SPAWN-ENV-FALSE-GREEN-505
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-STDERR-CONTENT-001
+    guard: tests/launcher/test_engine_stderr_is_kept.py::test_the_spawn_hands_the_operating_system_the_environment_under_test
+    ci_partition: remaining
+    red_evidence: environment_builder_tests_stayed_green_while_the_engine_spawn_could_discard_the_explicit_utf8_environment_2026_08_20_pending_immutable_capture
+    green_evidence: pending
+  - id: LAUNCHER-ASSISTANT-GRANT-FALSE-GREEN-506
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
+    guard: tests/test_launcher_bridge_handshake.py::test_assistant_spawn_delegates_only_its_bounded_soak_artifact_grant
+    ci_partition: remaining
+    platform: posix
+    red_evidence: generic_spawn_stripping_tests_stayed_green_while_the_capability_bearing_assistant_path_could_receive_launcher_owned_descriptor_authority_2026_08_20_pending_immutable_capture
     green_evidence: pending
   - id: LAUNCHER-STDOUT-INHERIT-FALSE-GREEN-002
     status: open
@@ -4262,6 +4279,10 @@ records:
     guards:
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_line_the_engine_wrote_is_what_is_logged
         ci_partition: remaining
+      - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_pump_adds_and_removes_nothing_even_for_a_real_token_shape
+        ci_partition: remaining
+      - node: tests/launcher/test_engine_stderr_is_kept.py::test_the_spawn_hands_the_operating_system_the_environment_under_test
+        ci_partition: remaining
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_a_russian_diagnostic_survives_the_real_subprocess_boundary
         ci_partition: remaining
       - node: tests/launcher/test_engine_stderr_is_kept.py::test_an_undecodable_byte_does_not_kill_the_pump
@@ -5729,6 +5750,9 @@ records:
     guards:
       - node: tests/test_launcher_bridge_handshake.py::test_every_production_spawn_strips_the_launcher_only_authority
         ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_assistant_spawn_delegates_only_its_bounded_soak_artifact_grant
+        ci_partition: remaining
+        platform: posix
       - node: tests/launcher/test_launcher_descriptor_poison_guards.py::test_poisoned_soak_handshake_cannot_emit_to_reused_descriptor
         ci_partition: remaining
       - node: tests/launcher/test_launcher_descriptor_poison_guards.py::test_poisoned_soak_capability_cannot_duplicate_reused_descriptor
