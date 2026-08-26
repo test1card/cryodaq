@@ -3450,7 +3450,23 @@ false_green_pairs:
     guard: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter
     ci_partition: agents
     red_evidence: exact_bad_candidate_4b4b3df2419083d80bd66083eebc38a1c53dc57b_tree_b471f74105578dfa66295cb854fc30e6a7f7435d_guard_passed_only_because_ad_hoc__Reply_violated_the_production__BarrierAuthority_to_BarrierQueryResult_contract_while_real_PeriodicEngineQuery_barrier_normalized_an_arbitrary_wire_code_to_response_invalid_so_the_guard_could_not_falsify_production
-    green_evidence: pending_corrected_exact_candidate_and_hosted_agents_partition
+    green_evidence: pending_corrected_worktree_blobs_69356c53e2b5f48bd04052031e884813a702e383_and_de1fd1a7a20788256dcc88aeb956849f601189fc_and_hosted_agents_partition
+  - id: ASSISTANT-LOG-TERMINAL-DELIMITER-COVERAGE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-LOG-FALSE-ABSENT-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_oversized_newline_terminated_record_is_not_absent_at_the_production_bound
+    ci_partition: remaining
+    red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_prior_no_newline_and_full_bound_tests_omitted_a_maximum_plus_one_single_record_whose_only_delimiter_was_the_final_byte_so_the_production_publisher_returned_the_false_absent_marker
+    green_evidence: pending_corrected_worktree_blobs_fbff3be3a3c680e627275685188668a3e97048eb_and_ae09a4201eb2d6c6c0579e5b93bf8b7555c6aebb_and_hosted_remaining_partition
+  - id: PERIODIC-LIVE-HELD-CALLBACK-CATEGORY-FALSE-GREEN-003
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-LIVE-HELD-CALLBACK-CATEGORY-002
+    guard: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_a_held_frame_callback_failure_keeps_its_category_through_ready
+    ci_partition: agents
+    red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_prior_receive_loop_callback_tests_never_flushed_a_held_provisional_frame_through_ready_so_the_production_path_reduced__FrameRejected_to_its_class_name_and_blamed_the_barrier
+    green_evidence: pending_corrected_worktree_blobs_69356c53e2b5f48bd04052031e884813a702e383_and_de1fd1a7a20788256dcc88aeb956849f601189fc_and_hosted_agents_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6794,3 +6810,43 @@ records:
     automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
     red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
     green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: ASSISTANT-LOG-FALSE-ABSENT-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Safe bounded publication of every existing assistant log leaf through scripts/soak_mock_stack_runner.py into a retained week-run evidence bundle.
+    classification: evidence_false_absence
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A nonempty assistant log can be discarded after safe record alignment and then published as absent, erasing the diagnostic artifact and falsely claiming that the assistant never started or never opened its log.
+    invariant: An existing nonempty regular assistant-log leaf that leaves no complete record after the bounded no-follow tail is aligned emits a bounded truthful refusal marker. It never becomes the absent marker and never publishes a partial record whose identifying prefix was cut away.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_oversized_newline_terminated_record_is_not_absent_at_the_production_bound
+        ci_partition: remaining
+    automation_limit: The exact production-bound guard passes locally, but the default hosted remaining partition has not yet sealed the corrected candidate.
+    red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_production_probe_wrote_8388609_bytes_as_one_newline_terminated_record_and_published_the_absent_marker_with_source_size_nonzero
+    green_evidence: pending_corrected_worktree_blobs_fbff3be3a3c680e627275685188668a3e97048eb_and_ae09a4201eb2d6c6c0579e5b93bf8b7555c6aebb_and_hosted_remaining_partition
+  - id: PERIODIC-LIVE-HELD-CALLBACK-CATEGORY-002
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Every provisional periodic-live frame callback that SequencedPeriodicLiveSources.ready flushes after a typed barrier result.
+    classification: diagnostic_category_loss
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A callback failure while ready flushes held frames can lose its finite local category, appear only as the private class name _FrameRejected, and falsely report that the barrier failed instead of naming the callback failure that invalidated the live source.
+    invariant: A held-frame callback rejection preserves its finite _FrameRejected.category through ready, invalidation state, watcher exception, rate-limiter key, and log text. The private class name, raw callback detail, and a false barrier-failure attribution never reach those surfaces.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_a_held_frame_callback_failure_keeps_its_category_through_ready
+        ci_partition: agents
+    automation_limit: The production-state-machine guard passes locally, but the default hosted agents partition has not yet sealed the corrected candidate.
+    red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_red_before_guard_drove_a_held_frame_callback_failure_through_ready_and_observed_the_barrier_failed_with__FrameRejected_in_exception_state_limiter_and_log
+    green_evidence: pending_corrected_worktree_blobs_69356c53e2b5f48bd04052031e884813a702e383_and_de1fd1a7a20788256dcc88aeb956849f601189fc_and_hosted_agents_partition
