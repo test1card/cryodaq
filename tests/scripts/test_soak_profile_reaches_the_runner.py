@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -138,28 +139,101 @@ def test_a_long_profile_is_refused_by_the_runner_for_the_contract_reason(monkeyp
 
 
 def test_the_short_profile_passes_the_selection_boundary(monkeypatch) -> None:
-    """The refusals must not swallow the profile that IS allowed.
+    """The short profile must pass both refusals AND reach the evidence contract.
 
-    A file that only proves refusals would pass with a runner that refuses everything. The
-    short profile therefore has to get PAST this boundary; it fails later, on the evidence
-    object this test deliberately does not build.
+    WHAT THE BOUNDARY IS. Past the two refusals, `_run_owned` inspects the host
+    before it first touches `evidence`: it enumerates the process tree through a
+    psutil build locked to one exact version, captures the running interpreter
+    into a sealed `.venv/bin/python` snapshot, materializes the passive fixture
+    through a validation child, and seals that fixture with POSIX-only owner and
+    mode checks. None of those steps is the selection check, and which one
+    speaks first depends on the host.
+
+    WHY THE PREVIOUS VERSION PROVED NOTHING ON WINDOWS. It handed `object()` to
+    `_run_owned` and accepted any `_RunnerFoundationError` whose message was
+    neither refusal. On Windows the locked observer's `create_time(monotonic=..)`
+    call is unsupported -- TypeError wrapped into "process start identity is
+    unavailable" -- so a host condition fired BEFORE the evidence boundary and
+    the test passed without ever observing the side effect it names. On Ubuntu
+    the same flow ran one step further and died on `AttributeError` because
+    `object()` has no `write_manifest`. One dummy, two platforms, two accidents.
+
+    WHAT IS DOUBLED, WHAT STAYS REAL. The four host-inspecting producers between
+    the refusals and `write_manifest` are replaced with inert stand-ins so the
+    flow reaches the evidence boundary on every platform. Deliberately real:
+    both profile refusals, `_CleanShaCollector`'s Git-worktree check, the
+    short-soak schedule alignment, and the actual `git rev-parse HEAD`. The
+    evidence double records the manifest payload and raises a dedicated
+    sentinel, so the only way this test passes is production crossing the whole
+    boundary with the selected profile.
     """
 
-    instance = _runner_at_the_selection_boundary(monkeypatch)
+    from contextlib import contextmanager
 
-    # WHICH later failure arrives depends on the machine, so it must not be pinned. On this
-    # host the next check to speak is the process start identity; on the hosted runner the
-    # exported candidate tree is not a Git worktree and that check speaks first. Pinning the
-    # first message I happened to see turned a green test here into a red one there.
-    #
-    # What this test is FOR is that the short profile passes the two refusals, so it names
-    # the exception CLASS -- specific, as the registered guard requires -- and then asserts
-    # the message is neither refusal.
-    with pytest.raises(runner._RunnerFoundationError) as caught:
-        instance._run_owned(object(), soak.profile("short"))
-    message = str(caught.value)
-    assert "not one of the reviewed profiles" not in message, message
-    assert "never seal" not in message, message
+    class _ManifestBoundaryReached(Exception):
+        """Raised by the evidence double exactly at `evidence.write_manifest`."""
+
+    manifests: list[dict] = []
+
+    class _RecordingEvidence:
+        def write_manifest(self, payload: dict) -> None:
+            manifests.append(payload)
+            raise _ManifestBoundaryReached("short profile reached the evidence contract")
+
+    class _OwnerlessProcessObserver:
+        """Stands in for `_LockedPsutilObserver`: host inspection, not selection."""
+
+        def __init__(self, psutil_module: object) -> None:
+            self._psutil_module = psutil_module
+
+        def identity_for_pid(self, pid: int) -> tuple[str, int]:
+            return ("test-owner", pid)
+
+        def descendants(self, owner: tuple[str, int], *, include_zombies: bool = False) -> tuple:
+            return ()
+
+    snapshot_shas: list[str] = []
+
+    @contextmanager
+    def _still_snapshot(git_sha: str):
+        snapshot_shas.append(git_sha)
+        yield object()
+
+    sealed_fixture_payload = {"schema": "cryodaq-soak-source-fixture/v1", "fixture": "test-double"}
+
+    class _StillSealedFixture:
+        payload = sealed_fixture_payload
+
+    def _still_materialized(config_dir: Path, *, report_interval_s: int, source_snapshot: object) -> int:
+        assert type(report_interval_s) is int and report_interval_s > 0
+        return 1
+
+    def _still_sealed(config_dir: Path, *, expected_readings_per_sample: int) -> _StillSealedFixture:
+        assert type(expected_readings_per_sample) is int and expected_readings_per_sample > 0
+        return _StillSealedFixture()
+
+    monkeypatch.setattr(runner, "_LockedPsutilObserver", _OwnerlessProcessObserver)
+    monkeypatch.setattr(runner, "_sealed_execution_snapshot", _still_snapshot)
+    monkeypatch.setattr(runner, "_materialize_complete_soak_config", _still_materialized)
+    monkeypatch.setattr(runner, "_source_fixture_seal", _still_sealed)
+
+    instance = _runner_at_the_selection_boundary(monkeypatch)
+    selected = soak.profile("short")
+
+    # The sentinel class IS the assertion that neither refusal fired: both
+    # refusals raise `_RunnerFoundationError`, which is not this sentinel.
+    with pytest.raises(_ManifestBoundaryReached):
+        instance._run_owned(_RecordingEvidence(), selected)
+
+    assert len(manifests) == 1, "the boundary must publish exactly one manifest"
+    manifest = manifests[0]
+    assert manifest["profile"] == "short"
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["git_sha"]) is not None, manifest["git_sha"]
+    assert snapshot_shas == [manifest["git_sha"]], "the sealed snapshot and manifest must name one commit"
+    assert manifest["thresholds"] == soak.effective_thresholds(soak.profile("short"))
+    assert manifest["periodic_schedule"]["expected_receipts"] == 2
+    assert manifest["source_fixture"] == sealed_fixture_payload
+    assert manifest["dirty"] is False
 
 
 @_POSIX_EVIDENCE
