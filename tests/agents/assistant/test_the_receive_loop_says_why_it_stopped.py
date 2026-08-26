@@ -249,6 +249,43 @@ def test_a_named_barrier_failure_survives_to_the_watcher() -> None:
     asyncio.run(_drive())
 
 
+def test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The protocol seam must close an arbitrary provider value before recording it."""
+
+    untrusted = "operator-token-and-address-" + "x" * 4096
+
+    class _Reply:
+        ok = False
+        error_code = untrusted
+
+    class _Query:
+        async def barrier(self, _nonce: str) -> object:
+            return _Reply()
+
+    async def _drive() -> None:
+        source = _SOURCE(_Query())
+        source._running = True
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+
+        periodic_runtime._last_discontinuity_log.clear()
+        with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+            with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+                await source.ready()
+
+        expected = "the engine barrier query returned an unsupported failure code"
+        assert raised.value.reason == expected
+        assert source._invalidation_reason == expected
+        assert set(periodic_runtime._last_discontinuity_log) == {expected}
+        assert untrusted not in "\n".join(record.getMessage() for record in caplog.records)
+        await source.stop()
+
+    asyncio.run(_drive())
+
+
 def test_an_invalid_transport_sequence_reaches_the_loop_reason(caplog: pytest.LogCaptureFixture) -> None:
     """A real reading frame must recategorize its helper validator failure."""
 

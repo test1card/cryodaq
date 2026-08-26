@@ -770,7 +770,8 @@ class SequencedPeriodicLiveSources:
         )
         if not isinstance(data, dict):
             raise _FrameRejected(
-                "a reading had an unexpected shape", "invalid reading shape: the reading is not a mapping"
+                "a reading payload was not a mapping",
+                "invalid reading shape: the reading is not a mapping",
             )
         keys = set(data)
         missing = sorted(_READING_REQUIRED_KEYS - keys)
@@ -780,7 +781,7 @@ class SequencedPeriodicLiveSources:
             # unexpected key is reported by COUNT rather than by name, because an unknown
             # name is not a fixed vocabulary and could carry content from the wire.
             raise _FrameRejected(
-                "a reading had an unexpected shape",
+                "a reading was missing required fields or carried unknown fields",
                 f"invalid reading shape: missing={missing} unexpected_key_count={len(unexpected)}",
             )
         transport = cls._transport(data["transport"])
@@ -924,7 +925,7 @@ class SequencedPeriodicLiveSources:
 
     async def _handle_frame(self, parts: list[bytes]) -> None:
         if not parts:
-            raise _FrameRejected("the multipart frame was not two parts on a known topic", "invalid multipart frame")
+            raise _FrameRejected("the multipart frame was empty", "invalid multipart frame")
         if parts[0] not in _PARTICIPATING_TOPICS:
             # NOT OURS, AND NOT A VIOLATION. A SUBSCRIBE is a byte PREFIX, so subscribing
             # to b"readings" also delivers anything the publisher later names
@@ -939,7 +940,7 @@ class SequencedPeriodicLiveSources:
         # handling above would then have protected only foreign topics that happened to
         # share our envelope shape, which is no protection at all.
         if len(parts) != 2:
-            raise _FrameRejected("the multipart frame was not two parts on a known topic", "invalid multipart frame")
+            raise _FrameRejected("a known topic's multipart frame was not exactly two parts", "invalid multipart frame")
         async with self._state_lock:
             if self._invalid or not self._running:
                 raise PeriodicLiveDiscontinuity("a frame arrived after the source stopped")
@@ -1143,15 +1144,23 @@ class SequencedPeriodicLiveSources:
                             raise PeriodicLiveDiscontinuity("the source stopped while waiting to connect")
                         query_result = await self._query.barrier(nonce)
                         if not query_result.ok:
+                            error_code = query_result.error_code
                             if (
                                 attempt + 1 < _READY_MAX_ATTEMPTS
-                                and query_result.error_code == "transport_unavailable"
+                                and type(error_code) is str
+                                and error_code == "transport_unavailable"
                                 and await self._retire_startup_attempt(nonce, marker, require_no_evidence=True)
                             ):
                                 continue
-                            raise PeriodicLiveDiscontinuity(
-                                f"the engine barrier query failed with {query_result.error_code!r}"
-                            )
+                            if type(error_code) is not str:
+                                failure_reason = "the engine barrier query returned an unsupported failure code"
+                            elif error_code == "transport_unavailable":
+                                failure_reason = "the engine barrier transport was unavailable"
+                            elif error_code == "response_invalid":
+                                failure_reason = "the engine barrier response was invalid"
+                            else:
+                                failure_reason = "the engine barrier query returned an unsupported failure code"
+                            raise PeriodicLiveDiscontinuity(failure_reason)
                         if query_result.nonce != nonce or query_result.cut is None:
                             raise PeriodicLiveDiscontinuity(
                                 "the barrier answer named a different nonce or carried no cut"
