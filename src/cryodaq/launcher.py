@@ -3878,7 +3878,12 @@ class LauncherWindow(QMainWindow):
         receipt beside an UNOBSERVABLE child -- one whose ``poll()`` raises -- is equally
         immutable: polling cannot answer, so no later pass can read a different verdict,
         and the refusal must stop being re-polled so the terminal quit decision can bound
-        the exact retained child through its owned reap machine instead. An open
+        the exact retained child through its owned reap machine instead. The PLAIN
+        retained-handle shape -- no shutdown worker, no transport identity, no receipt --
+        beside an unobservable ``poll()`` is bound by the same verdict: the handle itself
+        is the whole evidence, and it can never answer, so treating that shape as
+        progress-capable let every quit retry repeat the same exception while the
+        possibly live engine received zero terminate or kill attempts. An open
         exit-wait budget, an unreconciled transport identity, or a VALIDATED receipt
         beside a clean exit (whose remaining failure is retryable reader cleanup)
         keeps its progress-capable polling loop.
@@ -3897,15 +3902,22 @@ class LauncherWindow(QMainWindow):
             )
         if getattr(self, "_engine_shutdown_transport_identity", None) is not None:
             return False
+        process = getattr(self, "_engine_proc", None)
+        try:
+            returncode = process.poll() if process is not None else None
+        except Exception:
+            # An unobservable child can never produce a different verdict by
+            # polling again, whatever transaction evidence does or does not sit
+            # beside the retained handle. Returning True here routes the plain
+            # retained-handle shape into _shutdown_incomplete's terminal
+            # decision, which bounds this exact handle through its owned
+            # non-blocking terminate/kill reap machine instead of retrying a
+            # stop pass that raises before reaching any escalation.
+            return True
         if getattr(self, "_engine_shutdown_receipt", None) is None:
             return False
-        process = getattr(self, "_engine_proc", None)
         if process is None:
             return False
-        try:
-            returncode = process.poll()
-        except Exception:
-            return True
         if type(returncode) is not int:
             return False
         if returncode != 0:
@@ -7515,6 +7527,61 @@ class LauncherWindow(QMainWindow):
                 deferred_owner_id if type(deferred_owner_id) is str else "<unknown>",
                 returncode,
             )
+            owner_id = deferred_owner_id if type(deferred_owner_id) is str else "<unknown>"
+
+            def _on_reader_failure(reader_exc: Exception) -> None:
+                self._engine_unsettled_incarnation = (owner_id, returncode)
+                self._restart_giving_up = True
+                logger.critical(
+                    "Engine reader settlement failed in HOLD; phase=%s owner=%s exception=%s",
+                    "deferred-shutdown-refusal",
+                    owner_id,
+                    type(reader_exc).__name__,
+                )
+                self._show_engine_down_banner(
+                    "HOLD: engine process ended but its readiness/stderr readers remain unsettled. "
+                    "Restart and launcher exit are blocked."
+                )
+
+            def _continue_deferred_stop() -> None:
+                # The exact stop path -- including its owner and receipt
+                # validation -- runs unchanged; it merely runs from this
+                # settled callback, off the health-tick stack. This flight has
+                # already settled the terminal child's readers exactly once,
+                # so an immutable refusal here latches the giving-up HOLD
+                # directly instead of arming a second settlement over settled
+                # owners.
+                try:
+                    stop_engine = getattr(self, "_stop_engine", None)
+                    if callable(stop_engine):
+                        stop_engine()
+                    else:
+                        LauncherWindow._stop_engine(self)
+                except Exception as exc:
+                    self._show_engine_down_banner(f"HOLD: {exc}")
+                    if LauncherWindow._refused_settlement_reaches_stable_hold(self):
+                        self._restart_giving_up = True
+
+            if LauncherWindow._engine_reader_threads_are_alive(self):
+                # The stop path's success reaches its inline
+                # _close_engine_stderr_stream: bounded reader joins plus the
+                # stderr flush/close that would hold THIS Qt health-tick
+                # callback for seconds while an alive readiness/stderr reader
+                # drains -- exactly while the HOLD banner and alarm must stay
+                # responsive. The exact settlement, owner and phase run through
+                # the deferred machine instead, and the validated transaction
+                # continues only from its settled callback; a failed flight
+                # keeps the incarnation, giving-up HOLD and operator banner
+                # fail-closed. Nothing here schedules a restart or claims a
+                # clean exit.
+                LauncherWindow._begin_deferred_engine_reader_settlement(
+                    self,
+                    phase="deferred-shutdown-refusal",
+                    owner_id=owner_id,
+                    on_settled=_continue_deferred_stop,
+                    on_failed=_on_reader_failure,
+                )
+                return
             try:
                 stop_engine = getattr(self, "_stop_engine", None)
                 if callable(stop_engine):
@@ -7524,10 +7591,6 @@ class LauncherWindow(QMainWindow):
             except Exception as exc:
                 self._show_engine_down_banner(f"HOLD: {exc}")
                 if LauncherWindow._refused_settlement_reaches_stable_hold(self):
-                    owner_id = getattr(self, "_engine_instance_id", None)
-                    if type(owner_id) is not str:
-                        owner_id = "<unknown>"
-
                     # This health-tick callback used to settle the terminal
                     # child's readers inline: _close_engine_stderr_stream's
                     # bounded joins plus the stderr flush/close held the Qt
@@ -7538,28 +7601,15 @@ class LauncherWindow(QMainWindow):
                     # callback, and a failed flight keeps the incarnation,
                     # giving-up HOLD and operator banner fail-closed. Nothing
                     # here schedules a restart or claims a clean exit.
-                    def _on_readers_settled() -> None:
-                        self._restart_giving_up = True
 
-                    def _on_reader_failure(reader_exc: Exception) -> None:
-                        self._engine_unsettled_incarnation = (owner_id, returncode)
+                    def _on_refusal_readers_settled() -> None:
                         self._restart_giving_up = True
-                        logger.critical(
-                            "Engine reader settlement failed in HOLD; phase=%s owner=%s exception=%s",
-                            "deferred-shutdown-refusal",
-                            owner_id,
-                            type(reader_exc).__name__,
-                        )
-                        self._show_engine_down_banner(
-                            "HOLD: engine process ended but its readiness/stderr readers remain unsettled. "
-                            "Restart and launcher exit are blocked."
-                        )
 
                     LauncherWindow._begin_deferred_engine_reader_settlement(
                         self,
                         phase="deferred-shutdown-refusal",
                         owner_id=owner_id,
-                        on_settled=_on_readers_settled,
+                        on_settled=_on_refusal_readers_settled,
                         on_failed=_on_reader_failure,
                     )
             return
