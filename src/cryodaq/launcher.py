@@ -3404,6 +3404,15 @@ class LauncherWindow(QMainWindow):
         The failure travels through this machine's ordinary single delivering
         tick -- same state shape, same exactly-once reporting, fail-closed
         owners retained -- without a second close ever starting.
+        An exceeded deadline reports its bounded failure EXACTLY once but
+        KEEPS the overdue flight registered as the sole settlement owner,
+        still observing the same worker non-blockingly until it actually
+        terminates -- so the operation never becomes re-armable against a
+        live worker, no later retry can start a second overlapping close on
+        the shared stream/handler fields, the already-reported timeout is
+        never upgraded to success, and neither callback ever delivers twice;
+        when the overdue worker finally terminates, only that exact
+        registration clears.
         """
 
         existing = getattr(self, "_engine_reader_settlement_state", None)
@@ -3445,20 +3454,45 @@ class LauncherWindow(QMainWindow):
             except Exception:
                 finished = False
             if not finished:
-                if time.monotonic() < state["deadline"]:
-                    QTimer.singleShot(_ENGINE_READER_SETTLEMENT_TICK_MS, _advance)
-                    return
-                self._engine_reader_settlement_state = None
-                logger.critical(
-                    "Deferred engine reader settlement exceeded its bound; "
-                    "phase=%s owner=%s -- stream owners stay retained fail-closed",
-                    phase,
-                    owner_id,
-                )
-                on_failed(RuntimeError("deferred engine reader settlement exceeded its bound"))
+                if not state.get("timeout_reported") and time.monotonic() >= state["deadline"]:
+                    # The bound is spent, but the close worker may still be
+                    # running. Report the exceeded bound EXACTLY once while
+                    # KEEPING this exact flight registered as the settlement
+                    # owner: clearing the registration here would let a later
+                    # normal-shutdown retry see no owner and start a SECOND
+                    # overlapping close over the same shared stream/handler
+                    # fields, whose bounded joins could block the Qt thread
+                    # again. The operation therefore stays non-re-armable for
+                    # as long as this overdue worker lives.
+                    state["timeout_reported"] = True
+                    logger.critical(
+                        "Deferred engine reader settlement exceeded its bound; "
+                        "phase=%s owner=%s -- stream owners stay retained fail-closed "
+                        "until the overdue worker actually terminates",
+                        phase,
+                        owner_id,
+                    )
+                    on_failed(RuntimeError("deferred engine reader settlement exceeded its bound"))
+                # Keep observing the SAME worker and completion event
+                # non-blockingly: when the overdue close finally terminates,
+                # the completion tick below clears only this exact flight.
+                QTimer.singleShot(_ENGINE_READER_SETTLEMENT_TICK_MS, _advance)
                 return
             failure = state.get("error")
             self._engine_reader_settlement_state = None
+            if state.get("timeout_reported"):
+                # The overdue worker finally terminated. Release only this
+                # exact flight's registration; its timeout was already
+                # delivered exactly once above and stays final -- the late
+                # result is discarded without upgrading the verdict to success
+                # or delivering either callback a second time.
+                logger.error(
+                    "Overdue deferred engine reader settlement worker terminated; "
+                    "phase=%s owner=%s -- deferred ownership released, late result discarded",
+                    phase,
+                    owner_id,
+                )
+                return
             if failure is not None:
                 if isinstance(failure, Exception):
                     on_failed(failure)

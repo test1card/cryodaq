@@ -3696,3 +3696,151 @@ def test_deferred_transaction_success_settles_readers_off_the_health_tick_stack(
     finally:
         reader_release.set()
         reader.join(timeout=5.0)
+
+
+def test_deferred_settlement_timeout_keeps_ownership_until_the_worker_terminates(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out settlement flight stays the sole owner while its worker lives.
+
+    The Codex P1 finding against ``_begin_deferred_engine_reader_settlement``:
+    its deadline-exceeded tick used to clear ``_engine_reader_settlement_state``
+    even though the close worker could still be running. A later
+    normal-shutdown retry then saw no settlement owner, armed a fresh flight,
+    and started a SECOND overlapping ``_close_engine_stderr_stream`` over the
+    same shared stream/handler fields -- whose bounded joins can block the Qt
+    thread again. The corrected machine must observe the production side
+    effect end to end: the exceeded bound is diagnosed and delivered exactly
+    once while the flight's state and worker STAY published; a second arm
+    during the overdue interval is refused without starting another close;
+    observation of the SAME worker/event continues non-blockingly past the
+    timeout; and when the worker finally terminates only that exact state
+    clears -- the timeout verdict is never upgraded to success and neither
+    callback ever delivers a second time.
+
+    Falsification: reverting the timeout branch to clearing the registration
+    (and stopping the tick chain) fails the ownership assertion immediately,
+    lets the second arm return True with a second gated close thread, and
+    leaves no queued completion observation to drive.
+    """
+
+    import cryodaq.launcher as module
+    from cryodaq.launcher import LauncherWindow
+
+    close_started = threading.Event()
+    close_gate = threading.Event()
+    close_threads: list[str] = []
+    main_thread_name = threading.current_thread().name
+
+    def gated_close() -> None:
+        close_threads.append(threading.current_thread().name)
+        close_started.set()
+        assert close_gate.wait(timeout=10.0), "deferred settlement worker stalled"
+        host._close_completions.append(1)
+
+    host = SimpleNamespace(_close_engine_stderr_stream=gated_close, _close_completions=[])
+    settled_results: list[str] = []
+    failed_results: list[BaseException] = []
+
+    def arm(*, phase: str) -> bool:
+        return LauncherWindow._begin_deferred_engine_reader_settlement(
+            host,
+            phase=phase,
+            owner_id="a" * 32,
+            on_settled=lambda: settled_results.append(phase),
+            on_failed=failed_results.append,
+        )
+
+    clock = _QuitReapClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    try:
+        with (
+            caplog.at_level("ERROR", logger="cryodaq.launcher"),
+            patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+        ):
+            assert arm(phase="timeout-ownership-regression") is True
+
+            state = getattr(host, "_engine_reader_settlement_state", None)
+            assert type(state) is dict, "the flight publishes its ownership as soon as it arms"
+            worker = state.get("worker")
+            assert isinstance(worker, threading.Thread), "the close runs in a registered worker"
+            assert close_started.wait(timeout=5.0), "the real bound-close callback never started"
+            assert close_gate.is_set() is False, "the worker is genuinely still blocked mid-close"
+
+            cursor = [0]
+            assert _drive_next_reap_tick(single_shot, cursor, clock), (
+                "the machine observes non-blockingly before the deadline"
+            )
+            assert getattr(host, "_engine_reader_settlement_state", None) is state
+
+            # Cross the eight-second bound with the worker still blocked and
+            # drive the production advance callback past its deadline.
+            clock.advance(module._ENGINE_READER_SETTLEMENT_BOUND_S + 1.0)
+            assert _drive_next_reap_tick(single_shot, cursor, clock), (
+                "the deadline-expired observation runs on its own tick"
+            )
+
+            # The failure was delivered exactly once...
+            assert len(failed_results) == 1 and isinstance(failed_results[0], RuntimeError), failed_results
+            assert "exceeded its bound" in str(failed_results[0])
+            assert settled_results == [], "no success verdict beside the reported timeout"
+            critical_lines = [record for record in caplog.records if record.levelname == "CRITICAL"]
+            assert len(critical_lines) == 1, "the timeout diagnosis reports itself exactly once"
+
+            # ...but the state AND worker ownership remain published: this is
+            # the production side effect the old code got wrong.
+            assert getattr(host, "_engine_reader_settlement_state", None) is state, (
+                "the overdue flight stays the registered settlement owner while its worker lives"
+            )
+            assert state.get("worker") is worker
+            assert worker.is_alive(), "the blocked close worker really is still running"
+
+            # A second arm during the overdue interval changes nothing.
+            assert arm(phase="second-arm") is False, "the operation is not re-armable against a live worker"
+            assert getattr(host, "_engine_reader_settlement_state", None) is state
+            assert len(close_threads) == 1, "no second close started over the live worker"
+
+            # Observation of the SAME worker/event continues after the timeout.
+            assert _drive_next_reap_tick(single_shot, cursor, clock), "the overdue flight keeps ticking"
+            assert getattr(host, "_engine_reader_settlement_state", None) is state
+            assert len(failed_results) == 1 and settled_results == [], "neither callback repeats"
+
+            # Release the original worker, prove it terminated, then drive its
+            # queued observation: only now does the exact state clear.
+            close_gate.set()
+            worker.join(timeout=5.0)
+            assert not worker.is_alive(), "the overdue worker actually terminated"
+            assert _drive_next_reap_tick(single_shot, cursor, clock), (
+                "the queued completion observation drives after termination"
+            )
+
+            assert getattr(host, "_engine_reader_settlement_state", None) is None, (
+                "only the overdue worker's actual termination clears its own registration"
+            )
+            assert len(failed_results) == 1 and settled_results == [], (
+                "the timeout verdict is final: never upgraded to success, never repeated"
+            )
+            assert host._close_completions == [1], "the exact settlement completed exactly once"
+            assert len(critical_lines) == 1, "no duplicate timeout diagnosis after termination"
+            overdue_lines = [
+                record
+                for record in caplog.records
+                if "Overdue deferred engine reader settlement" in record.getMessage()
+            ]
+            assert len(overdue_lines) == 1, "the late termination reports itself exactly once"
+
+            # With the owner released, a fresh normal-shutdown retry may arm again.
+            assert arm(phase="post-termination-retry") is True
+            retry_state = getattr(host, "_engine_reader_settlement_state", None)
+            assert type(retry_state) is dict and retry_state.get("worker") is not worker
+    finally:
+        close_gate.set()
+        late_worker = (getattr(host, "_engine_reader_settlement_state", None) or {}).get("worker")
+        if isinstance(late_worker, threading.Thread):
+            late_worker.join(timeout=5.0)
+
+    assert all(name != main_thread_name for name in close_threads), (
+        "the bounded close always ran off the arming (Qt-side) thread"
+    )
