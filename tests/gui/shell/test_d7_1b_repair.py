@@ -968,6 +968,7 @@ def test_supervision_deadline_spent_escalates_to_owned_reap_ladder_until_explici
                 phase="readiness",
                 owner_id="a" * 32,
                 process=handle,
+                entry_reason="unobservable-poll supervision budget spent",
                 failure=RuntimeError("replacement never reported ready"),
                 child_start_attempted=True,
                 settle_bridge=False,
@@ -2864,24 +2865,30 @@ def _health_tick_launcher(calls: list[str]) -> SimpleNamespace:
     "evidence_case",
     ["absent-result", "malformed-unknown-outcome", "invalid-concrete-result"],
 )
+@pytest.mark.parametrize("poll_shape", ["readable-alive", "unobservable"])
 def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
     evidence_case: str,
+    poll_shape: str,
+    caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Rejected immutable worker evidence must not strand a still-live child.
+    """Rejected immutable worker evidence must not strand a possibly-live child.
 
     The worker and its absent, malformed, or invalid result remain exact HOLD
     evidence. It cannot remain a reason to refuse every process supervisor:
-    drive the real failed-restart route and its callback machine through both
-    terminate and kill, proving the side effect that bounds the live child.
+    drive the real failed-restart route for both readable-alive and poll-raising
+    handles, then drive its callback machine through terminate, kill, and the
+    final bounded reap outcome. This direct immutable-evidence route has spent
+    no observation budget, so its log must say why it actually entered.
     """
 
     import cryodaq.launcher as module
 
     calls: list[str] = []
     handle = _UnobservableChildHandle()
-    handle.readable = True
-    handle.readable_code = None
+    if poll_shape == "readable-alive":
+        handle.readable = True
+        handle.readable_code = None
     host = _unobservable_child_host(calls, handle)
     if evidence_case == "absent-result":
         worker = _ShutdownWorker(settles=True)
@@ -2894,11 +2901,16 @@ def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
     original_result = getattr(worker, "result", None)
     host._engine_shutdown_worker = worker
     host._engine_shutdown_request_id = "c" * 32
+    if poll_shape == "unobservable":
+        host._engine_shutdown_unreadable_evidence_worker = worker
     host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
     clock = _SupervisionClock()
     monkeypatch.setattr(module.time, "monotonic", clock)
 
-    with patch("cryodaq.launcher.QTimer.singleShot") as single_shot:
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
         recovered = LauncherWindow._recover_failed_engine_restart(
             host,
             phase="readiness",
@@ -2921,10 +2933,24 @@ def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
         clock.advance(5.2)
         assert _drive_next_supervision_tick(single_shot, cursor, clock), "the spent terminate stage kills"
         assert handle.kill_calls == 1
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), (
+            "the spent kill stage reaches the explicit bounded reap outcome"
+        )
+        assert getattr(host, "_engine_unobservable_reap_state", None) is None
+        assert _drive_next_supervision_tick(single_shot, cursor, clock) is False
 
     assert host._engine_shutdown_worker is worker, "reaping preserves the exact rejected worker"
     assert getattr(worker, "result", None) is original_result, "reaping does not rewrite immutable evidence"
     assert handle.wait_frames == [] and handle.communicate_frames == [], "the Qt path remains non-blocking"
+    entry_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "Owned bounded engine reaping entered" in record.getMessage()
+    ]
+    assert len(entry_lines) == 1
+    assert "reason=immutable shutdown evidence retained beside a possibly live child" in entry_lines[0]
+    assert "supervision budget spent" not in entry_lines[0].lower()
 
 
 @pytest.mark.parametrize(

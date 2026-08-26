@@ -5235,6 +5235,7 @@ class LauncherWindow(QMainWindow):
                 phase=phase,
                 owner_id=owner_id,
                 process=process,
+                entry_reason="immutable shutdown evidence retained beside a possibly live child",
                 failure=failure,
                 child_start_attempted=child_start_attempted,
                 settle_bridge=settle_bridge,
@@ -5337,6 +5338,7 @@ class LauncherWindow(QMainWindow):
                     phase=phase,
                     owner_id=owner_id,
                     process=process,
+                    entry_reason="unobservable-poll supervision budget spent",
                     failure=failure,
                     child_start_attempted=child_start_attempted,
                     settle_bridge=settle_bridge,
@@ -5372,6 +5374,7 @@ class LauncherWindow(QMainWindow):
         phase: str,
         owner_id: str,
         process: Any,
+        entry_reason: str,
         failure: Exception,
         child_start_attempted: bool,
         settle_bridge: bool,
@@ -5379,12 +5382,14 @@ class LauncherWindow(QMainWindow):
     ) -> bool:
         """Escalate one forever-unobservable watched child into owned reaping.
 
-        Armed only from the supervision watch after its finite deadline spent
-        with ``poll()`` still raising. The bound is a non-blocking timer chain
-        over THIS exact process object: terminate, one five-second stage budget
-        (the same budgets the normal-quit machine enforces), kill, one more
-        stage budget, then an explicit bounded failure. It never waits on the
-        Qt thread and never needs ``poll()`` to become readable -- a raising
+        Armed after the finite unobservable-poll watch spends, or immediately
+        when immutable rejected-worker evidence cannot itself make progress
+        while the child remains possibly live. ``entry_reason`` preserves that
+        distinction in the emitted evidence. The bound is a non-blocking timer
+        chain over THIS exact process object: terminate, one five-second stage
+        budget (the same budgets the normal-quit machine enforces), kill, one
+        more stage budget, then an explicit bounded failure. It never waits on
+        the Qt thread and never needs ``poll()`` to become readable -- a raising
         poll only delays observation, never escalation. A readable verdict
         before any terminate()/kill() hands the SAME owned process back to the
         ordinary recovery path, which owns reader settlement, incarnation
@@ -5414,10 +5419,11 @@ class LauncherWindow(QMainWindow):
             "escalated": False,
         }
         logger.error(
-            "Unobservable-poll supervision budget spent; phase=%s incarnation=%s -- "
+            "Owned bounded engine reaping entered; phase=%s incarnation=%s reason=%s -- "
             "the same owned child escalates into the non-blocking terminate/kill reap ladder",
             phase,
             owner_id,
+            entry_reason,
         )
 
         def _advance_unobservable_reap() -> None:
