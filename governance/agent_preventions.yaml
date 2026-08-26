@@ -6784,3 +6784,29 @@ records:
     automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
     red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
     green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: LAUNCHER-FD2-INHERITANCE-001
+    status: open
+    scope: product_contract
+    authority_source: docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    applies_to: Every launcher-owned POSIX engine or replay child bootstrap through src/cryodaq/_fd2_bootstrap.py isolation behind its complete-authority gate in src/cryodaq/engine.py and src/cryodaq/replay_engine/__main__.py, and every launcher stderr pump and acquisition owner settlement that requires OS descriptor 2 to reach EOF after engine death.
+    classification: silent_failure
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: On Ubuntu 22.04 an abruptly dead launcher-owned engine left the launcher stderr pipe open because the USBTMC multiprocessing spawn descendant inherited OS descriptor 2 and the multiprocessing ResourceTracker separately preserved sys.stderr.fileno(), so the pump never received EOF, restart remained in HOLD, and no registered prevention bound the production-path guards that detect it.
+    invariant: Before any multiprocessing construction every launcher-owned POSIX engine or replay child installs isolate_launcher_stderr_fd2 exactly once behind its complete-authority non-Windows gate, redirects OS descriptor 2 to devnull, keeps the private duplicate non-inheritable and retained with fileno denied, and after abrupt engine death no descendant holds a duplicate of the launch pipe so the pump reaches EOF within two seconds and both stream and acquisition owners settle.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_control_leaving_fd2_attached_must_fail_detected_as_leak
+        ci_partition: remaining
+        platform: posix
+      - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_control_exposing_private_fileno_must_fail_detected_as_leak
+        ci_partition: remaining
+        platform: posix
+    red_evidence: measured_on_native_ubuntu_22_04_at_commit_007d71ace28b7432f6d6d233552f61b490472fb3_where_an_abruptly_killed_launcher_engine_kept_the_stderr_pipe_open_until_descendants_were_killed_and_each_falsifying_control_adds_exactly_one_explicit_preserving_descendant_holding_a_duplicate_of_the_leaked_descriptor_so_leaving_os_fd_2_attached_or_exposing_the_private_fileno_turns_this_harness_red_no_immutable_red_or_green_receipt_is_bound_yet_2026_08_26_pending_immutable_capture
+    green_evidence: pending
