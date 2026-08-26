@@ -86,6 +86,14 @@ _PIDFD_SEND_SIGNAL_SYSCALL = {
     "ppc64le": 424,
     "s390x": 424,
 }.get(platform.machine())
+_PIDFD_OPEN_SYSCALL = {
+    "x86_64": 434,
+    "aarch64": 434,
+    "riscv64": 434,
+    "loongarch64": 434,
+    "ppc64le": 434,
+    "s390x": 434,
+}.get(platform.machine())
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 
@@ -97,10 +105,28 @@ class _UnstableIdentity(RuntimeError):
 def _stable_identity(pid: int) -> int:
     """Open a pidfd BEFORE anything can exit and its number be reused."""
 
-    if _PIDFD_SEND_SIGNAL_SYSCALL is None or not hasattr(os, "pidfd_open"):
+    if _PIDFD_SEND_SIGNAL_SYSCALL is None or _PIDFD_OPEN_SYSCALL is None:
         raise _UnstableIdentity(f"no pidfd surface on {platform.machine()} / {sys.version_info[:3]}")
     try:
-        return os.pidfd_open(pid)
+        if hasattr(os, "pidfd_open"):
+            return os.pidfd_open(pid)
+
+        # The laboratory conda-forge Python omits os.pidfd_open even though its
+        # Ubuntu 22.04 kernel provides the syscall. Use the same exact kernel
+        # identity surface directly instead of skipping every registered guard.
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syscall.restype = ctypes.c_long
+        pidfd = libc.syscall(
+            ctypes.c_long(_PIDFD_OPEN_SYSCALL),
+            ctypes.c_int(pid),
+            ctypes.c_uint(0),
+        )
+        if pidfd >= 0:
+            return int(pidfd)
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
     except OSError as exc:
         raise _UnstableIdentity(str(exc)) from exc
 
@@ -617,6 +643,22 @@ def _close_proof_pidfd(pidfd: int) -> None:
     except OSError as exc:
         if exc.errno != errno.EBADF:
             raise
+
+
+@_LINUX_ONLY
+def test_stable_identity_uses_kernel_pidfd_when_python_omits_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if _PIDFD_OPEN_SYSCALL is None:
+        pytest.skip(f"no reviewed pidfd_open syscall number for {platform.machine()}")
+
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    pidfd = _stable_identity(os.getpid())
+    try:
+        assert not _identity_exited(pidfd)
+        _signal_via_identity(pidfd, 0)
+    finally:
+        os.close(pidfd)
 
 
 @_LINUX_ONLY
