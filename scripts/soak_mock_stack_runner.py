@@ -954,6 +954,11 @@ _ENGINE_STDERR_ABSENT_MARKER: Final = (
     "<no engine stderr log was written under the isolated state root; the engine either "
     "never started or never opened its stderr log>\n"
 )
+_UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER: Final = (
+    "<the child-writable logs were refused: the launcher session and its descendants "
+    "could not be proven settled, so the writable state root was not traversed. "
+    "Nothing was read or published from that root.>\n"
+)
 
 
 def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
@@ -1144,6 +1149,8 @@ def _read_regular_file_no_follow(
         return _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE
     try:
         info = os.fstat(descriptor)
+        if not os.path.samestat(link_info, info):
+            return _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE
         if stat.S_ISLNK(info.st_mode):
             return _AssistantLogLeafRefusal.SYMBOLIC_LINK
         if not stat.S_ISREG(info.st_mode):
@@ -1426,7 +1433,16 @@ def _launcher_log_capture(
                 drain.writer.close()
         except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
             primary.add_note(f"launcher diagnostic capture failed: {capture_error}")
-        if state_root is not None:
+        if state_root is not None and not settled:
+            for evidence_name, subject in (
+                (_ENGINE_STDERR_EVIDENCE_NAME, "engine stderr"),
+                (_ASSISTANT_LOG_EVIDENCE_NAME, "assistant log"),
+            ):
+                try:
+                    evidence.write_log(evidence_name, _UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER)
+                except Exception as refusal_error:  # noqa: BLE001 - preserve the primary failure
+                    primary.add_note(f"{subject} refusal capture failed: {refusal_error}")
+        elif state_root is not None:
             try:
                 _publish_engine_stderr(evidence, state_root)
             except Exception as engine_error:  # noqa: BLE001 - preserve the primary failure

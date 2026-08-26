@@ -3467,6 +3467,22 @@ false_green_pairs:
     ci_partition: agents
     red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_prior_receive_loop_callback_tests_never_flushed_a_held_provisional_frame_through_ready_so_the_production_path_reduced__FrameRejected_to_its_class_name_and_blamed_the_barrier
     green_evidence: pending_corrected_worktree_blobs_69356c53e2b5f48bd04052031e884813a702e383_and_de1fd1a7a20788256dcc88aeb956849f601189fc_and_hosted_agents_partition
+  - id: SOAK-UNSETTLED-LOG-TRAVERSAL-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_unsettled_writer_cannot_publish_a_junction_aba_stream
+    ci_partition: remaining
+    red_evidence: exact_9733238a5abe60d69536495e716e7a6e908559cb_tree_e04ae1aabd598d64b7a5acec217f20f23af2d09f_the_production_launcher_log_capture_continued_into_the_child_writable_root_after_settle_writer_raised_and_a_real_Windows_junction_ABA_restored_the_original_directory_before_the_after_check_so_EXTERNAL_JUNCTION_ABA_STREAM_MUST_NOT_PUBLISH_entered_log_assistant_txt
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
+  - id: SOAK-WINDOWS-LOG-LEAF-IDENTITY-FALSE-GREEN-002
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_windows_leaf_open_must_match_the_enumerated_file
+    ci_partition: remaining
+    red_evidence: exact_9733238a5abe60d69536495e716e7a6e908559cb_tree_e04ae1aabd598d64b7a5acec217f20f23af2d09f_the_production_no_follow_reader_lstat_the_internal_leaf_then_opened_a_different_external_regular_file_and_published_EXTERNAL_LEAF_ABA_STREAM_MUST_NOT_PUBLISH_because_no_pre_open_to_descriptor_identity_check_existed_on_Windows
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6850,3 +6866,27 @@ records:
     automation_limit: The production-state-machine guard passes locally, but the default hosted agents partition has not yet sealed the corrected candidate.
     red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_red_before_guard_drove_a_held_frame_callback_failure_through_ready_and_observed_the_barrier_failed_with__FrameRejected_in_exception_state_limiter_and_log
     green_evidence: pending_corrected_worktree_blobs_69356c53e2b5f48bd04052031e884813a702e383_and_de1fd1a7a20788256dcc88aeb956849f601189fc_and_hosted_agents_partition
+  - id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Failure-path retention of engine stderr and assistant logs from the source soak runner's child-writable isolated state root, and every assistant-log leaf opened by scripts/soak_mock_stack_runner.py.
+    classification: evidence_misbinding
+    correction_owner: primary
+    guard_owner: primary
+    disposition_owner: reviewer
+    consequence: A launcher session whose process and descendants were not proven settled can replace the child-writable logs directory or one of its leaves while failure evidence is captured. On Windows it can junction-swap the directory to an external location, restore the original directory before the pathname after-check, or redirect the leaf between lstat and open. Unrelated bytes can then enter the retained week-run evidence bundle and disclose another run's log while appearing to belong to this run.
+    invariant: If launcher-session settlement raises, failure capture performs no pathname measurement, enumeration, open, or read under the child-writable state root and instead writes a bounded truthful refusal artifact for both engine stderr and assistant log. On every admitted assistant-log leaf, the file identity measured before open must match the identity of the opened descriptor before any bytes are read; a mismatch is an explicit replaced-or-unreadable refusal. A before/after directory identity comparison is not authority against ABA and is never the only control while the writer may still be live.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_unsettled_writer_refuses_child_writable_logs_without_traversal
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_unsettled_writer_cannot_publish_a_junction_aba_stream
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_windows_leaf_open_must_match_the_enumerated_file
+        ci_partition: remaining
+    automation_limit: The three production-path guards pass locally on Windows, including a real junction ABA, but the default hosted remaining partition has not yet sealed the corrected candidate.
+    red_evidence: exact_9733238a5abe60d69536495e716e7a6e908559cb_tree_e04ae1aabd598d64b7a5acec217f20f23af2d09f_python_3_14_3_Windows_exact_three_new_nodes_selected_three_failed_the_unsettled_path_attempted_read_bytes_and_lstat_the_real_junction_ABA_published_EXTERNAL_JUNCTION_ABA_STREAM_MUST_NOT_PUBLISH_and_the_leaf_identity_ABA_published_EXTERNAL_LEAF_ABA_STREAM_MUST_NOT_PUBLISH
+    green_evidence: pending_corrected_candidate_and_hosted_remaining_partition

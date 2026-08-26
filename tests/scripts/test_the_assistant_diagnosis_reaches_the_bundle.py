@@ -140,6 +140,134 @@ def test_the_FAILURE_path_publishes_it(tmp_path: Path, state_root: Path) -> None
     assert "receive loop ended" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
 
 
+def test_unsettled_writer_refuses_child_writable_logs_without_traversal(
+    tmp_path: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed owner settlement makes every pathname under its state root untrusted."""
+
+    (state_root / "logs" / "engine.stderr.log").write_bytes(b"MUST NOT READ ENGINE STDERR\n")
+    (state_root / "logs" / "assistant.log").write_bytes(b"MUST NOT READ ASSISTANT LOG\n")
+    traversals: list[str] = []
+
+    def forbidden_read_bytes(path: Path) -> bytes:
+        traversals.append(f"read:{path}")
+        raise AssertionError("the unsettled child-writable root was read")
+
+    def forbidden_lstat(path: object, **_kwargs: object) -> os.stat_result:
+        traversals.append(f"lstat:{path}")
+        raise AssertionError("the unsettled child-writable root was measured")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read_bytes)
+    monkeypatch.setattr(runner.os, "lstat", forbidden_lstat)
+    evidence = _Evidence()
+
+    def fail_settlement() -> None:
+        raise RuntimeError("owned writer did not settle")
+
+    with pytest.raises(ValueError, match="primary") as raised:
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "launcher.txt",
+            settle_writer=fail_settlement,
+            state_root=state_root,
+        ) as writer:
+            writer.write(b"launcher output\n")
+            raise ValueError("primary")
+
+    assert traversals == [], "no syscall may enter a root whose writer is still live"
+    assert evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
+    assert evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
+    assert "MUST NOT READ" not in "".join(evidence.logs.values())
+    assert len(runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER.encode("utf-8")) <= 512
+    assert any("launcher writer settlement failed" in note for note in (raised.value.__notes__ or ()))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction ABA contract")
+def test_unsettled_writer_cannot_publish_a_junction_aba_stream(
+    tmp_path: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observe the forbidden effect: external bytes must not enter retained evidence.
+
+    Before the fix, the failed settlement still entered the publisher. The wrappers
+    below then perform a real Windows junction ABA: selection is made in the original
+    directory, the read resolves through an external junction, and the original
+    directory is restored before the publisher's after-check. That exact production
+    path published the external stream while both directory identities compared equal.
+    """
+
+    import _winapi
+
+    logs = state_root / "logs"
+    (logs / "assistant.log").write_bytes(b"INTERNAL LOG\n")
+    saved_logs = state_root / "logs-saved"
+    external = tmp_path / "external-logs"
+    external.mkdir()
+    secret = b"EXTERNAL JUNCTION ABA STREAM MUST NOT PUBLISH\n"
+    (external / "assistant.log").write_bytes(secret)
+
+    real_files = runner._assistant_log_files
+    real_read = runner._read_regular_file_no_follow
+
+    def select_then_swap(root: Path):
+        selected = real_files(root)
+        logs.rename(saved_logs)
+        _winapi.CreateJunction(str(external), str(logs))
+        return selected
+
+    def read_then_restore(directory_descriptor: int | None, path: Path | str, *, maximum_bytes: int):
+        result = real_read(directory_descriptor, path, maximum_bytes=maximum_bytes)
+        os.rmdir(logs)
+        saved_logs.rename(logs)
+        return result
+
+    monkeypatch.setattr(runner, "_assistant_log_files", select_then_swap)
+    monkeypatch.setattr(runner, "_read_regular_file_no_follow", read_then_restore)
+    evidence = _Evidence()
+
+    def fail_settlement() -> None:
+        raise RuntimeError("owned writer did not settle")
+
+    with pytest.raises(ValueError, match="primary"):
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "launcher-aba.txt",
+            settle_writer=fail_settlement,
+            state_root=state_root,
+        ):
+            raise ValueError("primary")
+
+    assert secret.decode("ascii").strip() not in "".join(evidence.logs.values())
+    assert evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pathname open identity contract")
+def test_windows_leaf_open_must_match_the_enumerated_file(
+    state_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The descriptor must name the same file that the pre-open lstat measured."""
+
+    internal = state_root / "logs" / "assistant.log"
+    internal.write_bytes(b"INTERNAL LOG\n")
+    external = tmp_path / "external-secret.log"
+    secret = b"EXTERNAL LEAF ABA STREAM MUST NOT PUBLISH\n"
+    external.write_bytes(secret)
+    real_open = runner.os.open
+
+    def redirect_leaf_open(path: object, flags: int, **kwargs: object) -> int:
+        if Path(path) == internal:
+            return real_open(external, flags)
+        return real_open(path, flags, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner.os, "open", redirect_leaf_open)
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert secret.decode("ascii").strip() not in published
+    assert published == runner._ASSISTANT_LOG_REPLACED_OR_UNREADABLE_MARKER
+
+
 def test_a_rotated_day_is_not_left_behind(state_root: Path) -> None:
     """`setup_logging` rotates the assistant log daily and keeps dated backups.
 
