@@ -6,8 +6,8 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | Measure | Value |
 |---|---:|
 | Baseline commit | `f5d6434d20dffae62c9f03fbc12f68b03f48351b` |
-| Source snapshot tree | `46f1b65c70a2d7c0f160914139f7e8db91d1fd66` |
-| Source snapshot object manifest SHA-256 | `1cf5e0817e1e9e9f6e2bfc5d68988e8f2bdbe61c16ceb8117254fd9e3bb9cea7` |
+| Source snapshot tree | `944aa60484df00d94b1c5aed5a16004f12343fc6` |
+| Source snapshot object manifest SHA-256 | `75233cb88ad9afc5ffdbb8610b127c52ca10c3b1179e4b857b268c38e1c12855` |
 | Changed source-inventory paths | 889 |
 | Source-inventory Git churn | 325,966 insertions / 21,282 deletions / 304,684 net |
 | Delivered-tree changed paths | 891 |
