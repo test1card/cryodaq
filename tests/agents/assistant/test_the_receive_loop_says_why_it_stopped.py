@@ -20,6 +20,7 @@ import logging
 
 import msgpack
 import pytest
+import zmq
 
 from cryodaq.agents.assistant import periodic_runtime
 
@@ -251,7 +252,6 @@ def test_a_named_barrier_failure_survives_to_the_watcher() -> None:
 
 def test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter(
     caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The real query parser must close an arbitrary wire value before recording it."""
 
@@ -268,19 +268,58 @@ def test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter(
     ).encode("ascii")
     assert len(raw) < periodic_runtime.PERIODIC_QUERY_MAX_BYTES
 
-    async def _drive() -> None:
-        query = periodic_runtime.PeriodicEngineQuery()
+    class _FakeSocket:
+        def __init__(self) -> None:
+            self.request: bytes | None = None
+            self.closed = False
 
-        async def _request(payload: object) -> bytes:
-            assert isinstance(payload, dict)
-            assert payload["cmd"] == "periodic_subscription_barrier"
-            assert payload["schema"] == periodic_runtime.PERIODIC_QUERY_SCHEMA
-            assert isinstance(payload["nonce"], str) and len(payload["nonce"]) == 32
+        def setsockopt(self, _option: int, _value: object) -> None:
+            pass
+
+        def connect(self, address: str) -> None:
+            assert address == periodic_runtime.DEFAULT_CMD_ADDR
+
+        async def send(self, request: bytes) -> None:
+            self.request = request
+
+        async def recv(self) -> bytes:
             return raw
 
-        monkeypatch.setattr(query, "_request", _request)
+        def close(self, *, linger: int) -> None:
+            assert linger == 0
+            self.closed = True
+
+    class _FakeContext:
+        def __init__(self) -> None:
+            self.socket_instance = _FakeSocket()
+            self.terminated = False
+
+        def socket(self, socket_type: int) -> _FakeSocket:
+            assert socket_type == zmq.REQ
+            return self.socket_instance
+
+        def term(self) -> None:
+            self.terminated = True
+
+    contexts: list[_FakeContext] = []
+
+    def factory() -> _FakeContext:
+        context = _FakeContext()
+        contexts.append(context)
+        return context
+
+    async def _drive() -> None:
+        query = periodic_runtime.PeriodicEngineQuery(_context_factory=factory)  # type: ignore[arg-type]
         normalized = await query.barrier("a" * 32)
         assert normalized == periodic_runtime.BarrierQueryResult(False, None, None, "response_invalid")
+        first = contexts[0]
+        assert json.loads(first.socket_instance.request or b"") == {
+            "cmd": "periodic_subscription_barrier",
+            "nonce": "a" * 32,
+            "schema": periodic_runtime.PERIODIC_QUERY_SCHEMA,
+        }
+        assert first.socket_instance.closed
+        assert first.terminated
 
         source = _SOURCE(query)
         source._running = True
@@ -298,10 +337,80 @@ def test_an_untrusted_barrier_error_code_never_reaches_the_log_or_limiter(
             assert raised.value.reason == expected
             assert source._invalidation_reason == expected
             assert set(periodic_runtime._last_discontinuity_log) == {expected}
-            assert untrusted not in "\n".join(record.getMessage() for record in caplog.records)
+            logged = "\n".join(record.getMessage() for record in caplog.records)
+            assert untrusted not in logged
+            second = contexts[1]
+            request = json.loads(second.socket_instance.request or b"")
+            assert request["cmd"] == "periodic_subscription_barrier"
+            assert request["schema"] == periodic_runtime.PERIODIC_QUERY_SCHEMA
+            assert isinstance(request["nonce"], str) and len(request["nonce"]) == 32
+            assert second.socket_instance.closed
+            assert second.terminated
         finally:
             await source.stop()
             await query.close()
+
+    asyncio.run(_drive())
+
+
+def test_a_held_frame_callback_failure_keeps_its_category_through_ready(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The real startup state machine must preserve a held-frame rejection category."""
+
+    raw_detail = "operator-token-and-address-from-callback"
+    source: periodic_runtime.SequencedPeriodicLiveSources
+
+    class Query:
+        async def barrier(self, nonce: str) -> periodic_runtime.BarrierQueryResult:
+            cut = periodic_runtime.LiveSourceCut(
+                "0" * 32,
+                source._generation,
+                1,
+                10.5,
+                0,
+                0,
+                0,
+                "sha256:" + "0" * 64,
+            )
+            source._provisional_cut = cut
+            source._provisional_last = 2
+            source._provisional.append(periodic_runtime._ProvisionalFrame(2, "reading", object(), 1))
+            assert source._ready_marker is not None
+            source._ready_marker.set_result(cut)
+            return periodic_runtime.BarrierQueryResult(True, nonce, cut, None)
+
+    source = _SOURCE(Query())
+    source._running = True
+
+    def fail(_reading: object) -> None:
+        raise OSError(raw_detail)
+
+    source._on_reading = fail
+    source._on_event = lambda _event: None
+
+    async def _drive() -> None:
+        source._failure = asyncio.get_running_loop().create_future()
+        source._connected = asyncio.Event()
+        source._connected.set()
+        periodic_runtime._last_discontinuity_log.clear()
+        with caplog.at_level(logging.WARNING, logger=periodic_runtime.__name__):
+            with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+                await source.ready()
+
+        expected = "a periodic live callback failed"
+        assert raised.value.reason == expected
+        assert source._invalidation_reason == expected
+        assert set(periodic_runtime._last_discontinuity_log) == {expected}
+        exposed = "\n".join(
+            [str(raised.value), source._invalidation_reason]
+            + list(periodic_runtime._last_discontinuity_log)
+            + [record.getMessage() for record in caplog.records]
+        )
+        assert raw_detail not in exposed
+        assert "_FrameRejected" not in exposed
+        assert "barrier failed" not in exposed
+        await source.stop()
 
     asyncio.run(_drive())
 

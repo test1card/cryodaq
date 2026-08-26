@@ -1219,14 +1219,17 @@ class SequencedPeriodicLiveSources:
             # threw away a reason that had been worked out -- and the live watcher, which
             # `_invalidate` releases, then reported the generic replacement to whoever was
             # waiting. The immediate caller saw the detail; the later observer did not.
-            self._invalidate(
+            reason = (
                 exc.reason
                 if isinstance(exc, PeriodicLiveDiscontinuity)
+                else exc.category
+                if isinstance(exc, _FrameRejected)
                 else f"the barrier failed with {type(exc).__name__}"
             )
+            self._invalidate(reason)
             if isinstance(exc, PeriodicLiveDiscontinuity):
                 raise
-            raise PeriodicLiveDiscontinuity(f"the barrier failed with {type(exc).__name__}") from None
+            raise PeriodicLiveDiscontinuity(reason) from None
         finally:
             self._ready_active = False
             self._ready_task = None
