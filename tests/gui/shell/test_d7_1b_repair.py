@@ -3804,7 +3804,17 @@ def test_settlement_callback_is_inert_when_a_new_engine_already_owns_the_slot() 
         launcher._engine_instance_id = "f" * 32
         callback()
 
+        # The old false-green guard stopped after the first callback. The
+        # defect queued a process-supervision callback over this healthy
+        # replacement, so drive any such side effect before asserting none was
+        # created. On the defective implementation that callback polls and can
+        # stop the new engine under the stale failure context.
+        unexpected_successors = list(settlement_shot.call_args_list[1:])
+        for successor in unexpected_successors:
+            successor.args[1]()
+
     assert launcher._engine_proc is healthy, "the healthy replacement must keep its handle"
+    assert settlement_shot.call_count == 1, "a foreign owner must receive no stale successor callback"
     assert "terminate" not in calls and "kill" not in calls and "wait" not in calls
     assert "new_poll" not in calls, "the new owner must not even be polled by the stale pass"
     assert launcher._restart_giving_up is False, "an inert pass must not latch HOLD"

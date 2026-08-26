@@ -4984,13 +4984,13 @@ class LauncherWindow(QMainWindow):
         path transfers a finished worker into its published transport identity
         (retiring the worker slot) precisely so that late reconciliation stays
         owned by these settlement ladders. A fired callback whose captured
-        owner no longer matches therefore re-binds the SAME scheduling
-        parameters to the CURRENT owner instead of quiet-returning -- which
-        used to strand the new recorded shape with zero callbacks and block
-        every later restart. The re-bind is deduplicated: exactly one
-        progress-capable callback is queued per owner at any time, a fired
-        callback releases its own registration before any branch, and a
-        declined re-bind falls back to the bounded process-bound supervision.
+        owner no longer matches therefore re-binds only when that exact worker
+        produced the CURRENT transport identity for the SAME shutdown
+        transaction. Every other owner move stays inert so an old failure
+        context cannot supervise a new engine. The re-bind is deduplicated:
+        exactly one progress-capable callback is queued per owner at any time,
+        and a fired
+        callback releases its own registration before any branch.
         An unchanged owner continues settling regardless of how far the restart
         generation moved meanwhile. Returns False when no settlement evidence
         is pending -- or when the only pending evidence is a finished worker
@@ -5009,6 +5009,13 @@ class LauncherWindow(QMainWindow):
             getattr(self, "_replay_session_id", None),
             getattr(self, "_engine_instance_id", None),
             getattr(self, "_engine_shutdown_transport_identity", None),
+        )
+        captured_transaction = (
+            captured_owner[1],
+            captured_owner[2],
+            captured_owner[3],
+            getattr(self, "_engine_shutdown_request_id", None),
+            getattr(self, "_engine_shutdown_capability", None),
         )
         if captured_owner[0] is None and captured_owner[4] is None and not receipt_waiting_for_exit:
             return False
@@ -5052,20 +5059,44 @@ class LauncherWindow(QMainWindow):
                 getattr(self, "_engine_shutdown_transport_identity", None),
             )
             if live_owner != captured_owner:
-                # Ownership MOVED between capture and fire -- most often the
-                # health tick's stop transferring a finished worker into its
-                # published transport identity. Settling here would drive a
-                # wrong incarnation with a stale failure context, but merely
-                # returning stranded the new recorded shape: an identity-only
-                # owner reconciles through these ladders alone, and the health
-                # tick deliberately defers to them. Rebind the same parameters
-                # to the current owner so exactly one progress-capable
-                # callback always remains; when even the current owner holds
-                # no progress-capable evidence, fall back to the bounded
-                # process-bound supervision for a possibly live bare handle.
+                captured_worker = captured_owner[0]
+                try:
+                    captured_worker_finished = captured_worker is not None and captured_worker.isFinished() is True
+                except Exception:
+                    captured_worker_finished = False
+                live_transport_identity = live_owner[4]
+                live_transaction = (
+                    live_owner[1],
+                    live_owner[2],
+                    live_owner[3],
+                    getattr(self, "_engine_shutdown_request_id", None),
+                    getattr(self, "_engine_shutdown_capability", None),
+                )
+                same_shutdown_transaction = (
+                    live_owner[1] is captured_owner[1]
+                    and live_owner[2] == captured_owner[2]
+                    and live_owner[3] == captured_owner[3]
+                    and type(captured_transaction[3]) is str
+                    and bool(captured_transaction[3])
+                    and type(captured_transaction[4]) is str
+                    and bool(captured_transaction[4])
+                    and live_transaction[3:] == captured_transaction[3:]
+                )
+                sanctioned_worker_transfer = (
+                    captured_worker_finished
+                    and captured_owner[4] is None
+                    and live_owner[0] is None
+                    and live_transport_identity is not None
+                    and same_shutdown_transaction
+                    and getattr(self, "_engine_shutdown_receipt", None) is None
+                    and _parse_bridge_unknown_outcome_envelope(getattr(captured_worker, "result", None))
+                    == live_transport_identity
+                )
+                if not sanctioned_worker_transfer:
+                    return
                 logger.warning(
-                    "Owner-bound settlement callback outlived its captured owner; "
-                    "phase=%s rebinding to the current recorded owner",
+                    "Owner-bound settlement callback observed the same transaction's "
+                    "worker-to-transport transfer; phase=%s rebinding to its current owner",
                     phase,
                 )
                 if LauncherWindow._schedule_owner_bound_settlement_retry(
@@ -5077,13 +5108,11 @@ class LauncherWindow(QMainWindow):
                     raise_on_hold=raise_on_hold,
                 ):
                     return
-                LauncherWindow._schedule_unowned_process_supervision(
-                    self,
-                    phase=phase,
-                    failure=failure,
-                    child_start_attempted=child_start_attempted,
-                    settle_bridge=settle_bridge,
-                    raise_on_hold=raise_on_hold,
+                logger.critical(
+                    "The same shutdown transaction transferred to a transport identity "
+                    "but no owner-bound successor could be scheduled; phase=%s retained_owner=%r",
+                    phase,
+                    live_owner,
                 )
                 return
             LauncherWindow._recover_failed_engine_restart(

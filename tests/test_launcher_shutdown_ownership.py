@@ -4035,8 +4035,12 @@ class _SettlementScriptProcess:
 class _RunningShutdownWorker:
     """A shutdown worker still inside its command: a progress-capable owner."""
 
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self._finished = False
+
     def isFinished(self) -> bool:  # noqa: N802 -- Qt's spelling
-        return False
+        return self._finished
 
 
 def test_stale_owner_bound_retry_rebinds_to_the_current_recorded_owner(
@@ -4108,7 +4112,18 @@ def test_stale_owner_bound_retry_rebinds_to_the_current_recorded_owner(
     host._show_engine_down_banner = MagicMock()
     host._invalidate_engine_producer = MagicMock()
 
-    worker = _RunningShutdownWorker()
+    worker = _RunningShutdownWorker(
+        {
+            "ok": False,
+            "error": "shutdown outcome is unknown",
+            "request_id": "e" * 32,
+            "generation": 4,
+            "dispatched": True,
+            "outcome_unknown": True,
+            "delivery_state": "dispatched",
+            "commit_state": "unknown",
+        }
+    )
     host._engine_shutdown_worker = worker
     failure = RuntimeError("engine shutdown command is dispatched on a background worker awaiting its reply")
 
@@ -4143,10 +4158,12 @@ def test_stale_owner_bound_retry_rebinds_to_the_current_recorded_owner(
         assert len(single_shot.call_args_list) == 1
         assert single_shot.call_args_list[0].args[0] == grace_ms
 
-        # The health tick's stop path transfers the finished worker into its
-        # published transport identity BEFORE the queued callback fires.
-        host._engine_shutdown_worker = None
+        # The health tick's real transfer path publishes the exact identity and
+        # retires only the finished worker whose strict envelope produced it.
+        worker._finished = True
         host._engine_shutdown_transport_identity = transport_identity
+        LauncherWindow._transfer_finished_shutdown_worker_to_transport_identity(host)
+        assert host._engine_shutdown_worker is None
 
         assert drive_next_retry() is True
 
@@ -4166,7 +4183,7 @@ def test_stale_owner_bound_retry_rebinds_to_the_current_recorded_owner(
         assert single_shot.call_args_list[1].args[0] == grace_ms
         live_owner = (None, process, None, "a" * 32, transport_identity)
         assert getattr(host, "_engine_owner_settlement_retry_owner", None) == live_owner
-        rebinding_lines = [record for record in caplog.records if "outlived its captured owner" in record.getMessage()]
+        rebinding_lines = [record for record in caplog.records if "worker-to-transport transfer" in record.getMessage()]
         assert len(rebinding_lines) == 1, "the ownership hop reports itself exactly once"
 
         # A repeat schedule for the same current owner neither duplicates the
