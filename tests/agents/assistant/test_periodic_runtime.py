@@ -194,6 +194,25 @@ def _event(sequence: int) -> bytes:
     ).encode()
 
 
+async def _until(condition, *, deadline_s: float = 5.0) -> bool:
+    """Poll a condition to a deadline instead of sleeping for a guessed interval.
+
+    A fixed sleep before asserting delivery is a race dressed as a test: on a loaded
+    runner the receive task may legitimately not have run yet, and the guard fails while
+    the transport is behaving correctly. Polling to a generous deadline is deterministic
+    in both directions -- it returns as soon as the condition holds, and it fails only
+    when the condition never holds.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+    while loop.time() < deadline:
+        if condition():
+            return True
+        await asyncio.sleep(0.005)
+    return condition()
+
+
 async def _publisher() -> tuple[zmq.asyncio.Context, zmq.asyncio.Socket, str]:
     context = zmq.asyncio.Context()
     socket = context.socket(zmq.PUB)
@@ -224,7 +243,18 @@ async def test_constructor_is_resource_free_and_rejects_non_loopback() -> None:
         PeriodicEngineQuery("tcp://0.0.0.0:5556")
 
 
-async def test_start_connects_before_one_all_topic_subscription() -> None:
+async def test_start_connects_before_subscribing_to_the_participating_topics() -> None:
+    """Connect first, then subscribe -- and subscribe to those three topics only.
+
+    The all-topic subscription this replaces also received `operator.snapshot`, which
+    the publisher sends on the same socket. `_handle_frame` refuses a frame on a topic
+    this source does not participate in, and that refusal invalidates the whole
+    generation, so an ordinary operator snapshot took the periodic source's authority.
+
+    Connect-before-subscribe is required by the supported macOS/Python/pyzmq
+    combination, so the ORDER is part of what this pins.
+    """
+
     class Query:
         async def barrier(self, _nonce: str) -> BarrierQueryResult:
             raise AssertionError
@@ -239,10 +269,32 @@ async def test_start_connects_before_one_all_topic_subscription() -> None:
         await live.start(lambda _reading: None, lambda _event: None)
         assert operations == [
             ("connect", "tcp://127.0.0.1:5555"),
-            ("subscribe", b""),
+            ("subscribe", DEFAULT_TOPIC),
+            ("subscribe", EVENTS_TOPIC),
+            ("subscribe", PERIODIC_BARRIER_TOPIC),
         ]
+        assert b"" not in [value for name, value in operations if name == "subscribe"], (
+            "an all-topic subscription also receives operator.snapshot, which this source "
+            "refuses as a protocol violation"
+        )
     finally:
         await live.stop()
+
+
+async def test_the_subscription_and_the_refusal_name_the_same_topics() -> None:
+    """A topic in one and not the other is either a silent drop or a fatal refusal."""
+
+    from cryodaq.agents.assistant import periodic_runtime
+
+    assert periodic_runtime._PARTICIPATING_TOPICS == (
+        DEFAULT_TOPIC,
+        EVENTS_TOPIC,
+        PERIODIC_BARRIER_TOPIC,
+    )
+    # And the publisher's fourth topic is deliberately NOT in it.
+    from cryodaq.core.zmq_subprocess import OPERATOR_SNAPSHOT_TOPIC
+
+    assert OPERATOR_SNAPSHOT_TOPIC not in periodic_runtime._PARTICIPATING_TOPICS
 
 
 async def test_startup_marker_buffers_then_filters_and_dispatches_in_order() -> None:
@@ -277,6 +329,201 @@ async def test_startup_marker_buffers_then_filters_and_dispatches_in_order() -> 
         await live.stop()
         publisher.close(linger=0)
         context.term()
+
+
+async def test_the_engines_fourth_topic_never_reaches_this_source_over_a_real_socket() -> None:
+    """The laboratory failure, reproduced through a real PUB/SUB socket rather than a mock.
+
+    The assertions on the mocked socket compare constants: they show the SUBSCRIBE list is
+    the intended one, and nothing more. What actually cost the laboratory a week was
+    transport behaviour -- an `operator.snapshot` published on the SAME socket arrived,
+    `_handle_frame` refused it, and the refusal invalidated the whole live generation.
+
+    So this publishes that fourth topic on the real socket after readiness and then a
+    perfectly ordinary reading, and requires the reading to arrive with the generation
+    still authoritative. Under the previous `SUBSCRIBE b""` the snapshot was delivered and
+    this goes red.
+    """
+
+    from cryodaq.core.zmq_subprocess import OPERATOR_SNAPSHOT_TOPIC
+
+    context, publisher, address = await _publisher()
+    readings: list[str] = []
+
+    class Query:
+        async def barrier(self, nonce: str) -> BarrierQueryResult:
+            cut, marker = _cut(10, nonce=nonce)
+            await publisher.send_multipart([PERIODIC_BARRIER_TOPIC, marker])
+            return BarrierQueryResult(True, nonce, cut, None)
+
+    live = SequencedPeriodicLiveSources(Query(), address)
+    try:
+        await live.start(lambda reading: readings.append(reading.channel), lambda _event: None)
+        await live.ready()
+
+        await publisher.send_multipart([OPERATOR_SNAPSHOT_TOPIC, b"an operator snapshot payload"])
+        await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
+        assert await _until(lambda: readings == ["T11"]), readings
+        assert live._invalid is False, "an operator snapshot took the live generation's authority"
+        assert live._foreign_topic_frames == 0, "the snapshot should not have been delivered at all"
+    finally:
+        await live.stop()
+        publisher.close(linger=0)
+        context.term()
+
+
+async def test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal() -> None:
+    """ZMQ SUBSCRIBE is a byte PREFIX, so this source cannot choose what arrives.
+
+    Subscribing to `b"readings"` also delivers a future `b"readings.detail"`. No list this
+    consumer keeps can prevent that -- the publisher owns its own topics. If admission
+    refused such a frame, one new publisher topic would invalidate an unrelated consumer's
+    whole generation: the same failure shape that has just been corrected and registered.
+
+    Measured 2026-08-21: no topic in use today is a byte-prefix of another, so this is a
+    guard against the next one being added, not a reproduction of a live defect. That is
+    exactly why it is written now -- the cost of finding out later is a laboratory week.
+    """
+
+    context, publisher, address = await _publisher()
+    readings: list[str] = []
+
+    class Query:
+        async def barrier(self, nonce: str) -> BarrierQueryResult:
+            cut, marker = _cut(10, nonce=nonce)
+            await publisher.send_multipart([PERIODIC_BARRIER_TOPIC, marker])
+            return BarrierQueryResult(True, nonce, cut, None)
+
+    live = SequencedPeriodicLiveSources(Query(), address)
+    try:
+        await live.start(lambda reading: readings.append(reading.channel), lambda _event: None)
+        await live.ready()
+
+        # A topic the publisher might add tomorrow. It starts with a subscribed one, so the
+        # socket delivers it whatever this source intended.
+        await publisher.send_multipart([DEFAULT_TOPIC + b".detail", b"payload of a topic added later"])
+        assert await _until(lambda: live._foreign_topic_frames == 1), "the prefix-extension frame was not delivered"
+        assert live._invalid is False, "a topic somebody else added invalidated this generation"
+
+        # And the source still works afterwards, which is the point of not refusing.
+        await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
+        assert await _until(lambda: readings == ["T11"]), readings
+    finally:
+        await live.stop()
+        publisher.close(linger=0)
+        context.term()
+
+
+async def test_a_foreign_topic_is_ignored_whatever_shape_its_envelope_has() -> None:
+    """The frame count is a rule about OUR topics, so it cannot be applied before the topic.
+
+    A future topic is free to use one frame or three. If the count were checked first, such
+    a frame would raise and invalidate the generation, and the non-fatal handling would
+    have protected only foreign topics that happened to share our two-part envelope --
+    which is no protection at all. Driven over the real socket, because the shape of what
+    ZMQ delivers is the whole question.
+    """
+
+    context, publisher, address = await _publisher()
+    readings: list[str] = []
+
+    class Query:
+        async def barrier(self, nonce: str) -> BarrierQueryResult:
+            cut, marker = _cut(10, nonce=nonce)
+            await publisher.send_multipart([PERIODIC_BARRIER_TOPIC, marker])
+            return BarrierQueryResult(True, nonce, cut, None)
+
+    live = SequencedPeriodicLiveSources(Query(), address)
+    try:
+        await live.start(lambda reading: readings.append(reading.channel), lambda _event: None)
+        await live.ready()
+
+        await publisher.send_multipart([DEFAULT_TOPIC + b".one"])
+        await publisher.send_multipart([DEFAULT_TOPIC + b".three", b"second", b"third"])
+        assert await _until(lambda: live._foreign_topic_frames == 2), live._foreign_topic_frames
+        assert live._invalid is False, "a foreign envelope shape invalidated the generation"
+
+        await publisher.send_multipart([DEFAULT_TOPIC, _reading(11, authoritative=True)])
+        assert await _until(lambda: readings == ["T11"]), readings
+    finally:
+        await live.stop()
+        publisher.close(linger=0)
+        context.term()
+
+
+async def test_the_shared_sequence_belongs_only_to_the_topics_that_are_followed() -> None:
+    """Ignoring a foreign frame is safe only if that frame never took a sequence number.
+
+    `_allocate_sequence` advances ONE counter for the whole socket, and this subscriber
+    validates that counter for continuity. If a future topic were published through the
+    allocating path, ignoring its frame would leave a GAP, and the next participating frame
+    would invalidate the generation anyway -- the ignore would have bought nothing.
+
+    So the publisher refuses to allocate for a topic outside the sequenced set, and it
+    refuses BEFORE the counter moves, so the refusal itself leaves no gap.
+    """
+
+    from cryodaq.core.zmq_bridge import _SEQUENCED_TOPICS, ZMQPublisher
+
+    assert _SEQUENCED_TOPICS == periodic_runtime._PARTICIPATING_TOPICS, (
+        "the topics that consume the sequence and the topics this source follows must be "
+        "the same set, or a published frame creates a gap nobody can close"
+    )
+
+    publisher = ZMQPublisher()
+    publisher._send_lock = asyncio.Lock()
+    before = publisher._sequence
+    with pytest.raises(ValueError, match="sequenced topics"):
+        await publisher._send_allocated(b"readings.detail", lambda _sequence: b"payload")
+    assert publisher._sequence == before, "a refused topic still moved the counter"
+
+
+async def test_a_publisher_nobody_follows_is_refused_before_it_can_swallow_a_queue() -> None:
+    """The refusal has to happen at CONSTRUCTION, because the send path swallows.
+
+    `_publish_loop` catches whatever `_publish_reading` raises and still calls
+    `queue.task_done()`. So a publisher built on a topic outside the sequenced set would
+    drain its queue while sending nothing: every reading lost, the queue reporting itself
+    handled, and the publisher still alive. The per-send guard alone therefore converts a
+    wiring mistake into silent data loss, which is the one outcome this project exists to
+    prevent.
+
+    No production call site passes a custom topic today, measured 2026-08-21 -- the three
+    constructions in `src/` all take the default. This refuses the shape rather than
+    waiting for someone to reach it.
+    """
+
+    from cryodaq.core.zmq_bridge import ZMQPublisher
+
+    with pytest.raises(ValueError, match="subscribers follow"):
+        ZMQPublisher(topic=b"nobody.follows.this")
+
+    # And the ordinary construction is untouched.
+    assert ZMQPublisher()._topic == DEFAULT_TOPIC
+
+
+async def test_a_malformed_frame_on_a_participating_topic_is_still_refused() -> None:
+    """The boundary: ignoring a foreign topic must not soften the real contract.
+
+    A frame that is not two parts, or a reading whose shape is wrong on a topic this
+    source DOES participate in, is a protocol violation and still invalidates the
+    generation. Only "this frame is not addressed to me" became non-fatal.
+    """
+
+    live = SequencedPeriodicLiveSources(_UnusedQuery())
+    live._running = True
+    live._failure = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(ValueError, match="invalid multipart frame"):
+        await live._handle_frame([DEFAULT_TOPIC])
+    with pytest.raises(ValueError, match="invalid multipart frame"):
+        await live._handle_frame([DEFAULT_TOPIC, b"one", b"two"])
+    assert live._foreign_topic_frames == 0
+
+
+class _UnusedQuery:
+    async def barrier(self, _nonce: str) -> BarrierQueryResult:
+        raise AssertionError("this test never reaches the barrier")
 
 
 async def test_startup_retries_dropped_first_marker_with_fresh_matching_nonce() -> None:
@@ -609,8 +856,19 @@ async def test_forbidden_marker_ok_prefix_topic_and_changed_baseline_fail_closed
     forbidden["ok"] = True
     with pytest.raises(ValueError, match="marker shape"):
         await live._handle_frame([PERIODIC_BARRIER_TOPIC, json.dumps(forbidden).encode()])
-    with pytest.raises(ValueError, match="multipart"):
-        await live._handle_frame([DEFAULT_TOPIC + b".suffix", b"x"])
+    # DELIBERATE REVERSAL, 2026-08-21. This line used to require a refusal for a topic that
+    # merely EXTENDS a subscribed one, and that is now wrong: ZMQ SUBSCRIBE matches by byte
+    # prefix, so subscribing to b"readings" delivers a future b"readings.detail" whatever
+    # this source intends. Refusing it invalidates the whole live generation -- so one new
+    # topic on the publisher would kill an unrelated consumer, which is the exact failure
+    # this branch exists to correct, arriving by a second door.
+    #
+    # Fail-closed is preserved where it means something: the frame is not ACTED ON, and no
+    # reading from it reaches the broker. It is counted instead of being made fatal.
+    # See test_a_topic_that_extends_a_subscribed_one_is_counted_not_fatal.
+    before = live._foreign_topic_frames
+    await live._handle_frame([DEFAULT_TOPIC + b".suffix", b"x"])
+    assert live._foreign_topic_frames == before + 1
 
     live._session_id = SESSION
     live._last_sequence = 1
@@ -1329,3 +1587,131 @@ async def test_live_runtime_consumes_context_receipt_and_expires_it(
         assert cache.get_summary() is None
     finally:
         await cache.stop()
+
+
+def _published_reading_bytes(*, descriptor_envelope: bytes | None) -> bytes:
+    """Build a reading frame with the PRODUCTION packer.
+
+    Hand-building the payload is how producer and consumer drift apart without a test
+    noticing: the consumer's expectation gets written twice, once in production and once
+    in the test, and the producer is in neither. `_pack_reading` is what the engine
+    actually calls, so a rename or an omission there reddens this instead of reaching a
+    laboratory run.
+    """
+
+    from datetime import UTC, datetime
+
+    from cryodaq.core.zmq_bridge import _pack_reading
+    from cryodaq.drivers.base import ChannelStatus, Reading
+
+    reading = Reading(
+        timestamp=datetime.fromtimestamp(1_700_000_000.0, tz=UTC),
+        instrument_id="ls",
+        channel="T2",
+        value=2.0,
+        unit="K",
+        status=ChannelStatus.OK,
+        raw=None,
+        metadata={},
+    )
+    return _pack_reading(
+        reading,
+        transport={
+            "schema": "cryodaq.periodic.stream/v1",
+            "session_id": "1" * 32,
+            "sequence": 1,
+            "persistence_authoritative": True,
+        },
+        descriptor_envelope=descriptor_envelope,
+    )
+
+
+async def test_a_reading_carrying_a_descriptor_envelope_is_accepted() -> None:
+    """The publisher attaches `desc` whenever it has a channel-descriptor envelope.
+
+    Its own docstring calls that key additive and expects a consumer to ignore unknown
+    keys structurally. This consumer did not: it compared the key set with `!=`, so an
+    ordinary reading with a descriptor was refused exactly as hard as one missing a
+    required field -- and the refusal invalidates the whole generation.
+
+    Measured on Ubuntu 22.04 on 2026-08-20, after the topic fix removed the previous
+    dominant cause, this became the most frequent reason the source lost authority.
+    """
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    frame = _published_reading_bytes(descriptor_envelope=b"an opaque descriptor envelope")
+    transport, reading = SequencedPeriodicLiveSources._reading(frame)
+
+    assert reading.channel == "T2"
+    assert transport.sequence == 1
+
+
+async def test_a_reading_without_a_descriptor_is_still_accepted() -> None:
+    """The publisher omits the key entirely when it has nothing to attach."""
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    frame = _published_reading_bytes(descriptor_envelope=None)
+    _transport, reading = SequencedPeriodicLiveSources._reading(frame)
+
+    assert reading.channel == "T2"
+
+
+async def test_a_reading_missing_a_required_field_is_still_refused() -> None:
+    """Accepting a documented optional field must not relax the contract."""
+
+    import msgpack
+    import pytest as _pytest
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    # The production packer always writes the required keys, so this one is built by
+    # REMOVING a key from a real frame rather than by writing a payload from scratch.
+    frame = _published_reading_bytes(descriptor_envelope=None)
+    payload = msgpack.unpackb(frame, raw=False)
+    del payload["transport"]
+
+    with _pytest.raises(ValueError, match="missing="):
+        SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
+
+
+async def test_an_unknown_field_is_refused_and_not_echoed() -> None:
+    """Fail-closed on a key nobody documented -- and the message must not carry the wire."""
+
+    import msgpack
+    import pytest as _pytest
+
+    from cryodaq.agents.assistant.periodic_runtime import SequencedPeriodicLiveSources
+
+    frame = _published_reading_bytes(descriptor_envelope=None)
+    payload = msgpack.unpackb(frame, raw=False)
+    payload["smuggled_secret_name"] = 1
+
+    with _pytest.raises(ValueError) as raised:
+        SequencedPeriodicLiveSources._reading(msgpack.packb(payload, use_bin_type=True))
+
+    said = str(raised.value)
+    assert "unexpected_key_count=1" in said
+    assert "smuggled_secret_name" not in said, "an unknown key name reached the message"
+
+
+async def test_every_key_the_publisher_writes_is_known_to_this_consumer() -> None:
+    """The producer/consumer contract, checked in one place instead of two.
+
+    This is the drift itself: the publisher grew `desc` and the consumer's key set did
+    not. Asking the packer what it writes -- with and without the optional envelope --
+    makes a future addition redden here rather than in a laboratory run.
+    """
+
+    import msgpack
+
+    from cryodaq.agents.assistant import periodic_runtime
+
+    known = periodic_runtime._READING_REQUIRED_KEYS | periodic_runtime._READING_OPTIONAL_KEYS
+    for envelope in (None, b"an opaque descriptor envelope"):
+        written = set(msgpack.unpackb(_published_reading_bytes(descriptor_envelope=envelope), raw=False))
+        unknown = sorted(written - known)
+        assert not unknown, f"the publisher writes keys this consumer refuses: {unknown}"
+        missing = sorted(periodic_runtime._READING_REQUIRED_KEYS - written)
+        assert not missing, f"the consumer requires keys the publisher does not write: {missing}"

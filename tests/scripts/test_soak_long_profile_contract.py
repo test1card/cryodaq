@@ -29,6 +29,12 @@ def _samples(profile: soak.SoakProfile) -> list[dict[str, object]]:
         rows = {}
         for role, index in role_indexes.items():
             restart_count = sum(event.target == role and elapsed_s > event.at_s for event in profile.events)
+            if role == "bridge":
+                # THE BRIDGE GOES WITH THE ENGINE. Every scheduled engine replacement shuts
+                # the bridge down and starts another, because a new child must not inherit
+                # an old transport. This series showed the engine replaced and the bridge
+                # untouched, which is a run the launcher cannot produce.
+                restart_count = sum(event.target == "engine" and elapsed_s > event.at_s for event in profile.events)
             rows[role] = (
                 restart_count,
                 soak.ProcessSnapshot(

@@ -216,6 +216,19 @@ PERIODIC_STREAM_SCHEMA = "cryodaq.periodic.stream/v1"
 PERIODIC_BARRIER_SCHEMA = "cryodaq.periodic.barrier/v1"
 PERIODIC_QUERY_SCHEMA = "cryodaq.periodic.query/v1"
 PERIODIC_BARRIER_TOPIC = b"periodic.barrier"
+
+# THE TOPICS THAT CONSUME THE SHARED SEQUENCE, and the only ones allowed to.
+#
+# `_allocate_sequence` advances one counter for the whole socket, and the private
+# subscriber validates that counter for continuity. A topic outside this set that
+# allocated a sequence would therefore create a GAP for every subscriber that does
+# not participate in it -- and a gap invalidates the whole live generation, which is
+# the failure this file's fourth topic already caused once by a different route.
+#
+# A new topic joins this set only together with the subscribers that must follow it.
+# Publishing outside the sequence is the ordinary case: `publish_operator_snapshot`
+# does not allocate, which is why an operator snapshot never disturbed continuity.
+_SEQUENCED_TOPICS: tuple[bytes, ...] = (DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC)
 PERIODIC_QUERY_MAX_BYTES = 64 * 1024
 PERIODIC_MAX_SEQUENCE = 2**63 - 1
 _PERIODIC_BARRIER_TIMEOUT_S = 1.5
@@ -701,6 +714,16 @@ class ZMQPublisher:
         applied_cold_stage_channel: str | None = None,
     ) -> None:
         self._address = address
+        if topic not in _SEQUENCED_TOPICS:
+            # AT CONSTRUCTION, WHERE IT IS LOUD. The per-send guard below is the same rule,
+            # but reaching it costs data: `_publish_loop` catches whatever `_publish_reading`
+            # raises and still calls `queue.task_done()`, so a publisher built on an
+            # unfollowed topic would drain its queue while sending nothing -- silent loss of
+            # every reading, with the publisher still reporting itself alive.
+            #
+            # This is a wiring mistake, not an operator action, so there is nobody to guide
+            # through it; the honest answer is to refuse the object rather than the data.
+            raise ValueError("publisher topic must be one this transport's subscribers follow")
         self._topic = topic
         self._ctx: zmq.asyncio.Context | None = None
         self._socket: zmq.asyncio.Socket | None = None
@@ -771,6 +794,10 @@ class ZMQPublisher:
         encode: Callable[[int], bytes],
     ) -> int:
         """Allocate, encode, and send while the caller owns ``_send_lock``."""
+        if topic not in _SEQUENCED_TOPICS:
+            # Refused BEFORE the counter moves, so a refusal costs nothing and leaves no
+            # gap behind. See _SEQUENCED_TOPICS for why a gap is not a cosmetic problem.
+            raise ValueError("only sequenced topics may consume the shared sequence")
         sequence = self._allocate_sequence()
         try:
             frame = encode(sequence)

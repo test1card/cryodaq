@@ -92,6 +92,37 @@ _MONITOR_FAILURE_EVENTS = frozenset(
 
 _log = logging.getLogger(__name__)
 
+# The topics this source participates in.
+#
+# ZMQ SUBSCRIBE MATCHES BY PREFIX, NOT BY EQUALITY, and that is why admission cannot be
+# a refusal. Subscribing to b"readings" also delivers a future b"readings.detail", and
+# no list this consumer keeps can prevent that -- the publisher owns its own topics.
+# So `_handle_frame` IGNORES AND COUNTS a frame on a topic outside this tuple, and
+# refuses only what is genuinely malformed. A refusal invalidates the whole generation,
+# and a topic somebody else added must never be able to kill this source. Measured on
+# 2026-08-20: an ordinary `operator.snapshot` did exactly that.
+#
+# Equality between this tuple and the SUBSCRIBE list is still required, because a topic
+# subscribed but not admitted is a silent drop, and one admitted but not subscribed is a
+# frame that never arrives.
+_PARTICIPATING_TOPICS: tuple[bytes, ...] = (DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC)
+
+# THE READING CONTRACT, SPLIT INTO WHAT MUST BE THERE AND WHAT MAY BE.
+#
+# This used to be one set compared with `!=`, which refuses a reading that carries an
+# extra field just as hard as one that is missing a required field. `zmq_bridge._pack_reading`
+# attaches `desc`, the channel-descriptor envelope, whenever it has one -- so an ordinary
+# reading with a descriptor was refused, and the refusal INVALIDATES THE WHOLE GENERATION.
+# Measured on Ubuntu 22.04 on 2026-08-20, after the topic fix removed the previous
+# dominant cause, `a reading had an unexpected shape` became the most frequent reason the
+# periodic source lost authority.
+#
+# The check stays fail-closed on an unknown key. What changed is that a field the
+# publisher documents as optional is no longer treated as an unknown one.
+_READING_REQUIRED_KEYS: frozenset[str] = frozenset({"ts", "iid", "ch", "v", "u", "st", "raw", "meta", "transport"})
+_READING_OPTIONAL_KEYS: frozenset[str] = frozenset({"desc"})
+
+
 # One line per distinct reason per minute. A run that flaps once a second for a week
 # must leave a diagnosis, not a log nobody can open; and the FIRST occurrence of each
 # reason is always written, because that is the one that says what happened.
@@ -653,6 +684,9 @@ class SequencedPeriodicLiveSources:
         self._failure: asyncio.Future[None] | None = None
         self._connected: asyncio.Event | None = None
         self._state_lock = asyncio.Lock()
+        # Frames delivered by prefix matching on a topic this source does not
+        # participate in. Counted rather than refused; see _handle_frame.
+        self._foreign_topic_frames = 0
         self._ready_active = False
         self._ready_nonce: str | None = None
         self._retired_ready_nonces: set[str] = set()
@@ -734,9 +768,21 @@ class SequencedPeriodicLiveSources:
             max_array_len=1024,
             max_map_len=1024,
         )
-        expected = {"ts", "iid", "ch", "v", "u", "st", "raw", "meta", "transport"}
-        if not isinstance(data, dict) or set(data) != expected:
-            raise _FrameRejected("a reading had an unexpected shape", "invalid reading shape")
+        if not isinstance(data, dict):
+            raise _FrameRejected(
+                "a reading had an unexpected shape", "invalid reading shape: the reading is not a mapping"
+            )
+        keys = set(data)
+        missing = sorted(_READING_REQUIRED_KEYS - keys)
+        unexpected = sorted(keys - _READING_REQUIRED_KEYS - _READING_OPTIONAL_KEYS)
+        if missing or unexpected:
+            # The KEY NAMES, never a value. The required set is a fixed vocabulary, and an
+            # unexpected key is reported by COUNT rather than by name, because an unknown
+            # name is not a fixed vocabulary and could carry content from the wire.
+            raise _FrameRejected(
+                "a reading had an unexpected shape",
+                f"invalid reading shape: missing={missing} unexpected_key_count={len(unexpected)}",
+            )
         transport = cls._transport(data["transport"])
         timestamp = _finite_number(data["ts"])
         instrument = _text(data["iid"], maximum=256)
@@ -877,7 +923,22 @@ class SequencedPeriodicLiveSources:
         marker.set_result(cut)
 
     async def _handle_frame(self, parts: list[bytes]) -> None:
-        if len(parts) != 2 or parts[0] not in {DEFAULT_TOPIC, EVENTS_TOPIC, PERIODIC_BARRIER_TOPIC}:
+        if not parts:
+            raise _FrameRejected("the multipart frame was not two parts on a known topic", "invalid multipart frame")
+        if parts[0] not in _PARTICIPATING_TOPICS:
+            # NOT OURS, AND NOT A VIOLATION. A SUBSCRIBE is a byte PREFIX, so subscribing
+            # to b"readings" also delivers anything the publisher later names
+            # b"readings.<something>". Refusing that would let one new publisher topic
+            # invalidate this source's whole generation -- the exact failure this class was
+            # just corrected for. Count it and move on.
+            self._foreign_topic_frames += 1
+            return
+        # THE FRAME COUNT IS A RULE ABOUT OUR OWN TOPICS, so it is applied after the topic
+        # is classified and never before. Checking it first would make a foreign topic
+        # fatal whenever it used one or three parts instead of two -- the non-fatal
+        # handling above would then have protected only foreign topics that happened to
+        # share our envelope shape, which is no protection at all.
+        if len(parts) != 2:
             raise _FrameRejected("the multipart frame was not two parts on a known topic", "invalid multipart frame")
         async with self._state_lock:
             if self._invalid or not self._running:
@@ -984,11 +1045,27 @@ class SequencedPeriodicLiveSources:
             )
             self._monitor.setsockopt(zmq.LINGER, 0)
             self._socket.connect(self._address)
-            # One all-topic subscription is one propagation unit: receiving
-            # the exact nonce barrier therefore also proves that readings and
-            # events use the same active SUB pipe.  Connect-before-subscribe is
-            # required by the supported macOS/Python/pyzmq combination.
-            self._socket.setsockopt(zmq.SUBSCRIBE, b"")
+            # SUBSCRIBE TO WHAT THIS SOURCE PARTICIPATES IN, AND TO NOTHING ELSE.
+            #
+            # This used to subscribe to every topic with `b""`, and the reasoning was
+            # sound when it was written: one subscription is one propagation unit, so
+            # receiving the exact nonce barrier also proved that readings and events use
+            # the same active SUB pipe. That argument still holds with three
+            # subscriptions -- one socket, one connection, one pipe -- and the all-topic
+            # form acquired a defect the day a FOURTH topic appeared on the publisher.
+            #
+            # `zmq_bridge.publish_operator_snapshot` sends `operator.snapshot` on the
+            # sole PUB socket. An all-topic subscriber receives it, `_handle_frame`
+            # refuses it as a frame that is not two parts on a participating topic, and
+            # that refusal INVALIDATES THE WHOLE GENERATION. Measured on Ubuntu 22.04 on
+            # 2026-08-20, it was the most frequent reason the periodic source lost
+            # authority during a run -- which is why no periodic slot was ever allocated
+            # and no receipt could be sealed.
+            #
+            # Connect-before-subscribe is required by the supported macOS/Python/pyzmq
+            # combination, so the order below is deliberate.
+            for topic in _PARTICIPATING_TOPICS:
+                self._socket.setsockopt(zmq.SUBSCRIBE, topic)
             self._running = True
             self._receive_task = asyncio.create_task(self._receive_loop(), name="periodic_live_receive")
             self._monitor_task = asyncio.create_task(self._monitor_loop(), name="periodic_live_monitor")
