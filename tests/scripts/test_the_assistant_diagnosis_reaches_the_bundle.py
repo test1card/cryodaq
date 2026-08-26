@@ -182,10 +182,10 @@ def test_unsettled_writer_refuses_child_writable_logs_without_traversal(
     assert any("launcher writer settlement failed" in note for note in (raised.value.__notes__ or ()))
 
 
-def test_settlement_baseexception_preserves_primary_closes_drain_and_refuses_root(
+def test_settlement_baseexception_preserves_primary_refuses_root_and_defers_drain_until_writer_settles(
     tmp_path: Path, state_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cleanup interruption cannot mask the run failure or leave evidence ownership live."""
+    """A live child-style writer keeps drain ownership pending until outer settlement."""
 
     (state_root / "logs" / "engine.stderr.log").write_bytes(b"MUST NOT READ ENGINE STDERR\n")
     (state_root / "logs" / "assistant.log").write_bytes(b"MUST NOT READ ASSISTANT LOG\n")
@@ -249,6 +249,7 @@ def test_settlement_baseexception_preserves_primary_closes_drain_and_refuses_roo
     monkeypatch.setattr(runner, "_BoundedLauncherLogDrain", ObservedDrain)
     evidence = _Evidence()
     writer = None
+    retained_writer_fd: int | None = None
     caught: BaseException | None = None
 
     def interrupt_settlement() -> None:
@@ -261,28 +262,123 @@ def test_settlement_baseexception_preserves_primary_closes_drain_and_refuses_roo
             settle_writer=interrupt_settlement,
             state_root=state_root,
         ) as writer:
+            retained_writer_fd = os.dup(writer.fileno())
             writer.write(b"launcher output\n")
             raise ValueError("primary run failure")
     except BaseException as error:
         caught = error
 
     production_closed_writer = writer is not None and writer.closed
-    production_settled_drain = len(created_drains) == 1 and not created_drains[0]._thread.is_alive()
+    production_pending_drain = len(created_drains) == 1 and created_drains[0]._thread.is_alive()
     if writer is not None and not writer.closed:
         writer.close()
+    if retained_writer_fd is not None:
+        os.close(retained_writer_fd)
+        retained_writer_fd = None
     for drain in created_drains:
         drain._thread.join(timeout=1)
 
+    settled_after_outer_writer = len(created_drains) == 1 and not created_drains[0]._thread.is_alive()
     assert type(caught) is ValueError and str(caught) == "primary run failure"
     notes = tuple(getattr(caught, "__notes__", ()))
-    assert any("launcher writer settlement failed: SettlementInterrupted" in note for note in notes)
+    assert notes == ("launcher writer settlement failed: SettlementInterrupted",)
     assert "MUST NOT LEAK SETTLEMENT DETAIL" not in "\n".join(notes)
     assert production_closed_writer, "production left the parent write end open after cleanup interruption"
-    assert production_settled_drain, "production left the launcher-log drain thread alive"
+    assert production_pending_drain, "a retained child-style writer did not retain drain ownership"
+    assert settled_after_outer_writer, "the drain did not settle after outer lifecycle ownership closed"
     assert traversals == [], "no syscall may enter a root whose writer settlement was interrupted"
     assert evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
     assert evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
     assert "MUST NOT READ" not in "".join(evidence.logs.values())
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected_note"),
+    (
+        ("drain_finish", "launcher diagnostic capture failed: CleanupInterrupted"),
+        ("launcher_publish", "launcher diagnostic capture failed: CleanupInterrupted"),
+        ("engine_refusal", "engine stderr refusal capture failed: CleanupInterrupted"),
+        ("assistant_refusal", "assistant log refusal capture failed: CleanupInterrupted"),
+    ),
+)
+def test_post_settlement_baseexception_cannot_replace_primary(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    expected_note: str,
+) -> None:
+    """Every cleanup boundary after settlement preserves the original failure."""
+
+    class SettlementInterrupted(BaseException):
+        pass
+
+    class CleanupInterrupted(BaseException):
+        pass
+
+    class BoundaryEvidence(_Evidence):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[str] = []
+
+        def write_log(self, name: str, text: str) -> None:
+            self.calls.append(name)
+            target = {
+                "engine_refusal": runner._ENGINE_STDERR_EVIDENCE_NAME,
+                "assistant_refusal": runner._ASSISTANT_LOG_EVIDENCE_NAME,
+            }.get(boundary)
+            if name == target:
+                raise CleanupInterrupted("MUST NOT LEAK CLEANUP DETAIL")
+            super().write_log(name, text)
+
+    if boundary == "drain_finish":
+
+        class InterruptedDrain(runner._BoundedLauncherLogDrain):
+            def finish(self) -> tuple[bytes, int]:
+                super().finish()
+                raise CleanupInterrupted("MUST NOT LEAK CLEANUP DETAIL")
+
+        monkeypatch.setattr(runner, "_BoundedLauncherLogDrain", InterruptedDrain)
+    elif boundary == "launcher_publish":
+
+        def interrupt_launcher_publish(*_args: object, **_kwargs: object) -> None:
+            raise CleanupInterrupted("MUST NOT LEAK CLEANUP DETAIL")
+
+        monkeypatch.setattr(runner, "_publish_launcher_log", interrupt_launcher_publish)
+
+    refusal_boundary = boundary in {"engine_refusal", "assistant_refusal"}
+
+    def settle_writer() -> None:
+        if refusal_boundary:
+            raise SettlementInterrupted("MUST NOT LEAK SETTLEMENT DETAIL")
+
+    evidence = BoundaryEvidence()
+    caught: BaseException | None = None
+    try:
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / f"launcher-{boundary}.txt",
+            settle_writer=settle_writer,
+            state_root=state_root if refusal_boundary else None,
+        ) as writer:
+            writer.write(b"launcher output\n")
+            raise ValueError("primary run failure")
+    except BaseException as error:
+        caught = error
+
+    assert type(caught) is ValueError and str(caught) == "primary run failure"
+    notes = tuple(getattr(caught, "__notes__", ()))
+    assert expected_note in notes
+    assert "MUST NOT LEAK" not in "\n".join(notes)
+    if refusal_boundary:
+        assert evidence.calls == [
+            runner._ENGINE_STDERR_EVIDENCE_NAME,
+            runner._ASSISTANT_LOG_EVIDENCE_NAME,
+        ]
+        successful_name = (
+            runner._ASSISTANT_LOG_EVIDENCE_NAME if boundary == "engine_refusal" else runner._ENGINE_STDERR_EVIDENCE_NAME
+        )
+        assert evidence.logs[successful_name] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction ABA contract")

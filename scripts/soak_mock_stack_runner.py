@@ -915,9 +915,13 @@ class _BoundedLauncherLogDrain:
         finally:
             os.close(self._read_fd)
 
-    def finish(self) -> tuple[bytes, int]:
+    def close_writer(self) -> None:
+        """Release only this owner's write end without claiming pipe EOF."""
         if not self.writer.closed:
             self.writer.close()
+
+    def finish(self) -> tuple[bytes, int]:
+        self.close_writer()
         self._thread.join(timeout=_PROCESS_GROUP_GRACE_S)
         if self._thread.is_alive():
             raise _RunnerFoundationError("launcher log writer did not settle")
@@ -1397,6 +1401,14 @@ def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
     evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
 
 
+def _add_sanitized_cleanup_note(primary: BaseException, subject: str, error: BaseException) -> None:
+    """Record only a cleanup failure's type without risking replacement of primary."""
+    try:
+        BaseException.add_note(primary, f"{subject}: {type(error).__name__}")
+    except BaseException:
+        pass
+
+
 @contextmanager
 def _launcher_log_capture(
     evidence: Any,
@@ -1424,13 +1436,15 @@ def _launcher_log_capture(
                 settle_writer()
             except BaseException as settle_error:  # noqa: BLE001 - retain the primary failure
                 settled = False
-                primary.add_note(f"launcher writer settlement failed: {type(settle_error).__name__}")
+                _add_sanitized_cleanup_note(primary, "launcher writer settlement failed", settle_error)
         try:
-            raw, total_bytes = drain.finish()
             if settled:
+                raw, total_bytes = drain.finish()
                 _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=True)
-        except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
-            primary.add_note(f"launcher diagnostic capture failed: {capture_error}")
+            else:
+                drain.close_writer()
+        except BaseException as capture_error:  # noqa: BLE001 - preserve the primary failure
+            _add_sanitized_cleanup_note(primary, "launcher diagnostic capture failed", capture_error)
         if state_root is not None and not settled:
             for evidence_name, subject in (
                 (_ENGINE_STDERR_EVIDENCE_NAME, "engine stderr"),
@@ -1438,17 +1452,17 @@ def _launcher_log_capture(
             ):
                 try:
                     evidence.write_log(evidence_name, _UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER)
-                except Exception as refusal_error:  # noqa: BLE001 - preserve the primary failure
-                    primary.add_note(f"{subject} refusal capture failed: {refusal_error}")
+                except BaseException as refusal_error:  # noqa: BLE001 - preserve the primary failure
+                    _add_sanitized_cleanup_note(primary, f"{subject} refusal capture failed", refusal_error)
         elif state_root is not None:
             try:
                 _publish_engine_stderr(evidence, state_root)
-            except Exception as engine_error:  # noqa: BLE001 - preserve the primary failure
-                primary.add_note(f"engine stderr capture failed: {engine_error}")
+            except BaseException as engine_error:  # noqa: BLE001 - preserve the primary failure
+                _add_sanitized_cleanup_note(primary, "engine stderr capture failed", engine_error)
             try:
                 _publish_assistant_log(evidence, state_root)
-            except Exception as assistant_error:  # noqa: BLE001 - preserve the primary failure
-                primary.add_note(f"assistant log capture failed: {assistant_error}")
+            except BaseException as assistant_error:  # noqa: BLE001 - preserve the primary failure
+                _add_sanitized_cleanup_note(primary, "assistant log capture failed", assistant_error)
         raise
     else:
         raw, total_bytes = drain.finish()
