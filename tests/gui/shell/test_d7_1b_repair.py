@@ -2245,8 +2245,11 @@ def test_finished_shutdown_workers_unknown_outcome_is_reconciled_before_release(
     assert launcher._engine_shutdown_worker is None, "the drained worker may be released"
     assert launcher._engine_shutdown_transport_identity is None
     assert launcher._engine_shutdown_receipt == {"ok": True}, "the late reply must survive for validation"
+    assert getattr(launcher, "_engine_shutdown_receipt_rejected", False) is True, (
+        "the reconciled reply reached the real stop-path validator in this same pass and was refused"
+    )
     assert launcher._engine_instance_id == "a" * 32, "reconciliation alone cannot retire the owner"
-    assert "exact validation" in launcher._engine_shutdown_hold_reason
+    assert "missing or mismatched" in launcher._engine_shutdown_hold_reason
 
 
 @pytest.mark.parametrize(("returncode", "settles"), [(0, True), (9, False)])
@@ -4026,6 +4029,123 @@ def test_health_tick_validates_a_finished_worker_receipt_before_retirement() -> 
     assert launcher._restart_attempts == 0
     assert single_shot.call_count == 1, "only the settlement delivery tick was scheduled -- no replacement, no retry"
     assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
+
+
+@pytest.mark.parametrize(
+    ("reply_kind", "reconciled_reply_builder"),
+    [
+        ("valid-receipt", lambda: _exact_shutdown_receipt("d" * 32)),
+        ("malformed-reply", lambda: {"ok": True}),
+    ],
+)
+def test_health_tick_validates_the_reconciled_receipt_before_any_stable_hold_latch(
+    reply_kind: str,
+    reconciled_reply_builder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reconciled late reply must be validated before it can latch a stable HOLD.
+
+    With NO recorded request id, ``_handle_engine_exit``'s deferred-shutdown branch
+    refuses to continue the transaction (a worker without a recorded request id is
+    not this launcher's transaction to continue), so the observed terminal exit
+    falls through to the retryable observed-exit branch whose settler reconciles
+    the finished worker's unknown-outcome envelope into a concrete reply and
+    publishes it. Publishing WITHOUT validating handed
+    ``_refused_settlement_reaches_stable_hold`` an evidence shape it reads as final
+    beside a nonzero exit or a raising poll: ``_restart_giving_up`` latched while
+    the health gate stopped calling this handler at all -- foreclosing exactly the
+    promised next validation pass and leaving HOLD evidence forever claiming
+    validation was still owed. The settler must route the freshly reconciled reply
+    through the REAL receipt-aware stop path in the SAME pass, so the immutable-HOLD
+    predicate can only ever classify a validated or explicitly rejected receipt.
+
+    Falsification: reverting the settler to publishing the reconciled reply without
+    calling the stop path leaves ``_engine_shutdown_receipt_rejected`` False after
+    the first drive -- the reply never reached the production validator, the only
+    writer of that flag -- so the same-pass validation assertion fails in both
+    parametrized cases even though the giving-up latch itself still lands.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._stop_engine = MethodType(LauncherWindow._stop_engine, launcher)
+    bridge = MagicMock()
+    launcher._bridge = bridge
+    transport_request_id = "d" * 32
+    transport_generation = 5
+    reconciled_reply = reconciled_reply_builder()
+    bridge.reconcile_late_result.return_value = LateCommandResult(
+        request_id=transport_request_id,
+        generation=transport_generation,
+        reply=dict(reconciled_reply),
+    )
+    launcher._engine_shutdown_worker = _unknown_outcome_shutdown_worker(
+        transport_request_id,
+        transport_generation,
+    )
+    banners: list[str] = []
+    launcher._show_engine_down_banner = banners.append
+
+    with (
+        caplog.at_level("ERROR", logger="cryodaq.launcher"),
+        patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
+    ):
+        LauncherWindow._handle_engine_exit(launcher)
+
+        # First drive: reconciliation happened exactly once, and the freshly
+        # published reply was validated through the real stop path IN THIS PASS --
+        # the production validator inside _stop_engine is the flag's only writer.
+        assert bridge.reconcile_late_result.call_count == 1
+        bridge.reconcile_late_result.assert_called_once_with(
+            transport_request_id,
+            generation=transport_generation,
+        )
+        assert getattr(launcher, "_engine_shutdown_receipt_rejected", False) is True, (
+            f"{reply_kind}: the reconciled reply reached the real production validation before any latch"
+        )
+        minted_request_id = launcher._engine_shutdown_request_id
+        assert type(minted_request_id) is str and len(minted_request_id) == 32, (
+            "the stop path ran far enough to record its own request identity before refusing"
+        )
+        assert launcher._restart_giving_up is True, (
+            "a refused reconciled receipt beside a terminal nonzero exit is immutable under existing rules"
+        )
+        assert launcher._engine_shutdown_receipt == reconciled_reply, "the evidence stays retained verbatim"
+        assert launcher._engine_shutdown_worker is None, "the drained worker stays released"
+        assert launcher._engine_shutdown_transport_identity is None
+        assert launcher._engine_proc is not None, "the terminal handle stays retained"
+        assert launcher._engine_instance_id == "a" * 32, "no identity is released from the HOLD"
+        assert launcher._restart_attempts == 0, "no restart may be booked over unsettled evidence"
+        assert len(banners) == 1 and banners[0].startswith("HOLD"), banners
+
+        # Second real drive of the handler: the published transaction routes through
+        # the deferred receipt-aware branch, refuses again on the same evidence, and
+        # defers the crashed-child readers off this stack; the latch lands from the
+        # flight's settled callback. Nothing re-reconciles, re-dispatches, or books
+        # a replacement behind the stable HOLD.
+        LauncherWindow._handle_engine_exit(launcher)
+
+        state = getattr(launcher, "_engine_reader_settlement_state", None)
+        assert type(state) is dict, "the deferred machine owns the second refusal's reader settlement"
+        _drive_reader_settlement_to_completion(single_shot, [0], _SupervisionClock(), launcher)
+
+    assert launcher._restart_giving_up is True
+    assert getattr(launcher, "_engine_shutdown_receipt_rejected", False) is True, (
+        "rejected evidence is never mistaken for validated settlement"
+    )
+    assert launcher._engine_shutdown_receipt == reconciled_reply, "evidence survives the stable HOLD verbatim"
+    assert launcher._engine_proc is not None, "the terminal handle survives both drives"
+    assert launcher._engine_instance_id == "a" * 32
+    assert getattr(launcher, "_engine_unsettled_incarnation", None) is None, "no forced death was invented here"
+    assert launcher._restart_attempts == 0, "no replacement is scheduled over HOLD evidence"
+    assert single_shot.call_count == 1, (
+        "only the reader-settlement delivery tick was armed across both drives -- no restart callback"
+    )
+    assert bridge.reconcile_late_result.call_count == 1, (
+        "an irreversibly consumed reconciliation is never re-fabricated by a later pass"
+    )
+    bridge.send_command.assert_not_called()
+    assert len(banners) == 2 and all(banner.startswith("HOLD") for banner in banners), banners
 
 
 def test_health_tick_keeps_a_published_transport_identity_out_of_generic_retirement() -> None:

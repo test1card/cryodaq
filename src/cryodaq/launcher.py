@@ -3797,16 +3797,23 @@ class LauncherWindow(QMainWindow):
             # Reconciliation proves which transport request replied. It does not
             # prove that the reply is a valid engine-shutdown receipt or that the
             # child exited cleanly. Preserve the reply, release only the drained
-            # worker/transport slot, and let the normal receipt-aware stop path
-            # validate both properties on the next settlement pass.
+            # worker/transport slot, and hand it straight to the receipt-aware
+            # stop path in this same pass: an unvalidated published receipt beside
+            # a terminal or unobservable child would satisfy
+            # _refused_settlement_reaches_stable_hold, latch _restart_giving_up,
+            # and foreclose the very validation pass this publication promised --
+            # the health gate would never reach the handler again.
             self._engine_shutdown_receipt = dict(late_result.reply)
             self._engine_shutdown_transport_identity = None
             self._engine_shutdown_transport_identity_awaited = None
             self._engine_shutdown_worker = None
-            self._engine_shutdown_hold_reason = (
-                "the shutdown command was reconciled, but its receipt and process exit still require exact validation"
-            )
-            return False
+            try:
+                LauncherWindow._stop_engine(self)
+            except Exception as exc:
+                if getattr(self, "_engine_shutdown_hold_reason", None) is None:
+                    self._engine_shutdown_hold_reason = str(exc)
+                return False
+            return True
         try:
             LauncherWindow._stop_engine(self)
         except Exception as exc:
