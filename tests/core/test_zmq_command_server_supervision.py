@@ -11,6 +11,7 @@ import os
 import socket
 import stat
 import sys
+import types
 from dataclasses import MISSING, fields
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -427,6 +428,13 @@ def test_engine_consumes_shutdown_authority_before_descendant_environment_snapsh
 def test_engine_main_consumes_authority_before_force_child_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Launch authority must leave the environment before --force snapshots it
+    for engine-owned children, and the launcher-owned POSIX fd-2 bootstrap must
+    sit between that consumption and logging init. The bootstrap itself is only
+    observed here (stubbed module recording its invocation) so the recorded
+    startup sequence proves the ordering on every host without installing
+    isolation into the pytest process; the real installer stays covered by the
+    subprocess guards in tests/integration/test_launcher_fd2_shutdown_blocker.py."""
     import cryodaq.engine as engine_module
     import cryodaq.logging_setup as logging_setup
 
@@ -436,6 +444,7 @@ def test_engine_main_consumes_authority_before_force_child_environment(
     force_environments: list[dict[str, str]] = []
     force_channel_inheritable: list[bool] = []
     run_arguments: list[tuple[bool, str, str, str, int]] = []
+    startup_events: list[str] = []
     read_fd, write_fd = os.pipe()
     os.set_inheritable(write_fd, True)
     monkeypatch.setenv("CRYODAQ_ENGINE_INSTANCE_ID", instance_id)
@@ -447,16 +456,32 @@ def test_engine_main_consumes_authority_before_force_child_environment(
         "parse_args",
         lambda _self: SimpleNamespace(mock=True, mock_thermal_simulator=None, force=True),
     )
-    monkeypatch.setattr(logging_setup, "setup_logging", lambda *_args, **_kwargs: None)
+
+    def observe_setup_logging(*_args: object, **_kwargs: object) -> None:
+        startup_events.append("setup_logging")
+
+    monkeypatch.setattr(logging_setup, "setup_logging", observe_setup_logging)
     monkeypatch.setattr(logging_setup, "resolve_log_level", lambda: logging.INFO)
 
     def observe_force_environment() -> None:
         force_environments.append(os.environ.copy())
         force_channel_inheritable.append(os.get_inheritable(write_fd))
+        startup_events.append("force_environment_snapshot")
+
+    fd2_bootstrap_stub = types.ModuleType("cryodaq._fd2_bootstrap")
+
+    def record_fd2_bootstrap_installation() -> None:
+        startup_events.append("fd2_bootstrap_installed")
+
+    fd2_bootstrap_stub.isolate_launcher_stderr_fd2 = record_fd2_bootstrap_installation
+    monkeypatch.setitem(sys.modules, "cryodaq._fd2_bootstrap", fd2_bootstrap_stub)
 
     monkeypatch.setattr(engine_module, "_force_kill_existing", observe_force_environment)
     monkeypatch.setattr(engine_module, "_acquire_engine_lock", lambda: 17)
     monkeypatch.setattr(engine_module, "_release_engine_lock", lambda _fd: None)
+    # The gate decision must stay host-independent here: with a complete
+    # envelope on a POSIX-marked platform it authorizes isolation before any
+    # descendant can spawn, exactly as the launcher-owned child runs.
     monkeypatch.setattr(engine_module.sys, "platform", "linux")
 
     async def fake_run_engine(
@@ -474,6 +499,7 @@ def test_engine_main_consumes_authority_before_force_child_environment(
         run_arguments.append(
             (mock, engine_instance_id, shutdown_capability, engine_ready_nonce, engine_ready_channel_fd)
         )
+        startup_events.append("engine_run")
         os.close(engine_ready_channel_fd)
 
     monkeypatch.setattr(engine_module, "_run_engine", fake_run_engine)
@@ -484,6 +510,12 @@ def test_engine_main_consumes_authority_before_force_child_environment(
         os.close(read_fd)
 
     assert run_arguments == [(True, instance_id, capability, ready_nonce, write_fd)]
+    assert startup_events == [
+        "fd2_bootstrap_installed",
+        "setup_logging",
+        "force_environment_snapshot",
+        "engine_run",
+    ]
     assert len(force_environments) == 1
     assert force_channel_inheritable == [False]
     force_environment = force_environments[0]

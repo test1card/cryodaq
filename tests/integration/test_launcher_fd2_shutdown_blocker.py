@@ -104,6 +104,7 @@ class _SimulantRun:
     capture: _CaptureRecordsHandler
     prior_propagate: bool
     launch_pipe_inode: int | None = field(default=None)
+    reader_thread: threading.Thread | None = None
 
 
 def _simulant_base_env(tmp_path: Path) -> dict[str, str]:
@@ -266,6 +267,28 @@ def _detach_pump(run: _SimulantRun, pump_logger: logging.Logger) -> None:
     pump_logger.propagate = run.prior_propagate
 
 
+def _settle_exact_pipes(run: _SimulantRun) -> None:
+    """Settle every exact pipe owner in the production teardown order.
+
+    Mirrors launcher._close_engine_stderr_stream: the joined pump has already
+    settled the exact stream owner, so the raw acquisition owner settles next,
+    then the drained stdout handle closes only after its marker reader reached
+    EOF. Every step is bounded; a surviving owner fails here instead of leaking
+    an unclosed BufferedReader into test finalization.
+    """
+    if run.reader_thread is not None:
+        run.reader_thread.join(_EOF_BUDGET_S)
+        assert not run.reader_thread.is_alive(), "marker reader never reached EOF; stdout stayed owned"
+    run.acquisition_owner.settle()
+    assert run.acquisition_owner.settlement_state is _OwnerSettlementState.SETTLED
+    for stream in (run.process.stdout, run.process.stderr):
+        if stream is not None and not stream.closed:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
 def _spawn_simulant(env: dict[str, str], inherit_ready_fd: int | None = None) -> subprocess.Popen[bytes]:
     extra_spawn_arguments: dict[str, Any] = {}
     if inherit_ready_fd is not None:
@@ -371,8 +394,9 @@ def _run_blocker_scenario(
                 os.close(descriptor)
             except OSError:
                 pass
-    marker_lines, _reader_thread = _start_line_reader(process.stdout)
+    marker_lines, marker_reader = _start_line_reader(process.stdout)
     run, pump_logger = _attach_pump(process)
+    run.reader_thread = marker_reader
     try:
         run.marker = _await_marker_or_fail_child(marker_lines, process)
         if _LINUX:
@@ -385,7 +409,11 @@ def _run_blocker_scenario(
         except subprocess.TimeoutExpired:
             run.process.kill()
             run.process.wait(timeout=5)
+        if run.pump_thread.ident is not None:
+            run.pump_thread.join(_SETTLEMENT_TIMEOUT_S)
+        _cleanup_descendants(run)
         _detach_pump(run, pump_logger)
+        _settle_exact_pipes(run)
         raise
     return run, pump_logger
 
@@ -394,14 +422,14 @@ def _settle_scenario_after_kill(run: _SimulantRun, pump_logger: logging.Logger) 
     started = time.monotonic()
     run.pump_thread.join(_EOF_BUDGET_S + 0.5)
     elapsed = time.monotonic() - started
-    try:
-        run.process.stdout.close()
-    except OSError:
-        pass
-    try:
-        run.process.stderr.close()
-    except OSError:
-        pass
+    # The launcher pump settles only the exact stream owner; production settles
+    # the raw acquisition owner separately, after joining that settled pump
+    # thread (_close_engine_stderr_stream). Mirror that exact teardown here
+    # instead of expecting the pump to have done it. The marker-reader stdout
+    # handle settles in the caller's finally (_settle_exact_pipes) once every
+    # descendant is dead and its EOF is certain.
+    run.acquisition_owner.settle()
+    assert run.acquisition_owner.settlement_state is _OwnerSettlementState.SETTLED
     run.process.wait(timeout=5)
     _detach_pump(run, pump_logger)
     return elapsed
@@ -485,6 +513,7 @@ def test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds
         _cleanup_descendants(run)
         run.pump_thread.join(_SETTLEMENT_TIMEOUT_S)
         _detach_pump(run, pump_logger)
+        _settle_exact_pipes(run)
 
 
 @pytest.mark.skipif(not _LINUX, reason="mutation control requires Linux /proc and POSIX fd semantics")
@@ -534,6 +563,7 @@ def test_control_leaving_fd2_attached_must_fail_detected_as_leak(tmp_path: Path)
         assert not run.pump_thread.is_alive(), "pump did not settle even after every descendant was killed"
         assert run.stream_owner.settlement_state is _OwnerSettlementState.SETTLED
         _detach_pump(run, pump_logger)
+        _settle_exact_pipes(run)
 
 
 @pytest.mark.skipif(not _LINUX, reason="mutation control requires Linux /proc and POSIX fd semantics")
@@ -564,14 +594,16 @@ def test_control_exposing_private_fileno_must_fail_detected_as_leak(tmp_path: Pa
         assert not run.pump_thread.is_alive(), "pump did not settle even after the preserving consumer was killed"
         assert run.stream_owner.settlement_state is _OwnerSettlementState.SETTLED
         _detach_pump(run, pump_logger)
+        _settle_exact_pipes(run)
 
 
 def test_direct_cli_engine_child_keeps_stderr_attached_to_launch_pipe(tmp_path: Path) -> None:
     env = _simulant_base_env(tmp_path)
     env[EXIT_AFTER_MARKER_ENV] = "1"
     process = _spawn_simulant(env)
-    marker_lines, _reader_thread = _start_line_reader(process.stdout)
+    marker_lines, marker_reader = _start_line_reader(process.stdout)
     run, pump_logger = _attach_pump(process)
+    run.reader_thread = marker_reader
     try:
         run.marker = _await_marker_or_fail_child(marker_lines, process)
         run.pump_thread.start()
@@ -591,6 +623,7 @@ def test_direct_cli_engine_child_keeps_stderr_attached_to_launch_pipe(tmp_path: 
             process.wait(timeout=5)
         run.pump_thread.join(_SETTLEMENT_TIMEOUT_S)
         _detach_pump(run, pump_logger)
+        _settle_exact_pipes(run)
 
 
 @pytest.mark.skipif(not _WINDOWS, reason="Windows-unchanged guard runs only on win32")
@@ -608,8 +641,9 @@ def test_windows_launcher_owned_engine_child_remains_unisolated(tmp_path: Path) 
                 os.close(descriptor)
             except OSError:
                 pass
-    marker_lines, _reader_thread = _start_line_reader(process.stdout)
+    marker_lines, marker_reader = _start_line_reader(process.stdout)
     run, pump_logger = _attach_pump(process)
+    run.reader_thread = marker_reader
     try:
         run.marker = _await_marker_or_fail_child(marker_lines, process)
         run.pump_thread.start()
@@ -624,6 +658,7 @@ def test_windows_launcher_owned_engine_child_remains_unisolated(tmp_path: Path) 
             process.wait(timeout=5)
         run.pump_thread.join(_SETTLEMENT_TIMEOUT_S)
         _detach_pump(run, pump_logger)
+        _settle_exact_pipes(run)
 
 
 def test_engine_gate_requires_complete_envelope_and_non_windows(monkeypatch: pytest.MonkeyPatch) -> None:
