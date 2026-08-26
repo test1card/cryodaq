@@ -85,6 +85,12 @@ _AUTHORITY_KEY_PREFIXES = (
 )
 
 
+def _require_linux_proc_guard_runtime() -> None:
+    """Fail loud when a registered POSIX guard cannot inspect procfs."""
+
+    assert _LINUX, "registered POSIX fd-2 guard requires Linux /proc; unsupported POSIX must fail, not skip"
+
+
 class _CaptureRecordsHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
@@ -463,8 +469,9 @@ def _assert_probe_reached_launcher_pipe(run: _SimulantRun) -> None:
     _wait_for_pump_stderr_record(run, _MARKER_TIMEOUT_S)
 
 
-@pytest.mark.skipif(not _LINUX, reason="external-effect guard requires Linux /proc and POSIX fd semantics")
+@pytest.mark.skipif(not _POSIX, reason="external-effect guard requires POSIX fd semantics")
 def test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds(tmp_path: Path) -> None:
+    _require_linux_proc_guard_runtime()
     run, pump_logger = _run_blocker_scenario(tmp_path, install_isolation=True, expose_fileno=False)
     try:
         marker = run.marker
@@ -516,8 +523,9 @@ def test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds
         _settle_exact_pipes(run)
 
 
-@pytest.mark.skipif(not _LINUX, reason="mutation control requires Linux /proc and POSIX fd semantics")
+@pytest.mark.skipif(not _POSIX, reason="mutation control requires POSIX fd semantics")
 def test_control_leaving_fd2_attached_must_fail_detected_as_leak(tmp_path: Path) -> None:
+    _require_linux_proc_guard_runtime()
     run, pump_logger = _run_blocker_scenario(tmp_path, install_isolation=False, expose_fileno=False)
     try:
         marker = run.marker
@@ -566,8 +574,9 @@ def test_control_leaving_fd2_attached_must_fail_detected_as_leak(tmp_path: Path)
         _settle_exact_pipes(run)
 
 
-@pytest.mark.skipif(not _LINUX, reason="mutation control requires Linux /proc and POSIX fd semantics")
+@pytest.mark.skipif(not _POSIX, reason="mutation control requires POSIX fd semantics")
 def test_control_exposing_private_fileno_must_fail_detected_as_leak(tmp_path: Path) -> None:
+    _require_linux_proc_guard_runtime()
     run, pump_logger = _run_blocker_scenario(tmp_path, install_isolation=True, expose_fileno=True)
     try:
         marker = run.marker
