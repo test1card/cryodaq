@@ -1500,6 +1500,35 @@ def _add_sanitized_cleanup_note(primary: BaseException, subject: str, error: Bas
         pass
 
 
+class _CleanupFailureAccumulator:
+    """Attempt every cleanup while retaining the authoritative exception."""
+
+    def __init__(self, primary: BaseException | None) -> None:
+        self._primary = primary
+        self._first_cleanup_failure: BaseException | None = None
+
+    def attempt(self, subject: str, action: Callable[[], object]) -> bool:
+        """Run one cleanup action and retain only type-safe secondary evidence."""
+
+        try:
+            action()
+        except BaseException as cleanup_error:  # noqa: BLE001 - cleanup is attempt-all
+            if self._primary is not None:
+                _add_sanitized_cleanup_note(self._primary, subject, cleanup_error)
+            elif self._first_cleanup_failure is None:
+                self._first_cleanup_failure = cleanup_error
+            else:
+                _add_sanitized_cleanup_note(self._first_cleanup_failure, subject, cleanup_error)
+            return False
+        return True
+
+    def raise_if_no_primary(self) -> None:
+        """Raise the first cleanup failure only when no run failure owns the exit."""
+
+        if self._primary is None and self._first_cleanup_failure is not None:
+            raise self._first_cleanup_failure
+
+
 @contextmanager
 def _launcher_log_capture(
     evidence: Any,
@@ -5130,21 +5159,7 @@ class _PosixSoakRunner:
         finally:
             primary_info = sys.exc_info()
             primary = sys.exception()
-            cleanup_failure: BaseException | None = None
-
-            def attempt_cleanup(subject: str, action: Callable[[], object]) -> bool:
-                nonlocal cleanup_failure
-                try:
-                    action()
-                except BaseException as cleanup_error:  # noqa: BLE001 - cleanup is attempt-all
-                    if primary is not None:
-                        _add_sanitized_cleanup_note(primary, subject, cleanup_error)
-                    elif cleanup_failure is None:
-                        cleanup_failure = cleanup_error
-                    else:
-                        _add_sanitized_cleanup_note(cleanup_failure, subject, cleanup_error)
-                    return False
-                return True
+            cleanup = _CleanupFailureAccumulator(primary)
 
             with _block_termination_signals():
                 if process is not None and launcher_identity is not None and not launcher_settled:
@@ -5164,22 +5179,21 @@ class _PosixSoakRunner:
                                 deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
                             )
 
-                    if attempt_cleanup("final launcher settlement failed", settle_launcher):
+                    if cleanup.attempt("final launcher settlement failed", settle_launcher):
                         launcher_settled = True
                 if sink is not None:
-                    attempt_cleanup("artifact receipt sink cleanup failed", sink.close)
+                    cleanup.attempt("artifact receipt sink cleanup failed", sink.close)
                 if artifact_pair is not None:
-                    attempt_cleanup("artifact capability pair cleanup failed", artifact_pair.close)
+                    cleanup.attempt("artifact capability pair cleanup failed", artifact_pair.close)
                 if bridge_pipe is not None:
-                    attempt_cleanup("bridge handshake pipe cleanup failed", bridge_pipe.close)
+                    cleanup.attempt("bridge handshake pipe cleanup failed", bridge_pipe.close)
                 if source_temporary is not None and (process is None or launcher_settled):
-                    attempt_cleanup("source temporary cleanup failed", source_temporary.cleanup)
-                attempt_cleanup(
+                    cleanup.attempt("source temporary cleanup failed", source_temporary.cleanup)
+                cleanup.attempt(
                     "source snapshot cleanup failed",
                     lambda: source_snapshot_context.__exit__(*primary_info),
                 )
-                if primary is None and cleanup_failure is not None:
-                    raise cleanup_failure
+                cleanup.raise_if_no_primary()
 
         collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
         survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)

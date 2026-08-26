@@ -496,6 +496,48 @@ def test_post_settlement_baseexception_cannot_replace_primary(
         assert evidence.logs[successful_name] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
 
 
+def test_cleanup_failure_accumulator_retains_first_without_primary_and_attempts_all() -> None:
+    """No-primary teardown retains its first exact failure and sanitizes later failures."""
+
+    class FirstCleanupFailure(BaseException):
+        pass
+
+    class SecondCleanupFailure(BaseException):
+        pass
+
+    calls: list[str] = []
+    first = FirstCleanupFailure("FIRST CLEANUP SECRET DETAIL")
+    second = SecondCleanupFailure("SECOND CLEANUP SECRET DETAIL")
+    cleanup = runner._CleanupFailureAccumulator(primary=None)
+
+    def fail_first() -> None:
+        calls.append("first")
+        raise first
+
+    def fail_second() -> None:
+        calls.append("second")
+        raise second
+
+    def finish_third() -> None:
+        calls.append("third")
+
+    assert not cleanup.attempt("first owner cleanup failed", fail_first)
+    assert not cleanup.attempt("second owner cleanup failed", fail_second)
+    assert cleanup.attempt("third owner cleanup failed", finish_third)
+
+    with pytest.raises(FirstCleanupFailure) as caught:
+        cleanup.raise_if_no_primary()
+
+    assert calls == ["first", "second", "third"]
+    assert caught.value is first
+    assert type(caught.value) is FirstCleanupFailure
+    assert str(caught.value) == "FIRST CLEANUP SECRET DETAIL"
+    notes = tuple(getattr(caught.value, "__notes__", ()))
+    assert notes == ("second owner cleanup failed: SecondCleanupFailure",)
+    assert "FIRST CLEANUP SECRET DETAIL" not in "\n".join(notes)
+    assert "SECOND CLEANUP SECRET DETAIL" not in "\n".join(notes)
+
+
 @pytest.mark.parametrize(
     ("cleanup_boundary", "final_settlement_fails"),
     (
