@@ -256,11 +256,16 @@ def test_observed_owned_live_engine_exit_latches_hold_before_reaping() -> None:
     calls: list[str] = []
     launcher = _exited_owned_launcher(calls, 9)
 
+    process = launcher._engine_proc
     with (
         patch("cryodaq.launcher.time.monotonic", return_value=10.0),
         patch("cryodaq.launcher.QTimer.singleShot") as single_shot,
     ):
         LauncherWindow._handle_engine_exit(launcher)
+        assert launcher._engine_proc is process
+        state = launcher._engine_reader_settlement_state
+        assert state["done"].wait(1.0)
+        single_shot.call_args.args[1]()
 
     # Exit observation and authority invalidation precede reaping, but process
     # death never authorizes replacement of the live source.
@@ -271,7 +276,7 @@ def test_observed_owned_live_engine_exit_latches_hold_before_reaping() -> None:
     assert launcher._restart_attempts == 0
     assert launcher._engine_proc is None
     assert calls.count("close_stream") == 1
-    single_shot.assert_not_called()
+    single_shot.assert_called_once()
 
 
 def test_observed_owned_engine_exit_names_the_incarnation_and_code_in_the_log(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -131,17 +132,22 @@ def test_owned_live_observed_exit_latches_permanent_hold_before_reaping():
     w._engine_instance_id = "a" * 32
     w._engine_shutdown_capability = "b" * 64
 
+    process = w._engine_proc
     with patch("cryodaq.launcher.QTimer") as mock_qtimer:
         with patch("cryodaq.launcher.time") as mock_time:
             mock_time.monotonic.return_value = 0.0
             LauncherWindow._handle_engine_exit(w)
+            assert w._engine_proc is process
+            state = w._engine_reader_settlement_state
+            assert state["done"].wait(1.0)
+            mock_qtimer.singleShot.call_args.args[1]()
 
     assert w._engine_unsettled_incarnation == ("a" * 32, 1)
     assert w._restart_giving_up is True
     assert w._restart_pending is False
     assert w._restart_attempts == 50
     assert w._engine_proc is None
-    mock_qtimer.singleShot.assert_not_called()
+    mock_qtimer.singleShot.assert_called_once()
     w._start_engine.assert_not_called()
 
 
@@ -278,6 +284,102 @@ def test_live_invalidation_failure_cannot_be_cleared_by_manual_restart() -> None
     w._start_engine.assert_not_called()
     w._bridge.start.assert_not_called()
     assert w._invalidate_engine_producer.call_count == 1
+
+
+def test_clean_pre_spawn_live_restart_recovery_stays_operator_retryable() -> None:
+    """A settled old child plus recovered bridge cleanup is not an unknown live loss."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=None)
+    w._replay_source = None
+    w._mock = False
+    w._engine_proc = None
+    w._engine_instance_id = None
+    w._engine_shutdown_capability = None
+    w._engine_shutdown_request_id = None
+    w._engine_shutdown_transport_identity = None
+    w._engine_shutdown_receipt = None
+    w._stop_engine = MagicMock()
+    w._bridge.shutdown.side_effect = [RuntimeError("first bridge shutdown failed"), None, None]
+
+    with patch("cryodaq.launcher.QTimer") as mock_qtimer, patch("cryodaq.launcher.time.sleep"):
+        LauncherWindow._restart_engine(w)
+
+        assert w._engine_unsettled_incarnation is None
+        assert w._restart_giving_up is True
+        assert w._restart_pending is False
+        w._start_engine.assert_not_called()
+        w._bridge.start.assert_not_called()
+        mock_qtimer.singleShot.assert_not_called()
+
+        # The first attempt settled the commanded stop and bridge cleanup. The
+        # operator may explicitly retry; no unknown incarnation was invented.
+        LauncherWindow._restart_engine(w)
+
+    w._start_engine.assert_called_once_with()
+    w._bridge.start.assert_called_once_with()
+    assert w._bridge.shutdown.call_count == 3
+    assert w._engine_unsettled_incarnation is None
+    assert w._restart_giving_up is False
+
+
+def test_live_hold_reader_settlement_returns_before_blocked_reader_close() -> None:
+    """The Qt health callback must not join terminal-child readers inline."""
+    from cryodaq.launcher import LauncherWindow
+
+    w = _make_launcher_mock(returncode=9)
+    w._replay_source = None
+    w._mock = False
+    w._engine_instance_id = "a" * 32
+    w._engine_shutdown_capability = "b" * 64
+    w._engine_reader_settlement_state = None
+    process = w._engine_proc
+    close_started = threading.Event()
+    release_close = threading.Event()
+    callback_returned = threading.Event()
+    callback_failures: list[BaseException] = []
+
+    def _blocked_close() -> None:
+        close_started.set()
+        if not release_close.wait(2.0):
+            raise RuntimeError("test did not release reader settlement")
+
+    def _invoke_health_callback() -> None:
+        try:
+            LauncherWindow._handle_engine_exit(w)
+        except BaseException as exc:  # the test must release the blocker before reporting
+            callback_failures.append(exc)
+        finally:
+            callback_returned.set()
+
+    w._close_engine_stderr_stream.side_effect = _blocked_close
+    callback_thread = threading.Thread(target=_invoke_health_callback, daemon=True)
+    try:
+        with patch("cryodaq.launcher.QTimer") as mock_qtimer:
+            callback_thread.start()
+            assert close_started.wait(1.0), "the production reader-close side effect must run"
+            returned_while_close_blocked = callback_returned.wait(0.25)
+            handle_retained_while_close_blocked = w._engine_proc is process
+            release_close.set()
+            callback_thread.join(timeout=1.0)
+
+            state = getattr(w, "_engine_reader_settlement_state", None)
+            if type(state) is dict:
+                assert state["done"].wait(1.0)
+                mock_qtimer.singleShot.call_args.args[1]()
+    finally:
+        release_close.set()
+        callback_thread.join(timeout=1.0)
+
+    assert callback_failures == []
+    assert returned_while_close_blocked, "the Qt callback waited for the reader close"
+    assert handle_retained_while_close_blocked
+    assert w._engine_proc is None
+    assert w._engine_unsettled_incarnation == ("a" * 32, 9)
+    assert w._restart_giving_up is True
+    w._close_engine_stderr_stream.assert_called_once_with()
+    w._start_engine.assert_not_called()
+    w._bridge.start.assert_not_called()
 
 
 def test_retryable_exit_reader_settlement_failure_retains_owner_and_blocks_restart() -> None:

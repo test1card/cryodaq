@@ -5762,6 +5762,35 @@ class LauncherWindow(QMainWindow):
             )
             return False
 
+        clean_live_prespawn_retry = (
+            not child_start_attempted
+            and phase == "old-bridge-settlement"
+            and getattr(self, "_replay_source", None) is None
+            and getattr(self, "_mock", None) is not True
+            and getattr(self, "_engine_proc", None) is None
+            and getattr(self, "_engine_unsettled_incarnation", None) is None
+        )
+        if clean_live_prespawn_retry:
+            # The operator-driven path already completed _stop_engine before
+            # its first bridge shutdown failed. The recovery pass above has now
+            # settled that bridge too, and no replacement child was started.
+            # Re-entering the generic observed-loss classifier would invent an
+            # unknown live incarnation from this deliberately empty slot and
+            # turn a retryable pre-spawn failure into permanent HOLD.
+            logger.error(
+                "Engine manual restart stopped before replacement spawn after exact cleanup; "
+                "phase=%s failure=%s; operator retry remains available",
+                phase,
+                type(failure).__name__,
+            )
+            self._restart_giving_up = True
+            self._show_engine_down_banner(
+                "Engine restart stopped before spawning a replacement. The old engine and bridge are settled; "
+                "press «Перезапустить Engine» to retry."
+            )
+            self._data_timer.start()
+            self._health_timer.start()
+            return False
         logger.error(
             "Engine restart phase failed after exact cleanup; phase=%s failure=%s; scheduling bounded retry",
             phase,
@@ -7963,15 +7992,26 @@ class LauncherWindow(QMainWindow):
                 "HOLD: live-source I/O settlement cannot be proven. Automatic and manual restart "
                 "remain blocked pending independent recovery proof."
             )
-            if getattr(self, "_engine_proc", None) is not None:
-                try:
-                    LauncherWindow._reap_unsettled_engine_process(
-                        self,
-                        owner_id=preserved_id,
+            if process is not None and getattr(self, "_engine_proc", None) is process:
+                # The process is already terminal, but its readiness/stderr
+                # readers can still be draining. Their bounded joins and
+                # handler flush must not run on this Qt health callback. Keep
+                # the permanent live-source HOLD and exact handle published;
+                # the deferred worker releases only this captured handle after
+                # the exact reader settlement finishes.
+                def _release_live_hold_after_readers() -> None:
+                    if getattr(self, "_engine_proc", None) is process:
+                        self._engine_proc = None
+                    logger.error(
+                        "Live-source HOLD readers settled off the Qt callback; "
+                        "phase=owned-exit owner=%s code=%s -- permanent HOLD remains",
+                        preserved_id,
+                        returncode,
                     )
-                except Exception as exc:
+
+                def _on_live_hold_reader_failure(exc: Exception) -> None:
                     logger.critical(
-                        "Engine process reaping failed in HOLD; phase=owned-exit owner=%s exception=%s",
+                        "Engine reader settlement failed in live-source HOLD; phase=owned-exit owner=%s exception=%s",
                         preserved_id,
                         type(exc).__name__,
                     )
@@ -7979,6 +8019,14 @@ class LauncherWindow(QMainWindow):
                         "HOLD: engine ownership is unsafe and its process/readers remain unsettled. "
                         "Restart and launcher exit are blocked."
                     )
+
+                LauncherWindow._begin_deferred_engine_reader_settlement(
+                    self,
+                    phase="owned-live-exit-hold",
+                    owner_id=preserved_id,
+                    on_settled=_release_live_hold_after_readers,
+                    on_failed=_on_live_hold_reader_failure,
+                )
             return
 
         # Retry forever: backoff caps at the last slot (120s), no give-up.
