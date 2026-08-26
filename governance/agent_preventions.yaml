@@ -111,10 +111,10 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
-    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_after_ready
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_during_post_parent_kill_cleanup
     ci_partition: remaining
     platform: posix
-    red_evidence: after_READY_a_pidfd_poll_error_left_the_pinned_child_live_until_the_control_observed_that_side_effect_directly_2026_08_26_pending_immutable_capture
+    red_evidence: after_parent_kill_the_cleanup_polled_before_pidfd_SIGKILL_so_an_injected_poll_error_skipped_the_kill_and_entered_unbounded_waitpid_for_the_live_600_second_child_2026_08_27_pending_immutable_capture
     green_evidence: pending
   - id: USBTMC-PREBINDER-REPARENT-EXTERNAL-EFFECT-FALSE-GREEN-008
     status: open
@@ -5065,7 +5065,7 @@ records:
     guard_owner: primary
     disposition_owner: reviewer
     consequence: Cancellation can clear ownership while an I/O or close operation remains live, and an abruptly dead engine can leave a source-owning VISA worker alive past the OFF a replacement engine commands.
-    invariant: Incomplete close retains one bounded recovery owner and visible HOLD until the handle is exactly settled. The source-owning VISA worker binds its lifetime to the engine-captured parent -- Linux prctl PR_SET_PDEATHSIG carrying exactly SIGKILL with a post-call parent re-check and a refuse-unbound failure direction -- while platforms without an equivalent binding stay explicitly open gates that start no fake guarantee. The lifecycle harness pins and settles each exact child on every error after spawn, including pidfd setup and poll failures, and its production-path guard reaches the real USBTMC process constructor. This evidence proves process lifetime only; it does not prove USB transaction settlement, physical OFF, or restart authority.
+    invariant: Incomplete close retains one bounded recovery owner and visible HOLD until the handle is exactly settled. The source-owning VISA worker binds its lifetime to the engine-captured parent -- Linux prctl PR_SET_PDEATHSIG carrying exactly SIGKILL with a post-call parent re-check and a refuse-unbound failure direction -- while platforms without an equivalent binding stay explicitly open gates that start no fake guarantee. The lifecycle harness pins and settles each exact child on every error after spawn, including pidfd setup and post-parent-kill poll failures; cleanup attempts exact-identity SIGKILL before any fallible poll and reaps the adopted child within a fixed deadline. Its production-path guard reaches the real USBTMC process constructor. This evidence proves process lifetime only; it does not prove USB transaction settlement, physical OFF, or restart authority.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -5099,7 +5099,7 @@ records:
       - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_setup_fails_after_spawn
         ci_partition: remaining
         platform: posix
-      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_after_ready
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_during_post_parent_kill_cleanup
         ci_partition: remaining
         platform: posix
       - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_production_settle_process_open_worker_cannot_survive_killed_parent

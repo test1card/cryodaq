@@ -151,14 +151,21 @@ def _set_child_subreaper(enabled: bool) -> bool:
     return previous_enabled
 
 
-def _reap_adopted_child(child_pid: int) -> None:
-    """Wait for the exact orphan adopted after its deliberately killed parent."""
+def _reap_adopted_child(child_pid: int, *, timeout: float = 10.0) -> None:
+    """Reap the exact adopted orphan within a fixed deadline."""
 
-    try:
-        reaped_pid, _status = os.waitpid(child_pid, 0)
-    except ChildProcessError as exc:
-        raise AssertionError(f"spawned child {child_pid} was not adopted for exact reap") from exc
-    assert reaped_pid == child_pid, f"waitpid reaped {reaped_pid}, expected exact child {child_pid}"
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            reaped_pid, _status = os.waitpid(child_pid, os.WNOHANG)
+        except ChildProcessError as exc:
+            raise AssertionError(f"spawned child {child_pid} was not adopted for exact reap") from exc
+        if reaped_pid == child_pid:
+            return
+        assert reaped_pid == 0, f"waitpid reaped {reaped_pid}, expected exact child {child_pid}"
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"spawned child {child_pid} was not reaped within {timeout:.1f}s")
+        time.sleep(0.05)
 
 
 def _restore_child_subreaper(previous: bool) -> None:
@@ -535,11 +542,13 @@ def _spawned_child_survives_killed_parent(
         # handles the cleanup command itself.
         if child_pidfd is not None:
             try:
-                if not _identity_exited(child_pidfd):
-                    try:
-                        _signal_via_identity(child_pidfd, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                # Never put a fallible poll in front of the exact-identity kill. A pidfd
+                # SIGKILL is safe even when the process exited concurrently (ESRCH), while
+                # a failed readiness poll must not strand a still-live 600-second child.
+                try:
+                    _signal_via_identity(child_pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 if not _wait_for_identity_exit(child_pidfd, timeout=10.0):
                     raise AssertionError(f"spawned child {child_pid} did not reach exact pidfd settlement")
             except BaseException as exc:
@@ -574,7 +583,13 @@ def _spawned_child_survives_killed_parent(
             raise AssertionError(f"lifecycle harness cleanup failed: {details}") from cleanup_errors[0]
 
 
-def _child_survives_a_killed_parent(tmp_path: Path, *, bound: bool, busy: str) -> bool:
+def _child_survives_a_killed_parent(
+    tmp_path: Path,
+    *,
+    bound: bool,
+    busy: str,
+    after_parent_kill: Callable[[], None] | None = None,
+) -> bool:
     """Kill a parent with SIGKILL and report whether its busy child outlived it."""
 
     parent_file = tmp_path / f"parent_{'bound' if bound else 'unbound'}_{abs(hash(busy))}.py"
@@ -586,7 +601,7 @@ def _child_survives_a_killed_parent(tmp_path: Path, *, bound: bool, busy: str) -
         ),
         encoding="utf-8",
     )
-    return _spawned_child_survives_killed_parent(parent_file)
+    return _spawned_child_survives_killed_parent(parent_file, after_parent_kill=after_parent_kill)
 
 
 def _assert_proof_pidfd_exited(pidfd: int, identity_exited) -> None:
@@ -662,38 +677,90 @@ def test_lifecycle_harness_reaps_exact_child_when_pidfd_setup_fails_after_spawn(
 
 
 @_LINUX_ONLY
-def test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_after_ready(
+def test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_during_post_parent_kill_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_stable_identity = _stable_identity
     real_identity_exited = _identity_exited
+    real_reap_adopted_child = _reap_adopted_child
+    real_signal_via_identity = _signal_via_identity
+    real_wait_for_identity_exit = _wait_for_identity_exit
     child_pidfds: list[int] = []
+    child_pids: list[int] = []
     proof_pidfds: list[int] = []
+    sigkill_attempts: list[int] = []
+    reaped_child_pids: list[int] = []
+    wait_calls = 0
+    cleanup_poll_armed = False
+    emergency_sigkill_required = False
     injected = False
 
     def recording_child_identity(pid: int) -> int:
         pidfd = real_stable_identity(pid)
         if pid != os.getpid():
             child_pidfds.append(pidfd)
+            child_pids.append(pid)
             proof_pidfds.append(os.dup(pidfd))
         return pidfd
 
-    def fail_first_child_poll(pidfd: int) -> bool:
+    def skip_main_settlement_then_poll_in_cleanup(pidfd: int, *, timeout: float) -> bool:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            return False
+        return real_wait_for_identity_exit(pidfd, timeout=timeout)
+
+    def fail_cleanup_poll(pidfd: int) -> bool:
         nonlocal injected
-        if child_pidfds and pidfd == child_pidfds[-1] and not injected:
+        if cleanup_poll_armed and child_pidfds and pidfd == child_pidfds[-1] and not injected:
             injected = True
-            raise OSError(errno.EIO, "injected pidfd poll failure after READY")
+            raise OSError(errno.EIO, "injected pidfd poll failure during post-parent-kill cleanup")
         return real_identity_exited(pidfd)
 
+    def arm_cleanup_poll() -> None:
+        nonlocal cleanup_poll_armed
+        cleanup_poll_armed = True
+
+    def recording_signal(pidfd: int, sig: int) -> None:
+        if child_pidfds and pidfd == child_pidfds[-1] and sig == signal.SIGKILL:
+            sigkill_attempts.append(pidfd)
+        real_signal_via_identity(pidfd, sig)
+
+    def recording_reap(child_pid: int) -> None:
+        nonlocal emergency_sigkill_required
+        if not sigkill_attempts:
+            # Keep the red control bounded even when the pre-fix cleanup skips SIGKILL
+            # and enters blocking waitpid(child_pid, 0). This emergency signal bypasses
+            # the recorder so it cannot satisfy the side-effect assertion below.
+            emergency_sigkill_required = True
+            real_signal_via_identity(proof_pidfds[0], signal.SIGKILL)
+        real_reap_adopted_child(child_pid)
+        reaped_child_pids.append(child_pid)
+
     monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
-    monkeypatch.setattr(sys.modules[__name__], "_identity_exited", fail_first_child_poll)
+    monkeypatch.setattr(sys.modules[__name__], "_wait_for_identity_exit", skip_main_settlement_then_poll_in_cleanup)
+    monkeypatch.setattr(sys.modules[__name__], "_identity_exited", fail_cleanup_poll)
+    monkeypatch.setattr(sys.modules[__name__], "_signal_via_identity", recording_signal)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", recording_reap)
     try:
-        with pytest.raises(OSError, match="injected pidfd poll failure"):
-            _child_survives_a_killed_parent(tmp_path, bound=False, busy="time.sleep(600)")
+        with pytest.raises(AssertionError, match="injected pidfd poll failure during post-parent-kill cleanup"):
+            _child_survives_a_killed_parent(
+                tmp_path,
+                bound=False,
+                busy="time.sleep(600)",
+                after_parent_kill=arm_cleanup_poll,
+            )
         assert injected is True
+        assert emergency_sigkill_required is False, "the guard had to rescue a child cleanup left live"
+        assert sigkill_attempts == child_pidfds, "cleanup must attempt exact-identity SIGKILL before its poll"
+        assert wait_calls == 2, "the injected poll must come from cleanup after the main settlement deadline"
+        assert len(child_pids) == 1
+        assert reaped_child_pids == child_pids, "cleanup must complete the exact adopted-child reap"
         assert len(proof_pidfds) == 1
         _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child_pids[0], os.WNOHANG)
     finally:
         for pidfd in proof_pidfds:
             if not real_identity_exited(pidfd):
