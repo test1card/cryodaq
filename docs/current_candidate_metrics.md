@@ -6,22 +6,22 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | Measure | Value |
 |---|---:|
 | Baseline commit | `f5d6434d20dffae62c9f03fbc12f68b03f48351b` |
-| Source snapshot tree | `192f5ee312d063f1c8bfe0540177f9352a6de275` |
-| Source snapshot object manifest SHA-256 | `8bade59f116c19d6e566f1eb890aa1f99867637dbab152aa297c22f1199f19b3` |
+| Source snapshot tree | `4f9825128aa4c40a9b80547ca00877d3f967f87e` |
+| Source snapshot object manifest SHA-256 | `800cd2f040c4c00143709aecefee3e46f2d011eaf8c68ef5eb26e75b3fcc186e` |
 | Changed source-inventory paths | 889 |
-| Source-inventory Git churn | 326,043 insertions / 21,282 deletions / 304,761 net |
+| Source-inventory Git churn | 326,236 insertions / 21,282 deletions / 304,954 net |
 | Delivered-tree changed paths | 891 |
-| Delivered-tree Git churn | 326,164 insertions / 21,282 deletions / 304,882 net |
+| Delivered-tree Git churn | 326,357 insertions / 21,282 deletions / 305,075 net |
 | Changed binary paths, source / delivered | 9 / 9 |
 | Baseline repository text | 188,539 lines |
-| Candidate source-inventory text | 493,300 lines |
-| Delivered-tree text | 493,421 lines |
+| Candidate source-inventory text | 493,493 lines |
+| Delivered-tree text | 493,614 lines |
 | Baseline production Python | 68,857 lines |
-| Candidate production Python | 158,946 lines |
-| Production-Python inventory growth | 90,089 lines |
+| Candidate production Python | 158,949 lines |
+| Production-Python inventory growth | 90,092 lines |
 | Baseline test Python | 80,529 lines |
-| Candidate test Python | 244,280 lines |
-| Test-Python inventory growth | 163,751 lines |
+| Candidate test Python | 244,409 lines |
+| Test-Python inventory growth | 163,880 lines |
 | Baseline files | 779 |
 | Candidate source-manifest files | 1,243 |
 | Delivered-tree files | 1,245 |
@@ -32,6 +32,6 @@ This is the sole numeric authority for current-candidate aggregate measurements 
 | `src/cryodaq/engine.py`, baseline / candidate | 4,103 / 8,027 lines |
 | `_run_engine`, baseline / candidate | 1,945 / 1,330 lines |
 | Engine local-module imports, baseline / candidate | 69 / 59 |
-| `scripts/soak_mock_stack_runner.py` | 5,083 lines |
+| `scripts/soak_mock_stack_runner.py` | 5,084 lines |
 | `scripts/soak_mock_stack.py` | 2,829 lines |
 | Generated metrics document / surviving SVG | 37 / 84 lines |
