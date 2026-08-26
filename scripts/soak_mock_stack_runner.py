@@ -4705,6 +4705,7 @@ class _PosixSoakRunner:
         sink: _ArtifactReceiptSink | None = None
         bridge_buffer = bytearray()
         log_path: Path | None = None
+        source_temporary: tempfile.TemporaryDirectory[str] | None = None
         graceful = False
         shutdown_elapsed = 0.0
         source_snapshot_context = _sealed_execution_snapshot(sha)
@@ -4717,7 +4718,8 @@ class _PosixSoakRunner:
                 nonce=artifact_pair.nonce,
                 evidence_dir=evidence.directory,
             )
-            with tempfile.TemporaryDirectory(prefix="cryodaq-source-soak-") as temporary:
+            source_temporary = tempfile.TemporaryDirectory(prefix="cryodaq-source-soak-", delete=False)
+            with source_temporary as temporary:
                 root = Path(temporary).resolve()
                 root.chmod(0o700)
                 config_dir = root / "config"
@@ -5035,29 +5037,43 @@ class _PosixSoakRunner:
                     ):
                         raise _RunnerFoundationError("passive source fixture changed during execution")
         finally:
+            primary = sys.exception()
             with _block_termination_signals():
                 try:
                     if process is not None and launcher_identity is not None and not launcher_settled:
-                        if process.returncode is None:
-                            _force_settle_owned_session(
-                                process,
-                                observer=locked,
-                                expected=launcher_identity,
-                                owner=owner_identity,
-                            )
+                        try:
+                            if process.returncode is None:
+                                _force_settle_owned_session(
+                                    process,
+                                    observer=locked,
+                                    expected=launcher_identity,
+                                    owner=owner_identity,
+                                )
+                            else:
+                                _settle_adopted_owner_descendants(
+                                    observer=locked,
+                                    owner=owner_identity,
+                                    deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
+                                )
+                        except BaseException as settlement_error:  # noqa: BLE001 - preserve the run failure
+                            if primary is None:
+                                raise
+                            _add_sanitized_cleanup_note(primary, "final launcher settlement failed", settlement_error)
                         else:
-                            _settle_adopted_owner_descendants(
-                                observer=locked,
-                                owner=owner_identity,
-                                deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
-                            )
-                        launcher_settled = True
+                            launcher_settled = True
                     if sink is not None:
                         sink.close()
                     if artifact_pair is not None:
                         artifact_pair.close()
                     if bridge_pipe is not None:
                         bridge_pipe.close()
+                    if source_temporary is not None and (process is None or launcher_settled):
+                        try:
+                            source_temporary.cleanup()
+                        except BaseException as cleanup_error:  # noqa: BLE001 - preserve the run failure
+                            if primary is None:
+                                raise
+                            _add_sanitized_cleanup_note(primary, "source temporary cleanup failed", cleanup_error)
                 finally:
                     source_snapshot_context.__exit__(*sys.exc_info())
 

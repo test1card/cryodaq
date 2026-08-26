@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import errno
 import os
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -190,6 +192,7 @@ def test_settlement_baseexception_preserves_primary_refuses_root_and_defers_drai
     (state_root / "logs" / "engine.stderr.log").write_bytes(b"MUST NOT READ ENGINE STDERR\n")
     (state_root / "logs" / "assistant.log").write_bytes(b"MUST NOT READ ASSISTANT LOG\n")
     traversals: list[str] = []
+    settlement_failed = False
 
     def under_state_root(value: object) -> bool:
         return isinstance(value, (str, os.PathLike)) and Path(value).is_relative_to(state_root)
@@ -201,31 +204,31 @@ def test_settlement_baseexception_preserves_primary_refuses_root_and_defers_drai
     real_scandir = runner.os.scandir
 
     def guarded_read_bytes(path: Path) -> bytes:
-        if under_state_root(path):
+        if settlement_failed and under_state_root(path):
             traversals.append(f"read_bytes:{path}")
             raise AssertionError("the unsettled child-writable root was read")
         return real_read_bytes(path)
 
     def guarded_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
-        if under_state_root(path):
+        if settlement_failed and under_state_root(path):
             traversals.append(f"lstat:{path}")
             raise AssertionError("the unsettled child-writable root was measured")
         return real_lstat(path, *args, **kwargs)  # type: ignore[arg-type]
 
     def guarded_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
-        if under_state_root(path):
+        if settlement_failed and under_state_root(path):
             traversals.append(f"stat:{path}")
             raise AssertionError("the unsettled child-writable root was measured")
         return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
 
     def guarded_open(path: object, *args: object, **kwargs: object) -> int:
-        if under_state_root(path):
+        if settlement_failed and under_state_root(path):
             traversals.append(f"open:{path}")
             raise AssertionError("the unsettled child-writable root was opened")
         return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
     def guarded_scandir(path: object):
-        if under_state_root(path):
+        if settlement_failed and under_state_root(path):
             traversals.append(f"scandir:{path}")
             raise AssertionError("the unsettled child-writable root was enumerated")
         return real_scandir(path)  # type: ignore[arg-type]
@@ -253,6 +256,8 @@ def test_settlement_baseexception_preserves_primary_refuses_root_and_defers_drai
     caught: BaseException | None = None
 
     def interrupt_settlement() -> None:
+        nonlocal settlement_failed
+        settlement_failed = True
         raise SettlementInterrupted("MUST NOT LEAK SETTLEMENT DETAIL")
 
     try:
@@ -379,6 +384,253 @@ def test_post_settlement_baseexception_cannot_replace_primary(
             runner._ASSISTANT_LOG_EVIDENCE_NAME if boundary == "engine_refusal" else runner._ENGINE_STDERR_EVIDENCE_NAME
         )
         assert evidence.logs[successful_name] == runner._UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER
+
+
+@pytest.mark.parametrize("final_settlement_fails", (False, True))
+def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_settlement_fails: bool
+) -> None:
+    """The real owner lifecycle must not tear down a root while its child can write."""
+
+    from scripts import soak_mock_stack as soak
+
+    class PrimaryFailure(ValueError):
+        pass
+
+    class SettlementInterrupted(BaseException):
+        pass
+
+    class CleanupInterrupted(BaseException):
+        pass
+
+    child_writer = {"fd": None, "live": False}
+    cleanup_saw_live_writer: list[bool] = []
+    source_temporaries: list[ObservedTemporaryDirectory] = []
+    settlement_calls: list[int] = []
+    real_temporary_directory = runner.tempfile.TemporaryDirectory
+
+    class ObservedTemporaryDirectory:
+        def __init__(
+            self,
+            *,
+            prefix: str,
+            delete: bool = True,
+            **kwargs: object,
+        ) -> None:
+            self._source = prefix == "cryodaq-source-soak-"
+            self._delete = delete
+            self._inner = real_temporary_directory(prefix=prefix, delete=False, **kwargs)
+            if self._source:
+                source_temporaries.append(self)
+
+        def __enter__(self) -> str:
+            return self._inner.__enter__()
+
+        def __exit__(self, *_exc: object) -> bool:
+            if self._source:
+                if self._delete:
+                    self.cleanup()
+            else:
+                self._inner.cleanup()
+            return False
+
+        def cleanup(self) -> None:
+            if self._source:
+                cleanup_saw_live_writer.append(child_writer["live"])
+            self._inner.cleanup()
+            if self._source:
+                raise CleanupInterrupted("MUST NOT LEAK TEMP CLEANUP DETAIL")
+
+    class StillSnapshot:
+        root = tmp_path / "snapshot"
+        interpreter = Path(runner.sys.executable)
+        environment: dict[str, str] = {}
+
+        def __enter__(self) -> StillSnapshot:
+            self.root.mkdir(exist_ok=True)
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    @contextmanager
+    def still_snapshot(_sha: str):
+        snapshot = StillSnapshot()
+        with snapshot:
+            yield snapshot
+
+    fixture_payload = {"schema": "test-source-fixture"}
+
+    class StillSeal:
+        payload = fixture_payload
+
+    def materialize(config_dir: Path, **_kwargs: object) -> int:
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return 1
+
+    class OwnerObserver:
+        def __init__(self, _module: object) -> None:
+            pass
+
+        def identity_for_pid(self, pid: int) -> tuple[str, int]:
+            return ("owner", pid)
+
+        def descendants(self, _owner: object, *, include_zombies: bool = False) -> tuple[()]:
+            assert include_zombies
+            return ()
+
+    class BroadObserver:
+        def __init__(self, _module: object) -> None:
+            pass
+
+        def snapshot(self) -> tuple[()]:
+            return ()
+
+    class Collector:
+        def __init__(self, _root: Path) -> None:
+            pass
+
+        def observe(self, _boundary: object) -> None:
+            pass
+
+    class ExactSix:
+        def execute(self, _evidence: object, *, collector: object) -> dict[str, object]:
+            assert isinstance(collector, Collector)
+            return {"command": ["exact-six"], "git_sha": "a" * 40, "exit_code": 0, "status": "passed"}
+
+    class Evidence(_Evidence):
+        def __init__(self) -> None:
+            super().__init__()
+            self.directory = tmp_path / "evidence"
+            self.directory.mkdir()
+
+        def write_manifest(self, _payload: dict[str, object]) -> None:
+            pass
+
+        def write_prerequisites(self, _payload: dict[str, object]) -> None:
+            pass
+
+        def begin_run(self) -> None:
+            pass
+
+        def _sha256(self, _name: str) -> str:
+            return "b" * 64
+
+    class BridgePipe:
+        nonce = "bridge-nonce"
+
+        @classmethod
+        def create(cls) -> BridgePipe:
+            return cls()
+
+        def child_environment(self) -> dict[str, str]:
+            return {}
+
+        def child_pass_fds(self) -> tuple[()]:
+            return ()
+
+        def close_parent_write_end(self) -> None:
+            raise PrimaryFailure("primary production failure")
+
+        def close(self) -> None:
+            pass
+
+    class ArtifactPair:
+        runner = object()
+        nonce = "artifact-nonce"
+
+        @classmethod
+        def create(cls) -> ArtifactPair:
+            return cls()
+
+        def child_environment(self) -> dict[str, str]:
+            return {}
+
+        def child_pass_fds(self) -> tuple[()]:
+            return ()
+
+        def close_launcher_end(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class Sink:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    process = SimpleNamespace(pid=424242, returncode=None)
+    identity = SimpleNamespace(start_identity="pid=424242")
+
+    def spawn_source(*, stdout: object, **_kwargs: object) -> tuple[object, object]:
+        child_writer["fd"] = os.dup(stdout.fileno())  # type: ignore[attr-defined]
+        child_writer["live"] = True
+        return process, identity
+
+    def force_settle(*_args: object, **_kwargs: object) -> None:
+        settlement_calls.append(len(settlement_calls) + 1)
+        if len(settlement_calls) == 1 or final_settlement_fails:
+            raise SettlementInterrupted("MUST NOT LEAK FINAL SETTLEMENT DETAIL")
+        descriptor = child_writer["fd"]
+        assert isinstance(descriptor, int)
+        os.close(descriptor)
+        child_writer["fd"] = None
+        child_writer["live"] = False
+        process.returncode = 1
+
+    monkeypatch.setattr(runner.tempfile, "TemporaryDirectory", ObservedTemporaryDirectory)
+    monkeypatch.setattr(runner, "_sealed_execution_snapshot", still_snapshot)
+    monkeypatch.setattr(runner, "_materialize_complete_soak_config", materialize)
+    monkeypatch.setattr(runner, "_source_fixture_seal", lambda *_args, **_kwargs: StillSeal())
+    monkeypatch.setattr(runner, "_LockedPsutilObserver", OwnerObserver)
+    monkeypatch.setattr(soak, "PsutilObserver", BroadObserver)
+    monkeypatch.setattr(runner, "_CleanShaCollector", Collector)
+    monkeypatch.setattr(runner, "_select_short_soak_report_schedule", lambda _now: (600, 500))
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="a" * 40),
+    )
+    monkeypatch.setattr(runner, "_EXACT_SIX_EXECUTIONS", ExactSix())
+    monkeypatch.setattr(runner, "_BridgeHandshakePipe", BridgePipe)
+    monkeypatch.setattr(runner, "_ArtifactCapabilityPair", ArtifactPair)
+    monkeypatch.setattr(runner, "_ArtifactReceiptSink", Sink)
+    monkeypatch.setattr(runner, "_source_environment", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(runner, "_spawn_gated_source", spawn_source)
+    monkeypatch.setattr(runner, "_force_settle_owned_session", force_settle)
+    monkeypatch.setattr(runner, "_block_termination_signals", nullcontext)
+
+    caught: BaseException | None = None
+    try:
+        runner._PosixSoakRunner()._run_owned(Evidence(), soak.profile("short"))
+    except BaseException as error:
+        caught = error
+    finally:
+        descriptor = child_writer["fd"]
+        if isinstance(descriptor, int):
+            os.close(descriptor)
+            child_writer["fd"] = None
+            child_writer["live"] = False
+        for source_temporary in source_temporaries:
+            source_temporary._inner.cleanup()
+
+    assert type(caught) is PrimaryFailure and str(caught) == "primary production failure"
+    expected_cleanup_observations = [] if final_settlement_fails else [False]
+    assert cleanup_saw_live_writer == expected_cleanup_observations, (
+        "state-root cleanup ran before the retained writer settled"
+    )
+    assert settlement_calls == [1, 2]
+    notes = tuple(getattr(caught, "__notes__", ()))
+    assert "launcher writer settlement failed: SettlementInterrupted" in notes
+    if final_settlement_fails:
+        assert "final launcher settlement failed: SettlementInterrupted" in notes
+        assert not any(note.startswith("source temporary cleanup failed:") for note in notes)
+    else:
+        assert "source temporary cleanup failed: CleanupInterrupted" in notes
+    assert "MUST NOT LEAK" not in "\n".join(notes)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction ABA contract")
