@@ -2864,6 +2864,73 @@ def _health_tick_launcher(calls: list[str]) -> SimpleNamespace:
     "evidence_case",
     ["absent-result", "malformed-unknown-outcome", "invalid-concrete-result"],
 )
+def test_live_child_with_immutable_finished_worker_enters_bounded_reaping(
+    evidence_case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rejected immutable worker evidence must not strand a still-live child.
+
+    The worker and its absent, malformed, or invalid result remain exact HOLD
+    evidence. It cannot remain a reason to refuse every process supervisor:
+    drive the real failed-restart route and its callback machine through both
+    terminate and kill, proving the side effect that bounds the live child.
+    """
+
+    import cryodaq.launcher as module
+
+    calls: list[str] = []
+    handle = _UnobservableChildHandle()
+    handle.readable = True
+    handle.readable_code = None
+    host = _unobservable_child_host(calls, handle)
+    if evidence_case == "absent-result":
+        worker = _ShutdownWorker(settles=True)
+    elif evidence_case == "malformed-unknown-outcome":
+        worker = _unknown_outcome_shutdown_worker("c" * 32, 5)
+        worker.result.update({"generation": "five"})
+    else:
+        worker = _ShutdownWorker(settles=True)
+        worker.result = {"ok": True}
+    original_result = getattr(worker, "result", None)
+    host._engine_shutdown_worker = worker
+    host._engine_shutdown_request_id = "c" * 32
+    host._stop_engine = MethodType(LauncherWindow._stop_engine, host)
+    clock = _SupervisionClock()
+    monkeypatch.setattr(module.time, "monotonic", clock)
+
+    with patch("cryodaq.launcher.QTimer.singleShot") as single_shot:
+        recovered = LauncherWindow._recover_failed_engine_restart(
+            host,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+
+        assert recovered is False
+        assert host._restart_giving_up is True, "the retained evidence remains an operator-visible HOLD"
+        assert host._engine_shutdown_worker is worker
+        assert getattr(host, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+        machine = getattr(host, "_engine_unobservable_reap_state", None)
+        assert type(machine) is dict and machine["process"] is handle and machine["stage"] == "terminate"
+
+        cursor = [0]
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the first bounded tick terminates"
+        assert handle.terminate_calls == 1 and handle.kill_calls == 0
+        clock.advance(5.2)
+        assert _drive_next_supervision_tick(single_shot, cursor, clock), "the spent terminate stage kills"
+        assert handle.kill_calls == 1
+
+    assert host._engine_shutdown_worker is worker, "reaping preserves the exact rejected worker"
+    assert getattr(worker, "result", None) is original_result, "reaping does not rewrite immutable evidence"
+    assert handle.wait_frames == [] and handle.communicate_frames == [], "the Qt path remains non-blocking"
+
+
+@pytest.mark.parametrize(
+    "evidence_case",
+    ["absent-result", "malformed-unknown-outcome", "invalid-concrete-result"],
+)
 def test_deferred_refusal_settles_crashed_child_readers_before_the_immutable_latch(
     evidence_case: str,
     caplog: pytest.LogCaptureFixture,
@@ -3818,6 +3885,76 @@ def test_settlement_callback_is_inert_when_a_new_engine_already_owns_the_slot() 
     assert "terminate" not in calls and "kill" not in calls and "wait" not in calls
     assert "new_poll" not in calls, "the new owner must not even be polled by the stale pass"
     assert launcher._restart_giving_up is False, "an inert pass must not latch HOLD"
+    launcher._bridge.shutdown.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("_engine_shutdown_request_id", "d" * 32),
+        ("_engine_shutdown_capability", "e" * 64),
+    ],
+)
+def test_owner_bound_settlement_callback_is_inert_after_shutdown_transaction_changes(
+    changed_field: str,
+    changed_value: str,
+) -> None:
+    """A queued settlement pass belongs to the exact shutdown transaction.
+
+    Process/session/incarnation/worker identity can remain unchanged while a new
+    request id or capability replaces the shutdown transaction. The old callback
+    must neither run recovery nor deduplicate the new transaction's callback.
+    Drive the real queued callback so absence of a successor alone cannot make
+    this guard pass while the stale recovery side effect still ran.
+    """
+
+    calls: list[str] = []
+    launcher = _exited_owned_launcher(calls, 9)
+    launcher._engine_shutdown_worker = _ShutdownWorker(settles=False)
+    launcher._engine_shutdown_request_id = "c" * 32
+    launcher._restart_pending = True
+    launcher._data_timer = MagicMock()
+    launcher._health_timer = MagicMock()
+
+    with patch("cryodaq.launcher.QTimer.singleShot") as settlement_shot:
+        assert LauncherWindow._schedule_owner_bound_settlement_retry(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+        stale_callback = settlement_shot.call_args.args[1]
+
+        setattr(launcher, changed_field, changed_value)
+        assert LauncherWindow._schedule_owner_bound_settlement_retry(
+            launcher,
+            phase="readiness",
+            failure=RuntimeError("replacement never reported ready"),
+            child_start_attempted=True,
+            settle_bridge=False,
+            raise_on_hold=False,
+        )
+        stale_callback()
+
+    assert settlement_shot.call_count == 2, "the changed transaction owns a distinct deduplicated callback"
+    assert launcher._engine_owner_settlement_retry_owner == (
+        launcher._engine_shutdown_worker,
+        launcher._engine_proc,
+        getattr(launcher, "_replay_session_id", None),
+        launcher._engine_instance_id,
+        getattr(launcher, "_engine_shutdown_transport_identity", None),
+    )
+    assert launcher._engine_owner_settlement_retry_transaction == (
+        launcher._engine_proc,
+        getattr(launcher, "_replay_session_id", None),
+        launcher._engine_instance_id,
+        launcher._engine_shutdown_request_id,
+        launcher._engine_shutdown_capability,
+    )
+    assert calls == [], "the stale transaction must not poll, settle, or schedule recovery for the live owner"
+    assert launcher._restart_pending is True
     launcher._bridge.shutdown.assert_not_called()
 
 

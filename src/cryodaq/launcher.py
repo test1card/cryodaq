@@ -4978,7 +4978,8 @@ class LauncherWindow(QMainWindow):
         and ``_restart_giving_up`` kept the health timer from settling either.
         Ownership of the pending command -- the exact worker thread, the exact
         process handle, both incarnation ids, and the retained transport
-        identity -- is what decides whether this pass may still run. A changed
+        identity, request id, and shutdown capability -- is what decides whether
+        this pass may still run. A changed
         owner means this pass must not settle a wrong incarnation -- but it
         does not always mean the question is closed: the health tick's stop
         path transfers a finished worker into its published transport identity
@@ -5039,7 +5040,10 @@ class LauncherWindow(QMainWindow):
                 # or one whose parsed identity still awaits transport reconciliation,
                 # remains progress-capable and keeps its polling loop.
                 return False
-        if getattr(self, "_engine_owner_settlement_retry_owner", None) == captured_owner:
+        if (
+            getattr(self, "_engine_owner_settlement_retry_owner", None) == captured_owner
+            and getattr(self, "_engine_owner_settlement_retry_transaction", None) == captured_transaction
+        ):
             # One progress-capable callback for this exact owner is already
             # queued; queueing another would overlap two settlement flights
             # over the same owner. Report success so the caller neither
@@ -5047,8 +5051,12 @@ class LauncherWindow(QMainWindow):
             return True
 
         def _retry_owner_bound_settlement() -> None:
-            if getattr(self, "_engine_owner_settlement_retry_owner", None) == captured_owner:
+            if (
+                getattr(self, "_engine_owner_settlement_retry_owner", None) == captured_owner
+                and getattr(self, "_engine_owner_settlement_retry_transaction", None) == captured_transaction
+            ):
                 self._engine_owner_settlement_retry_owner = None
+                self._engine_owner_settlement_retry_transaction = None
             if not LauncherWindow._runtime_callback_is_current(self):
                 return
             live_owner = (
@@ -5058,7 +5066,10 @@ class LauncherWindow(QMainWindow):
                 getattr(self, "_engine_instance_id", None),
                 getattr(self, "_engine_shutdown_transport_identity", None),
             )
-            if live_owner != captured_owner:
+            if live_owner != captured_owner or (
+                getattr(self, "_engine_shutdown_request_id", None) != captured_transaction[3]
+                or getattr(self, "_engine_shutdown_capability", None) != captured_transaction[4]
+            ):
                 captured_worker = captured_owner[0]
                 try:
                     captured_worker_finished = captured_worker is not None and captured_worker.isFinished() is True
@@ -5125,6 +5136,7 @@ class LauncherWindow(QMainWindow):
             )
 
         self._engine_owner_settlement_retry_owner = captured_owner
+        self._engine_owner_settlement_retry_transaction = captured_transaction
         QTimer.singleShot(_ENGINE_SHUTDOWN_WORKER_GRACE_MS, _retry_owner_bound_settlement)
         return True
 
@@ -5180,13 +5192,54 @@ class LauncherWindow(QMainWindow):
         time.
         """
 
-        if getattr(self, "_engine_shutdown_worker", None) is not None:
-            return False
+        worker = getattr(self, "_engine_shutdown_worker", None)
+        immutable_rejected_worker = False
+        if worker is not None:
+            try:
+                worker_finished = worker.isFinished() is True
+            except Exception:
+                return False
+            immutable_rejected_worker = (
+                worker_finished and getattr(self, "_engine_shutdown_unreadable_evidence_worker", None) is worker
+            )
+            if not immutable_rejected_worker:
+                return False
         if getattr(self, "_engine_shutdown_transport_identity", None) is not None:
             return False
         process = getattr(self, "_engine_proc", None)
         if process is None:
             return False
+        if immutable_rejected_worker:
+            # The finished worker can no longer make progress, but it remains the
+            # exact immutable evidence explaining why shutdown was refused. It
+            # must not block the independent process owner from bounding a child
+            # that is still live or unobservable. Skip the observation-only watch:
+            # a readable-alive verdict would merely return to the same immutable
+            # refusal and strand the child again. The existing non-blocking ladder
+            # preserves every evidence field while driving terminate then kill.
+            try:
+                observed = process.poll()
+            except Exception:
+                observed = None
+            if type(observed) is int:
+                return False
+            owner_id = (
+                getattr(self, "_replay_session_id", None)
+                if getattr(self, "_replay_source", None) is not None
+                else getattr(self, "_engine_instance_id", None)
+            )
+            if type(owner_id) is not str:
+                owner_id = "<unknown>"
+            return LauncherWindow._begin_unobservable_bounded_reap(
+                self,
+                phase=phase,
+                owner_id=owner_id,
+                process=process,
+                failure=failure,
+                child_start_attempted=child_start_attempted,
+                settle_bridge=settle_bridge,
+                raise_on_hold=raise_on_hold,
+            )
         receipt = getattr(self, "_engine_shutdown_receipt", None)
         if receipt is not None:
             # A validated receipt normally keeps its own settlement owners. It
