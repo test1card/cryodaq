@@ -653,10 +653,10 @@ false_green_pairs:
     status: open
     scope: product_contract
     runtime_prevention_id: LAUNCHER-DESCRIPTOR-EVIDENCE-021
-    guard: tests/test_launcher_bridge_handshake.py::test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation
+    guard: tests/test_launcher_bridge_handshake.py::test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested_mutants
     ci_partition: remaining
-    red_evidence: added_allowed_spawn_boundary_call_with_exact_three_key_grant_and_pass_fds_999_reached_fake_Popen_while_the_existing_definition_and_process_reference_inventory_stayed_green_2026_08_27_pending_candidate_binding
-    green_evidence: focused_spawn_callsite_inventory_fake_sink_guard_passed_2026_08_27_pending_candidate_binding
+    red_evidence: local_alias_default_alias_tuple_callee_lambda_default_and_nested_alias_references_to_the_allowed_spawn_boundary_preserved_the_exact_three_literal_callee_inventory_and_reached_fake_Popen_with_pass_fds_999_2026_08_27_pending_candidate_binding
+    green_evidence: focused_complete_spawn_reference_inventory_mutation_matrix_passed_with_each_red_control_reaching_fake_Popen_and_each_guarded_control_reaching_no_sink_2026_08_27_pending_candidate_binding
   - id: LAUNCHER-TRACEBACK-BUILTINS-RECOVERY-FALSE-GREEN-511
     status: open
     scope: product_contract
@@ -5808,11 +5808,16 @@ records:
       return. The sole Popen allowance is bound to that exact frozen definition
       node, so moving authority through a same-identity capture/redefine/restore
       sequence cannot inherit the allowance. The inventory freezes the exact
-      three production _spawn_child_process calls by their enclosing semantic
-      scope and signature, complete call AST, and immediate parent AST. Any
-      added call fails closed even when it uses the allowed boundary and forges
-      the exact three-key assistant grant while delegating an unrelated
-      pass_fds descriptor. It also freezes the exact reviewed import syntax and
+      three executable _spawn_child_process name references by their enclosing
+      semantic scope and signature, complete name AST, and immediate parent
+      AST, and requires each reference to be the direct callee of one of those
+      reviewed calls. Any added direct call, local or nested alias, default or
+      lambda-default capture, or tuple-callee indirection fails closed. Red
+      controls prove that each alias form preserves the earlier literal-callee
+      inventory and reaches fake Popen with an unrelated pass_fds descriptor;
+      guarded controls prove that none reaches the sink. The direct-call control
+      also covers an exact forged three-key assistant grant. The inventory also
+      freezes the exact reviewed import syntax and
       every syntactic occurrence rooted at an imported
       module alias. Each occurrence is bound to its enclosing class/function,
       function signature, full direct attribute chain, and immediate semantic
@@ -5880,6 +5885,8 @@ records:
       - node: tests/test_launcher_bridge_handshake.py::test_popen_inventory_rejects_descriptor_reintroduction_after_sanitization
         ci_partition: remaining
       - node: tests/test_launcher_bridge_handshake.py::test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation
+        ci_partition: remaining
+      - node: tests/test_launcher_bridge_handshake.py::test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested_mutants
         ci_partition: remaining
       - node: tests/test_launcher_bridge_handshake.py::test_traceback_frame_builtin_recovery_reaches_sink_and_is_rejected
         ci_partition: remaining

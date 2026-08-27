@@ -727,17 +727,25 @@ def _launcher_process_authority_violations(source: str) -> tuple[int, list[str]]
         if spawn_definition_digest != "ecd94f462f3373b4fa816d1348ffe0c358f49f0868b69260952e46f724a95540":
             unsafe.append("the complete reviewed _spawn_child_process definition changed")
 
-    spawn_call_occurrences = sorted(
-        f"{semantic_scope(node)}|{ast.dump(node, include_attributes=False)}|{immediate_context(node)}"
+    spawn_reference_nodes = [
+        node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and node not in annotation_nodes and call_name(node) == "_spawn_child_process"
+        if isinstance(node, ast.Name) and node not in annotation_nodes and node.id == "_spawn_child_process"
+    ]
+    spawn_reference_occurrences = sorted(
+        f"{semantic_scope(node)}|{ast.dump(node, include_attributes=False)}|{immediate_context(node)}"
+        for node in spawn_reference_nodes
     )
-    spawn_call_digest = hashlib.sha256("\n".join(spawn_call_occurrences).encode("utf-8")).hexdigest()
+    spawn_reference_digest = hashlib.sha256("\n".join(spawn_reference_occurrences).encode("utf-8")).hexdigest()
+    for node in spawn_reference_nodes:
+        parent = parents.get(node)
+        if not isinstance(parent, ast.Call) or parent.func is not node:
+            unsafe.append(f"line {node.lineno}: _spawn_child_process reference is outside a reviewed direct call")
     if (
-        len(spawn_call_occurrences) != 3
-        or spawn_call_digest != "9e6105955c850cc5913a77eba1646c126521feef000a62699b8e6e31f5f9920e"
+        len(spawn_reference_occurrences) != 3
+        or spawn_reference_digest != "5f3e6b2725e7524ac7de20f03e3f2aeed3ea9777d1cfa8da49791f51c46dfea9"
     ):
-        unsafe.append("the exact reviewed _spawn_child_process call sites changed")
+        unsafe.append("the exact reviewed _spawn_child_process references changed")
 
     if len(imports) != 80 or import_digest != "8069275ec1216221ff3e09ce5303af2a1fc2a0202fafb84311ede476cc94a936":
         unsafe.append("the exact reviewed import vocabulary changed")
@@ -1417,7 +1425,7 @@ def test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation(
     )
     popen_count, mutant_unsafe = _launcher_process_authority_violations(mutant)
     assert popen_count == 1
-    assert mutant_unsafe == ["the exact reviewed _spawn_child_process call sites changed"]
+    assert mutant_unsafe == ["the exact reviewed _spawn_child_process references changed"]
 
     observed: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
 
@@ -1439,6 +1447,111 @@ def test_spawn_callsite_inventory_rejects_forged_grant_descriptor_delegation(
         pass_fds=(999,),
     )
     assert observed == [(["escaped"], {"SAFE": "kept", **exact_grant}, (999,))]
+
+
+def test_spawn_reference_inventory_rejects_alias_default_tuple_lambda_and_nested_mutants() -> None:
+    """Every executable reference is frozen before an alias can reach process creation."""
+
+    source = Path("src/cryodaq/launcher.py").read_text(encoding="utf-8")
+    grant_literal = (
+        "{'CRYODAQ_SOAK_ARTIFACT_FD': '999', "
+        "'CRYODAQ_SOAK_ARTIFACT_NONCE': '" + "f" * 64 + "', "
+        "'CRYODAQ_SOAK_ASSISTANT_GENERATION': '7'}"
+    )
+    call_arguments = (
+        "['escaped'], environment=environment, "
+        f"assistant_artifact_grant={grant_literal}, close_fds=True, pass_fds=(999,)"
+    )
+    mutation_suffixes = {
+        "local_alias": (
+            f"\n\ndef _escape(environment):\n    launch = _spawn_child_process\n    return launch({call_arguments})\n"
+        ),
+        "default_alias": (
+            f"\n\ndef _escape(environment, launch=_spawn_child_process):\n    return launch({call_arguments})\n"
+        ),
+        "tuple_callee": (f"\n\ndef _escape(environment):\n    return (_spawn_child_process,)[0]({call_arguments})\n"),
+        "lambda_default": (
+            f"\n\n_escape = lambda environment, launch=_spawn_child_process: launch({call_arguments})\n"
+        ),
+        "nested_alias": (
+            "\n\ndef _escape(environment):\n"
+            "    launch = _spawn_child_process\n"
+            "    def _nested():\n"
+            f"        return launch({call_arguments})\n"
+            "    return _nested()\n"
+        ),
+    }
+
+    def old_literal_callee_inventory(text: str) -> list[str]:
+        tree = ast.parse(text)
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+        def semantic_scope(node: ast.AST) -> str:
+            path: list[str] = []
+            current = parents.get(node)
+            while current is not None:
+                if isinstance(current, ast.ClassDef):
+                    path.append(f"class:{current.name}")
+                elif isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    path.append(f"function:{current.name}:{ast.dump(current.args, include_attributes=False)}")
+                current = parents.get(current)
+            return "/".join(reversed(path)) or "module"
+
+        return sorted(
+            f"{semantic_scope(node)}|{ast.dump(node, include_attributes=False)}|"
+            f"{ast.dump(parents[node], include_attributes=False)}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_spawn_child_process"
+        )
+
+    old_inventory = old_literal_callee_inventory(source)
+    assert len(old_inventory) == 3
+    assert hashlib.sha256("\n".join(old_inventory).encode("utf-8")).hexdigest() == (
+        "9e6105955c850cc5913a77eba1646c126521feef000a62699b8e6e31f5f9920e"
+    )
+
+    def execute_mutation(suffix: str, sink_calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]]) -> None:
+        def fake_popen_sink(command, *_args, **kwargs):
+            sink_calls.append(
+                (
+                    list(command),
+                    dict(kwargs["assistant_artifact_grant"]),
+                    tuple(kwargs["pass_fds"]),
+                )
+            )
+            return SimpleNamespace(pid=1)
+
+        namespace = {"_spawn_child_process": fake_popen_sink}
+        exec(compile(suffix, "<spawn-reference-mutant>", "exec"), namespace)
+        namespace["_escape"]({"SAFE": "kept"})
+
+    for name, suffix in mutation_suffixes.items():
+        mutant = source + suffix
+        assert old_literal_callee_inventory(mutant) == old_inventory, name
+        _count, mutant_unsafe = _launcher_process_authority_violations(mutant)
+        assert any(
+            "_spawn_child_process reference is outside a reviewed direct call" in finding for finding in mutant_unsafe
+        ), name
+        assert "the exact reviewed _spawn_child_process references changed" in mutant_unsafe, name
+
+        red_control_calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
+        execute_mutation(suffix, red_control_calls)
+        assert red_control_calls == [
+            (
+                ["escaped"],
+                {
+                    "CRYODAQ_SOAK_ARTIFACT_FD": "999",
+                    "CRYODAQ_SOAK_ARTIFACT_NONCE": "f" * 64,
+                    "CRYODAQ_SOAK_ASSISTANT_GENERATION": "7",
+                },
+                (999,),
+            )
+        ], f"{name} did not reproduce the escaped descriptor side effect"
+
+        guarded_calls: list[tuple[list[str], dict[str, str], tuple[int, ...]]] = []
+        if not mutant_unsafe:
+            execute_mutation(suffix, guarded_calls)
+        assert not guarded_calls, f"{name} reached the guarded fake Popen sink"
 
 
 def test_traceback_frame_builtin_recovery_reaches_sink_and_is_rejected(
