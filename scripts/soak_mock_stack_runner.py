@@ -153,6 +153,12 @@ _MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
 # ceiling marker, and lost the artifact this publisher exists to preserve
 # (PR #102 cold review F1).
 _ASSISTANT_LOG_BACKUP_COUNT: Final = ASSISTANT_LOG_BACKUP_COUNT
+# TimedRotatingFileHandler renames the active file before it deletes backups. A
+# process death in that exact window therefore leaves one extra dated file. The
+# publisher accepts only that single bounded residue; a second excess rotation
+# still proves that the producer and retention contract have diverged.
+_ASSISTANT_LOG_INTERRUPTED_ROLLOVER_SLACK: Final = 1
+_ASSISTANT_LOG_SCAN_ROTATION_CEILING: Final = _ASSISTANT_LOG_BACKUP_COUNT + _ASSISTANT_LOG_INTERRUPTED_ROLLOVER_SLACK
 _ASSISTANT_LOG_ACTIVE_NAME: Final[str] = ASSISTANT_LOG_BASENAME
 _ASSISTANT_LOG_ROTATION_RE: Final = rotated_log_name_pattern(ASSISTANT_LOG_BASENAME)
 # The logs directory is writable by the measured process, so enumeration cost is
@@ -1116,9 +1122,9 @@ _ASSISTANT_LOG_DIRECTORY_ENTRY_CEILING_MARKER: Final = (
     "from the directory were published.>\n"
 )
 _ASSISTANT_LOG_ROTATION_CEILING_MARKER: Final = (
-    f"<the assistant log was refused: more than {_ASSISTANT_LOG_BACKUP_COUNT} exact dated rotations were observed, "
-    "which exceeds the configured retention contract. No bytes from the directory were "
-    "published.>\n"
+    f"<the assistant log was refused: more than {_ASSISTANT_LOG_SCAN_ROTATION_CEILING} exact dated rotations "
+    f"were observed, exceeding the configured {_ASSISTANT_LOG_BACKUP_COUNT}-backup retention plus the single "
+    "bounded residue of an interrupted rollover. No bytes from the directory were published.>\n"
 )
 
 
@@ -1328,7 +1334,9 @@ def _rotated_assistant_log_names(
     ``_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES`` -- not only regex-matching names --
     and the scan fails closed the moment that ceiling is exceeded. Counting only
     matching candidates would let any number of unrelated names make teardown
-    traverse the directory without a total-work bound.
+    traverse the directory without a total-work bound. One rotation beyond the
+    handler's retention is accepted because its real rollover renames before deleting
+    old backups; process death in that window leaves exactly that bounded residue.
     """
 
     rotated: list[str] = []
@@ -1341,7 +1349,7 @@ def _rotated_assistant_log_names(
             if _ASSISTANT_LOG_ROTATION_RE.fullmatch(entry.name) is None:
                 continue
             rotated.append(entry.name)
-            if len(rotated) > _ASSISTANT_LOG_BACKUP_COUNT:
+            if len(rotated) > _ASSISTANT_LOG_SCAN_ROTATION_CEILING:
                 return _AssistantLogDirectoryRefusal.TOO_MANY_ROTATIONS
     return sorted(rotated)
 
@@ -4432,6 +4440,77 @@ class _CancellationCleanupContract:
         )
 
 
+def _cleanup_owned_run(
+    *,
+    primary_info: tuple[Any, Any, Any],
+    process: subprocess.Popen[bytes] | None,
+    launcher_identity: _ProcessIdentity | None,
+    launcher_settled: bool,
+    locked: _LockedPsutilObserver,
+    owner_identity: Any,
+    sink: _ArtifactReceiptSink | None,
+    artifact_pair: _ArtifactCapabilityPair | None,
+    bridge_pipe: _BridgeHandshakePipe | None,
+    source_temporary: tempfile.TemporaryDirectory[str] | None,
+    source_snapshot_context: Any,
+) -> bool:
+    """Attempt every owned teardown and retain the authoritative first failure."""
+
+    primary = primary_info[1]
+    cleanup = _CleanupFailureAccumulator(primary)
+
+    signal_mask: Any | None = None
+
+    def acquire_signal_mask() -> None:
+        nonlocal signal_mask
+        signal_mask = _block_termination_signals()
+        signal_mask.__enter__()
+
+    signal_mask_acquired = cleanup.attempt(
+        "termination signal mask acquisition failed",
+        acquire_signal_mask,
+    )
+    if process is not None and launcher_identity is not None and not launcher_settled:
+
+        def settle_launcher() -> None:
+            if process.returncode is None:
+                _force_settle_owned_session(
+                    process,
+                    observer=locked,
+                    expected=launcher_identity,
+                    owner=owner_identity,
+                )
+            else:
+                _settle_adopted_owner_descendants(
+                    observer=locked,
+                    owner=owner_identity,
+                    deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
+                )
+
+        if cleanup.attempt("final launcher settlement failed", settle_launcher):
+            launcher_settled = True
+    if sink is not None:
+        cleanup.attempt("artifact receipt sink cleanup failed", sink.close)
+    if artifact_pair is not None:
+        cleanup.attempt("artifact capability pair cleanup failed", artifact_pair.close)
+    if bridge_pipe is not None:
+        cleanup.attempt("bridge handshake pipe cleanup failed", bridge_pipe.close)
+    if source_temporary is not None and (process is None or launcher_settled):
+        cleanup.attempt("source temporary cleanup failed", source_temporary.cleanup)
+    cleanup.attempt(
+        "source snapshot cleanup failed",
+        lambda: source_snapshot_context.__exit__(*primary_info),
+    )
+    if signal_mask_acquired:
+        assert signal_mask is not None
+        cleanup.attempt(
+            "termination signal mask restoration failed",
+            lambda: signal_mask.__exit__(None, None, None),
+        )
+    cleanup.raise_if_no_primary()
+    return launcher_settled
+
+
 class _PosixSoakRunner:
     """Single-use owner of the real Linux source-mode short qualification."""
 
@@ -5157,43 +5236,19 @@ class _PosixSoakRunner:
                     ):
                         raise _RunnerFoundationError("passive source fixture changed during execution")
         finally:
-            primary_info = sys.exc_info()
-            primary = sys.exception()
-            cleanup = _CleanupFailureAccumulator(primary)
-
-            with _block_termination_signals():
-                if process is not None and launcher_identity is not None and not launcher_settled:
-
-                    def settle_launcher() -> None:
-                        if process.returncode is None:
-                            _force_settle_owned_session(
-                                process,
-                                observer=locked,
-                                expected=launcher_identity,
-                                owner=owner_identity,
-                            )
-                        else:
-                            _settle_adopted_owner_descendants(
-                                observer=locked,
-                                owner=owner_identity,
-                                deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
-                            )
-
-                    if cleanup.attempt("final launcher settlement failed", settle_launcher):
-                        launcher_settled = True
-                if sink is not None:
-                    cleanup.attempt("artifact receipt sink cleanup failed", sink.close)
-                if artifact_pair is not None:
-                    cleanup.attempt("artifact capability pair cleanup failed", artifact_pair.close)
-                if bridge_pipe is not None:
-                    cleanup.attempt("bridge handshake pipe cleanup failed", bridge_pipe.close)
-                if source_temporary is not None and (process is None or launcher_settled):
-                    cleanup.attempt("source temporary cleanup failed", source_temporary.cleanup)
-                cleanup.attempt(
-                    "source snapshot cleanup failed",
-                    lambda: source_snapshot_context.__exit__(*primary_info),
-                )
-                cleanup.raise_if_no_primary()
+            launcher_settled = _cleanup_owned_run(
+                primary_info=sys.exc_info(),
+                process=process,
+                launcher_identity=launcher_identity,
+                launcher_settled=launcher_settled,
+                locked=locked,
+                owner_identity=owner_identity,
+                sink=sink,
+                artifact_pair=artifact_pair,
+                bridge_pipe=bridge_pipe,
+                source_temporary=source_temporary,
+                source_snapshot_context=source_snapshot_context,
+            )
 
         collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
         survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)

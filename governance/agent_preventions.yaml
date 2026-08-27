@@ -3531,6 +3531,22 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: local_corrected_production_blob_1ecfe9bf4ab7f871b2e0da0a5c698900a0588d04_guard_blob_ab410272adb9a894e5ff1f1936a5c2d407e2166a_python_3_14_3_Windows_two_independent_mutations_overwrite_first_with_second_and_omit_later_type_note_each_made_only_the_new_node_fail_while_the_existing_primary_failure_node_six_parameters_passed
     green_evidence: local_corrected_production_blob_1ecfe9bf4ab7f871b2e0da0a5c698900a0588d04_guard_blob_ab410272adb9a894e5ff1f1936a5c2d407e2166a_python_3_14_3_Windows_new_node_plus_existing_six_parameter_primary_failure_node_seven_passed_and_full_scripts_directory_225_passed_100_platform_skipped_pending_hosted_remaining_partition
+  - id: PERIODIC-LIVE-CALLBACK-CANCELLATION-CLEANUP-FALSE-GREEN-004
+    status: open
+    scope: product_contract
+    runtime_prevention_id: PERIODIC-LIVE-HELD-CALLBACK-CATEGORY-002
+    guard: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_callback_self_cancellation_still_closes_its_returned_awaitable
+    ci_partition: agents
+    red_evidence: exact_local_mutation_reordered_callback_self_cancellation_before_returned_awaitable_close_and_the_guard_failed_because_the_production_callback_coroutine_remained_unclosed
+    green_evidence: local_corrected_production_blob_7bbc9a5ed0acea2fa7503b8f0f817a046909e1bd_guard_blob_1ade7e99396028c20ad8b184ff74e475d9b433da_python_3_14_3_Windows_exact_hybrid_guard_passed_pending_native_Ubuntu_and_hosted_agents_partition
+  - id: SOAK-TERMINATION-MASK-CLEANUP-FALSE-GREEN-010
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_signal_mask_acquisition_failure_preserves_primary_and_attempts_all_cleanup
+    ci_partition: remaining
+    red_evidence: exact_local_mutation_wrapped_all_cleanup_inside_termination_signal_mask_acquisition_and_the_acquisition_and_first_failure_order_guards_failed_because_no_cleanup_owner_ran_and_mask_restoration_replaced_earlier_authority
+    green_evidence: local_corrected_production_blob_6de659389c884ef344c43f567d01ef4160ad506b_guard_blob_473a6aa061121b85a2581360a9144455a381e080_python_3_14_3_Windows_exact_cleanup_guards_passed_pending_native_Ubuntu_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6898,20 +6914,49 @@ records:
     status: open
     scope: product_contract
     authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
-    applies_to: Every provisional periodic-live frame callback that SequencedPeriodicLiveSources.ready flushes after a typed barrier result.
+    applies_to: Every receive-loop or held-frame periodic-live callback invoked by SequencedPeriodicLiveSources.
     classification: diagnostic_category_loss
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: A callback failure while ready flushes held frames can lose its finite local category, appear only as the private class name _FrameRejected, and falsely report that the barrier failed instead of naming the callback failure that invalidated the live source.
-    invariant: A held-frame callback rejection preserves its finite _FrameRejected.category through ready, invalidation state, watcher exception, rate-limiter key, and log text. The private class name, raw callback detail, and a false barrier-failure attribution never reach those surfaces.
+    consequence: >-
+      A callback failure can lose its finite local category, appear only as the private
+      class name _FrameRejected, or leave a returned awaitable unclosed when the callback
+      cancels its own task. The live source can then leak coroutine cleanup, retain a waiter,
+      or falsely blame the barrier while raw callback detail reaches operator surfaces.
+    invariant: >-
+      A receive-loop or held-frame callback rejection preserves its finite
+      _FrameRejected.category through invalidation state, watcher exception, rate-limiter
+      key, and log text. Cancellation already pending before callback entry propagates
+      unchanged and the callback does not run. Callback-origin cancellation is consumed
+      only by its post-entry cancellation delta and only after any returned awaitable is
+      detected and closed. Awaitable detection, close lookup, and close execution remain
+      inside the callback failure boundary. Every callback failure invalidates the source
+      and releases its waiter. The private class name, raw callback detail, and a false
+      barrier-failure attribution never reach operator surfaces.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
       - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_a_held_frame_callback_failure_keeps_its_category_through_ready
         ci_partition: agents
-    automation_limit: The production-state-machine guard passes locally, but the default hosted agents partition has not yet sealed the corrected candidate.
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_callback_cancelled_error_invalidates_source_and_releases_wait
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_callback_self_cancellation_invalidates_source_and_releases_wait
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_cancellation_pending_before_callback_entry_is_not_consumed
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_returned_awaitable_close_cancelled_error_invalidates_and_releases_wait
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_returned_awaitable_close_self_cancellation_invalidates_and_releases_wait
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_callback_self_cancellation_still_closes_its_returned_awaitable
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_receive_loop_preserves_cancellation_pending_before_callback_entry
+        ci_partition: agents
+      - node: tests/agents/assistant/test_the_receive_loop_says_why_it_stopped.py::test_owner_receive_task_cancellation_still_propagates_without_invalidation
+        ci_partition: agents
+    automation_limit: The nine registered production-state-machine guards pass locally, but the default hosted agents partition has not yet sealed the corrected candidate.
     red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_red_before_guard_drove_a_held_frame_callback_failure_through_ready_and_observed_the_barrier_failed_with__FrameRejected_in_exception_state_limiter_and_log
     green_evidence: pending_corrected_worktree_blobs_69356c53e2b5f48bd04052031e884813a702e383_and_de1fd1a7a20788256dcc88aeb956849f601189fc_and_hosted_agents_partition
   - id: SOAK-CHILD-WRITABLE-LOG-AUTHORITY-001
@@ -6966,6 +7011,10 @@ records:
       order even after any BaseException. The active primary exception is preserved and each
       cleanup failure contributes only a sanitized type-only note; without an active primary,
       the first cleanup failure is retained while later failures add sanitized type-only notes.
+      Termination-signal mask acquisition and restoration are cleanup actions in that same
+      ordering. Acquisition failure cannot skip any cleanup owner. Restoration failure cannot
+      replace an active primary exception or an earlier cleanup failure, and later details stay
+      sanitized.
     rule_refs:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
@@ -6988,6 +7037,12 @@ records:
         ci_partition: remaining
       - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_cleanup_failure_accumulator_retains_first_without_primary_and_attempts_all
         ci_partition: remaining
-    automation_limit: The nine registered production-path guard nodes pass locally on Windows. Real symlink creation and filesystem fifo execution are platform-gated here and remain pending a POSIX hosted remaining partition; the corrected candidate itself is not yet sealed by hosted CI.
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_signal_mask_acquisition_failure_preserves_primary_and_attempts_all_cleanup
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_signal_mask_restoration_failure_obeys_no_primary_first_failure_order
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_run_owned_no_primary_cleanup_attempts_all_and_retains_first
+        ci_partition: remaining
+    automation_limit: The twelve registered production-path guard nodes pass locally on Windows. Real symlink creation and filesystem fifo execution are platform-gated here and remain pending a POSIX hosted remaining partition; the corrected candidate itself is not yet sealed by hosted CI.
     red_evidence: exact_starting_commit_fe0c3abba15ce0476cb6e580cdbcc102295b6a6c_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_final_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_six_exact_red_on_revert_parameters_failed_external_hard_link_bytes_were_published_Path_read_bytes_was_called_before_the_bound_and_sink_artifact_pair_bridge_pipe_and_source_snapshot_exit_each_replaced_PrimaryFailure_with_CleanupInterrupted_plus_local_corrected_production_blob_1ecfe9bf4ab7f871b2e0da0a5c698900a0588d04_guard_blob_ab410272adb9a894e5ff1f1936a5c2d407e2166a_two_independent_no_primary_mutations_each_failed_only_the_new_node_while_the_existing_six_parameter_primary_node_passed
     green_evidence: local_corrected_production_blob_1ecfe9bf4ab7f871b2e0da0a5c698900a0588d04_guard_blob_ab410272adb9a894e5ff1f1936a5c2d407e2166a_python_3_14_3_Windows_full_guard_module_50_passed_four_platform_skipped_and_full_scripts_directory_225_passed_100_platform_skipped_pending_hosted_remaining_partition

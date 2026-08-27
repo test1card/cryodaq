@@ -580,3 +580,331 @@ def test_a_callback_failure_is_not_mislabeled_as_a_frame_or_transport_failure(
 
     assert "a periodic live callback failed" in source._invalidation_reason
     assert "subscriber transport failed" not in source._invalidation_reason
+
+
+def test_callback_cancelled_error_invalidates_source_and_releases_wait() -> None:
+    """Callback-originated cancellation is a callback failure, not task ownership."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        def callback(_event: object) -> None:
+            raise asyncio.CancelledError("CALLBACK SECRET MUST NOT ESCAPE")
+
+        class _Socket:
+            async def recv_multipart(self):
+                return [
+                    periodic_runtime.EVENTS_TOPIC,
+                    json.dumps(
+                        {
+                            "event_type": "notice",
+                            "ts": 1.0,
+                            "payload": {},
+                            "experiment_id": None,
+                            "transport": {
+                                "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                                "session_id": "0" * 32,
+                                "sequence": 2,
+                                "persistence_authoritative": False,
+                            },
+                        }
+                    ).encode(),
+                ]
+
+        source._on_event = callback
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+        waiter = asyncio.create_task(_SOURCE.wait(source))
+
+        await receive
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await asyncio.wait_for(waiter, timeout=1)
+
+        assert raised.value.reason == "the receive loop stopped: a periodic live callback failed"
+        assert source._invalid
+        assert "CALLBACK SECRET" not in str(raised.value)
+
+    asyncio.run(_drive())
+
+
+def test_callback_self_cancellation_invalidates_source_and_releases_wait() -> None:
+    """A callback cannot cancel its owner task and strand the source waiter."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._state_lock = asyncio.Lock()
+        source._failure = asyncio.get_running_loop().create_future()
+
+        def callback(_event: object) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel("CALLBACK CANCELLATION SECRET")
+
+        class _Socket:
+            async def recv_multipart(self):
+                return [
+                    periodic_runtime.EVENTS_TOPIC,
+                    json.dumps(
+                        {
+                            "event_type": "notice",
+                            "ts": 1.0,
+                            "payload": {},
+                            "experiment_id": None,
+                            "transport": {
+                                "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                                "session_id": "0" * 32,
+                                "sequence": 2,
+                                "persistence_authoritative": False,
+                            },
+                        }
+                    ).encode(),
+                ]
+
+        source._on_event = callback
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+        waiter = asyncio.create_task(_SOURCE.wait(source))
+
+        await receive
+        with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+            await asyncio.wait_for(waiter, timeout=1)
+
+        assert raised.value.reason == "the receive loop stopped: a periodic live callback failed"
+        assert "CALLBACK CANCELLATION SECRET" not in str(raised.value)
+        assert source._invalid
+        assert receive.cancelling() == 0
+        assert not receive.cancelled()
+
+    asyncio.run(_drive())
+
+
+def test_cancellation_pending_before_callback_entry_is_not_consumed() -> None:
+    """A callback failure must not erase cancellation already owned by its task."""
+
+    async def _drive() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel("OWNER CANCELLATION")
+        before = task.cancelling()
+        callback_called = False
+
+        def callback(_value: object) -> None:
+            nonlocal callback_called
+            callback_called = True
+            raise asyncio.CancelledError("callback")
+
+        with pytest.raises(asyncio.CancelledError):
+            _SOURCE._call(callback, object())
+
+        assert not callback_called
+        assert task.cancelling() == before
+        while task.cancelling():
+            task.uncancel()
+
+    asyncio.run(_drive())
+
+
+def _valid_callback_event_parts() -> list[bytes]:
+    return [
+        periodic_runtime.EVENTS_TOPIC,
+        json.dumps(
+            {
+                "event_type": "notice",
+                "ts": 1.0,
+                "payload": {},
+                "experiment_id": None,
+                "transport": {
+                    "schema": periodic_runtime.PERIODIC_STREAM_SCHEMA,
+                    "session_id": "0" * 32,
+                    "sequence": 2,
+                    "persistence_authoritative": False,
+                },
+            }
+        ).encode(),
+    ]
+
+
+async def _drive_returned_awaitable_callback(callback: object) -> tuple[object, asyncio.Task[None]]:
+    source = _fresh()
+    source._session_id = "0" * 32
+    source._last_sequence = 1
+    source._state_lock = asyncio.Lock()
+    source._failure = asyncio.get_running_loop().create_future()
+
+    class _Socket:
+        async def recv_multipart(self):
+            return _valid_callback_event_parts()
+
+    source._on_event = callback
+    source._socket = _Socket()
+    receive = asyncio.create_task(_SOURCE._receive_loop(source))
+    source._receive_task = receive
+    waiter = asyncio.create_task(_SOURCE.wait(source))
+
+    await receive
+    with pytest.raises(periodic_runtime.PeriodicLiveDiscontinuity) as raised:
+        await asyncio.wait_for(waiter, timeout=1)
+
+    assert raised.value.reason == "the receive loop stopped: a periodic live callback failed"
+    assert source._invalid
+    assert not receive.cancelled()
+    assert receive.cancelling() == 0
+    return source, receive
+
+
+def test_returned_awaitable_close_cancelled_error_invalidates_and_releases_wait() -> None:
+    """CancelledError from awaitable cleanup is callback failure, not owner cancellation."""
+
+    async def _drive() -> None:
+        closed = False
+
+        class _ReturnedAwaitable:
+            def __await__(self):
+                if False:
+                    yield None
+                return None
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+                raise asyncio.CancelledError("CLOSE SECRET MUST NOT ESCAPE")
+
+        await _drive_returned_awaitable_callback(lambda _value: _ReturnedAwaitable())
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_returned_awaitable_close_self_cancellation_invalidates_and_releases_wait() -> None:
+    """A close method cannot cancel the receive owner and strand its failure waiter."""
+
+    async def _drive() -> None:
+        closed = False
+
+        class _ReturnedAwaitable:
+            def __await__(self):
+                if False:
+                    yield None
+                return None
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel("CLOSE CANCELLATION SECRET")
+
+        await _drive_returned_awaitable_callback(lambda _value: _ReturnedAwaitable())
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_callback_self_cancellation_still_closes_its_returned_awaitable() -> None:
+    """Awaitable cleanup precedes rejection even when the callback also self-cancels."""
+
+    async def _drive() -> None:
+        closed = False
+
+        class _ReturnedAwaitable:
+            def __await__(self):
+                if False:
+                    yield None
+                return None
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+
+        def callback(_value: object) -> _ReturnedAwaitable:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel("CALLBACK CANCELLATION SECRET")
+            return _ReturnedAwaitable()
+
+        await _drive_returned_awaitable_callback(callback)
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_receive_loop_preserves_cancellation_pending_before_callback_entry() -> None:
+    """The real frame path must leave pre-entry owner cancellation untouched."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._session_id = "0" * 32
+        source._last_sequence = 1
+        source._failure = asyncio.get_running_loop().create_future()
+        callback_called = False
+
+        class _CancelOnEntryLock:
+            async def __aenter__(self):
+                task = asyncio.current_task()
+                assert task is not None
+                task.cancel("OWNER CANCELLATION")
+                return self
+
+            async def __aexit__(self, *_exc: object) -> bool:
+                return False
+
+        class _Socket:
+            async def recv_multipart(self):
+                return _valid_callback_event_parts()
+
+        def callback(_value: object) -> None:
+            nonlocal callback_called
+            callback_called = True
+
+        source._state_lock = _CancelOnEntryLock()
+        source._on_event = callback
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+
+        with pytest.raises(asyncio.CancelledError):
+            await receive
+
+        assert not callback_called
+        assert receive.cancelled()
+        assert receive.cancelling() == 1
+        assert not source._invalid
+        assert not source._failure.done()
+
+    asyncio.run(_drive())
+
+
+def test_owner_receive_task_cancellation_still_propagates_without_invalidation() -> None:
+    """Task-owner cancellation must not be recategorized as a callback failure."""
+
+    async def _drive() -> None:
+        source = _fresh()
+        source._failure = asyncio.get_running_loop().create_future()
+        entered = asyncio.Event()
+
+        class _Socket:
+            async def recv_multipart(self):
+                entered.set()
+                await asyncio.Event().wait()
+
+        source._socket = _Socket()
+        receive = asyncio.create_task(_SOURCE._receive_loop(source))
+        source._receive_task = receive
+        await entered.wait()
+        receive.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await receive
+
+        assert not source._invalid
+        assert not source._failure.done()
+
+    asyncio.run(_drive())

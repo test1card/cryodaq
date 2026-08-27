@@ -833,14 +833,50 @@ class SequencedPeriodicLiveSources:
 
     @staticmethod
     def _call(callback: Callable[[Any], object], value: object) -> None:
+        task = asyncio.current_task()
+        cancellation_depth = task.cancelling() if task is not None else 0
+        if cancellation_depth:
+            # Cancellation already owned the receive task before callback entry. Do not
+            # run subscriber code or recategorize that owner-directed cancellation.
+            raise asyncio.CancelledError
+
+        def consume_callback_cancellation() -> bool:
+            if task is None or task.cancelling() <= cancellation_depth:
+                return False
+            # `Task.cancel()` called synchronously by the callback schedules delivery at
+            # the NEXT await, outside this try/except. Consume only requests added during
+            # this callback so the owner loop can finish its invalidation path.
+            while task.cancelling() > cancellation_depth:
+                task.uncancel()
+            return True
+
+        def reject_callback(error: BaseException | None = None) -> None:
+            rejection = _FrameRejected("a periodic live callback failed", "periodic callback failed")
+            if error is None:
+                raise rejection
+            raise rejection from error
+
         try:
             result = callback(value)
+            returned_awaitable = inspect.isawaitable(result)
+            if returned_awaitable:
+                # Rejected awaitables must be settled before the receive loop records
+                # the callback failure. Keep lookup and close inside this boundary:
+                # either can raise CancelledError or add a synchronous cancellation
+                # request to the owner task, and neither is owner cancellation merely
+                # because coroutine cleanup happened to use that exception type.
+                close = getattr(result, "close", None)
+                if callable(close):
+                    close()
+        except asyncio.CancelledError as exc:
+            consume_callback_cancellation()
+            reject_callback(exc)
         except Exception as exc:
-            raise _FrameRejected("a periodic live callback failed", "periodic callback failed") from exc
-        if inspect.isawaitable(result):
-            close = getattr(result, "close", None)
-            if callable(close):
-                close()
+            consume_callback_cancellation()
+            reject_callback(exc)
+        if consume_callback_cancellation():
+            reject_callback()
+        if returned_awaitable:
             raise _FrameRejected(
                 "a periodic callback returned an awaitable instead of running synchronously",
                 "periodic live callbacks must be synchronous",

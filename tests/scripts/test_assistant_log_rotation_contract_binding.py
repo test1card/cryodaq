@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from datetime import date, timedelta
@@ -162,18 +164,66 @@ def test_publisher_publishes_a_full_handler_retention_of_real_rotation_names(
     assert runner._ASSISTANT_LOG_ROTATION_CEILING_MARKER not in published
 
 
-def test_one_rotation_beyond_the_handler_retention_refuses_fail_closed(state_root: Path) -> None:
-    """The drift shape from the finding, driven: more retained days than allowed.
+def test_process_death_after_real_handler_rename_keeps_the_causal_log(state_root: Path) -> None:
+    """One extra rotation is a real interrupted-rollover state, not contract drift."""
 
-    One dated rotation MORE than the contract retains must publish nothing and
-    say why. After the unification this can only happen when producer and
-    consumer have genuinely come apart -- and the attribute bindings above go
-    red first -- but the refusal boundary itself stays fail-closed either way.
-    """
+    logs_dir = state_root / "logs"
+    old_rotations = []
+    for offset in range(30, 30 + logging_setup.ASSISTANT_LOG_BACKUP_COUNT):
+        rotation_day = date.today() - timedelta(days=offset)
+        suffix = time.strftime(logging_setup.ASSISTANT_LOG_SUFFIX_FORMAT, rotation_day.timetuple())
+        old_rotations.append(f"{logging_setup.ASSISTANT_LOG_BASENAME}.{suffix}")
+    for offset, name in enumerate(old_rotations):
+        (logs_dir / name).write_bytes(f"OLDER CAUSE {offset:02d}\n".encode())
+
+    child = "\n".join(
+        (
+            "import logging, logging.handlers, os, time",
+            "from cryodaq import logging_setup",
+            "logging_setup.setup_logging('assistant', console=False)",
+            "handler = next(h for h in logging.getLogger().handlers "
+            "if isinstance(h, logging.handlers.TimedRotatingFileHandler))",
+            "logging.getLogger('rollover.death').error('PERIODIC SOURCE FAILED; api_key: leakme020Fj')",
+            "handler.flush()",
+            "handler.rolloverAt = int(time.time()) - 1",
+            "handler.getFilesToDelete = lambda: os._exit(91)",
+            "handler.doRollover()",
+            "raise SystemExit(92)",
+        )
+    )
+    completed = subprocess.run(
+        (sys.executable, "-c", child),
+        cwd=Path(__file__).parents[2],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert completed.returncode == 91, completed.stderr
+
+    selected = runner._rotated_assistant_log_names(logs_dir)
+    assert not isinstance(selected, runner._AssistantLogDirectoryRefusal)
+    assert len(selected) == logging_setup.ASSISTANT_LOG_BACKUP_COUNT + 1
+
+    evidence = _Evidence()
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "PERIODIC SOURCE FAILED" in published
+    assert "OLDER CAUSE" in published
+    assert "leakme020Fj" not in published
+    assert runner._ASSISTANT_LOG_ROTATION_CEILING_MARKER not in published
+
+
+def test_two_rotations_beyond_handler_retention_refuse_fail_closed(state_root: Path) -> None:
+    """Only one interrupted-rollover residue is accepted; further excess refuses."""
 
     logging_setup.setup_logging("assistant", console=False)
     handler = _production_assistant_file_handler()
-    rotations = _dated_rotation_names(handler.suffix, logging_setup.ASSISTANT_LOG_BACKUP_COUNT + 1)
+    rotations = _dated_rotation_names(
+        handler.suffix,
+        logging_setup.ASSISTANT_LOG_BACKUP_COUNT + 2,
+    )
 
     logs_dir = state_root / "logs"
     for name in rotations:

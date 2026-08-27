@@ -538,19 +538,176 @@ def test_cleanup_failure_accumulator_retains_first_without_primary_and_attempts_
     assert "SECOND CLEANUP SECRET DETAIL" not in "\n".join(notes)
 
 
+def test_signal_mask_acquisition_failure_preserves_primary_and_attempts_all_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed mask enter is one accumulated failure, not a cleanup-wide gate."""
+
+    class PrimaryFailure(BaseException):
+        pass
+
+    class MaskAcquisitionFailure(BaseException):
+        pass
+
+    primary = PrimaryFailure("PRIMARY SECRET")
+    calls: list[str] = []
+
+    class FailingMask:
+        def __enter__(self) -> None:
+            calls.append("mask_enter")
+            raise MaskAcquisitionFailure("MASK SECRET")
+
+        def __exit__(self, *_exc: object) -> bool:
+            calls.append("mask_exit")
+            return False
+
+    class CloseOwner:
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def close(self) -> None:
+            calls.append(self._name)
+
+    class TemporaryOwner:
+        def cleanup(self) -> None:
+            calls.append("source_temporary")
+
+    class SnapshotOwner:
+        def __exit__(self, *_exc: object) -> bool:
+            calls.append("source_snapshot")
+            return False
+
+    monkeypatch.setattr(runner, "_block_termination_signals", lambda: FailingMask())
+
+    settled = runner._cleanup_owned_run(
+        primary_info=(type(primary), primary, None),
+        process=None,
+        launcher_identity=None,
+        launcher_settled=True,
+        locked=object(),
+        owner_identity=object(),
+        sink=CloseOwner("sink"),
+        artifact_pair=CloseOwner("artifact_pair"),
+        bridge_pipe=CloseOwner("bridge_pipe"),
+        source_temporary=TemporaryOwner(),
+        source_snapshot_context=SnapshotOwner(),
+    )
+
+    assert settled
+    assert calls == [
+        "mask_enter",
+        "sink",
+        "artifact_pair",
+        "bridge_pipe",
+        "source_temporary",
+        "source_snapshot",
+    ]
+    assert tuple(getattr(primary, "__notes__", ())) == (
+        "termination signal mask acquisition failed: MaskAcquisitionFailure",
+    )
+    assert "MASK SECRET" not in "\n".join(primary.__notes__)
+
+
+@pytest.mark.parametrize("earlier_cleanup_failure", (False, True))
+def test_signal_mask_restoration_failure_obeys_no_primary_first_failure_order(
+    monkeypatch: pytest.MonkeyPatch,
+    earlier_cleanup_failure: bool,
+) -> None:
+    """Mask restoration is exact only when no earlier cleanup failure owns exit."""
+
+    class FirstCleanupFailure(BaseException):
+        pass
+
+    class MaskRestorationFailure(BaseException):
+        pass
+
+    first = FirstCleanupFailure("FIRST CLEANUP SECRET")
+    restoration = MaskRestorationFailure("MASK RESTORATION SECRET")
+    calls: list[str] = []
+
+    class FailingRestoreMask:
+        def __enter__(self) -> None:
+            calls.append("mask_enter")
+
+        def __exit__(self, *_exc: object) -> bool:
+            calls.append("mask_exit")
+            raise restoration
+
+    class Sink:
+        def close(self) -> None:
+            calls.append("sink")
+            if earlier_cleanup_failure:
+                raise first
+
+    class SnapshotOwner:
+        def __exit__(self, *_exc: object) -> bool:
+            calls.append("source_snapshot")
+            return False
+
+    monkeypatch.setattr(runner, "_block_termination_signals", lambda: FailingRestoreMask())
+
+    caught: BaseException | None = None
+    try:
+        runner._cleanup_owned_run(
+            primary_info=(None, None, None),
+            process=None,
+            launcher_identity=None,
+            launcher_settled=True,
+            locked=object(),
+            owner_identity=object(),
+            sink=Sink(),
+            artifact_pair=None,
+            bridge_pipe=None,
+            source_temporary=None,
+            source_snapshot_context=SnapshotOwner(),
+        )
+    except BaseException as error:
+        caught = error
+
+    assert calls == ["mask_enter", "sink", "source_snapshot", "mask_exit"]
+    if earlier_cleanup_failure:
+        assert caught is first
+        assert tuple(getattr(caught, "__notes__", ())) == (
+            "termination signal mask restoration failed: MaskRestorationFailure",
+        )
+        assert "MASK RESTORATION SECRET" not in "\n".join(caught.__notes__)
+    else:
+        assert caught is restoration
+        assert not getattr(caught, "__notes__", ())
+
+
+def test_run_owned_no_primary_cleanup_attempts_all_and_retains_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Drive `_run_owned` with no active primary and exercise every cleanup owner."""
+
+    test_run_owned_settles_session_before_state_root_cleanup_and_preserves_primary(
+        tmp_path,
+        monkeypatch,
+        cleanup_boundary="no-primary",
+        final_settlement_fails=False,
+        no_primary=True,
+    )
+
+
 @pytest.mark.parametrize(
-    ("cleanup_boundary", "final_settlement_fails"),
+    ("cleanup_boundary", "final_settlement_fails", "no_primary"),
     (
-        pytest.param("source-root", False, id="source-root"),
-        pytest.param("final-settlement", True, id="final-settlement"),
-        pytest.param("sink", False, id="sink"),
-        pytest.param("artifact-pair", False, id="artifact-pair"),
-        pytest.param("bridge-pipe", False, id="bridge-pipe"),
-        pytest.param("snapshot-exit", False, id="snapshot-exit"),
+        pytest.param("source-root", False, False, id="source-root"),
+        pytest.param("final-settlement", True, False, id="final-settlement"),
+        pytest.param("sink", False, False, id="sink"),
+        pytest.param("artifact-pair", False, False, id="artifact-pair"),
+        pytest.param("bridge-pipe", False, False, id="bridge-pipe"),
+        pytest.param("snapshot-exit", False, False, id="snapshot-exit"),
     ),
 )
 def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_primary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_boundary: str, final_settlement_fails: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_boundary: str,
+    final_settlement_fails: bool,
+    no_primary: bool,
 ) -> None:
     """The real owner lifecycle must not tear down a root while its child can write."""
 
@@ -565,6 +722,16 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
     class CleanupInterrupted(BaseException):
         pass
 
+    class BodyComplete(BaseException):
+        pass
+
+    class FirstCleanupFailure(BaseException):
+        pass
+
+    class LaterCleanupFailure(BaseException):
+        pass
+
+    first_cleanup_failure = FirstCleanupFailure("FIRST OWNER CLEANUP SECRET")
     child_writer = {"fd": None, "live": False}
     cleanup_saw_live_writer: list[bool] = []
     source_temporaries: list[ObservedTemporaryDirectory] = []
@@ -603,6 +770,8 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
                 cleanup_calls.append("source_root")
                 cleanup_saw_live_writer.append(child_writer["live"])
             self._inner.cleanup()
+            if self._source and no_primary:
+                raise LaterCleanupFailure("MUST NOT LEAK SOURCE ROOT DETAIL")
             if self._source and cleanup_boundary == "source-root":
                 raise CleanupInterrupted("MUST NOT LEAK TEMP CLEANUP DETAIL")
 
@@ -623,6 +792,8 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
         def __exit__(self, *_exc: object) -> bool:
             if self._source:
                 cleanup_calls.append("snapshot_exit")
+                if no_primary:
+                    raise LaterCleanupFailure("MUST NOT LEAK SNAPSHOT DETAIL")
                 if cleanup_boundary == "snapshot-exit":
                     raise CleanupInterrupted("MUST NOT LEAK SNAPSHOT EXIT DETAIL")
             return False
@@ -704,10 +875,14 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
             return ()
 
         def close_parent_write_end(self) -> None:
+            if no_primary:
+                raise BodyComplete
             raise PrimaryFailure("primary production failure")
 
         def close(self) -> None:
             cleanup_calls.append("bridge_pipe")
+            if no_primary:
+                raise LaterCleanupFailure("MUST NOT LEAK BRIDGE CLOSE DETAIL")
             if cleanup_boundary == "bridge-pipe":
                 raise CleanupInterrupted("MUST NOT LEAK BRIDGE CLOSE DETAIL")
 
@@ -730,6 +905,8 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
 
         def close(self) -> None:
             cleanup_calls.append("artifact_pair")
+            if no_primary:
+                raise LaterCleanupFailure("MUST NOT LEAK ARTIFACT CLOSE DETAIL")
             if cleanup_boundary == "artifact-pair":
                 raise CleanupInterrupted("MUST NOT LEAK ARTIFACT CLOSE DETAIL")
 
@@ -739,6 +916,8 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
 
         def close(self) -> None:
             cleanup_calls.append("sink")
+            if no_primary:
+                raise first_cleanup_failure
             if cleanup_boundary == "sink":
                 raise CleanupInterrupted("MUST NOT LEAK SINK CLOSE DETAIL")
 
@@ -752,7 +931,7 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
 
     def force_settle(*_args: object, **_kwargs: object) -> None:
         settlement_calls.append(len(settlement_calls) + 1)
-        if len(settlement_calls) == 1 or final_settlement_fails:
+        if not no_primary and (len(settlement_calls) == 1 or final_settlement_fails):
             raise SettlementInterrupted("MUST NOT LEAK FINAL SETTLEMENT DETAIL")
         descriptor = child_writer["fd"]
         assert isinstance(descriptor, int)
@@ -782,6 +961,19 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
     monkeypatch.setattr(runner, "_spawn_gated_source", spawn_source)
     monkeypatch.setattr(runner, "_force_settle_owned_session", force_settle)
     monkeypatch.setattr(runner, "_block_termination_signals", nullcontext)
+    if no_primary:
+
+        @contextmanager
+        def body_completion_capture(*_args: object, **_kwargs: object):
+            with runner.tempfile.TemporaryFile(mode="w+b") as log:
+                try:
+                    yield log
+                except BodyComplete:
+                    # Suppression completes `_run_owned`'s body with no active exception;
+                    # its REAL finally block must now run the no-primary cleanup path.
+                    pass
+
+        monkeypatch.setattr(runner, "_launcher_log_capture", body_completion_capture)
 
     caught: BaseException | None = None
     try:
@@ -796,6 +988,22 @@ def test_run_owned_settles_session_before_state_root_cleanup_and_preserves_prima
             child_writer["live"] = False
         for source_temporary in source_temporaries:
             source_temporary._inner.cleanup()
+
+    if no_primary:
+        assert caught is first_cleanup_failure
+        assert cleanup_saw_live_writer == [False]
+        assert cleanup_calls == ["sink", "artifact_pair", "bridge_pipe", "source_root", "snapshot_exit"]
+        assert settlement_calls == [1]
+        notes = tuple(getattr(caught, "__notes__", ()))
+        assert notes == (
+            "artifact capability pair cleanup failed: LaterCleanupFailure",
+            "bridge handshake pipe cleanup failed: LaterCleanupFailure",
+            "source temporary cleanup failed: LaterCleanupFailure",
+            "source snapshot cleanup failed: LaterCleanupFailure",
+        )
+        assert "MUST NOT LEAK" not in "\n".join(notes)
+        assert "FIRST OWNER CLEANUP SECRET" not in "\n".join(notes)
+        return
 
     assert type(caught) is PrimaryFailure and str(caught) == "primary production failure"
     expected_cleanup_observations = [] if final_settlement_fails else [False]
@@ -1437,10 +1645,10 @@ def test_rotated_log_enumeration_streams_exact_dated_names_only(
 
 
 def test_too_many_rotated_logs_refuse_the_child_writable_directory(state_root: Path) -> None:
-    """More rotations than the configured handler retains are not safe to enumerate."""
+    """More than retention plus one interrupted-rollover residue must refuse."""
 
     logs = state_root / "logs"
-    for day in range(1, ASSISTANT_LOG_BACKUP_COUNT + 2):
+    for day in range(1, ASSISTANT_LOG_BACKUP_COUNT + 3):
         (logs / f"assistant.log.2026-08-{day:02d}").write_bytes(b"MUST NOT PUBLISH\n")
     (logs / "assistant.log").write_bytes(b"ACTIVE MUST NOT PUBLISH\n")
     evidence = _Evidence()
