@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -104,10 +105,15 @@ _log = logging.getLogger(__name__)
 
 _RUNTIME_FAILED_TEXT = "periodic runtime is unavailable"
 _RUNTIME_REASON_MAX_CHARS = 160
-# One line per distinct reason, then at most one per minute while it persists. The monitor
-# retries about once a second, and a week of that is a log file nobody can read and a disk
-# nobody budgeted for -- the exact failure mode a week-long run is supposed to survive.
+# A bounded burst distinguishes new reasons; repeats then emit at most once per minute.
+# The monitor retries about once a second, and a week of that is a log file nobody can read
+# and a disk nobody budgeted for -- the exact failure mode a week-long run must survive.
 _RUNTIME_FAILED_LOG_INTERVAL_S = 60.0
+# Bound both retained limiter state and the number of novel diagnostic lines that a
+# changing exception can produce in one interval. A device error containing a counter or
+# timestamp must not turn a week-long run into an unbounded dictionary or log flood.
+_RUNTIME_FAILED_LOG_SIGNATURE_LIMIT = 64
+_RUNTIME_FAILED_LOG_BURST = 8
 # Exactly what periodic_state._validated_text refuses, matched here so a reason is made
 # writable rather than discovered to be unwritable after the writer has already refused it.
 _PROHIBITED_LOCATOR = re.compile(r"\S*api\.telegram\.org/bot\S*", re.IGNORECASE)
@@ -124,6 +130,18 @@ def _bounded_text(value: str) -> str:
     if len(detail) > _RUNTIME_REASON_MAX_CHARS:
         detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
     return detail
+
+
+def _fit_bounded_text(value: str, limit: int) -> str:
+    """Fit already state-safe text to ``limit`` while preserving truncation evidence."""
+
+    if limit <= 0:
+        return ""
+    if len(value) <= limit:
+        return value
+    if limit == 1:
+        return "\u2026"
+    return value[: limit - 1] + "\u2026"
 
 
 def _bounded_reason(cause: BaseException) -> str:
@@ -158,13 +176,16 @@ def _runtime_failed_text(cause: BaseException | None, because: str = "") -> str:
 
     parts = [_RUNTIME_FAILED_TEXT]
     if because:
-        parts.append(because)
+        # Branch context is useful, but it may contain an arbitrarily long path. Reserve
+        # enough of the durable budget for the exception type and meaningful detail.
+        parts.append(_fit_bounded_text(_bounded_text(because), 72))
     if cause is not None:
-        parts.append(type(cause).__name__)
+        parts.append(_fit_bounded_text(_bounded_text(type(cause).__name__), 32))
         detail = _bounded_reason(cause)
         if detail:
-            parts.append(detail)
-    return _bounded_text(": ".join(parts))
+            used = len(": ".join(parts)) + 2
+            parts.append(_fit_bounded_text(detail, _RUNTIME_REASON_MAX_CHARS - used))
+    return ": ".join(parts)
 
 
 def _known_render_outcome(error_code: str) -> bool:
@@ -1773,7 +1794,9 @@ class PeriodicPngSupervisor:
         self._published_health_record: PeriodicStateDocument | None = None
         # Last runtime-failure line written for each bounded signature. Alternating two
         # persistent branches must not evade the per-minute limit.
-        self._last_runtime_failure_logs: dict[tuple[str, str], float] = {}
+        self._last_runtime_failure_logs: OrderedDict[tuple[str, str, str], float] = OrderedDict()
+        self._runtime_failure_window_started: float | None = None
+        self._runtime_failure_lines_in_window = 0
 
     async def run(self) -> None:
         if self._run_task is not None and self._run_task is not asyncio.current_task():
@@ -1981,6 +2004,16 @@ class PeriodicPngSupervisor:
         because = f"the configuration could not be loaded from {self._config_dir}"
         if cause is not None:
             self._log_runtime_failure(because, cause)
+        if self._leader_fd is None:
+            # The first loader call precedes ordinary election. Without this bounded
+            # attempt every process logged the fault, but no authoritative process wrote
+            # the durable health receipt. Only the lock winner publishes; standbys remain
+            # read-only and retry after the ordinary backoff.
+            self._leader_fd = await _acquire_lock_cancellation_safe(
+                self._run_blocking,
+                PERIODIC_LEADER_LOCK,
+                lock_dir=self._data_dir,
+            )
         if self._leader_fd is not None:
             await self._stop_then_mark_runtime_failed(cause, because=because)
             self._release_leader()
@@ -2017,7 +2050,7 @@ class PeriodicPngSupervisor:
             raise cleanup_error
 
     def _log_runtime_failure(self, because: str, cause: BaseException | None) -> None:
-        """One line per distinct reason, then at most one a minute while it persists.
+        """Emit a bounded burst of distinct reasons and rate-limit persistent repeats.
 
         EVERY caller comes through here. The configuration-loader handler logged directly
         and bypassed the limit, so a reload failing once a second wrote once a second --
@@ -2025,17 +2058,33 @@ class PeriodicPngSupervisor:
         """
 
         bounded_because = _bounded_text(because)
-        signature = (bounded_because, "none" if cause is None else type(cause).__name__)
+        cause_type = "none" if cause is None else _bounded_text(type(cause).__name__)
+        bounded_detail = "" if cause is None else _bounded_reason(cause)
+        signature = (bounded_because, cause_type, bounded_detail)
         now_monotonic = self._clock.monotonic()
         last = self._last_runtime_failure_logs.get(signature)
-        if last is not None and now_monotonic - last < _RUNTIME_FAILED_LOG_INTERVAL_S:
+        if last is not None and 0.0 <= now_monotonic - last < _RUNTIME_FAILED_LOG_INTERVAL_S:
+            return
+        window_started = self._runtime_failure_window_started
+        if (
+            window_started is None
+            or now_monotonic < window_started
+            or now_monotonic - window_started >= _RUNTIME_FAILED_LOG_INTERVAL_S
+        ):
+            self._runtime_failure_window_started = now_monotonic
+            self._runtime_failure_lines_in_window = 0
+        if self._runtime_failure_lines_in_window >= _RUNTIME_FAILED_LOG_BURST:
             return
         self._last_runtime_failure_logs[signature] = now_monotonic
+        self._last_runtime_failure_logs.move_to_end(signature)
+        while len(self._last_runtime_failure_logs) > _RUNTIME_FAILED_LOG_SIGNATURE_LIMIT:
+            self._last_runtime_failure_logs.popitem(last=False)
+        self._runtime_failure_lines_in_window += 1
         _log.error(
             "periodic runtime is unavailable; because=%s type=%s detail=%s",
             bounded_because or "unstated",
-            signature[1],
-            "" if cause is None else _bounded_reason(cause),
+            cause_type,
+            bounded_detail,
         )
 
     async def _stop_then_keep_monitor_health(self, cause: BaseException | None = None) -> None:
@@ -2056,7 +2105,7 @@ class PeriodicPngSupervisor:
             # logging nothing meant the next coordinator could put the record back to
             # `ready` seconds later, leaving no trace anywhere that the live source had
             # stopped at all -- worse than the vague sentence it replaced.
-            self._log_runtime_failure("the live-source monitor stopped the coordinator", None)
+            self._log_runtime_failure("the live-source monitor stopped the coordinator", cause)
         else:
             await self._write_runtime_failed_health(cause, because="the monitor reported a failure")
         if cleanup_error is not None:

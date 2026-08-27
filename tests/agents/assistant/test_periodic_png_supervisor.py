@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -798,6 +799,67 @@ async def test_critical_runtime_failure_marks_nonready_before_re_election(
 
 
 @pytest.mark.asyncio
+async def test_live_source_failure_preserves_health_and_logs_real_cause_before_re_election(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailedLiveSourceCoordinator(Coordinator):
+        async def wait(self) -> None:
+            state = load_periodic_state(tmp_path)
+            write_periodic_state(
+                tmp_path,
+                set_periodic_health(
+                    state,
+                    status="degraded_source",
+                    code="periodic_live_source_stopped",
+                    text="periodic live source stopped unexpectedly",
+                    now=1.0,
+                ),
+            )
+            raise ValueError("ZMQ subscription socket died")
+
+    class BackoffClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    clock = BackoffClock()
+    coordinator = FailedLiveSourceCoordinator()
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: coordinator,
+        config_loader=lambda _path: _runnable_load(),
+        clock=clock,
+    )
+    with caplog.at_level(logging.ERROR, logger="cryodaq.agents.assistant.periodic_png"):
+        task = asyncio.create_task(supervisor.run())
+        for _ in _settle_attempts():
+            health = (await _load_stable(tmp_path)).payload["health"]
+            messages = [record.getMessage() for record in caplog.records]
+            if health["error_code"] == "periodic_live_source_stopped" and any(
+                "ValueError" in message and "ZMQ subscription socket died" in message for message in messages
+            ):
+                break
+            await asyncio.sleep(0.001)
+
+    health = (await _load_stable(tmp_path)).payload["health"]
+    assert health["error_code"] == "periodic_live_source_stopped"
+    assert health["error_text"] == "periodic live source stopped unexpectedly"
+    assert any("ValueError" in message and "ZMQ subscription socket died" in message for message in messages)
+    fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fd is not None
+    release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+    await supervisor.stop()
+    await task
+
+
+@pytest.mark.asyncio
 async def test_cancelled_leader_acquisition_releases_late_fd(tmp_path: Path) -> None:
     acquired = asyncio.Event()
     release_result = asyncio.Event()
@@ -1038,8 +1100,16 @@ async def test_raising_config_loader_backs_off_then_recovers_to_idle(
     await clock.entered.wait()
     assert calls == 1
     assert made == 0
-    assert not (tmp_path / ".report-locks").exists()
-    assert not (tmp_path / "reporting").exists()
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "degraded_runtime"
+    assert health["error_code"] == "periodic_runtime_failed"
+    assert "RuntimeError" in health["error_text"]
+    assert "config loader failed" in health["error_text"]
+    assert (tmp_path / ".report-locks").exists()
+    assert (tmp_path / "reporting").exists()
+    fault_receipt_owner = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fault_receipt_owner is not None
+    release_lock(fault_receipt_owner, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
     assert not task.done()
     clock.entered.clear()
     clock.release.set()

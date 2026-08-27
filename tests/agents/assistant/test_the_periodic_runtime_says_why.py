@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
+import sys
 
 import pytest
 
 from cryodaq.agents.assistant import periodic_png
-from cryodaq.periodic_state import load_periodic_state, set_periodic_health, write_periodic_state
+from cryodaq.periodic_state import (
+    load_periodic_state,
+    periodic_state_path,
+    set_periodic_health,
+    write_periodic_state,
+)
 
 
 class _Clock:
@@ -42,23 +50,91 @@ def _supervisor(tmp_path, factory):
     return supervisor, clock
 
 
-def test_the_production_failure_branches_persist_distinct_labels(tmp_path) -> None:
-    """The loader and construction paths must leave distinguishable durable reasons."""
+def _probe_periodic_leader_from_distinct_process(data_dir) -> subprocess.CompletedProcess[str]:
+    """Observe kernel lock ownership from a process that cannot inherit it."""
+
+    probe = subprocess.run(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from cryodaq.instance_lock import release_lock, try_acquire_lock; "
+                "lock_dir, name = sys.argv[1:]; "
+                "fd = try_acquire_lock(name, lock_dir=lock_dir); "
+                "sys.exit(0) if fd is None else "
+                "(release_lock(fd, name, unlink=False, lock_dir=lock_dir), sys.exit(91))"
+            ),
+            str(data_dir),
+            periodic_png.PERIODIC_LEADER_LOCK,
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return probe
+
+
+def _durable_file_observation(path) -> tuple[tuple[int, int], tuple[int, int, int], bytes]:
+    """Bind exact content and metadata to the file object behind ``path``."""
+
+    with path.open("rb") as stream:
+        content = stream.read()
+        result = os.fstat(stream.fileno())
+    identity = (result.st_dev, result.st_ino)
+    metadata = (result.st_size, result.st_mtime_ns, result.st_ctime_ns)
+    return identity, metadata, content
+
+
+def test_the_production_failure_branches_persist_distinct_labels(tmp_path, caplog, monkeypatch) -> None:
+    """The elected loader writes an owned, bounded, branch-specific receipt."""
+
+    _assert_standby_loader_failure_never_writes_durable_health(tmp_path, monkeypatch)
+    caplog.clear()
 
     loader, _clock = _supervisor(tmp_path / "loader", lambda _config: pytest.fail("factory must not run"))
     loader._config_dir = "api.telegram.org/bot-config"
-    loader._leader_fd = 1
-    loader._release_leader = lambda: None
+    write_lock_probes: list[subprocess.CompletedProcess[str]] = []
+
+    async def _run_blocking_with_lock_probe(func, *args, **kwargs):
+        if func is write_periodic_state:
+            write_lock_probes.append(_probe_periodic_leader_from_distinct_process(tmp_path / "loader"))
+        return func(*args, **kwargs)
+
+    loader._run_blocking = _run_blocking_with_lock_probe
 
     async def _sleep_or_stop(_seconds: float) -> None:
         return None
 
     loader._sleep_or_stop = _sleep_or_stop
-    asyncio.run(loader._handle_config_loader_failure(0, ValueError("bad yaml")))
+    detail = "bad yaml " + "x" * 10_000
+    with caplog.at_level(logging.ERROR, logger=periodic_png.__name__):
+        asyncio.run(loader._handle_config_loader_failure(0, ValueError(detail)))
+    assert len(write_lock_probes) == 1
+    probe = write_lock_probes[0]
+    assert probe.returncode == 0, (
+        "the durable runtime-failure writer ran without the leader lock; "
+        f"distinct-process probe returned {probe.returncode}: {probe.stderr}"
+    )
     loader_text = load_periodic_state(tmp_path / "loader").payload["health"]["error_text"]
     assert "configuration could not be loaded" in loader_text
     assert "api.telegram.org/bot" not in loader_text
     assert "<telegram-url-removed>" in loader_text
+    assert "bad yaml" in loader_text
+
+    assert len(loader._last_runtime_failure_logs) == 1
+    (signature,) = loader._last_runtime_failure_logs
+    assert all(len(part) <= periodic_png._RUNTIME_REASON_MAX_CHARS for part in signature)
+    assert signature[2].endswith("\u2026")
+    loader_records = [record for record in caplog.records if "configuration could not be loaded" in record.getMessage()]
+    assert len(loader_records) == 1
+    loader_record = loader_records[0]
+    assert isinstance(loader_record.args, tuple)
+    emitted_because, emitted_type, emitted_detail = loader_record.args
+    assert (emitted_because, emitted_type, emitted_detail) == signature
+    assert len(emitted_detail) <= periodic_png._RUNTIME_REASON_MAX_CHARS
+    assert emitted_detail.endswith("\u2026")
 
     def _construction_fails(_config):
         raise ValueError("bad yaml")
@@ -68,6 +144,103 @@ def test_the_production_failure_branches_persist_distinct_labels(tmp_path) -> No
     construction_text = load_periodic_state(tmp_path / "constructed").payload["health"]["error_text"]
     assert "coordinator could not be constructed" in construction_text
     assert loader_text != construction_text
+
+
+def _assert_standby_loader_failure_never_writes_durable_health(tmp_path, monkeypatch) -> None:
+    """A losing election must leave the exact durable artifact untouched."""
+
+    data_dir = tmp_path / "standby"
+    seeded = set_periodic_health(
+        load_periodic_state(data_dir),
+        status="starting",
+        code=None,
+        text="",
+        now=1.0,
+    )
+    write_periodic_state(data_dir, seeded)
+    state_path = periodic_state_path(data_dir)
+    before_payload = load_periodic_state(data_dir).payload
+    before_identity, before_metadata, before_bytes = _durable_file_observation(state_path)
+    holder = subprocess.Popen(
+        (
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from cryodaq.instance_lock import release_lock, try_acquire_lock; "
+                "lock_dir, name = sys.argv[1:]; "
+                "fd = try_acquire_lock(name, lock_dir=lock_dir); "
+                "print('LOCKED' if fd is not None else 'FAILED', flush=True); "
+                "sys.stdin.readline(); "
+                "release_lock(fd, name, unlink=False, lock_dir=lock_dir) if fd is not None else None"
+            ),
+            str(data_dir),
+            periodic_png.PERIODIC_LEADER_LOCK,
+        ),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    standby, _clock = _supervisor(data_dir, lambda _config: pytest.fail("factory must not run"))
+    writer_binding_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    production_writer = periodic_png.write_periodic_state
+
+    def _observe_production_writer(*args, **kwargs) -> None:
+        writer_binding_calls.append((args, kwargs))
+        production_writer(*args, **kwargs)
+
+    async def _sleep_or_stop(_seconds: float) -> None:
+        return None
+
+    standby._sleep_or_stop = _sleep_or_stop
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "LOCKED"
+        with monkeypatch.context() as patch:
+            patch.setattr(periodic_png, "write_periodic_state", _observe_production_writer)
+            next_backoff = asyncio.run(standby._handle_config_loader_failure(0, ValueError("bad yaml")))
+        assert next_backoff == 1
+        assert standby._leader_fd is None
+        assert writer_binding_calls == []
+        after_identity, after_metadata, after_bytes = _durable_file_observation(state_path)
+        assert after_identity == before_identity
+        assert after_metadata == before_metadata
+        assert after_bytes == before_bytes
+        assert load_periodic_state(data_dir).payload == before_payload
+    finally:
+        if holder.stdin is not None:
+            try:
+                holder.stdin.write("release\n")
+                holder.stdin.flush()
+                holder.stdin.close()
+            except BrokenPipeError:
+                pass
+        try:
+            holder.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.wait(timeout=10)
+    assert holder.returncode == 0
+
+
+def test_production_loader_reserves_type_and_detail_when_config_path_is_long(tmp_path) -> None:
+    loader, _clock = _supervisor(tmp_path, lambda _config: pytest.fail("factory must not run"))
+    loader._config_dir = tmp_path / ("long-config-segment-" * 10)
+    loader._leader_fd = 1
+    loader._release_leader = lambda: None
+
+    async def _sleep_or_stop(_seconds: float) -> None:
+        return None
+
+    loader._sleep_or_stop = _sleep_or_stop
+    asyncio.run(loader._handle_config_loader_failure(0, ValueError("bad yaml at line 9")))
+
+    text = load_periodic_state(tmp_path).payload["health"]["error_text"]
+    assert "configuration could not be loaded" in text
+    assert "ValueError" in text
+    assert "bad yaml at line 9" in text
+    assert len(text) <= periodic_png._RUNTIME_REASON_MAX_CHARS
 
 
 def test_a_credential_bearing_exception_is_persisted_safely_by_the_production_writer(tmp_path) -> None:
@@ -168,16 +341,21 @@ def test_monitor_failure_orchestration_preserves_only_live_source_health(
         write_periodic_state(tmp_path, candidate)
 
     supervisor, _clock = _supervisor(tmp_path, lambda _config: pytest.fail("factory must not run"))
+    cause = ValueError("ZMQ subscription socket died")
     with caplog.at_level(logging.ERROR, logger=periodic_png.__name__):
-        asyncio.run(supervisor._stop_then_keep_monitor_health())
+        asyncio.run(supervisor._stop_then_keep_monitor_health(cause))
 
     health = load_periodic_state(tmp_path).payload["health"]
     if preserved:
         assert health["error_code"] == "periodic_live_source_stopped"
         assert "live-source monitor stopped the coordinator" in caplog.records[-1].getMessage()
+        assert "ValueError" in caplog.records[-1].getMessage()
+        assert "ZMQ subscription socket died" in caplog.records[-1].getMessage()
     else:
         assert health["error_code"] == "periodic_runtime_failed"
         assert "monitor reported a failure" in health["error_text"]
+        assert "ValueError" in health["error_text"]
+        assert "ZMQ subscription socket died" in health["error_text"]
 
 
 def test_alternating_persisting_failures_are_limited_per_signature(caplog, tmp_path) -> None:
@@ -195,6 +373,31 @@ def test_alternating_persisting_failures_are_limited_per_signature(caplog, tmp_p
         supervisor._log_runtime_failure("the monitor reported a failure", None)
         supervisor._log_runtime_failure("the configuration changed", None)
         assert len(caplog.records) == 4
+
+
+def test_limiter_distinguishes_details_but_bounds_state_and_novel_line_burst(caplog, tmp_path) -> None:
+    supervisor, clock = _supervisor(tmp_path, lambda _config: pytest.fail("factory must not run"))
+
+    with caplog.at_level(logging.ERROR, logger=periodic_png.__name__):
+        supervisor._log_runtime_failure("configuration loader", ValueError("bad yaml"))
+        supervisor._log_runtime_failure("configuration loader", ValueError("permission denied"))
+        assert len(caplog.records) == 2
+        assert "bad yaml" in caplog.records[0].getMessage()
+        assert "permission denied" in caplog.records[1].getMessage()
+
+        supervisor._log_runtime_failure("configuration loader", ValueError("bad yaml"))
+        supervisor._log_runtime_failure("configuration loader", ValueError("permission denied"))
+        assert len(caplog.records) == 2
+
+        for index in range(periodic_png._RUNTIME_FAILED_LOG_BURST * 2):
+            supervisor._log_runtime_failure("configuration loader", ValueError(f"novel detail {index}"))
+        assert len(caplog.records) == periodic_png._RUNTIME_FAILED_LOG_BURST
+
+        for index in range(periodic_png._RUNTIME_FAILED_LOG_SIGNATURE_LIMIT + 10):
+            clock.monotonic_value += periodic_png._RUNTIME_FAILED_LOG_INTERVAL_S
+            supervisor._log_runtime_failure(f"branch {index}", ValueError(f"bounded detail {index}"))
+
+    assert len(supervisor._last_runtime_failure_logs) == periodic_png._RUNTIME_FAILED_LOG_SIGNATURE_LIMIT
 
 
 def test_every_runtime_failure_entry_point_is_rate_limited(caplog, tmp_path) -> None:
