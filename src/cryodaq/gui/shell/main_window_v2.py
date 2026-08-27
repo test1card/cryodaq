@@ -285,8 +285,9 @@ class MainWindowV2(QMainWindow):
         self._analytics_snapshot: dict[str, tuple] = {}
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
+        # Source-state publications belong to the engine/SafetyManager
+        # producer, not to a replaceable ZMQ transport incarnation.
         self._keithley_channel_state_snapshot: dict[str, Reading] = {}
-        self._keithley_channel_state_bridge_instance_id = self._current_bridge_instance_id()
         # v0.55.15 (audit SCOPE 5 finding 5.7) — MultiLine readings
         # cache. Accumulates the latest reading per channel so a panel
         # opened after readings start arriving still gets a populated
@@ -499,7 +500,6 @@ class MainWindowV2(QMainWindow):
         # overlay stays in its fail-closed default (disconnected, safety_ready=False)
         # until the next _tick_status / safety_state event arrives.
         if name == "source":
-            self._synchronize_keithley_channel_state_snapshot()
             derived_connected = False
             if self._last_reading_time > 0.0:
                 derived_connected = (time.monotonic() - self._last_reading_time) < 3.0
@@ -633,30 +633,12 @@ class MainWindowV2(QMainWindow):
             if callable(fn):
                 fn(*args)
 
-    def _synchronize_keithley_channel_state_snapshot(self) -> None:
-        """Retire cached source truth when the publishing engine changes."""
-        current_bridge_instance_id = self._current_bridge_instance_id()
-        if current_bridge_instance_id == self._keithley_channel_state_bridge_instance_id:
-            return
-        self._keithley_channel_state_snapshot.clear()
-        self._keithley_channel_state_bridge_instance_id = current_bridge_instance_id
-        if self._keithley_panel is not None:
-            # The panel owns the visible fail-closed transition. A new bridge
-            # must supply its own source observation before Start can return.
-            self._keithley_panel.set_connected(False)
-
     def _replay_keithley_channel_state_snapshot(self) -> None:
-        """Replay current-incarnation source truth only into a live panel."""
-        current_bridge_instance_id = self._current_bridge_instance_id()
-        if (
-            self._keithley_panel is None
-            or not self._keithley_panel._connected
-            or current_bridge_instance_id is None
-            or self._keithley_channel_state_bridge_instance_id != current_bridge_instance_id
-        ):
+        """Present retained producer truth without claiming a new observation."""
+        if self._keithley_panel is None or not self._keithley_panel._connected:
             return
         for reading in self._keithley_channel_state_snapshot.values():
-            self._keithley_panel.on_reading(reading)
+            self._keithley_panel.replay_source_state(reading)
 
     # ------------------------------------------------------------------
     # Reading dispatch — same routing as old MainWindow
@@ -730,7 +712,6 @@ class MainWindowV2(QMainWindow):
         """Retire every GUI consumer anchored to the outgoing engine."""
 
         self._keithley_channel_state_snapshot.clear()
-        self._keithley_channel_state_bridge_instance_id = None
         if self._keithley_panel is not None:
             self._keithley_panel.set_connected(False)
         self.invalidate_descriptor_transport()
@@ -801,8 +782,10 @@ class MainWindowV2(QMainWindow):
             "analytics/keithley_channel_state/smua",
             "analytics/keithley_channel_state/smub",
         }:
-            self._synchronize_keithley_channel_state_snapshot()
-            if self._keithley_channel_state_bridge_instance_id is not None:
+            # Retain only events admitted through a live bridge identity.
+            # Once admitted, their lifetime belongs to the engine producer;
+            # later transport replacement does not retire them.
+            if self._current_bridge_instance_id() is not None:
                 self._keithley_channel_state_snapshot[channel] = reading
             if self._keithley_panel is not None:
                 self._keithley_panel.on_reading(reading)
@@ -1171,7 +1154,6 @@ class MainWindowV2(QMainWindow):
         connected = silence < 3.0
         wall_now = datetime.now(UTC)
         current_bridge_instance_id = self._current_bridge_instance_id()
-        self._synchronize_keithley_channel_state_snapshot()
         disk_marked_stale = False
         if (
             self._accepted_disk_bridge_instance_id is not None

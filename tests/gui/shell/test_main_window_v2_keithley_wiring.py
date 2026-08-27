@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -101,6 +102,36 @@ def _measurement_reading() -> Reading:
         value=4.2,
         unit="K",
     )
+
+
+class _TransportRestartBridge:
+    """Minimal exact-generation bridge for the launcher watchdog path."""
+
+    def __init__(self) -> None:
+        self.bridge_instance_id = "a" * 32
+        self._alive = True
+        self._restart_count = 1
+
+    def restart_count(self) -> int:
+        return self._restart_count
+
+    def shutdown(self) -> None:
+        self._alive = False
+
+    def start(self) -> None:
+        assert not self._alive
+        self._restart_count += 1
+        self.bridge_instance_id = "f" * 32
+        self._alive = True
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def is_healthy(self) -> bool:
+        return self._alive
+
+    def process_pid(self) -> int:
+        return 12345 if self._alive else 0
 
 
 def _typed_ready_snapshot(
@@ -719,6 +750,111 @@ def test_keithley_overlay_replays_cached_state_when_measurement_flow_recovers(
         w._tick_status()
 
         assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_watchdog_transport_replacement_keeps_source_state_and_start_available() -> None:
+    from cryodaq.launcher import LauncherWindow
+
+    _app()
+    bridge = _TransportRestartBridge()
+    w = MainWindowV2(bridge=bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot(revision=42)))
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+        w._ensure_overlay("source")
+        block = w._keithley_panel._smua_block
+        assert block._start_btn.isEnabled() is True
+
+        launcher = SimpleNamespace(
+            _bridge=bridge,
+            _bridge_watchdog_generation=0,
+            _bridge_restart_fault=False,
+            _bridge_restart_hold=False,
+            _invalidate_descriptor_transport=w.invalidate_descriptor_transport,
+            _soak_bridge_handshake=None,
+            _replay_source=None,
+        )
+        assert LauncherWindow._replace_bridge_from_watchdog(launcher, reason="heartbeat") is True
+
+        # The watchdog replaced only the transport. A fresh typed Safety cut
+        # may re-bind to it, while the unchanged engine's retained OFF remains
+        # the source-state fact that permits Start.
+        w._tick_status()
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot(revision=43)))
+
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_cached_replay_cannot_reconcile_unknown_start_outcome(
+    monkeypatch,
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot(revision=42)))
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+        w._ensure_overlay("source")
+        block = w._keithley_panel._smua_block
+        assert block._start_btn.isEnabled() is True
+
+        class _FakeSignal:
+            def __init__(self) -> None:
+                self._slot = None
+
+            def connect(self, slot) -> None:
+                self._slot = slot
+
+            def emit(self, result: dict) -> None:
+                assert self._slot is not None
+                self._slot(result)
+
+        workers = []
+
+        class _FakeWorker:
+            def __init__(self, command: dict, parent=None) -> None:
+                self.command = command
+                self.finished = _FakeSignal()
+                workers.append(self)
+
+            def start(self) -> None:
+                pass
+
+        import cryodaq.gui.shell.overlays.keithley_panel as keithley_panel_module
+
+        monkeypatch.setattr(keithley_panel_module, "ZmqCommandWorker", _FakeWorker)
+        block._start_btn.click()
+        assert len(workers) == 1
+        workers[0].finished.emit({"ok": False, "outcome_unknown": True})
+        assert block._start_btn.isEnabled() is False
+
+        # Lose and recover measurement flow. Recovery replays the cached OFF,
+        # then a newer Safety cut arrives, but neither is a new source event.
+        w._last_reading_time = time.monotonic() - 10.0
+        w._tick_status()
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot(revision=43)))
+
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is False
+        block._start_btn.click()
+        assert len(workers) == 1
+
+        # Only a genuine new producer observation completes reconciliation.
+        w._dispatch_reading(_source_state_reading("smua", "off"))
         assert block._start_btn.isEnabled() is True
     finally:
         _stop_timers(w)
