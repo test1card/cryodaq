@@ -444,8 +444,12 @@ def _run_blocker_scenario(
     return run, pump_logger
 
 
-def _settle_scenario_after_kill(run: _SimulantRun, pump_logger: logging.Logger) -> float:
-    started = time.monotonic()
+def _settle_scenario_after_kill(
+    run: _SimulantRun,
+    pump_logger: logging.Logger,
+    *,
+    started: float,
+) -> float:
     run.pump_thread.join(_EOF_BUDGET_S + 0.5)
     elapsed = time.monotonic() - started
     # The launcher pump settles only the exact stream owner; production settles
@@ -513,10 +517,11 @@ def test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds
         assert not any(pre_kill_violations.values()), (
             f"while the engine lived, descendants already inherited the launch pipe: {pre_kill_violations}"
         )
+        started = time.monotonic()
         assert _kill_exact(int(marker["pid"])) is True
         run.process.wait(timeout=5)
         assert run.process.returncode == -signal.SIGKILL
-        elapsed = _settle_scenario_after_kill(run, pump_logger)
+        elapsed = _settle_scenario_after_kill(run, pump_logger, started=started)
         assert not run.pump_thread.is_alive(), "launcher pump never reached EOF after engine SIGKILL"
         assert elapsed <= _EOF_BUDGET_S + 0.25, f"pump termination took {elapsed:.3f}s (budget {_EOF_BUDGET_S}s)"
         assert run.stream_owner.settlement_state is _OwnerSettlementState.SETTLED
@@ -1101,12 +1106,13 @@ def test_replay_production_entry_installs_fd2_isolation_before_runtime_spawn_bou
 
         _assert_probe_reached_launcher_pipe(run)
         assert process.poll() is None, "replay child exited before the abrupt-death phase"
+        started = time.monotonic()
         assert _kill_exact(int(marker["pid"])) is True
         process.wait(timeout=5)
         assert process.returncode == -signal.SIGKILL
         # Both descendants are still alive by construction (120 s sleep), yet
         # neither preserves the launch pipe: the pump must reach EOF in budget.
-        elapsed = _settle_scenario_after_kill(run, pump_logger)
+        elapsed = _settle_scenario_after_kill(run, pump_logger, started=started)
         assert not run.pump_thread.is_alive(), "launcher pump never reached EOF after replay SIGKILL"
         assert elapsed <= _EOF_BUDGET_S + 0.25, f"pump termination took {elapsed:.3f}s (budget {_EOF_BUDGET_S}s)"
         assert run.stream_owner.settlement_state is _OwnerSettlementState.SETTLED

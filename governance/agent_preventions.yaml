@@ -55,6 +55,15 @@ false_green_pair_semantics:
   guard_removed_skipped_xfailed_deselected_or_nondefault: reopen
 
 false_green_pairs:
+  - id: LAUNCHER-FD2-POST-DUP2-DIAGNOSTIC-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: LAUNCHER-FD2-INHERITANCE-001
+    guard: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_post_dup2_installation_failure_fails_closed_and_reports_on_launch_pipe
+    ci_partition: remaining
+    platform: posix
+    red_evidence: post_dup2_facade_construction_failure_left_the_launcher_pipe_byte_empty_after_the_original_fd2_suite_was_green_because_no_guard_injected_a_failure_after_os_descriptor_2_was_redirected_2026_08_26_pending_immutable_capture
+    green_evidence: pending
   - id: NARRATION-GUARD-IN-FLIGHT-RETRY-MARKER-FALSE-GREEN-314
     status: open
     scope: product_contract
@@ -6799,6 +6808,8 @@ records:
       - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
       - docs/adr/003-governance-as-enforcement.md#enforcement-registry
     guards:
+      - node: tests/core/test_zmq_command_server_supervision.py::test_engine_main_installs_launcher_fd2_isolation_before_logging
+        ci_partition: core
       - node: tests/integration/test_launcher_fd2_shutdown_blocker.py::test_abruptly_killed_launcher_engine_releases_stderr_pipe_within_two_seconds
         ci_partition: remaining
         platform: posix

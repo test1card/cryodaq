@@ -528,6 +528,48 @@ def test_engine_main_consumes_authority_before_force_child_environment(
     assert ready_nonce not in force_environment.values()
 
 
+def test_engine_main_installs_launcher_fd2_isolation_before_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registered fd-2 guard invokes the production ``engine.main()`` wiring."""
+    import cryodaq.engine as engine_module
+    import cryodaq.logging_setup as logging_setup
+
+    startup_events: list[str] = []
+    monkeypatch.setattr(engine_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        engine_module,
+        "_consume_engine_launch_authority",
+        lambda: ("a" * 32, "b" * 64, "c" * 64, 17),
+    )
+    monkeypatch.setattr(
+        argparse.ArgumentParser,
+        "parse_args",
+        lambda _self: SimpleNamespace(mock=True, mock_thermal_simulator=None, force=False),
+    )
+
+    fd2_bootstrap_stub = types.ModuleType("cryodaq._fd2_bootstrap")
+    fd2_bootstrap_stub.isolate_launcher_stderr_fd2 = lambda: startup_events.append("fd2_bootstrap_installed")
+    monkeypatch.setitem(sys.modules, "cryodaq._fd2_bootstrap", fd2_bootstrap_stub)
+    monkeypatch.setattr(
+        logging_setup,
+        "setup_logging",
+        lambda *_args, **_kwargs: startup_events.append("setup_logging"),
+    )
+    monkeypatch.setattr(logging_setup, "resolve_log_level", lambda: logging.INFO)
+    monkeypatch.setattr(engine_module, "_acquire_engine_lock", lambda: 19)
+    monkeypatch.setattr(engine_module, "_release_engine_lock", lambda _fd: None)
+
+    async def observe_engine_run(**_kwargs: object) -> None:
+        startup_events.append("engine_run")
+
+    monkeypatch.setattr(engine_module, "_run_engine", observe_engine_run)
+
+    engine_module.main()
+
+    assert startup_events == ["fd2_bootstrap_installed", "setup_logging", "engine_run"]
+
+
 @pytest.mark.parametrize(
     ("instance_id", "capability"),
     [
