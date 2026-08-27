@@ -554,6 +554,36 @@ def test_manager_requires_matching_descriptor_identity_and_keeps_it_in_derived_t
     assert manager._collect_conductivity_rows([mismatched]) == []
 
 
+def test_manager_rejects_non_descriptor_parameter_mismatch(tmp_path) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    parameters = _bound_parameters()
+    path = tmp_path / "parameter-mismatch.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id="parameter-mismatch-run",
+        started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
+        parameters=parameters,
+    )
+    writer.append_binding("experiment-a")
+    writer.append_point(_point())
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
+    record_parameters = json.loads(json.dumps(parameters, ensure_ascii=False))
+    record_parameters["power_values_w"] = [0.024]
+    mismatched = _autosweep_record(
+        path,
+        source_run_id="parameter-mismatch-run",
+        status="COMPLETED",
+        point_count=1,
+        parameters=record_parameters,
+    )
+
+    assert manager._collect_conductivity_rows([mismatched]) == []
+
+
 def test_manager_skips_csv_parser_error_without_aborting_other_artifacts(tmp_path, caplog) -> None:
     manager_root = tmp_path / "manager"
     manager_root.mkdir()

@@ -333,6 +333,7 @@ class ConductivityPanel(QWidget):
         self._auto_run_id: str | None = None
         self._auto_run_started_at: datetime | None = None
         self._latest_channel_descriptors: dict[str, ChannelDescriptorV1] = {}
+        self._latest_channel_descriptor_generations: dict[str, int] = {}
         self._auto_bound_power_channel: str | None = None
         self._auto_bound_temperature_channels: tuple[str, ...] = ()
         self._auto_bound_descriptors: dict[str, ChannelDescriptorV1] = {}
@@ -341,6 +342,9 @@ class ConductivityPanel(QWidget):
         self._auto_trailing_write_outcome: str | None = None
         self._auto_experiment_id: str | None = None
         self._auto_experiment_binding_known = False
+        # Engine attachment settlement and durable file binding are separate
+        # authorities: only the latter permits terminal publication.
+        self._auto_binding_resolution = "unrequested"
         self._auto_persistence_worker: _ConductivityPersistenceWorker | None = None
         self._auto_pending_point_result: dict[str, float] | None = None
         self._auto_deferred_terminal_status: str | None = None
@@ -356,6 +360,9 @@ class ConductivityPanel(QWidget):
         self._auto_settled_command_tokens: set[int] = set()
         self._auto_pending_token: int | None = None
         self._auto_pending_stop_intent: str | None = None
+        # Once a point write fails, a later generic Stop retry must not
+        # downgrade the terminal record from FAILED to ABORTED.
+        self._auto_terminal_failure_required = False
         # Activity and command outcome are independent truth axes.  A lost
         # reply must retain the last-known ACTIVE state so external finalize
         # guards cannot be cleared by GUI inference.
@@ -1202,9 +1209,13 @@ class ConductivityPanel(QWidget):
                     descriptor = None
                 else:
                     descriptor = verified
-                    self._latest_channel_descriptors[ch] = verified
+                    if self._connected:
+                        self._latest_channel_descriptors[ch] = verified
+                        self._latest_channel_descriptor_generations[ch] = self._auto_connection_generation
         if descriptor is None:
-            descriptor = self._latest_channel_descriptors.get(ch_id or ch)
+            cached_channel = ch_id or ch
+            if self._latest_channel_descriptor_generations.get(cached_channel) == self._auto_connection_generation:
+                descriptor = self._latest_channel_descriptors.get(cached_channel)
         bound_descriptor = self._auto_bound_descriptors.get(ch_id or ch)
         if bound_descriptor is not None and (
             descriptor is None or descriptor.canonical_json != bound_descriptor.canonical_json
@@ -1575,11 +1586,11 @@ class ConductivityPanel(QWidget):
 
         temperature_channels = tuple(self._chain)
         power_channel = self._power_channel
-        power_descriptor = self._latest_channel_descriptors.get(power_channel)
+        power_descriptor = self._current_cached_descriptor(power_channel)
         temperature_descriptors = tuple(
             descriptor
             for channel in temperature_channels
-            if (descriptor := self._latest_channel_descriptors.get(channel)) is not None
+            if (descriptor := self._current_cached_descriptor(channel)) is not None
         )
         if power_descriptor is None or len(temperature_descriptors) != len(temperature_channels):
             self.show_warning("Автоизмерение не запущено: нет подтверждённых дескрипторов выбранных каналов.")
@@ -1600,6 +1611,13 @@ class ConductivityPanel(QWidget):
         }
         self._auto_descriptor_parameters = descriptor_parameters
         return True
+
+    def _current_cached_descriptor(self, channel: str) -> ChannelDescriptorV1 | None:
+        """Return descriptor authority only from the current transport incarnation."""
+
+        if self._latest_channel_descriptor_generations.get(channel) != self._auto_connection_generation:
+            return None
+        return self._latest_channel_descriptors.get(channel)
 
     def _clear_auto_selection(self) -> None:
         self._auto_bound_power_channel = None
@@ -1628,8 +1646,10 @@ class ConductivityPanel(QWidget):
         self._auto_run_started_at = started_at
         self._auto_experiment_id = None
         self._auto_experiment_binding_known = False
+        self._auto_binding_resolution = "unrequested"
         self._auto_persistence_error = None
         self._auto_trailing_write_outcome = None
+        self._auto_terminal_failure_required = False
         self._auto_run_creation_failed = False
         self._auto_run_creation_error = None
         return self._dispatch_persistence(
@@ -1732,7 +1752,6 @@ class ConductivityPanel(QWidget):
             self._latch_auto_outcome_unknown("Контекст файла потерян до фиксации привязки; мощность не изменена.")
             return
         self._auto_experiment_id = experiment_id
-        self._auto_experiment_binding_known = True
         if not self._dispatch_persistence(
             lambda: writer.append_binding(experiment_id),
             self._on_auto_binding_persisted,
@@ -1746,12 +1765,19 @@ class ConductivityPanel(QWidget):
         stopping = self._auto_pending_stop_intent is not None or self._auto_deferred_terminal_status is not None
         if self._auto_experiment_binding_known or not stopping:
             return False
+        if self._auto_binding_resolution == "attachment_pending":
+            return True
+        if self._auto_binding_resolution != "unrequested":
+            self._block_after_terminal_persistence_failure(
+                "привязка эксперимента не получила устойчивого подтверждения"
+            )
+            return True
         writer = self._auto_run_writer
         if writer is None:
             self._block_after_terminal_persistence_failure("контекст файла потерян до записи отсутствующей привязки")
             return True
         self._auto_experiment_id = None
-        self._auto_experiment_binding_known = True
+        self._auto_binding_resolution = "unbound"
         if not self._dispatch_persistence(
             lambda: writer.append_binding(None),
             self._on_prearm_unbound_persisted,
@@ -1766,6 +1792,8 @@ class ConductivityPanel(QWidget):
                 f"отсутствующая привязка не подтверждена ({str(result.get('error', 'ошибка'))[:120]})"
             )
             return
+        self._auto_experiment_binding_known = True
+        self._auto_binding_resolution = "durable"
         if not self._persistence_completion_is_stopped():
             self._latch_auto_outcome_unknown(
                 "Останов потерял состояние после записи отсутствующей привязки; мощность не изменена."
@@ -1777,6 +1805,8 @@ class ConductivityPanel(QWidget):
                 f"Привязка файла не подтверждена ({str(result.get('error', 'ошибка'))[:120]}); мощность не изменена."
             )
             return
+        self._auto_experiment_binding_known = True
+        self._auto_binding_resolution = "durable"
         if not self._persistence_completion_is_stopped():
             self._dispatch_first_auto_target()
 
@@ -1818,14 +1848,19 @@ class ConductivityPanel(QWidget):
     def _begin_or_defer_terminal(self, status: str) -> None:
         """Serialize terminal fsync after any already-running persistence operation."""
 
+        if self._auto_terminal_failure_required:
+            status = "FAILED"
         if self._auto_persistence_worker is not None:
             self._auto_deferred_terminal_status = status
             return
+        self._auto_deferred_terminal_status = None
         self._begin_terminalize_auto_run(status)
 
     def _begin_terminalize_auto_run(self, status: str) -> None:
         """After authoritative OFF, fsync terminal truth off-thread."""
 
+        if self._auto_terminal_failure_required:
+            status = "FAILED"
         if not self._auto_experiment_binding_known:
             self._auto_deferred_terminal_status = status
             if self._persist_explicit_unbound_while_stopping():
@@ -1919,6 +1954,9 @@ class ConductivityPanel(QWidget):
 
         self._auto_persistence_error = f"{type(exc).__name__}: {exc}"
         self._auto_trailing_write_outcome = "indeterminate"
+        self._auto_terminal_failure_required = True
+        if self._auto_deferred_terminal_status is not None:
+            self._auto_deferred_terminal_status = "FAILED"
         self._auto_timer.stop()
         self._auto_pending_stop_intent = "failure"
         self._auto_status_label.setVisible(True)
@@ -1994,6 +2032,8 @@ class ConductivityPanel(QWidget):
         worker.finished.connect(_completed)
         self._auto_workers.append(worker)
         self._auto_pending_token = token
+        if cmd.get("cmd") == "experiment_attach_run_record" and cmd.get("status") == "RUNNING":
+            self._auto_binding_resolution = "attachment_pending"
         worker.start()
         return True
 
@@ -2017,8 +2057,12 @@ class ConductivityPanel(QWidget):
         self._auto_settled_command_tokens.add(token)
         if worker is not None:
             self._auto_workers = [candidate for candidate in self._auto_workers if candidate is not worker]
+        is_start_attachment = (
+            command.get("cmd") == "experiment_attach_run_record" and command.get("status") == "RUNNING"
+        )
+        reconcile_start_attachment = is_start_attachment and self._auto_binding_resolution == "attachment_pending"
         pending_token = self._auto_pending_token
-        if pending_token is not None and token != pending_token:
+        if pending_token is not None and token != pending_token and not reconcile_start_attachment:
             logger.warning(
                 "Ответ вытесненной авто-команды проигнорирован: %s, token=%s, current=%s",
                 command.get("cmd", "?"),
@@ -2042,7 +2086,6 @@ class ConductivityPanel(QWidget):
             return
 
         if command.get("cmd") == "experiment_attach_run_record":
-            is_start_attachment = command.get("status") == "RUNNING"
             if not is_start_attachment:
                 self._auto_terminal_attachment_inflight = False
                 error = (
@@ -2077,12 +2120,8 @@ class ConductivityPanel(QWidget):
                 self._auto_outcome_unknown = False
                 self._publish_terminal_status(status)
                 return
-            if is_start_attachment and (
-                self._auto_pending_stop_intent is not None
-                or self._auto_deferred_terminal_status is not None
-                or self._auto_experiment_binding_known
-            ):
-                logger.warning("Вытесненный ответ RUNNING-привязки проигнорирован после начала останова.")
+            if not reconcile_start_attachment:
+                logger.warning("Повторный ответ RUNNING-привязки проигнорирован после разрешения привязки.")
                 return
             if not isinstance(result, dict) or result.get("ok") is not True:
                 error = (
@@ -2096,6 +2135,7 @@ class ConductivityPanel(QWidget):
                 return
             if result.get("attached") is False:
                 logger.info("Файл автоизмерения сохранён без привязки: активного эксперимента нет.")
+                self._auto_binding_resolution = "unbound"
                 self._persist_auto_binding_then_arm(None)
                 return
             record = result.get("run_record")
@@ -2112,6 +2152,7 @@ class ConductivityPanel(QWidget):
                     "RUNNING-привязка вернула несогласованную идентичность; мощность не изменена."
                 )
                 return
+            self._auto_binding_resolution = "attached"
             self._persist_auto_binding_then_arm(experiment_id)
             return
 
@@ -2216,6 +2257,7 @@ class ConductivityPanel(QWidget):
         self._auto_terminal_attachment_command = None
         self._auto_terminal_publication_status = None
         self._auto_terminal_attachment_inflight = False
+        self._auto_terminal_failure_required = False
         self._invalidate_auto_step_evidence()
 
         self._auto_start_btn.setEnabled(False)
@@ -2248,7 +2290,8 @@ class ConductivityPanel(QWidget):
             )
             return
         self._auto_timer.stop()
-        self._auto_pending_stop_intent = "operator"
+        stop_intent = "failure" if self._auto_terminal_failure_required else "operator"
+        self._auto_pending_stop_intent = stop_intent
         self._auto_status_label.setVisible(True)
         self._auto_status_label.setText("Останов запрошен — ожидается подтверждение отключения источника")
         self._update_control_enablement()
@@ -2259,7 +2302,7 @@ class ConductivityPanel(QWidget):
                     self._auto_bound_power_channel or self._auto_step_power_channel or self._power_channel
                 ),
             },
-            stop_intent="operator",
+            stop_intent=stop_intent,
         ):
             self._auto_pending_stop_intent = None
             self._latch_auto_outcome_unknown("Команда останова не отправлена.")
@@ -2295,6 +2338,7 @@ class ConductivityPanel(QWidget):
         self._auto_state = "done"
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
+        self._auto_terminal_failure_required = False
         self._auto_timer.stop()
         self._auto_progress.setVisible(False)
         self._auto_status_label.setVisible(True)
@@ -2729,6 +2773,9 @@ class ConductivityPanel(QWidget):
             return
         self._connected = connected
         self._auto_connection_generation += 1
+        if not connected:
+            self._latest_channel_descriptors.clear()
+            self._latest_channel_descriptor_generations.clear()
         if not connected and self._auto_state == "stabilizing":
             self._auto_pending_token = None
             self._auto_pending_stop_intent = None

@@ -2906,6 +2906,9 @@ class ExperimentManager:
                 ) != tuple(item.canonical_json for item in record_descriptors.temperatures):
                     logger.warning("Ignoring autosweep artifact %s: descriptor identity mismatch", resolved)
                     continue
+                if snapshot.parameters != record.parameters:
+                    logger.warning("Ignoring autosweep artifact %s: persisted parameters mismatch", resolved)
+                    continue
                 record_experiment_id = record.experiment_context.get("experiment_id")
                 if (
                     type(record_experiment_id) is not str

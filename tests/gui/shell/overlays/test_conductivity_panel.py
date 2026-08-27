@@ -307,6 +307,9 @@ def _install_descriptors(panel: ConductivityPanel, channels: list[str]) -> dict[
     }
     if hasattr(panel, "_latest_channel_descriptors"):
         panel._latest_channel_descriptors.update(descriptors)
+    if hasattr(panel, "_latest_channel_descriptor_generations"):
+        generation = panel._auto_connection_generation if panel._connected else panel._auto_connection_generation + 1
+        panel._latest_channel_descriptor_generations.update(dict.fromkeys(descriptors, generation))
     return descriptors
 
 
@@ -1685,6 +1688,37 @@ def test_reconnected_reenables_start(app):
     assert panel._auto_start_btn.isEnabled()
 
 
+def test_restart_invalidates_cached_descriptors_until_new_generation_readings(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+    descriptors = _install_descriptors(panel, ["Т1", "Т2"])
+    for reading, descriptor in (
+        (_temp_reading("Т1", 110.0), descriptors["Т1"]),
+        (_temp_reading("Т2", 100.0), descriptors["Т2"]),
+        (_power_reading(0.012), descriptors["Keithley_1/smua/power"]),
+    ):
+        panel.on_descriptor_reading(reading, descriptor)
+    app.processEvents()
+    assert set(panel._latest_channel_descriptors) >= {
+        "Т1",
+        "Т2",
+        "Keithley_1/smua/power",
+    }
+
+    panel.set_connected(False)
+    panel.set_connected(True)
+    panel._on_auto_start()
+
+    assert panel.get_auto_state() == "idle"
+    assert panel._auto_run_path is None
+    assert _DeferredWorker.all_instances == []
+    assert "нет подтверждённых дескрипторов" in panel._banner_label.text()
+
+
 def test_connection_drop_mid_sweep_retains_active_unknown_until_live_stop(app, monkeypatch):
     """Disconnect cannot synthesize idle or dispatch through a dead link."""
     import cryodaq.gui.shell.overlays.conductivity_panel as module
@@ -2464,20 +2498,11 @@ def test_stop_during_pending_running_attachment_persists_unbound_before_terminal
     assert stop_worker is not attachment_worker
     assert stop_worker.cmd["cmd"] == "keithley_stop"
     stop_worker.finish({"ok": True})
+    assert _DeferredPersistenceWorker.instances == [create_worker]
+
+    attachment_worker.finish({"ok": True, "attached": False, "run_record": None})
     binding_worker = _DeferredPersistenceWorker.instances[-1]
     assert binding_worker is not create_worker
-
-    attachment_worker.finish(
-        {
-            "ok": True,
-            "attached": True,
-            "run_record": {
-                "source_run_id": attachment_worker.cmd["source_run_id"],
-                "status": "RUNNING",
-                "experiment_context": {"experiment_id": "experiment-a"},
-            },
-        }
-    )
 
     binding_worker.finish()
     terminal_worker = _DeferredPersistenceWorker.instances[-1]
@@ -2497,6 +2522,154 @@ def test_stop_during_pending_running_attachment_persists_unbound_before_terminal
         "keithley_stop",
     ]
     assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+
+
+def test_stop_reconciles_superseded_running_attachment_before_terminal(app, monkeypatch) -> None:
+    _DeferredWorker.defer_running_attachment = True
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ControllablePersistenceWorker)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    create_worker = _ControllablePersistenceWorker.instances[-1]
+    create_worker.finish()
+    attachment_worker = _DeferredWorker.instances[-1]
+    assert attachment_worker.cmd["status"] == "RUNNING"
+
+    panel._on_auto_stop()
+    stop_worker = _DeferredWorker.instances[-1]
+    stop_worker.finish({"ok": True})
+
+    assert _ControllablePersistenceWorker.instances == [create_worker]
+    attachment_worker.finish(
+        {
+            "ok": True,
+            "attached": True,
+            "run_record": {
+                "source_run_id": attachment_worker.cmd["source_run_id"],
+                "status": "RUNNING",
+                "experiment_context": {"experiment_id": "experiment-a"},
+            },
+        }
+    )
+    binding_worker = _ControllablePersistenceWorker.instances[-1]
+    assert binding_worker is not create_worker
+    binding_worker.finish()
+    terminal_worker = _ControllablePersistenceWorker.instances[-1]
+    assert terminal_worker is not binding_worker
+    terminal_worker.finish()
+
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "ABORTED"
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id == "experiment-a"
+    assert panel.get_auto_state() == "idle"
+    terminal_attachments = [
+        worker.cmd
+        for worker in _DeferredWorker.all_instances
+        if worker.cmd.get("cmd") == "experiment_attach_run_record" and worker.cmd.get("status") != "RUNNING"
+    ]
+    assert len(terminal_attachments) == 1
+    assert terminal_attachments[0]["experiment_id"] == "experiment-a"
+
+
+def test_binding_write_failure_cannot_authorize_terminal_attachment(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ControllablePersistenceWorker)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    create_worker = _ControllablePersistenceWorker.instances[-1]
+    create_worker.finish()
+    binding_worker = _ControllablePersistenceWorker.instances[-1]
+    writer = panel._auto_run_writer
+    assert writer is not None
+    original_append_binding = writer.append_binding
+
+    def _fail_before_binding_record(_experiment_id) -> None:
+        raise OSError("injected binding write failure")
+
+    monkeypatch.setattr(writer, "append_binding", _fail_before_binding_record)
+    binding_worker.finish()
+    monkeypatch.setattr(writer, "append_binding", original_append_binding)
+    assert panel._auto_run_path is not None
+    assert read_conductivity_run(panel._auto_run_path).binding_recorded is False
+
+    panel._on_auto_stop()
+    stop_worker = _DeferredWorker.instances[-1]
+    stop_worker.finish({"ok": True})
+
+    assert _ControllablePersistenceWorker.instances == [create_worker, binding_worker]
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "RUNNING"
+    assert snapshot.terminal is None
+    assert snapshot.binding_recorded is False
+    assert panel.get_auto_state() == "stabilizing"
+    assert not any(
+        worker.cmd.get("cmd") == "experiment_attach_run_record" and worker.cmd.get("status") != "RUNNING"
+        for worker in _DeferredWorker.all_instances
+    )
+
+
+def test_failed_terminal_intent_survives_stop_failure_and_operator_retry(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ControllablePersistenceWorker)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    _ControllablePersistenceWorker.instances[-1].finish()
+    _ControllablePersistenceWorker.instances[-1].finish()
+    target_worker = _DeferredWorker.instances[-1]
+    target_worker.finish({"ok": True})
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012))
+    assert panel._auto_record_point()
+    point_worker = _ControllablePersistenceWorker.instances[-1]
+    writer = panel._auto_run_writer
+    assert writer is not None
+
+    panel._on_auto_stop()
+    first_stop = _DeferredWorker.instances[-1]
+    first_stop.finish({"ok": True})
+    assert panel._auto_deferred_terminal_status == "ABORTED"
+
+    def _fail_point(_point) -> None:
+        raise OSError("injected point failure")
+
+    monkeypatch.setattr(writer, "append_point", _fail_point)
+    point_worker.finish()
+    failure_stop = _DeferredWorker.instances[-1]
+    failure_stop.finish({"ok": False, "error": "stop authority lost"})
+    assert panel.get_auto_state() == "stabilizing"
+
+    panel._on_auto_stop()
+    retry_stop = _DeferredWorker.instances[-1]
+    assert retry_stop is not failure_stop
+    retry_stop.finish({"ok": True})
+    terminal_worker = _ControllablePersistenceWorker.instances[-1]
+    assert terminal_worker is not point_worker
+    terminal_worker.finish()
+
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "FAILED"
+    assert snapshot.terminal is not None
+    assert snapshot.terminal["trailing_write_outcome"] == "indeterminate"
+    assert panel.get_auto_state() == "done"
 
 
 def test_failed_running_attachment_never_changes_source_target(app, monkeypatch) -> None:
