@@ -125,6 +125,33 @@ false_green_pairs:
     platform: posix
     red_evidence: the_ubuntu_2204_lab_conda_python_omitted_os_pidfd_open_while_the_kernel_exposed_syscall_434_so_seven_registered_pidfd_guards_skipped_and_a_green_suite_executed_none_of_the_target_identity_lifecycle_2026_08_27_pending_immutable_capture
     green_evidence: pending
+  - id: USBTMC-PARENT-KILL-REAP-OWNERSHIP-FALSE-GREEN-010
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_successful_parent_SIGKILL_followed_by_the_first_parent_wait_failure_left_parent_was_killed_false_so_cleanup_skipped_its_subreaper_owned_adopted_child_waitpid_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-PIDFD-SIGKILL-RETRY-CLOSE-FALSE-GREEN-011
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_retries_exact_sigkill_before_reap_and_pidfd_close
+    ci_partition: remaining
+    platform: posix
+    red_evidence: a_failed_first_exact_identity_SIGKILL_had_no_independent_pidfd_retry_and_cleanup_could_close_the_only_stable_identity_before_exit_and_exact_reap_settled_2026_08_27_pending_immutable_capture
+    green_evidence: pending
+  - id: USBTMC-STREAM-CLEANUP-SUBREAPER-RESTORE-FALSE-GREEN-012
+    status: open
+    scope: product_contract
+    runtime_prevention_id: USBTMC-CLOSE-SETTLEMENT-001B
+    guard: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_restores_subreaper_after_parent_stream_close_failure
+    ci_partition: remaining
+    platform: posix
+    red_evidence: the_first_parent_stream_close_failure_skipped_later_stream_cleanup_and_the_guard_counted_one_restore_helper_call_so_a_no_op_restore_left_PR_GET_CHILD_SUBREAPER_enabled_while_remaining_green_2026_08_27_pending_immutable_capture
+    green_evidence: pending
   - id: USBTMC-PREBINDER-REPARENT-EXTERNAL-EFFECT-FALSE-GREEN-008
     status: open
     scope: product_contract
@@ -5073,8 +5100,31 @@ records:
     correction_owner: primary
     guard_owner: primary
     disposition_owner: reviewer
-    consequence: Cancellation can clear ownership while an I/O or close operation remains live, and an abruptly dead engine can leave a source-owning VISA worker alive past the OFF a replacement engine commands.
-    invariant: Incomplete close retains one bounded recovery owner and visible HOLD until the handle is exactly settled. The source-owning VISA worker binds its lifetime to the engine-captured parent -- Linux prctl PR_SET_PDEATHSIG carrying exactly SIGKILL with a post-call parent re-check and a refuse-unbound failure direction -- while platforms without an equivalent binding stay explicitly open gates that start no fake guarantee. The lifecycle harness pins and settles each exact child on every error after spawn, including pidfd setup and post-parent-kill poll failures; cleanup attempts exact-identity SIGKILL before any fallible poll and reaps the adopted child within a fixed deadline. The harness uses the kernel pidfd_open syscall when the target Python omits its wrapper, so wrapper absence cannot skip the registered target-OS guards. Its production-path guard reaches the real USBTMC process constructor. This evidence proves process lifetime only; it does not prove USB transaction settlement, physical OFF, or restart authority.
+    consequence: Cancellation can clear ownership while an I/O or close operation remains live, and an abruptly dead engine can leave a source-owning VISA worker alive past the OFF a replacement engine commands. A lifecycle harness that loses kill, reap, pidfd, stream, or process-global subreaper ownership can manufacture a clean-looking result while leaving its own worker or host state unsettled.
+    invariant: >-
+      Incomplete close retains one bounded recovery owner and visible HOLD until
+      the handle is exactly settled. The source-owning VISA worker binds its
+      lifetime to the engine-captured parent -- Linux prctl PR_SET_PDEATHSIG
+      carrying exactly SIGKILL with a post-call parent re-check and a
+      refuse-unbound failure direction -- while platforms without an equivalent
+      binding stay explicitly open gates that start no fake guarantee. The
+      lifecycle harness pins and settles each exact child on every error after
+      spawn, including pidfd setup and post-parent-kill poll failures; cleanup
+      attempts exact-identity SIGKILL before any fallible poll and reaps the
+      adopted child within a fixed deadline. Successful parent kill establishes
+      subreaper-owned reap responsibility before the first fallible parent wait.
+      Exact child exit and exact adopted-child reap are separate settlements: a
+      failed wrapper signal gets an independent raw pidfd SIGKILL retry, and the
+      pidfd remains open until both settlements complete. Parent stdin, stdout,
+      and stderr cleanup is attempt-all and independent, preserves the first
+      failure while sanitizing later failure details, and restores the prior
+      process-global subreaper state from a finally boundary even when stream
+      cleanup fails. The harness uses the kernel pidfd_open syscall when the
+      target Python omits its wrapper, so wrapper absence cannot skip the
+      registered target-OS guards. Its production-path guard reaches the real
+      USBTMC process constructor. This evidence proves process lifetime only; it
+      does not prove USB transaction settlement, physical OFF, or restart
+      authority.
     rule_refs:
       - ROADMAP.md#montana-correction-programme-after-exact-object-review-2026-07-22
     guards:
@@ -5112,6 +5162,15 @@ records:
         ci_partition: remaining
         platform: posix
       - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_during_post_parent_kill_cleanup
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_retries_exact_sigkill_before_reap_and_pidfd_close
+        ci_partition: remaining
+        platform: posix
+      - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_lifecycle_harness_restores_subreaper_after_parent_stream_close_failure
         ci_partition: remaining
         platform: posix
       - node: tests/drivers/test_the_source_child_dies_with_its_engine.py::test_production_settle_process_open_worker_cannot_survive_killed_parent

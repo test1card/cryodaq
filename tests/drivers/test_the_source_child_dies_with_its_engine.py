@@ -139,8 +139,8 @@ def _identity_exited(pidfd: int) -> bool:
         return bool(selector.select(0))
 
 
-def _signal_via_identity(pidfd: int, sig: int) -> None:
-    """Signal the EXACT process the pidfd names; ESRCH means it is already gone."""
+def _pidfd_send_signal_syscall(pidfd: int, sig: int) -> None:
+    """Issue the raw exact-identity signal used by both proof and cleanup paths."""
 
     import ctypes
 
@@ -160,6 +160,12 @@ def _signal_via_identity(pidfd: int, sig: int) -> None:
     raise OSError(code, os.strerror(code))
 
 
+def _signal_via_identity(pidfd: int, sig: int) -> None:
+    """Signal the EXACT process the pidfd names; ESRCH means it is already gone."""
+
+    _pidfd_send_signal_syscall(pidfd, sig)
+
+
 def _set_child_subreaper(enabled: bool) -> bool:
     """Set this pytest process as the nearest orphan adopter; return prior state."""
 
@@ -175,6 +181,19 @@ def _set_child_subreaper(enabled: bool) -> bool:
         code = ctypes.get_errno()
         raise _UnstableIdentity(f"PR_SET_CHILD_SUBREAPER failed: {os.strerror(code)}")
     return previous_enabled
+
+
+def _child_subreaper_state() -> bool:
+    """Read the process-global child-subreaper state without changing it."""
+
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    current = ctypes.c_int()
+    if libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(current), 0, 0, 0) != 0:
+        code = ctypes.get_errno()
+        raise _UnstableIdentity(f"PR_GET_CHILD_SUBREAPER failed: {os.strerror(code)}")
+    return current.value == 1
 
 
 def _reap_adopted_child(child_pid: int, *, timeout: float = 10.0) -> None:
@@ -498,9 +517,25 @@ def _request_exact_parent_cleanup(parent: subprocess.Popen[bytes]) -> None:
 
 
 def _close_parent_streams(parent: subprocess.Popen[bytes]) -> None:
-    for stream in (parent.stdin, parent.stdout, parent.stderr):
+    first_failure: BaseException | None = None
+    later_failures: list[str] = []
+    for name, stream in (("stdin", parent.stdin), ("stdout", parent.stdout), ("stderr", parent.stderr)):
         if stream is not None:
-            stream.close()
+            try:
+                stream.close()
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                else:
+                    later_failures.append(f"{name}: {type(exc).__name__}")
+    if first_failure is not None:
+        if later_failures:
+            sanitized_failures = tuple(later_failures)
+            setattr(first_failure, "_cryodaq_later_stream_close_failures", sanitized_failures)
+            add_note = getattr(first_failure, "add_note", None)
+            if callable(add_note):
+                add_note("additional parent stream close failures: " + "; ".join(sanitized_failures))
+        raise first_failure
 
 
 def _spawned_child_survives_killed_parent(
@@ -555,19 +590,23 @@ def _spawned_child_survives_killed_parent(
                 raise AssertionError("the child died of a bare SIGTERM; only SIGKILL may close it")
 
         parent.kill()
-        parent.wait(timeout=10)
+        # From the successful kill onward this process, as subreaper, owns the
+        # adopted-child waitpid even if the first parent.wait() itself fails.
         parent_was_killed = True
+        parent.wait(timeout=10)
         if after_parent_kill is not None:
             after_parent_kill()
         return not _wait_for_identity_exit(child_pidfd, timeout=6.0)
     finally:
         cleanup_errors: list[BaseException] = []
-        # If pidfd setup succeeded, kill through that exact identity first. The parent then
-        # either observes EOF and runs its Process.join, or is already the deliberate
-        # SIGKILL victim. If setup failed, the still-live parent remains the exact owner and
-        # handles the cleanup command itself.
-        if child_pidfd is not None:
-            try:
+        child_identity_settled = child_pidfd is None
+        child_reap_settled = child_pid is None
+        try:
+            # If pidfd setup succeeded, kill through that exact identity first. The parent then
+            # either observes EOF and runs its Process.join, or is already the deliberate
+            # SIGKILL victim. If setup failed, the still-live parent remains the exact owner and
+            # handles the cleanup command itself.
+            if child_pidfd is not None:
                 # Never put a fallible poll in front of the exact-identity kill. A pidfd
                 # SIGKILL is safe even when the process exited concurrently (ESRCH), while
                 # a failed readiness poll must not strand a still-live 600-second child.
@@ -575,35 +614,59 @@ def _spawned_child_survives_killed_parent(
                     _signal_via_identity(child_pidfd, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                if not _wait_for_identity_exit(child_pidfd, timeout=10.0):
-                    raise AssertionError(f"spawned child {child_pid} did not reach exact pidfd settlement")
-            except BaseException as exc:
-                cleanup_errors.append(exc)
-        if not parent_was_killed:
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+                    # Keep the already-open pidfd as the authority for one independent raw
+                    # cleanup attempt. Never fall back to the reusable numeric PID.
+                    try:
+                        _pidfd_send_signal_syscall(child_pidfd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except BaseException as recovery_exc:
+                        cleanup_errors.append(recovery_exc)
+                try:
+                    if not _wait_for_identity_exit(child_pidfd, timeout=10.0):
+                        raise AssertionError(f"spawned child {child_pid} did not reach exact pidfd settlement")
+                    child_identity_settled = True
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            if not parent_was_killed:
+                try:
+                    _request_exact_parent_cleanup(parent)
+                    child_identity_settled = True
+                    child_reap_settled = True
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            else:
+                try:
+                    parent.wait(timeout=10)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            if parent_was_killed and child_pid is not None:
+                try:
+                    _reap_adopted_child(child_pid)
+                    child_identity_settled = True
+                    child_reap_settled = True
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            if child_pidfd is not None and child_identity_settled and child_reap_settled:
+                try:
+                    os.close(child_pidfd)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            elif child_pidfd is not None:
+                cleanup_errors.append(
+                    AssertionError(f"retained exact child pidfd {child_pidfd} because exit and reap did not settle")
+                )
             try:
-                _request_exact_parent_cleanup(parent)
+                _close_parent_streams(parent)
             except BaseException as exc:
                 cleanup_errors.append(exc)
-        else:
+        finally:
             try:
-                parent.wait(timeout=10)
+                _restore_child_subreaper(previous_subreaper)
             except BaseException as exc:
                 cleanup_errors.append(exc)
-        if parent_was_killed and child_pid is not None:
-            try:
-                _reap_adopted_child(child_pid)
-            except BaseException as exc:
-                cleanup_errors.append(exc)
-        if child_pidfd is not None:
-            try:
-                os.close(child_pidfd)
-            except BaseException as exc:
-                cleanup_errors.append(exc)
-        _close_parent_streams(parent)
-        try:
-            _restore_child_subreaper(previous_subreaper)
-        except BaseException as exc:
-            cleanup_errors.append(exc)
         if cleanup_errors:
             details = "; ".join(f"{type(error).__name__}: {error}" for error in cleanup_errors)
             raise AssertionError(f"lifecycle harness cleanup failed: {details}") from cleanup_errors[0]
@@ -809,6 +872,297 @@ def test_lifecycle_harness_reaps_exact_child_when_pidfd_poll_fails_during_post_p
                 _signal_via_identity(pidfd, signal.SIGKILL)
                 _assert_proof_pidfd_exited(pidfd, real_identity_exited)
             _close_proof_pidfd(pidfd)
+
+
+@_LINUX_ONLY
+def test_lifecycle_harness_reaps_adopted_child_when_first_post_kill_wait_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_popen = subprocess.Popen
+    real_stable_identity = _stable_identity
+    real_identity_exited = _identity_exited
+    real_reap_adopted_child = _reap_adopted_child
+    child_pids: list[int] = []
+    proof_pidfds: list[int] = []
+    reaped_child_pids: list[int] = []
+    parent_kill_succeeded = False
+    injected = False
+
+    def recording_child_identity(pid: int) -> int:
+        pidfd = real_stable_identity(pid)
+        if pid != os.getpid():
+            child_pids.append(pid)
+            proof_pidfds.append(os.dup(pidfd))
+        return pidfd
+
+    def recording_reap(child_pid: int) -> None:
+        real_reap_adopted_child(child_pid)
+        reaped_child_pids.append(child_pid)
+
+    def popen_with_first_post_kill_wait_failure(*args, **kwargs):
+        parent = real_popen(*args, **kwargs)
+        real_kill = parent.kill
+        real_wait = parent.wait
+
+        def recording_kill() -> None:
+            nonlocal parent_kill_succeeded
+            real_kill()
+            parent_kill_succeeded = True
+
+        def fail_first_post_kill_wait(timeout=None):
+            nonlocal injected
+            if parent_kill_succeeded and not injected:
+                injected = True
+                raise OSError(errno.EIO, "injected first parent wait failure after successful kill")
+            return real_wait(timeout=timeout)
+
+        parent.kill = recording_kill
+        parent.wait = fail_first_post_kill_wait
+        return parent
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", recording_reap)
+    monkeypatch.setattr(subprocess, "Popen", popen_with_first_post_kill_wait_failure)
+    try:
+        with pytest.raises(OSError, match="injected first parent wait failure after successful kill"):
+            _child_survives_a_killed_parent(tmp_path, bound=False, busy="time.sleep(600)")
+        assert parent_kill_succeeded is True
+        assert injected is True
+        assert len(child_pids) == 1
+        assert reaped_child_pids == child_pids
+        assert len(proof_pidfds) == 1
+        _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child_pids[0], os.WNOHANG)
+    finally:
+        for pidfd in proof_pidfds:
+            if not real_identity_exited(pidfd):
+                _signal_via_identity(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+        for child_pid in child_pids:
+            try:
+                real_reap_adopted_child(child_pid)
+            except AssertionError as exc:
+                if not isinstance(exc.__cause__, ChildProcessError):
+                    raise
+        for pidfd in proof_pidfds:
+            _close_proof_pidfd(pidfd)
+
+
+@_LINUX_ONLY
+def test_lifecycle_harness_retries_exact_sigkill_before_reap_and_pidfd_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_stable_identity = _stable_identity
+    real_identity_exited = _identity_exited
+    real_reap_adopted_child = _reap_adopted_child
+    real_signal_via_identity = _signal_via_identity
+    real_pidfd_send_signal_syscall = _pidfd_send_signal_syscall
+    real_close = os.close
+    child_pidfds: list[int] = []
+    child_pids: list[int] = []
+    proof_pidfds: list[int] = []
+    fallback_sigkills: list[int] = []
+    reaped_child_pids: list[int] = []
+    closed_child_pidfds: list[int] = []
+    cleanup_armed = False
+    injected = False
+
+    def recording_child_identity(pid: int) -> int:
+        pidfd = real_stable_identity(pid)
+        if pid != os.getpid():
+            child_pidfds.append(pidfd)
+            child_pids.append(pid)
+            proof_pidfds.append(os.dup(pidfd))
+        return pidfd
+
+    def fail_first_cleanup_sigkill(pidfd: int, sig: int) -> None:
+        nonlocal injected
+        if cleanup_armed and child_pidfds and pidfd == child_pidfds[-1] and sig == signal.SIGKILL and not injected:
+            injected = True
+            raise OSError(errno.EIO, "injected exact SIGKILL failure after engine death")
+        real_signal_via_identity(pidfd, sig)
+
+    def record_raw_fallback(pidfd: int, sig: int) -> None:
+        if cleanup_armed and child_pidfds and pidfd == child_pidfds[-1] and sig == signal.SIGKILL:
+            fallback_sigkills.append(pidfd)
+        real_pidfd_send_signal_syscall(pidfd, sig)
+
+    def record_reap(child_pid: int) -> None:
+        real_reap_adopted_child(child_pid)
+        reaped_child_pids.append(child_pid)
+
+    def close_after_settlement(fd: int) -> None:
+        if child_pidfds and fd == child_pidfds[-1]:
+            assert real_identity_exited(fd), "the exact child pidfd was closed before process exit"
+            assert reaped_child_pids == child_pids, "the exact child pidfd was closed before reap"
+            closed_child_pidfds.append(fd)
+        real_close(fd)
+
+    def arm_cleanup() -> None:
+        nonlocal cleanup_armed
+        cleanup_armed = True
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_signal_via_identity", fail_first_cleanup_sigkill)
+    monkeypatch.setattr(sys.modules[__name__], "_pidfd_send_signal_syscall", record_raw_fallback)
+    monkeypatch.setattr(sys.modules[__name__], "_reap_adopted_child", record_reap)
+    monkeypatch.setattr(os, "close", close_after_settlement)
+    try:
+        with pytest.raises(AssertionError, match="injected exact SIGKILL failure after engine death"):
+            _child_survives_a_killed_parent(
+                tmp_path,
+                bound=False,
+                busy="time.sleep(600)",
+                after_parent_kill=arm_cleanup,
+            )
+        assert injected is True
+        assert fallback_sigkills == child_pidfds, "cleanup must retry SIGKILL through the same exact pidfd"
+        assert reaped_child_pids == child_pids, "cleanup must reap the exact adopted child after fallback SIGKILL"
+        assert closed_child_pidfds == child_pidfds, "pidfd closure must follow exact exit and reap"
+        assert len(proof_pidfds) == 1
+        _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child_pids[0], os.WNOHANG)
+    finally:
+        for pidfd in proof_pidfds:
+            if not real_identity_exited(pidfd):
+                real_pidfd_send_signal_syscall(pidfd, signal.SIGKILL)
+                _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+        for child_pid in child_pids:
+            try:
+                real_reap_adopted_child(child_pid)
+            except AssertionError as exc:
+                if not isinstance(exc.__cause__, ChildProcessError):
+                    raise
+        for pidfd in proof_pidfds:
+            try:
+                real_close(pidfd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+        for pidfd in child_pidfds:
+            try:
+                real_close(pidfd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+
+
+@_LINUX_ONLY
+def test_lifecycle_harness_restores_subreaper_after_parent_stream_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_popen = subprocess.Popen
+    real_stable_identity = _stable_identity
+    real_identity_exited = _identity_exited
+    real_reap_adopted_child = _reap_adopted_child
+    real_restore_child_subreaper = _restore_child_subreaper
+    original_subreaper_state = _child_subreaper_state()
+
+    def exercise(restore_action: Callable[[bool], None]) -> None:
+        child_pids: list[int] = []
+        proof_pidfds: list[int] = []
+        reaped_child_pids: list[int] = []
+        close_attempts: list[str] = []
+        restored_states: list[bool] = []
+
+        def recording_child_identity(pid: int) -> int:
+            pidfd = real_stable_identity(pid)
+            if pid != os.getpid():
+                child_pids.append(pid)
+                proof_pidfds.append(os.dup(pidfd))
+            return pidfd
+
+        def recording_reap(child_pid: int) -> None:
+            real_reap_adopted_child(child_pid)
+            reaped_child_pids.append(child_pid)
+
+        class CloseProbe:
+            def __init__(self, name: str, stream) -> None:
+                self._name = name
+                self._stream = stream
+
+            def __getattr__(self, name: str):
+                return getattr(self._stream, name)
+
+            def close(self) -> None:
+                close_attempts.append(self._name)
+                self._stream.close()
+                if self._name == "stdin":
+                    raise OSError(errno.EIO, "injected first real stream close failure")
+                if self._name == "stdout":
+                    raise OSError(errno.EIO, "private later close detail must be sanitized")
+
+        def popen_with_close_probes(*args, **kwargs):
+            parent = real_popen(*args, **kwargs)
+            for name in ("stdin", "stdout", "stderr"):
+                stream = getattr(parent, name)
+                if stream is not None:
+                    setattr(parent, name, CloseProbe(name, stream))
+            return parent
+
+        def record_restore(previous: bool) -> None:
+            restore_action(previous)
+            restored_states.append(previous)
+
+        real_restore_child_subreaper(False)
+        assert _child_subreaper_state() is False
+        with monkeypatch.context() as patch:
+            patch.setattr(sys.modules[__name__], "_stable_identity", recording_child_identity)
+            patch.setattr(sys.modules[__name__], "_reap_adopted_child", recording_reap)
+            patch.setattr(sys.modules[__name__], "_restore_child_subreaper", record_restore)
+            patch.setattr(subprocess, "Popen", popen_with_close_probes)
+            try:
+                with pytest.raises(AssertionError, match="injected first real stream close failure") as caught:
+                    _child_survives_a_killed_parent(tmp_path, bound=True, busy="time.sleep(600)")
+                assert close_attempts == ["stdin", "stdout", "stderr"]
+                first_close_failure = caught.value.__cause__
+                assert isinstance(first_close_failure, OSError)
+                assert str(first_close_failure) == "[Errno 5] injected first real stream close failure"
+                assert getattr(first_close_failure, "_cryodaq_later_stream_close_failures", ()) == ("stdout: OSError",)
+                notes = getattr(first_close_failure, "__notes__", [])
+                if notes:
+                    assert notes == ["additional parent stream close failures: stdout: OSError"]
+                assert "private later close detail" not in str(caught.value)
+                assert len(child_pids) == 1
+                assert reaped_child_pids == child_pids
+                assert len(proof_pidfds) == 1
+                _assert_proof_pidfd_exited(proof_pidfds[0], real_identity_exited)
+                with pytest.raises(ChildProcessError):
+                    os.waitpid(child_pids[0], os.WNOHANG)
+                assert restored_states == [False], (
+                    "stream cleanup failure must attempt one restoration to the captured prior state"
+                )
+                assert _child_subreaper_state() is False, (
+                    "restore helper call must restore the actual PR_GET_CHILD_SUBREAPER state"
+                )
+            finally:
+                try:
+                    for pidfd in proof_pidfds:
+                        if not real_identity_exited(pidfd):
+                            _signal_via_identity(pidfd, signal.SIGKILL)
+                            _assert_proof_pidfd_exited(pidfd, real_identity_exited)
+                    for child_pid in child_pids:
+                        try:
+                            real_reap_adopted_child(child_pid)
+                        except AssertionError as exc:
+                            if not isinstance(exc.__cause__, ChildProcessError):
+                                raise
+                    for pidfd in proof_pidfds:
+                        _close_proof_pidfd(pidfd)
+                finally:
+                    real_restore_child_subreaper(False)
+
+    try:
+        exercise(real_restore_child_subreaper)
+        with pytest.raises(AssertionError, match="actual PR_GET_CHILD_SUBREAPER"):
+            exercise(lambda _previous: None)
+    finally:
+        real_restore_child_subreaper(original_subreaper_state)
 
 
 @_LINUX_ONLY
