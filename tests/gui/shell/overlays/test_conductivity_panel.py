@@ -1308,6 +1308,13 @@ def test_auto_step_keeps_commanded_channels_when_controls_change(app, monkeypatc
     _DeferredWorker.instances[-1].finish({"ok": True})
 
     original_checkboxes = dict(panel._checkboxes)
+    # The preserved pre-fix object also used a QGridLayout-only-incompatible
+    # stretch call. Supply that old API only when the channel-binding state
+    # under test is absent, so the red reproduction reaches this guard's
+    # identity assertion instead of stopping at the unrelated layout defect.
+    if not hasattr(panel, "_auto_step_temperature_channels"):
+        monkeypatch.setattr(type(panel._ch_layout), "addStretch", lambda _layout: None, raising=False)
+
     monkeypatch.setattr(module, "_get_temperature_channels", lambda: [("Т2", "Т2"), ("Т3", "Т3"), ("Т4", "Т4")])
     panel._on_channels_changed()
     assert panel._chain == ["Т1", "Т2"]
