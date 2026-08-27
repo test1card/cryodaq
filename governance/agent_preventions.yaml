@@ -6243,6 +6243,7 @@ records:
       covered_classifications:
         - coverage_escape
         - evidence_misbinding
+        - evidence_retention_authority
         - instrument_authority_escape
         - late_side_effect
         - markup_interpretation
@@ -7207,3 +7208,33 @@ records:
     automation_limit: The production-side-effect guards are locally executable on POSIX; the corrected exact candidate still requires the hosted remaining partition.
     red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_and_reproduction_published_external_state_root_assistant_bytes_through_the_old_logs_only_descriptor_anchor
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-DIAGNOSTIC-FINALIZATION-ATTEMPT-ALL-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Final publication of the launcher log, engine stderr, and assistant log after the soak launcher writer has settled.
+    classification: evidence_retention_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A publisher failure or launcher size refusal can abort teardown before later publishers run, after which outer cleanup deletes the state root and loses diagnostics. A last-failure-wins accumulator can also replace the authoritative first exception and expose secondary detail.
+    invariant: Normal completion does not publish or return until every launcher-pipe writer end is closed and the real bounded drain thread is terminal. Finalization then attempts engine stderr, assistant-log, and launcher-log publication in order. A failure in one never suppresses later artifacts. Without a primary run failure, the exact first publisher failure is re-raised after every attempt and later failures appear only as sanitized type notes. A caller without a state root retains the same drain-settlement and launcher-publication boundary.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_oversized_launcher_log_retains_both_child_logs_before_refusal
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_finalization_attempts_later_publishers_after_engine_baseexception
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_finalization_retains_first_failure_and_sanitizes_later_failures
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_normal_success_waits_for_duplicate_launcher_writer_and_real_drain
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_capture_without_state_root_still_settles_and_publishes_launcher
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_settlement_baseexception_preserves_primary_refuses_root_and_defers_drain_until_writer_settles
+        ci_partition: remaining
+    automation_limit: The side-effect, exception-authority, duplicate-writer drain-settlement, and launcher-only guards are locally executable on Windows and Ubuntu 22.04; the corrected exact candidate still requires the hosted remaining partition.
+    red_evidence: exact_c0e925f46bd4a9ac94e9c0c0a90034ec5f11503f_github_codex_findings_3869132639_and_3869238522_plus_local_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_immediate_nonjoining_mutant_blob_45bf9e4377de8e11887a0fa96deaa219cf8013d9_and_delayed_correct_bytes_nonjoining_mutant_blob_c4dface8685271066a25be8ad13fa118ab62e7f5_each_failed_the_exact_normal_drain_guard_on_windows_and_ubuntu_22_04_2026_08_27
+    green_evidence: local_corrected_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_guard_blob_790025409dbf1d337073a96753b83c7e1174e5d0_six_registered_finalization_guards_passed_on_windows_full_windows_affected_module_61_passed_12_skipped_full_ubuntu_22_04_affected_module_70_passed_3_skipped_full_registry_and_removal_baseline_governance_61_passed_read_only_ruff_clean_pending_hosted_remaining_partition

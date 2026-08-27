@@ -1671,10 +1671,15 @@ def _launcher_log_capture(
         raise
     else:
         raw, total_bytes = drain.finish()
-        _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
+        cleanup = _CleanupFailureAccumulator(primary=None)
         if state_root is not None:
-            _publish_engine_stderr(evidence, state_root)
-            _publish_assistant_log(evidence, state_root)
+            cleanup.attempt("engine stderr capture failed", lambda: _publish_engine_stderr(evidence, state_root))
+            cleanup.attempt("assistant log capture failed", lambda: _publish_assistant_log(evidence, state_root))
+        cleanup.attempt(
+            "launcher diagnostic capture failed",
+            lambda: _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False),
+        )
+        cleanup.raise_if_no_primary()
 
 
 @dataclass(frozen=True, slots=True)

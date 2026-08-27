@@ -121,6 +121,222 @@ def test_the_success_path_publishes_it(tmp_path: Path, state_root: Path) -> None
     assert "finished cleanly" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
 
 
+def test_oversized_launcher_log_retains_both_child_logs_before_refusal(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launcher-log refusal must not delete the child diagnostics it explains."""
+
+    monkeypatch.setattr(runner, "_MAX_LAUNCHER_LOG_BYTES", 128)
+    (state_root / "logs" / "engine.stderr.log").write_bytes(b"engine stopped after the bridge failed\n")
+    (state_root / "logs" / "assistant.log").write_bytes(b"assistant lost the periodic source\n")
+    evidence = _Evidence()
+
+    with pytest.raises(runner._RunnerFoundationError, match="launcher log exceeded the reviewed evidence ceiling"):
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "oversized-launcher.txt",
+            state_root=state_root,
+        ) as writer:
+            writer.write(b"x" * 256)
+
+    assert "bridge failed" in evidence.logs[runner._ENGINE_STDERR_EVIDENCE_NAME]
+    assert "lost the periodic source" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+
+
+def test_launcher_finalization_attempts_later_publishers_after_engine_baseexception(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One failed child publisher cannot suppress later retained artifacts."""
+
+    class EnginePublisherInterrupted(BaseException):
+        pass
+
+    first = EnginePublisherInterrupted("ENGINE PUBLISHER SECRET")
+    calls: list[str] = []
+    real_assistant_publish = runner._publish_assistant_log
+    real_launcher_publish = runner._publish_launcher_log
+
+    def fail_engine_publish(*_args: object, **_kwargs: object) -> None:
+        calls.append("engine")
+        raise first
+
+    def observe_assistant_publish(*args: object, **kwargs: object) -> None:
+        calls.append("assistant")
+        real_assistant_publish(*args, **kwargs)
+
+    def observe_launcher_publish(*args: object, **kwargs: object) -> None:
+        calls.append("launcher")
+        real_launcher_publish(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_publish_engine_stderr", fail_engine_publish)
+    monkeypatch.setattr(runner, "_publish_assistant_log", observe_assistant_publish)
+    monkeypatch.setattr(runner, "_publish_launcher_log", observe_launcher_publish)
+    (state_root / "logs" / "assistant.log").write_bytes(b"assistant publisher completed\n")
+    evidence = _Evidence()
+    writer = None
+    caught: BaseException | None = None
+
+    try:
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "launcher-engine-publisher-interrupted.txt",
+            state_root=state_root,
+        ) as writer:
+            writer.write(b"launcher publisher completed\n")
+    except BaseException as error:
+        caught = error
+
+    assert caught is first
+    assert calls == ["engine", "assistant", "launcher"]
+    assert "assistant publisher completed" in evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "launcher publisher completed" in evidence.logs["log-launcher.txt"]
+    assert writer is not None and writer.closed, "finalization returned before the launcher writer settled"
+
+
+def test_launcher_finalization_retains_first_failure_and_sanitizes_later_failures(
+    tmp_path: Path,
+    state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production context manager is attempt-all and first-failure authoritative."""
+
+    class EnginePublisherInterrupted(BaseException):
+        pass
+
+    class AssistantPublisherInterrupted(BaseException):
+        pass
+
+    class LauncherPublisherInterrupted(BaseException):
+        pass
+
+    first = EnginePublisherInterrupted("ENGINE PUBLISHER SECRET")
+    second = AssistantPublisherInterrupted("ASSISTANT PUBLISHER SECRET")
+    third = LauncherPublisherInterrupted("LAUNCHER PUBLISHER SECRET")
+    calls: list[str] = []
+
+    def fail(name: str, error: BaseException):
+        def action(*_args: object, **_kwargs: object) -> None:
+            calls.append(name)
+            raise error
+
+        return action
+
+    monkeypatch.setattr(runner, "_publish_engine_stderr", fail("engine", first))
+    monkeypatch.setattr(runner, "_publish_assistant_log", fail("assistant", second))
+    monkeypatch.setattr(runner, "_publish_launcher_log", fail("launcher", third))
+    evidence = _Evidence()
+    writer = None
+    caught: BaseException | None = None
+
+    try:
+        with runner._launcher_log_capture(
+            evidence,
+            tmp_path / "launcher-multiple-publisher-failures.txt",
+            state_root=state_root,
+        ) as writer:
+            writer.write(b"launcher output\n")
+    except BaseException as error:
+        caught = error
+
+    assert caught is first
+    assert calls == ["engine", "assistant", "launcher"]
+    assert writer is not None and writer.closed, "finalization returned before the launcher writer settled"
+    notes = tuple(getattr(caught, "__notes__", ()))
+    assert notes == (
+        "assistant log capture failed: AssistantPublisherInterrupted",
+        "launcher diagnostic capture failed: LauncherPublisherInterrupted",
+    )
+    assert "ENGINE PUBLISHER SECRET" not in "\n".join(notes)
+    assert "ASSISTANT PUBLISHER SECRET" not in "\n".join(notes)
+    assert "LAUNCHER PUBLISHER SECRET" not in "\n".join(notes)
+
+
+def test_normal_success_waits_for_duplicate_launcher_writer_and_real_drain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal finalization cannot return while a child-style pipe writer remains live."""
+
+    created_drains: list[runner._BoundedLauncherLogDrain] = []
+    duplicate_writer_fds: list[int] = []
+    worker_errors: list[BaseException] = []
+    finish_entered = threading.Event()
+    finish_returned = threading.Event()
+    context_returned = threading.Event()
+    evidence = _Evidence()
+
+    class ObservedDrain(runner._BoundedLauncherLogDrain):
+        def __init__(self) -> None:
+            super().__init__()
+            created_drains.append(self)
+
+        def finish(self) -> tuple[bytes, int]:
+            finish_entered.set()
+            result = super().finish()
+            assert not self._thread.is_alive(), (
+                "the production finalizer returned before the real launcher drain thread terminated"
+            )
+            finish_returned.set()
+            return result
+
+    monkeypatch.setattr(runner, "_BoundedLauncherLogDrain", ObservedDrain)
+
+    def capture() -> None:
+        try:
+            with runner._launcher_log_capture(evidence, tmp_path / "launcher-duplicate-writer.txt") as writer:
+                duplicate_writer_fds.append(os.dup(writer.fileno()))
+                writer.write(b"launcher child copy remained open\n")
+        except BaseException as error:
+            worker_errors.append(error)
+        finally:
+            context_returned.set()
+
+    worker = threading.Thread(target=capture, name="launcher-capture-owner", daemon=True)
+    worker.start()
+    assert finish_entered.wait(timeout=1.0), "the normal path never entered the real drain finalizer"
+    assert len(created_drains) == 1
+    assert len(duplicate_writer_fds) == 1
+
+    # This bounded delay is the control: the real finalizer must still be waiting for
+    # EOF from the child-style duplicate. A mutation that returns retained bytes without
+    # joining sets both return events while the real drain thread remains alive.
+    finish_returned_before_release = finish_returned.wait(timeout=0.5)
+    context_returned_before_release = context_returned.is_set()
+    drain_alive_before_release = created_drains[0]._thread.is_alive()
+    worker_alive_before_release = worker.is_alive()
+
+    os.close(duplicate_writer_fds.pop())
+    worker.join(timeout=runner._PROCESS_GROUP_GRACE_S + 1.0)
+    created_drains[0]._thread.join(timeout=runner._PROCESS_GROUP_GRACE_S + 1.0)
+
+    assert not finish_returned_before_release, "finish returned while a duplicate launcher writer stayed open"
+    assert not context_returned_before_release, "capture returned while a duplicate launcher writer stayed open"
+    assert drain_alive_before_release, "the control did not retain a live real drain before duplicate release"
+    assert worker_alive_before_release, "the capture owner was not blocked in real drain settlement"
+    assert not worker.is_alive()
+    assert context_returned.is_set()
+    assert finish_returned.is_set()
+    assert not created_drains[0]._thread.is_alive()
+    assert worker_errors == []
+    assert evidence.logs == {"log-launcher.txt": "launcher child copy remained open\n"}
+
+
+def test_launcher_capture_without_state_root_still_settles_and_publishes_launcher(tmp_path: Path) -> None:
+    """Callers without child logs retain the original settled launcher-only contract."""
+
+    evidence = _Evidence()
+
+    with runner._launcher_log_capture(evidence, tmp_path / "launcher-only.txt") as writer:
+        writer.write(b"launcher-only evidence\n")
+
+    assert writer is not None and writer.closed
+    assert evidence.logs == {"log-launcher.txt": "launcher-only evidence\n"}
+
+
 def test_the_FAILURE_path_publishes_it(tmp_path: Path, state_root: Path) -> None:
     """And a soak that fails must carry it MOST of all -- that is the run being diagnosed.
 
