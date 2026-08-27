@@ -19,7 +19,7 @@ Panel-level:
 
 Public API (MainWindowV2 push points):
 - ``on_reading(reading)``  — route a single Reading into the overlay
-- ``replay_source_state(reading)`` — present retained state without freshness credit
+- ``replay_source_state(key, reading)`` — present retained state without freshness credit
 - ``set_connected(ok)``    — mark Keithley connection state
 - ``set_safety_ready(ok, reason="")`` — toggle safety gate
 
@@ -1377,12 +1377,8 @@ class KeithleyPanel(QWidget):
                     block.handle_reading(suffix, reading)
                     return
 
-    def replay_source_state(self, reading: Reading) -> None:
+    def replay_source_state(self, key: str, reading: Reading) -> None:
         """Present one retained source state without producer-observation credit."""
-        channel = reading.channel
-        if not channel.startswith("analytics/keithley_channel_state/"):
-            return
-        key = channel.rsplit("/", 1)[-1]
         block = self._blocks.get(key)
         if block is None:
             return
