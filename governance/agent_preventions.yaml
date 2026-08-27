@@ -3401,7 +3401,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_auto_evidence_authority_081.json
-      sha256: sha256:8147a2f08a9f13cee97bdb2234d00e45030a01933f496ed6327e5d2822a28f5a
+      sha256: sha256:6cb6cdb3f6778788f5b0adf57db2b8754fde3f9f595f49a3cf5808ff95ad8b12
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-CHANNEL-IDENTITY-FALSE-GREEN-081
     status: open
@@ -3411,7 +3411,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_channel_identity_false_green_081.json
-      sha256: sha256:9712b01183962a02412e98d824cc32347962574475f822c98c61281184b3b84a
+      sha256: sha256:93c0cf7f080bee074ff24aba629e5032cabab0a596b819ad9e1219bf5d41a12a
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-UNUSABLE-FEED-FALSE-GREEN-081
     status: open
@@ -3421,7 +3421,7 @@ false_green_pairs:
     ci_partition: gui
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_unusable_feed_false_green_081.json
-      sha256: sha256:a7444ef60de59546dbb7f21ea82c2802d0285b0549dac0380df53a326f70f978
+      sha256: sha256:5e06c0383f2c0ab1c68c09546cf1d44f6bfc4b0a7e64db3307f77072e6e0bf8b
     green_evidence: pending
   - id: CONDUCTIVITY-GUARD-LAKESHORE-ACQUISITION-FALSE-GREEN-081
     status: open
@@ -7047,7 +7047,7 @@ records:
         ci_partition: remaining
     red_evidence:
       locator: red-reproduction:governance/red_reproductions/conductivity_runtime_authority_081.json
-      sha256: sha256:ac393ab63c2bf5f24b014836e1478e63263ee1dbe8d4d394fac7e565e7f190f1
+      sha256: sha256:08ec1f14a6379a794026c2fc8279cffd9053fd89fc3ba721deea290d0b053610
     green_evidence: pending
   - id: EXTERNAL-MOCK-THERMAL-AUTHORITY-001
     status: open
