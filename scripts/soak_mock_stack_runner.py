@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -31,6 +32,16 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 import yaml
+
+# The authoritative retention/naming contract for the rotating logs this
+# publisher reads at teardown. Consumed, never restated: see the constants at
+# the top of cryodaq.logging_setup and their cross-binding guard.
+from cryodaq.logging_setup import (
+    ASSISTANT_LOG_BACKUP_COUNT,
+    ASSISTANT_LOG_BASENAME,
+    ASSISTANT_LOG_SUFFIX_FORMAT,
+    rotated_log_name_pattern,
+)
 
 _REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 _TEST_FILE: Final = "tests/integration/test_periodic_png_multiprocess.py"
@@ -135,6 +146,26 @@ _SHORT_SOAK_THIRD_REPORT_FLOOR_S: Final = 1050
 _MAX_RECEIPT_LEDGER_BYTES: Final = 8 * 1024 * 1024
 _MAX_RECEIPT_RECORD_BYTES: Final = 8 * 1024
 _MAX_LAUNCHER_LOG_BYTES: Final = 8 * 1024 * 1024
+# Retention and naming are NOT restated here. These names re-export the one
+# authoritative contract from cryodaq.logging_setup -- the module whose
+# TimedRotatingFileHandler PRODUCES the assistant log and its dated rotations.
+# A copied-by-value count once drifted from that handler: teardown refused the
+# days it validly retained, replaced the diagnosis with a false rotation-
+# ceiling marker, and lost the artifact this publisher exists to preserve
+# (PR #102 cold review F1).
+_ASSISTANT_LOG_BACKUP_COUNT: Final = ASSISTANT_LOG_BACKUP_COUNT
+# TimedRotatingFileHandler renames the active file before it deletes backups. A
+# process death in that exact window therefore leaves one extra dated file. The
+# publisher accepts only that single bounded residue; a second excess rotation
+# still proves that the producer and retention contract have diverged.
+_ASSISTANT_LOG_INTERRUPTED_ROLLOVER_SLACK: Final = 1
+_ASSISTANT_LOG_SCAN_ROTATION_CEILING: Final = _ASSISTANT_LOG_BACKUP_COUNT + _ASSISTANT_LOG_INTERRUPTED_ROLLOVER_SLACK
+_ASSISTANT_LOG_ACTIVE_NAME: Final[str] = ASSISTANT_LOG_BASENAME
+_ASSISTANT_LOG_ROTATION_RE: Final = rotated_log_name_pattern(ASSISTANT_LOG_BASENAME)
+# The logs directory is writable by the measured process, so enumeration cost is
+# bounded by TOTAL entries: the fixed ceiling leaves headroom for normal component
+# rotations while keeping a hostile directory's enumeration finite.
+_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES: Final = 256
 _MAX_SOURCE_FIXTURE_FILE_BYTES: Final = 4 * 1024 * 1024
 _TRUNCATED_LAUNCHER_LOG_MARKER: Final = b"[launcher log truncated; bounded tail follows]\n"
 _LOCKED_PSUTIL_VERSION: Final = "7.2.2"
@@ -891,9 +922,13 @@ class _BoundedLauncherLogDrain:
         finally:
             os.close(self._read_fd)
 
-    def finish(self) -> tuple[bytes, int]:
+    def close_writer(self) -> None:
+        """Release only this owner's write end without claiming pipe EOF."""
         if not self.writer.closed:
             self.writer.close()
+
+    def finish(self) -> tuple[bytes, int]:
+        self.close_writer()
         self._thread.join(timeout=_PROCESS_GROUP_GRACE_S)
         if self._thread.is_alive():
             raise _RunnerFoundationError("launcher log writer did not settle")
@@ -926,45 +961,657 @@ def _publish_launcher_log(evidence: Any, raw: bytes, total_bytes: int, *, allow_
 
 
 _ENGINE_STDERR_EVIDENCE_NAME: Final = "log-engine-stderr.txt"
+_ENGINE_STDERR_BASENAME: Final = "engine.stderr.log"
+_ENGINE_STDERR_REDACTION_CONTEXT_BYTES: Final = 64 * 1024
 _ENGINE_STDERR_ABSENT_MARKER: Final = (
     "<no engine stderr log was written under the isolated state root; the engine either "
     "never started or never opened its stderr log>\n"
 )
+_ENGINE_STDERR_REPLACED_MARKER: Final = (
+    "<the engine stderr log was refused: the log directory changed during the read on a "
+    "platform without descriptor-relative traversal. Nothing read is published.>\n"
+)
+_ENGINE_STDERR_REFUSED_MARKER: Final = (
+    "<the engine stderr log was refused: the leaf is a symbolic link. The measured process "
+    "can write that name, so following it could publish an unrelated file.>\n"
+)
+_ENGINE_STDERR_NOT_REGULAR_MARKER: Final = (
+    "<the engine stderr log was refused: the leaf is not a regular file -- a directory, "
+    "reparse point, device, or fifo holds it. Nothing was opened or read.>\n"
+)
+_ENGINE_STDERR_HARD_LINKED_MARKER: Final = (
+    "<the engine stderr log was refused: it is a regular file carrying more than one link "
+    "(st_nlink != 1), so its bytes may also live outside this isolated root.>\n"
+)
+_ENGINE_STDERR_REPLACED_OR_UNREADABLE_MARKER: Final = (
+    "<the engine stderr log was refused: the leaf was removed, replaced, or made unreadable "
+    "between validation and descriptor open. Nothing was read.>\n"
+)
+_ENGINE_STDERR_OPENED_BUT_UNREADABLE_MARKER: Final = (
+    "<the engine stderr log was refused: its descriptor opened as a lone regular file but "
+    "could not be read to the retention bound. No partial stream was published.>\n"
+)
+_ENGINE_STDERR_RECORD_SPANS_BOUNDARY_MARKER: Final = (
+    "<the engine stderr log was refused: its retained tail began inside one record and held "
+    "no complete following record. The partial record was not published.>\n"
+)
+_ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER: Final = (
+    "<the engine stderr log was refused: the child-writable logs directory could not be "
+    "opened and bound to a plain unlinked directory. Nothing was read.>\n"
+)
+_UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER: Final = (
+    "<the child-writable logs were refused: the launcher session and its descendants "
+    "could not be proven settled, so the writable state root was not traversed. "
+    "Nothing was read or published from that root.>\n"
+)
 
 
 def _publish_engine_stderr(evidence: Any, state_root: Path) -> None:
-    """Publish the engine's own stderr, so a dead engine can say why it died.
-
-    Without this the run reports a CONDITION without its SUBJECT. The launcher forwards
-    engine stderr to a rotating log under the writable state root, which for this run is
-    the runner's own temporary directory and is deleted with it, so
-    ``Launcher construction failed; phase=engine exception=RuntimeError`` arrived with no
-    way to see the engine's traceback. Measured 2026-08-19 on Ubuntu 22.04.5: the evidence
-    bundle held six files and none of them was that log.
-
-    The artifact is ALWAYS written, and says so when the log is absent, because a missing
-    file is indistinguishable from a publisher that silently did nothing.
-    """
+    """Publish a descriptor-bound, bounded tail of the engine's own stderr."""
 
     from scripts.soak_mock_stack import redact_text
 
-    path = Path(state_root) / "logs" / "engine.stderr.log"
-    try:
-        raw = path.read_bytes()
-    except OSError:
+    logs_directory = Path(state_root) / "logs"
+    if _assistant_log_uses_pathname_traversal():
+        try:
+            os.lstat(logs_directory)
+        except FileNotFoundError:
+            evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
+            return
+        identity_before = _directory_identity(logs_directory)
+    else:
+        identity_before = None
+    selected = _engine_stderr_file(state_root)
+    if selected is _AssistantLogDirectoryAbsence.MISSING_DIRECTORY:
         evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
         return
+    if isinstance(selected, _AssistantLogDirectoryRefusal):
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_DIRECTORY_UNTRUSTED_MARKER)
+        return
+    directory_descriptor, path = selected
+    try:
+        if _assistant_log_path_is_absent(directory_descriptor, path):
+            result: tuple[bytes, int] | _AssistantLogLeafRefusal | None = None
+        else:
+            result = _read_regular_file_no_follow(
+                directory_descriptor,
+                path,
+                maximum_bytes=_MAX_LAUNCHER_LOG_BYTES + _ENGINE_STDERR_REDACTION_CONTEXT_BYTES,
+            )
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
 
+    if _assistant_log_uses_pathname_traversal() and (
+        identity_before is None or _directory_identity(logs_directory) != identity_before
+    ):
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_REPLACED_MARKER)
+        return
+    if result is None:
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, _ENGINE_STDERR_ABSENT_MARKER)
+        return
+    if isinstance(result, _AssistantLogLeafRefusal):
+        marker = {
+            _AssistantLogLeafRefusal.SYMBOLIC_LINK: _ENGINE_STDERR_REFUSED_MARKER,
+            _AssistantLogLeafRefusal.NOT_REGULAR_FILE: _ENGINE_STDERR_NOT_REGULAR_MARKER,
+            _AssistantLogLeafRefusal.HARD_LINKED: _ENGINE_STDERR_HARD_LINKED_MARKER,
+            _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE: _ENGINE_STDERR_REPLACED_OR_UNREADABLE_MARKER,
+            _AssistantLogLeafRefusal.OPENED_BUT_UNREADABLE: _ENGINE_STDERR_OPENED_BUT_UNREADABLE_MARKER,
+            _AssistantLogLeafRefusal.RECORD_SPANS_RETENTION_BOUNDARY: _ENGINE_STDERR_RECORD_SPANS_BOUNDARY_MARKER,
+        }[result]
+        evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, marker)
+        return
+
+    raw, source_bytes = result
     encoded = redact_text(raw.decode("utf-8", errors="replace")).encode("utf-8")
-    if len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
-        # Keep the END: a traceback's cause is written last, and the bound exists to
-        # protect the bundle's size, not to choose which half of the failure survives.
+    if source_bytes > _MAX_LAUNCHER_LOG_BYTES or len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
         tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER)
         tail = encoded[-tail_bytes:]
         while tail and tail[0] & 0xC0 == 0x80:
             tail = tail[1:]
         encoded = _TRUNCATED_LAUNCHER_LOG_MARKER + tail
     evidence.write_log(_ENGINE_STDERR_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
+
+
+_ASSISTANT_LOG_EVIDENCE_NAME: Final = "log-assistant.txt"
+_ASSISTANT_LOG_ABSENT_MARKER: Final = (
+    "<no assistant log was written under the isolated state root; the assistant either "
+    "never started or never opened its log>\n"
+)
+_ASSISTANT_LOG_REPLACED_MARKER: Final = (
+    "REFUSED: the log directory was not the same directory after the read as before it. "
+    "This platform has no descriptor-anchored traversal, so the read cannot be bound to "
+    "the directory that was validated; what it can do is prove afterwards that nothing "
+    "swapped underneath it, and that proof failed. Nothing read is published, because a "
+    "stream that may have come from a replaced directory is worse than none."
+)
+_ASSISTANT_LOG_REFUSED_MARKER: Final = (
+    "<the assistant log was refused: the path under the isolated state root is not a "
+    "regular file. The measured process can write that directory, so a symbolic link "
+    "there would have copied an unrelated file into this bundle.>\n"
+)
+_ASSISTANT_LOG_NOT_REGULAR_MARKER: Final = (
+    "<the assistant log was refused: the name under the isolated state root exists but is "
+    "not a regular file -- a directory, reparse point, device, or fifo holds it. Nothing "
+    "read is published, because reading it could copy bytes the isolated root never wrote.>\n"
+)
+_ASSISTANT_LOG_HARD_LINKED_MARKER: Final = (
+    "<the assistant log was refused: it is a regular file carrying more than one link "
+    "(st_nlink != 1), so its bytes may also live under a path outside this isolated root. "
+    "Nothing read is published.>\n"
+)
+_ASSISTANT_LOG_REPLACED_OR_UNREADABLE_MARKER: Final = (
+    "<the assistant log was refused: during the walk the leaf could neither be measured nor "
+    "opened without following links -- it was removed, replaced, or made unreadable between "
+    "enumeration and open. Nothing read is published.>\n"
+)
+_ASSISTANT_LOG_OPENED_BUT_UNREADABLE_MARKER: Final = (
+    "<the assistant log was refused: it opened as a lone regular file but could not be "
+    "read to the retention bound. Nothing read is published, because a partial stream "
+    "from a failing file is worse than an honest refusal.>\n"
+)
+_ASSISTANT_LOG_RECORD_SPANS_BOUNDARY_MARKER: Final = (
+    "<part of the assistant log was withheld: its retained tail began inside one record "
+    "and contained no complete following record, so publishing it could carry "
+    "the undetectable half of a credential whose identifying prefix was already gone. That "
+    "record was discarded whole rather than guessed at.>\n"
+)
+_ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER: Final = (
+    "<the assistant log was refused: the logs directory under the isolated state root could "
+    "not be opened and proven to be a plain, unlinked directory -- linked, replaced, or "
+    "unreadable. Nothing is published, because nothing inside it can be trusted on that "
+    "platform.>\n"
+)
+_ASSISTANT_LOG_DIRECTORY_ENTRY_CEILING_MARKER: Final = (
+    "<the assistant log was refused: more than "
+    f"{_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES} entries were observed in the logs "
+    "directory. Enumeration stopped at the fixed teardown-work ceiling, and no bytes "
+    "from the directory were published.>\n"
+)
+_ASSISTANT_LOG_ROTATION_CEILING_MARKER: Final = (
+    f"<the assistant log was refused: more than {_ASSISTANT_LOG_SCAN_ROTATION_CEILING} exact dated rotations "
+    f"were observed, exceeding the configured {_ASSISTANT_LOG_BACKUP_COUNT}-backup retention plus the single "
+    "bounded residue of an interrupted rollover. No bytes from the directory were published.>\n"
+)
+
+
+class _AssistantLogDirectoryAbsence(StrEnum):
+    """The exact securely observed reason no log directory can hold artifacts."""
+
+    MISSING_DIRECTORY = "missing-directory"
+
+
+class _AssistantLogDirectoryRefusal(StrEnum):
+    """The exact observed reason the assistant-log directory walk refused."""
+
+    UNTRUSTED_DIRECTORY = "untrusted-directory"
+    TOO_MANY_ENTRIES = "too-many-entries"
+    TOO_MANY_ROTATIONS = "too-many-rotations"
+
+
+class _AssistantLogLeafRefusal(StrEnum):
+    """The closed set of reasons a no-follow regular-file read refuses.
+
+    Every member names a condition somebody actually observed. A single untyped
+    ``None`` here once made the publisher claim ``symbolic link`` for hard links,
+    open failures, races, and I/O errors alike -- a marker asserting a topology
+    nobody saw.
+    """
+
+    SYMBOLIC_LINK = "symbolic-link"
+    NOT_REGULAR_FILE = "not-regular-file"
+    HARD_LINKED = "hard-linked"
+    REPLACED_OR_UNREADABLE = "replaced-or-unreadable"
+    OPENED_BUT_UNREADABLE = "opened-but-unreadable"
+    RECORD_SPANS_RETENTION_BOUNDARY = "record-spans-retention-boundary"
+
+
+_ASSISTANT_LOG_LEAF_REFUSAL_MARKERS: Final[dict[_AssistantLogLeafRefusal, str]] = {
+    _AssistantLogLeafRefusal.SYMBOLIC_LINK: _ASSISTANT_LOG_REFUSED_MARKER,
+    _AssistantLogLeafRefusal.NOT_REGULAR_FILE: _ASSISTANT_LOG_NOT_REGULAR_MARKER,
+    _AssistantLogLeafRefusal.HARD_LINKED: _ASSISTANT_LOG_HARD_LINKED_MARKER,
+    _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE: _ASSISTANT_LOG_REPLACED_OR_UNREADABLE_MARKER,
+    _AssistantLogLeafRefusal.OPENED_BUT_UNREADABLE: _ASSISTANT_LOG_OPENED_BUT_UNREADABLE_MARKER,
+    _AssistantLogLeafRefusal.RECORD_SPANS_RETENTION_BOUNDARY: _ASSISTANT_LOG_RECORD_SPANS_BOUNDARY_MARKER,
+}
+
+
+def _assistant_log_uses_pathname_traversal(*, platform: str | None = None) -> bool:
+    """Whether this platform lacks descriptor-relative log traversal."""
+
+    return (os.name if platform is None else platform) == "nt"
+
+
+def _read_regular_file_no_follow(
+    directory_descriptor: int | None, path: Path | str, *, maximum_bytes: int
+) -> tuple[bytes, int] | _AssistantLogLeafRefusal:
+    """Read a file the MEASURED PROCESS can replace, without following a link.
+
+    The isolated state root is writable by the very process this bundle describes. If it
+    replaces `logs/assistant.log` with a symbolic link before teardown, an ordinary read
+    copies whatever the runner can reach into the retained evidence. So the open refuses
+    to follow a link, and the descriptor is checked to be a regular file before a byte is
+    read -- the check is on the DESCRIPTOR, not on the path, because a path can change
+    between the check and the open.
+
+    The returned tail is RECORD-ALIGNED: a bounded slice that begins mid-record would
+    carry text whose identifying context stayed behind, and `redact_text` cannot
+    recognize a credential whose keyword it never sees. One byte before the cutoff is
+    read so alignment can PROVE whether the slice starts at a record boundary; a record
+    with no line break inside the window is refused whole instead of guessed at.
+
+    Returns the aligned bounded tail and full descriptor size when safe. Otherwise it
+    returns exactly which closed condition refused: a symbolic link, a non-regular file,
+    a hard link, a leaf replaced or unreadable during the walk, a file that opened but
+    could not be read, or a record spanning the whole retention window. It never returns
+    ``None`` -- silence here would force the publisher to invent why nothing was read.
+    """
+
+    # TWO CHECKS, because neither is enough alone. `O_NOFOLLOW` does not exist on
+    # Windows, where `getattr` would quietly return 0 and the open would follow the link
+    # -- a guard that is absent on one platform is a guard that is untested there. So the
+    # link is rejected first by `lstat`, which does not follow, and the open still asks
+    # for `O_NOFOLLOW` where the platform has it.
+    try:
+        link_info = os.lstat(path, dir_fd=directory_descriptor)
+    except OSError:
+        return _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE
+    if stat.S_ISLNK(link_info.st_mode):
+        return _AssistantLogLeafRefusal.SYMBOLIC_LINK
+    if not stat.S_ISREG(link_info.st_mode):
+        return _AssistantLogLeafRefusal.NOT_REGULAR_FILE
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags, dir_fd=directory_descriptor)
+    except OSError as error:
+        # ELOOP is `O_NOFOLLOW` refusing a link that raced in after the lstat above: name
+        # the link it is rather than folding it into "replaced or unreadable".
+        if error.errno == errno.ELOOP:
+            return _AssistantLogLeafRefusal.SYMBOLIC_LINK
+        return _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE
+    try:
+        info = os.fstat(descriptor)
+        if not os.path.samestat(link_info, info):
+            return _AssistantLogLeafRefusal.REPLACED_OR_UNREADABLE
+        if stat.S_ISLNK(info.st_mode):
+            return _AssistantLogLeafRefusal.SYMBOLIC_LINK
+        if not stat.S_ISREG(info.st_mode):
+            return _AssistantLogLeafRefusal.NOT_REGULAR_FILE
+        if info.st_nlink != 1:
+            return _AssistantLogLeafRefusal.HARD_LINKED
+        size = info.st_size
+        if maximum_bytes <= 0:
+            os.close(descriptor)
+            descriptor = -1
+            return b"", size
+
+        # ONE byte of context BEFORE the cutoff decides everything: if the byte at
+        # `size - maximum_bytes - 1` is a newline, the slice already begins at a record
+        # boundary; otherwise it begins inside one and must be trimmed forward to the
+        # next one. Without that byte, alignment would silently drop a whole record.
+        window = maximum_bytes + 1 if size > maximum_bytes else maximum_bytes
+        if size > maximum_bytes:
+            os.lseek(descriptor, size - window, os.SEEK_SET)
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = -1
+            raw = handle.read(window)
+        if size > maximum_bytes:  # align the truncated descriptor tail before redaction
+            if raw[:1] == b"\n":
+                raw = raw[1:]
+            else:
+                newline = raw.find(b"\n")
+                if newline < 0 or newline == len(raw) - 1:
+                    # No record boundary exists inside the retained window. Any prefix of
+                    # this record carries text whose identifying context -- possibly the
+                    # keyword of a credential -- was already cut off upstream. A newline
+                    # at the final byte leaves no complete following record to retain.
+                    # Discard the whole record rather than reporting a successful empty read.
+                    return _AssistantLogLeafRefusal.RECORD_SPANS_RETENTION_BOUNDARY
+                raw = raw[newline + 1 :]
+        return raw, size
+    except OSError:
+        return _AssistantLogLeafRefusal.OPENED_BUT_UNREADABLE
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _assistant_log_path_is_absent(directory_descriptor: int | None, path: Path | str) -> bool:
+    """Return whether a log leaf is absent without following a replacement link."""
+
+    try:
+        os.lstat(path, dir_fd=directory_descriptor)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _directory_identity(directory: Path) -> tuple[int, int] | None:
+    """The volume and index of ``directory``, or None if it is not a plain directory.
+
+    Used only where descriptor-relative traversal does not exist. Comparing this before
+    and after the reads does not CLOSE the replacement window -- nothing on that platform
+    can -- but it turns a read from a directory somebody swapped in into a refusal
+    instead of into published evidence.
+    """
+
+    try:
+        info = os.lstat(directory)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _open_posix_state_logs_directory(
+    state_root: Path,
+) -> int | _AssistantLogDirectoryAbsence | _AssistantLogDirectoryRefusal:
+    """Open ``logs`` through the state root from its trusted parent descriptor.
+
+    The measured child can rename or replace ``state_root`` itself. Opening
+    ``state_root / "logs"`` follows a replaced ancestor before ``O_NOFOLLOW``
+    can protect the final component. Bind the trusted parent first, then open and
+    verify the state root and logs directory one leaf at a time.
+    """
+
+    state_root = Path(state_root)
+    state_name = state_root.name
+    if not state_name or state_name in {".", ".."}:
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor = -1
+    state_descriptor = -1
+    logs_descriptor = -1
+    keep_logs_descriptor = False
+    try:
+        parent_info = os.lstat(state_root.parent)
+        if not stat.S_ISDIR(parent_info.st_mode):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        parent_descriptor = os.open(state_root.parent, directory_flags)
+        opened_parent = os.fstat(parent_descriptor)
+        if not stat.S_ISDIR(opened_parent.st_mode) or not os.path.samestat(parent_info, opened_parent):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+
+        state_info = os.stat(state_name, dir_fd=parent_descriptor, follow_symlinks=False)
+        if not stat.S_ISDIR(state_info.st_mode):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        state_descriptor = os.open(state_name, directory_flags, dir_fd=parent_descriptor)
+        opened_state = os.fstat(state_descriptor)
+        if not stat.S_ISDIR(opened_state.st_mode) or not os.path.samestat(state_info, opened_state):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+
+        try:
+            logs_info = os.stat("logs", dir_fd=state_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return _AssistantLogDirectoryAbsence.MISSING_DIRECTORY
+        if not stat.S_ISDIR(logs_info.st_mode):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        logs_descriptor = os.open("logs", directory_flags, dir_fd=state_descriptor)
+        opened_logs = os.fstat(logs_descriptor)
+        if not stat.S_ISDIR(opened_logs.st_mode) or not os.path.samestat(logs_info, opened_logs):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        keep_logs_descriptor = True
+        return logs_descriptor
+    except OSError:
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    finally:
+        if state_descriptor >= 0:
+            os.close(state_descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+        if logs_descriptor >= 0 and not keep_logs_descriptor:
+            os.close(logs_descriptor)
+
+
+def _engine_stderr_file(
+    state_root: Path,
+) -> tuple[int | None, Path | str] | _AssistantLogDirectoryAbsence | _AssistantLogDirectoryRefusal:
+    """Bind the exact engine stderr leaf to its child-writable logs directory."""
+
+    directory = Path(state_root) / "logs"
+    if _assistant_log_uses_pathname_traversal():
+        try:
+            directory_info = os.lstat(directory)
+        except OSError:
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        return None, directory / _ENGINE_STDERR_BASENAME
+
+    directory_descriptor = _open_posix_state_logs_directory(Path(state_root))
+    if isinstance(directory_descriptor, (_AssistantLogDirectoryAbsence, _AssistantLogDirectoryRefusal)):
+        return directory_descriptor
+    return directory_descriptor, _ENGINE_STDERR_BASENAME
+
+
+def _rotated_assistant_log_names(
+    directory: Path | int,
+) -> list[str] | _AssistantLogDirectoryRefusal:
+    """Return the bounded set of exact dated assistant-log rotations, oldest first.
+
+    The directory is child-writable, so EVERY entry it yields counts against
+    ``_MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES`` -- not only regex-matching names --
+    and the scan fails closed the moment that ceiling is exceeded. Counting only
+    matching candidates would let any number of unrelated names make teardown
+    traverse the directory without a total-work bound. One rotation beyond the
+    handler's retention is accepted because its real rollover renames before deleting
+    old backups; process death in that window leaves exactly that bounded residue.
+    """
+
+    rotated: list[str] = []
+    enumerated = 0
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            enumerated += 1
+            if enumerated > _MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES:
+                return _AssistantLogDirectoryRefusal.TOO_MANY_ENTRIES
+            if not _is_valid_assistant_log_rotation_name(entry.name):
+                continue
+            rotated.append(entry.name)
+            if len(rotated) > _ASSISTANT_LOG_SCAN_ROTATION_CEILING:
+                return _AssistantLogDirectoryRefusal.TOO_MANY_ROTATIONS
+    return sorted(rotated)
+
+
+def _is_valid_assistant_log_rotation_name(name: str) -> bool:
+    """Return whether ``name`` is an exact, real handler-supported calendar day."""
+
+    if _ASSISTANT_LOG_ROTATION_RE.fullmatch(name) is None:
+        return False
+    suffix = name.removeprefix(f"{_ASSISTANT_LOG_ACTIVE_NAME}.")
+    try:
+        time.strptime(suffix, ASSISTANT_LOG_SUFFIX_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
+def _assistant_log_files(
+    state_root: Path,
+) -> tuple[int | None, list[Path | str]] | _AssistantLogDirectoryAbsence | _AssistantLogDirectoryRefusal:
+    """The active log and every rotated backup, oldest first.
+
+    `setup_logging` rotates the assistant log daily and keeps up to
+    ``ASSISTANT_LOG_BACKUP_COUNT`` dated backups -- the authoritative contract
+    imported from ``cryodaq.logging_setup``, not a local copy of it. On a
+    multi-day run the decisive line is often written on the day it happened
+    and never repeats, so reading only the active file retains the last day and
+    deletes the cause -- the exact evidence loss this publisher exists to stop.
+    """
+
+    directory = Path(state_root) / "logs"
+    active = _ASSISTANT_LOG_ACTIVE_NAME
+    if _assistant_log_uses_pathname_traversal():
+        try:
+            directory_info = os.lstat(directory)
+        except OSError:
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        if not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory) or os.path.isjunction(directory):
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        # Windows lacks descriptor-relative `open`; explicitly reject reparse roots,
+        # then use a non-globbing enumeration. Any directory access failure is refused.
+        # The window this leaves open -- the directory replaced between here and the
+        # leaf reads -- cannot be closed on this platform, so the publisher proves
+        # afterwards that the directory did not change, and refuses if it did.
+        try:
+            rotated = _rotated_assistant_log_names(directory)
+        except OSError:
+            return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+        if isinstance(rotated, _AssistantLogDirectoryRefusal):
+            return rotated
+        return None, [*(directory / name for name in rotated), directory / active]
+
+    directory_descriptor = _open_posix_state_logs_directory(Path(state_root))
+    if isinstance(directory_descriptor, (_AssistantLogDirectoryAbsence, _AssistantLogDirectoryRefusal)):
+        return directory_descriptor
+    keep_descriptor = False
+    try:
+        rotated = _rotated_assistant_log_names(directory_descriptor)
+        if isinstance(rotated, _AssistantLogDirectoryRefusal):
+            return rotated
+    except OSError:
+        return _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY
+    else:
+        keep_descriptor = True
+        return directory_descriptor, [*rotated, active]
+    finally:
+        if not keep_descriptor:
+            os.close(directory_descriptor)
+
+
+def _publish_assistant_log(evidence: Any, state_root: Path) -> None:
+    """Publish the assistant's own log, so a periodic reporter can say why it stopped.
+
+    Without this the reporter's diagnosis exists and is unreachable. The launcher sends
+    the assistant child's stderr to the null device, and `setup_logging("assistant")`
+    writes `logs/assistant.log` under the writable state root -- which for this run is
+    the runner's temporary directory and is deleted with it. So the line naming WHICH
+    condition took the live source lived only inside a directory the run removes, and
+    the bundle a week-long run leaves behind never held it.
+
+    The artifact is ALWAYS written, and says so when the log is absent or when the path
+    is not readable as a lone regular file -- naming WHICH closed condition refused,
+    because a marker asserting an unobserved topology diagnoses nothing. Each retained
+    per-file tail is record-aligned before redaction, so the redactor never meets a
+    credential whose identifying prefix was already cut off by the size bound.
+    """
+
+    from scripts.soak_mock_stack import redact_text
+
+    logs_directory = Path(state_root) / "logs"
+    # On the descriptor path this is None and unused: the descriptor IS the binding.
+    identity_before = _directory_identity(logs_directory) if _assistant_log_uses_pathname_traversal() else None
+
+    selected = _assistant_log_files(state_root)
+    if selected is _AssistantLogDirectoryAbsence.MISSING_DIRECTORY:
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_ABSENT_MARKER)
+        return
+    if isinstance(selected, _AssistantLogDirectoryRefusal):
+        marker = {
+            _AssistantLogDirectoryRefusal.UNTRUSTED_DIRECTORY: _ASSISTANT_LOG_DIRECTORY_UNTRUSTED_MARKER,
+            _AssistantLogDirectoryRefusal.TOO_MANY_ENTRIES: _ASSISTANT_LOG_DIRECTORY_ENTRY_CEILING_MARKER,
+            _AssistantLogDirectoryRefusal.TOO_MANY_ROTATIONS: _ASSISTANT_LOG_ROTATION_CEILING_MARKER,
+        }[selected]
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, marker)
+        return
+    directory_descriptor, paths = selected
+
+    # Walk newest-to-oldest and prepend each retained suffix. This preserves the
+    # combined stream's tail while never acquiring more than the bundle can retain.
+    # A per-file cap would still read one full cap for every rotated day before the
+    # deque could discard it.
+    collected: deque[bytes] = deque()
+    retained_bytes = 0
+    source_bytes = 0
+    refusals: list[_AssistantLogLeafRefusal] = []
+    try:
+        for path in reversed(paths):
+            # A missing leaf is absent; every existing leaf must pass the no-follow read.
+            if _assistant_log_path_is_absent(directory_descriptor, path):
+                continue
+            remaining = max(_MAX_LAUNCHER_LOG_BYTES - retained_bytes, 0)
+            result = _read_regular_file_no_follow(directory_descriptor, path, maximum_bytes=remaining)
+            if isinstance(result, _AssistantLogLeafRefusal):
+                if result not in refusals:
+                    refusals.append(result)
+                continue
+            raw, size = result
+            source_bytes += size
+            if raw:
+                collected.appendleft(raw)
+                retained_bytes += len(raw)
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+
+    if _assistant_log_uses_pathname_traversal() and (
+        identity_before is None or _directory_identity(logs_directory) != identity_before
+    ):
+        evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, _ASSISTANT_LOG_REPLACED_MARKER)
+        return
+
+    if not collected:
+        evidence.write_log(
+            _ASSISTANT_LOG_EVIDENCE_NAME,
+            "".join(_ASSISTANT_LOG_LEAF_REFUSAL_MARKERS[refusal] for refusal in refusals)
+            if refusals
+            else _ASSISTANT_LOG_ABSENT_MARKER,
+        )
+        return
+
+    payload = redact_text(b"".join(collected).decode("utf-8", errors="replace")).encode("utf-8")
+    refusal_notice = "".join(_ASSISTANT_LOG_LEAF_REFUSAL_MARKERS[refusal] for refusal in refusals).encode("utf-8")
+    encoded = refusal_notice + payload
+    if source_bytes > _MAX_LAUNCHER_LOG_BYTES or len(encoded) > _MAX_LAUNCHER_LOG_BYTES:
+        # Keep the END, across the rotated files as one stream: the bound protects the
+        # bundle's size and must not choose which half of the failure survives.
+        tail_bytes = _MAX_LAUNCHER_LOG_BYTES - len(_TRUNCATED_LAUNCHER_LOG_MARKER) - len(refusal_notice)
+        tail = payload[-tail_bytes:]
+        while tail and tail[0] & 0xC0 == 0x80:
+            tail = tail[1:]
+        encoded = _TRUNCATED_LAUNCHER_LOG_MARKER + refusal_notice + tail
+    evidence.write_log(_ASSISTANT_LOG_EVIDENCE_NAME, encoded.decode("utf-8", errors="replace"))
+
+
+def _add_sanitized_cleanup_note(primary: BaseException, subject: str, error: BaseException) -> None:
+    """Record only a cleanup failure's type without risking replacement of primary."""
+    try:
+        BaseException.add_note(primary, f"{subject}: {type(error).__name__}")
+    except BaseException:
+        pass
+
+
+class _CleanupFailureAccumulator:
+    """Attempt every cleanup while retaining the authoritative exception."""
+
+    def __init__(self, primary: BaseException | None) -> None:
+        self._primary = primary
+        self._first_cleanup_failure: BaseException | None = None
+
+    def attempt(self, subject: str, action: Callable[[], object]) -> bool:
+        """Run one cleanup action and retain only type-safe secondary evidence."""
+
+        try:
+            action()
+        except BaseException as cleanup_error:  # noqa: BLE001 - cleanup is attempt-all
+            if self._primary is not None:
+                _add_sanitized_cleanup_note(self._primary, subject, cleanup_error)
+            elif self._first_cleanup_failure is None:
+                self._first_cleanup_failure = cleanup_error
+            else:
+                _add_sanitized_cleanup_note(self._first_cleanup_failure, subject, cleanup_error)
+            return False
+        return True
+
+    def raise_if_no_primary(self) -> None:
+        """Raise the first cleanup failure only when no run failure owns the exit."""
+
+        if self._primary is None and self._first_cleanup_failure is not None:
+            raise self._first_cleanup_failure
 
 
 @contextmanager
@@ -992,28 +1639,47 @@ def _launcher_log_capture(
         if settle_writer is not None:
             try:
                 settle_writer()
-            except Exception as settle_error:  # noqa: BLE001 - retain the primary failure
+            except BaseException as settle_error:  # noqa: BLE001 - retain the primary failure
                 settled = False
-                primary.add_note(f"launcher writer settlement failed: {settle_error}")
+                _add_sanitized_cleanup_note(primary, "launcher writer settlement failed", settle_error)
         try:
             if settled:
                 raw, total_bytes = drain.finish()
                 _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=True)
-            elif not drain.writer.closed:
-                drain.writer.close()
-        except Exception as capture_error:  # noqa: BLE001 - preserve the primary failure
-            primary.add_note(f"launcher diagnostic capture failed: {capture_error}")
-        if state_root is not None:
+            else:
+                drain.close_writer()
+        except BaseException as capture_error:  # noqa: BLE001 - preserve the primary failure
+            _add_sanitized_cleanup_note(primary, "launcher diagnostic capture failed", capture_error)
+        if state_root is not None and not settled:
+            for evidence_name, subject in (
+                (_ENGINE_STDERR_EVIDENCE_NAME, "engine stderr"),
+                (_ASSISTANT_LOG_EVIDENCE_NAME, "assistant log"),
+            ):
+                try:
+                    evidence.write_log(evidence_name, _UNSETTLED_CHILD_WRITER_LOG_REFUSAL_MARKER)
+                except BaseException as refusal_error:  # noqa: BLE001 - preserve the primary failure
+                    _add_sanitized_cleanup_note(primary, f"{subject} refusal capture failed", refusal_error)
+        elif state_root is not None:
             try:
                 _publish_engine_stderr(evidence, state_root)
-            except Exception as engine_error:  # noqa: BLE001 - preserve the primary failure
-                primary.add_note(f"engine stderr capture failed: {engine_error}")
+            except BaseException as engine_error:  # noqa: BLE001 - preserve the primary failure
+                _add_sanitized_cleanup_note(primary, "engine stderr capture failed", engine_error)
+            try:
+                _publish_assistant_log(evidence, state_root)
+            except BaseException as assistant_error:  # noqa: BLE001 - preserve the primary failure
+                _add_sanitized_cleanup_note(primary, "assistant log capture failed", assistant_error)
         raise
     else:
         raw, total_bytes = drain.finish()
-        _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False)
+        cleanup = _CleanupFailureAccumulator(primary=None)
         if state_root is not None:
-            _publish_engine_stderr(evidence, state_root)
+            cleanup.attempt("engine stderr capture failed", lambda: _publish_engine_stderr(evidence, state_root))
+            cleanup.attempt("assistant log capture failed", lambda: _publish_assistant_log(evidence, state_root))
+        cleanup.attempt(
+            "launcher diagnostic capture failed",
+            lambda: _publish_launcher_log(evidence, raw, total_bytes, allow_truncated=False),
+        )
+        cleanup.raise_if_no_primary()
 
 
 @dataclass(frozen=True, slots=True)
@@ -3856,6 +4522,77 @@ class _CancellationCleanupContract:
         )
 
 
+def _cleanup_owned_run(
+    *,
+    primary_info: tuple[Any, Any, Any],
+    process: subprocess.Popen[bytes] | None,
+    launcher_identity: _ProcessIdentity | None,
+    launcher_settled: bool,
+    locked: _LockedPsutilObserver,
+    owner_identity: Any,
+    sink: _ArtifactReceiptSink | None,
+    artifact_pair: _ArtifactCapabilityPair | None,
+    bridge_pipe: _BridgeHandshakePipe | None,
+    source_temporary: tempfile.TemporaryDirectory[str] | None,
+    source_snapshot_context: Any,
+) -> bool:
+    """Attempt every owned teardown and retain the authoritative first failure."""
+
+    primary = primary_info[1]
+    cleanup = _CleanupFailureAccumulator(primary)
+
+    signal_mask: Any | None = None
+
+    def acquire_signal_mask() -> None:
+        nonlocal signal_mask
+        signal_mask = _block_termination_signals()
+        signal_mask.__enter__()
+
+    signal_mask_acquired = cleanup.attempt(
+        "termination signal mask acquisition failed",
+        acquire_signal_mask,
+    )
+    if process is not None and launcher_identity is not None and not launcher_settled:
+
+        def settle_launcher() -> None:
+            if process.returncode is None:
+                _force_settle_owned_session(
+                    process,
+                    observer=locked,
+                    expected=launcher_identity,
+                    owner=owner_identity,
+                )
+            else:
+                _settle_adopted_owner_descendants(
+                    observer=locked,
+                    owner=owner_identity,
+                    deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
+                )
+
+        if cleanup.attempt("final launcher settlement failed", settle_launcher):
+            launcher_settled = True
+    if sink is not None:
+        cleanup.attempt("artifact receipt sink cleanup failed", sink.close)
+    if artifact_pair is not None:
+        cleanup.attempt("artifact capability pair cleanup failed", artifact_pair.close)
+    if bridge_pipe is not None:
+        cleanup.attempt("bridge handshake pipe cleanup failed", bridge_pipe.close)
+    if source_temporary is not None and (process is None or launcher_settled):
+        cleanup.attempt("source temporary cleanup failed", source_temporary.cleanup)
+    cleanup.attempt(
+        "source snapshot cleanup failed",
+        lambda: source_snapshot_context.__exit__(*primary_info),
+    )
+    if signal_mask_acquired:
+        assert signal_mask is not None
+        cleanup.attempt(
+            "termination signal mask restoration failed",
+            lambda: signal_mask.__exit__(None, None, None),
+        )
+    cleanup.raise_if_no_primary()
+    return launcher_settled
+
+
 class _PosixSoakRunner:
     """Single-use owner of the real Linux source-mode short qualification."""
 
@@ -4249,6 +4986,7 @@ class _PosixSoakRunner:
         sink: _ArtifactReceiptSink | None = None
         bridge_buffer = bytearray()
         log_path: Path | None = None
+        source_temporary: tempfile.TemporaryDirectory[str] | None = None
         graceful = False
         shutdown_elapsed = 0.0
         source_snapshot_context = _sealed_execution_snapshot(sha)
@@ -4261,7 +4999,8 @@ class _PosixSoakRunner:
                 nonce=artifact_pair.nonce,
                 evidence_dir=evidence.directory,
             )
-            with tempfile.TemporaryDirectory(prefix="cryodaq-source-soak-") as temporary:
+            source_temporary = tempfile.TemporaryDirectory(prefix="cryodaq-source-soak-", delete=False)
+            with source_temporary as temporary:
                 root = Path(temporary).resolve()
                 root.chmod(0o700)
                 config_dir = root / "config"
@@ -4579,31 +5318,19 @@ class _PosixSoakRunner:
                     ):
                         raise _RunnerFoundationError("passive source fixture changed during execution")
         finally:
-            with _block_termination_signals():
-                try:
-                    if process is not None and launcher_identity is not None and not launcher_settled:
-                        if process.returncode is None:
-                            _force_settle_owned_session(
-                                process,
-                                observer=locked,
-                                expected=launcher_identity,
-                                owner=owner_identity,
-                            )
-                        else:
-                            _settle_adopted_owner_descendants(
-                                observer=locked,
-                                owner=owner_identity,
-                                deadline=time.monotonic() + _PROCESS_GROUP_GRACE_S,
-                            )
-                        launcher_settled = True
-                    if sink is not None:
-                        sink.close()
-                    if artifact_pair is not None:
-                        artifact_pair.close()
-                    if bridge_pipe is not None:
-                        bridge_pipe.close()
-                finally:
-                    source_snapshot_context.__exit__(*sys.exc_info())
+            launcher_settled = _cleanup_owned_run(
+                primary_info=sys.exc_info(),
+                process=process,
+                launcher_identity=launcher_identity,
+                launcher_settled=launcher_settled,
+                locked=locked,
+                owner_identity=owner_identity,
+                sink=sink,
+                artifact_pair=artifact_pair,
+                bridge_pipe=bridge_pipe,
+                source_temporary=source_temporary,
+                source_snapshot_context=source_snapshot_context,
+            )
 
         collector.observe(_ShaBoundary.AFTER_SOURCE_SHUTDOWN)
         survivors = soak.surviving_recorded_identities(tuple(broad.snapshot()), observations)

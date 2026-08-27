@@ -3603,6 +3603,59 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_ae2ff30a76f466dea8d525e4ef7625c55d946d9d_tree_e3f6f65e8a6c4359fc9905edfa646f579e708263_guard_red_before_blocked_the_health_callback_on_the_reader_close_side_effect_1_failed_2026_08_26
     green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: ASSISTANT-LOG-ROTATION-CALENDAR-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-LOG-ROTATION-CALENDAR-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_width_only_rotation_recognition_would_displace_the_genuine_rotation
+    ci_partition: remaining
+    red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_found_that_width_only_rotation_recognition_admitted_an_impossible_calendar_suffix_and_an_executed_mutation_restoring_that_logic_displaced_the_genuine_2026_02_28_rotation_with_oversized_2026_02_31_content
+    green_evidence: pending_corrected_worktree_blobs_70af6458543390a479996b0b7ac34975a6d5c106_and_838ed3bd8e09f573695e17de53bce18dec5f4d7c_and_hosted_remaining_partition
+  - id: SOAK-STATE-ROOT-ANCESTOR-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_linked_state_root_is_refused_before_posix_logs_traversal
+    ci_partition: remaining
+    platform: posix
+    red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_reproduced_that_opening_state_root_slash_logs_followed_a_state_root_symlink_and_published_external_assistant_log_bytes
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-STATE-DIRECTORY-ABA-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_directory_replacement_between_stat_and_open_is_refused
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_showed_the_preexisting_link_guard_stayed_green_when_state_and_logs_opened_identity_checks_were_neutralized
+    green_evidence: pending_exact_corrected_commit_tree_mutation_red_and_hosted_remaining_partition
+  - id: SOAK-DANGLING-STATE-ROOT-DIAGNOSTIC-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_dangling_state_root_link_refuses_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_reproduced_that_a_dangling_state_root_link_was_untrusted_for_assistant_but_misreported_as_engine_never_started_for_engine_stderr
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-UNREADABLE-STATE-ROOT-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_unreadable_state_root_refuses_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: corrected_worktree_cold_review_reproduced_that_posix_engine_stderr_pathname_preflight_raised_permission_error_while_assistant_refused_the_same_unreadable_state_root
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-MISSING-LOGS-ABSENCE-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_missing_logs_leaf_under_a_verified_state_root_is_absent_for_both_publishers
+    ci_partition: remaining
+    platform: posix
+    red_evidence: exact_6a9c65304f92ec3b93e910d1d402d4d1db309a8b_github_codex_finding_3868911463_and_local_ubuntu_22_04_guard_reproduced_both_publishers_misclassifying_a_securely_observed_missing_logs_leaf_as_untrusted
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
 records:
   - id: ALARM-NARRATION-SUPPRESSION-WITHOUT-FLOOR-304
     status: open
@@ -6190,6 +6243,7 @@ records:
       covered_classifications:
         - coverage_escape
         - evidence_misbinding
+        - evidence_retention_authority
         - instrument_authority_escape
         - late_side_effect
         - markup_interpretation
@@ -7098,3 +7152,89 @@ records:
     automation_limit: Red and green executions are bound below to immutable commit 88c9d5d2b501903397a0a4b39b7fcd5df81c3abf and tree 9fc31fa06ef93b26231bc940a753ba2f69e4f739, but no sealed hosted agents artifact can be produced from this machine; this record therefore remains open until the hosted partition seals it.
     red_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_python_3_14_3_with_BOTH_production_blobs_reverted_to_origin_master_f081befcae0923daec0649297a43b9edcc5b1875_and_51d7283179f8b5d3b3e57ed1df6b779154b01128_exact_13_nodes_selected_12_failed_1_passed_exit_1_stdout_stderr_sha256_bfa62bb763bb7ce022d8de0e22fa547bfdbc72f3c60ac4d479a639f9668a1344_the_one_passing_node_is_test_a_reading_without_a_descriptor_is_still_accepted_which_is_a_regression_guard_over_behaviour_master_already_had_and_is_registered_as_such_both_production_blobs_verified_restored_after_the_run_zero_modified_paths_under_src
     green_evidence: local_executed_on_guard_blob_5e98445e6ac20109da939ee2c755dbeecca6c282_production_blobs_cf63760bdf65f205955a02ba5a324e434a8a55e5_and_f52b45803f1ed106863798a0ba1ab414db2472d8_python_3_14_3_exact_13_nodes_selected_13_passed_exit_0_stdout_stderr_sha256_993006ea776d0bd6778650982dfe1b2133491507e39ad2394474dd2bf8bd993c_pending_sealed_hosted_agents_artifact
+  - id: ASSISTANT-LOG-ROTATION-CALENDAR-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Dated assistant-log rotation admission and bounded retained-tail publication through scripts/soak_mock_stack_runner.py.
+    classification: evidence_retention_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A child-created name with the right width but an impossible calendar date can consume the retained byte budget and displace a genuine diagnostic rotation from the week-run evidence bundle.
+    invariant: A rotated assistant-log name is admitted only when it matches the handler-derived name grammar and its suffix is a real calendar date under the same authoritative suffix format. An impossible date never consumes the rotation count or retained byte budget, and genuine rotations remain ordered oldest first before the active log.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_impossible_calendar_rotation_cannot_consume_the_retained_budget
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_width_only_rotation_recognition_would_displace_the_genuine_rotation
+        ci_partition: remaining
+    automation_limit: The exact full-size production-bound guard and its width-only mutation control pass locally, but the default hosted remaining partition has not yet sealed the corrected candidate.
+    red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_finding_3868393550_reported_that_width_only_rotation_recognition_admitted_impossible_dated_names_that_could_consume_retained_budget_and_displace_genuine_diagnostics
+    green_evidence: local_corrected_production_blob_70af6458543390a479996b0b7ac34975a6d5c106_guard_blob_838ed3bd8e09f573695e17de53bce18dec5f4d7c_python_3_14_focused_five_passed_full_affected_modules_63_passed_4_platform_skipped_read_only_ruff_and_ast_clean_pending_hosted_remaining_partition
+  - id: SOAK-STATE-ROOT-TRAVERSAL-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: POSIX retention of child-writable engine stderr and assistant logs from the isolated soak state root.
+    classification: evidence_path_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A measured child can replace the state-root ancestor with a link so descriptor checks below it copy unrelated or private bytes into the retained week-run evidence bundle, while a catch-all traversal error can misreport an ordinary pre-log startup exit as unsafe topology and hide the truthful absence diagnosis.
+    invariant: On POSIX, retained child-writable logs are reached only by opening the trusted parent, state-root leaf, and logs leaf as separate no-follow directory descriptors and verifying each opened identity. A missing logs leaf observed relative to the verified state-root descriptor is reported as an absent artifact; linked, replaced, unreadable, or identity-mismatched state/logs directories refuse both assistant-log and engine-stderr publication, and no bytes below a replacement enter the bundle.
+    rule_refs:
+      - AGENTS.md#mission-and-safety-boundary
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_linked_state_root_is_refused_before_posix_logs_traversal
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_directory_replacement_between_stat_and_open_is_refused
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_dangling_state_root_link_refuses_both_publishers
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_an_unreadable_state_root_refuses_both_publishers
+        ci_partition: remaining
+        platform: posix
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_a_missing_logs_leaf_under_a_verified_state_root_is_absent_for_both_publishers
+        ci_partition: remaining
+        platform: posix
+    automation_limit: The production-side-effect guards are locally executable on POSIX; the corrected exact candidate still requires the hosted remaining partition.
+    red_evidence: exact_984f9f81e0f34d747093a5f0e50f3f75b3236491_github_codex_finding_3868675783_and_reproduction_published_external_state_root_assistant_bytes_through_the_old_logs_only_descriptor_anchor
+    green_evidence: pending_exact_corrected_commit_tree_and_hosted_remaining_partition
+  - id: SOAK-DIAGNOSTIC-FINALIZATION-ATTEMPT-ALL-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Final publication of the launcher log, engine stderr, and assistant log after the soak launcher writer has settled.
+    classification: evidence_retention_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A publisher failure or launcher size refusal can abort teardown before later publishers run, after which outer cleanup deletes the state root and loses diagnostics. A last-failure-wins accumulator can also replace the authoritative first exception and expose secondary detail.
+    invariant: Normal completion does not publish or return until every launcher-pipe writer end is closed and the real bounded drain thread is terminal. Finalization then attempts engine stderr, assistant-log, and launcher-log publication in order. A failure in one never suppresses later artifacts. Without a primary run failure, the exact first publisher failure is re-raised after every attempt and later failures appear only as sanitized type notes. A caller without a state root retains the same drain-settlement and launcher-publication boundary.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_oversized_launcher_log_retains_both_child_logs_before_refusal
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_finalization_attempts_later_publishers_after_engine_baseexception
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_finalization_retains_first_failure_and_sanitizes_later_failures
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_normal_success_waits_for_duplicate_launcher_writer_and_real_drain
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_launcher_capture_without_state_root_still_settles_and_publishes_launcher
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_settlement_baseexception_preserves_primary_refuses_root_and_defers_drain_until_writer_settles
+        ci_partition: remaining
+    automation_limit: The side-effect, exception-authority, duplicate-writer drain-settlement, and launcher-only guards are locally executable on Windows and Ubuntu 22.04; the corrected exact candidate still requires the hosted remaining partition.
+    red_evidence: exact_c0e925f46bd4a9ac94e9c0c0a90034ec5f11503f_github_codex_findings_3869132639_and_3869238522_plus_local_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_immediate_nonjoining_mutant_blob_45bf9e4377de8e11887a0fa96deaa219cf8013d9_and_delayed_correct_bytes_nonjoining_mutant_blob_c4dface8685271066a25be8ad13fa118ab62e7f5_each_failed_the_exact_normal_drain_guard_on_windows_and_ubuntu_22_04_2026_08_27
+    green_evidence: local_corrected_production_blob_7ef280c2119b7a5c15520f48cf37bedd3d289f26_guard_blob_790025409dbf1d337073a96753b83c7e1174e5d0_six_registered_finalization_guards_passed_on_windows_full_windows_affected_module_61_passed_12_skipped_full_ubuntu_22_04_affected_module_70_passed_3_skipped_full_registry_and_removal_baseline_governance_61_passed_read_only_ruff_clean_pending_hosted_remaining_partition
