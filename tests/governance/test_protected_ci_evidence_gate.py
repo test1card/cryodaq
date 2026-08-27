@@ -28,14 +28,14 @@ PULL_REQUEST_REQUIRED_EVENTS = (
     "converted_to_draft",
 )
 PULL_REQUEST_DRAFT_GATE = "github.event.pull_request.draft == false"
-# Every cancellation predicate is reviewed for the workflow it belongs to. A global
-# allowlist lets the protected workflow borrow main.yml's predicate, which would cancel
-# a merge-group run and leave its required evidence absent.
+# Every cancellation predicate is reviewed for the workflow it belongs to. The
+# live-state controller owns pull-request cancellation; only main.yml retains
+# its separate branch-push cancellation path.
 _APPROVED_CANCEL_EXPRESSIONS: dict[str, str | bool] = {
-    "main.yml": "${{ github.ref != 'refs/heads/master' }}",
-    "protected-ci-evidence-gate.yml": "${{ github.event_name == 'pull_request' }}",
-    "windows-onedir-smoke.yml": "${{ github.ref != 'refs/heads/master' }}",
-    "docs-gate.yml": True,
+    "main.yml": "${{ github.event_name == 'push' && github.ref != 'refs/heads/master' }}",
+    "protected-ci-evidence-gate.yml": False,
+    "windows-onedir-smoke.yml": False,
+    "docs-gate.yml": False,
 }
 # Every concurrency group reviewed as giving each pull request its OWN group, KEYED BY
 # THE WORKFLOW IT BELONGS TO. Two reasons it is not a plain set of strings:
@@ -54,7 +54,7 @@ _APPROVED_CANCEL_EXPRESSIONS: dict[str, str | bool] = {
 # entry rather than the shared one.
 _APPROVED_CONCURRENCY_GROUPS: dict[str, str] = {
     "main.yml": "${{ github.workflow }}-${{ github.ref }}",
-    "protected-ci-evidence-gate.yml": "${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.draft }}",
+    "protected-ci-evidence-gate.yml": "${{ github.workflow }}-${{ github.ref }}",
     "windows-onedir-smoke.yml": "${{ github.workflow }}-${{ github.ref }}",
     "docs-gate.yml": "docs-gate-${{ github.ref }}",
 }
@@ -65,10 +65,9 @@ _APPROVED_CONCURRENCY_GROUPS: dict[str, str] = {
 # expression table above would still accept it. So the group is EVALUATED for one
 # pull-request ref and the results must be distinct.
 _GROUP_PROBE_REF = "refs/pull/9999/merge"
-_GROUP_PROBE_DRAFT = "false"
 
 
-def _evaluated_group(payload: dict, group: str, *, draft: str = _GROUP_PROBE_DRAFT) -> str:
+def _evaluated_group(payload: dict, group: str) -> str:
     """Substitute the context values these groups use, and nothing else.
 
     A general expression evaluator is not needed and would be worse: the reviewed groups
@@ -78,18 +77,11 @@ def _evaluated_group(payload: dict, group: str, *, draft: str = _GROUP_PROBE_DRA
 
     workflow_name = payload.get("name")
     assert isinstance(workflow_name, str) and workflow_name, "workflow has no top-level name"
-    return (
-        group.replace("${{ github.workflow }}", workflow_name)
-        .replace("${{ github.ref }}", _GROUP_PROBE_REF)
-        .replace("${{ github.event.pull_request.draft }}", draft)
-    )
+    return group.replace("${{ github.workflow }}", workflow_name).replace("${{ github.ref }}", _GROUP_PROBE_REF)
 
 
 def _assert_unique_evaluated_concurrency_groups(workflows: tuple[tuple[str, dict], ...]) -> None:
-    evaluated = {
-        name: _evaluated_group(payload, payload["concurrency"]["group"])
-        for name, payload in workflows
-    }
+    evaluated = {name: _evaluated_group(payload, payload["concurrency"]["group"]) for name, payload in workflows}
     normalized = {name: value.casefold() for name, value in evaluated.items()}
     collisions = {
         value: sorted(name for name, group in normalized.items() if group == value)
@@ -229,8 +221,8 @@ def test_protected_workflow_is_native_and_candidate_bound() -> None:
         "merge_group": None,
     }
     assert payload["concurrency"] == {
-        "group": "${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.draft }}",
-        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+        "group": "${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": False,
     }
 
     assert "workflow_run" not in text
@@ -539,22 +531,14 @@ def test_draft_gate_expressions_are_compared_not_searched() -> None:
     renamed = copy.deepcopy(workflows["main.yml"])
     renamed["name"] = dict(workflows)["protected-ci-evidence-gate.yml"]["name"].swapcase()
     renamed["concurrency"]["group"] = _APPROVED_CONCURRENCY_GROUPS["protected-ci-evidence-gate.yml"]
-    renamed_workflows = tuple(
-        (name, renamed if name == "main.yml" else payload) for name, payload in workflows.items()
-    )
+    renamed_workflows = tuple((name, renamed if name == "main.yml" else payload) for name, payload in workflows.items())
     with pytest.raises(AssertionError, match="SAME concurrency group"):
         _assert_unique_evaluated_concurrency_groups(renamed_workflows)
 
-    protected = copy.deepcopy(workflows["protected-ci-evidence-gate.yml"])
-    protected_group = protected["concurrency"]["group"]
-    assert _evaluated_group(protected, protected_group, draft="false") != _evaluated_group(
-        protected, protected_group, draft="true"
-    ), "a stale draft event shares the ready run's cancellation group"
-
-    borrowed_cancel = copy.deepcopy(protected)
-    borrowed_cancel["concurrency"]["cancel-in-progress"] = _APPROVED_CANCEL_EXPRESSIONS["main.yml"]
-    assert _refuses("protected-ci-evidence-gate.yml", borrowed_cancel), (
-        "the protected workflow borrowed main.yml's merge-group cancellation predicate and was accepted"
+    stale_draft_cancellation = copy.deepcopy(workflows["main.yml"])
+    stale_draft_cancellation["concurrency"]["cancel-in-progress"] = True
+    assert _refuses("main.yml", stale_draft_cancellation), (
+        "a pull-request workflow that lets a stale draft event cancel a ready run was accepted"
     )
 
 
@@ -606,9 +590,8 @@ def test_every_pull_request_workflow_keeps_ready_to_draft_gating(workflow_name: 
     )
     assert cancel == expected_cancel, (
         f"{workflow_name}: cancel-in-progress is {cancel!r}, and the predicate reviewed for "
-        f"THIS workflow is {expected_cancel!r}. A workflow must not borrow another workflow's "
-        "predicate: the protected workflow's predicate must stay false for merge_group events "
-        "so a newer queue entry cannot cancel required evidence in flight."
+        f"THIS workflow is {expected_cancel!r}. Pull-request cancellation is owned by the live-state "
+        "controller, so a delayed converted_to_draft payload cannot cancel the ready run that followed it."
     )
 
     for job_name, job in payload["jobs"].items():

@@ -17,12 +17,12 @@ on:
         required: true
         type: string
 
-# If you push again before CI finishes, cancel the superseded run to save
-# runner minutes — EXCEPT on master, where every mainline commit is fully
-# validated (never cancelled).
+# Pushes may cancel an older branch-push run. Pull-request cancellation is
+# owned by draft-pr-cancellation.yml, which checks the live draft state before
+# cancelling; a delayed draft event must never cancel a newer ready run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref != 'refs/heads/master' }}
 
 permissions:
   contents: read

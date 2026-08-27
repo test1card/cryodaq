@@ -23,7 +23,9 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  # draft-pr-cancellation.yml owns pull-request cancellation after confirming
+  # the current PR state, so a delayed draft event cannot cancel a ready run.
+  cancel-in-progress: false
 
 jobs:
   windows-onedir:
