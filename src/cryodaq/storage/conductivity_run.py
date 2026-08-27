@@ -52,6 +52,7 @@ class ConductivityRunSnapshot:
     rows: tuple[dict[str, float], ...]
     raw_row_count: int
     run_id: str | None
+    started_at: datetime | None
     parameters: dict[str, Any]
     status: str
     accepted_point_count: int
@@ -150,6 +151,19 @@ def _utc_text(value: datetime | None = None) -> str:
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
     return current.astimezone(UTC).isoformat()
+
+
+def _durable_started_at(value: object) -> datetime:
+    if type(value) is not str or not value:
+        raise ConductivityRunFormatError("Autosweep start started_at is invalid.")
+    text = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ConductivityRunFormatError("Autosweep start started_at is invalid.") from exc
+    if parsed.tzinfo is None:
+        raise ConductivityRunFormatError("Autosweep start started_at must include a timezone.")
+    return parsed.astimezone(UTC)
 
 
 def _json_comment(payload: dict[str, Any]) -> str:
@@ -397,7 +411,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
             continue
         try:
             candidate = json.loads(line[len(_COMMENT_PREFIX) :])
-        except json.JSONDecodeError:
+        except ValueError:
             continue
         if isinstance(candidate, dict):
             metadata.append(candidate)
@@ -411,6 +425,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
         return ConductivityRunSnapshot(
             legacy_rows,
             len(parsed_rows),
+            None,
             None,
             {},
             "LEGACY",
@@ -429,6 +444,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
     run_id = starts[0].get("run_id")
     if type(run_id) is not str or not run_id.strip():
         raise ConductivityRunFormatError("Autosweep start run_id is invalid.")
+    started_at = _durable_started_at(starts[0].get("started_at"))
     parameters = starts[0].get("parameters")
     if type(parameters) is not dict:
         raise ConductivityRunFormatError("Autosweep start parameters are invalid.")
@@ -472,6 +488,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
             published,
             len(parsed_rows),
             run_id,
+            started_at,
             dict(parameters),
             "RUNNING",
             contiguous,
@@ -516,6 +533,7 @@ def read_conductivity_run(path: Path) -> ConductivityRunSnapshot:
         published_rows,
         len(parsed_rows),
         run_id,
+        started_at,
         dict(parameters),
         status,
         accepted,

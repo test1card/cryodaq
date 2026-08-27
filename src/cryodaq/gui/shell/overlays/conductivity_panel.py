@@ -2146,6 +2146,7 @@ class ConductivityPanel(QWidget):
                     if isinstance(result, dict)
                     else "некорректный ответ Engine"
                 )
+                self._auto_binding_resolution = "unrequested"
                 self._latch_auto_outcome_unknown(
                     f"RUNNING-привязка не подтверждена ({error[:120]}); мощность не изменена."
                 )

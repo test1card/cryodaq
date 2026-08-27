@@ -506,6 +506,7 @@ def _autosweep_record(
     record_id: str = "experiment:run",
     experiment_id: str = "experiment-a",
     parameters: dict[str, object] | None = None,
+    started_at: datetime | None = None,
 ) -> RunRecord:
     summary = {} if point_count is None else {"point_count": point_count}
     return RunRecord(
@@ -515,7 +516,7 @@ def _autosweep_record(
         source_module="conductivity_panel",
         run_type="autosweep",
         status=status,
-        started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
+        started_at=started_at or datetime(2026, 8, 27, 12, tzinfo=UTC),
         finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC),
         parameters=dict(_bound_parameters() if parameters is None else parameters),
         result_summary=summary,
@@ -609,6 +610,49 @@ def test_manager_rejects_non_descriptor_parameter_mismatch(tmp_path) -> None:
     assert manager._collect_conductivity_rows([mismatched]) == []
 
 
+@pytest.mark.parametrize(
+    ("parameter_name", "artifact_value", "record_value"),
+    [
+        ("stabilization_threshold_pct", 1.0, True),
+        ("power_values_w", [1], [True]),
+    ],
+)
+def test_manager_compares_persisted_parameters_with_json_type_identity(
+    tmp_path,
+    parameter_name: str,
+    artifact_value: object,
+    record_value: object,
+) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    artifact_parameters = _bound_parameters()
+    artifact_parameters[parameter_name] = artifact_value
+    path = tmp_path / f"type-mismatch-{parameter_name}.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id=f"type-mismatch-{parameter_name}",
+        started_at=datetime(2026, 8, 27, 12, tzinfo=UTC),
+        parameters=artifact_parameters,
+    )
+    writer.append_binding("experiment-a")
+    writer.append_point(_point())
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
+    record_parameters = json.loads(json.dumps(artifact_parameters, ensure_ascii=False))
+    record_parameters[parameter_name] = record_value
+    mismatched = _autosweep_record(
+        path,
+        source_run_id=f"type-mismatch-{parameter_name}",
+        status="COMPLETED",
+        point_count=1,
+        parameters=record_parameters,
+    )
+
+    assert manager._collect_conductivity_rows([mismatched]) == []
+
+
 def test_manager_skips_csv_parser_error_without_aborting_other_artifacts(tmp_path, caplog) -> None:
     manager_root = tmp_path / "manager"
     manager_root.mkdir()
@@ -633,6 +677,71 @@ def test_manager_skips_csv_parser_error_without_aborting_other_artifacts(tmp_pat
     finally:
         csv.field_size_limit(previous_limit)
     assert "Failed to parse autosweep artifact" in caplog.text
+
+
+def test_manager_contains_oversized_metadata_integer_and_collects_other_artifacts(tmp_path) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    oversized = tmp_path / "oversized-metadata.csv"
+    oversized.write_text(
+        '# {"oversized":' + "9" * 5000 + "}\nT_avg_K,G_WK,R_KW\n",
+        encoding="utf-8",
+    )
+    valid = tmp_path / "valid-legacy.csv"
+    valid.write_text("T_avg_K,G_WK,R_KW\n105.0,0.0012,833.3333333333334\n", encoding="utf-8")
+    corrupt_record = _autosweep_record(
+        oversized,
+        source_run_id="oversized-metadata",
+        status="COMPLETED",
+        point_count=0,
+    )
+    valid_record = _autosweep_record(
+        valid,
+        source_run_id="valid-legacy",
+        status="COMPLETED",
+        point_count=1,
+        record_id="experiment:valid-legacy",
+    )
+
+    assert manager._collect_conductivity_rows([corrupt_record, valid_record]) == [
+        {
+            "temperature_k": 105.0,
+            "conductance_wk": 0.0012,
+            "resistance_kw": pytest.approx(833.3333333333334),
+        }
+    ]
+
+
+def test_manager_requires_durable_run_start_to_match_run_record(tmp_path) -> None:
+    manager_root = tmp_path / "manager"
+    manager_root.mkdir()
+    instruments = manager_root / "instruments.yaml"
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_root, instruments)
+    artifact_started_at = datetime(2026, 8, 27, 12, tzinfo=UTC)
+    path = tmp_path / "start-mismatch.csv"
+    writer = ConductivityRunWriter(
+        path,
+        run_id="start-mismatch",
+        started_at=artifact_started_at,
+        parameters=_bound_parameters(),
+    )
+    writer.append_binding("experiment-a")
+    writer.append_point(_point())
+    writer.append_terminal("COMPLETED", finished_at=datetime(2026, 8, 27, 12, 1, tzinfo=UTC))
+    mismatched = _autosweep_record(
+        path,
+        source_run_id="start-mismatch",
+        status="COMPLETED",
+        point_count=1,
+        started_at=datetime(2026, 8, 27, 12, 0, 1, tzinfo=UTC),
+    )
+
+    assert read_conductivity_run(path).started_at == artifact_started_at
+    assert manager._collect_conductivity_rows([mismatched]) == []
 
 
 def test_manager_rejects_durable_identity_status_count_and_duplicate_conflicts(tmp_path) -> None:

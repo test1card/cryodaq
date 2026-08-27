@@ -2904,6 +2904,35 @@ def test_failed_running_attachment_never_changes_source_target(app, monkeypatch)
     assert read_conductivity_run(panel._auto_run_path).binding_recorded is False
 
 
+def test_failed_running_attachment_is_retired_before_verified_stop_terminalizes(app, monkeypatch) -> None:
+    _DeferredWorker.defer_running_attachment = True
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    attachment = _DeferredWorker.instances[-1]
+    attachment.finish({"ok": False, "error": "attachment failed"})
+
+    panel._on_auto_stop()
+    stop_worker = _DeferredWorker.instances[-1]
+    assert stop_worker is not attachment
+    assert stop_worker.cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    stop_worker.finish({"ok": True})
+
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "ABORTED"
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id is None
+    assert panel.get_auto_state() == "idle"
+    assert panel._auto_pending_stop_intent is None
+    assert panel._auto_outcome_unknown is False
+
+
 def test_point_effect_order_is_row_checkpoint_ui_accept_then_next_target(app, monkeypatch) -> None:
     panel, target_worker = _start_bound_autosweep(monkeypatch)
     panel._power_count_spin.setValue(2)

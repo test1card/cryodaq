@@ -97,6 +97,16 @@ def _canonical_digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_json_bytes(payload: object) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _is_lower_hex(value: Any, length: int) -> bool:
     return (
         type(value) is str
@@ -2895,6 +2905,14 @@ class ExperimentManager:
                         record.source_run_id,
                     )
                     continue
+                if snapshot.started_at != record.started_at:
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: started_at mismatch (%s != %s)",
+                        resolved,
+                        snapshot.started_at,
+                        record.started_at,
+                    )
+                    continue
                 try:
                     artifact_descriptors = validate_conductivity_descriptor_parameters(snapshot.parameters)
                     record_descriptors = validate_conductivity_descriptor_parameters(record.parameters)
@@ -2906,7 +2924,17 @@ class ExperimentManager:
                 ) != tuple(item.canonical_json for item in record_descriptors.temperatures):
                     logger.warning("Ignoring autosweep artifact %s: descriptor identity mismatch", resolved)
                     continue
-                if snapshot.parameters != record.parameters:
+                try:
+                    artifact_parameters = _canonical_json_bytes(snapshot.parameters)
+                    record_parameters = _canonical_json_bytes(record.parameters)
+                except (TypeError, ValueError) as exc:
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: parameters are not canonical JSON (%s)",
+                        resolved,
+                        exc,
+                    )
+                    continue
+                if artifact_parameters != record_parameters:
                     logger.warning("Ignoring autosweep artifact %s: persisted parameters mismatch", resolved)
                     continue
                 record_experiment_id = record.experiment_context.get("experiment_id")
