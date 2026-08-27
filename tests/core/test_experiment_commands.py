@@ -2307,3 +2307,74 @@ def test_lifecycle_admission_is_atomic_with_durable_mutation_reservation(
     assert len(failures) == 1
     assert isinstance(failures[0], RuntimeError)
     assert "identity mismatch" in str(failures[0]).lower()
+
+
+async def test_attach_run_record_command_rejects_terminal_rebind_from_experiment_a_to_b(
+    manager: ExperimentManager,
+) -> None:
+    started_a = _run_experiment_command(
+        "experiment_start",
+        {
+            "template_id": "cooldown_test",
+            "title": "Experiment A",
+            "operator": "Operator",
+        },
+        manager,
+    )
+    experiment_a = started_a["experiment_id"]
+    running = _run_experiment_command(
+        "experiment_attach_run_record",
+        {
+            "experiment_id": experiment_a,
+            "source_tab": "conductivity",
+            "source_module": "conductivity_panel",
+            "run_type": "autosweep",
+            "status": "RUNNING",
+            "source_run_id": "conductivity-run-1",
+            "started_at": "2026-08-27T12:00:00+00:00",
+            "result_summary": {"point_count": 0, "recovery_required": True},
+            "artifact_paths": ["C:/data/conductivity-run-1.csv"],
+        },
+        manager,
+    )
+    assert running["attached"] is True
+    assert running["run_record"]["experiment_context"]["experiment_id"] == experiment_a
+
+    _run_experiment_command(
+        "experiment_finalize",
+        {"experiment_id": experiment_a, "status": "COMPLETED"},
+        manager,
+    )
+    started_b = _run_experiment_command(
+        "experiment_start",
+        {
+            "template_id": "cooldown_test",
+            "title": "Experiment B",
+            "operator": "Operator",
+        },
+        manager,
+    )
+    experiment_b = started_b["experiment_id"]
+
+    with pytest.raises(ValueError, match="does not match active"):
+        _run_experiment_command(
+            "experiment_attach_run_record",
+            {
+                "experiment_id": experiment_a,
+                "source_tab": "conductivity",
+                "source_module": "conductivity_panel",
+                "run_type": "autosweep",
+                "status": "COMPLETED",
+                "source_run_id": "conductivity-run-1",
+                "started_at": "2026-08-27T12:00:00+00:00",
+                "finished_at": "2026-08-27T12:10:00+00:00",
+                "result_summary": {"point_count": 1},
+                "artifact_paths": ["C:/data/conductivity-run-1.csv"],
+            },
+            manager,
+        )
+
+    assert manager.list_run_records(experiment_id=experiment_b) == []
+    records_a = manager.list_run_records(experiment_id=experiment_a)
+    assert len(records_a) == 1
+    assert records_a[0].status == "RUNNING"

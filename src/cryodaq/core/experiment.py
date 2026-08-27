@@ -34,6 +34,7 @@ from cryodaq.report_state import (
 )
 from cryodaq.storage._sqlite import sqlite3
 from cryodaq.storage.archive_reader import ArchiveReader
+from cryodaq.storage.conductivity_run import ConductivityRunFormatError, read_conductivity_run
 
 logger = logging.getLogger(__name__)
 
@@ -2856,6 +2857,8 @@ class ExperimentManager:
 
     def _collect_conductivity_rows(self, run_records: list[RunRecord]) -> list[dict[str, float]]:
         rows: list[dict[str, float]] = []
+        seen_paths: set[Path] = set()
+        seen_durable_run_ids: set[str] = set()
         for record in run_records:
             if record.run_type != "autosweep":
                 continue
@@ -2864,21 +2867,70 @@ class ExperimentManager:
                 if path.suffix.lower() != ".csv" or not path.exists():
                     continue
                 try:
-                    with path.open(encoding="utf-8", newline="") as handle:
-                        reader = csv.DictReader(line for line in handle if not line.startswith("#"))
-                        for item in reader:
-                            try:
-                                row = {
-                                    "temperature_k": float(item.get("T_avg_K", "")),
-                                    "conductance_wk": float(item.get("G_WK", "")),
-                                    "resistance_kw": float(item.get("R_KW", "")),
-                                }
-                            except (TypeError, ValueError):
-                                continue
-                            if all(math.isfinite(value) for value in row.values()):
-                                rows.append(row)
-                except Exception as exc:
+                    resolved = path.resolve(strict=True)
+                    if resolved in seen_paths:
+                        logger.warning("Ignoring repeated autosweep artifact path %s", resolved)
+                        continue
+                    seen_paths.add(resolved)
+                    snapshot = read_conductivity_run(resolved)
+                except (ConductivityRunFormatError, OSError, UnicodeError) as exc:
                     logger.warning("Failed to parse autosweep artifact %s: %s", path, exc)
+                    continue
+                if not snapshot.durable_format:
+                    # Historical plain CSV has no embedded identity or status.
+                    # Its compatibility rule is path de-duplication plus the
+                    # legacy finite-row parser; durable assertions are not
+                    # invented retroactively.
+                    rows.extend(snapshot.rows)
+                    continue
+                if snapshot.run_id != record.source_run_id:
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: source_run_id mismatch (%s != %s)",
+                        resolved,
+                        snapshot.run_id,
+                        record.source_run_id,
+                    )
+                    continue
+                record_experiment_id = record.experiment_context.get("experiment_id")
+                if (
+                    type(record_experiment_id) is not str
+                    or not record_experiment_id
+                    or not snapshot.binding_recorded
+                    or snapshot.bound_experiment_id != record_experiment_id
+                ):
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: experiment binding mismatch (%s != %s)",
+                        resolved,
+                        snapshot.bound_experiment_id if snapshot.binding_recorded else "missing",
+                        record_experiment_id,
+                    )
+                    continue
+                if snapshot.run_id in seen_durable_run_ids:
+                    logger.warning("Ignoring repeated durable autosweep run_id %s", snapshot.run_id)
+                    continue
+                if snapshot.status != record.status.strip().upper():
+                    logger.warning(
+                        "Ignoring autosweep artifact %s: status mismatch (%s != %s)",
+                        resolved,
+                        snapshot.status,
+                        record.status,
+                    )
+                    continue
+                if snapshot.terminal is not None:
+                    recorded_count = record.result_summary.get("point_count")
+                    if type(recorded_count) is not int or recorded_count != snapshot.accepted_point_count:
+                        logger.warning(
+                            "Ignoring autosweep artifact %s: terminal/count mismatch (%s != %s)",
+                            resolved,
+                            recorded_count,
+                            snapshot.accepted_point_count,
+                        )
+                        continue
+                elif snapshot.status != "RUNNING" or not snapshot.recovery_required:
+                    logger.warning("Ignoring autosweep artifact %s: nonterminal state is inconsistent", resolved)
+                    continue
+                seen_durable_run_ids.add(snapshot.run_id)
+                rows.extend(snapshot.rows)
         return rows
 
     def _write_conductivity_table(self, path: Path, rows: list[dict[str, float]]) -> None:

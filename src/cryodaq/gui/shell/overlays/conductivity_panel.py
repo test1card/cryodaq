@@ -38,12 +38,15 @@ import csv
 import logging
 import math
 import time
+import uuid
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -72,7 +75,14 @@ from cryodaq.core.channel_manager import get_channel_manager
 from cryodaq.drivers.base import Reading
 from cryodaq.gui import theme
 from cryodaq.gui._plot_style import apply_plot_style, series_pen
-from cryodaq.gui.zmq_client import ZmqCommandWorker
+from cryodaq.gui.zmq_client import (
+    ZmqCommandWorker,
+    capture_gui_worker_session_token,
+    gui_worker_delivery_is_current,
+    record_gui_worker_delivery_disposition,
+    start_gui_worker_with_ownership,
+)
+from cryodaq.storage.conductivity_run import ConductivityRunWriter
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +230,62 @@ def _style_input(widget: QDoubleSpinBox | QSpinBox | QComboBox) -> None:
     )
 
 
+class _ConductivityPersistenceWorker(QThread):
+    """Run one serialized autosweep filesystem operation off the GUI thread."""
+
+    completed = Signal(object)
+    _result_ready = Signal(int, object)
+
+    def __init__(
+        self,
+        operation: Callable[[], Any],
+        *,
+        cleanup_on_interruption: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(None)
+        self._operation = operation
+        self._cleanup_on_interruption = cleanup_on_interruption
+        self._session_epoch: int | None = None
+        self._result_ready.connect(self._deliver_if_current, Qt.ConnectionType.QueuedConnection)
+
+    def start(self, priority: QThread.Priority = QThread.Priority.InheritPriority) -> None:
+        session_epoch = capture_gui_worker_session_token()
+        self._session_epoch = session_epoch
+        try:
+            start_gui_worker_with_ownership(self, session_epoch, priority)
+        except BaseException:
+            self._session_epoch = None
+            raise
+
+    def run(self) -> None:
+        try:
+            value = self._operation()
+        except BaseException as exc:
+            result: dict[str, Any] = {
+                "ok": False,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            }
+        else:
+            result = {"ok": True, "value": value}
+        if self.isInterruptionRequested() and self._cleanup_on_interruption is not None:
+            try:
+                self._cleanup_on_interruption()
+            except BaseException:
+                logger.exception("Failed to close interrupted autosweep persistence owner")
+        session_epoch = self._session_epoch
+        if session_epoch is not None:
+            self._result_ready.emit(session_epoch, result)
+
+    @Slot(int, object)
+    def _deliver_if_current(self, session_epoch: int, result: object) -> None:
+        try:
+            if not self.isInterruptionRequested() and gui_worker_delivery_is_current(session_epoch):
+                self.completed.emit(result)
+        finally:
+            record_gui_worker_delivery_disposition(self)
+
+
 class ConductivityPanel(QWidget):
     """Thermal conductivity overlay (Phase II.5)."""
 
@@ -256,6 +322,17 @@ class ConductivityPanel(QWidget):
         self._auto_step: int = 0
         self._auto_step_start: float = 0.0
         self._auto_results: list[dict] = []
+        self._auto_run_writer: ConductivityRunWriter | None = None
+        self._auto_run_path: Path | None = None
+        self._auto_run_id: str | None = None
+        self._auto_run_started_at: datetime | None = None
+        self._auto_persistence_error: str | None = None
+        self._auto_trailing_write_outcome: str | None = None
+        self._auto_experiment_id: str | None = None
+        self._auto_experiment_binding_known = False
+        self._auto_persistence_worker: _ConductivityPersistenceWorker | None = None
+        self._auto_pending_point_result: dict[str, float] | None = None
+        self._auto_deferred_terminal_status: str | None = None
         self._auto_workers: list[ZmqCommandWorker] = []
         self._auto_connection_generation = 0
         self._auto_operation_generation = 0
@@ -1396,6 +1473,317 @@ class ConductivityPanel(QWidget):
         count = self._power_count_spin.value()
         return [round(start + i * step, 6) for i in range(count)]
 
+    def _dispatch_persistence(
+        self,
+        operation: Callable[[], Any],
+        callback: Callable[[dict[str, Any]], None],
+        *,
+        cleanup_on_interruption: Callable[[], None] | None = None,
+    ) -> bool:
+        """Serialize one filesystem operation through the registered GUI worker session."""
+
+        if self._auto_persistence_worker is not None:
+            return False
+        expected_generation = self._auto_operation_generation
+        worker = _ConductivityPersistenceWorker(
+            operation,
+            cleanup_on_interruption=cleanup_on_interruption,
+        )
+
+        def _completed(
+            result: object,
+            *,
+            completed_worker: _ConductivityPersistenceWorker = worker,
+            operation_generation: int = expected_generation,
+        ) -> None:
+            if self._auto_persistence_worker is not completed_worker:
+                return
+            self._auto_persistence_worker = None
+            if operation_generation != self._auto_operation_generation:
+                return
+            if not isinstance(result, dict):
+                callback({"ok": False, "error": "invalid persistence worker result"})
+                return
+            callback(result)
+
+        worker.completed.connect(_completed)
+        self._auto_persistence_worker = worker
+        try:
+            worker.start()
+        except (RuntimeError, OSError) as exc:
+            self._auto_persistence_worker = None
+            callback({"ok": False, "error": str(exc), "error_type": type(exc).__name__})
+            return False
+        return True
+
+    def _begin_auto_run_async(self, powers: list[float]) -> bool:
+        """Create the run file off-thread before any source target can change."""
+
+        from cryodaq.paths import get_data_dir
+
+        started_at = datetime.now(UTC)
+        run_id = f"conductivity-{started_at.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:12]}"
+        path = get_data_dir() / "conductivity_runs" / f"{run_id}.csv"
+        parameters = {
+            "power_values_w": list(powers),
+            "power_channel": self._power_channel,
+            "temperature_channels": list(self._chain),
+        }
+        self._auto_run_writer = None
+        self._auto_run_path = path
+        self._auto_run_id = run_id
+        self._auto_run_started_at = started_at
+        self._auto_experiment_id = None
+        self._auto_experiment_binding_known = False
+        self._auto_persistence_error = None
+        self._auto_trailing_write_outcome = None
+        return self._dispatch_persistence(
+            lambda: ConductivityRunWriter(
+                path,
+                run_id=run_id,
+                started_at=started_at,
+                parameters=parameters,
+            ),
+            self._on_auto_run_created,
+        )
+
+    def _on_auto_run_created(self, result: dict[str, Any]) -> None:
+        if result.get("ok") is not True or not isinstance(result.get("value"), ConductivityRunWriter):
+            reason = str(result.get("error", "file writer was not created"))
+            self._auto_state = "idle"
+            self._auto_outcome_unknown = False
+            self._auto_status_label.setVisible(True)
+            self._auto_status_label.setText(f"Автоизмерение не запущено: файл данных не создан ({reason[:160]})")
+            self._update_control_enablement()
+            return
+        self._auto_run_writer = result["value"]
+        if self._persist_explicit_unbound_while_stopping():
+            return
+        if self._persistence_completion_is_stopped():
+            return
+        command = self._attachment_command(status="RUNNING", terminal=None, finished_at=None)
+        if command is None or not self._send_auto_cmd(command):
+            self._latch_auto_outcome_unknown("Начальная RUNNING-привязка не отправлена; мощность не изменена.")
+
+    def _attachment_command(
+        self,
+        *,
+        status: str,
+        terminal: dict[str, Any] | None,
+        finished_at: datetime | None,
+    ) -> dict[str, Any] | None:
+        writer = self._auto_run_writer
+        path = self._auto_run_path
+        run_id = self._auto_run_id
+        started_at = self._auto_run_started_at
+        if writer is None or path is None or run_id is None or started_at is None:
+            return None
+        if status != "RUNNING" and self._auto_experiment_id is None:
+            return None
+        command: dict[str, Any] = {
+            "cmd": "experiment_attach_run_record",
+            "source_tab": "conductivity",
+            "source_module": "conductivity_panel",
+            "run_type": "autosweep",
+            "status": status,
+            "source_run_id": run_id,
+            "started_at": started_at.isoformat(),
+            "parameters": dict(writer.parameters),
+            "result_summary": {
+                "point_count": 0 if terminal is None else terminal["accepted_point_count"],
+                "recovery_required": terminal is None,
+                "persistence_error": self._auto_persistence_error,
+            },
+            "artifact_paths": [str(path)],
+        }
+        if self._auto_experiment_id is not None:
+            command["experiment_id"] = self._auto_experiment_id
+        if finished_at is not None:
+            command["finished_at"] = finished_at.isoformat()
+        return command
+
+    def _persist_auto_binding_then_arm(self, experiment_id: str | None) -> None:
+        writer = self._auto_run_writer
+        if writer is None:
+            self._latch_auto_outcome_unknown("Контекст файла потерян до фиксации привязки; мощность не изменена.")
+            return
+        self._auto_experiment_id = experiment_id
+        self._auto_experiment_binding_known = True
+        if not self._dispatch_persistence(
+            lambda: writer.append_binding(experiment_id),
+            self._on_auto_binding_persisted,
+            cleanup_on_interruption=writer.close,
+        ):
+            self._latch_auto_outcome_unknown("Привязка файла не поставлена в очередь; мощность не изменена.")
+
+    def _persist_explicit_unbound_while_stopping(self) -> bool:
+        """Record pre-arm absence before a pending Stop can terminalize the run."""
+
+        stopping = self._auto_pending_stop_intent is not None or self._auto_deferred_terminal_status is not None
+        if self._auto_experiment_binding_known or not stopping:
+            return False
+        writer = self._auto_run_writer
+        if writer is None:
+            self._block_after_terminal_persistence_failure("контекст файла потерян до записи отсутствующей привязки")
+            return True
+        self._auto_experiment_id = None
+        self._auto_experiment_binding_known = True
+        if not self._dispatch_persistence(
+            lambda: writer.append_binding(None),
+            self._on_prearm_unbound_persisted,
+            cleanup_on_interruption=writer.close,
+        ):
+            self._block_after_terminal_persistence_failure("отсутствующая привязка не поставлена в очередь")
+        return True
+
+    def _on_prearm_unbound_persisted(self, result: dict[str, Any]) -> None:
+        if result.get("ok") is not True:
+            self._block_after_terminal_persistence_failure(
+                f"отсутствующая привязка не подтверждена ({str(result.get('error', 'ошибка'))[:120]})"
+            )
+            return
+        if not self._persistence_completion_is_stopped():
+            self._latch_auto_outcome_unknown(
+                "Останов потерял состояние после записи отсутствующей привязки; мощность не изменена."
+            )
+
+    def _on_auto_binding_persisted(self, result: dict[str, Any]) -> None:
+        if result.get("ok") is not True:
+            self._latch_auto_outcome_unknown(
+                f"Привязка файла не подтверждена ({str(result.get('error', 'ошибка'))[:120]}); мощность не изменена."
+            )
+            return
+        if not self._persistence_completion_is_stopped():
+            self._dispatch_first_auto_target()
+
+    def _dispatch_first_auto_target(self) -> None:
+        if not self._auto_power_list:
+            self._latch_auto_outcome_unknown("Список мощностей потерян до первого шага.")
+            return
+        power_channel = self._power_channel
+        temperature_channels = tuple(self._chain)
+        self._auto_step_power_channel = power_channel
+        self._auto_step_temperature_channels = temperature_channels
+        if not self._send_auto_cmd(
+            {
+                "cmd": "keithley_set_target",
+                "channel": self._smu_channel_for(power_channel),
+                "p_target": self._auto_power_list[0],
+            },
+            evidence_power_channel=power_channel,
+            evidence_temperature_channels=temperature_channels,
+        ):
+            self._latch_auto_outcome_unknown("Начальная команда мощности не отправлена.")
+            return
+        self._auto_timer.start()
+        self.auto_sweep_started.emit()
+
+    def _persistence_completion_is_stopped(self) -> bool:
+        """Prevent target advancement while Stop waits for or has received OFF."""
+
+        status = self._auto_deferred_terminal_status
+        if status is not None:
+            self._auto_deferred_terminal_status = None
+            self._begin_terminalize_auto_run(status)
+            return True
+        return self._auto_pending_stop_intent is not None
+
+    def _begin_or_defer_terminal(self, status: str) -> None:
+        """Serialize terminal fsync after any already-running persistence operation."""
+
+        if self._auto_persistence_worker is not None:
+            self._auto_deferred_terminal_status = status
+            return
+        self._begin_terminalize_auto_run(status)
+
+    def _begin_terminalize_auto_run(self, status: str) -> None:
+        """After authoritative OFF, fsync terminal truth off-thread."""
+
+        if not self._auto_experiment_binding_known:
+            self._auto_deferred_terminal_status = status
+            if self._persist_explicit_unbound_while_stopping():
+                return
+        writer = self._auto_run_writer
+        if writer is None:
+            self._block_after_terminal_persistence_failure("контекст файла автоизмерения потерян")
+            return
+        finished_at = datetime.now(UTC)
+        if not self._dispatch_persistence(
+            lambda: writer.append_terminal(
+                status,
+                finished_at=finished_at,
+                error=self._auto_persistence_error,
+                trailing_write_outcome=self._auto_trailing_write_outcome,
+            ),
+            lambda result: self._on_auto_terminal_persisted(status, finished_at, result),
+            cleanup_on_interruption=writer.close,
+        ):
+            self._block_after_terminal_persistence_failure("терминальная запись не поставлена в очередь")
+
+    def _on_auto_terminal_persisted(
+        self,
+        status: str,
+        finished_at: datetime,
+        result: dict[str, Any],
+    ) -> None:
+        terminal = result.get("value")
+        if result.get("ok") is not True or not isinstance(terminal, dict):
+            self._block_after_terminal_persistence_failure(str(result.get("error", "ошибка терминальной записи")))
+            return
+        attachment = self._attachment_command(status=status, terminal=terminal, finished_at=finished_at)
+        if status == "COMPLETED":
+            self._publish_auto_complete(attachment)
+        elif status == "FAILED":
+            self._publish_auto_failure(attachment)
+        else:
+            self._publish_auto_stop(attachment)
+
+    def _block_after_terminal_persistence_failure(self, reason: str) -> None:
+        """Fail closed after OFF when terminal authority could not be fsynced."""
+
+        self._auto_state = "stabilizing"
+        self._auto_outcome_unknown = True
+        self._auto_pending_stop_intent = "persistence_failed"
+        self._auto_timer.stop()
+        self._auto_status_label.setVisible(True)
+        self._auto_status_label.setText(
+            f"Источник отключен, но итоговый файл не подтверждён. Автозапуск заблокирован: {reason[:160]}"
+        )
+        self._update_control_enablement()
+
+    def _dispatch_auto_attachment(self, command: dict | None) -> None:
+        """Attach only a terminal-fsynced artifact to the active experiment."""
+
+        if command is None:
+            return
+        if not self._send_auto_cmd(command):
+            logger.warning(
+                "Терминальный файл автоизмерения сохранён, но его не удалось прикрепить к эксперименту: %s",
+                self._auto_run_path,
+            )
+
+    def _request_stop_after_point_persistence_failure(self, exc: BaseException) -> None:
+        """Request authoritative OFF without accepting or retrying the point."""
+
+        self._auto_persistence_error = f"{type(exc).__name__}: {exc}"
+        self._auto_trailing_write_outcome = "indeterminate"
+        self._auto_timer.stop()
+        self._auto_pending_stop_intent = "failure"
+        self._auto_status_label.setVisible(True)
+        self._auto_status_label.setText(
+            "Ошибка сохранения точки — переход запрещён; ожидается подтверждение отключения источника"
+        )
+        self._update_control_enablement()
+        if not self._send_auto_cmd(
+            {
+                "cmd": "keithley_stop",
+                "channel": self._smu_channel_for(self._auto_step_power_channel or self._power_channel),
+            },
+            stop_intent="failure",
+        ):
+            self._auto_pending_stop_intent = None
+            self._latch_auto_outcome_unknown("Команда останова после ошибки сохранения не отправлена.")
+
     def _update_power_preview(self) -> None:
         powers = self._generate_power_list()
         if len(powers) <= 6:
@@ -1499,6 +1887,57 @@ class ConductivityPanel(QWidget):
             )
             return
 
+        if command.get("cmd") == "experiment_attach_run_record":
+            is_start_attachment = command.get("status") == "RUNNING"
+            if is_start_attachment and (
+                self._auto_pending_stop_intent is not None
+                or self._auto_deferred_terminal_status is not None
+                or self._auto_experiment_binding_known
+            ):
+                logger.warning("Вытесненный ответ RUNNING-привязки проигнорирован после начала останова.")
+                return
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                error = (
+                    str(result.get("error", "неизвестная ошибка"))
+                    if isinstance(result, dict)
+                    else "некорректный ответ Engine"
+                )
+                if is_start_attachment:
+                    self._latch_auto_outcome_unknown(
+                        f"RUNNING-привязка не подтверждена ({error[:120]}); мощность не изменена."
+                    )
+                    return
+                logger.warning(
+                    "Терминальный файл автоизмерения сохранён, но прикрепление не подтверждено: %s",
+                    error,
+                )
+                self.show_warning("Файл автоизмерения сохранён, но не прикреплён к эксперименту.")
+                return
+            if not is_start_attachment:
+                if result.get("attached") is False:
+                    logger.warning("Терминальная замена не прикреплена к захваченному эксперименту.")
+                return
+            if result.get("attached") is False:
+                logger.info("Файл автоизмерения сохранён без привязки: активного эксперимента нет.")
+                self._persist_auto_binding_then_arm(None)
+                return
+            record = result.get("run_record")
+            context = record.get("experiment_context") if isinstance(record, dict) else None
+            experiment_id = context.get("experiment_id") if isinstance(context, dict) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("source_run_id") != self._auto_run_id
+                or record.get("status") != "RUNNING"
+                or type(experiment_id) is not str
+                or not experiment_id
+            ):
+                self._latch_auto_outcome_unknown(
+                    "RUNNING-привязка вернула несогласованную идентичность; мощность не изменена."
+                )
+                return
+            self._persist_auto_binding_then_arm(experiment_id)
+            return
+
         if not isinstance(result, dict) or result.get("ok") is not True:
             error = (
                 str(result.get("error", "неизвестная ошибка"))
@@ -1513,6 +1952,8 @@ class ConductivityPanel(QWidget):
         if command.get("cmd") == "keithley_stop":
             if stop_intent == "complete":
                 self._commit_auto_complete()
+            elif stop_intent == "failure":
+                self._commit_auto_failure()
             else:
                 self._commit_auto_stop()
             return
@@ -1580,7 +2021,6 @@ class ConductivityPanel(QWidget):
         if not powers:
             QMessageBox.warning(self, "Ошибка", "Список мощностей пуст.")
             return
-
         self._auto_power_list = powers
         self._auto_step = 0
         self._auto_results = []
@@ -1588,6 +2028,7 @@ class ConductivityPanel(QWidget):
         self._auto_operation_generation += 1
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
+        self._auto_deferred_terminal_status = None
         self._invalidate_auto_step_evidence()
 
         self._auto_start_btn.setEnabled(False)
@@ -1598,26 +2039,10 @@ class ConductivityPanel(QWidget):
         self._auto_status_label.setText(f"Шаг 1/{len(powers)} — P = {powers[0]:.4g} Вт")
         self._update_control_enablement()
 
-        self._auto_step_start = time.monotonic()
-        self._auto_step_power_channel = self._power_channel
-        self._auto_step_temperature_channels = tuple(self._chain)
-        power_channel = self._auto_step_power_channel
-        temperature_channels = self._auto_step_temperature_channels
-        dispatched = self._send_auto_cmd(
-            {
-                "cmd": "keithley_set_target",
-                "channel": self._smu_channel_for(power_channel),
-                "p_target": powers[0],
-            },
-            evidence_power_channel=power_channel,
-            evidence_temperature_channels=temperature_channels,
-        )
-        if not dispatched:
-            self._latch_auto_outcome_unknown("Начальная команда мощности не отправлена.")
+        if not self._begin_auto_run_async(powers):
+            self._latch_auto_outcome_unknown("Создание файла не поставлено в очередь; мощность не изменена.")
             return
         logger.info("Автоизмерение: старт, %d шагов, P=%s", len(powers), powers)
-        self._auto_timer.start()
-        self.auto_sweep_started.emit()
 
     @Slot()
     def _on_auto_stop(self) -> None:
@@ -1644,24 +2069,53 @@ class ConductivityPanel(QWidget):
             self._latch_auto_outcome_unknown("Команда останова не отправлена.")
 
     def _commit_auto_stop(self) -> None:
+        """After authoritative OFF, begin terminal persistence."""
+
+        self._begin_or_defer_terminal("ABORTED")
+
+    def _publish_auto_stop(self, attachment: dict[str, Any] | None) -> None:
         """Apply operator stop only after SafetyManager confirms the command."""
 
+        self._dispatch_auto_attachment(attachment)
         self._auto_state = "idle"
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
         self._auto_timer.stop()
         self._auto_progress.setVisible(False)
         self._auto_status_label.setVisible(True)
-        self._auto_status_label.setText("Остановлено оператором — отключение подтверждено")
+        self._auto_status_label.setText("Остановлено оператором — отключение и запись подтверждены")
         self._on_channels_changed()
-        logger.info("Автоизмерение: остановлено оператором, отключение подтверждено")
+        logger.info("Автоизмерение: остановлено оператором, отключение и запись подтверждены")
         self.auto_sweep_aborted.emit("operator_stop")
+
+    def _commit_auto_failure(self) -> None:
+        """After authoritative OFF, begin FAILED terminal persistence."""
+
+        self._begin_or_defer_terminal("FAILED")
+
+    def _publish_auto_failure(self, attachment: dict[str, Any] | None) -> None:
+        """Publish a durable FAILED run only after authoritative source OFF."""
+
+        self._dispatch_auto_attachment(attachment)
+        self._auto_state = "done"
+        self._auto_outcome_unknown = False
+        self._auto_pending_stop_intent = None
+        self._auto_timer.stop()
+        self._auto_progress.setVisible(False)
+        self._auto_status_label.setVisible(True)
+        self._auto_status_label.setText(
+            "Автоизмерение остановлено: точка не принята; отключение и FAILED-запись подтверждены"
+        )
+        self._on_channels_changed()
+        logger.error("Автоизмерение завершено с ошибкой сохранения: %s", self._auto_persistence_error)
+        self.auto_sweep_aborted.emit("persistence_failure")
 
     @Slot()
     def _auto_tick(self) -> None:
         if (
             self._auto_state != "stabilizing"
             or not self._connected
+            or self._auto_persistence_worker is not None
             or self._auto_outcome_unknown
             or self._auto_pending_token is not None
             or self._auto_pending_stop_intent is not None
@@ -1723,38 +2177,13 @@ class ConductivityPanel(QWidget):
 
         if is_stable:
             self._auto_record_point()
-            self._auto_step += 1
-            if self._auto_step >= step_total:
-                self._auto_complete()
-            else:
-                next_p = self._auto_power_list[self._auto_step]
-                power_channel = self._auto_step_power_channel
-                temperature_channels = self._auto_step_temperature_channels
-                self._invalidate_auto_step_evidence()
-                if power_channel is None or not temperature_channels:
-                    self._latch_auto_outcome_unknown("Идентичность следующего измерительного шага потеряна.")
-                    return
-                self._send_auto_cmd(
-                    {
-                        "cmd": "keithley_set_target",
-                        "channel": self._smu_channel_for(power_channel),
-                        "p_target": next_p,
-                    },
-                    evidence_power_channel=power_channel,
-                    evidence_temperature_channels=temperature_channels,
-                )
-                logger.info(
-                    "Автоизмерение: шаг %d/%d, P=%.4g Вт",
-                    self._auto_step + 1,
-                    step_total,
-                    next_p,
-                )
 
-    def _auto_record_point(self) -> None:
+    def _auto_record_point(self) -> bool:
         P = self._auto_step_power_value
         temperature_channels = self._auto_step_temperature_channels
         if len(temperature_channels) < 2 or P is None:
-            return
+            self._request_stop_after_point_persistence_failure(ValueError("step measurement identity is incomplete"))
+            return False
         hot_ch = temperature_channels[0]
         cold_ch = temperature_channels[-1]
         T_hot = self._auto_step_temperature_values.get(hot_ch, float("nan"))
@@ -1768,24 +2197,86 @@ class ConductivityPanel(QWidget):
             if pred and pred.valid:
                 settled_values.append(pred.percent_settled)
         min_settled = min(settled_values) if settled_values else 0.0
-        self._auto_results.append(
-            {
-                "P": P,
-                "T_hot": T_hot,
-                "T_cold": T_cold,
-                "dT": dT,
-                "R": R,
-                "G": G,
-                "settled_pct": min_settled,
-            }
-        )
+        point = {
+            "timestamp_utc": datetime.now(UTC).isoformat(),
+            "P_W": P,
+            "T_hot_K": T_hot,
+            "T_cold_K": T_cold,
+            "T_avg_K": (T_hot + T_cold) / 2.0,
+            "dT_K": dT,
+            "R_KW": R,
+            "G_WK": G,
+            "settled_pct": min_settled,
+        }
+        writer = self._auto_run_writer
+        if writer is None:
+            self._request_stop_after_point_persistence_failure(RuntimeError("autosweep writer is missing"))
+            return False
+        self._auto_pending_point_result = {
+            "P": P,
+            "T_hot": T_hot,
+            "T_cold": T_cold,
+            "dT": dT,
+            "R": R,
+            "G": G,
+            "settled_pct": min_settled,
+        }
+        if not self._dispatch_persistence(
+            lambda: writer.append_point(point),
+            self._on_auto_point_persisted,
+            cleanup_on_interruption=writer.close,
+        ):
+            self._auto_pending_point_result = None
+            self._request_stop_after_point_persistence_failure(RuntimeError("point write was not queued"))
+            return False
+        return True
+
+    def _on_auto_point_persisted(self, result: dict[str, Any]) -> None:
+        pending = self._auto_pending_point_result
+        self._auto_pending_point_result = None
+        if result.get("ok") is not True or pending is None:
+            error = RuntimeError(str(result.get("error", "point write failed")))
+            logger.error("Автоизмерение: точка не принята из-за ошибки сохранения: %s", error)
+            self._request_stop_after_point_persistence_failure(error)
+            return
+        self._auto_results.append(pending)
+        self._auto_step += 1
         logger.info(
             "Автоизмерение: точка P=%.4g, dT=%.4f, R=%.4g, G=%.4g, settled=%.0f%%",
-            P,
-            dT,
-            R,
-            G,
-            min_settled,
+            pending["P"],
+            pending["dT"],
+            pending["R"],
+            pending["G"],
+            pending["settled_pct"],
+        )
+        if self._persistence_completion_is_stopped():
+            return
+        if self._auto_step >= len(self._auto_power_list):
+            self._auto_complete()
+            return
+        next_p = self._auto_power_list[self._auto_step]
+        power_channel = self._auto_step_power_channel
+        temperature_channels = self._auto_step_temperature_channels
+        self._invalidate_auto_step_evidence()
+        if power_channel is None or not temperature_channels:
+            self._latch_auto_outcome_unknown("Идентичность следующего измерительного шага потеряна.")
+            return
+        if not self._send_auto_cmd(
+            {
+                "cmd": "keithley_set_target",
+                "channel": self._smu_channel_for(power_channel),
+                "p_target": next_p,
+            },
+            evidence_power_channel=power_channel,
+            evidence_temperature_channels=temperature_channels,
+        ):
+            self._latch_auto_outcome_unknown("Команда следующей мощности не отправлена.")
+            return
+        logger.info(
+            "Автоизмерение: шаг %d/%d, P=%.4g Вт",
+            self._auto_step + 1,
+            len(self._auto_power_list),
+            next_p,
         )
 
     def _auto_complete(self) -> None:
@@ -1811,15 +2302,21 @@ class ConductivityPanel(QWidget):
             self._latch_auto_outcome_unknown("Команда завершающего останова не отправлена.")
 
     def _commit_auto_complete(self) -> None:
+        """After authoritative OFF, begin COMPLETED terminal persistence."""
+
+        self._begin_or_defer_terminal("COMPLETED")
+
+    def _publish_auto_complete(self, attachment: dict[str, Any] | None) -> None:
         """Publish completion only after authoritative source shutdown."""
 
+        self._dispatch_auto_attachment(attachment)
         self._auto_state = "done"
         self._auto_outcome_unknown = False
         self._auto_pending_stop_intent = None
         self._auto_progress.setValue(100)
         self._on_channels_changed()
         n = len(self._auto_results)
-        self._auto_status_label.setText(f"Завершено: {n} точек измерено; отключение источника подтверждено")
+        self._auto_status_label.setText(f"Завершено: {n} точек; отключение и запись подтверждены")
         logger.info("Автоизмерение: завершено, %d точек", n)
         if self._auto_results:
             summary_lines = ["Автоизмерение завершено:\n"]
@@ -1937,6 +2434,20 @@ class ConductivityPanel(QWidget):
         if self._flight_log:
             self._flight_log.close()
             self._flight_log = None
+        persistence_worker = self._auto_persistence_worker
+        writer = self._auto_run_writer
+        if persistence_worker is not None:
+            persistence_worker.requestInterruption()
+        elif writer is not None:
+            close_worker = _ConductivityPersistenceWorker(
+                writer.close,
+                cleanup_on_interruption=writer.close,
+            )
+            self._auto_persistence_worker = close_worker
+            try:
+                close_worker.start()
+            except (RuntimeError, OSError):
+                logger.exception("Autosweep writer close could not be scheduled during panel shutdown")
         super().closeEvent(event)
 
     # ------------------------------------------------------------------

@@ -15,18 +15,32 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import msgpack
 import pytest
 import zmq
+from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QApplication
 
+import cryodaq.gui.shell.overlays.conductivity_panel as panel_module
+from cryodaq.core.experiment import ExperimentManager, RunRecord
 from cryodaq.core.zmq_subprocess import DEFAULT_TOPIC, zmq_bridge_main
 from cryodaq.drivers.base import ChannelStatus, Reading
 from cryodaq.gui import theme
 from cryodaq.gui.shell.overlays.conductivity_panel import ConductivityPanel, _pct_color
-from cryodaq.gui.zmq_client import ZmqBridge
+from cryodaq.gui.zmq_client import ZmqBridge, registered_gui_command_workers
+from cryodaq.storage.conductivity_run import read_conductivity_run
 
 
 @pytest.fixture(scope="session")
 def app():
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("CRYODAQ_STATE_ROOT", str(tmp_path / "state"))
+    _DeferredWorker.instances.clear()
+    _DeferredWorker.all_instances.clear()
+    _DeferredWorker.defer_running_attachment = False
+    _DeferredWorker.running_experiment_id = "experiment-a"
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _ImmediatePersistenceWorker)
 
 
 class _StubPrediction:
@@ -63,20 +77,78 @@ class _DeferredSignal:
             callback(result)
 
 
+class _ImmediatePersistenceWorker:
+    """Deterministic filesystem worker preserving callback ordering in most GUI tests."""
+
+    def __init__(self, operation, *, cleanup_on_interruption=None) -> None:
+        self._operation = operation
+        self._cleanup_on_interruption = cleanup_on_interruption
+        self._running = False
+        self._interrupted = False
+        self.completed = _DeferredSignal()
+
+    def start(self, *_args) -> None:
+        self._running = True
+        try:
+            value = self._operation()
+        except BaseException as exc:
+            result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+        else:
+            result = {"ok": True, "value": value}
+        if self._interrupted and self._cleanup_on_interruption is not None:
+            self._cleanup_on_interruption()
+        self._running = False
+        if not self._interrupted:
+            self.completed.emit(result)
+
+    def requestInterruption(self) -> None:
+        self._interrupted = True
+
+    def isRunning(self) -> bool:
+        return self._running
+
+
+_REAL_PERSISTENCE_WORKER = panel_module._ConductivityPersistenceWorker
+
+
 class _DeferredWorker:
     """Deterministic worker whose reply is controlled by the test."""
 
     instances: list[_DeferredWorker] = []
+    all_instances: list[_DeferredWorker] = []
+    defer_running_attachment = False
+    running_experiment_id: str | None = "experiment-a"
 
     def __init__(self, cmd: dict, *, parent=None) -> None:
         del parent
         self.cmd = dict(cmd)
         self.finished = _DeferredSignal()
         self.running = False
-        self.__class__.instances.append(self)
+        self.__class__.all_instances.append(self)
+        self._is_running_attachment = (
+            self.cmd.get("cmd") == "experiment_attach_run_record" and self.cmd.get("status") == "RUNNING"
+        )
+        if not self._is_running_attachment or self.__class__.defer_running_attachment:
+            self.__class__.instances.append(self)
 
     def start(self) -> None:
         self.running = True
+        if self._is_running_attachment and not self.__class__.defer_running_attachment:
+            experiment_id = self.__class__.running_experiment_id
+            if experiment_id is None:
+                self.finish({"ok": True, "attached": False, "run_record": None})
+            else:
+                self.finish(
+                    {
+                        "ok": True,
+                        "attached": True,
+                        "run_record": {
+                            "source_run_id": self.cmd["source_run_id"],
+                            "status": "RUNNING",
+                            "experiment_context": {"experiment_id": experiment_id},
+                        },
+                    }
+                )
 
     def isRunning(self) -> bool:
         return self.running
@@ -558,14 +630,22 @@ def test_auto_start_generates_power_list(app, monkeypatch):
     class _StubWorker:
         def __init__(self, cmd, *, parent=None) -> None:
             self._cmd = cmd
-
-            class _FakeSignal:
-                def connect(self, *_a) -> None:
-                    return None
-
-            self.finished = _FakeSignal()
+            self.finished = _DeferredSignal()
 
         def start(self) -> None:
+            if self._cmd.get("cmd") == "experiment_attach_run_record" and self._cmd.get("status") == "RUNNING":
+                self.finished.emit(
+                    {
+                        "ok": True,
+                        "attached": True,
+                        "run_record": {
+                            "source_run_id": self._cmd["source_run_id"],
+                            "status": "RUNNING",
+                            "experiment_context": {"experiment_id": "experiment-a"},
+                        },
+                    }
+                )
+                return
             started.append(self._cmd)
 
         def isRunning(self) -> bool:
@@ -1348,6 +1428,10 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     # Advanced to step 1 and recorded exactly one point.
     assert panel._auto_step == 1
     assert len(panel._auto_results) == 1
+    assert panel._auto_run_writer is not None
+    assert panel._auto_run_writer.accepted_point_count == 1
+    assert panel._auto_run_path is not None
+    assert '"accepted_point_count":1' in panel._auto_run_path.read_text(encoding="utf-8")
 
     # Assert exact recorded values in _auto_results[0].
     rec = panel._auto_results[0]
@@ -1374,6 +1458,99 @@ def test_auto_tick_advances_when_stable_and_min_wait_elapsed(app, monkeypatch):
     assert 0 < progress <= 99, f"Progress expected >0 after first step, got {progress}"
 
     panel._auto_timer.stop()
+
+
+def test_real_fsync_failure_keeps_point_unaccepted_and_stops_before_failed_attachment(
+    app,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import time as _time
+
+    import cryodaq.gui.shell.overlays.conductivity_panel as panel_module
+    import cryodaq.storage.conductivity_run as run_storage
+
+    _DeferredWorker.instances.clear()
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel._power_count_spin.setValue(2)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    assert all(worker.cmd["cmd"] != "keithley_start" for worker in _DeferredWorker.instances)
+    _DeferredWorker.instances[-1].finish({"ok": True})
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012))
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = _time.monotonic() - 60.0
+
+    run_path = panel._auto_run_path
+    assert run_path is not None
+    real_fsync = run_storage.os.fsync
+    fsync_calls = 0
+
+    def _real_fsync_then_raise(fd: int) -> None:
+        nonlocal fsync_calls
+        fsync_calls += 1
+        real_fsync(fd)
+        if fsync_calls != 2:
+            return
+        raise OSError("deterministic post-checkpoint-fsync failure")
+
+    monkeypatch.setattr(run_storage.os, "fsync", _real_fsync_then_raise)
+    panel._auto_tick()
+
+    assert panel._auto_results == []
+    assert panel._auto_step == 0
+    assert panel._auto_pending_stop_intent == "failure"
+    assert _DeferredWorker.instances[-1].cmd == {"cmd": "keithley_stop", "channel": "smua"}
+    assert "105.0" in run_path.read_text(encoding="utf-8")
+    assert not any(worker.cmd["cmd"] == "experiment_attach_run_record" for worker in _DeferredWorker.instances)
+    assert '"accepted_point_count":1' in run_path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(run_storage.os, "fsync", real_fsync)
+    _DeferredWorker.instances[-1].finish({"ok": True})
+
+    snapshot = read_conductivity_run(run_path)
+    assert snapshot.raw_row_count == 1
+    assert snapshot.rows == ()
+    assert snapshot.terminal is not None
+    assert snapshot.terminal["status"] == "FAILED"
+    assert snapshot.terminal["accepted_point_count"] == 0
+    assert snapshot.terminal["trailing_write_outcome"] == "indeterminate"
+    assert panel.get_auto_state() == "done"
+    assert panel._auto_results == []
+    assert panel._auto_step == 0
+
+    attach = _DeferredWorker.instances[-1].cmd
+    assert attach["cmd"] == "experiment_attach_run_record"
+    assert attach["status"] == "FAILED"
+    assert attach["result_summary"]["point_count"] == 0
+    assert attach["artifact_paths"] == [str(run_path)]
+
+    manager_dir = tmp_path / "manager"
+    instruments = manager_dir / "instruments.yaml"
+    instruments.parent.mkdir(parents=True)
+    instruments.write_text("instruments: []\n", encoding="utf-8")
+    manager = ExperimentManager(manager_dir, instruments)
+    record = RunRecord(
+        record_id="experiment:failed-run",
+        source_run_id=str(panel._auto_run_id),
+        source_tab="conductivity",
+        source_module="conductivity_panel",
+        run_type="autosweep",
+        status="FAILED",
+        started_at=panel._auto_run_started_at or datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+        artifact_paths=(str(run_path),),
+    )
+    assert manager._collect_conductivity_rows([record]) == []
 
 
 # ----------------------------------------------------------------------
@@ -1586,10 +1763,21 @@ def test_auto_completion_waits_for_authoritative_off_reply(app, monkeypatch):
     assert panel.get_auto_state() == "stabilizing"
     assert panel.is_auto_sweep_active() is True
     assert completed == []
-    assert _DeferredWorker.instances[-1].cmd["cmd"] == "keithley_stop"
-    _DeferredWorker.instances[-1].finish({"ok": True})
+    stop_worker = _DeferredWorker.instances[-1]
+    assert stop_worker.cmd["cmd"] == "keithley_stop"
+    assert not any(worker.cmd["cmd"] == "experiment_attach_run_record" for worker in _DeferredWorker.instances)
+    stop_worker.finish({"ok": True})
     assert panel.get_auto_state() == "done"
     assert completed == [0]
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.terminal is not None
+    assert snapshot.terminal["status"] == "COMPLETED"
+    assert snapshot.terminal["accepted_point_count"] == 0
+    attach_worker = _DeferredWorker.instances[-1]
+    assert attach_worker is not stop_worker
+    assert attach_worker.cmd["cmd"] == "experiment_attach_run_record"
+    assert attach_worker.cmd["result_summary"]["point_count"] == 0
 
 
 def test_empty_state_not_hidden_by_power_only_reading(app):
@@ -1860,3 +2048,390 @@ def test_prediction_stack_synced_via_refresh_tick_too(app):
     panel._update_table({})
     assert panel._prediction_stack.currentWidget() is panel._prediction_placeholder
     assert panel._indicator_stack.currentIndex() == 0
+
+
+def _start_bound_autosweep(monkeypatch) -> tuple[ConductivityPanel, _DeferredWorker]:
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+    panel._on_auto_start()
+    target_worker = _DeferredWorker.instances[-1]
+    assert target_worker.cmd["cmd"] == "keithley_set_target"
+    return panel, target_worker
+
+
+def test_running_attachment_and_binding_precede_first_target_without_source_start(app, monkeypatch) -> None:
+    panel, _target_worker = _start_bound_autosweep(monkeypatch)
+
+    commands = [worker.cmd for worker in _DeferredWorker.all_instances]
+    assert [command["cmd"] for command in commands] == [
+        "experiment_attach_run_record",
+        "keithley_set_target",
+    ]
+    assert commands[0]["status"] == "RUNNING"
+    assert all(command["cmd"] != "keithley_start" for command in commands)
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id == "experiment-a"
+    panel._auto_timer.stop()
+
+
+def test_stop_during_writer_creation_persists_explicit_unbound_before_terminal(app, monkeypatch) -> None:
+    class _DeferredPersistenceWorker:
+        instances: list[_DeferredPersistenceWorker] = []
+
+        def __init__(self, operation, *, cleanup_on_interruption=None) -> None:
+            self._operation = operation
+            self._cleanup_on_interruption = cleanup_on_interruption
+            self._running = False
+            self._interrupted = False
+            self.completed = _DeferredSignal()
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            self._running = True
+
+        def requestInterruption(self) -> None:
+            self._interrupted = True
+
+        def isRunning(self) -> bool:
+            return self._running
+
+        def finish(self) -> None:
+            try:
+                value = self._operation()
+            except BaseException as exc:
+                result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+            else:
+                result = {"ok": True, "value": value}
+            if self._interrupted and self._cleanup_on_interruption is not None:
+                self._cleanup_on_interruption()
+            self._running = False
+            if not self._interrupted:
+                self.completed.emit(result)
+
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _DeferredPersistenceWorker)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    create_worker = _DeferredPersistenceWorker.instances[-1]
+    assert _DeferredWorker.instances == []
+
+    panel._on_auto_stop()
+    stop_worker = _DeferredWorker.instances[-1]
+    assert stop_worker.cmd["cmd"] == "keithley_stop"
+    stop_worker.finish({"ok": True})
+    assert panel._auto_deferred_terminal_status == "ABORTED"
+
+    create_worker.finish()
+    binding_worker = _DeferredPersistenceWorker.instances[-1]
+    assert binding_worker is not create_worker
+    binding_worker.finish()
+    terminal_worker = _DeferredPersistenceWorker.instances[-1]
+    assert terminal_worker is not binding_worker
+    terminal_worker.finish()
+
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "ABORTED"
+    assert snapshot.accepted_point_count == 0
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id is None
+    assert panel.get_auto_state() == "idle"
+    assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == ["keithley_stop"]
+
+
+def test_stop_during_pending_running_attachment_persists_unbound_before_terminal(app, monkeypatch) -> None:
+    class _DeferredPersistenceWorker:
+        instances: list[_DeferredPersistenceWorker] = []
+
+        def __init__(self, operation, *, cleanup_on_interruption=None) -> None:
+            self._operation = operation
+            self._cleanup_on_interruption = cleanup_on_interruption
+            self._running = False
+            self._interrupted = False
+            self.completed = _DeferredSignal()
+            self.__class__.instances.append(self)
+
+        def start(self) -> None:
+            self._running = True
+
+        def requestInterruption(self) -> None:
+            self._interrupted = True
+
+        def isRunning(self) -> bool:
+            return self._running
+
+        def finish(self) -> None:
+            try:
+                value = self._operation()
+            except BaseException as exc:
+                result = {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+            else:
+                result = {"ok": True, "value": value}
+            if self._interrupted and self._cleanup_on_interruption is not None:
+                self._cleanup_on_interruption()
+            self._running = False
+            if not self._interrupted:
+                self.completed.emit(result)
+
+    _DeferredWorker.defer_running_attachment = True
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _DeferredPersistenceWorker)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    create_worker = _DeferredPersistenceWorker.instances[-1]
+    create_worker.finish()
+
+    attachment_worker = _DeferredWorker.instances[-1]
+    assert attachment_worker.cmd["cmd"] == "experiment_attach_run_record"
+    assert attachment_worker.cmd["status"] == "RUNNING"
+
+    panel._on_auto_stop()
+    stop_worker = _DeferredWorker.instances[-1]
+    assert stop_worker is not attachment_worker
+    assert stop_worker.cmd["cmd"] == "keithley_stop"
+    stop_worker.finish({"ok": True})
+    binding_worker = _DeferredPersistenceWorker.instances[-1]
+    assert binding_worker is not create_worker
+
+    attachment_worker.finish(
+        {
+            "ok": True,
+            "attached": True,
+            "run_record": {
+                "source_run_id": attachment_worker.cmd["source_run_id"],
+                "status": "RUNNING",
+                "experiment_context": {"experiment_id": "experiment-a"},
+            },
+        }
+    )
+
+    binding_worker.finish()
+    terminal_worker = _DeferredPersistenceWorker.instances[-1]
+    assert terminal_worker is not binding_worker
+    terminal_worker.finish()
+
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.status == "ABORTED"
+    assert snapshot.accepted_point_count == 0
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id is None
+    assert panel.get_auto_state() == "idle"
+
+    assert [worker.cmd["cmd"] for worker in _DeferredWorker.all_instances] == [
+        "experiment_attach_run_record",
+        "keithley_stop",
+    ]
+    assert all(worker.cmd.get("cmd") != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+
+
+def test_failed_running_attachment_never_changes_source_target(app, monkeypatch) -> None:
+    _DeferredWorker.defer_running_attachment = True
+    panel = ConductivityPanel()
+    _stub_channels(panel, ["Т1", "Т2"])
+    panel._checkboxes["Т1"].setChecked(True)
+    panel._checkboxes["Т2"].setChecked(True)
+    monkeypatch.setattr(panel_module, "ZmqCommandWorker", _DeferredWorker)
+    panel.set_connected(True)
+
+    panel._on_auto_start()
+    attachment = _DeferredWorker.instances[-1]
+    assert attachment.cmd["cmd"] == "experiment_attach_run_record"
+    attachment.finish({"ok": False, "error": "attachment failed"})
+
+    assert all(worker.cmd["cmd"] != "keithley_set_target" for worker in _DeferredWorker.all_instances)
+    assert all(worker.cmd["cmd"] != "keithley_start" for worker in _DeferredWorker.all_instances)
+    assert panel._auto_outcome_unknown is True
+    assert panel._auto_run_path is not None
+    assert read_conductivity_run(panel._auto_run_path).binding_recorded is False
+
+
+def test_point_effect_order_is_row_checkpoint_ui_accept_then_next_target(app, monkeypatch) -> None:
+    panel, target_worker = _start_bound_autosweep(monkeypatch)
+    panel._power_count_spin.setValue(2)
+    target_worker.finish({"ok": True})
+
+    events: list[str] = []
+    writer = panel._auto_run_writer
+    assert writer is not None
+    original_sync = writer._sync
+    point_sync_count = 0
+
+    def _traced_sync() -> None:
+        nonlocal point_sync_count
+        original_sync()
+        point_sync_count += 1
+        events.append("row_fsync" if point_sync_count == 1 else "checkpoint_fsync")
+
+    monkeypatch.setattr(writer, "_sync", _traced_sync)
+
+    class _TracedResults(list):
+        def append(self, value) -> None:
+            events.append("ui_accept")
+            super().append(value)
+
+    panel._auto_results = _TracedResults()
+    original_send = panel._send_auto_cmd
+
+    def _traced_send(command, **kwargs):
+        if command.get("cmd") == "keithley_set_target":
+            events.append(f"next_target_at_step_{panel._auto_step}")
+        return original_send(command, **kwargs)
+
+    monkeypatch.setattr(panel, "_send_auto_cmd", _traced_send)
+    panel._min_wait_spin.setValue(10)
+    panel._settled_pct_spin.setValue(50.0)
+    panel._handle_reading(_temp_reading("Т1", 110.0))
+    panel._handle_reading(_temp_reading("Т2", 100.0))
+    panel._handle_reading(_power_reading(0.012))
+    panel._predictor.get_prediction = lambda _channel: _StubPrediction(percent_settled=99.0)  # type: ignore[method-assign]
+    panel._auto_step_start = time.monotonic() - 60.0
+
+    panel._auto_tick()
+
+    assert events == ["row_fsync", "checkpoint_fsync", "ui_accept", "next_target_at_step_1"]
+    assert panel._auto_step == 1
+    assert len(panel._auto_results) == 1
+    panel._auto_timer.stop()
+
+
+def test_terminal_effect_order_and_captured_experiment_binding(app, monkeypatch) -> None:
+    panel, target_worker = _start_bound_autosweep(monkeypatch)
+    target_worker.finish({"ok": True})
+    events: list[str] = []
+    writer = panel._auto_run_writer
+    assert writer is not None
+    original_sync = writer._sync
+
+    def _terminal_sync() -> None:
+        original_sync()
+        events.append("terminal_fsync")
+
+    monkeypatch.setattr(writer, "_sync", _terminal_sync)
+    original_send = panel._send_auto_cmd
+
+    def _traced_send(command, **kwargs):
+        if command.get("cmd") == "experiment_attach_run_record":
+            events.append("attachment")
+        return original_send(command, **kwargs)
+
+    monkeypatch.setattr(panel, "_send_auto_cmd", _traced_send)
+    panel.auto_sweep_completed.connect(lambda _count: events.append("completed_signal"))
+    panel._auto_complete()
+    stop_worker = _DeferredWorker.instances[-1]
+    assert stop_worker.cmd["cmd"] == "keithley_stop"
+
+    events.append("off_ack")
+    stop_worker.finish({"ok": True})
+
+    assert events == ["off_ack", "terminal_fsync", "attachment", "completed_signal"]
+    terminal_attachment = _DeferredWorker.instances[-1].cmd
+    assert terminal_attachment["status"] == "COMPLETED"
+    assert terminal_attachment["experiment_id"] == "experiment-a"
+    assert panel.get_auto_state() == "done"
+
+
+def test_run_started_without_experiment_never_attaches_to_a_later_experiment(app, monkeypatch) -> None:
+    _DeferredWorker.running_experiment_id = None
+    panel, target_worker = _start_bound_autosweep(monkeypatch)
+    target_worker.finish({"ok": True})
+    assert panel._auto_run_path is not None
+    snapshot = read_conductivity_run(panel._auto_run_path)
+    assert snapshot.binding_recorded is True
+    assert snapshot.bound_experiment_id is None
+
+    panel._auto_complete()
+    stop_worker = _DeferredWorker.instances[-1]
+    stop_worker.finish({"ok": True})
+
+    assert _DeferredWorker.instances[-1] is stop_worker
+    assert not any(
+        worker.cmd.get("cmd") == "experiment_attach_run_record" and worker.cmd.get("status") != "RUNNING"
+        for worker in _DeferredWorker.all_instances
+    )
+
+
+def test_real_persistence_worker_keeps_gui_thread_responsive(app) -> None:
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+    operation_threads: list[QThread] = []
+    results: list[dict] = []
+
+    def _blocking_operation() -> str:
+        operation_threads.append(QThread.currentThread())
+        operation_started.set()
+        assert release_operation.wait(3.0)
+        return "done"
+
+    worker = _REAL_PERSISTENCE_WORKER(_blocking_operation)
+    worker.completed.connect(results.append)
+    worker.start()
+    assert operation_started.wait(1.0)
+    assert operation_threads[0] is not app.thread()
+
+    timer_fired: list[bool] = []
+    QTimer.singleShot(0, lambda: timer_fired.append(True))
+    deadline = time.monotonic() + 1.0
+    while not timer_fired and time.monotonic() < deadline:
+        app.processEvents()
+    assert timer_fired == [True]
+
+    release_operation.set()
+    deadline = time.monotonic() + 2.0
+    while (worker.isRunning() or not results) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.001)
+    assert results == [{"ok": True, "value": "done"}]
+
+
+def test_close_interrupts_live_persistence_without_destroying_thread(app, monkeypatch) -> None:
+    monkeypatch.setattr(panel_module, "_ConductivityPersistenceWorker", _REAL_PERSISTENCE_WORKER)
+    panel = ConductivityPanel()
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+    cleanup_called = threading.Event()
+
+    def _blocking_operation() -> None:
+        operation_started.set()
+        assert release_operation.wait(3.0)
+
+    assert panel._dispatch_persistence(
+        _blocking_operation,
+        lambda _result: None,
+        cleanup_on_interruption=cleanup_called.set,
+    )
+    worker = panel._auto_persistence_worker
+    assert worker is not None
+    assert operation_started.wait(1.0)
+    panel.show()
+    panel.close()
+    app.processEvents()
+
+    assert worker.isInterruptionRequested()
+    assert worker in registered_gui_command_workers()
+    assert worker.isRunning()
+    assert not cleanup_called.is_set()
+
+    release_operation.set()
+    deadline = time.monotonic() + 2.0
+    while (worker.isRunning() or not cleanup_called.is_set()) and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.001)
+    assert cleanup_called.is_set()
+    assert not worker.isRunning()
