@@ -596,6 +596,63 @@ def test_keithley_overlay_safety_replay_on_lazy_open():
         _stop_timers(w)
 
 
+def test_keithley_overlay_channel_state_replay_on_lazy_open(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w._last_reading_time = time.monotonic()
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
+
+        assert w._keithley_panel is None
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+        assert w._keithley_panel is None
+
+        w._ensure_overlay("source")
+
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_channel_state_replay_cleared_on_lifecycle_reset() -> None:
+    _app()
+    w = MainWindowV2()
+    try:
+        w._on_experiment_status_received(
+            {
+                "active_experiment": {"experiment_id": "exp-old"},
+                "phases": [],
+            }
+        )
+        w._last_reading_time = time.monotonic()
+        assert w._keithley_panel is None
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+        assert w._keithley_panel is None
+
+        w._on_experiment_status_received(
+            {
+                "active_experiment": {"experiment_id": "exp-new"},
+                "phases": [],
+            }
+        )
+        w._ensure_overlay("source")
+
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
 def test_keithley_overlay_connection_replay_on_lazy_open():
     _app()
     w = MainWindowV2()

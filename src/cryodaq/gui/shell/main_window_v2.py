@@ -285,6 +285,7 @@ class MainWindowV2(QMainWindow):
         self._analytics_snapshot: dict[str, tuple] = {}
         self._analytics_temperature_snapshot: dict[str, Reading] = {}
         self._analytics_keithley_snapshot: dict[str, Reading] = {}
+        self._keithley_channel_state_snapshot: dict[str, Reading] = {}
         # v0.55.15 (audit SCOPE 5 finding 5.7) — MultiLine readings
         # cache. Accumulates the latest reading per channel so a panel
         # opened after readings start arriving still gets a populated
@@ -503,6 +504,8 @@ class MainWindowV2(QMainWindow):
             widget.set_connected(derived_connected)
             ready, reason_text = self._current_keithley_safety_gate()
             widget.set_safety_ready(ready, reason_text)
+            for reading in self._keithley_channel_state_snapshot.values():
+                widget.on_reading(reading)
         # Phase II.3: replay connection + current experiment into OperatorLog
         # overlay on first construction (same contract pattern as II.6).
         if name == "log":
@@ -764,15 +767,13 @@ class MainWindowV2(QMainWindow):
         # B.8.0.2: route log entries to overlay for live timeline
         if channel == "analytics/operator_log_entry" and self._experiment_overlay is not None:
             self._experiment_overlay.on_reading(reading)
-        if (
-            channel
-            in {
-                "analytics/keithley_channel_state/smua",
-                "analytics/keithley_channel_state/smub",
-            }
-            and self._keithley_panel is not None
-        ):
-            self._keithley_panel.on_reading(reading)
+        if channel in {
+            "analytics/keithley_channel_state/smua",
+            "analytics/keithley_channel_state/smub",
+        }:
+            self._keithley_channel_state_snapshot[channel] = reading
+            if self._keithley_panel is not None:
+                self._keithley_panel.on_reading(reading)
         if channel.startswith("analytics/"):
             # Note: _overview_panel.on_reading already called above in
             # eager sinks — no need to call again here (B.5.5 F3)
@@ -1460,6 +1461,7 @@ class MainWindowV2(QMainWindow):
             self._analytics_snapshot.pop("set_experiment_status", None)
             self._analytics_temperature_snapshot.clear()
             self._analytics_keithley_snapshot.clear()
+            self._keithley_channel_state_snapshot.clear()
             self._analytics_last_exp_id = new_exp_id
 
         self._overview_panel.on_experiment_status(status)
