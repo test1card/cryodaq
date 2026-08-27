@@ -680,9 +680,9 @@ def _settle_new_adopted_descendants(
                     except BaseException as close_exc:
                         record_error(f"close unauthenticated pidfd for {candidate}", close_exc)
 
+        # Signal the complete pinned generation before waiting on any one descendant.
+        # Otherwise a slow/failing first identity can delay SIGKILL to every sibling.
         for candidate, pidfd in identities:
-            exited = False
-            reaped = False
             try:
                 try:
                     _signal_via_identity(pidfd, signal.SIGKILL)
@@ -697,8 +697,14 @@ def _settle_new_adopted_descendants(
                         pass
                     except BaseException as recovery_exc:
                         record_error(f"raw signal adopted descendant {candidate}", recovery_exc)
-                exit_deadline = time.monotonic() + 2.0
-                while time.monotonic() < exit_deadline and not _identity_exited(pidfd):
+            except BaseException as exc:
+                record_error(f"signal adopted descendant {candidate}", exc)
+
+        for candidate, pidfd in identities:
+            exited = False
+            reaped = False
+            try:
+                while time.monotonic() < deadline and not _identity_exited(pidfd):
                     time.sleep(_ADOPTED_PIN_RETRY_BACKOFF_S)
                 exited = _identity_exited(pidfd)
                 if not exited:
@@ -708,7 +714,10 @@ def _settle_new_adopted_descendants(
                     )
                 if exited:
                     try:
-                        _reap_adopted_descendant(candidate)
+                        _reap_adopted_descendant(
+                            candidate,
+                            timeout=max(0.0, deadline - time.monotonic()),
+                        )
                         reaped = True
                     except AssertionError as exc:
                         if isinstance(exc.__cause__, ChildProcessError):
@@ -761,7 +770,7 @@ def _settle_new_adopted_descendants(
 
 
 def _preflight_stable_identity_surface() -> None:
-    """Skip only before spawning, after proving every pidfd operation we use."""
+    """Skip only before spawning, after proving every kernel surface we use."""
 
     pidfd: int | None = None
     try:
@@ -769,12 +778,14 @@ def _preflight_stable_identity_surface() -> None:
         if _identity_exited(pidfd):
             raise _UnstableIdentity("the current process pidfd was already readable")
         _signal_via_identity(pidfd, 0)
+        _direct_child_pids()
     except (_UnstableIdentity, OSError, ValueError) as exc:
         pytest.skip(
-            "no stable process identity on this host: refusing to spawn an uncleanable "
-            f"control child ({exc}). Parent-death evidence requires the Ubuntu 22.04-class "
-            "kernel (pidfd plus pidfd_send_signal, >= 5.3); this limitation is the open "
-            "target-OS gate, not a pass."
+            "no stable process identity or procfs child inventory on this host: refusing "
+            f"to spawn an uncleanable control child ({exc}). Parent-death evidence requires "
+            "the Ubuntu 22.04-class kernel (pidfd plus pidfd_send_signal, >= 5.3) and "
+            "/proc/<pid>/task/<pid>/children; this limitation is the open target-OS gate, "
+            "not a pass."
         )
     finally:
         if pidfd is not None:
@@ -830,6 +841,30 @@ def _wait_for_child_identity_file(
             raise AssertionError("harness parent exited before its child published exact identity")
         time.sleep(0.01)
     raise AssertionError(f"child did not publish exact identity before startup deadline; got {last_text!r}")
+
+
+def _wait_for_numeric_pid_marker(
+    marker_path: Path,
+    *,
+    expected_count: int,
+    timeout: float,
+) -> list[int]:
+    """Wait for one complete numeric descendant marker, not mere file creation."""
+
+    deadline = time.monotonic() + timeout
+    last_text = ""
+    while time.monotonic() < deadline:
+        try:
+            last_text = marker_path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            last_text = ""
+        values = last_text.split()
+        if len(values) == expected_count and all(value.isdigit() for value in values):
+            return [int(value) for value in values]
+        time.sleep(0.01)
+    raise AssertionError(
+        f"descendant marker did not publish {expected_count} complete numeric identities; got {last_text!r}"
+    )
 
 
 _PARENT_CLEANUP_WAIT_S = 15.0
@@ -1260,6 +1295,46 @@ def test_stable_identity_uses_kernel_pidfd_when_python_omits_wrapper(
         os.close(pidfd)
 
 
+@_LINUX_ONLY
+def test_missing_proc_children_inventory_skips_before_subreaper_or_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_pidfds: list[int] = []
+    forbidden_calls: list[str] = []
+
+    def preflight_identity(_pid: int) -> int:
+        pidfd = os.open(os.devnull, os.O_RDONLY)
+        opened_pidfds.append(pidfd)
+        return pidfd
+
+    def missing_children_inventory() -> set[int]:
+        raise FileNotFoundError("injected missing /proc children inventory")
+
+    def forbidden_subreaper(_enabled: bool) -> bool:
+        forbidden_calls.append("subreaper")
+        raise AssertionError("subreaper state changed after failed procfs preflight")
+
+    def forbidden_spawn(*_args, **_kwargs):
+        forbidden_calls.append("spawn")
+        raise AssertionError("a process spawned after failed procfs preflight")
+
+    monkeypatch.setattr(sys.modules[__name__], "_stable_identity", preflight_identity)
+    monkeypatch.setattr(sys.modules[__name__], "_identity_exited", lambda _pidfd: False)
+    monkeypatch.setattr(sys.modules[__name__], "_signal_via_identity", lambda _pidfd, _sig: None)
+    monkeypatch.setattr(sys.modules[__name__], "_direct_child_pids", missing_children_inventory)
+    monkeypatch.setattr(sys.modules[__name__], "_set_child_subreaper", forbidden_subreaper)
+    monkeypatch.setattr(subprocess, "Popen", forbidden_spawn)
+
+    with pytest.raises(pytest.skip.Exception, match="procfs child inventory"):
+        _spawned_child_survives_killed_parent(tmp_path / "must_not_run.py")
+    assert forbidden_calls == []
+    assert len(opened_pidfds) == 1
+    with pytest.raises(OSError) as raised:
+        os.fstat(opened_pidfds[0])
+    assert raised.value.errno == errno.EBADF
+
+
 @pytest.mark.parametrize("wrapper_mode", ["failure", "absence"])
 @_LINUX_ONLY
 def test_child_and_adopted_pins_recover_raw_after_post_start_wrapper_loss(
@@ -1388,8 +1463,8 @@ def test_child_and_adopted_pins_recover_raw_after_post_start_wrapper_loss(
             closed_raw_pids.append(raw_pid)
         real_close(fd)
 
-    def record_reap(pid: int) -> None:
-        real_reap_child(pid)
+    def record_reap(pid: int, *, timeout: float = 10.0) -> None:
+        real_reap_child(pid, timeout=timeout)
         reaped_pids.append(pid)
 
     monkeypatch.setattr(sys.modules[__name__], "_stable_parent_identity", record_parent_pin)
@@ -1755,6 +1830,7 @@ def test_adopted_descendant_signal_errors_retry_raw_and_attempt_every_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _preflight_stable_identity_surface()
     marker = tmp_path / "adopted_descendants"
     launcher = tmp_path / "fork_two_descendants.py"
     launcher.write_text(
@@ -1780,10 +1856,7 @@ def test_adopted_descendant_signal_errors_retry_raw_and_attempt_every_identity(
     baseline = _direct_child_pids()
     owner = subprocess.Popen([sys.executable, "-B", str(launcher)])
     owner.wait(timeout=5)
-    deadline = time.monotonic() + 2.0
-    while not marker.is_file() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    descendant_pids = [int(value) for value in marker.read_text(encoding="ascii").split()]
+    descendant_pids = _wait_for_numeric_pid_marker(marker, expected_count=2, timeout=2.0)
     real_adopted_identity = _adopted_descendant_identity
     real_wrapper_signal = _signal_via_identity
     real_raw_signal = _pidfd_send_signal_syscall
@@ -1837,10 +1910,50 @@ def test_adopted_descendant_signal_errors_retry_raw_and_attempt_every_identity(
 
 
 @_LINUX_ONLY
+def test_adopted_descendant_waits_share_one_deadline_and_signal_every_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidates = {101, 102, 103}
+    timeout = 3.0
+    now = 0.0
+    signal_times: list[tuple[int, float]] = []
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    def record_signal(pidfd: int, sig: int) -> None:
+        assert sig == signal.SIGKILL
+        signal_times.append((pidfd, now))
+
+    monkeypatch.setattr(time, "monotonic", monotonic)
+    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(sys.modules[__name__], "_direct_child_pids", lambda: candidates)
+    monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", lambda pid: pid)
+    monkeypatch.setattr(sys.modules[__name__], "_pidfd_process_id", lambda pidfd: pidfd)
+    monkeypatch.setattr(sys.modules[__name__], "_proc_parent_pid", lambda _pid: os.getpid())
+    monkeypatch.setattr(sys.modules[__name__], "_signal_via_identity", record_signal)
+    monkeypatch.setattr(sys.modules[__name__], "_identity_exited", lambda _pidfd: False)
+
+    with pytest.raises(AssertionError, match="adopted descendant cleanup failed"):
+        _settle_new_adopted_descendants(set(), set(), timeout=timeout)
+
+    assert [pid for pid, _at in signal_times] == sorted(candidates)
+    assert {at for _pid, at in signal_times} == {0.0}
+    assert now <= timeout + _ADOPTED_PIN_RETRY_BACKOFF_S
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize("fail_proof_open", [False, True])
 def test_persistent_adopted_pin_failures_are_bounded_backed_off_and_deduplicated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    fail_proof_open: bool,
 ) -> None:
+    _preflight_stable_identity_surface()
     marker = tmp_path / "persistent_pin_failure_descendants"
     launcher = tmp_path / "fork_two_persistent_pin_failures.py"
     launcher.write_text(
@@ -1862,35 +1975,56 @@ def test_persistent_adopted_pin_failures_are_bounded_backed_off_and_deduplicated
         ),
         encoding="utf-8",
     )
-    previous_subreaper = _set_child_subreaper(True)
-    baseline = _direct_child_pids()
-    owner = subprocess.Popen([sys.executable, "-B", str(launcher)])
-    owner.wait(timeout=5)
-    deadline = time.monotonic() + 2.0
-    while not marker.is_file() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    descendant_pids = [int(value) for value in marker.read_text(encoding="ascii").split()]
-    proof_pidfds = {pid: _pidfd_open_syscall(pid) for pid in descendant_pids}
-    attempts = {pid: 0 for pid in descendant_pids}
+    baseline: set[int] = set()
+    owner_pid: int | None = None
+    descendant_pids: list[int] = []
+    proof_pidfds: dict[int, int] = {}
+    attempts: dict[int, int] = {}
     injected_text = "persistent adopted pin failure " + ("x" * 4096)
+    proof_open_injected = False
+    real_proof_open = _pidfd_open_syscall
+    real_adopted_identity = _adopted_descendant_identity
 
     def persistent_pin_failure(pid: int) -> int:
         attempts[pid] += 1
         raise OSError(errno.EIO, injected_text)
 
-    monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", persistent_pin_failure)
-    started = time.monotonic()
+    def open_proof(pid: int) -> int:
+        nonlocal proof_open_injected
+        if fail_proof_open and not proof_open_injected:
+            proof_open_injected = True
+            raise _UnstableIdentity("injected descendant proof pidfd failure")
+        return real_proof_open(pid)
+
+    previous_subreaper = _set_child_subreaper(True)
     try:
-        with pytest.raises(AssertionError) as raised:
-            _settle_new_adopted_descendants(baseline, {owner.pid}, timeout=3.0)
-        elapsed = time.monotonic() - started
-        assert set(attempts) == set(descendant_pids)
-        assert set(attempts.values()) == {3}
-        assert elapsed >= 0.02
-        assert elapsed < 1.0
-        diagnostic = str(raised.value)
-        assert len(diagnostic) <= 2048
-        assert diagnostic.count("persistent adopted pin failure") == len(descendant_pids)
+        baseline = _direct_child_pids()
+        owner = subprocess.Popen([sys.executable, "-B", str(launcher)])
+        owner_pid = owner.pid
+        owner.wait(timeout=5)
+        descendant_pids = _wait_for_numeric_pid_marker(marker, expected_count=2, timeout=2.0)
+        attempts = {pid: 0 for pid in descendant_pids}
+        try:
+            for pid in descendant_pids:
+                proof_pidfds[pid] = open_proof(pid)
+        except _UnstableIdentity:
+            if not fail_proof_open:
+                raise
+        else:
+            if fail_proof_open:
+                raise AssertionError("descendant proof pidfd failure was not injected")
+            monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", persistent_pin_failure)
+            started = time.monotonic()
+            with pytest.raises(AssertionError) as raised:
+                _settle_new_adopted_descendants(baseline, {owner.pid}, timeout=3.0)
+            elapsed = time.monotonic() - started
+            assert set(attempts) == set(descendant_pids)
+            assert set(attempts.values()) == {3}
+            assert elapsed >= 0.02
+            assert elapsed < 1.0
+            diagnostic = str(raised.value)
+            assert len(diagnostic) <= 2048
+            assert diagnostic.count("persistent adopted pin failure") == len(descendant_pids)
     finally:
         for pid, pidfd in proof_pidfds.items():
             if not _identity_exited(pidfd):
@@ -1901,7 +2035,20 @@ def test_persistent_adopted_pin_failures_are_bounded_backed_off_and_deduplicated
             except ChildProcessError:
                 pass
             os.close(pidfd)
-        _restore_child_subreaper(previous_subreaper)
+        monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", real_adopted_identity)
+        try:
+            _settle_new_adopted_descendants(
+                baseline,
+                ({owner_pid} if owner_pid is not None else set()),
+                timeout=3.0,
+            )
+        finally:
+            _restore_child_subreaper(previous_subreaper)
+    assert _child_subreaper_state() is previous_subreaper
+    assert proof_open_injected is fail_proof_open
+    for pid in descendant_pids:
+        with pytest.raises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
 
 
 @_LINUX_ONLY
@@ -1975,6 +2122,7 @@ def test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     descendant_marker = tmp_path / "unreported_descendant_pid"
+    partial_marker_observed = tmp_path / "unreported_descendant_partial_marker_observed"
     parent_file = tmp_path / "unreported_descendant_parent.py"
     parent_file.write_text(
         textwrap.dedent(
@@ -1982,10 +2130,14 @@ def test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped(
             import multiprocessing, os, signal, sys, time
             from pathlib import Path
             marker = Path({str(descendant_marker)!r})
+            partial_observed = Path({str(partial_marker_observed)!r})
             def worker():
                 descendant = os.fork()
                 if descendant == 0:
                     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    marker.touch()
+                    while not partial_observed.is_file():
+                        time.sleep(0.01)
                     marker.write_text(str(os.getpid()), encoding="ascii")
                     time.sleep(600)
                     os._exit(0)
@@ -2010,16 +2162,23 @@ def test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped(
     )
     real_wait_identity = _wait_for_child_identity_file
     real_adopted_identity = _adopted_descendant_identity
+    real_read_text = Path.read_text
     descendant_proofs: dict[int, int] = {}
     inventoried: set[int] = set()
 
+    def acknowledge_partial_marker(path: Path, *args, **kwargs) -> str:
+        text = real_read_text(path, *args, **kwargs)
+        if path == descendant_marker and text == "":
+            partial_marker_observed.write_bytes(b"OBSERVED_EMPTY_MARKER")
+        return text
+
     def short_identity_wait(path: Path, parent_pidfd: int, *, timeout: float) -> int:
-        deadline = time.monotonic() + 0.5
-        while not descendant_marker.is_file() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if descendant_marker.is_file():
-            descendant_pid = int(descendant_marker.read_text(encoding="ascii"))
-            descendant_proofs[descendant_pid] = _stable_identity(descendant_pid)
+        descendant_pid = _wait_for_numeric_pid_marker(
+            descendant_marker,
+            expected_count=1,
+            timeout=0.5,
+        )[0]
+        descendant_proofs[descendant_pid] = _stable_identity(descendant_pid)
         return real_wait_identity(path, parent_pidfd, timeout=min(timeout, 0.5))
 
     def record_adopted(pid: int) -> int:
@@ -2027,6 +2186,7 @@ def test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped(
         inventoried.add(pid)
         return pidfd
 
+    monkeypatch.setattr(Path, "read_text", acknowledge_partial_marker)
     monkeypatch.setattr(sys.modules[__name__], "_wait_for_child_identity_file", short_identity_wait)
     monkeypatch.setattr(sys.modules[__name__], "_adopted_descendant_identity", record_adopted)
     monkeypatch.setattr(sys.modules[__name__], "_PARENT_CLEANUP_WAIT_S", 0.1)
@@ -2034,6 +2194,7 @@ def test_unreported_sigterm_immune_descendant_is_inventoried_killed_and_reaped(
         with pytest.raises(AssertionError, match="child did not publish exact identity"):
             _spawned_child_survives_killed_parent(parent_file)
         descendant_pid = int(descendant_marker.read_text(encoding="ascii"))
+        assert partial_marker_observed.read_bytes() == b"OBSERVED_EMPTY_MARKER"
         assert descendant_pid in inventoried, "the unreported descendant was never kernel-inventoried"
         _assert_proof_pidfd_exited(descendant_proofs[descendant_pid], _identity_exited)
         with pytest.raises(ChildProcessError):
