@@ -93,6 +93,16 @@ def _source_state_reading(channel: str, state: str) -> Reading:
     )
 
 
+def _measurement_reading() -> Reading:
+    return Reading(
+        timestamp=datetime.now(UTC),
+        instrument_id="lakeshore",
+        channel="lakeshore/input_a/temperature",
+        value=4.2,
+        unit="K",
+    )
+
+
 def _typed_ready_snapshot(
     *,
     revision: int = 42,
@@ -616,6 +626,98 @@ def test_keithley_overlay_channel_state_replay_on_lazy_open(
 
         assert w._keithley_panel is not None
         block = w._keithley_panel._smua_block
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_does_not_replay_state_from_replaced_engine_incarnation(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._on_experiment_status_received(
+            {
+                "active_experiment": {"experiment_id": "exp-1"},
+                "phases": [],
+            }
+        )
+        w._last_reading_time = time.monotonic()
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+
+        # The experiment is unchanged, but the bridge now represents a new
+        # engine incarnation. Opening the panel must not make the dead
+        # incarnation's OFF observation look current.
+        w.invalidate_engine_producer()
+        live_zmq_bridge._bridge_instance_id = "f" * 32
+        w._ensure_overlay("source")
+
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_keeps_state_when_experiment_starts_before_lazy_open(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._last_reading_time = time.monotonic()
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+
+        # Starting an experiment does not create a new engine incarnation and
+        # SafetyManager does not republish the unchanged OFF state here.
+        w._on_experiment_status_received(
+            {
+                "active_experiment": {"experiment_id": "exp-1"},
+                "phases": [],
+            }
+        )
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
+        w._ensure_overlay("source")
+
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "off"
+        assert block._start_btn.isEnabled() is True
+    finally:
+        _stop_timers(w)
+
+
+def test_keithley_overlay_replays_cached_state_when_measurement_flow_recovers(
+    live_zmq_bridge: ZmqBridge,
+) -> None:
+    _app()
+    w = MainWindowV2(bridge=live_zmq_bridge)
+    store = OperatorSnapshotStore()
+    try:
+        assert live_zmq_bridge.bridge_instance_id is not None
+        w._latest_experiment_status = {"active_experiment": {"experiment_id": "exp-1"}}
+        w.render_operator_snapshot(store.accept_snapshot(_typed_ready_snapshot()))
+        w._dispatch_reading(_source_state_reading("smua", "off"))
+
+        # No measurement has arrived, so lazy-open is honestly disconnected.
+        # The panel must remain fail-closed until measurement flow is live.
+        w._ensure_overlay("source")
+        assert w._keithley_panel is not None
+        block = w._keithley_panel._smua_block
+        assert block._channel_state == "unknown"
+        assert block._start_btn.isEnabled() is False
+
+        # Drive the real shell ingress + status-tick path. The source-state
+        # producer is event-driven and emits nothing on this transition.
+        w._dispatch_reading(_measurement_reading())
+        w._tick_status()
+
         assert block._channel_state == "off"
         assert block._start_btn.isEnabled() is True
     finally:
