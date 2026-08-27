@@ -158,7 +158,7 @@ def test_missing_stale_moved_or_cross_owned_capsule_fails_closed(tmp_path: Path)
     validate_resume(raw, SCHEMA, **kwargs)
     for changed in (
         {"raw": None},
-        {"capsule_path": "scratchpad/montana/exec/progress.md"},
+        {"capsule_path": "foreign/progress.yaml"},
         {"agent_id": "/root/another-worker"},
         {"head": "4" * 40},
     ):
@@ -265,7 +265,7 @@ def test_legacy_or_self_asserted_capsule_cannot_claim_continuity(tmp_path: Path)
             SCHEMA,
             **{
                 **_resume_kwargs(successor, repository),
-                "capsule_path": "scratchpad/montana/exec/progress.md",
+                "capsule_path": "foreign/progress.yaml",
             },
             previous_raw=previous,
         )

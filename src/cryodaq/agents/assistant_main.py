@@ -2,8 +2,8 @@
 
 B1 (roadmap: extract Гемма + RAG out of the safety-critical engine
 process). This module is the *only* place agents/ code runs now — the
-engine process no longer imports it (see ``scratchpad/montana/exec/impl_b1.md``
-for the full coupling map and design).
+engine process no longer imports it. The coupling described below is the
+public design rationale for that separation.
 
 This process talks to the engine over the same trust-bounded ZMQ sockets
 the GUI already uses:

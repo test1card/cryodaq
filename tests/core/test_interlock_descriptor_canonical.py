@@ -6,7 +6,7 @@ F-1 made ``LiveChannelDescriptorCatalog.bind()`` canonicalize every published
 (space + display-name suffix) and went permanently silent for every Т1–Т12
 cryostat/compressor overtemp interlock once F-1 landed — a safety-critical
 regression with no prior test coverage (see
-scratchpad/montana/exec/reviews/interlock_canonical_fix.md).
+the public regression rationale in this docstring).
 
 This test wires the REAL production ``config/interlocks.yaml`` +
 ``config/channel_descriptors.yaml`` through a real

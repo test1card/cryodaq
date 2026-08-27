@@ -19,7 +19,7 @@ from pathlib import Path
 from generate_fable_review_map import _kind, _review_lane
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "scratchpad" / "montana" / "exec" / "dual_review_coverage.md"
+OUTPUT = ROOT / ".audit-run" / "review-ledgers" / "dual_review_coverage.md"
 BASE_REF = "master"
 
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -120,7 +120,7 @@ REVIEW_RUNS = (
         paths=R07_PATHS,
         verdict="reviewed-good",
         whole_file=False,
-        evidence="scratchpad/montana/exec/fable_runs/FABLE-R07-20260718.md",
+        evidence="External review record is not published.",
     ),
     ReviewRun(
         run_id="CODEX+FABLE-R02B-20260718",
@@ -130,7 +130,7 @@ REVIEW_RUNS = (
         paths=R02_PATHS,
         verdict="reviewed-good",
         whole_file=False,
-        evidence="scratchpad/montana/exec/fable_runs/FABLE-R02B-20260718.md",
+        evidence="External review record is not published.",
     ),
     ReviewRun(
         run_id="FABLE-BOUNDARY-01-20260719",
@@ -140,31 +140,19 @@ REVIEW_RUNS = (
         paths=FABLE_BOUNDARY01_WHOLE_PATHS,
         verdict="conditional-pass-with-P3-findings",
         whole_file=True,
-        evidence="scratchpad/montana/exec/fable_runs/FABLE-BOUNDARY-01-20260719.md",
+        evidence="External review record is not published.",
     ),
 )
 
-WORKTREE_REVIEW_RUNS: tuple[WorktreeReviewRun, ...] = (
-    WorktreeReviewRun(
-        run_id="FABLE-GUI-01-20260719",
-        reviewers=("fable",),
-        base="503c8bf8d884654256ede4f08a9e44ab7b382242",
-        hashes=_report_sha256_rows(
-            "scratchpad/montana/exec/fable_runs/FABLE-GUI-01-20260719.md",
-            "### SHA-256 table — files fully read line-by-line (production)",
-            "Fully read test file:",
-        ),
-        verdict="conditional-pass-with-F1-F15",
-        whole_file_reviewers=("fable",),
-        evidence="scratchpad/montana/exec/fable_runs/FABLE-GUI-01-20260719.md",
-    ),
-)
+# The underlying worktree review record is private and deliberately not
+# published. Without its immutable report this generator grants it no coverage.
+WORKTREE_REVIEW_RUNS: tuple[WorktreeReviewRun, ...] = ()
 
 ARCHITECTURE_REVIEW_ROWS = (
     (
         "| `FABLE-ARCH-01-20260719` | fable | `e38930df6b2d` plus dirty worktree as read | "
         "CONDITIONAL_PASS | 8.5/10 | no line-level credit; moving-tree limitations | "
-        "scratchpad/montana/exec/fable_runs/FABLE-ARCH-01-20260719.md |"
+        "External review record is not published. |"
     ),
 )
 
@@ -263,7 +251,7 @@ def _candidate_paths(merge_base: str) -> list[str]:
     )
     assert isinstance(untracked_raw, bytes)
     paths.update(_zpaths(untracked_raw))
-    paths.add("scratchpad/montana/exec/dual_review_coverage.md")
+    paths.add(OUTPUT.relative_to(ROOT).as_posix())
     return sorted(paths)
 
 

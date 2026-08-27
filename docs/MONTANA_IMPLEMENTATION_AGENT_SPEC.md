@@ -49,10 +49,9 @@ these reviewer-owned surfaces:
 - Git history, index, branches, tags, remotes, releases, or pull requests.
 
 When code makes a governing document stale, the implementation agent records
-the exact required delta in
-`scratchpad/montana/exec/implementation_agent_doc_requests.md`. It does not
-apply the delta. The reviewer adjudicates and authors it after reviewing the
-code.
+the exact required delta in its current reviewer ticket. It does not apply the
+delta. The reviewer adjudicates and authors it after reviewing the code. This
+keeps campaign coordination out of the published repository.
 
 The reviewer never repairs code directly. Every code correction is returned to
 the implementation agent as a bounded finding with exact behavior, evidence,
@@ -156,9 +155,7 @@ files in this order:
 3. this file completely;
 4. `PROJECT_STATUS.md` for open physical and release-boundary gates;
 5. this agent's own ignored context capsule from section 9, when it exists;
-6. `scratchpad/montana/exec/implementation_agent_doc_requests.md`, when it
-   exists and this agent owns it;
-7. the current reviewer ticket or standing-lane disposition selected by the
+6. the current reviewer ticket or standing-lane disposition selected by the
    live roadmap/contract.
 
 The first orientation is strictly read-only. Missing or stale optional
@@ -935,10 +932,10 @@ exact next action / updated-at timestamp:
 authority: none; live user, governance, and Git must be revalidated
 ```
 
-The implementation agent also owns
-`scratchpad/montana/exec/implementation_agent_doc_requests.md`. Each request
-names the code blob, governing file/section, old claim, new verified claim, and
-supporting test. The reviewer owns all dispositions and governing edits.
+The implementation agent records each required documentation update in its
+current reviewer ticket. Each request names the code blob, governing
+file/section, old claim, new verified claim, and supporting test. The reviewer
+owns all dispositions and governing edits.
 
 After compaction, never resume from memory alone. Re-read the files in section
 2 and verify every recorded root, branch, HEAD/tree, governing hash, dirty

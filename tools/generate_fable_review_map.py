@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT = ROOT / "scratchpad" / "montana" / "exec" / "fable_review_map.md"
+OUTPUT = ROOT / ".audit-run" / "review-ledgers" / "fable_review_map.md"
 BASE_REF = "master"
 
 # Include our local audit implementation before it is staged. Generated audit
@@ -25,7 +25,7 @@ BASE_REF = "master"
 # make its own fingerprint self-referential.
 LOCAL_AUDIT_PATHS = {
     "tools/generate_fable_review_map.py",
-    "scratchpad/montana/exec/fable_review_map.md",
+    ".audit-run/review-ledgers/fable_review_map.md",
 }
 
 STATUSES = ("unreviewed", "corrected", "reviewed-good", "reviewed-bad")
@@ -277,10 +277,7 @@ def _escape(value: str) -> str:
 
 
 def _tree_fingerprint() -> str:
-    exclusions = (
-        ":(exclude)scratchpad/montana/exec/fable_review_map.md",
-        ":(exclude)scratchpad/montana/exec/fable_runs/**",
-    )
+    exclusions = (":(exclude).audit-run/review-ledgers/fable_review_map.md",)
     committed = _git(
         "diff",
         "--binary",
@@ -306,9 +303,6 @@ def _inventory() -> tuple[list[str], set[str], set[str]]:
     )
     working = _lines(_git("diff", "--name-only", "--diff-filter=ACDMRTUXB", "HEAD"))
     local_audit = {path for path in LOCAL_AUDIT_PATHS if (ROOT / path).exists()}
-    runs = ROOT / "scratchpad" / "montana" / "exec" / "fable_runs"
-    if runs.exists():
-        local_audit.update(file.relative_to(ROOT).as_posix() for file in runs.iterdir() if file.is_file())
     working.update(local_audit)
     return sorted(committed | working), committed, working
 
@@ -437,7 +431,7 @@ def main() -> None:
         "|---|---|---|---|---|",
         "| `FABLE-PRELIM-20260717` | Whole architecture / earlier dirty snapshot | Architecture and high-risk pattern sweep; not literal all-file review | Completed, partial transcript | Findings summarized below; exact MON-02..MON-06 text unavailable |",
         "| `FABLE-R03A-ATTEMPT1` | `R03` / invalid expected full SHA | Preflight only | Aborted correctly; zero files reviewed | Superseded `SNAPSHOT_MISMATCH` stub |",
-        "| `FABLE-R03A-20260717` | `R03` / committed HEAD only | Assistant query allowlist, web write auth and tests | `CONDITIONAL_PASS`: no P0/P1, one P2 and five P3 IDs across five files | `scratchpad/montana/exec/fable_runs/FABLE-R03A-20260717.md` |",
+        "| `FABLE-R03A-20260717` | `R03` / committed HEAD only | Assistant query allowlist, web write auth and tests | `CONDITIONAL_PASS`: no P0/P1, one P2 and five P3 IDs across five files | External review record is not published. |",
         "| `FABLE-R00-20260717` | `R00` / future frozen candidate | Safety, engine and launcher shutdown | Blocked only on active authors freezing diff | Planned |",
         "",
         "## Finding registry",

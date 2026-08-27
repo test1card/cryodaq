@@ -1348,10 +1348,10 @@ git log --reverse --format='%h %ad %s' --date=short \
   f5d6434d20dffae62c9f03fbc12f68b03f48351b..HEAD
 ```
 
-The progress ledger under `scratchpad/montana/exec/progress.md` is detailed campaign
-evidence, not permanent product policy. `AGENTS.md`, `ROADMAP.md`,
-`PROJECT_STATUS.md`, `docs/architecture.md`, and the design system remain the
-canonical maintained sources.
+Campaign progress records are not permanent product policy and are not
+published here. `AGENTS.md`, `ROADMAP.md`, `PROJECT_STATUS.md`,
+`docs/architecture.md`, and the design system remain the canonical maintained
+sources.
 
 ## 17. Review and collaboration methodology
 

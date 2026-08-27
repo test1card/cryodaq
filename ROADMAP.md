@@ -600,13 +600,13 @@ safety boundaries.
 
 The owner requires all project documentation to use Simplified Technical
 English (ASD-STE100), via the skill installed at `docs/skills/asd-ste100/`.
-The direction requiring it, and the decision on what it covers, are recorded
-outside this repository; this entry is the plan for the retrofit of the EXISTING
-corpus.
+This requirement binds new and changed client-facing English documentation and
+agent-layer governed files. Russian-language text, verbatim quotes, immutable evidence and archives, and changelog history
+are exempt. This entry is the plan for the retrofit of the EXISTING corpus.
 
 Sequencing: this is a parallel documentation track. It must not displace the
 software-side pre-lab phases (H3/H4, F35, F36) above, which set the lab date.
-New and changed English text conforms immediately (per the obligation);
+New and changed English text in that scope conforms immediately;
 existing documents convert in the slices below, each slice one PR, started
 after the current open-PR queue drains.
 
@@ -629,8 +629,7 @@ files so the same document is not rewritten twice:
    purge and STE pass complete here). ROADMAP.md itself is deliberately NOT a
    purge target: its remaining campaign-name occurrences are the archived-plan
    stub heading, section names, and generator/file identifiers — historical
-   identifiers the client-facing language amendment explicitly permits (see its disposition
-   list).
+   identifiers that remain for historical traceability.
 
 Honest costs, stated so this entry cannot decay into a checkbox: STE
 conversion of technical prose is slow (each slice is a real editing pass, not

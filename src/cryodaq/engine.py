@@ -1399,7 +1399,7 @@ async def _handle_multiline_burst_command(
 # B1 (2026-07): live index mutation and bootstrap-on-empty were removed.
 # index logic below moved to cryodaq.agents.assistant_main — the standalone
 # assistant process now owns the RAG index end-to-end (own REP command
-# surface at tcp://127.0.0.1:5557). See scratchpad/montana/exec/impl_b1.md.
+# surface at tcp://127.0.0.1:5557).
 def _run_calibration_command(
     action: str,
     cmd: dict[str, Any],
@@ -7172,7 +7172,6 @@ async def _run_engine(
     #    ``telegram_bot._query_agent = <in-process AssistantQueryAgent>``)
     #    still resolves, by forwarding to the assistant process's own
     #    REP (:5557) instead of calling an in-process object.
-    # See scratchpad/montana/exec/impl_b1.md for the full design.
     if telegram_bot is not None:
         telegram_bot._query_agent = _RemoteAssistantQueryProxy()
 

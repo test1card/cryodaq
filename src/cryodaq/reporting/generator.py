@@ -174,8 +174,7 @@ class ReportGenerator:
         # B1 (2026-07): Гемма-generated annotation used to be produced
         # in-process here (import + synchronous Ollama call from the
         # engine process). B1 moved all LLM/RAG code out of the engine —
-        # the intro paragraph is not reinstated via a cross-process call
-        # in this pass (see scratchpad/montana/exec/impl_b1.md, "forks").
+        # the intro paragraph is not reinstated via a cross-process call.
         # ``_build_document`` already treats ``gemma_intro=None`` as
         # "skip the annotation section", which is exactly the existing
         # graceful-degradation behaviour when Ollama was unavailable.

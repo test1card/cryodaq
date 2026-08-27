@@ -452,3 +452,12 @@ eight tracked paths, every one of which is read by tests, tools or continuous
 integration. Until those land, a reader still meets identifiers in the register,
 in `tests/release/`, and in several `tools/ci_*` comments. They are work in
 progress, not a contradiction of this decision.
+
+## [Coordinator] 2026-08-27 — Campaign-name inventory corrected on the reviewed tree
+
+This supersedes only the campaign-codename count in the preceding owner decision.
+On commit `3e3b770285fcdc4eae074f1f16fd641ca7a67d13`, run from the repository
+root, `git grep -Il Montana | wc -l` printed `26`; the case-insensitive
+`git grep -Iil Montana | wc -l` printed `51`. Those commands bind the counts to
+that immutable reviewed commit. They are an inventory of remaining occurrences,
+not a disposition or permission to retain any particular one.

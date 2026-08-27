@@ -1718,6 +1718,76 @@ _VERBATIM_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+_PRIVATE_PUBLICATION_PATHS = frozenset(
+    {
+        "docs/OBLIGATIONS.md",
+        "docs/campaigns/MONTANA_CAMPAIGN_ARCHIVE.md",
+    }
+)
+_PRIVATE_SCRATCHPAD_ROOT = "scratchpad" + "/montana/"
+
+
+def _private_publication_violations(tracked_paths: set[str], grep_output: str) -> list[str]:
+    """Return private material that must never return to the published tree."""
+
+    violations = [f"tracked private path: {path}" for path in sorted(_PRIVATE_PUBLICATION_PATHS & tracked_paths)]
+    if grep_output:
+        violations.append(f"tracked reference under private scratchpad root: {_PRIVATE_SCRATCHPAD_ROOT}")
+    return violations
+
+
+def test_instrument_repository_excludes_private_register_archive_and_scratchpad() -> None:
+    """Publication guard for the private register/archive removal decision."""
+
+    tracked_paths = set(_tracked_files())
+    grep = subprocess.run(
+        ["git", "grep", "-I", "-n", _PRIVATE_SCRATCHPAD_ROOT],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert grep.returncode in (0, 1), grep.stderr
+    assert not _private_publication_violations(tracked_paths, grep.stdout)
+
+    # Negative controls: restoring either removed private document or a
+    # reference below its old root must make this publication guard fail.
+    assert _private_publication_violations({"docs/OBLIGATIONS.md"}, "") == ["tracked private path: docs/OBLIGATIONS.md"]
+    assert _private_publication_violations(set(), f"src/example.py:{_PRIVATE_SCRATCHPAD_ROOT}private.md") == [
+        f"tracked reference under private scratchpad root: {_PRIVATE_SCRATCHPAD_ROOT}"
+    ]
+
+
+def test_ste100_scope_remains_public_and_actionable() -> None:
+    """The roadmap must retain the documentation scope after private records leave."""
+
+    roadmap = _read(REPO_ROOT / "ROADMAP.md")
+    for required_scope_text in (
+        "client-facing English documentation",
+        "agent-layer governed files",
+        "Russian-language text",
+        "verbatim quotes",
+        "immutable evidence and archives",
+        "changelog history",
+    ):
+        assert required_scope_text in roadmap
+
+
+def test_campaign_name_inventory_records_its_command_and_immutable_tree() -> None:
+    """A current-count correction must remain reproducible from its stated tree."""
+
+    decisions = _read(REPO_ROOT / "docs/DECISIONS.md")
+    heading = "## [Coordinator] 2026-08-27 — Campaign-name inventory corrected on the reviewed tree"
+    correction = decisions.split(heading, 1)[1]
+    for required_evidence in (
+        "3e3b770285fcdc4eae074f1f16fd641ca7a67d13",
+        "git grep -Il Montana | wc -l",
+        "printed `26`",
+        "git grep -Iil Montana | wc -l",
+        "printed `51`",
+    ):
+        assert required_evidence in correction
+
 
 def _is_path_candidate(span: str) -> bool:
     if not any(span.startswith(p) for p in _PATH_PREFIXES):

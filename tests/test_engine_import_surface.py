@@ -1,8 +1,7 @@
 """B1 exit criterion: the engine process imports no LLM/RAG/agents code.
 
 Regression guard for the whole point of B1 (roadmap: extract Гемма + RAG
-out of the safety-critical engine process into cryodaq-assistant — see
-scratchpad/montana/exec/impl_b1.md). Everything the engine still does
+out of the safety-critical engine process into cryodaq-assistant). Everything the engine still does
 with the assistant is either emit events (ZMQ "events" topic) or answer
 read-only queries the assistant process asks for — engine.py itself must
 never import ``cryodaq.agents`` or its RAG/LLM dependencies again.
