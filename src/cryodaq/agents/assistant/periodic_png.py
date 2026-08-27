@@ -122,11 +122,14 @@ _PROHIBITED_LOCATOR = re.compile(r"\S*api\.telegram\.org/bot\S*", re.IGNORECASE)
 def _bounded_text(value: str) -> str:
     """Return state-safe diagnostic text within the runtime health budget."""
 
-    # Bound before locator matching: its leading ``\S*`` backtracks quadratically
-    # through a long whitespace-free diagnostic when no locator is present.
+    # Redact before taking a prefix. Otherwise the prefix can cut a credential into a
+    # short fragment that no longer matches the credential grammar and then becomes
+    # operator-visible when whitespace is collapsed. Keep the potentially quadratic
+    # prohibited-locator matcher bounded after that credential-safe cut.
     source = value.encode("utf-8", errors="replace").decode("utf-8")
+    source = _redact(source)
     source = source[: _RUNTIME_REASON_MAX_CHARS * 16]
-    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", _redact(source)).split())
+    detail = " ".join(_PROHIBITED_LOCATOR.sub("<telegram-url-removed>", source).split())
     if len(detail) > _RUNTIME_REASON_MAX_CHARS:
         detail = detail[: _RUNTIME_REASON_MAX_CHARS - 1] + "\u2026"
     return detail
@@ -245,6 +248,25 @@ async def _acquire_lock_cancellation_safe(
         if settlement_error is not None:
             raise cancelled from settlement_error
         raise cancelled
+
+
+async def _run_blocking_side_effect_cancellation_safe(
+    run_blocking: RunBlocking,
+    function: Callable[..., Any],
+    /,
+    *args: object,
+    **kwargs: object,
+) -> Any:
+    """Settle an executor-owned side effect before cancellation can unwind its owner."""
+
+    task = asyncio.create_task(run_blocking(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        _value, settlement_error = await _settle_cancelled_task(task)
+        if settlement_error is not None:
+            raise cancelled from settlement_error
+        raise
 
 
 def _exact_nonnegative(value: object, field: str) -> int:
@@ -1817,6 +1839,8 @@ class PeriodicPngSupervisor:
                     if self._leader_fd is not None:
                         await self._stop_then_write_orderly(disabled=True)
                         self._release_leader()
+                    elif self._published_health_record is not None:
+                        await self._write_orderly_if_unowned(disabled=True)
                     backoff_index = 0
                     await self._sleep_or_stop(_CONFIG_POLL_S)
                     continue
@@ -1956,12 +1980,12 @@ class PeriodicPngSupervisor:
                 await self._stop_coordinator()
             finally:
                 if self._stop_requested and self._leader_fd is None and self._published_health_record is not None:
-                    await self._write_stopped_if_unowned()
+                    await self._write_orderly_if_unowned(disabled=False)
                 self._release_leader()
                 self._run_task = None
 
-    async def _write_stopped_if_unowned(self) -> None:
-        """Publish terminal health only while holding otherwise-free authority."""
+    async def _write_orderly_if_unowned(self, *, disabled: bool) -> None:
+        """Replace this supervisor's exact receipt while holding re-elected authority."""
 
         try:
             leader_fd = await _acquire_lock_cancellation_safe(
@@ -1991,7 +2015,7 @@ class PeriodicPngSupervisor:
                 # provenance, not merely a familiar health status, is the
                 # authority to replace that record with terminal health.
                 return
-            await self._write_orderly_health(disabled=False)
+            await self._write_orderly_health(disabled=disabled)
         finally:
             self._release_leader()
 
@@ -2211,7 +2235,13 @@ class PeriodicPngSupervisor:
                     "expected_owner_token": active["owner_token"],
                     "expected_status": PeriodicStatus(active["status"]),
                 }
-            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            await _run_blocking_side_effect_cancellation_safe(
+                self._run_blocking,
+                write_periodic_state,
+                self._data_dir,
+                candidate,
+                **kwargs,
+            )
             self._published_health_record = candidate
             return True
         except Exception:
@@ -2238,7 +2268,13 @@ class PeriodicPngSupervisor:
                     "expected_owner_token": active["owner_token"],
                     "expected_status": PeriodicStatus(active["status"]),
                 }
-            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            await _run_blocking_side_effect_cancellation_safe(
+                self._run_blocking,
+                write_periodic_state,
+                self._data_dir,
+                candidate,
+                **kwargs,
+            )
             self._published_health_record = candidate
         except Exception:
             return
@@ -2277,7 +2313,13 @@ class PeriodicPngSupervisor:
                     "expected_owner_token": active["owner_token"],
                     "expected_status": PeriodicStatus(active["status"]),
                 }
-            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            await _run_blocking_side_effect_cancellation_safe(
+                self._run_blocking,
+                write_periodic_state,
+                self._data_dir,
+                candidate,
+                **kwargs,
+            )
             self._published_health_record = candidate
         except Exception:
             return
@@ -2303,7 +2345,13 @@ class PeriodicPngSupervisor:
                     "expected_owner_token": active["owner_token"],
                     "expected_status": PeriodicStatus(active["status"]),
                 }
-            await self._run_blocking(write_periodic_state, self._data_dir, candidate, **kwargs)
+            await _run_blocking_side_effect_cancellation_safe(
+                self._run_blocking,
+                write_periodic_state,
+                self._data_dir,
+                candidate,
+                **kwargs,
+            )
             self._published_health_record = candidate
         except Exception:
             return

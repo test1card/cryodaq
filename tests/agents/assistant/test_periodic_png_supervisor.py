@@ -892,6 +892,74 @@ async def test_cancelled_leader_acquisition_releases_late_fd(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_cancelled_failure_writer_settles_before_leader_release(
+    tmp_path: Path,
+) -> None:
+    first_write_entered = asyncio.Event()
+    release_first_write = asyncio.Event()
+    detached_writes: list[asyncio.Task[None]] = []
+    write_calls = 0
+
+    async def executor_like_blocking(fn, *args, **kwargs):
+        nonlocal write_calls
+        if fn is write_periodic_state:
+            write_calls += 1
+            if write_calls == 1:
+
+                async def delayed_side_effect() -> None:
+                    first_write_entered.set()
+                    await release_first_write.wait()
+                    fn(*args, **kwargs)
+
+                worker = asyncio.create_task(delayed_side_effect())
+                try:
+                    return await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    detached_writes.append(worker)
+                    raise
+        return fn(*args, **kwargs)
+
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: Coordinator(),
+        config_loader=lambda _path: (_ for _ in ()).throw(RuntimeError("loader failed")),
+        clock=Clock(),
+        run_blocking=executor_like_blocking,
+    )
+    run_task = asyncio.create_task(supervisor.run())
+    await first_write_entered.wait()
+    run_task.cancel()
+    await asyncio.sleep(0)
+
+    competing_owner = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    escaped_before_settlement = competing_owner is not None
+    try:
+        assert not run_task.done()
+        assert competing_owner is None
+    finally:
+        release_first_write.set()
+        await asyncio.gather(*detached_writes, return_exceptions=True)
+        if competing_owner is not None:
+            release_lock(
+                competing_owner,
+                PERIODIC_LEADER_LOCK,
+                unlink=False,
+                lock_dir=tmp_path,
+            )
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    assert not escaped_before_settlement
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "stopped"
+    settled_owner = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert settled_owner is not None
+    release_lock(settled_owner, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+
+
+@pytest.mark.asyncio
 async def test_reload_factory_failure_replaces_prior_ready_with_nonready(
     tmp_path: Path,
 ) -> None:
@@ -1119,6 +1187,67 @@ async def test_raising_config_loader_backs_off_then_recovers_to_idle(
         await asyncio.sleep(0.001)
     assert calls == 2
     assert not task.done()
+    await supervisor.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_loader_failure_then_unrequested_replaces_owned_receipt_with_disabled(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def loader(_path: Path) -> PeriodicPngConfigLoad:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient loader failure")
+        return PeriodicPngConfigLoad(
+            selected_path=None,
+            requested=False,
+            runnable=False,
+            config=None,
+            error_code=None,
+            error_text="",
+        )
+
+    class FailureThenDisabledClock(Clock):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sleeps = 0
+            self.disabled_sleep = asyncio.Event()
+
+        async def sleep(self, _seconds: float) -> None:
+            self.sleeps += 1
+            if self.sleeps == 1:
+                return
+            self.disabled_sleep.set()
+            await asyncio.Event().wait()
+
+    async def direct_blocking(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    clock = FailureThenDisabledClock()
+    supervisor = PeriodicPngSupervisor(
+        data_dir=tmp_path,
+        config_dir=tmp_path,
+        periodic_allowed=True,
+        coordinator_factory=lambda _config: pytest.fail("factory must not run"),
+        config_loader=loader,
+        clock=clock,
+        run_blocking=direct_blocking,
+    )
+    task = asyncio.create_task(supervisor.run())
+    await clock.disabled_sleep.wait()
+
+    assert calls == 2
+    health = load_periodic_state(tmp_path).payload["health"]
+    assert health["status"] == "disabled"
+    assert health["error_code"] == "periodic_disabled"
+    fd = try_acquire_lock(PERIODIC_LEADER_LOCK, lock_dir=tmp_path)
+    assert fd is not None
+    release_lock(fd, PERIODIC_LEADER_LOCK, unlink=False, lock_dir=tmp_path)
+
     await supervisor.stop()
     await task
 

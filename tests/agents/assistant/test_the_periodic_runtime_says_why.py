@@ -258,6 +258,21 @@ def test_a_credential_bearing_exception_is_persisted_safely_by_the_production_wr
     assert "401" in health["error_text"]
 
 
+def test_production_writer_redacts_a_credential_crossing_the_input_bound(tmp_path) -> None:
+    token = "7701234567:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
+    retained_prefix = "failure "
+    padding = " " * (periodic_png._RUNTIME_REASON_MAX_CHARS * 16 - len(retained_prefix) - 21)
+    cause = RuntimeError(retained_prefix + padding + token)
+    supervisor, _clock = _supervisor(tmp_path, lambda _config: pytest.fail("factory must not run"))
+
+    asyncio.run(supervisor._write_runtime_failed_health(cause))
+
+    text = load_periodic_state(tmp_path).payload["health"]["error_text"]
+    assert "failure" in text
+    assert "7701234567:" not in text
+    assert "ABCDEFGHIJ" not in text
+
+
 def test_an_unrenderable_exception_still_replaces_stale_health(tmp_path) -> None:
     class _UnrenderableError(RuntimeError):
         def __str__(self) -> str:
