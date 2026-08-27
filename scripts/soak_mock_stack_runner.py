@@ -39,6 +39,7 @@ import yaml
 from cryodaq.logging_setup import (
     ASSISTANT_LOG_BACKUP_COUNT,
     ASSISTANT_LOG_BASENAME,
+    ASSISTANT_LOG_SUFFIX_FORMAT,
     rotated_log_name_pattern,
 )
 
@@ -1346,12 +1347,25 @@ def _rotated_assistant_log_names(
             enumerated += 1
             if enumerated > _MAX_ASSISTANT_LOG_DIRECTORY_ENTRIES:
                 return _AssistantLogDirectoryRefusal.TOO_MANY_ENTRIES
-            if _ASSISTANT_LOG_ROTATION_RE.fullmatch(entry.name) is None:
+            if not _is_valid_assistant_log_rotation_name(entry.name):
                 continue
             rotated.append(entry.name)
             if len(rotated) > _ASSISTANT_LOG_SCAN_ROTATION_CEILING:
                 return _AssistantLogDirectoryRefusal.TOO_MANY_ROTATIONS
     return sorted(rotated)
+
+
+def _is_valid_assistant_log_rotation_name(name: str) -> bool:
+    """Return whether ``name`` is an exact, real handler-supported calendar day."""
+
+    if _ASSISTANT_LOG_ROTATION_RE.fullmatch(name) is None:
+        return False
+    suffix = name.removeprefix(f"{_ASSISTANT_LOG_ACTIVE_NAME}.")
+    try:
+        time.strptime(suffix, ASSISTANT_LOG_SUFFIX_FORMAT)
+    except ValueError:
+        return False
+    return True
 
 
 def _assistant_log_files(

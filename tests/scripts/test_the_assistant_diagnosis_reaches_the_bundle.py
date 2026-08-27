@@ -1644,6 +1644,52 @@ def test_rotated_log_enumeration_streams_exact_dated_names_only(
     assert "NONCANONICAL MUST NOT PUBLISH" not in published
 
 
+def _write_impossible_rotation_budget_case(state_root: Path) -> None:
+    """Put a width-correct impossible day after a genuine day in retention order."""
+
+    logs = state_root / "logs"
+    (logs / "assistant.log.2026-02-28").write_bytes(b"GENUINE ROTATION MUST SURVIVE\n")
+    impossible_record = b"IMPOSSIBLE DATE LOOKALIKE\n"
+    impossible = logs / "assistant.log.2026-02-31"
+    impossible.write_bytes(impossible_record * (runner._MAX_LAUNCHER_LOG_BYTES // len(impossible_record) + 2))
+    assert impossible.stat().st_size > runner._MAX_LAUNCHER_LOG_BYTES
+    (logs / "assistant.log").write_bytes(b"ACTIVE\n")
+
+
+def test_impossible_calendar_rotation_cannot_consume_the_retained_budget(state_root: Path) -> None:
+    """An oversized impossible date must not displace a genuine older rotation."""
+
+    _write_impossible_rotation_budget_case(state_root)
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "GENUINE ROTATION MUST SURVIVE" in published
+    assert "ACTIVE" in published
+    assert "IMPOSSIBLE DATE LOOKALIKE" not in published
+
+
+def test_width_only_rotation_recognition_would_displace_the_genuine_rotation(
+    state_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation control: the former regex-only admission loses the genuine day."""
+
+    _write_impossible_rotation_budget_case(state_root)
+    monkeypatch.setattr(
+        runner,
+        "_is_valid_assistant_log_rotation_name",
+        lambda name: runner._ASSISTANT_LOG_ROTATION_RE.fullmatch(name) is not None,
+    )
+    evidence = _Evidence()
+
+    runner._publish_assistant_log(evidence, state_root)
+
+    published = evidence.logs[runner._ASSISTANT_LOG_EVIDENCE_NAME]
+    assert "IMPOSSIBLE DATE LOOKALIKE" in published
+    assert "GENUINE ROTATION MUST SURVIVE" not in published
+
+
 def test_too_many_rotated_logs_refuse_the_child_writable_directory(state_root: Path) -> None:
     """More than retention plus one interrupted-rollover residue must refuse."""
 

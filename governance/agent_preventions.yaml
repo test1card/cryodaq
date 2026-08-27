@@ -3459,6 +3459,14 @@ false_green_pairs:
     ci_partition: remaining
     red_evidence: exact_d757aa40dcc84c080fd6417e53da39418ac9e04c_tree_ef02a303075a3b8cf3f8644484abaf4f5daaf9f9_prior_no_newline_and_full_bound_tests_omitted_a_maximum_plus_one_single_record_whose_only_delimiter_was_the_final_byte_so_the_production_publisher_returned_the_false_absent_marker
     green_evidence: pending_corrected_worktree_blobs_fbff3be3a3c680e627275685188668a3e97048eb_and_ae09a4201eb2d6c6c0579e5b93bf8b7555c6aebb_and_hosted_remaining_partition
+  - id: ASSISTANT-LOG-ROTATION-CALENDAR-FALSE-GREEN-001
+    status: open
+    scope: product_contract
+    runtime_prevention_id: ASSISTANT-LOG-ROTATION-CALENDAR-AUTHORITY-001
+    guard: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_width_only_rotation_recognition_would_displace_the_genuine_rotation
+    ci_partition: remaining
+    red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_found_that_width_only_rotation_recognition_admitted_an_impossible_calendar_suffix_and_an_executed_mutation_restoring_that_logic_displaced_the_genuine_2026_02_28_rotation_with_oversized_2026_02_31_content
+    green_evidence: pending_corrected_worktree_blobs_70af6458543390a479996b0b7ac34975a6d5c106_and_838ed3bd8e09f573695e17de53bce18dec5f4d7c_and_hosted_remaining_partition
   - id: PERIODIC-LIVE-HELD-CALLBACK-CATEGORY-FALSE-GREEN-003
     status: open
     scope: product_contract
@@ -7073,3 +7081,25 @@ records:
     automation_limit: The twelve registered production-path guard nodes pass locally on Windows. Real symlink creation and filesystem fifo execution are platform-gated here and remain pending a POSIX hosted remaining partition; the corrected candidate itself is not yet sealed by hosted CI.
     red_evidence: exact_starting_commit_fe0c3abba15ce0476cb6e580cdbcc102295b6a6c_production_blob_14929041bd9f3c0260b6ed0d203297d6c7dbc1b0_final_guard_blob_9c66f3425a67cda3434214efcd882ea69bdfd714_python_3_14_3_Windows_six_exact_red_on_revert_parameters_failed_external_hard_link_bytes_were_published_Path_read_bytes_was_called_before_the_bound_and_sink_artifact_pair_bridge_pipe_and_source_snapshot_exit_each_replaced_PrimaryFailure_with_CleanupInterrupted_plus_local_corrected_production_blob_1ecfe9bf4ab7f871b2e0da0a5c698900a0588d04_guard_blob_ab410272adb9a894e5ff1f1936a5c2d407e2166a_two_independent_no_primary_mutations_each_failed_only_the_new_node_while_the_existing_six_parameter_primary_node_passed
     green_evidence: local_corrected_production_blob_1ecfe9bf4ab7f871b2e0da0a5c698900a0588d04_guard_blob_ab410272adb9a894e5ff1f1936a5c2d407e2166a_python_3_14_3_Windows_full_guard_module_50_passed_four_platform_skipped_and_full_scripts_directory_225_passed_100_platform_skipped_pending_hosted_remaining_partition
+  - id: ASSISTANT-LOG-ROTATION-CALENDAR-AUTHORITY-001
+    status: open
+    scope: product_contract
+    authority_source: AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+    applies_to: Dated assistant-log rotation admission and bounded retained-tail publication through scripts/soak_mock_stack_runner.py.
+    classification: evidence_retention_authority
+    correction_owner: primary
+    guard_owner: reviewer
+    disposition_owner: reviewer
+    consequence: A child-created name with the right width but an impossible calendar date can consume the retained byte budget and displace a genuine diagnostic rotation from the week-run evidence bundle.
+    invariant: A rotated assistant-log name is admitted only when it matches the handler-derived name grammar and its suffix is a real calendar date under the same authoritative suffix format. An impossible date never consumes the rotation count or retained byte budget, and genuine rotations remain ordered oldest first before the active log.
+    rule_refs:
+      - AGENTS.md#primary-ai-first-rule-mistake-to-enforcement
+      - docs/adr/003-governance-as-enforcement.md#enforcement-registry
+    guards:
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_impossible_calendar_rotation_cannot_consume_the_retained_budget
+        ci_partition: remaining
+      - node: tests/scripts/test_the_assistant_diagnosis_reaches_the_bundle.py::test_width_only_rotation_recognition_would_displace_the_genuine_rotation
+        ci_partition: remaining
+    automation_limit: The exact full-size production-bound guard and its width-only mutation control pass locally, but the default hosted remaining partition has not yet sealed the corrected candidate.
+    red_evidence: exact_6e104bb207298c8e7185ea7b3585e8f6596c21b4_github_codex_finding_3868393550_reported_that_width_only_rotation_recognition_admitted_impossible_dated_names_that_could_consume_retained_budget_and_displace_genuine_diagnostics
+    green_evidence: local_corrected_production_blob_70af6458543390a479996b0b7ac34975a6d5c106_guard_blob_838ed3bd8e09f573695e17de53bce18dec5f4d7c_python_3_14_focused_five_passed_full_affected_modules_63_passed_4_platform_skipped_read_only_ruff_and_ast_clean_pending_hosted_remaining_partition
