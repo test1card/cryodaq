@@ -8,6 +8,7 @@ QT_QPA_PLATFORM=offscreen, shared QApplication, no engine round-trip
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -184,6 +185,22 @@ def test_badge_unknown_when_history_has_unreadable_record(tmp_path: Path) -> Non
     set_baseline("cd_1000", tmp_path)
     badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
     assert badge.verdict() == "unknown"
+
+
+def test_badge_unknown_when_latest_fingerprint_has_impossible_metric(tmp_path: Path) -> None:
+    _app()
+    save_fingerprint(_fp("cd_1000", ts=1000.0, time_to_base_h=10.0), tmp_path)
+    save_fingerprint(_fp("cd_2000", ts=2000.0, time_to_base_h=10.0), tmp_path)
+    latest_path = tmp_path / "cd_2000.json"
+    payload = json.loads(latest_path.read_text(encoding="utf-8"))
+    payload["time_to_base_h"] = -1.0
+    latest_path.write_text(json.dumps(payload), encoding="utf-8")
+    set_baseline("cd_1000", tmp_path)
+
+    badge = CooldownVerdictBadge(history_dir=tmp_path, enabled=True)
+
+    assert badge.verdict() == "unknown"
+    assert badge.text() == "Эталон: НЕТ ДАННЫХ"
 
 
 def test_badge_unknown_when_only_history_is_unreadable(tmp_path: Path) -> None:

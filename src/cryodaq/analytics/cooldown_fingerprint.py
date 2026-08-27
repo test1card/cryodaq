@@ -77,6 +77,14 @@ def _validate_fingerprint_dict(d: dict[str, Any]) -> None:
         raise ValueError("invalid fingerprint record")
     if not isinstance(d.get("n_points"), int) or isinstance(d.get("n_points"), bool):
         raise ValueError("invalid fingerprint record")
+    if (
+        d["duration_h"] < 0
+        or d["T_cold_final"] < 0
+        or any(d.get(field) is not None and d[field] < 0 for field in ("time_to_base_h", "time_to_50K_h"))
+        or (d.get("ultimate_vacuum_mbar") is not None and d["ultimate_vacuum_mbar"] <= 0)
+        or d["n_points"] <= 0
+    ):
+        raise ValueError("invalid fingerprint record")
 
 
 def _opt_float(v: Any) -> float | None:
